@@ -15,7 +15,14 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
-> **Status:** early development. APIs and data formats may change until v1.0.
+[![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Enricko/rast?include_prereleases)](https://github.com/Enricko/rast/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
+
+> **Status:** v0.1.0 — first public release (2026-11-10). APIs and data formats
+> may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the exact
+> feature set and known limitations.
 
 ## Quick start (installed server)
 
