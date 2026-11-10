@@ -49,12 +49,15 @@ impl AppState {
         let jobs = JobManager::new(db.clone(), events.clone(), config.job_concurrency);
         jobs.recover_stale().await?;
 
+        crate::backup::schedule::ensure_default(&db).await?;
+
         let monitor = crate::monitor::Monitor::new(&config)?;
         let storage = crate::storage::Storage::new(&config).map_err(|e| {
             AppError::internal(format!("cannot initialise storage: {e}"))
         })?;
         let docker = crate::docker::DockerManager::new(&config);
 
+        let config = Arc::new(config);
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -62,9 +65,16 @@ impl AppState {
             events.clone(),
             config.monitor_interval_secs,
         );
+        // Scheduled backups (disabled until the operator enables them).
+        crate::backup::schedule::spawn(
+            db.clone(),
+            config.clone(),
+            jobs.clone(),
+            events.clone(),
+        );
 
         Ok(Self {
-            config: Arc::new(config),
+            config,
             db,
             secrets: Arc::new(secrets),
             events,

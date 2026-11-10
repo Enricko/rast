@@ -1,0 +1,83 @@
+[Unit]
+Description=RAST privileged worker (Docker administration)
+Documentation=https://github.com/Enricko/rast/blob/main/docs/ARCHITECTURE.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/OPERATIONS.md
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# The worker is only useful when Docker is available. If Docker is installed
+# later, restart this unit (`systemctl restart rast-worker.service`).
+ConditionPathExists=/var/run/docker.sock
+
+[Service]
+# Internal JSON-lines service on /run/rast/worker.sock. The web server never
+# touches the Docker socket; this process does, and only runs whitelisted
+# `docker compose`/`docker` operations with structured arguments (no shell).
+Type=simple
+ExecStart=/usr/local/bin/rast worker
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Dedicated account. Primary group is `rast` so that the socket created here is
+# owned rast-worker:rast and the unprivileged rast.service (group rast) can
+# connect. `docker` is a supplementary group because /var/run/docker.sock is
+# root:docker 0660 — membership in `docker` is effectively root-equivalent.
+User=rast-worker
+Group=rast
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/rast
+Environment=RAST_CONFIG=/etc/rast/rast.toml
+# The worker chowns its socket to this group (rast), so rast.service — which
+# runs as rast:rast — can connect to /run/rast/worker.sock. Never add the
+# unprivileged web server to the `docker` group instead.
+Environment=RAST_WORKER_SOCKET_GROUP=rast
+EnvironmentFile=-/etc/rast/rast.env
+# Keep the Docker CLI from trying to write to a read-only home directory.
+Environment=DOCKER_CONFIG=/run/rast
+
+# Socket directory. Created before ExecStart, removed on stop, preserved across
+# restarts so clients see a stable path. Mode/ownership: rast-worker:rast 0750.
+RuntimeDirectory=rast
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+
+# Socket files must stay group-readable/writable (0660) for rast.service, so
+# the worker uses a permissive group umask instead of the server's 0027.
+UMask=0007
+LimitNOFILE=65536
+MemoryHigh=256M
+MemoryMax=1G
+
+# ---- Sandboxing -----------------------------------------------------------
+# The worker needs: the Docker socket (/run/docker.sock, not covered by
+# ProtectSystem), its runtime directory (/run/rast) and read-only access to
+# managed compose files under /var/lib/rast/apps. It does not need privileges
+# of its own — the Docker daemon performs privileged operations.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rast/apps
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# Go-based Docker/Compose binaries are sensitive to overly tight whitelists.
+# A blacklist of dangerous groups is used for compatibility; tighten with a
+# drop-in (SystemCallFilter=@system-service) if your Docker version allows it.
+SystemCallFilter=~@mount @swap @reboot @obsolete @raw-io
+
+[Install]
+WantedBy=multi-user.target

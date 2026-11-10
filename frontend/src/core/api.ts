@@ -1,16 +1,24 @@
 // HTTP client for the RAST API: CSRF handling, typed errors, streamed uploads.
+//
+// Error contract (matches docs/API.md):
+//   {error: {code, message}} with HTTP status 400/401/403/404/409/413/429/503.
+//   429 responses may carry a Retry-After header; it is exposed as
+//   ApiError.retryAfterSecs so the UI can show a precise countdown.
 
 import type { FileEntry } from "./types";
 
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Seconds to wait before retrying (from Retry-After on 429), when present. */
+  readonly retryAfterSecs: number | null;
 
-  constructor(status: number, code: string, message: string) {
+  constructor(status: number, code: string, message: string, retryAfterSecs: number | null = null) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.retryAfterSecs = retryAfterSecs;
   }
 
   get isUnauthorized(): boolean {
@@ -24,12 +32,60 @@ export class ApiError extends Error {
   get isNotFound(): boolean {
     return this.status === 404;
   }
+
+  get isConflict(): boolean {
+    return this.status === 409;
+  }
+
+  get isRateLimited(): boolean {
+    return this.status === 429;
+  }
+
+  get isNotImplemented(): boolean {
+    return this.status === 501 || this.code === "not_implemented";
+  }
+
+  get isUnavailable(): boolean {
+    return this.status === 503 || this.code === "unavailable";
+  }
+
+  get isNetworkError(): boolean {
+    return this.status === 0;
+  }
+
+  get isServerError(): boolean {
+    return this.status >= 500;
+  }
 }
 
 export interface RequestOptions {
   signal?: AbortSignal;
   /** Do not throw on 401 (useful for probing). */
   allowUnauthorized?: boolean;
+}
+
+/** Human message for API errors, with optional retry countdown for 429. */
+export function apiErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.isRateLimited) {
+      const secs = error.retryAfterSecs;
+      if (secs && secs > 0) {
+        const mins = Math.ceil(secs / 60);
+        return `${error.message} (try again in ${mins > 1 ? `${mins} minutes` : `${secs}s`})`;
+      }
+    }
+    return error.message;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+/** True when an optional endpoint is missing or temporarily unavailable. */
+export function isFeatureUnavailable(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    (error.isNotImplemented || error.isUnavailable || error.status === 0)
+  );
 }
 
 function buildQuery(params: Record<string, unknown> | undefined): string {
@@ -41,6 +97,15 @@ function buildQuery(params: Record<string, unknown> | undefined): string {
   }
   const text = search.toString();
   return text ? `?${text}` : "";
+}
+
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds);
+  const date = Date.parse(header);
+  if (Number.isFinite(date)) return Math.max(0, Math.ceil((date - Date.now()) / 1000));
+  return null;
 }
 
 export class ApiClient {
@@ -109,6 +174,7 @@ export class ApiClient {
         response.status,
         err?.code ?? "http_error",
         err?.message ?? `Request failed (${response.status})`,
+        parseRetryAfter(response.headers.get("retry-after")),
       );
     }
     return payload as T;
@@ -175,6 +241,7 @@ export class ApiClient {
               xhr.status,
               err?.code ?? "upload_failed",
               err?.message ?? `Upload failed (${xhr.status})`,
+              parseRetryAfter(xhr.getResponseHeader("retry-after")),
             ),
           );
         }

@@ -1,0 +1,75 @@
+[Unit]
+Description=RAST — Resource Administration & Storage Toolkit
+Documentation=https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/OPERATIONS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# `rast serve` runs in the foreground, logs to stderr (journald) and shuts down
+# gracefully on SIGTERM (in-flight requests finish, then WAL checkpoint).
+Type=simple
+ExecStart=/usr/local/bin/rast serve
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+
+# Unprivileged service account created by the installer.
+User=rast
+Group=rast
+WorkingDirectory=/var/lib/rast
+Environment=RAST_CONFIG=/etc/rast/rast.toml
+# Optional operator overrides (RAST_* variables, mode 0600 root:rast).
+EnvironmentFile=-/etc/rast/rast.env
+
+# The configuration file must exist before the service starts. The installer
+# creates it; if you delete it, systemd will report a failed unit instead of
+# silently starting with defaults.
+# Config is read once at startup: `systemctl restart rast.service` after edits.
+
+# Files written by the server are 0640/0750: no access for other users.
+UMask=0027
+
+# CPU/memory guardrails. Tune with a drop-in, e.g.
+#   /etc/systemd/system/rast.service.d/20-memory.conf
+#   [Service]
+#   MemoryHigh=1G
+#   MemoryMax=2G
+MemoryHigh=512M
+MemoryMax=1G
+LimitNOFILE=65536
+
+# ---- Sandboxing -----------------------------------------------------------
+# The server itself never needs privileges: it listens on an unprivileged port,
+# opens sockets, reads/writes its own directories and talks to the worker over a
+# Unix socket. Docker access is deliberately delegated to rast-worker.service.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/rast /srv/rast
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Block genuinely dangerous syscall groups without whitelisting everything
+# (a whitelist such as @system-service can break new runtimes; switch to it via
+# a drop-in only after testing on your distribution).
+SystemCallFilter=~@mount @swap @reboot @obsolete @raw-io @cpu-emulation
+
+[Install]
+WantedBy=multi-user.target

@@ -210,7 +210,28 @@ async fn run(
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect();
-                    let meta = backup::create(&cfg, &scopes, &note, out.as_deref()).await?;
+                    let pool = db::init(&cfg).await?;
+                    eprintln!("creating backup (scopes: {})...", scopes.join(","));
+                    let progress: rast::backup::ProgressFn = {
+                        let last = std::sync::Arc::new(std::sync::Mutex::new((0u64, String::new())));
+                        std::sync::Arc::new(move |done, total, message| {
+                            let mut state = last.lock().unwrap_or_else(|e| e.into_inner());
+                            if state.0 != done || state.1 != message {
+                                state.0 = done;
+                                state.1 = message.clone();
+                                eprintln!("  [{done:>3}/{total}] {message}");
+                            }
+                        })
+                    };
+                    let meta = backup::create(
+                        &cfg,
+                        Some(&pool),
+                        &scopes,
+                        &note,
+                        out.as_deref(),
+                        Some(progress),
+                    )
+                    .await?;
                     println!("{}", serde_json::to_string_pretty(&meta)?);
                     Ok(ExitCode::SUCCESS)
                 }

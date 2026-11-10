@@ -1,0 +1,11 @@
+# Toolchain pinned for reproducible builds and CI.
+#
+# The crate's MSRV (Cargo.toml `rust-version`) is lower, but releases are always
+# built with this exact stable release. `.github/workflows/*.yml` read this file
+# to install the toolchain, so update both by changing this file only.
+#
+# Run `rustup show` after changing this to fetch/verify the toolchain.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

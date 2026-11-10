@@ -1,0 +1,126 @@
+# RAST configuration file — /etc/rast/rast.toml
+#
+# Every setting is optional; the built-in defaults are shown below. Values are
+# loaded once at startup: run `systemctl restart rast.service` after editing.
+#
+# Precedence (lowest to highest):
+#   built-in defaults  <  this file  <  RAST_* environment variables  <  CLI flags
+#
+# Environment variables may also be placed in /etc/rast/rast.env (mode 0600
+# root:rast), which rast.service loads when present. See docs/CONFIGURATION.md
+# for the full reference, validation ranges and examples.
+#
+# Unknown keys are rejected at startup so that typos never go unnoticed; run
+# `rast doctor` to validate the resulting configuration.
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+
+# Listen address. Keep it on loopback when a reverse proxy terminates TLS.
+# env: RAST_BIND
+bind = "127.0.0.1:8720"
+
+# Canonical public URL (no trailing slash needed). Required in production:
+# it drives the Secure cookie flag, login redirects and links.
+# Must start with http:// or https://.
+# env: RAST_PUBLIC_URL
+# public_url = "https://rast.example.com"
+
+# Reverse proxies whose X-Forwarded-For / CF-Connecting-IP headers are trusted.
+# CIDR notation is required; bare IP addresses are rejected. Only list proxies
+# you control — otherwise clients could spoof their address.
+# env: RAST_TRUSTED_PROXIES (comma separated)
+trusted_proxies = []
+# trusted_proxies = ["127.0.0.1/32", "::1/128"]
+
+# Honour forwarding headers at all. Default: automatic — enabled when
+# trusted_proxies is non-empty. Set explicitly only if you know why.
+# env: RAST_TRUST_FORWARDED_HEADERS
+# trust_forwarded_headers = true
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+# Database, backups, managed applications and key material. Must be on a local
+# filesystem with working SQLite locking (no NFS/SMB/CIFS).
+# env: RAST_DATA_DIR
+data_dir = "/var/lib/rast"
+
+# User homes, shared folders and the recycle bin.
+# Recommended: a separate volume; never set it inside data_dir.
+# env: RAST_STORAGE_DIR
+storage_dir = "/srv/rast"
+
+# Unix socket of the privileged Docker worker. The directory is created by
+# rast-worker.service (RuntimeDirectory) and removed when it stops.
+# env: RAST_WORKER_SOCKET
+worker_socket = "/run/rast/worker.sock"
+
+# ---------------------------------------------------------------------------
+# Sessions and authentication
+# ---------------------------------------------------------------------------
+
+# Sliding session lifetime in hours (1–8760). The absolute cap is 30 days.
+# env: RAST_SESSION_TTL_HOURS
+session_ttl_hours = 168
+
+# Force the Secure cookie attribute. Default: automatic — true when public_url
+# is https://. Leave unset unless you terminate TLS in an unusual way.
+# env: RAST_SECURE_COOKIES
+# secure_cookies = true
+
+# Require `rast setup-token` before the web-based first-run setup is allowed.
+# CLI account creation (`rast user create-admin`) always works. Recommended for
+# any internet-reachable instance.
+# env: RAST_SETUP_TOKEN_REQUIRED
+setup_token_required = false
+
+# ---------------------------------------------------------------------------
+# Storage, uploads and quotas
+# ---------------------------------------------------------------------------
+
+# Maximum size of a single uploaded file in bytes (1 MiB – 1 TiB).
+# Keep reverse-proxy body limits at or above this value.
+# env: RAST_MAX_UPLOAD_BYTES
+max_upload_bytes = 10737418240
+
+# Default per-user quota in bytes (0 = unlimited). New accounts only; existing
+# quotas are changed per user in the UI/CLI.
+# env: RAST_DEFAULT_QUOTA_BYTES
+default_quota_bytes = 21474836480
+
+# ---------------------------------------------------------------------------
+# Database and background jobs
+# ---------------------------------------------------------------------------
+
+# SQLite connection pool size (1–64). 8 is plenty for a home server.
+# env: RAST_DB_MAX_CONNECTIONS
+db_max_connections = 8
+
+# Concurrent background jobs (1–8): copies, moves, deletes, backups, deploys.
+# env: RAST_JOB_CONCURRENCY
+job_concurrency = 2
+
+# ---------------------------------------------------------------------------
+# Monitoring and logging
+# ---------------------------------------------------------------------------
+
+# Resource monitor sampling interval in seconds (1–300).
+# env: RAST_MONITOR_INTERVAL_SECS
+monitor_interval_secs = 5
+
+# Log level written to stderr/journald: error, warn, info, debug, trace.
+# RUST_LOG, when set, overrides this at runtime.
+# env: RAST_LOG_LEVEL
+log_level = "info"
+
+# ---------------------------------------------------------------------------
+# Optional Docker integration
+# ---------------------------------------------------------------------------
+
+# Enable the Applications app (Docker Compose deployments). Requires Docker and
+# rast-worker.service; the server itself never accesses the Docker socket.
+# env: RAST_DOCKER_ENABLED
+docker_enabled = false

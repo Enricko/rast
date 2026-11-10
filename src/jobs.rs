@@ -374,6 +374,7 @@ pub async fn job_json(pool: &SqlitePool, id: &str) -> Result<Option<Value>, AppE
 mod tests {
     use super::*;
     use crate::db;
+    use std::time::Duration;
 
     async fn pool() -> (tempfile::TempDir, SqlitePool) {
         let dir = tempfile::tempdir().unwrap();
