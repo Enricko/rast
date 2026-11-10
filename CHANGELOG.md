@@ -22,6 +22,21 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.7] - 2026-11-11
+
+Follow-up polish found while capturing the release screenshots.
+
+### Fixed
+
+- **File Station toolbar and pagination layout regressed under the new form
+  system.** The canonical `.input`/`.select` rules set `width: 100%`, which also
+  captured toolbar search fields and the page-size selector: the search box
+  wrapped onto its own row, view toggles dropped below it and the pager summary
+  was squeezed to “3 ite…”. Toolbar-scoped fields now keep their intrinsic
+  width, File Station search is a fixed flexible column and the pagination
+  selector keeps its natural width. Same guard covers the logs/control-panel/
+  user toolbars.
+
 ## [0.1.6] - 2026-11-11
 
 A coherence and live-updates release: one control system, ten accent presets and

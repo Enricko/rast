@@ -1169,6 +1169,33 @@ input[type="radio"]:disabled {
   color: var(--text-dim);
 }
 
+/* Toolbar-scoPED controls must not inherit the full-width form sizing. */
+.app-toolbar .input,
+.app-toolbar .select,
+.fs-toolbar .input,
+.fs-toolbar .select,
+.logs-toolbar .input,
+.logs-toolbar .select,
+.cp-toolbar .input,
+.cp-toolbar .select,
+.users-toolbar .input,
+.users-toolbar .select {
+  width: auto;
+  min-width: 130px;
+}
+
+.fs-toolbar .fs-search {
+  flex: 0 1 220px;
+  width: 200px;
+  min-width: 150px;
+}
+
+/* Pagination size selector keeps its intrinsic width so the summary stays readable. */
+.pager .select {
+  width: auto;
+  min-width: 96px;
+}
+
 /* ------------------------------------------------------------ chart accents */
 
 .sparkline,
