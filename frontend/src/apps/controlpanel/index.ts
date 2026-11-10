@@ -1,4 +1,4 @@
-// Control Panel: profile, users, shared folders, storage, components, settings.
+// Control Panel: profile, appearance, users, shared folders, storage, components, settings.
 // Every value comes from the live API; unavailable endpoints render an explicit
 // "not available yet" state instead of placeholder numbers.
 
@@ -7,6 +7,7 @@ import { h } from "../../core/dom";
 import { iconSvg } from "../../core/icons";
 import { errorMessage } from "../../core/ui";
 import type { TabRenderer } from "./common";
+import { renderAppearanceTab } from "./appearance";
 import { renderComponentsTab } from "./components";
 import { renderProfileTab } from "./profile";
 import { renderSettingsTab } from "./settings";
@@ -24,6 +25,7 @@ interface TabDefinition {
 
 const TABS: TabDefinition[] = [
   { id: "profile", label: "Profile", icon: "user", adminOnly: false, render: renderProfileTab },
+  { id: "appearance", label: "Appearance", icon: "wallpaper", adminOnly: false, render: renderAppearanceTab },
   { id: "users", label: "Users", icon: "users", adminOnly: true, render: renderUsersTab },
   { id: "shares", label: "Shared folders", icon: "share", adminOnly: true, render: renderSharesTab },
   { id: "storage", label: "Storage", icon: "disk", adminOnly: true, render: renderStorageTab },

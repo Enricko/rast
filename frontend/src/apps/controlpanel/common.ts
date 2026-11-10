@@ -17,7 +17,7 @@ export interface TabRenderContext {
   section?: string;
 }
 
-export type TabRenderer = (tab: TabRenderContext) => Promise<(() => void) | void>;
+export type TabRenderer = (tab: TabRenderContext) => Promise<(() => void) | void> | (() => void) | void;
 
 export function pageIntro(title: string, detail: string): HTMLElement {
   return h("div", { class: "cp-intro" }, h("h2", { class: "cp-intro-title" }, title), h("p", { class: "cp-intro-detail muted" }, detail));

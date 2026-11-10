@@ -150,7 +150,8 @@ function readThemePreference(): ThemePreference {
   } catch {
     /* storage disabled */
   }
-  return "system";
+  // RAST ships with the calm light NAS look; OS preference is opt-in.
+  return "light";
 }
 
 function writeThemePreference(preference: ThemePreference): void {

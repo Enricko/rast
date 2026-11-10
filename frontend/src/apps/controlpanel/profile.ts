@@ -2,12 +2,11 @@
 // active sessions.
 
 import { apiErrorMessage } from "../../core/api";
-import { badge, card, iconButton, segmented, usageBar } from "../../core/components";
+import { badge, card, iconButton, usageBar } from "../../core/components";
 import { h } from "../../core/dom";
 import { formatBytes, formatDateTime, relativeTime } from "../../core/format";
 import { formField, passwordField, validatePassword, validateRequiredText, withButtonBusy } from "../../core/forms";
 import { iconSvg } from "../../core/icons";
-import type { ThemePreference } from "../../core/store";
 import type { MeResponse, SessionInfo } from "../../core/types";
 import { confirmDialog, errorMessage } from "../../core/ui";
 import { describeUserAgent, scrollToSection, type TabRenderContext } from "./common";
@@ -16,7 +15,6 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
   const { ctx, host, actions } = tab;
   const me = await ctx.api.get<MeResponse>("/api/auth/me");
   const user = me.user;
-  const store = ctx.store;
 
   host.replaceChildren();
   actions.replaceChildren();
@@ -24,7 +22,7 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
     "div",
     { class: "cp-intro" },
     h("h2", { class: "cp-intro-title" }, "Your profile"),
-    h("p", { class: "cp-intro-detail muted" }, "Update how you appear on RAST, change your password and review where you are signed in."),
+    h("p", { class: "cp-intro-detail muted" }, "Update how you appear on RAST, change your password and review where you are signed in. Wallpaper and theme live in the Appearance section."),
   );
   host.appendChild(intro);
 
@@ -182,27 +180,6 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
     ],
   });
 
-  // -------------------------------------------------------------- appearance
-  const appearance = segmented<ThemePreference>({
-    items: [
-      { value: "dark", label: "Dark", icon: "moon" },
-      { value: "light", label: "Light", icon: "sun" },
-      { value: "system", label: "System", icon: "monitor" },
-    ],
-    value: store.get().themePreference,
-    ariaLabel: "Theme preference",
-    onChange: (value) => {
-      store.setThemePreference(value);
-      appearanceNote.textContent = themeNote(store.get().themePreference, store.get().theme);
-    },
-  });
-  const appearanceNote = h("div", { class: "small muted" }, themeNote(store.get().themePreference, store.get().theme));
-  const appearanceCard = card({
-    title: "Appearance",
-    subtitle: "Applies to this browser only",
-    children: [appearance.el, appearanceNote],
-  });
-
   // ---------------------------------------------------------------- sessions
   const sessionsCard = card({
     title: "Active sessions",
@@ -227,7 +204,6 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
     accountCard,
     displayCard,
     passwordCard,
-    appearanceCard,
     h("div", { class: "cp-span-2" }, sessionsCard),
   );
   host.appendChild(grid);
@@ -364,7 +340,3 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
   scrollToSection(host, tab.section);
 }
 
-function themeNote(preference: string, resolved: string): string {
-  if (preference === "system") return `Following the operating system. Currently ${resolved} mode.`;
-  return `${resolved === "dark" ? "Dark" : "Light"} mode selected.`;
-}

@@ -11,7 +11,8 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **File Station** | Browse, upload, download, rename, copy, move, delete, preview and restore files, with per-user homes, shared folders and quotas. |
 | **Applications** | Deploy and manage Docker Compose applications through a restricted administrative worker. |
 | **Resource Monitor** | Live CPU, memory, swap, disk, network and container metrics. |
-| **Control Panel** | Profile, password, users, roles, quotas, shared folders, storage locations and component health. |
+| **Control Panel** | Profile, password, users, roles, quotas, shared folders, storage locations, appearance and component health. |
+| **Appearance** | Per-user wallpaper (bundled nature scenes, solid colour or private upload), fit/position/overlay and light/dark/system theme, saved on the server. |
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
@@ -20,9 +21,19 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.3 — first public release series (2026-11-10). APIs and data
+> **Status:** v0.1.4 — first public release series (2026-11-10). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
+
+## Screenshots
+
+![RAST desktop](docs/screenshots/desktop.jpg)
+
+| | |
+| --- | --- |
+| ![Login](docs/screenshots/login.jpg) | ![File Station](docs/screenshots/file-station.jpg) |
+| ![Personalize](docs/screenshots/personalize.jpg) | ![Appearance](docs/screenshots/control-panel-appearance.jpg) |
+| ![Resource Monitor](docs/screenshots/resource-monitor.jpg) | ![Mobile](docs/screenshots/mobile.jpg) |
 
 ## Verified deployment
 
@@ -101,6 +112,8 @@ Environment variables use the `RAST_` prefix (see `.env.example`).
   setup token.
 * Per-user filesystem isolation with path-traversal and symlink-escape
   protection enforced on the server for every endpoint.
+* Per-user appearance is private: uploaded wallpapers are validated, stored
+  under server-generated identifiers and served only to their owner.
 * Docker operations run through a separate worker process with a strict
   message protocol — the web server never talks to the Docker socket.
 
@@ -113,6 +126,7 @@ See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 * [Installation](docs/INSTALL.md)
 * [Operations: backup, restore, update, rollback](docs/OPERATIONS.md)
 * [API reference](docs/API.md)
+* [Wallpapers and their licence](docs/WALLPAPERS.md)
 
 ## License
 

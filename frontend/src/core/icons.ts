@@ -112,3 +112,47 @@ export function fileIcon(entry: { kind: string; name: string; mime?: string }): 
   if (mime.startsWith("image/")) return "image";
   return "file";
 }
+
+// ---------------------------------------------------------------------------
+// Application icons: coloured, two-tone originals so each app is recognisable
+// by function at a glance. Static markup only (no user data, safe as innerHTML).
+// ---------------------------------------------------------------------------
+
+const APP_ICONS: Record<string, string> = {
+  files: `<path d="M3.2 6.6c0-.9.7-1.6 1.6-1.6h4.1l1.9 2.2h8.4c.9 0 1.6.7 1.6 1.6v8.6c0 .9-.7 1.6-1.6 1.6H4.8c-.9 0-1.6-.7-1.6-1.6V6.6z" fill="#E9A93C"/><path d="M3.2 9.4h17.6v7.4c0 .9-.7 1.6-1.6 1.6H4.8c-.9 0-1.6-.7-1.6-1.6V9.4z" fill="#F2B95A"/><path d="M3.2 6.6c0-.9.7-1.6 1.6-1.6h4.1l1.9 2.2H3.2V6.6z" fill="#C98B2C"/><rect x="12.6" y="10.4" width="6" height="5.4" rx="0.9" fill="#FFF7E8"/><path d="M14 12h3.2M14 13.6h3.2M14 15.2h2" stroke="#D9A035" stroke-width="0.8" stroke-linecap="round"/>`,
+  applications: `<rect x="2.8" y="2.8" width="18.4" height="18.4" rx="4.2" fill="#2785D8"/><rect x="6.4" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF"/><rect x="13" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="6.4" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="13" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.62"/>`,
+  monitor: `<rect x="2.8" y="4" width="18.4" height="13" rx="2.4" fill="#2B9C74"/><rect x="4.6" y="5.8" width="14.8" height="9.4" rx="1.4" fill="#E6F4EE"/><path d="M6.4 11.4h2.6l1.3-2.6 2.2 4.6 1.5-2.8h3.6" fill="none" stroke="#1F7A5C" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.4 19.4h5.2M12 17v2.4" stroke="#2B9C74" stroke-width="1.7" stroke-linecap="round"/>`,
+  backup: `<path d="M12 3.4a8.4 8.4 0 1 1-7.6 4.9" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round"/><path d="M4 3.6v5h5" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="7.8" y="10" width="8.4" height="7.6" rx="1.2" fill="#F4C39A"/><path d="M10.4 12.4h3.2M10.4 14.6h3.2" stroke="#C25E19" stroke-width="1" stroke-linecap="round"/>`,
+  controlpanel: `<circle cx="12" cy="12" r="3" fill="none" stroke="#5A6673" stroke-width="2"/><path d="M12 2.9v3M12 18.1v3M2.9 12h3M18.1 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="#5A6673" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.3" fill="#2785D8"/>`,
+  logs: `<path d="M5.4 3.6h9.2l4 4v12.8H5.4z" fill="#F3F5F7" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M14.4 3.8v4h4" fill="none" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M8.2 10.4h7.4M8.2 13h7.4M8.2 15.6h4.6" stroke="#2785D8" stroke-width="1.3" stroke-linecap="round"/>`,
+};
+
+const APP_ACCENT: Record<string, string> = {
+  files: "files",
+  applications: "applications",
+  monitor: "monitor",
+  backup: "backup",
+  controlpanel: "controlpanel",
+  logs: "logs",
+};
+
+export function appAccentClass(appId: string): string {
+  return `app-icon--${APP_ACCENT[appId] ?? "controlpanel"}`;
+}
+
+/** Coloured application icon (falls back to the monochrome icon set). */
+export function appIconSvg(appId: string, fallbackIcon: string, size = 28): SVGSVGElement {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", String(size));
+  svg.setAttribute("height", String(size));
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  svg.classList.add("icon", "app-icon", appAccentClass(appId));
+  const markup = APP_ICONS[appId];
+  if (!markup) {
+    return iconSvg(fallbackIcon, size);
+  }
+  svg.innerHTML = markup;
+  return svg;
+}

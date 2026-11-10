@@ -6,7 +6,7 @@
 // drop tiles the window or maximizes it.
 
 import { h } from "./dom";
-import { iconSvg } from "./icons";
+import { appIconSvg, iconSvg } from "./icons";
 
 export interface WindowRect {
   x: number;
@@ -142,8 +142,8 @@ export class WindowManager {
     el.dataset.appId = app.id;
     el.tabIndex = -1;
 
-    const iconEl = h("span", { class: "win-icon" });
-    iconEl.appendChild(iconSvg(app.icon, 18));
+    const iconEl = h("span", { class: "win-icon", dataset: { app: app.id } });
+    iconEl.appendChild(appIconSvg(app.id, app.icon, 16));
     const titleEl = h("span", { class: "win-title" }, app.name);
     const titlebar = h(
       "header",
