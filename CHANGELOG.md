@@ -22,6 +22,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.5] - 2026-11-10
+
+Appearance polish found while verifying v0.1.4 on a live deployment.
+
+### Fixed
+
+- **A freshly uploaded wallpaper did not appear in the Personalize dialog until
+  it was reopened.** The editor refreshed its draft copy of the wallpaper list
+  separately from the shared appearance service, so only the built-in gallery
+  updated. The upload list now merges the service result immediately, so the new
+  thumbnail is selectable (and previewed) at once.
+
 ## [0.1.4] - 2026-11-10
 
 A visual and personalisation release: the desktop now follows a calm,

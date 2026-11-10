@@ -294,8 +294,11 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
       status.textContent = "Uploading and validating…";
       try {
         const upload = await service.upload(file);
+        // Merge the new upload into the draft so the "My wallpapers" list
+        // refreshes immediately (the service keeps its own copy).
         draft = {
           ...draft,
+          uploads: service.value.uploads,
           wallpaper: { ...draft.wallpaper, kind: "upload", uploadId: upload.id },
         };
         emitChange();
