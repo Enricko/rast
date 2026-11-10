@@ -22,6 +22,15 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.8] - 2026-11-11
+
+Follow-up layout polish from screenshot review.
+
+### Fixed
+
+- File Station footer item counter no longer truncates to “6 ite…” next to the
+  pager (it keeps its intrinsic width).
+
 ## [0.1.7] - 2026-11-11
 
 Follow-up polish found while capturing the release screenshots.
@@ -36,6 +45,11 @@ Follow-up polish found while capturing the release screenshots.
   width, File Station search is a fixed flexible column and the pagination
   selector keeps its natural width. Same guard covers the logs/control-panel/
   user toolbars.
+- **File Station footer counter was truncated** (“6 ite…”) next to the pager;
+  the selection counter no longer shrinks below its content.
+- **`rast version | head -n 1` could panic with a broken pipe** (exit 134) on
+  slower release runners, failing the aarch64 release job. The banner is now
+  written once and stdout errors are ignored, so shell pipelines are safe.
 
 ## [0.1.6] - 2026-11-11
 

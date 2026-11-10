@@ -1196,6 +1196,11 @@ input[type="radio"]:disabled {
   min-width: 96px;
 }
 
+/* File Station footer counters must not shrink next to the pager. */
+.fs-selection-info {
+  flex: 0 0 auto;
+}
+
 /* ------------------------------------------------------------ chart accents */
 
 .sparkline,
