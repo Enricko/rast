@@ -4,7 +4,7 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 316 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 323 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
 
@@ -12,17 +12,17 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 
 | License expression | Packages |
 | --- | ---: |
-| MIT OR Apache-2.0 | 181 |
-| MIT | 47 |
+| MIT OR Apache-2.0 | 182 |
+| MIT | 49 |
 | Apache-2.0 OR MIT | 23 |
 | Unicode-3.0 | 18 |
 | MIT/Apache-2.0 | 8 |
+| Zlib OR Apache-2.0 OR MIT | 6 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 5 |
 | Unlicense OR MIT | 5 |
-| Zlib OR Apache-2.0 OR MIT | 5 |
+| ISC | 4 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 3 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
-| ISC | 2 |
 | MIT OR Apache-2.0 OR LGPL-2.1-or-later | 2 |
 | Unlicense/MIT | 2 |
 | Zlib | 2 |
@@ -34,6 +34,7 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | Apache-2.0 OR ISC OR MIT | 1 |
 | Apache-2.0/MIT | 1 |
 | BSD-3-Clause | 1 |
+| CC0-1.0 | 1 |
 | CDLA-Permissive-2.0 | 1 |
 | MIT AND BSD-3-Clause | 1 |
 | MIT OR Zlib OR Apache-2.0 | 1 |
@@ -161,11 +162,15 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `idna` | 1.1.0 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
 | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT | <https://github.com/hsivonen/idna_adapter> |
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT | <https://github.com/indexmap-rs/indexmap> |
+| `inotify` | 0.11.5 | ISC | <https://github.com/hannobraun/inotify-rs> |
+| `inotify-sys` | 0.1.8 | ISC | <https://github.com/hannobraun/inotify-sys> |
 | `inout` | 0.1.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | `ipnet` | 2.12.2 | MIT OR Apache-2.0 | <https://github.com/krisprice/ipnet> |
 | `is_terminal_polyfill` | 1.70.2 | MIT OR Apache-2.0 | <https://github.com/polyfill-rs/is_terminal_polyfill> |
 | `itoa` | 1.0.19 | MIT OR Apache-2.0 | <https://github.com/dtolnay/itoa> |
 | `js-sys` | 0.3.107 | MIT OR Apache-2.0 | <https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/js-sys> |
+| `kqueue` | 1.2.1 | MIT | <https://crates.io/crates/kqueue/1.2.1> |
+| `kqueue-sys` | 1.1.2 | MIT | <https://crates.io/crates/kqueue-sys/1.1.2> |
 | `lazy_static` | 1.5.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang-nursery/lazy-static.rs> |
 | `libc` | 0.2.191 | MIT OR Apache-2.0 | <https://github.com/rust-lang/libc> |
 | `libsqlite3-sys` | 0.37.0 | MIT | <https://github.com/rusqlite/rusqlite> |
@@ -181,11 +186,14 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `mime_guess` | 2.0.5 | MIT | <https://github.com/abonander/mime_guess> |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
 | `mio` | 1.2.4 | MIT | <https://github.com/tokio-rs/mio> |
+| `notify` | 8.2.2 | CC0-1.0 | <https://github.com/notify-rs/notify.git> |
+| `notify-types` | 2.3.0 | MIT OR Apache-2.0 | <https://github.com/notify-rs/notify.git> |
 | `ntapi` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/MSxDOS/ntapi> |
 | `nu-ansi-term` | 0.50.3 | MIT | <https://github.com/nushell/nu-ansi-term> |
 | `num-traits` | 0.2.19 | MIT OR Apache-2.0 | <https://github.com/rust-num/num-traits> |
 | `objc2` | 0.6.5 | MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-core-foundation` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | <https://github.com/madsmtm/objc2> |
+| `objc2-core-services` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-encode` | 4.1.0 | MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-foundation` | 0.3.2 | MIT | <https://github.com/madsmtm/objc2> |
 | `objc2-io-kit` | 0.3.2 | Zlib OR Apache-2.0 OR MIT | <https://github.com/madsmtm/objc2> |
