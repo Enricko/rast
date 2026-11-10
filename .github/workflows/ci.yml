@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Installer, maintenance scripts and workflow YAML
+  # ---------------------------------------------------------------------------
+  packaging:
+    name: Installer, scripts and YAML
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck dash
+          python3 -m pip install --user yamllint
+
+      - name: Shell syntax checks
+        run: |
+          for f in installer/*.sh; do
+            sh -n "$f"
+            dash -n "$f"
+          done
+          for f in scripts/*.sh; do
+            bash -n "$f"
+          done
+
+      - name: ShellCheck (installers, POSIX sh)
+        run: shellcheck -s sh -x installer/install.sh installer/uninstall.sh
+
+      - name: ShellCheck (maintenance scripts, bash)
+        run: shellcheck -s bash -x scripts/*.sh
+
+      - name: Installer help and safe-path smoke tests
+        run: |
+          sh installer/install.sh --help > /dev/null
+          sh installer/uninstall.sh --help > /dev/null
+          # The installer must work when piped to sh and still parse arguments.
+          cat installer/install.sh | sh -s -- --help > /dev/null
+          # Invalid input must fail cleanly before doing anything (no root, no network).
+          if RAST_VERSION=not-a-version sh installer/install.sh --dry-run > /dev/null 2>&1; then
+            echo "expected an invalid version to be rejected" >&2
+            exit 1
+          fi
+
+      - name: Embedded deploy assets are in sync
+        run: scripts/sync-installer-assets.sh --check
+
+      - name: YAML lint
+        run: python3 -m yamllint -c .github/yamllint.yml .github/workflows
+
+      - name: Third-party license inventory is up to date
+        run: scripts/generate-third-party-licenses.sh --check
+
+  # ---------------------------------------------------------------------------
+  # Frontend: Node.js + npm, built once and shared with the binary jobs
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Rust: formatting, lints and tests
+  # ---------------------------------------------------------------------------
+  rust:
+    name: Rust lint and tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal --component rustfmt --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+  # ---------------------------------------------------------------------------
+  # Release-profile builds on native runners (arm64 is a real arm runner,
+  # never a cross-compile — see docs/COMPATIBILITY.md)
+  # ---------------------------------------------------------------------------
+  build:
+    name: Release build (${{ matrix.arch }})
+    needs: frontend
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download frontend assets
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Smoke test
+        run: |
+          test -f frontend/dist/index.html
+          ./target/release/rast version
+
+      - name: Stage release asset
+        run: |
+          cp target/release/rast "rast-linux-${{ matrix.arch }}"
+          chmod 0755 "rast-linux-${{ matrix.arch }}"
+          sha256sum "rast-linux-${{ matrix.arch }}" > "rast-linux-${{ matrix.arch }}.sha256"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rast-linux-${{ matrix.arch }}
+          path: |
+            rast-linux-${{ matrix.arch }}
+            rast-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Security: secret scanning and dependency auditing
+  # ---------------------------------------------------------------------------
+  security:
+    name: Secrets and dependency audit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit (non-blocking)
+        # Upstream advisories occasionally lag or produce false positives for
+        # transitive dependencies; report but do not fail the build.
+        continue-on-error: true
+        run: cargo audit
+
+      - name: Duplicate dependency survey (informational)
+        run: cargo tree -d || true

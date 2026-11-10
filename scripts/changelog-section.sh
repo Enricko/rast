@@ -73,9 +73,11 @@ awk -v target="$TARGET" '
             printf "changelog-section: no section for \"%s\" in the changelog\n", target > "/dev/stderr"
             exit 1
         }
-        # Drop trailing blank lines so the release body is tidy.
+        # Trim leading/trailing blank lines so the release body is tidy.
+        first = 1
+        while (first <= n && body[first] ~ /^[[:space:]]*$/) first++
         last = n
-        while (last > 0 && body[last] ~ /^[[:space:]]*$/) last--
-        for (i = 1; i <= last; i++) print body[i]
+        while (last >= first && body[last] ~ /^[[:space:]]*$/) last--
+        for (i = first; i <= last; i++) print body[i]
     }
 ' "$FILE"

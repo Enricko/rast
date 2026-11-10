@@ -32,6 +32,10 @@ Environment=RAST_CONFIG=/etc/rast/rast.toml
 # runs as rast:rast — can connect to /run/rast/worker.sock. Never add the
 # unprivileged web server to the `docker` group instead.
 Environment=RAST_WORKER_SOCKET_GROUP=rast
+# Defense in depth: only the web server's uid may connect. The installer writes
+# /etc/systemd/system/rast-worker.service.d/20-peer-uid.conf with
+# RAST_WORKER_ALLOWED_UID=<uid of the rast user>; set it manually if you install
+# the worker by hand.
 EnvironmentFile=-/etc/rast/rast.env
 # Keep the Docker CLI from trying to write to a read-only home directory.
 Environment=DOCKER_CONFIG=/run/rast

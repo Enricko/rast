@@ -54,6 +54,17 @@ done
 
 cd "$ROOT"
 
+# Make the toolchain usable when the script is started from a non-login shell.
+if ! command -v cargo >/dev/null 2>&1; then
+    for _cargo_dir in "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+        if [[ -x "$_cargo_dir/cargo" ]]; then
+            PATH="$_cargo_dir:$PATH"
+            export PATH
+            break
+        fi
+    done
+fi
+
 command -v cargo >/dev/null 2>&1 || {
     echo "build-release: cargo not found; install Rust (see rust-toolchain.toml)" >&2
     exit 1

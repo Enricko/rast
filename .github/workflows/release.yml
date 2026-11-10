@@ -1,0 +1,315 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, without the leading v (e.g. 0.1.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark the release as a pre-release"
+        required: false
+        default: false
+        type: boolean
+      draft:
+        description: "Create the release as a draft"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve the version, validate it against Cargo.toml and build release notes
+  # ---------------------------------------------------------------------------
+  prepare:
+    name: Resolve version and release notes
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            raw="$INPUT_VERSION"
+          else
+            raw="${GITHUB_REF_NAME}"
+          fi
+          version="${raw#v}"
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "Invalid release version: '$raw' (expected vX.Y.Z or X.Y.Z)" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-check Cargo.toml version
+        run: |
+          set -euo pipefail
+          cargo_version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          expected="${{ steps.version.outputs.version }}"
+          if [[ "$cargo_version" != "$expected" ]]; then
+            echo "Cargo.toml version ($cargo_version) does not match the release version ($expected)" >&2
+            echo "Bump the version in Cargo.toml before tagging." >&2
+            exit 1
+          fi
+          echo "Version $expected matches Cargo.toml"
+
+      - name: Build release notes from CHANGELOG
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          tag="${{ steps.version.outputs.tag }}"
+          {
+            scripts/changelog-section.sh "$version"
+            echo
+            echo "## Installation"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://github.com/Enricko/rast/releases/download/${tag}/install.sh | sudo sh"
+            echo '```'
+            echo
+            echo "Pin this exact release:"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://github.com/Enricko/rast/releases/download/${tag}/install.sh | sudo sh -s -- --version ${version}"
+            echo '```'
+            echo
+            echo "Upgrading an existing installation preserves \`/etc/rast\`, \`/var/lib/rast\` and \`/srv/rast\`."
+            echo
+            echo "## Release assets"
+            echo
+            echo "| Asset | Description |"
+            echo "| --- | --- |"
+            echo "| \`rast-linux-x86_64\` | Static frontend embedded; x86_64 Linux (glibc >= 2.35) |"
+            echo "| \`rast-linux-aarch64\` | Static frontend embedded; aarch64 Linux (glibc >= 2.39) |"
+            echo "| \`SHA256SUMS\` | SHA-256 checksums for every asset |"
+            echo "| \`install.sh\` | Installer (POSIX sh, pinned to this release) |"
+            echo "| \`uninstall.sh\` | Uninstaller |"
+            echo "| \`rast.toml.example\` | Fully commented configuration reference |"
+            echo
+            echo "## Verification"
+            echo
+            echo '```bash'
+            echo "sha256sum -c SHA256SUMS"
+            echo "sh install.sh --help"
+            echo '```'
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Frontend (Node.js + npm) shared by both binary builds
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Upload frontend assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Native builds: x86_64 on Ubuntu 22.04 (glibc 2.35), aarch64 on a real arm64
+  # runner. Cross-compilation is explicitly not used.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: [prepare, frontend]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download frontend assets
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Verify binary version
+        run: |
+          set -euo pipefail
+          reported=$(./target/release/rast version | head -n 1 | awk '{print $2}')
+          if [[ "$reported" != "${{ needs.prepare.outputs.version }}" ]]; then
+            echo "Binary reports '$reported', expected '${{ needs.prepare.outputs.version }}'" >&2
+            exit 1
+          fi
+          test -f frontend/dist/index.html
+          echo "Verified rast $reported with embedded frontend assets"
+
+      - name: Stage release asset
+        run: |
+          set -euo pipefail
+          asset="rast-linux-${{ matrix.arch }}"
+          cp target/release/rast "$asset"
+          chmod 0755 "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          cat "$asset.sha256"
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: rast-linux-${{ matrix.arch }}
+          path: |
+            rast-linux-${{ matrix.arch }}
+            rast-linux-${{ matrix.arch }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # Assemble all assets, verify them and publish the GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rast-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+          path: .
+
+      - name: Assemble release assets
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          tag="${{ needs.prepare.outputs.tag }}"
+          rm -f dist/*.sha256
+
+          # Pin install.sh to this release so a release asset never installs
+          # some other (newer) release by accident.
+          sed "s|^RAST_DEFAULT_VERSION=.*|RAST_DEFAULT_VERSION=\"${tag}\"|" \
+            installer/install.sh > dist/install.sh
+          cp installer/uninstall.sh dist/uninstall.sh
+          cp deploy/rast.toml.example dist/rast.toml.example
+          chmod 0755 dist/install.sh dist/uninstall.sh
+
+          (cd dist && sha256sum rast-linux-x86_64 rast-linux-aarch64 \
+            install.sh uninstall.sh rast.toml.example > SHA256SUMS)
+
+          test -x dist/install.sh
+          test -f dist/install.sh
+          grep -q "^RAST_DEFAULT_VERSION=\"${tag}\"" dist/install.sh
+
+      - name: Verify release assets
+        run: |
+          set -euo pipefail
+          ls -l dist
+          scripts/verify-release.sh --dir dist --version "${{ needs.prepare.outputs.version }}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: RAST ${{ needs.prepare.outputs.version }}
+          body_path: release-notes.md
+          target_commitish: ${{ github.sha }}
+          draft: ${{ inputs.draft || false }}
+          prerelease: ${{ inputs.prerelease || false }}
+          fail_on_unmatched_files: true
+          generate_release_notes: false
+          files: |
+            dist/rast-linux-x86_64
+            dist/rast-linux-aarch64
+            dist/SHA256SUMS
+            dist/install.sh
+            dist/uninstall.sh
+            dist/rast.toml.example
+
+      - name: Verify published release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          gh release view "$tag" --json assets --jq '.assets[].name' | sort > published-assets.txt
+          cat published-assets.txt
+          for asset in rast-linux-x86_64 rast-linux-aarch64 SHA256SUMS install.sh uninstall.sh rast.toml.example; do
+            grep -qx "$asset" published-assets.txt || {
+              echo "Release $tag is missing asset: $asset" >&2
+              exit 1
+            }
+          done
+          echo "Release $tag published with all expected assets"

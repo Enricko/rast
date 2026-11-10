@@ -1,0 +1,21 @@
+---
+# yamllint configuration for the GitHub Actions workflows.
+# CI runs: yamllint -c .github/yamllint.yml .github/workflows
+extends: default
+
+rules:
+  truthy:
+    # GitHub Actions uses the bare `on:` key, which the default truthy rule
+    # would otherwise reject.
+    allowed-values: ["true", "false", "on", "off"]
+    check-keys: false
+  line-length:
+    max: 200
+    level: warning
+  comments:
+    min-spaces-from-content: 1
+  braces:
+    max-spaces-inside: 1
+  brackets:
+    max-spaces-inside: 1
+  document-start: disable

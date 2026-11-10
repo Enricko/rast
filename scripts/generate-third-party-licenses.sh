@@ -44,6 +44,17 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+# Make the toolchain usable when the script is started from a non-login shell.
+if ! command -v cargo >/dev/null 2>&1; then
+    for _cargo_dir in "$HOME/.cargo/bin" /usr/local/cargo/bin; do
+        if [[ -x "$_cargo_dir/cargo" ]]; then
+            PATH="$_cargo_dir:$PATH"
+            export PATH
+            break
+        fi
+    done
+fi
+
 command -v cargo >/dev/null 2>&1 || {
     echo "generate-third-party-licenses: cargo not found" >&2
     exit 1
@@ -112,11 +123,13 @@ lines.append(
     "`scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`."
 )
 lines.append("")
-lines.append(f"The release binary statically links {len(rows)} third-party crates. "
-             "Each crate remains under the license declared by its authors; the "
-             "full license texts are available in the upstream crate packages. "
-             "Package-level license metadata follows the SPDX expressions reported "
-             "by each crate.")
+lines.append(f"The locked dependency graph (`Cargo.lock`) contains {len(rows)} third-party "
+             "Rust crates, including crates used only for specific platforms or for "
+             "tests; only the subset required by the Linux release build is linked "
+             "into the binary. Each crate remains under the license declared by its "
+             "authors; the full license texts are available in the upstream crate "
+             "packages. Package-level license metadata follows the SPDX expressions "
+             "reported by each crate.")
 lines.append("")
 lines.append("Frontend build tooling (Vite, TypeScript and their transitive "
              "dependencies) is used only to build `frontend/dist` and is not "

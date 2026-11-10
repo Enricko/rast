@@ -307,6 +307,7 @@ if [ -d "$MAIN_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
     run rmdir "$MAIN_DROPIN_DIR" 2>/dev/null || true
 fi
 remove_file "$WORKER_DROPIN_DIR/10-rast-paths.conf"
+remove_file "$WORKER_DROPIN_DIR/20-peer-uid.conf"
 if [ -d "$WORKER_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
     run rmdir "$WORKER_DROPIN_DIR" 2>/dev/null || true
 fi
