@@ -107,7 +107,9 @@ impl WorkerOptions {
             docker_bin,
             quick_timeout: QUICK_OP_TIMEOUT,
             compose_timeout: COMPOSE_OP_TIMEOUT,
-            max_concurrent: 2,
+            // Container stats/compose operations can be slow; a small limit
+            // would let one slow `docker stats` starve deploys and restarts.
+            max_concurrent: 8,
             allowed_peer_uid,
         }
     }
@@ -738,7 +740,13 @@ async fn docker_stats(options: &WorkerOptions) -> Result<Value, WorkerError> {
         "--format",
         "{{json .}}",
     ]);
-    let output = run_docker(options, args, None, options.quick_timeout, MAX_CMD_OUTPUT).await?;
+    // `docker stats` blocks while the daemon is busy (e.g. image pulls during a
+    // deploy). Cap it tightly so monitoring can never occupy a worker slot for
+    // long; callers treat a timeout as "container stats unavailable".
+    let stats_timeout = options
+        .quick_timeout
+        .min(std::time::Duration::from_secs(10));
+    let output = run_docker(options, args, None, stats_timeout, MAX_CMD_OUTPUT).await?;
     if !output.success {
         return Err(WorkerError::unavailable(format!(
             "docker is not reachable: {}",
@@ -1035,7 +1043,9 @@ mod tests {
                 docker_bin: script_path,
                 quick_timeout: Duration::from_secs(5),
                 compose_timeout: Duration::from_secs(10),
-                max_concurrent: 2,
+                // Container stats/compose operations can be slow; a small limit
+                // would let one slow `docker stats` starve deploys and restarts.
+                max_concurrent: 8,
                 allowed_peer_uid: None,
             };
             let (tx, rx) = tokio::sync::oneshot::channel();

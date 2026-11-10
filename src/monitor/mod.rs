@@ -31,6 +31,7 @@ pub const DEFAULT_HISTORY_POINTS: usize = 120;
 /// A sample is "fresh" while it is younger than this many intervals.
 const FRESH_INTERVAL_MULTIPLIER: u32 = 3;
 /// Maximum number of containers reported in one snapshot.
+const CONTAINER_STATS_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_CONTAINERS: usize = 100;
 /// Maximum disks reported in one snapshot.
 const MAX_DISKS: usize = 64;
@@ -151,6 +152,7 @@ struct Inner {
     containers: Vec<Value>,
     containers_available: bool,
     containers_reason: Option<String>,
+    last_containers_at: Option<Instant>,
 }
 
 /// Process-wide resource sampler.
@@ -181,6 +183,7 @@ impl Monitor {
                 containers: Vec::new(),
                 containers_available: false,
                 containers_reason: None,
+                last_containers_at: None,
             }),
         }))
     }
@@ -257,8 +260,30 @@ impl Monitor {
         };
 
         // Phase 2: container stats (may await the worker; never while holding
-        // the lock).
-        let (containers, docker_ok, docker_reason) = self.collect_containers().await;
+        // the lock). `docker stats` can take seconds while the daemon is busy, so
+        // it is collected at most every CONTAINER_STATS_INTERVAL; other samples
+        // reuse the last values instead of queueing more worker requests.
+        let (containers, docker_ok, docker_reason) = {
+            let due = {
+                let inner = self.lock();
+                inner
+                    .last_containers_at
+                    .map(|at| at.elapsed() >= CONTAINER_STATS_INTERVAL)
+                    .unwrap_or(true)
+            };
+            if due {
+                let result = self.collect_containers().await;
+                self.lock().last_containers_at = Some(Instant::now());
+                result
+            } else {
+                let inner = self.lock();
+                (
+                    inner.containers.clone(),
+                    inner.containers_available,
+                    inner.containers_reason.clone(),
+                )
+            }
+        };
 
         // Phase 3: compose the snapshot and store it.
         let mut inner = self.lock();
@@ -694,6 +719,7 @@ mod tests {
                 containers: Vec::new(),
                 containers_available: false,
                 containers_reason: None,
+                last_containers_at: None,
             }),
         }
     }
