@@ -1213,11 +1213,19 @@ if [ "$WORKER_ENABLED" -eq 1 ]; then
     fi
 fi
 
-if [ "$WORKER_ENABLED" -eq 1 ] && [ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]; then
-    run install -d -m 0755 "$WORKER_DROPIN_DIR"
-    write_paths_dropin "$RAST_TMP/10-rast-worker-paths.conf" "$DATA_DIR/apps"
-    install_managed_file "$RAST_TMP/10-rast-worker-paths.conf" "$WORKER_DROPIN_DIR/10-rast-paths.conf" 0644 root root
+if [ "$WORKER_ENABLED" -eq 1 ]; then
+    if [ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]; then
+        run install -d -m 0755 "$WORKER_DROPIN_DIR"
+        write_paths_dropin "$RAST_TMP/10-rast-worker-paths.conf" "$DATA_DIR/apps"
+        install_managed_file "$RAST_TMP/10-rast-worker-paths.conf" "$WORKER_DROPIN_DIR/10-rast-paths.conf" 0644 root root
+    else
+        if [ -f "$WORKER_DROPIN_DIR/10-rast-paths.conf" ]; then
+            run rm -f -- "$WORKER_DROPIN_DIR/10-rast-paths.conf"
+            log "removed stale custom-path drop-in for rast-worker.service"
+        fi
+    fi
 else
+    # Worker disabled: clean up both installer-managed drop-ins.
     if [ -f "$WORKER_DROPIN_DIR/10-rast-paths.conf" ]; then
         run rm -f -- "$WORKER_DROPIN_DIR/10-rast-paths.conf"
         log "removed stale custom-path drop-in for rast-worker.service"

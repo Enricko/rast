@@ -219,11 +219,16 @@ jobs:
         with:
           tool: cargo-audit
 
-      - name: cargo audit (non-blocking)
-        # Upstream advisories occasionally lag or produce false positives for
-        # transitive dependencies; report but do not fail the build.
-        continue-on-error: true
-        run: cargo audit
+      - name: cargo audit
+        # Fail loudly on new advisories. One advisory is explicitly ignored
+        # because it cannot be fixed yet: RUSTSEC-2026-0459 (libsqlite3-sys
+        # 0.37.0 bundles SQLite with CVE-2026-119375, an information-disclosure
+        # issue in WAL handling). sqlx 0.9.0 constrains libsqlite3-sys to
+        # <0.38.0, so the patched >=0.39.0 is not yet usable; remove this
+        # --ignore as soon as a compatible sqlx release is available.
+        run: |
+          echo "::warning title=cargo audit::Known advisory RUSTSEC-2026-0459 ignored pending a sqlx release compatible with libsqlite3-sys >= 0.39.0"
+          cargo audit --ignore RUSTSEC-2026-0459
 
       - name: Duplicate dependency survey (informational)
         run: cargo tree -d || true

@@ -24,104 +24,155 @@ this file by `scripts/changelog-section.sh`.
 
 ## [0.1.0] - 2026-11-10
 
-Initial public release: a single Rust binary that replaces the collection of
-ad-hoc tools used to administer a home or small-office Linux server.
+Initial public release. RAST replaces a pile of ad-hoc scripts and web tools
+with one self-hosted binary: a desktop-like web UI, a REST API, a CLI and
+hardened systemd units for a home or small-office Linux server. Includes the
+File Station, Applications (Docker Compose), Resource Monitor, Control Panel,
+Backup Center and Activity Logs apps, all backed by the same SQLite database
+and embedded frontend — no runtime Node.js, database server or external web
+server required.
 
 ### Added
 
 - **Single binary distribution.** Axum HTTP server, SQLite metadata store and
-  the built frontend (Vite/TypeScript, embedded via `rust-embed`) in one
-  `rast` executable for Linux x86_64 and aarch64. No runtime Node.js, database
-  server or external web server required.
+  the built frontend (TypeScript + Vite, embedded via `rust-embed` with a strict
+  CSP) in one `rast` executable for Linux x86_64 and aarch64, plus hardened
+  `rast.service` and `rast-worker.service` systemd units.
 - **CLI**: `rast serve [--bind]`, `rast status [--json]`, `rast doctor`,
   `rast user create-admin`, `rast user list`, `rast user reset-password`,
-  `rast setup-token`, `rast backup`, `rast restore`, `rast update`,
-  `rast version`, plus the internal `rast worker`.
+  `rast setup-token`, `rast backup [--scope …] [--out DIR] [--note TEXT]`,
+  `rast restore --from FILE [--dry-run] [--yes]`, `rast update [--version X]
+  [--check]`, `rast version`, and the internal `rast worker`.
 - **Authentication and accounts**: Argon2id password hashing (19 MiB, 2
-  iterations), password policy (minimum 10 characters), server-side sessions
-  whose tokens are stored only as SHA-256 hashes, sliding expiry with a 30-day
-  absolute cap, per-session revocation, CSRF tokens bound to the session,
-  `HttpOnly`/`SameSite=Lax`/auto-`Secure` cookies, login rate limiting and
-  per-account lockout. No default credentials and no public registration.
-- **First-run setup**: create the first administrator from the CLI, or use a
-  one-shot `rast setup-token` token (60 minutes, single use) with
-  `setup_token_required` enforced by the API.
-- **Layered configuration**: built-in defaults → `/etc/rast/rast.toml` →
-  `RAST_*` environment variables → CLI flags, with validation, warnings
-  surfaced by `rast doctor`, and a fully documented
-  [deploy/rast.toml.example](deploy/rast.toml.example).
-- **Audit log**: append-only record of who did what, to which object, with
-  result and client IP; retention pruning (90 days), Activity Logs app and
-  export endpoint.
-- **Background jobs**: persistent queue with bounded concurrency, progress
-  reporting over Server-Sent Events (SSE) and cooperative cancellation; stale
-  jobs recovered on startup.
-- **Events**: `/api/events` SSE stream backed by a single in-process broadcast
-  bus (one monitor sampler regardless of open tabs).
-- **Backups**: self-contained `.tar.gz` archives with a checksummed manifest,
-  `db` (consistent `VACUUM INTO` snapshot), `config` (including `secret.key`),
-  `users` and `apps` scopes; archive verification; integrity-checked restore
-  that refuses to run while the service is active and keeps a pre-restore copy
-  of the database; daily/hourly/weekly schedules in server-local time with
-  configurable retention (default schedule disabled, 03:00, keep 7).
-- **Self-update**: `rast update [--version X] [--check]` verifies
-  `SHA256SUMS`, checks the downloaded binary's version, takes a database
-  backup, replaces the binary atomically, restarts `rast.service` and rolls the
-  binary back if the health check fails.
-- **Service management**: hardened systemd units for `rast.service` and the
-  separate privileged Docker worker `rast-worker.service` (unprivileged web
-  process, Unix-socket JSON protocol with an operation whitelist, no shell
-  execution).
-- **Installer and uninstaller**: POSIX-sh, `curl | sudo sh` capable, checksum
-  verification before installation, architecture/OS/systemd detection,
-  idempotent upgrades that preserve data, optional Docker worker setup and a
-  safe uninstaller that preserves configuration/data unless `--purge` is
-  confirmed.
-- **Web desktop** (single-page app): desktop shell, login/first-run screens and
-  app modules for File Station, Applications, Resource Monitor, Control Panel,
-  Backup Center and Activity Logs. Live data is delivered over SSE.
-- **Docker administration foundation**: compose validation, app deployment
-  metadata and the worker IPC client/protocol live in
-  `src/docker/`; the worker executes only `docker`/`docker compose` commands
-  with structured arguments.
-- **Documentation**: architecture, configuration, installation (including
-  nginx/Caddy/Cloudflare Tunnel examples), operations/backup/restore/update
-  runbooks, compatibility matrix, security policy, contributing guide and
-  third-party license inventory.
-- **CI/CD**: format, strict clippy, tests, frontend build (Node.js + npm),
-  native x86_64/aarch64 release builds, ShellCheck/YAML linting for packaging,
-  installer asset sync check, secret scanning, non-blocking dependency audit,
-  and a tag-driven release workflow that publishes `rast-linux-x86_64`,
+  iterations, 1 lane), password policy (minimum 10 characters), opaque
+  server-side sessions stored only as SHA-256 hashes with sliding expiry and a
+  30-day absolute cap, per-session revocation and "sign out everywhere", CSRF
+  tokens bound to the session, `HttpOnly`/`SameSite=Lax` cookies with automatic
+  `Secure` when `public_url` is HTTPS, login rate limiting (per IP and per
+  account), persistent lockout after repeated failures, no default credentials
+  and no public registration. First administrator via CLI or a one-shot
+  `rast setup-token` (60 minutes, single use).
+- **File Station**: home and shared-folder roots with breadcrumbs, list/grid
+  views, sorting, pagination and bounded search; streaming uploads (single
+  request and resumable chunked upload via init/chunk/complete) and streaming
+  downloads with `Range` support; basic operations (mkdir, rename, copy, move,
+  delete); sandboxed previews for images, text and PDF with a restrictive CSP;
+  transactional quota accounting (`used`/`reserved` bytes per user, `0` =
+  unlimited); recycle bin with restore, permanent delete and empty; shared
+  folders with per-user `read`/`write`/`admin` ACLs; usage statistics; every
+  mutation audited.
+- **Applications (Docker Compose)**: deploy, start, stop, restart, redeploy,
+  inspect logs and deployment history for managed apps; compose validation
+  (bind mounts restricted to the app data directory, host namespaces, devices
+  and privileged mode refused) and encrypted per-app environment secrets that
+  are masked in API responses; detection of unmanaged containers with an
+  explicit import flow (never silently adopted); delete with a deliberate
+  keep-data vs remove-volumes choice. All Docker access goes through
+  `rast-worker.service` over a Unix socket; the web server never touches
+  `/var/run/docker.sock` and the worker runs only whitelisted
+  `docker`/`docker compose` operations with structured arguments, no shell, and
+  per-operation timeouts.
+- **Resource Monitor**: one process-wide sampler for CPU/load, memory/swap,
+  uptime, disks, network throughput and (when Docker is available) container
+  stats; bounded in-memory history; live updates over Server-Sent Events with
+  stale/unavailable states instead of falling over.
+- **Backup Center**: self-contained `.tar.gz` archives with a checksummed
+  manifest and `db` (consistent `VACUUM INTO` snapshot), `config` (including
+  `secret.key`), `users` and `apps` scopes; verification, download, deletion;
+  hourly/daily/weekly schedules evaluated in the server's local timezone with
+  configurable retention (default schedule disabled: daily 03:00, keep 7);
+  integrity-checked restore that refuses to run while the service is active and
+  keeps a pre-restore copy of the database.
+- **Control Panel and Activity Logs**: profile, password change, active
+  sessions, theme; user management with roles and quotas (with safety checks
+  around the last administrator); shared-folder management; storage and
+  component health; audit-log browsing with filters, pagination, row details
+  and CSV export.
+- **Web desktop**: window manager, taskbar, start menu, desktop icons, light
+  and dark themes, keyboard navigation and accessibility labels, responsive
+  mobile layout, toasts, session-expiry handling that preserves context;
+  real-time updates over SSE without unbounded DOM growth.
+- **Operations**: `rast update` verifies release `SHA256SUMS`, checks the
+  downloaded binary version, takes a database backup, replaces the binary
+  atomically, restarts the service and rolls the binary back if health checks
+  fail; migrations are compiled into the binary and applied at startup
+  (forward-only), with the schema version reported by `rast status`/`doctor`.
+- **Packaging and deployment**: POSIX-sh installer usable as
+  `curl … | sudo sh` (architecture/OS/systemd detection, SHA-256 verification,
+  optional fail-closed minisign/cosign hook, idempotent upgrades preserving
+  `/etc/rast`, `/var/lib/rast` and `/srv/rast`, optional Docker worker setup,
+  peer-uid restriction on the worker socket) and a safe uninstaller
+  (data-preserving by default, typed confirmation for `--purge`); fully
+  documented configuration template; nginx, Caddy and Cloudflare Tunnel
+  examples; compatibility matrix; security policy; third-party license
+  inventory; `rust-toolchain.toml` pinning the build toolchain.
+- **CI/CD and testing**: `cargo fmt`, strict `cargo clippy -D warnings` and the
+  full test suite (199 unit/integration tests covering safe-path escapes,
+  quota races, ACL enforcement, trash restore, worker protocol validation,
+  authentication flows and API end-to-end paths), frontend type-check/build
+  with Node.js + npm, native x86_64/aarch64 release builds, ShellCheck/YAML and
+  installer-asset sync checks, secret scanning, dependency audit reporting, and
+  a tag-driven release workflow that publishes `rast-linux-x86_64`,
   `rast-linux-aarch64`, `SHA256SUMS`, `install.sh`, `uninstall.sh` and
-  `rast.toml.example`.
+  `rast.toml.example` with release notes extracted from this file. A
+  clean-environment installer test (`scripts/test-installer-clean.sh`, 64
+  checks) installs, upgrades and uninstalls RAST inside a disposable systemd
+  container built from the official Ubuntu 24.04 image.
 
 ### Security
 
-- Unprivileged HTTP server; all Docker/root operations are delegated to a
-  separate worker unit over a Unix socket (mode 0660, group `rast`).
-- Strict systemd sandboxing for both units (`ProtectSystem=strict`,
-  `ProtectHome`, `PrivateTmp`, `PrivateDevices`, empty capability sets,
-  `NoNewPrivileges`, syscall filtering, memory caps).
-- Release archives are verified with SHA-256 checksums by both the installer
-  and `rast update`; fail-closed signature verification hooks are available for
-  operators who manage their own signing keys.
-- Path resolution for file operations canonicalises every path under the user's
-  root and rejects traversal/symlink escapes; previews of active content are
-  served with a sandboxing CSP.
-- Strict Content-Security-Policy for the embedded UI, cache-busting ETags and
-  no-store headers for health endpoints.
-- Master key (`secret.key`, 0600) with derived keys for CSRF tokens and
-  AES-256-GCM encryption of application secrets at rest.
+- Unprivileged HTTP server (loopback bind by default, forwarded headers trusted
+  only from configured proxy CIDRs); Docker/root operations delegated to a
+  separate worker account over a Unix socket (mode `0660`, group `rast`,
+  optional peer-uid allowlist).
+- Strict systemd sandboxing for both units: `ProtectSystem=strict` with explicit
+  `ReadWritePaths`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`, empty
+  capability bounding sets, `NoNewPrivileges`, syscall-group filtering, memory
+  limits and `UMask=0027`.
+- Per-user filesystem isolation: every path resolved and canonicalised under
+  the caller's root, with traversal and symlink-escape rejection before any
+  filesystem call; previews of user-supplied active content are served with a
+  sandboxing CSP and never execute in the application origin.
+- Secrets: master key at `<data_dir>/secret.key` (0600) with derived keys for
+  CSRF and AES-256-GCM encryption of application secrets at rest; session
+  tokens hashed in the database; release archives verified against
+  `SHA256SUMS` by both the installer and `rast update`.
+- Installer and uninstaller never modify firewall, DNS, TLS or reverse-proxy
+  configuration, and require explicit confirmation before deleting any data.
 
 ### Known limitations
 
-- Release signing is not enabled yet (see [Unreleased](#unreleased)).
-- The aarch64 release is **build-only**: it is compiled on a native arm64
-  runner, but runtime testing is pending (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
-- Only glibc-based systemd distributions are supported; musl/static builds and
-  non-systemd init systems are not provided in 0.1.x.
-- File Station, Applications and Resource Monitor screens are delivered
-  incrementally during the 0.1.x series; the backend status of each subsystem is
-  tracked in the repository issues and will be reflected here and in the README
-  as it stabilises.
+- **Release signing is not enabled yet.** Integrity relies on HTTPS plus the
+  published `SHA256SUMS`; the installer's fail-closed `RAST_REQUIRE_SIGNATURE`
+  (minisign/cosign) path exists for operators who manage their own keys.
+- **aarch64 is build-only.** The official `rast-linux-aarch64` binary is built
+  on a native arm64 runner, but runtime testing on arm64 hardware is still
+  pending; x86_64 is the tested platform. The arm64 build also needs glibc
+  >= 2.39 (built on Ubuntu 24.04), while x86_64 needs glibc >= 2.35.
+- **glibc + systemd only.** No musl/static build is published, and the
+  installer/service units assume systemd. Other init systems are unsupported
+  (the binary can run under a custom supervisor, but that is not a supported
+  configuration).
+- **Docker app path is not exercised against a live daemon in CI.** The worker
+  protocol, path/slug/compose validation and Docker-manager error paths are
+  unit-tested with a fake worker socket; a live-Docker end-to-end test is not
+  part of CI (the clean-environment installer test installs the worker only
+  when Docker is present).
+- **Proxy request-body limits still apply.** The File Station supports chunked
+  resumable uploads for environments with per-request limits (e.g. Cloudflare
+  plans cap request bodies), but a proxy's per-request limit is outside RAST's
+  control and the chunk size must be configured below it; direct large uploads
+  are also bounded by `RAST_MAX_UPLOAD_BYTES`.
+- **Not implemented yet:** two-factor authentication, passkey/WebAuthn login,
+  remote audit-log forwarding/SIEM integration, and cryptographically chained
+  (tamper-evident) audit records. Audit logs are append-only by convention and
+  can be altered by an administrator with database access.
+- **Known dependency advisory.** `RUSTSEC-2026-0459` (`libsqlite3-sys` 0.37.0,
+  CVE-2026-119375) affects the bundled SQLite WAL implementation; the patched
+  `>=0.39.0` is blocked by `sqlx 0.9.0`'s dependency constraint and needs an
+  upstream update. CI ignores exactly this advisory (any other advisory fails
+  the build) and the exposure/limits are documented in
+  [SECURITY.md](SECURITY.md#known-dependency-advisory-01).
+- Frontend build requires Node.js >= 22 and npm (build-time only); the
+  installed server needs neither.
+

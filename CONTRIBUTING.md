@@ -120,6 +120,10 @@ needs tests; bug fixes should add a regression test where practical.
   `uninstall.sh` (plus `rast.toml.example`).
 * Never programmatically modify a user's firewall, DNS, TLS or reverse proxy
   from the installer.
+* Run the clean-environment installer test before submitting changes to
+  `installer/`, `deploy/` or the unit files:
+  `scripts/test-installer-clean.sh` (Docker required; it never touches the
+  host — see [docs/INSTALL.md](docs/INSTALL.md#clean-environment-installer-test-maintainers)).
 
 ## Commit and pull-request style
 

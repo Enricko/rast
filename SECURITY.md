@@ -180,6 +180,23 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
   their own keys; official signatures are planned (see
   [CHANGELOG.md](CHANGELOG.md)).
 
+## Known dependency advisory (0.1.0)
+
+`cargo audit` reports **RUSTSEC-2026-0459** (`libsqlite3-sys` 0.37.0,
+CVE-2026-119375): the bundled SQLite version has an information-disclosure
+issue in WAL handling (CVSS 4.0 local attack vector). The fixed release is
+`libsqlite3-sys >= 0.39.0`, but `sqlx 0.9.0` currently constrains the dependency
+to `< 0.38.0`; the upgrade is blocked upstream and is tracked for the next
+dependency refresh. CI ignores exactly this advisory (all other advisories fail
+the build).
+
+Practical exposure is limited: RAST never executes user-supplied SQL — queries
+are parameterised and issued by the server itself — and the database, WAL and
+secret key are only readable by the `rast` service account (`0750`/`0640`/`0600`).
+An attacker who can already read those files has local access to the service
+account. Keep other local users out of the data directory, apply OS updates,
+and upgrade RAST once a build with the patched SQLite is published.
+
 ## Hardening checklist for operators
 
 - [ ] Serve RAST only over HTTPS; keep `bind` on loopback behind the proxy.

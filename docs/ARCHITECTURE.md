@@ -7,10 +7,11 @@ resource limits apply. For configuration keys see
 [CONFIGURATION.md](CONFIGURATION.md); for deployment procedures see
 [INSTALL.md](INSTALL.md) and [OPERATIONS.md](OPERATIONS.md).
 
-> Feature status per release is tracked in [CHANGELOG.md](../CHANGELOG.md).
-> In 0.1.0 the core platform (authentication, users, audit, jobs, events,
-> backups, self-update, static UI) is implemented; the File Station and
-> Applications/Monitor screens are being completed in the 0.1.x series.
+> Feature status and known limitations are tracked per release in
+> [CHANGELOG.md](../CHANGELOG.md). 0.1.0 ships the complete 0.1 feature set:
+> authentication, users, audit, jobs, events, backups, self-update, the File
+> Station, Applications/Docker worker, Resource Monitor, Control Panel and
+> Activity Logs.
 
 ## Design constraints
 

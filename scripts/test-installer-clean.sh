@@ -608,7 +608,7 @@ common_checks() {
     check_value "storage dir mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast')"
     check_value "storage homes mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/homes')"
     check_value "storage shared mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/shared')"
-    check_value "trash dir mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/.trash')"
+    check_value "trash dir mode/owner" "700 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/.trash')"
     if [[ "$EFFECTIVE_MODE" == "stub" ]]; then
         # Fallback mode starts the server outside systemd (no UMask=0027).
         check_value "database owner" "rast:rast" "$(capture_sh 'stat -c "%U:%G" /var/lib/rast/rast.db')"

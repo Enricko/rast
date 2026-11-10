@@ -2,17 +2,20 @@
 
 RAST is developed and released on Linux/systemd. This page states **honestly**
 what is tested, what is only built in CI and what is unsupported. “Tested”
-means the complete install → run → upgrade path was exercised; “CI” means the
-code builds and the test suite passes there but the installer/units were not
-manually deployed; “build-only” means a release binary is produced there but
-runtime behaviour is unverified.
+means the complete install → run → upgrade path was exercised; “installer
+tested in a clean container” means the full install/upgrade/uninstall flow was
+run by `scripts/test-installer-clean.sh` in a disposable systemd container (see
+[INSTALL.md](INSTALL.md#clean-environment-installer-test-maintainers)); “CI”
+means the code builds and the test suite passes there but the installer/units
+were not manually deployed; “build-only” means a release binary is produced
+there but runtime behaviour is unverified.
 
 ## Platform support
 
 | Platform | Architecture | Status | Notes |
 | --- | --- | --- | --- |
 | Ubuntu 26.04 LTS | x86_64 | **Tested (reference platform)** | Primary development and deployment target (Cloudflare Tunnel + nginx in front); installer, units and upgrade path are exercised here |
-| Ubuntu 24.04 LTS | x86_64 | CI (build + tests) | Also the frontend build runner; installer not manually verified |
+| Ubuntu 24.04 LTS | x86_64 | **Installer tested in a clean container** | `scripts/test-installer-clean.sh` installs/upgrades/uninstalls RAST inside a disposable systemd container built from the official `ubuntu:24.04` image (64 checks). Also a CI build/test runner |
 | Ubuntu 22.04 LTS | x86_64 | CI + release build host | Produces the official `rast-linux-x86_64` binary (glibc 2.35 baseline) |
 | Ubuntu 24.04 LTS | aarch64 | **Build-only** | Official `rast-linux-aarch64` binary is built on a native `ubuntu-24.04-arm` runner; runtime not yet tested |
 | Debian 12 / 13 | x86_64, aarch64 | Expected, untested | Installer uses standard systemd, `useradd` and `install`; verify `rast doctor` on your host |
@@ -33,6 +36,20 @@ anything**; a glibc mismatch is reported with instructions to build from source
 instead of leaving a broken service. On arm64 systems with glibc < 2.39 (for
 example Ubuntu 22.04 arm64), build from source.
 
+### Repeatable installer verification
+
+The clean-container test is the reference procedure for validating installer,
+systemd-unit or packaging changes:
+
+```bash
+scripts/test-installer-clean.sh            # build artifacts + 64-check container test
+scripts/test-installer-clean.sh --skip-build --artifacts dist
+```
+
+It is also the fastest way to reproduce a platform-specific installer bug
+without touching a real machine (see
+[INSTALL.md](INSTALL.md#clean-environment-installer-test-maintainers)).
+
 ## Build requirements
 
 Only needed when building from source or packaging; the installed server has no
@@ -40,7 +57,7 @@ runtime dependencies beyond glibc.
 
 | Requirement | Version | Notes |
 | --- | --- | --- |
-| Rust | pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) = **1.99.1** | `Cargo.toml` declares MSRV `1.85`; CI and releases always use the pinned toolchain |
+| Rust | pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) = **1.99.1** | CI and releases always use the pinned toolchain. Effective minimum is **1.94** (`sqlx 0.9` requires it); the `rust-version` field in `Cargo.toml` is being aligned with that |
 | Components | `rustfmt`, `clippy` | Installed automatically by `rustup` from the toolchain file |
 | Node.js | **>= 22** | Frontend build only |
 | npm | **>= 10** | Uses `frontend/package-lock.json` (`npm ci`) |
