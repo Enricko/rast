@@ -42,9 +42,8 @@ impl AppState {
             .ensure_dirs()
             .map_err(|e| AppError::internal(format!("cannot create directories: {e}")))?;
         let db = db::init(&config).await?;
-        let secrets = Secrets::load_or_create(&config.secret_path()).map_err(|e| {
-            AppError::internal(format!("cannot load server secrets: {e}"))
-        })?;
+        let secrets = Secrets::load_or_create(&config.secret_path())
+            .map_err(|e| AppError::internal(format!("cannot load server secrets: {e}")))?;
         let events = EventBus::new();
         let jobs = JobManager::new(db.clone(), events.clone(), config.job_concurrency);
         jobs.recover_stale().await?;
@@ -52,9 +51,8 @@ impl AppState {
         crate::backup::schedule::ensure_default(&db).await?;
 
         let monitor = crate::monitor::Monitor::new(&config)?;
-        let storage = crate::storage::Storage::new(&config).map_err(|e| {
-            AppError::internal(format!("cannot initialise storage: {e}"))
-        })?;
+        let storage = crate::storage::Storage::new(&config)
+            .map_err(|e| AppError::internal(format!("cannot initialise storage: {e}")))?;
         let docker = crate::docker::DockerManager::new(&config);
 
         let config = Arc::new(config);
@@ -66,12 +64,7 @@ impl AppState {
             config.monitor_interval_secs,
         );
         // Scheduled backups (disabled until the operator enables them).
-        crate::backup::schedule::spawn(
-            db.clone(),
-            config.clone(),
-            jobs.clone(),
-            events.clone(),
-        );
+        crate::backup::schedule::spawn(db.clone(), config.clone(), jobs.clone(), events.clone());
 
         Ok(Self {
             config,

@@ -114,10 +114,9 @@ pub async fn run(
     }
     let probe_stdout = String::from_utf8_lossy(&probe.stdout);
     if !probe_stdout.contains(&version) {
-        return Err(format!(
-            "downloaded binary reports an unexpected version: {probe_stdout}"
-        )
-        .into());
+        return Err(
+            format!("downloaded binary reports an unexpected version: {probe_stdout}").into(),
+        );
     }
 
     // ---- database backup before any migration ------------------------------
@@ -189,20 +188,7 @@ async fn backup_before_update(cfg: &Config) -> AppResult<Value> {
 }
 
 fn is_root() -> bool {
-    #[cfg(unix)]
-    {
-        // SAFETY: geteuid has no side effects and cannot fail.
-        unsafe { libc_geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
-#[cfg(unix)]
-fn libc_geteuid() -> u32 {
-    // Avoid a libc dependency by reading /proc/self/status.
+    // Avoid a libc dependency by reading the effective UID from /proc.
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|text| {
@@ -211,7 +197,8 @@ fn libc_geteuid() -> u32 {
                 .and_then(|line| line.split_whitespace().nth(2))
                 .and_then(|uid| uid.parse::<u32>().ok())
         })
-        .unwrap_or(1)
+        .map(|uid| uid == 0)
+        .unwrap_or(false)
 }
 
 fn arch_asset_suffix() -> Result<&'static str, Box<dyn std::error::Error>> {
@@ -345,13 +332,19 @@ async fn probe_health() -> Result<bool, Box<dyn std::error::Error>> {
         .map(|cfg| cfg.bind)
         .unwrap_or_else(|_| "127.0.0.1:8720".parse().expect("static addr"));
     let target = if addr.ip().is_unspecified() {
-        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        )
     } else {
         addr
     };
     let mut stream = tokio::net::TcpStream::connect(target).await?;
     stream
-        .write_all(format!("GET /healthz HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET /healthz HTTP/1.1\r\nHost: {target}\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
         .await?;
     let mut buf = String::new();
     stream.read_to_string(&mut buf).await?;

@@ -43,13 +43,12 @@ pub async fn list_jobs(
     let offset = (page - 1) * per_page;
     let status_filter = q.status.as_deref().unwrap_or("");
     let (total, rows) = if user.is_admin() {
-        let total: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM jobs WHERE (? = '' OR status = ?)",
-        )
-        .bind(status_filter)
-        .bind(status_filter)
-        .fetch_one(&state.db)
-        .await?;
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE (? = '' OR status = ?)")
+                .bind(status_filter)
+                .bind(status_filter)
+                .fetch_one(&state.db)
+                .await?;
         let rows = sqlx::query(
             "SELECT id, kind, status, progress, total, message, user_id, username, created_at,
                     started_at, finished_at, error
@@ -106,7 +105,9 @@ pub async fn list_jobs(
             })
         })
         .collect();
-    Ok(Json(json!({"items": items, "page": page, "perPage": per_page, "total": total})))
+    Ok(Json(
+        json!({"items": items, "page": page, "perPage": per_page, "total": total}),
+    ))
 }
 
 /// GET /api/jobs/{id}
@@ -145,7 +146,11 @@ pub async fn cancel_job(
             .actor(&user)
             .object("job", id.clone())
             .success()
-            .detail(if cancelled { "cancel requested" } else { "not running" }),
+            .detail(if cancelled {
+                "cancel requested"
+            } else {
+                "not running"
+            }),
     )
     .await;
     Ok(Json(json!({"ok": true, "cancelRequested": cancelled})))

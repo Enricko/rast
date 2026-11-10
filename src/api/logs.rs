@@ -8,14 +8,10 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{sqlite::SqliteArguments, Row, Sqlite};
 use sqlx::query::Query as SqlQuery;
+use sqlx::{sqlite::SqliteArguments, Row, Sqlite};
 
-use crate::{
-    auth::AuthUser,
-    error::AppResult,
-    state::AppState,
-};
+use crate::{auth::AuthUser, error::AppResult, state::AppState};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -228,7 +224,13 @@ pub async fn export_logs(
             r.get::<String, _>("detail"),
             r.get::<String, _>("ip"),
         ];
-        out.push_str(&fields.iter().map(|f| csv_escape(f)).collect::<Vec<_>>().join(","));
+        out.push_str(
+            &fields
+                .iter()
+                .map(|f| csv_escape(f))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         out.push('\n');
     }
     let mut response = out.into_response();
@@ -240,10 +242,9 @@ pub async fn export_logs(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_static("attachment; filename=\"rast-activity-logs.csv\""),
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 
@@ -254,4 +255,3 @@ fn csv_escape(field: &str) -> String {
         field.to_string()
     }
 }
-

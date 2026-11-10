@@ -12,7 +12,7 @@ fn main() {
         let _ = std::fs::write(
             dist.join("index.html"),
             "<!doctype html><title>RAST</title><p>Frontend assets are built with \
-             <code>pnpm --dir frontend build</code>.</p>",
+             <code>npm --prefix frontend run build</code>.</p>",
         );
     }
 

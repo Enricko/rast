@@ -56,11 +56,7 @@ pub async fn list_users(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<UserPage>> {
     let page = q.page.unwrap_or(1).max(1);
-    let per_page = q
-        .per_page
-        .or(q.per_page_camel)
-        .unwrap_or(25)
-        .clamp(1, 100);
+    let per_page = q.per_page.or(q.per_page_camel).unwrap_or(25).clamp(1, 100);
     let (rows, total) = users::list(&state.db, q.q.as_deref(), page, per_page).await?;
     Ok(Json(UserPage {
         items: rows.into_iter().map(UserDto::from).collect(),
@@ -136,7 +132,9 @@ pub async fn update_user(
         }
     };
     if body.active == Some(false) && id == admin.0.id {
-        return Err(AppError::bad_request("you cannot deactivate your own account"));
+        return Err(AppError::bad_request(
+            "you cannot deactivate your own account",
+        ));
     }
     if role == Some(Role::User) && id == admin.0.id {
         return Err(AppError::bad_request("you cannot demote your own account"));
@@ -174,7 +172,9 @@ pub async fn deactivate_user(
     Path(id): Path<i64>,
 ) -> AppResult<Json<serde_json::Value>> {
     if id == admin.0.id {
-        return Err(AppError::bad_request("you cannot deactivate your own account"));
+        return Err(AppError::bad_request(
+            "you cannot deactivate your own account",
+        ));
     }
     let target = users::find_by_id(&state.db, id)
         .await?

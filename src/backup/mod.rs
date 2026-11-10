@@ -120,7 +120,9 @@ pub async fn create(
     progress: Option<ProgressFn>,
 ) -> AppResult<BackupMeta> {
     let scopes = normalize_scopes(scopes)?;
-    let out_dir = out_dir.map(Path::to_path_buf).unwrap_or_else(|| default_out_dir(cfg));
+    let out_dir = out_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_out_dir(cfg));
     std::fs::create_dir_all(&out_dir)?;
 
     let now = db::now_ms();
@@ -202,7 +204,10 @@ async fn create_inner(
     if scopes.iter().any(|s| s == "config") {
         let candidates = [
             (cfg.loaded_from.clone(), "config/rast.toml"),
-            (Some(PathBuf::from("/etc/rast/rast.toml")), "config/rast.toml"),
+            (
+                Some(PathBuf::from("/etc/rast/rast.toml")),
+                "config/rast.toml",
+            ),
             (Some(PathBuf::from("/etc/rast/rast.env")), "config/rast.env"),
             (Some(cfg.secret_path()), "config/secret.key"),
         ];
@@ -219,7 +224,8 @@ async fn create_inner(
             }
         }
         // secret.key must always be present for restorable encrypted secrets.
-        if !config_files.iter().any(|(t, _)| t == "config/secret.key") && cfg.secret_path().exists() {
+        if !config_files.iter().any(|(t, _)| t == "config/secret.key") && cfg.secret_path().exists()
+        {
             config_files.push(("config/secret.key".to_string(), cfg.secret_path()));
         }
         emit(progress, 20, 100, "configuration".to_string());
@@ -291,10 +297,10 @@ async fn create_inner(
         let mut builder = tar::Builder::new(encoder);
         let mut entries: Vec<ManifestEntry> = Vec::new();
 
-        let mut add_bytes = |builder: &mut tar::Builder<_>,
-                             entries: &mut Vec<ManifestEntry>,
-                             path: &str,
-                             data: &[u8]|
+        let add_bytes = |builder: &mut tar::Builder<_>,
+                         entries: &mut Vec<ManifestEntry>,
+                         path: &str,
+                         data: &[u8]|
          -> AppResult<()> {
             let mut header = tar::Header::new_gnu();
             header.set_size(data.len() as u64);
@@ -359,7 +365,12 @@ async fn create_inner(
             });
             if index % 32 == 0 {
                 let done = 30 + ((index as u64 * 55) / user_total.max(1));
-                emit(progress, done, total_units, format!("archiving {index}/{user_total}"));
+                emit(
+                    progress,
+                    done,
+                    total_units,
+                    format!("archiving {index}/{user_total}"),
+                );
             }
         }
 
@@ -426,8 +437,6 @@ pub async fn verify(path: &Path) -> AppResult<Value> {
 
     let mut manifest: Option<Manifest> = None;
     let mut db_bytes: Option<Vec<u8>> = None;
-    let mut checked = 0usize;
-    let mut mismatches: Vec<String> = Vec::new();
 
     for entry in archive
         .entries()
@@ -447,11 +456,11 @@ pub async fn verify(path: &Path) -> AppResult<Value> {
         } else if entry_path == "db/rast.db" {
             db_bytes = Some(data.clone());
         }
-        checked += 1;
         tracing::debug!(entry = %entry_path, size = data.len(), "backup entry");
     }
 
-    let mut checks = json!({"archive": true, "manifest": false, "checksums": false, "database": Value::Null});
+    let mut checks =
+        json!({"archive": true, "manifest": false, "checksums": false, "database": Value::Null});
     let Some(manifest) = manifest else {
         return Ok(json!({
             "ok": false,
@@ -467,8 +476,11 @@ pub async fn verify(path: &Path) -> AppResult<Value> {
     let reader = BufReader::with_capacity(256 * 1024, file);
     let decoder = GzDecoder::new(reader);
     let mut archive = tar::Archive::new(decoder);
-    let expected: std::collections::HashMap<String, &ManifestEntry> =
-        manifest.entries.iter().map(|e| (e.path.clone(), e)).collect();
+    let expected: std::collections::HashMap<String, &ManifestEntry> = manifest
+        .entries
+        .iter()
+        .map(|e| (e.path.clone(), e))
+        .collect();
     let mut seen = 0usize;
     if let Ok(entries) = archive.entries() {
         for mut entry in entries.flatten() {
@@ -537,7 +549,10 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
             "rast.service is running; stop it before restoring the database",
         ));
     }
-    let tmp_dir = cfg.data_dir.join("tmp").join(format!("restore-{}", uuid::Uuid::new_v4()));
+    let tmp_dir = cfg
+        .data_dir
+        .join("tmp")
+        .join(format!("restore-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp_dir)?;
     let _guard = TempDirGuard(tmp_dir.clone());
 
@@ -551,7 +566,10 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
         .map_err(|e| AppError::internal(format!("cannot read archive: {e}")))?
     {
         let mut entry = entry.map_err(|e| AppError::internal(format!("corrupt archive: {e}")))?;
-        let path = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let path = entry
+            .path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
         if path == "db/rast.db" {
             let mut out = File::create(&extracted)?;
             std::io::copy(&mut entry, &mut out)?;
@@ -566,7 +584,11 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
         ));
     }
     let integrity = check_sqlite_integrity(&extracted).await?;
-    if !integrity.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !integrity
+        .get("ok")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Err(AppError::bad_request(format!(
             "restored database failed integrity check: {integrity}"
         )));
@@ -582,7 +604,10 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
     for suffix in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{suffix}", live.display()));
         if sidecar.exists() {
-            std::fs::copy(&sidecar, pre_restore_dir.join(sidecar.file_name().unwrap_or_default()))?;
+            std::fs::copy(
+                &sidecar,
+                pre_restore_dir.join(sidecar.file_name().unwrap_or_default()),
+            )?;
             std::fs::remove_file(&sidecar)?;
         }
     }
@@ -603,11 +628,7 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
 }
 
 /// Delete backups beyond `keep` newest archives (rows and files).
-pub async fn prune_retention(
-    cfg: &Config,
-    pool: &SqlitePool,
-    keep: i64,
-) -> AppResult<Vec<String>> {
+pub async fn prune_retention(cfg: &Config, pool: &SqlitePool, keep: i64) -> AppResult<Vec<String>> {
     let keep = keep.max(1);
     use sqlx::Row;
     let rows = sqlx::query(
@@ -621,7 +642,7 @@ pub async fn prune_retention(
         let id: String = row.get("id");
         let path: String = row.get("path");
         let path_ref = PathBuf::from(&path);
-        if path_ref.exists() && path_ref.starts_with(&cfg.backup_dir()) {
+        if path_ref.exists() && path_ref.starts_with(cfg.backup_dir()) {
             let _ = std::fs::remove_file(&path_ref);
         }
         sqlx::query("DELETE FROM backups WHERE id = ?")
@@ -778,7 +799,9 @@ impl Drop for BackupLock {
 /// Public helper used by the UI to describe what a backup contains.
 pub fn scope_description(scope: &str) -> &'static str {
     match scope {
-        "db" => "Accounts, sessions, settings, audit logs, job history (consistent SQLite snapshot)",
+        "db" => {
+            "Accounts, sessions, settings, audit logs, job history (consistent SQLite snapshot)"
+        }
         "config" => "Configuration file, environment file and server secret key",
         "users" => "User home directories and shared folders (file data)",
         "apps" => "Managed application definitions and encrypted environment variables",
@@ -861,7 +884,7 @@ mod tests {
         }
         let restored_db = restored_db.expect("db entry present");
         let rc = check_sqlite_integrity_bytes(&restored_db).await;
-        assert_eq!(rc, true);
+        assert!(rc);
     }
 
     async fn check_sqlite_integrity_bytes(bytes: &[u8]) -> bool {

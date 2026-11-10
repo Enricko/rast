@@ -30,8 +30,9 @@ pub fn now_secs() -> i64 {
 
 /// Open (and migrate) the database used by the server and CLI.
 pub async fn init(cfg: &Config) -> AppResult<SqlitePool> {
-    cfg.ensure_dirs()
-        .map_err(|e| crate::error::AppError::internal(format!("cannot create data directories: {e}")))?;
+    cfg.ensure_dirs().map_err(|e| {
+        crate::error::AppError::internal(format!("cannot create data directories: {e}"))
+    })?;
     let pool = connect(&cfg.db_path(), cfg.db_max_connections).await?;
     Ok(pool)
 }
@@ -56,12 +57,16 @@ pub async fn connect(path: &Path, max_connections: u32) -> AppResult<SqlitePool>
         .connect_with(opts)
         .await
         .map_err(|e| {
-            crate::error::AppError::internal(format!("cannot open database {}: {e}", path.display()))
+            crate::error::AppError::internal(format!(
+                "cannot open database {}: {e}",
+                path.display()
+            ))
         })?;
 
-    MIGRATOR.run(&pool).await.map_err(|e| {
-        crate::error::AppError::internal(format!("database migration failed: {e}"))
-    })?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(|e| crate::error::AppError::internal(format!("database migration failed: {e}")))?;
     Ok(pool)
 }
 
@@ -93,12 +98,10 @@ pub async fn set_setting(pool: &SqlitePool, key: &str, value: &str) -> AppResult
 /// True when at least one active admin account exists. The setup endpoints are
 /// only available while this is false.
 pub async fn has_admin(pool: &SqlitePool) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0)
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0)
         > 0
 }
 
@@ -112,12 +115,18 @@ pub async fn user_count(pool: &SqlitePool) -> i64 {
 
 /// Force a WAL checkpoint; used before consistent backups and on shutdown.
 pub async fn checkpoint(pool: &SqlitePool) -> AppResult<()> {
-    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(pool).await?;
+    sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 /// Delete old rows from high-volume tables (retention policy).
-pub async fn prune_old_rows(pool: &SqlitePool, audit_retention_days: i64, jobs_retention_days: i64) -> AppResult<()> {
+pub async fn prune_old_rows(
+    pool: &SqlitePool,
+    audit_retention_days: i64,
+    jobs_retention_days: i64,
+) -> AppResult<()> {
     let now = now_ms();
     let audit_cutoff = now - audit_retention_days.max(1) * 86_400_000;
     let jobs_cutoff = now - jobs_retention_days.max(1) * 86_400_000;
@@ -142,10 +151,12 @@ pub async fn prune_old_rows(pool: &SqlitePool, audit_retention_days: i64, jobs_r
 
 /// Migration version currently applied (for update/rollback compatibility checks).
 pub async fn schema_version(pool: &SqlitePool) -> i64 {
-    sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = 1")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0)
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = 1",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0)
 }
 
 /// Highest migration version compiled into this binary.
@@ -166,14 +177,25 @@ mod tests {
         // Reconnecting must not fail.
         let pool2 = connect(&path, 2).await.unwrap();
         assert_eq!(schema_version(&pool2).await, embedded_schema_version());
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        for expected in ["users", "sessions", "audit_logs", "jobs", "apps", "backups", "shares", "trash"] {
-            assert!(tables.iter().any(|t| t == expected), "missing table {expected}");
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for expected in [
+            "users",
+            "sessions",
+            "audit_logs",
+            "jobs",
+            "apps",
+            "backups",
+            "shares",
+            "trash",
+        ] {
+            assert!(
+                tables.iter().any(|t| t == expected),
+                "missing table {expected}"
+            );
         }
     }
 

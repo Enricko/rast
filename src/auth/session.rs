@@ -18,11 +18,10 @@ pub const ABSOLUTE_MAX_AGE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 pub const TOUCH_INTERVAL_MS: i64 = 60_000;
 
 pub struct NewSession {
+    /// Token only exists in the `Set-Cookie` header, never in the database.
     pub token: String,
     pub session_id: String,
     pub expires_at: i64,
-    /// Token only exists in the `Set-Cookie` header, never in the database.
-    _private: (),
 }
 
 fn random_token() -> String {
@@ -73,7 +72,6 @@ pub async fn create(
         token,
         session_id,
         expires_at,
-        _private: (),
     })
 }
 
@@ -117,7 +115,8 @@ pub async fn validate(
 
     // Sliding expiry: extend on activity, capped by the absolute lifetime.
     if now - record.last_seen_at > TOUCH_INTERVAL_MS {
-        let max_expiry = record.created_at + ABSOLUTE_MAX_AGE_MS.min(ttl_hours.max(1) * 3_600_000 * 4);
+        let max_expiry =
+            record.created_at + ABSOLUTE_MAX_AGE_MS.min(ttl_hours.max(1) * 3_600_000 * 4);
         let new_expiry = (now + ttl_hours.max(1) * 3_600_000).min(max_expiry);
         sqlx::query("UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?")
             .bind(now)
@@ -215,12 +214,7 @@ mod tests {
 
     async fn test_db() -> (tempfile::TempDir, SqlitePool) {
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::from_parts(
-            None,
-            crate::config::FileConfig::default(),
-            |_| None,
-        )
-        .unwrap();
+        let cfg = Config::from_parts(None, crate::config::FileConfig::default(), |_| None).unwrap();
         let _ = cfg;
         let pool = db::connect(&dir.path().join("t.db"), 4).await.unwrap();
         sqlx::query(
@@ -236,17 +230,18 @@ mod tests {
     #[tokio::test]
     async fn create_validate_revoke() {
         let (_dir, pool) = test_db().await;
-        let s = create(&pool, 1, 24, "127.0.0.1", "test-agent").await.unwrap();
+        let s = create(&pool, 1, 24, "127.0.0.1", "test-agent")
+            .await
+            .unwrap();
         let rec = validate(&pool, &s.token, 24).await.unwrap().expect("valid");
         assert_eq!(rec.session_id, s.session_id);
         assert_eq!(rec.user_id, 1);
         // Stored value is a hash, not the token.
-        let stored: Vec<u8> =
-            sqlx::query_scalar("SELECT token_hash FROM sessions WHERE id = ?")
-                .bind(&s.session_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM sessions WHERE id = ?")
+            .bind(&s.session_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(stored, hash_token(&s.token));
         assert_ne!(stored, s.token.as_bytes());
 
@@ -265,7 +260,9 @@ mod tests {
         let (_dir, pool) = test_db().await;
         let a = create(&pool, 1, 24, "", "").await.unwrap();
         let b = create(&pool, 1, 24, "", "").await.unwrap();
-        let n = revoke_all_for_user(&pool, 1, Some(&a.session_id)).await.unwrap();
+        let n = revoke_all_for_user(&pool, 1, Some(&a.session_id))
+            .await
+            .unwrap();
         assert_eq!(n, 1);
         assert!(validate(&pool, &a.token, 24).await.unwrap().is_some());
         assert!(validate(&pool, &b.token, 24).await.unwrap().is_none());

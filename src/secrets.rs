@@ -62,7 +62,8 @@ impl Secrets {
         }
         match Self::read_key(path) {
             Ok(key) => return Ok(Self { master: key }),
-            Err(SecretError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(SecretError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
         // Create atomically; if another process won the race, read its key.
@@ -110,7 +111,8 @@ impl Secrets {
                 source,
             })?;
         let trimmed = text.trim();
-        let bytes = hex::decode(trimmed).map_err(|_| SecretError::InvalidKey(path.display().to_string()))?;
+        let bytes = hex::decode(trimmed)
+            .map_err(|_| SecretError::InvalidKey(path.display().to_string()))?;
         let arr: [u8; 32] = bytes
             .try_into()
             .map_err(|_| SecretError::InvalidKey(path.display().to_string()))?;

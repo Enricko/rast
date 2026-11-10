@@ -11,11 +11,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::Row;
 
-use crate::{
-    db,
-    error::AppResult,
-    state::AppState,
-};
+use crate::{auth::AdminUser, db, error::AppResult, state::AppState};
 
 pub fn protected_routes() -> Router<AppState> {
     Router::new()
@@ -139,7 +135,9 @@ fn disk_usage(path: &std::path::Path) -> Value {
                 let mount = disk.mount_point();
                 if canonical.starts_with(mount) {
                     match best {
-                        Some(current) if mount.as_os_str().len() <= current.mount_point().as_os_str().len() => {}
+                        Some(current)
+                            if mount.as_os_str().len()
+                                <= current.mount_point().as_os_str().len() => {}
                         _ => best = Some(disk),
                     }
                 }
@@ -174,7 +172,10 @@ fn db_file_size(path: &std::path::Path) -> Value {
 }
 
 /// GET /api/system/info
-pub async fn system_info(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn system_info(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> AppResult<Json<Value>> {
     let (mem_total, mem_available) = meminfo();
     let users_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&state.db)
@@ -229,7 +230,10 @@ pub async fn system_info(State(state): State<AppState>) -> AppResult<Json<Value>
 }
 
 /// GET /api/system/components — health of internal components.
-pub async fn components(State(state): State<AppState>) -> AppResult<Json<Value>> {
+pub async fn components(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+) -> AppResult<Json<Value>> {
     let db_ok = sqlx::query("SELECT 1").fetch_one(&state.db).await.is_ok();
     let db_latency_ms = {
         let start = std::time::Instant::now();
@@ -244,10 +248,11 @@ pub async fn components(State(state): State<AppState>) -> AppResult<Json<Value>>
     let monitor = state.monitor.latest();
     let monitor_fresh = state.monitor.is_fresh();
     let docker = state.docker.status().await;
-    let jobs_running: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'")
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+    let jobs_running: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE status = 'running'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     Ok(Json(json!({
         "components": [

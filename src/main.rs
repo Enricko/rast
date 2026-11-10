@@ -14,9 +14,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use serde_json::json;
 
-use rast::{
-    backup, config::Config, db, error::AppResult, state::AppState, users, VERSION,
-};
+use rast::{backup, config::Config, db, error::AppResult, state::AppState, users, VERSION};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -172,12 +170,7 @@ async fn run(
     match command {
         Command::Serve { bind } => serve(config_path, log_level, bind).await,
         Command::Version => {
-            println!(
-                "{} {} ({})",
-                rast::NAME,
-                VERSION,
-                env!("RAST_GIT_SHA")
-            );
+            println!("{} {} ({})", rast::NAME, VERSION, env!("RAST_GIT_SHA"));
             println!("{}", rast::DESCRIPTION);
             println!("https://github.com/Enricko/rast");
             Ok(ExitCode::SUCCESS)
@@ -213,7 +206,8 @@ async fn run(
                     let pool = db::init(&cfg).await?;
                     eprintln!("creating backup (scopes: {})...", scopes.join(","));
                     let progress: rast::backup::ProgressFn = {
-                        let last = std::sync::Arc::new(std::sync::Mutex::new((0u64, String::new())));
+                        let last =
+                            std::sync::Arc::new(std::sync::Mutex::new((0u64, String::new())));
                         std::sync::Arc::new(move |done, total, message| {
                             let mut state = last.lock().unwrap_or_else(|e| e.into_inner());
                             if state.0 != done || state.1 != message {
@@ -235,11 +229,7 @@ async fn run(
                     println!("{}", serde_json::to_string_pretty(&meta)?);
                     Ok(ExitCode::SUCCESS)
                 }
-                Command::Restore {
-                    from,
-                    dry_run,
-                    yes,
-                } => restore(cfg, from, dry_run, yes).await,
+                Command::Restore { from, dry_run, yes } => restore(cfg, from, dry_run, yes).await,
                 Command::Update { version, check } => {
                     rast::update::run(cfg, version.as_deref(), check).await
                 }
@@ -385,7 +375,10 @@ fn service_state() -> String {
 async fn probe_health(addr: SocketAddr) -> Option<String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let target = if addr.ip().is_unspecified() {
-        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), addr.port())
+        SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            addr.port(),
+        )
     } else {
         addr
     };
@@ -510,19 +503,31 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("ok ({})", cfg.worker_socket.display());
         } else {
             warnings += 1;
-            println!("WARN: missing {} (is rast-worker.service running?)", cfg.worker_socket.display());
+            println!(
+                "WARN: missing {} (is rast-worker.service running?)",
+                cfg.worker_socket.display()
+            );
         }
     } else {
         println!("disabled (optional)");
     }
 
     print!("[    ] time drift (system clock) ... ");
-    println!("{}", if db::now_ms() > 1_600_000_000_000 { "ok" } else { "FAIL: clock looks wrong" });
+    println!(
+        "{}",
+        if db::now_ms() > 1_600_000_000_000 {
+            "ok"
+        } else {
+            "FAIL: clock looks wrong"
+        }
+    );
 
     // Reverse proxy hints
     if cfg.public_url.is_some() && cfg.trusted_proxies.is_empty() {
         warnings += 1;
-        println!("[WARN] public_url is set but no trusted_proxies; client IPs will be the proxy address");
+        println!(
+            "[WARN] public_url is set but no trusted_proxies; client IPs will be the proxy address"
+        );
     }
 
     println!();
@@ -587,7 +592,10 @@ async fn user_command(
         }
         UserCommand::List => {
             let (rows, total) = users::list(&pool, None, 1, 100).await?;
-            println!("{:<4} {:<24} {:<8} {:<7} {}", "ID", "USERNAME", "ROLE", "ACTIVE", "QUOTA");
+            println!(
+                "{:<4} {:<24} {:<8} {:<7} QUOTA",
+                "ID", "USERNAME", "ROLE", "ACTIVE"
+            );
             for u in rows {
                 println!(
                     "{:<4} {:<24} {:<8} {:<7} {}",
@@ -620,7 +628,10 @@ async fn user_command(
                     .detail("reset via CLI"),
             )
             .await;
-            println!("Password updated for '{}'. All sessions revoked.", user.username);
+            println!(
+                "Password updated for '{}'. All sessions revoked.",
+                user.username
+            );
             Ok(ExitCode::SUCCESS)
         }
     }
@@ -649,9 +660,7 @@ fn read_password(
     }
     let stdin = std::io::stdin();
     if !stdin.is_terminal() {
-        return Err(
-            "no terminal available: pass --password-stdin or set RAST_PASSWORD".into(),
-        );
+        return Err("no terminal available: pass --password-stdin or set RAST_PASSWORD".into());
     }
     eprint!("Password: ");
     std::io::stderr().flush()?;

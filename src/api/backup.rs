@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderValue},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -29,7 +29,10 @@ use crate::{
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/backups", get(list_backups).post(create_backup))
-        .route("/api/backups/schedule", get(get_schedule).put(update_schedule))
+        .route(
+            "/api/backups/schedule",
+            get(get_schedule).put(update_schedule),
+        )
         .route("/api/backups/restore-guide", get(restore_guide))
         .route("/api/backups/{id}", axum::routing::delete(delete_backup))
         .route("/api/backups/{id}/download", get(download_backup))
@@ -164,8 +167,8 @@ pub async fn create_backup(
         drop(tx);
         let _ = progress_task.await;
         backup::prune_retention(&cfg, &db, retention).await?;
-        Ok(serde_json::to_value(result)
-            .map_err(|e| crate::error::AppError::internal(format!("cannot serialise result: {e}")))?)
+        serde_json::to_value(result)
+            .map_err(|e| AppError::internal(format!("cannot serialise result: {e}")))
     })
     .actor(&admin.0);
 
@@ -221,9 +224,10 @@ pub async fn update_schedule(
     let next = schedule::compute_next_run(&frequency, &time_of_day, weekday, db::now_ms());
     let scopes_json = serde_json::to_string(&scopes).unwrap_or_else(|_| "[]".into());
 
-    let existing: Option<i64> = sqlx::query_scalar("SELECT id FROM backup_schedules ORDER BY id LIMIT 1")
-        .fetch_optional(&state.db)
-        .await?;
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT id FROM backup_schedules ORDER BY id LIMIT 1")
+            .fetch_optional(&state.db)
+            .await?;
     match existing {
         Some(id) => {
             sqlx::query(
@@ -284,8 +288,10 @@ pub async fn delete_backup(
     let path: String = row.get("path");
     let path_ref = PathBuf::from(&path);
     // Only ever delete files inside the configured backup directory.
-    if !path_ref.starts_with(&state.config.backup_dir()) {
-        return Err(AppError::Forbidden("refusing to delete a file outside the backup directory"));
+    if !path_ref.starts_with(state.config.backup_dir()) {
+        return Err(AppError::Forbidden(
+            "refusing to delete a file outside the backup directory",
+        ));
     }
     if path_ref.exists() {
         std::fs::remove_file(&path_ref)?;
@@ -320,7 +326,7 @@ pub async fn download_backup(
     let path: String = row.get("path");
     let file_name: String = row.get("file_name");
     let path_ref = PathBuf::from(&path);
-    if !path_ref.starts_with(&state.config.backup_dir()) || !path_ref.is_file() {
+    if !path_ref.starts_with(state.config.backup_dir()) || !path_ref.is_file() {
         return Err(AppError::NotFound("backup file not found"));
     }
     let file = tokio::fs::File::open(&path_ref).await?;
@@ -332,13 +338,15 @@ pub async fn download_backup(
     );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", safe_file_name(&file_name)))
-            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
+        HeaderValue::from_str(&format!(
+            "attachment; filename=\"{}\"",
+            safe_file_name(&file_name)
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 
@@ -361,7 +369,7 @@ pub async fn verify_backup(
         .ok_or(AppError::NotFound("backup not found"))?;
     let path: String = row.get("path");
     let path_ref = PathBuf::from(&path);
-    if !path_ref.starts_with(&state.config.backup_dir()) {
+    if !path_ref.starts_with(state.config.backup_dir()) {
         return Err(AppError::Forbidden("invalid backup path"));
     }
     let result = backup::verify(&path_ref).await?;
@@ -372,7 +380,11 @@ pub async fn verify_backup(
             .actor(&admin.0)
             .object("backup", id)
             .path(path)
-            .detail(if ok { "verified" } else { "verification failed" })
+            .detail(if ok {
+                "verified"
+            } else {
+                "verification failed"
+            })
             .success(),
     )
     .await;

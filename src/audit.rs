@@ -160,12 +160,11 @@ mod tests {
                 .ip("127.0.0.1"),
         )
         .await;
-        let row: (String, String, String, String) = sqlx::query_as(
-            "SELECT action, username, result, object_path FROM audit_logs LIMIT 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (String, String, String, String) =
+            sqlx::query_as("SELECT action, username, result, object_path FROM audit_logs LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(row.0, "file.upload");
         assert_eq!(row.1, "admin");
         assert_eq!(row.2, "success");

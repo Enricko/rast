@@ -20,7 +20,11 @@ frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-
 
 /// Fallback handler for every non-API route: serve the asset when it exists,
 /// otherwise serve the SPA shell so client-side routes survive a refresh.
-pub async fn static_files(State(_state): State<AppState>, uri: Uri, headers: HeaderMap) -> Response {
+pub async fn static_files(
+    State(_state): State<AppState>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path == "api" || path.starts_with("api/") {
         return (

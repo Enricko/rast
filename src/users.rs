@@ -173,7 +173,7 @@ pub async fn list(
     let per_page = per_page.clamp(1, 100);
     let offset = (page - 1) * per_page;
     let like = query
-        .map(|q| format!("%{}%", q.replace('%', "").replace('_', "").to_lowercase()))
+        .map(|q| format!("%{}%", q.replace(['%', '_'], "").to_lowercase()))
         .filter(|q| q.len() > 2);
     let (rows, total) = match like {
         Some(like) => {
@@ -242,7 +242,8 @@ pub async fn update(
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
     // Never allow removing the last active admin.
-    let losing_admin = current.role == Role::Admin && (role.is_some_and(|r| r != Role::Admin) || active == Some(false));
+    let losing_admin = current.role == Role::Admin
+        && (role.is_some_and(|r| r != Role::Admin) || active == Some(false));
     if losing_admin && active_admin_count(pool).await? <= 1 {
         return Err(AppError::bad_request(
             "cannot demote or deactivate the last active administrator",
@@ -253,7 +254,11 @@ pub async fn update(
         "UPDATE users SET display_name = ?, role = ?, active = ?, quota_bytes = ?,
                 must_change_password = ?, updated_at = ? WHERE id = ?",
     )
-    .bind(display_name.map(|s| s.trim().to_string()).unwrap_or(current.display_name))
+    .bind(
+        display_name
+            .map(|s| s.trim().to_string())
+            .unwrap_or(current.display_name),
+    )
     .bind(role.unwrap_or(current.role).as_str())
     .bind(active.unwrap_or(current.active))
     .bind(quota_bytes.unwrap_or(current.quota_bytes).max(0))
@@ -299,10 +304,12 @@ pub async fn set_password(
 
 /// Fetch the stored PHC hash (never exposed through the API).
 pub async fn password_hash(pool: &SqlitePool, id: i64) -> AppResult<Option<String>> {
-    Ok(sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// Deactivate an account (default admin action; data is preserved).
@@ -404,11 +411,16 @@ mod tests {
     use crate::{config::Config, db};
 
     fn test_cfg(dir: &std::path::Path) -> Config {
-        Config::from_parts(None, crate::config::FileConfig {
-            data_dir: Some(dir.join("data")),
-            storage_dir: Some(dir.join("storage")),
-            ..Default::default()
-        }, |_| None).unwrap()
+        Config::from_parts(
+            None,
+            crate::config::FileConfig {
+                data_dir: Some(dir.join("data")),
+                storage_dir: Some(dir.join("storage")),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap()
     }
 
     async fn setup() -> (tempfile::TempDir, Config, SqlitePool) {
@@ -422,7 +434,15 @@ mod tests {
     fn username_validation() {
         assert!(validate_username("alice").is_ok());
         assert!(validate_username("alice.b-1_2").is_ok());
-        for bad in ["", " ", "../etc", "a/b", ".hidden", "-x", "a".repeat(40).as_str().to_string().as_str()] {
+        for bad in [
+            "",
+            " ",
+            "../etc",
+            "a/b",
+            ".hidden",
+            "-x",
+            "a".repeat(40).as_str().to_string().as_str(),
+        ] {
             assert!(validate_username(bad).is_err(), "{bad:?} accepted");
         }
     }
@@ -430,15 +450,32 @@ mod tests {
     #[tokio::test]
     async fn create_and_find_user() {
         let (_d, cfg, pool) = setup().await;
-        let user = create(&pool, &cfg, "Alice", "Sup3r-Secret-1!", Role::Admin, None, None)
-            .await
-            .unwrap();
+        let user = create(
+            &pool,
+            &cfg,
+            "Alice",
+            "Sup3r-Secret-1!",
+            Role::Admin,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(user.username, "alice");
         assert_eq!(user.role, Role::Admin);
         assert!(cfg.home_for("alice").is_dir());
         assert!(find_by_username(&pool, "ALICE").await.unwrap().is_some());
         assert!(validate_username("alice").is_ok());
-        let dup = create(&pool, &cfg, "alice", "Sup3r-Secret-1!", Role::User, None, None).await;
+        let dup = create(
+            &pool,
+            &cfg,
+            "alice",
+            "Sup3r-Secret-1!",
+            Role::User,
+            None,
+            None,
+        )
+        .await;
         assert!(dup.is_err());
     }
 
@@ -452,29 +489,57 @@ mod tests {
     #[tokio::test]
     async fn last_admin_protected() {
         let (_d, cfg, pool) = setup().await;
-        let admin = create(&pool, &cfg, "root", "Sup3r-Secret-1!", Role::Admin, None, None)
-            .await
-            .unwrap();
+        let admin = create(
+            &pool,
+            &cfg,
+            "root",
+            "Sup3r-Secret-1!",
+            Role::Admin,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         let err = update(&pool, admin.id, None, Some(Role::User), None, None, None).await;
         assert!(err.is_err());
         let err = deactivate(&pool, admin.id).await;
         assert!(err.is_err());
         // A second admin allows demotion.
-        create(&pool, &cfg, "admin2", "Sup3r-Secret-2!", Role::Admin, None, None)
-            .await
-            .unwrap();
-        assert!(update(&pool, admin.id, None, Some(Role::User), None, None, None)
-            .await
-            .is_ok());
+        create(
+            &pool,
+            &cfg,
+            "admin2",
+            "Sup3r-Secret-2!",
+            Role::Admin,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            update(&pool, admin.id, None, Some(Role::User), None, None, None)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn password_change_revokes_sessions() {
         let (_d, cfg, pool) = setup().await;
-        let user = create(&pool, &cfg, "carol", "Sup3r-Secret-1!", Role::User, None, None)
+        let user = create(
+            &pool,
+            &cfg,
+            "carol",
+            "Sup3r-Secret-1!",
+            Role::User,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let s = crate::auth::session::create(&pool, user.id, 24, "", "")
             .await
             .unwrap();
-        let s = crate::auth::session::create(&pool, user.id, 24, "", "").await.unwrap();
         set_password(&pool, user.id, "An0ther-Secret!", false, None)
             .await
             .unwrap();
@@ -482,17 +547,29 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-        assert!(verify_password(&pool, user.id, "An0ther-Secret!").await.unwrap());
-        assert!(!verify_password(&pool, user.id, "Sup3r-Secret-1!").await.unwrap());
+        assert!(verify_password(&pool, user.id, "An0ther-Secret!")
+            .await
+            .unwrap());
+        assert!(!verify_password(&pool, user.id, "Sup3r-Secret-1!")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
     async fn listing_paginates() {
         let (_d, cfg, pool) = setup().await;
         for i in 0..5 {
-            create(&pool, &cfg, &format!("user{i}"), "Sup3r-Secret-1!", Role::User, None, None)
-                .await
-                .unwrap();
+            create(
+                &pool,
+                &cfg,
+                &format!("user{i}"),
+                "Sup3r-Secret-1!",
+                Role::User,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         }
         let (rows, total) = list(&pool, None, 1, 2).await.unwrap();
         assert_eq!(rows.len(), 2);

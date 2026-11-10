@@ -1,8 +1,6 @@
 //! Password hashing (Argon2id) and password policy.
 
-use argon2::{
-    Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version,
-};
+use argon2::{Algorithm, Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier, Version};
 
 use crate::error::{AppError, AppResult};
 
@@ -53,7 +51,9 @@ pub async fn verify_password_async(password: String, phc: String) -> AppResult<b
 pub fn verify_password(password: &str, phc: &str) -> AppResult<bool> {
     let parsed = PasswordHash::new(phc)
         .map_err(|e| AppError::internal(format!("stored password hash is invalid: {e}")))?;
-    Ok(argon2().verify_password(password.as_bytes(), &parsed).is_ok())
+    Ok(argon2()
+        .verify_password(password.as_bytes(), &parsed)
+        .is_ok())
 }
 
 /// True when the stored hash uses parameters weaker than the current policy,
@@ -65,10 +65,7 @@ pub fn needs_rehash(phc: &str) -> bool {
             let m = params.get("m").and_then(|v| v.decimal().ok()).unwrap_or(0);
             let t = params.get("t").and_then(|v| v.decimal().ok()).unwrap_or(0);
             let p = params.get("p").and_then(|v| v.decimal().ok()).unwrap_or(0);
-            parsed.algorithm.as_str() != "argon2id"
-                || m < M_COST_KIB
-                || t < T_COST
-                || p < P_COST
+            parsed.algorithm.as_str() != "argon2id" || m < M_COST_KIB || t < T_COST || p < P_COST
         }
         Err(_) => true,
     }
@@ -134,12 +131,7 @@ mod tests {
 
     #[test]
     fn policy_rejects_weak_passwords() {
-        for bad in [
-            "short",
-            "alllowercaseonly",
-            "1234567890123",
-            "nouppernum",
-        ] {
+        for bad in ["short", "alllowercaseonly", "1234567890123", "nouppernum"] {
             assert!(validate_password(bad).is_err(), "{bad:?} should fail");
         }
         assert!(validate_password("Sup3r-Secret-Passphrase!").is_ok());

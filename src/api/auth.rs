@@ -27,7 +27,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/me", get(me))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/password", post(change_password))
-        .route("/api/auth/sessions", get(list_sessions).delete(revoke_all_sessions))
+        .route(
+            "/api/auth/sessions",
+            get(list_sessions).delete(revoke_all_sessions),
+        )
         .route("/api/auth/sessions/{id}", delete(revoke_session))
 }
 
@@ -108,7 +111,8 @@ pub async fn login(
 
     let Some(row) = row else {
         // Burn comparable CPU for unknown users.
-        let _ = password::verify_password_async(body.password.clone(), dummy_hash().to_string()).await;
+        let _ =
+            password::verify_password_async(body.password.clone(), dummy_hash().to_string()).await;
         audit::record(
             &state.db,
             AuditLog::new("auth.login")
@@ -153,19 +157,13 @@ pub async fn login(
     let ok = password::verify_password_async(body.password.clone(), stored_hash.clone()).await?;
     if !ok {
         let attempts = failed_attempts + 1;
-        let lock_until = if attempts >= 5 {
-            now + 15 * 60_000
-        } else {
-            0
-        };
-        sqlx::query(
-            "UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?",
-        )
-        .bind(if lock_until > 0 { 0 } else { attempts })
-        .bind(lock_until)
-        .bind(user_id)
-        .execute(&state.db)
-        .await?;
+        let lock_until = if attempts >= 5 { now + 15 * 60_000 } else { 0 };
+        sqlx::query("UPDATE users SET failed_attempts = ?, locked_until = ? WHERE id = ?")
+            .bind(if lock_until > 0 { 0 } else { attempts })
+            .bind(lock_until)
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
         sqlx::query(
             "INSERT INTO login_attempts (username, ip, success, created_at) VALUES (?, ?, 0, ?)",
         )
@@ -199,7 +197,9 @@ pub async fn login(
 
     // Success: reset counters, transparently upgrade weak hashes.
     let new_hash = if password::needs_rehash(&stored_hash) {
-        password::hash_password_async(body.password.clone()).await.ok()
+        password::hash_password_async(body.password.clone())
+            .await
+            .ok()
     } else {
         None
     };
@@ -266,10 +266,9 @@ pub async fn login(
         header::SET_COOKIE,
         HeaderValue::from_str(&cookie).map_err(|_| AppError::internal("invalid cookie"))?,
     );
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     Ok(response)
 }
 
@@ -298,14 +297,13 @@ pub struct Features {
 pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<MeResponse>> {
     let record = users::find_by_id(&state.db, user.id)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("account no longer exists"))?;
-    let expires_at: i64 = sqlx::query_scalar(
-        "SELECT expires_at FROM sessions WHERE id = ? AND revoked_at IS NULL",
-    )
-    .bind(&user.session_id)
-    .fetch_optional(&state.db)
-    .await?
-    .unwrap_or_else(|| db::now_ms() + state.config.session_ttl_hours * 3_600_000);
+        .ok_or(AppError::Unauthorized("account no longer exists"))?;
+    let expires_at: i64 =
+        sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = ? AND revoked_at IS NULL")
+            .bind(&user.session_id)
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or_else(|| db::now_ms() + state.config.session_ttl_hours * 3_600_000);
     Ok(Json(MeResponse {
         csrf_token: csrf::token(&state.secrets, &user.session_id),
         session_expires_at: expires_at,

@@ -1,11 +1,6 @@
 //! Control-panel settings (admin), jobs and SSE endpoints.
 
-
-use axum::{
-    extract::State,
-    routing::get,
-    Json, Router,
-};
+use axum::{extract::State, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -26,14 +21,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/settings", get(get_settings).patch(update_settings))
         .route("/api/settings/storage", get(storage_settings))
 }
-
-const WRITABLE_SETTINGS: &[&str] = &[
-    "siteName",
-    "loginMessage",
-    "auditRetentionDays",
-    "trashRetentionDays",
-    "defaultQuotaBytes",
-];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -126,7 +113,9 @@ pub async fn update_settings(
     }
     if let Some(msg) = body.login_message {
         if msg.chars().count() > 200 {
-            return Err(AppError::bad_request("login message must be at most 200 characters"));
+            return Err(AppError::bad_request(
+                "login message must be at most 200 characters",
+            ));
         }
         db::set_setting(&state.db, "loginMessage", msg.trim()).await?;
         changed.push("loginMessage");
@@ -221,7 +210,9 @@ pub fn filesystem_usage(path: &std::path::Path) -> Value {
             for disk in &disks {
                 let mount = disk.mount_point();
                 if canonical.starts_with(mount)
-                    && best.map(|b| mount.as_os_str().len() > b.mount_point().as_os_str().len()).unwrap_or(true)
+                    && best
+                        .map(|b| mount.as_os_str().len() > b.mount_point().as_os_str().len())
+                        .unwrap_or(true)
                 {
                     best = Some(disk);
                 }

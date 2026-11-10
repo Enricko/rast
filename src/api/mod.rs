@@ -6,12 +6,7 @@
 
 use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, Router};
 
-use crate::{
-    auth::middleware::require_auth,
-    error::AppError,
-    server,
-    state::AppState,
-};
+use crate::{auth::middleware::require_auth, error::AppError, server, state::AppState};
 
 pub mod apps;
 pub mod auth;

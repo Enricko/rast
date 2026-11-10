@@ -75,10 +75,9 @@ impl AppError {
     /// Public message. Internal errors are never leaked to clients.
     pub fn public_message(&self) -> String {
         match self {
-            Self::BadRequest(m)
-            | Self::Conflict(m)
-            | Self::Unavailable(m)
-            | Self::Internal(m) => m.clone(),
+            Self::BadRequest(m) | Self::Conflict(m) | Self::Unavailable(m) | Self::Internal(m) => {
+                m.clone()
+            }
             Self::Unauthorized(m)
             | Self::Forbidden(m)
             | Self::NotFound(m)
@@ -139,9 +138,7 @@ impl From<sqlx::Error> for AppError {
             sqlx::Error::Database(ref db) if db.is_unique_violation() => {
                 Self::Conflict("resource already exists".into())
             }
-            sqlx::Error::PoolTimedOut => {
-                Self::Unavailable("database is busy, try again".into())
-            }
+            sqlx::Error::PoolTimedOut => Self::Unavailable("database is busy, try again".into()),
             other => {
                 tracing::error!(error = %other, "database error");
                 Self::Internal("database error".into())

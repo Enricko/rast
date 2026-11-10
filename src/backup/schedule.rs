@@ -3,11 +3,7 @@
 //! Schedules are stored in SQLite and evaluated by a background task. Times are
 //! entered by the operator in the server's local timezone.
 
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
-};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
@@ -83,9 +79,8 @@ pub fn compute_next_run(frequency: &str, time_of_day: &str, weekday: i64, from_m
         .timestamp_millis_opt(from_ms)
         .single()
         .unwrap_or_else(Local::now);
-    let time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap_or_else(|| {
-        NaiveTime::from_hms_opt(3, 0, 0).expect("3:00 is a valid time")
-    });
+    let time = NaiveTime::from_hms_opt(hour, minute, 0)
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(3, 0, 0).expect("3:00 is a valid time"));
 
     let candidate = match frequency {
         "hourly" => {
@@ -227,14 +222,12 @@ async fn tick(
             schedule.weekday,
             now + 1_000,
         );
-        sqlx::query(
-            "UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE id = ?",
-        )
-        .bind(now)
-        .bind(next)
-        .bind(schedule.id)
-        .execute(pool)
-        .await?;
+        sqlx::query("UPDATE backup_schedules SET last_run_at = ?, next_run_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(next)
+            .bind(schedule.id)
+            .execute(pool)
+            .await?;
 
         let cfg = cfg.clone();
         let db = pool.clone();
@@ -257,15 +250,8 @@ async fn tick(
                     let _ = tx.try_send((done, total, message));
                 })
             };
-            let result = backup::create(
-                &cfg,
-                Some(&db),
-                &scopes,
-                &note,
-                None,
-                Some(progress),
-            )
-            .await?;
+            let result =
+                backup::create(&cfg, Some(&db), &scopes, &note, None, Some(progress)).await?;
             drop(tx);
             let _ = progress_task.await;
             let removed = backup::prune_retention(&cfg, &db, retention).await?;
@@ -273,8 +259,9 @@ async fn tick(
                 "backup.done",
                 json!({"file": result.file_name, "removed": removed.len()}),
             );
-            Ok(serde_json::to_value(result)
-            .map_err(|e| crate::error::AppError::internal(format!("cannot serialise result: {e}")))?)
+            serde_json::to_value(result).map_err(|e| {
+                crate::error::AppError::internal(format!("cannot serialise result: {e}"))
+            })
         });
         jobs.submit(spec).await?;
         tracing::info!(schedule = schedule.id, "scheduled backup enqueued");

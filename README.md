@@ -36,13 +36,13 @@ and `/srv/rast/`, installs a `rast.service` systemd unit and starts it bound to
 ## Build from source
 
 Requirements: Rust stable (pinned in `rust-toolchain.toml`), Node.js 22+ and
-pnpm **for the frontend build only**. The installed server never needs Node.js.
+npm **for the frontend build only**. The installed server never needs Node.js.
 
 ```bash
 git clone https://github.com/Enricko/rast.git
 cd rast
-pnpm --dir frontend install
-pnpm --dir frontend build
+npm --prefix frontend ci
+npm --prefix frontend run build
 cargo build --release
 ./target/release/rast version
 ```

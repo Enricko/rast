@@ -101,7 +101,10 @@ pub async fn security_headers(req: Request<Body>, next: Next) -> Response {
 
 pub fn apply_security_headers(headers: &mut HeaderMap) {
     let defaults: [(&'static str, HeaderValue); 5] = [
-        ("x-content-type-options", HeaderValue::from_static("nosniff")),
+        (
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        ),
         ("x-frame-options", HeaderValue::from_static("DENY")),
         ("referrer-policy", HeaderValue::from_static("no-referrer")),
         (
@@ -115,10 +118,7 @@ pub fn apply_security_headers(headers: &mut HeaderMap) {
     ];
     for (name, value) in defaults {
         if !headers.contains_key(name) {
-            headers.insert(
-                header::HeaderName::from_static(name),
-                value,
-            );
+            headers.insert(header::HeaderName::from_static(name), value);
         }
     }
 }

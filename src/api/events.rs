@@ -24,9 +24,9 @@ pub async fn stream(
     let user_id = user.id;
 
     let initial = {
-        let snapshot = state.monitor.latest().unwrap_or_else(|| {
-            json!({"ts": db::now_ms(), "unavailable": true, "reason": "no sample yet"})
-        });
+        let snapshot = state.monitor.latest().unwrap_or_else(
+            || json!({"ts": db::now_ms(), "unavailable": true, "reason": "no sample yet"}),
+        );
         let ev = Event::default()
             .event("monitor")
             .id(db::now_ms().to_string())
@@ -34,26 +34,29 @@ pub async fn stream(
         futures::stream::once(async move { Ok(ev) })
     };
 
-    let live = futures::stream::unfold((rx, is_admin, user_id), |(mut rx, is_admin, user_id)| async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if let Some(owner) = event.data.get("userId").and_then(|v| v.as_i64()) {
-                        if !is_admin && owner != user_id {
-                            continue;
+    let live = futures::stream::unfold(
+        (rx, is_admin, user_id),
+        |(mut rx, is_admin, user_id)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Some(owner) = event.data.get("userId").and_then(|v| v.as_i64()) {
+                            if !is_admin && owner != user_id {
+                                continue;
+                            }
                         }
+                        let sse = Event::default()
+                            .event(event.kind.clone())
+                            .id(event.ts.to_string())
+                            .data(event.data.to_string());
+                        return Some((Ok(sse), (rx, is_admin, user_id)));
                     }
-                    let sse = Event::default()
-                        .event(event.kind.clone())
-                        .id(event.ts.to_string())
-                        .data(event.data.to_string());
-                    return Some((Ok(sse), (rx, is_admin, user_id)));
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
             }
-        }
-    });
+        },
+    );
     Sse::new(initial.chain(live)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))

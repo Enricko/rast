@@ -150,7 +150,10 @@ impl Config {
         let get_str = |file_field: Option<String>, env_key: &str| -> Option<String> {
             non_empty_env_in(&env, env_key).or(file_field)
         };
-        let get_parsed = |file_field: Option<String>, env_key: &str, what: &str| -> Result<Option<String>, ConfigError> {
+        let get_parsed = |file_field: Option<String>,
+                          env_key: &str,
+                          what: &str|
+         -> Result<Option<String>, ConfigError> {
             let raw = get_str(file_field, env_key);
             if let Some(v) = &raw {
                 if v.trim().is_empty() {
@@ -166,7 +169,8 @@ impl Config {
         let bind = SocketAddr::from_str(&bind_raw)
             .map_err(|e| ConfigError::Invalid(format!("invalid bind address {bind_raw:?}: {e}")))?;
 
-        let public_url = get_str(file.public_url, "RAST_PUBLIC_URL").map(|u| u.trim_end_matches('/').to_string());
+        let public_url = get_str(file.public_url, "RAST_PUBLIC_URL")
+            .map(|u| u.trim_end_matches('/').to_string());
         if let Some(url) = &public_url {
             if !(url.starts_with("https://") || url.starts_with("http://")) {
                 return Err(ConfigError::Invalid(format!(
@@ -175,9 +179,12 @@ impl Config {
             }
         }
 
-        let data_dir = get_str(file.data_dir.map(|p| p.display().to_string()), "RAST_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+        let data_dir = get_str(
+            file.data_dir.map(|p| p.display().to_string()),
+            "RAST_DATA_DIR",
+        )
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
         let storage_dir = get_str(
             file.storage_dir.map(|p| p.display().to_string()),
             "RAST_STORAGE_DIR",
@@ -199,8 +206,9 @@ impl Config {
             }
         }
 
-        let session_ttl_hours = parse_env_num(&env, "RAST_SESSION_TTL_HOURS", file.session_ttl_hours)?
-            .unwrap_or(DEFAULT_SESSION_TTL_HOURS);
+        let session_ttl_hours =
+            parse_env_num(&env, "RAST_SESSION_TTL_HOURS", file.session_ttl_hours)?
+                .unwrap_or(DEFAULT_SESSION_TTL_HOURS);
         if !(1..=24 * 365).contains(&session_ttl_hours) {
             return Err(ConfigError::Invalid(
                 "session_ttl_hours must be between 1 and 8760".into(),
@@ -219,9 +227,8 @@ impl Config {
             ));
         }
 
-        let max_upload_bytes =
-            parse_env_num(&env, "RAST_MAX_UPLOAD_BYTES", file.max_upload_bytes)?
-                .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES);
+        let max_upload_bytes = parse_env_num(&env, "RAST_MAX_UPLOAD_BYTES", file.max_upload_bytes)?
+            .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES);
         if !(1024 * 1024..=1024u64.pow(4)).contains(&max_upload_bytes) {
             return Err(ConfigError::Invalid(
                 "max_upload_bytes must be between 1 MiB and 1 TiB".into(),
@@ -246,19 +253,22 @@ impl Config {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKER_SOCKET));
 
-        let docker_enabled = parse_env_bool(&env, "RAST_DOCKER_ENABLED", file.docker_enabled)?
-            .unwrap_or(false);
+        let docker_enabled =
+            parse_env_bool(&env, "RAST_DOCKER_ENABLED", file.docker_enabled)?.unwrap_or(false);
 
         let default_quota_bytes =
             parse_env_num(&env, "RAST_DEFAULT_QUOTA_BYTES", file.default_quota_bytes)?
                 .unwrap_or(DEFAULT_QUOTA_BYTES);
 
         let secure_cookies = parse_env_bool(&env, "RAST_SECURE_COOKIES", file.secure_cookies)?
-            .unwrap_or_else(|| public_url.as_deref().is_some_and(|u| u.starts_with("https://")));
+            .unwrap_or_else(|| {
+                public_url
+                    .as_deref()
+                    .is_some_and(|u| u.starts_with("https://"))
+            });
 
-        let job_concurrency =
-            parse_env_num(&env, "RAST_JOB_CONCURRENCY", file.job_concurrency)?
-                .unwrap_or(DEFAULT_JOB_CONCURRENCY);
+        let job_concurrency = parse_env_num(&env, "RAST_JOB_CONCURRENCY", file.job_concurrency)?
+            .unwrap_or(DEFAULT_JOB_CONCURRENCY);
         if !(1..=8).contains(&job_concurrency) {
             return Err(ConfigError::Invalid(
                 "job_concurrency must be between 1 and 8".into(),
@@ -535,10 +545,7 @@ mod tests {
         };
         let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
         assert!(cfg.secure_cookies);
-        assert_eq!(
-            cfg.public_url.as_deref(),
-            Some("https://rast.example.com")
-        );
+        assert_eq!(cfg.public_url.as_deref(), Some("https://rast.example.com"));
     }
 
     #[test]

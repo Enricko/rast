@@ -88,7 +88,11 @@ mounted read-only or read-write under `/shared/<name>` (per ACL). Use
 | GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]` |
 | GET | `/api/files/stat?path=` | single entry |
 | POST | `/api/files/mkdir` | `{path}` (parent + name) |
-| POST | `/api/files/upload?dir=/&name=file.bin&overwrite=false` | **raw stream** body; `Content-Length` required; returns entry. Progress is client-side + SSE `job.progress` for large copies only |
+| POST | `/api/files/upload?dir=/&name=file.bin&overwrite=false` | **raw stream** body; `Content-Length` required; returns entry |
+| POST | `/api/files/upload/init` | chunked upload: `{"dir":"/","name":"file.bin","size":N,"overwrite":false}` → `{uploadId, chunkSize, offset, size, expiresAt}`; quota is reserved at init |
+| POST | `/api/files/upload/chunk?uploadId=&offset=` | raw chunk body (max `chunkSize`, normally 64 MiB); offsets must be sequential; returns `{uploadId, received, size, offset}` |
+| POST | `/api/files/upload/complete?uploadId=` | finalize chunked upload → file entry |
+| DELETE | `/api/files/upload?uploadId=` | cancel chunked upload and release its quota reservation |
 | GET | `/api/files/download?path=` | streamed, `Content-Disposition: attachment`, supports `Range` |
 | GET | `/api/files/preview?path=` | inline preview for images/PDF/text; sandboxed CSP |
 | GET | `/api/files/text?path=&maxBytes=262144` | `{content, truncated, encoding}` |
@@ -190,11 +194,26 @@ Each event has `event: <kind>`, `data: {...}`; include `id` for `Last-Event-ID`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/system/info` | host, server, counts, database, storage |
-| GET | `/api/system/components` | component health list |
+| GET | `/api/system/info` | host, server, counts, database, storage (admin) |
+| GET | `/api/system/components` | component health list (admin) |
 | GET | `/api/settings` | control panel settings |
 | PATCH | `/api/settings` | `{siteName?, loginMessage?, auditRetentionDays?, trashRetentionDays?, defaultQuotaBytes?}` |
 | GET | `/api/settings/storage` | storage dirs, usage, shares |
+
+## Chunked uploads (large files behind proxies)
+
+Cloudflare and some reverse proxies cap a single request body (100 MB on the
+Cloudflare free plan). Clients split larger files into `chunkSize` pieces:
+
+1. `POST /api/files/upload/init` reserves quota and returns `chunkSize`/`expiresAt`.
+2. Send chunks sequentially with `POST /api/files/upload/chunk?uploadId=..&offset=..`
+   (raw body, `Content-Length` required; offset must equal bytes received so far).
+3. `POST /api/files/upload/complete?uploadId=..` atomically moves the temp file
+   into place, commits the quota usage and returns the file entry.
+4. `DELETE /api/files/upload?uploadId=..` cancels and releases the reservation.
+
+Sessions expire after 24 hours (stale temp files and reservations are cleaned
+up automatically); only the initiating user may write to or complete an upload.
 
 ## Conventions for implementers
 

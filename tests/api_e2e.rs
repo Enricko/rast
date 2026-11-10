@@ -161,7 +161,7 @@ const USER_PASSWORD: &str = "User-Password-123!";
 #[tokio::test]
 async fn public_endpoints_work_without_auth() {
     let server = TestServer::start().await;
-    let (status, _, body) = server
+    let (status, _, _body) = server
         .request("GET", "/healthz", None, HeaderMap::new())
         .await;
     assert_eq!(status, StatusCode::OK);
@@ -183,7 +183,11 @@ async fn public_endpoints_work_without_auth() {
             HeaderMap::new(),
         )
         .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "setup must require a token: {body}");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "setup must require a token: {body}"
+    );
 }
 
 #[tokio::test]
@@ -219,7 +223,9 @@ async fn setup_token_flow_creates_admin_once() {
 #[tokio::test]
 async fn login_sets_cookie_and_requires_csrf_for_mutations() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
 
     let session = server.login("admin", ADMIN_PASSWORD).await;
 
@@ -247,7 +253,12 @@ async fn login_sets_cookie_and_requires_csrf_for_mutations() {
     let mut wrong = session.headers();
     wrong.insert("x-csrf-token", "deadbeef".parse().expect("header"));
     let (status, _, _) = server
-        .request("POST", "/api/files/mkdir", Some(json!({"path": "/demo"})), wrong)
+        .request(
+            "POST",
+            "/api/files/mkdir",
+            Some(json!({"path": "/demo"})),
+            wrong,
+        )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
@@ -263,9 +274,7 @@ async fn unauthenticated_api_requests_are_rejected() {
         ("GET", "/api/system/info"),
         ("GET", "/api/files"),
     ] {
-        let (status, _, _) = server
-            .request(method, path, None, HeaderMap::new())
-            .await;
+        let (status, _, _) = server.request(method, path, None, HeaderMap::new()).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -277,7 +286,9 @@ async fn unauthenticated_api_requests_are_rejected() {
 #[tokio::test]
 async fn login_rate_limiting_and_bad_credentials() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
 
     // Wrong password returns the same generic error as a missing user.
     let (status, _, body) = server
@@ -323,7 +334,9 @@ async fn login_rate_limiting_and_bad_credentials() {
 #[tokio::test]
 async fn logout_revokes_the_session() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     let session = server.login("admin", ADMIN_PASSWORD).await;
 
     let (status, headers, _) = server
@@ -354,7 +367,9 @@ async fn logout_revokes_the_session() {
 #[tokio::test]
 async fn role_enforcement_and_user_management() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     server.create_user("alice", USER_PASSWORD, Role::User).await;
 
     let admin = server.login("admin", ADMIN_PASSWORD).await;
@@ -367,9 +382,7 @@ async fn role_enforcement_and_user_management() {
         ("GET", "/api/backups", None),
         ("GET", "/api/system/info", None),
     ] {
-        let (status, _, _) = server
-            .request(method, path, body, alice.headers())
-            .await;
+        let (status, _, _) = server.request(method, path, body, alice.headers()).await;
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
@@ -490,7 +503,9 @@ async fn password_change_revokes_other_sessions() {
 #[tokio::test]
 async fn activity_log_records_actions_without_secrets() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     let admin = server.login("admin", ADMIN_PASSWORD).await;
     let _ = server
         .request(
@@ -520,7 +535,9 @@ async fn activity_log_records_actions_without_secrets() {
 #[tokio::test]
 async fn system_info_and_components_report_real_data() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     let admin = server.login("admin", ADMIN_PASSWORD).await;
 
     let (status, _, body) = server
@@ -529,7 +546,9 @@ async fn system_info_and_components_report_real_data() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["product"], "RAST");
     assert_eq!(body["counts"]["admins"], 1);
-    assert!(body["host"]["hostname"].as_str().is_some_and(|h| !h.is_empty()));
+    assert!(body["host"]["hostname"]
+        .as_str()
+        .is_some_and(|h| !h.is_empty()));
     assert!(body["storage"]["available"].as_bool().is_some());
 
     let (status, _, body) = server
@@ -537,13 +556,17 @@ async fn system_info_and_components_report_real_data() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let components = body["components"].as_array().expect("components");
-    assert!(components.iter().any(|c| c["id"] == "database" && c["status"] == "ok"));
+    assert!(components
+        .iter()
+        .any(|c| c["id"] == "database" && c["status"] == "ok"));
 }
 
 #[tokio::test]
 async fn backup_roundtrip_through_api() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     let admin = server.login("admin", ADMIN_PASSWORD).await;
 
     let (status, _, body) = server
@@ -622,7 +645,9 @@ async fn backup_roundtrip_through_api() {
 #[tokio::test]
 async fn setup_is_disabled_after_first_admin() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     let (_, _, body) = server
         .request("GET", "/api/bootstrap", None, HeaderMap::new())
         .await;
@@ -641,7 +666,9 @@ async fn setup_is_disabled_after_first_admin() {
 #[tokio::test]
 async fn metrics_is_not_public() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
     // Internal metrics endpoints must never be reachable unauthenticated.
     for path in [
         "/api/monitor/snapshot",
@@ -658,7 +685,9 @@ async fn metrics_is_not_public() {
 #[tokio::test]
 async fn tls_reverse_proxy_client_ip_is_trusted_only_from_proxy() {
     let server = TestServer::start().await;
-    server.create_user("admin", ADMIN_PASSWORD, Role::Admin).await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
 
     // Trusted peer (127.0.0.1) + CF-Connecting-IP: the audit log records the real IP.
     let mut headers = HeaderMap::new();

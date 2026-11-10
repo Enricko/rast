@@ -130,10 +130,7 @@ where
             .get::<ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0)
             .unwrap_or_else(|| {
-                std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                    0,
-                )
+                std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0)
             });
         Ok(PeerAddr(addr))
     }
@@ -161,9 +158,13 @@ impl FromRequestParts<AppState> for ClientIp {
         parts: &mut axum::http::request::Parts,
         _state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        Ok(parts.extensions.get::<ClientIp>().copied().unwrap_or(ClientIp(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-        )))
+        Ok(parts
+            .extensions
+            .get::<ClientIp>()
+            .copied()
+            .unwrap_or(ClientIp(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::LOCALHOST,
+            ))))
     }
 }
 
@@ -234,15 +235,15 @@ pub fn cookie_header(value: String) -> HeaderValue {
 /// `X-Forwarded-For` only when the immediate peer is a configured trusted
 /// proxy. Otherwise the peer address wins, preventing spoofed headers.
 pub fn client_ip(headers: &HeaderMap, peer: IpAddr, cfg: &Config) -> IpAddr {
-    let peer_trusted = cfg
-        .trusted_proxies
-        .iter()
-        .any(|net| net.contains(&peer));
+    let peer_trusted = cfg.trusted_proxies.iter().any(|net| net.contains(&peer));
     if !peer_trusted || !cfg.trust_forwarded_headers {
         return peer;
     }
     // Cloudflare Tunnel sets CF-Connecting-IP; trust it before XFF.
-    if let Some(cf) = headers.get("cf-connecting-ip").and_then(|v| v.to_str().ok()) {
+    if let Some(cf) = headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Ok(ip) = cf.trim().parse::<IpAddr>() {
             return ip;
         }
@@ -311,7 +312,10 @@ mod tests {
     fn trusted_peer_honours_cf_and_xff() {
         let cfg = cfg_with_proxies(&["127.0.0.1/32"]);
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("1.2.3.4, 5.6.7.8"));
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        );
         let peer: IpAddr = "127.0.0.1".parse().unwrap();
         assert_eq!(
             client_ip(&headers, peer, &cfg),
