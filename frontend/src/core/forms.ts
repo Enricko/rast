@@ -136,6 +136,8 @@ export function validateGib(value: string, options: { allowZero?: boolean; maxGi
 export interface FormFieldOptions<T extends HTMLElement> {
   label: string;
   control: T;
+  /** Element rendered in the DOM instead of the raw control (e.g. input wrapper). */
+  wrapper?: HTMLElement;
   hint?: string;
   required?: boolean;
   /** Extra content rendered under the control (e.g. a strength meter). */
@@ -163,10 +165,11 @@ export function formField<T extends HTMLElement>(options: FormFieldOptions<T>): 
     control.setAttribute("aria-describedby", describedBy);
     if (options.required) control.setAttribute("aria-required", "true");
   }
+  const domControl: HTMLElement = options.wrapper ?? control;
   const el = h(
     "div",
     { class: "field" },
-    h("label", { class: "field" }, h("span", { class: "field-label" }, options.label, options.required ? h("span", { class: "field-required", ariaLabel: "required" }, " *") : null), control),
+    h("label", { class: "field" }, h("span", { class: "field-label" }, options.label, options.required ? h("span", { class: "field-required", ariaLabel: "required" }, " *") : null), domControl),
     hintEl,
     options.extra ?? null,
     errorEl,
@@ -285,6 +288,7 @@ export function passwordField(options: PasswordFieldOptions = {}): PasswordField
   const field = formField({
     label: options.label ?? "Password",
     control: input,
+    wrapper: controlWrap,
     ...(options.hint ? { hint: options.hint } : {}),
     ...(options.required ? { required: true } : {}),
     ...(extraNodes.length > 0 ? { extra: h("div", { class: "password-extra" }, ...extraNodes) } : {}),

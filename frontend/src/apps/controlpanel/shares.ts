@@ -35,7 +35,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
   const intro = h(
     "div",
     { class: "cp-intro" },
-    h("h2", { class: "cp-intro-title" }, "Shared folders"),
+    h("h2", { class: "cp-intro-title" }, "Shared folder access"),
     h(
       "p",
       { class: "cp-intro-detail muted" },

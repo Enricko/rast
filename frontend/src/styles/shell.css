@@ -303,9 +303,12 @@ body.app-ready #boot-splash {
 
 .auth-panel {
   position: relative;
-  display: grid;
-  place-items: center;
-  padding: 40px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 100%;
+  padding: 56px 28px 36px;
   background: rgba(7, 12, 24, 0.28);
   backdrop-filter: blur(10px);
 }
@@ -315,7 +318,7 @@ body.app-ready #boot-splash {
 }
 
 .auth-theme-toggle {
-  position: absolute;
+  position: fixed;
   top: 20px;
   right: 20px;
   width: 38px;
@@ -337,6 +340,7 @@ body.app-ready #boot-splash {
 
 .auth-card {
   width: min(432px, 100%);
+  margin-block: auto;
   padding: 34px 32px 28px;
   background: var(--surface);
   backdrop-filter: blur(26px) saturate(1.15);
@@ -368,6 +372,33 @@ body.app-ready #boot-splash {
 .auth-content {
   display: flex;
   flex-direction: column;
+}
+
+/* First-run setup is the tallest auth form: tighten spacing so it fits a
+   900px-tall viewport without scrolling on most desktops. */
+.auth-content-setup .auth-title {
+  margin-bottom: 2px;
+}
+
+.auth-content-setup .auth-subtitle {
+  margin-bottom: 14px;
+}
+
+.auth-content-setup .auth-notice {
+  padding: 8px 10px;
+  margin-bottom: 12px;
+}
+
+.auth-content-setup .field {
+  margin-bottom: 9px;
+}
+
+.auth-content-setup .auth-token-hint {
+  margin-bottom: 10px;
+}
+
+.auth-content-setup .auth-divider {
+  margin: 12px 0 10px;
 }
 
 .auth-title {
@@ -486,7 +517,7 @@ body.app-ready #boot-splash {
 
 .auth-foot {
   width: min(432px, 100%);
-  margin-top: 18px;
+  margin-top: 20px;
   display: flex;
   justify-content: space-between;
   gap: 12px;
@@ -792,6 +823,22 @@ body.app-ready #boot-splash {
   z-index: 3;
 }
 
+/* The desktop shell suppresses accidental text selection, but content inside
+   windows and dialogs must stay selectable (paths, log entries, settings). */
+.window .win-body,
+.modal,
+.context-menu {
+  user-select: text;
+}
+
+.win-titlebar,
+.taskbar,
+.desktop-icons,
+.desktop-hint,
+.menu-panel {
+  user-select: none;
+}
+
 .window {
   border-radius: var(--radius-lg);
   border: 1px solid var(--border-strong);
@@ -1090,6 +1137,18 @@ body.app-ready #boot-splash {
 
 .user-chip:hover {
   border-color: var(--border-strong);
+}
+
+.user-chip[aria-expanded="true"],
+.tray-clock[aria-expanded="true"],
+.tray-button[aria-expanded="true"] {
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.user-chip-name {
+  max-width: 152px;
 }
 
 .user-chip-text {
@@ -1475,6 +1534,16 @@ body.app-ready #boot-splash {
 .status-panel .kv,
 .clock-panel .kv {
   font-size: 12.5px;
+}
+
+.status-panel .kv.compact {
+  grid-template-columns: 104px minmax(0, 1fr);
+}
+
+.status-panel .kv dd {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-actions {

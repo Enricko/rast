@@ -191,14 +191,32 @@ class MonitorApp {
   private async loadAllHistory(): Promise<void> {
     if (this.historyRequested) return;
     this.historyRequested = true;
-    await Promise.all([
-      this.loadHistory("cpu"),
-      this.loadHistory("memory"),
-      this.loadHistory("swap"),
-    ]);
+    await Promise.all([this.loadHistory("cpu"), this.loadHistory("memory"), this.loadNetworkHistory()]);
   }
 
-  private async loadHistory(metric: "cpu" | "memory" | "swap"): Promise<void> {
+  /** /api/monitor/history supports cpu | mem | net; net fills both network cards. */
+  private async loadNetworkHistory(): Promise<void> {
+    try {
+      const payload = await this.ctx.api.get<unknown>("/api/monitor/history", {
+        metric: "network",
+        points: SERIES_POINTS,
+      });
+      if (this.disposed) return;
+      const { rx, tx } = parseNetworkHistory(payload);
+      if (rx.length > 0) {
+        this.series.rx.length = 0;
+        this.series.rx.push(...rx.slice(-SERIES_POINTS));
+      }
+      if (tx.length > 0) {
+        this.series.tx.length = 0;
+        this.series.tx.push(...tx.slice(-SERIES_POINTS));
+      }
+    } catch {
+      // History is an enhancement; the live series still renders without it.
+    }
+  }
+
+  private async loadHistory(metric: "cpu" | "memory"): Promise<void> {
     try {
       const payload = await this.ctx.api.get<unknown>("/api/monitor/history", {
         metric,
@@ -257,7 +275,7 @@ class MonitorApp {
       if (this.paused || this.disposed) return;
       void this.loadHistory("cpu");
       void this.loadHistory("memory");
-      void this.loadHistory("swap");
+      void this.loadNetworkHistory();
     }, HISTORY_REFRESH_MS);
   }
 
@@ -462,10 +480,11 @@ class MonitorApp {
     const host = snapshot.host;
     if (!host) return;
     const cpu = clampPercent(host.cpuPercent);
-    this.updateCard(this.cardCpu, formatPercent(cpu, 1), `${host.cpuCores} core(s) · load ${formatLoad(host.loadAvg)}`, pushSeries(this.series.cpu, cpu));
+    this.updateCard(this.cardCpu, formatPercent(cpu, 1), `${host.cpuCores} core(s) · 1m load ${formatLoad(host.loadAvg, 0, 1)}`, pushSeries(this.series.cpu, cpu));
     if (this.cardLoad) {
-      this.cardLoad.value.textContent = formatLoad(host.loadAvg);
-      this.cardLoad.sub.textContent = "1 · 5 · 15 minute load";
+      const load = host.loadAvg ?? [];
+      this.cardLoad.value.textContent = load[0] !== undefined && Number.isFinite(load[0]) ? load[0].toFixed(2) : "—";
+      this.cardLoad.sub.textContent = `5 min ${formatLoad(load, 1, 2)} · 15 min ${formatLoad(load, 2, 3)}`;
     }
     if (this.cardUptime) {
       this.cardUptime.value.textContent = formatDuration(host.uptimeSecs);
@@ -662,10 +681,10 @@ function clampPercent(value: number | undefined | null): number {
   return Math.min(100, Math.max(0, value));
 }
 
-function formatLoad(load: number[] | undefined): string {
+function formatLoad(load: number[] | undefined, from = 0, to = 3): string {
   if (!load || load.length === 0) return "—";
   return load
-    .slice(0, 3)
+    .slice(from, to)
     .map((value) => (Number.isFinite(value) ? value.toFixed(2) : "—"))
     .join(" · ");
 }
@@ -695,6 +714,33 @@ function parseHistory(payload: unknown): number[] {
     for (const key of ["points", "values", "history", "data", "samples"]) {
       const candidate = record[key];
       if (Array.isArray(candidate)) return parseHistory(candidate);
+    }
+  }
+  return [];
+}
+
+function parseNetworkHistory(payload: unknown): { rx: number[]; tx: number[] } {
+  const entries = historyEntries(payload);
+  const rx: number[] = [];
+  const tx: number[] = [];
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    const rxValue = Number(record.rxBytesPerSec ?? record.rx);
+    const txValue = Number(record.txBytesPerSec ?? record.tx);
+    if (Number.isFinite(rxValue)) rx.push(rxValue);
+    if (Number.isFinite(txValue)) tx.push(txValue);
+  }
+  return { rx, tx };
+}
+
+function historyEntries(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    for (const key of ["points", "values", "history", "data", "samples"]) {
+      const candidate = record[key];
+      if (Array.isArray(candidate)) return candidate;
     }
   }
   return [];

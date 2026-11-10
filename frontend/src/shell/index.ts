@@ -26,7 +26,6 @@ export async function boot(root: HTMLElement): Promise<void> {
   };
   const { api, store, events } = deps;
 
-  document.body.classList.add("rast-booting");
   store.subscribe((state) => {
     setDocumentTitle(state.siteName);
     setFavicon(state.theme);

@@ -1718,6 +1718,10 @@ pre.code {
 
 /* ---------------------------------------------------------------- helpers */
 
+[hidden] {
+  display: none !important;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

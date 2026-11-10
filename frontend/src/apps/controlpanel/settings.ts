@@ -51,7 +51,7 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<void> {
   );
 
   const intro = pageIntro(
-    "Server settings",
+    "Server preferences",
     "Preferences stored in the RAST database. Fields managed by the server configuration file are read-only here.",
   );
 

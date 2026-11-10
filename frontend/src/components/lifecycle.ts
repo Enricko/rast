@@ -18,10 +18,18 @@ export class AppLifecycle {
   private readonly frames = new Set<number>();
   private readonly controllers = new Set<AbortController>();
   private closePoll: number | undefined;
+  private shellDispose: (() => void) | null = null;
   private disposed = false;
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
+    // Primary path: the shell tells the app when its window closes. The poll
+    // below remains as a safety net for shells that do not wire this callback.
+    try {
+      this.shellDispose = ctx.onDispose(() => this.dispose());
+    } catch {
+      this.shellDispose = null;
+    }
     this.closePoll = window.setInterval(() => {
       if (this.ctx.window.isClosed()) this.dispose();
     }, CLOSE_POLL_MS);
@@ -120,6 +128,11 @@ export class AppLifecycle {
     if (this.closePoll !== undefined) {
       window.clearInterval(this.closePoll);
       this.closePoll = undefined;
+    }
+    if (this.shellDispose) {
+      const off = this.shellDispose;
+      this.shellDispose = null;
+      safeRun(off);
     }
     for (const id of this.timeouts) window.clearTimeout(id);
     this.timeouts.clear();

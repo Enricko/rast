@@ -172,7 +172,7 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
   const actionsRow = h(
     "div",
     { class: "logs-actions-bar" },
-    isAdmin ? h("div", { class: "row" }, autoSwitch.el) : h("div", { class: "badge info" }, "Showing your activity"),
+    h("div", { class: "row" }, autoSwitch.el, isAdmin ? null : h("span", { class: "badge info" }, "Your activity only")),
     countLabel,
     h("div", { class: "cp-toolbar-spacer" }),
     refreshedLabel,

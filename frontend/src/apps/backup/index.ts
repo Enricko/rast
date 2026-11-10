@@ -47,10 +47,12 @@ interface VerifyResponse {
   sha256?: string;
 }
 
-type RestoreStep = string | { title?: string; text?: string; message?: string; command?: string };
+type RestoreStep = string | { title?: string; text?: string; message?: string; detail?: string; command?: string | null };
 
 interface RestoreGuideResponse {
   steps?: RestoreStep[];
+  warning?: string;
+  archive?: string;
 }
 
 const SCOPES: Array<{ id: string; label: string; description: string }> = [
@@ -203,9 +205,12 @@ class BackupCenterApp {
 
   private async loadSchedule(): Promise<void> {
     try {
-      const schedule = await this.ctx.api.get<BackupSchedule>("/api/backups/schedule");
+      const payload = await this.ctx.api.get<{ schedule?: BackupSchedule | null } | BackupSchedule>(
+        "/api/backups/schedule",
+      );
       if (this.disposed) return;
-      this.schedule = schedule;
+      const wrapped = payload && typeof payload === "object" && "schedule" in payload ? payload.schedule : null;
+      this.schedule = wrapped ?? (payload as BackupSchedule | null);
       this.scheduleError = null;
     } catch (error) {
       if (isAbortError(error) || this.disposed) return;
@@ -526,7 +531,12 @@ class BackupCenterApp {
         h("span", {}, h("span", { class: "backup-scope-option-title" }, scope.label), h("span", { class: "small muted" }, scope.description)),
       );
     });
-    const noteInput = h("textarea", { class: "textarea backup-note-input", placeholder: "Optional note (e.g. before upgrading to 2.x)", rows: 2 });
+    const noteInput = h("textarea", {
+      class: "textarea backup-note-input",
+      placeholder: "Optional note (e.g. before upgrading to 2.x)",
+      rows: 2,
+    });
+    noteInput.maxLength = 200;
     const validation = formError("");
     const progress = progressBar();
     progress.el.classList.add("hidden");
@@ -536,7 +546,13 @@ class BackupCenterApp {
       { class: "col" },
       h("p", { class: "small muted" }, "Select what to include. The archive is written to the backup directory on the server; download it afterwards from the list."),
       h("div", { class: "backup-scope-options" }, ...scopeRows),
-      h("label", { class: "field" }, h("span", { class: "field-label" }, "Note"), noteInput),
+      h(
+        "label",
+        { class: "field" },
+        h("span", { class: "field-label" }, "Note"),
+        noteInput,
+        h("span", { class: "field-hint" }, "Up to 200 characters."),
+      ),
       progress.el,
       progressLabel,
       validation,
@@ -797,6 +813,9 @@ class BackupCenterApp {
       const steps = Array.isArray(guide?.steps) ? guide.steps : [];
       clear(stepsHost);
       if (steps.length > 0) {
+        if (guide?.warning) {
+          stepsHost.appendChild(banner("warning", "Application data is not covered", guide.warning));
+        }
         stepsHost.appendChild(renderSteps(steps));
         stepsHost.appendChild(
           h(
@@ -885,7 +904,7 @@ function renderSteps(steps: RestoreStep[]): HTMLElement {
     }
     const item = h("li", {});
     if (step.title) item.appendChild(h("div", { class: "backup-restore-step-title" }, step.title));
-    const text = step.text ?? step.message;
+    const text = step.text ?? step.message ?? step.detail;
     if (text) item.appendChild(h("div", { class: "small muted" }, text));
     if (step.command) item.appendChild(h("pre", { class: "code backup-command" }, step.command));
     list.appendChild(item);

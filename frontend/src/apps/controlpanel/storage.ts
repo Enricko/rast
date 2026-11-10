@@ -65,7 +65,7 @@ export async function renderStorageTab(tab: TabRenderContext): Promise<void> {
   }
 
   const intro = pageIntro(
-    "Storage",
+    "Capacity & allocations",
     "Where RAST keeps data, how much space is available and how quotas are distributed across accounts.",
   );
   host.appendChild(intro);

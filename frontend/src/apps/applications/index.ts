@@ -29,9 +29,24 @@ import {
 // API payload shapes (docs/API.md).
 // ---------------------------------------------------------------------------
 
+interface ContainerResourceStat {
+  name?: string;
+  cpuPercent?: number;
+  memoryBytes?: number;
+  memoryLimitBytes?: number;
+}
+
+interface PortMappingLike {
+  hostPort?: number;
+  containerPort?: number;
+  protocol?: string;
+  hostIp?: string | null;
+}
+
 interface AppDetail extends ManagedApp {
   description?: string;
-  resources?: { cpuPercent?: number; memoryBytes?: number };
+  /** The backend returns one resource sample per container. */
+  resources?: ContainerResourceStat[];
   compose?: string;
 }
 
@@ -389,7 +404,7 @@ class ApplicationsApp {
     if (app.lastError) statusBadge.title = app.lastError;
     const containers = app.containers ?? [];
     const running = containers.filter((container) => container.state === "running").length;
-    const ports = app.ports ?? [];
+    const ports = publishedPorts(app);
     const actions = h("div", { class: "appmgmt-row-actions" });
     const busy = app.status === "deploying";
 
@@ -850,15 +865,34 @@ class ApplicationsApp {
         h("dt", {}, "Updated"),
         h("dd", {}, formatDateTime(detail.updatedAt)),
       );
-      if (detail.resources) {
-        kv.append(
-          h("dt", {}, "CPU"),
-          h("dd", {}, formatPercent(detail.resources.cpuPercent, 1)),
-          h("dt", {}, "Memory"),
-          h("dd", {}, formatBytes(detail.resources.memoryBytes)),
+      overviewHost.appendChild(h("div", { class: "appmgmt-panel" }, kv));
+
+      const resources = Array.isArray(detail.resources) ? detail.resources : [];
+      if (resources.length > 0) {
+        overviewHost.appendChild(h("h4", { class: "appmgmt-subhead" }, "Resource usage"));
+        const resourceRows = resources.map((resource) =>
+          h(
+            "tr",
+            {},
+            h("td", { class: "mono small" }, resource.name ?? "—"),
+            h("td", { class: "num" }, formatPercent(resource.cpuPercent, 1)),
+            h("td", { class: "num" }, formatBytes(resource.memoryBytes)),
+            h("td", { class: "num small muted" }, formatBytes(resource.memoryLimitBytes)),
+          ),
+        );
+        overviewHost.appendChild(
+          h(
+            "div",
+            { class: "table-wrap appmgmt-mini-table" },
+            h(
+              "table",
+              { class: "table" },
+              h("thead", {}, h("tr", {}, h("th", {}, "Container"), h("th", { class: "num" }, "CPU"), h("th", { class: "num" }, "Memory"), h("th", { class: "num" }, "Limit"))),
+              h("tbody", {}, ...resourceRows),
+            ),
+          ),
         );
       }
-      overviewHost.appendChild(h("div", { class: "appmgmt-panel" }, kv));
 
       const containers = detail.containers ?? [];
       overviewHost.appendChild(h("h4", { class: "appmgmt-subhead" }, `Containers (${containers.length})`));
@@ -872,7 +906,7 @@ class ApplicationsApp {
             h("td", {}, container.name),
             h("td", { class: "mono small" }, container.image),
             h("td", {}, h("span", { class: `badge ${container.state === "running" ? "ok" : ""}` }, container.state)),
-            h("td", { class: "small muted" }, (container.ports ?? []).join(", ") || "—"),
+            h("td", { class: "small muted" }, portLabels(container.ports).join(", ") || "—"),
           ),
         );
         overviewHost.appendChild(
@@ -889,7 +923,7 @@ class ApplicationsApp {
         );
       }
 
-      const ports = detail.ports ?? [];
+      const ports = publishedPorts(detail);
       overviewHost.appendChild(h("h4", { class: "appmgmt-subhead" }, "Published ports"));
       overviewHost.appendChild(
         ports.length > 0
@@ -1209,6 +1243,41 @@ function listOf<T>(payload: unknown, key = "items"): T[] {
     if (Array.isArray(candidate)) return candidate as T[];
   }
   return [];
+}
+
+function portLabel(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object") {
+    const mapping = value as PortMappingLike;
+    if (typeof mapping.containerPort !== "number") return null;
+    const protocol = mapping.protocol && mapping.protocol !== "tcp" ? `/${mapping.protocol}` : "";
+    if (typeof mapping.hostPort === "number") return `${mapping.hostPort}:${mapping.containerPort}${protocol}`;
+    return `${mapping.containerPort}${protocol}`;
+  }
+  return null;
+}
+
+function portLabels(values: unknown): string[] {
+  if (!Array.isArray(values)) return [];
+  const out: string[] = [];
+  for (const value of values) {
+    const label = portLabel(value);
+    if (label && !out.includes(label)) out.push(label);
+  }
+  return out;
+}
+
+/** Published ports for an app: top-level list when present, else container mappings. */
+function publishedPorts(app: { ports?: unknown; containers?: Array<{ ports?: unknown }> }): string[] {
+  const direct = portLabels(app.ports);
+  if (direct.length > 0) return direct;
+  const out: string[] = [];
+  for (const container of app.containers ?? []) {
+    for (const label of portLabels(container.ports)) {
+      if (!out.includes(label)) out.push(label);
+    }
+  }
+  return out;
 }
 
 function statusLabel(status: string): string {

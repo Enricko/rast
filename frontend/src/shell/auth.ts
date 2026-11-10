@@ -497,7 +497,7 @@ export function renderSetup(
     form,
   );
   renderAuthLayout(deps, content, {
-    visualDetail: bootstrap.description || "Welcome to your new server workspace. Start by creating the first administrator account.",
+    visualDetail: "Welcome to your new server workspace. Create the first administrator account to begin.",
   });
   window.setTimeout(() => (tokenRequired ? tokenInput : usernameInput).focus(), 40);
 }
