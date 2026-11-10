@@ -1,0 +1,71 @@
+[package]
+name = "rast"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "RAST — Resource Administration & Storage Toolkit"
+license = "MIT"
+repository = "https://github.com/Enricko/rast"
+homepage = "https://github.com/Enricko/rast"
+readme = "README.md"
+keywords = ["self-hosted", "server", "storage", "admin", "axum"]
+categories = ["web-programming::http-server", "command-line-utilities"]
+
+[[bin]]
+name = "rast"
+path = "src/main.rs"
+
+[lib]
+name = "rast"
+path = "src/lib.rs"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["macros"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time", "signal", "process"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace", "cors", "compression-gzip", "request-id"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros", "derive"] }
+argon2 = "0.6.0"
+rand = "0.9"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+base64 = "0.22"
+hex = "0.4"
+aes-gcm = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "2"
+clap = { version = "4.6", features = ["derive", "env"] }
+sysinfo = "0.40"
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
+mime_guess = "2"
+percent-encoding = "2"
+rust-embed = { version = "8", features = ["include-exclude"] }
+ipnet = "2"
+walkdir = "2"
+flate2 = "1"
+tar = "0.4"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+async-trait = "0.1"
+socket2 = "0.6"
+
+[dev-dependencies]
+tempfile = "3"
+http-body-util = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+debug = 1

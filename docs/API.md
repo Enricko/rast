@@ -1,0 +1,206 @@
+# RAST HTTP API
+
+Base path: `/api`. All bodies are JSON (`Content-Type: application/json`) unless
+noted. Timestamps are Unix epoch **milliseconds**.
+
+## Authentication
+
+1. `POST /api/auth/login` with `{"username","password"}` sets the session cookie
+   (`rast_session`, HttpOnly) and returns the user plus a CSRF token.
+2. Every subsequent request sends the cookie. Every **mutating** request
+   (`POST`, `PUT`, `PATCH`, `DELETE`) must also send `X-CSRF-Token` with the
+   token from the login response or `GET /api/auth/me`.
+3. `POST /api/auth/logout` revokes the session.
+
+Responses use this error shape and never leak internals:
+
+```json
+{"error": {"code": "forbidden", "message": "administrator role required"}}
+```
+
+| Status | Meaning |
+| --- | --- |
+| 400 | validation error |
+| 401 | not authenticated / session expired |
+| 403 | authenticated but not allowed (or CSRF mismatch) |
+| 404 | object not found **or** not visible to this user |
+| 409 | conflict (name exists, job cancelled) |
+| 413 | upload too large |
+| 429 | rate limited / account locked (`Retry-After` header) |
+| 503 | subsystem unavailable (e.g. Docker worker down) |
+
+Paged responses: `{"items": [...], "page": 1, "perPage": 25, "total": 137}`.
+All list endpoints accept `page` and `perPage` (bounded server-side).
+
+## Public endpoints
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/healthz` | liveness for proxies (`ok`) |
+| GET | `/api/bootstrap` | `{product, description, version, setupRequired, setupTokenRequired, registrationEnabled, maxUploadBytes, sessionTtlHours, serverTime}` |
+| GET | `/api/setup/status` | `{setupRequired, tokenRequired, version}` |
+| POST | `/api/setup` | `{token?, username, password, displayName?}` — creates the first admin, one-shot, disabled once an admin exists |
+| POST | `/api/auth/login` | `{username, password}` → `{user, csrfToken, expiresAt}` |
+
+`user` object (everywhere):
+
+```json
+{"id":1,"username":"admin","displayName":"Administrator","role":"admin|user",
+ "active":true,"quotaBytes":10737418240,"usedBytes":0,"mustChangePassword":false,
+ "createdAt":1700000000000,"updatedAt":1700000000000,"lastLoginAt":null}
+```
+
+## Session & profile
+
+| Method | Path | Body / Notes |
+| --- | --- | --- |
+| GET | `/api/auth/me` | `{user, csrfToken, sessionExpiresAt, features:{docker,apps,backup,monitor,activityLogs,fileStation}, serverTime}` |
+| POST | `/api/auth/logout` | clears cookie |
+| POST | `/api/auth/password` | `{currentPassword, newPassword}`; revokes other sessions |
+| GET | `/api/auth/sessions` | own sessions `{id, ip, userAgent, createdAt, lastSeenAt, expiresAt, current}` |
+| DELETE | `/api/auth/sessions/{id}` | revoke one session |
+| DELETE | `/api/auth/sessions` | revoke all other sessions |
+
+## Users (admin)
+
+| Method | Path | Body |
+| --- | --- | --- |
+| GET | `/api/users?page&perPage&q` | list |
+| POST | `/api/users` | `{username, password, role, displayName?, quotaBytes?}` |
+| PATCH | `/api/users/{id}` | `{displayName?, role?, active?, quotaBytes?, mustChangePassword?}` |
+| DELETE | `/api/users/{id}` | deactivate (data preserved) |
+| POST | `/api/users/{id}/password` | `{password, mustChangePassword?}` |
+| GET | `/api/users/{id}/sessions` | active sessions |
+| DELETE | `/api/users/{id}/sessions` | revoke all |
+
+Rules enforced server-side: cannot demote/deactivate the last active admin,
+cannot deactivate yourself.
+
+## File Station
+
+Paths are **logical** paths: `/` is the user's home root. Shared folders are
+mounted read-only or read-write under `/shared/<name>` (per ACL). Use
+`/api/files/roots` to discover them.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |
+| GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]` |
+| GET | `/api/files/stat?path=` | single entry |
+| POST | `/api/files/mkdir` | `{path}` (parent + name) |
+| POST | `/api/files/upload?dir=/&name=file.bin&overwrite=false` | **raw stream** body; `Content-Length` required; returns entry. Progress is client-side + SSE `job.progress` for large copies only |
+| GET | `/api/files/download?path=` | streamed, `Content-Disposition: attachment`, supports `Range` |
+| GET | `/api/files/preview?path=` | inline preview for images/PDF/text; sandboxed CSP |
+| GET | `/api/files/text?path=&maxBytes=262144` | `{content, truncated, encoding}` |
+| POST | `/api/files/rename` | `{path, newName}` |
+| POST | `/api/files/copy` | `{paths:[], destDir}` → `{jobId}` |
+| POST | `/api/files/move` | `{paths:[], destDir}` → `{jobId}` |
+| POST | `/api/files/delete` | `{paths:[]}` → moves to recycle bin, `{jobId}` |
+| GET | `/api/files/search?q=&path=&type=&page=` | recursive search (bounded) |
+| GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}}` |
+| GET | `/api/files/trash?page=` | `{items:[{id, originalPath, sizeBytes, kind, deletedAt}], total}` |
+| POST | `/api/files/trash/restore` | `{ids:[]}` |
+| POST | `/api/files/trash/delete` | `{ids:[]}` permanent delete (irreversible) |
+| DELETE | `/api/files/trash` | empty the bin |
+
+Entry object:
+
+```json
+{"name":"report.pdf","path":"/docs/report.pdf","kind":"file|dir",
+ "size":1234,"modifiedAt":1700000000000,"mime":"application/pdf",
+ "readable":true,"writable":true,"trashed":false}
+```
+
+Shared folders (admin CRUD; ACL enforced on every files endpoint):
+
+| Method | Path | Body |
+| --- | --- | --- |
+| GET | `/api/shares` | `[{id,name,path,description,members:[{userId,username,perms}],createdAt}]` |
+| POST | `/api/shares` | `{name, description?, members:[{userId, perms:"read|write|admin"}]}` |
+| PATCH | `/api/shares/{id}` | `{name?, description?, members?}` |
+| DELETE | `/api/shares/{id}` | removes the share definition, keeps data |
+
+## Applications (Docker, admin)
+
+Requires `RAST_DOCKER_ENABLED=true` and a running `rast-worker.service`.
+When unavailable: `503` with `{"error":{"code":"unavailable","message":"docker worker unavailable"}}`
+and `/api/docker/status` reports why.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/docker/status` | `{enabled, available, version, reason}` |
+| GET | `/api/apps` | managed apps with status |
+| POST | `/api/apps` | `{name, compose, env:[{key,value,secret}]}` → validates compose then `{app, jobId}` |
+| GET | `/api/apps/{id}` | detail: status, containers, ports, volumes, resources, lastError |
+| POST | `/api/apps/{id}/start` | |
+| POST | `/api/apps/{id}/stop` | |
+| POST | `/api/apps/{id}/restart` | |
+| POST | `/api/apps/{id}/redeploy` | `{compose?, env?}` |
+| GET | `/api/apps/{id}/logs?tail=200` | `{lines:[{ts,stream,message}]}` |
+| GET | `/api/apps/{id}/history` | deployment history |
+| DELETE | `/api/apps/{id}?removeVolumes=false` | confirmation required; volumes kept by default |
+| GET | `/api/docker/containers` | discovered containers, flagged `managed:true|false` |
+| POST | `/api/docker/import` | `{containerIds:[]}` explicit import |
+
+Env values marked `secret:true` are encrypted at rest and returned masked
+(`"••••"`); submit a new value to change them.
+
+## Resource monitor
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/monitor/snapshot` | latest sample: `{ts, host:{cpuPercent, cpuCores, loadAvg:[...], memoryUsed/Total, swapUsed/Total, uptimeSecs}, disks:[{mount, totalBytes, usedBytes}], network:{rxBytesPerSec, txBytesPerSec, rxTotal, txTotal}, containers:[{name, cpuPercent, memoryBytes}], components:[...]}`, `unavailable` + `reason` when sampling failed |
+| GET | `/api/monitor/history?metric=cpu&points=120` | ring buffer, bounded retention |
+| GET | `/api/monitor/containers` | container resources (empty when Docker unavailable) |
+
+Live updates: `GET /api/events` (SSE). Events: `monitor` (every interval),
+`job.queued|start|progress|done|failed|cancelled`, `notice`.
+Each event has `event: <kind>`, `data: {...}`; include `id` for `Last-Event-ID`.
+
+## Backup Center (admin)
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error}], total}` |
+| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}` |
+| DELETE | `/api/backups/{id}` | delete archive |
+| GET | `/api/backups/{id}/download` | streamed archive |
+| GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
+| PUT | `/api/backups/schedule` | update schedule |
+| POST | `/api/backups/{id}/verify` | integrity check |
+| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...]}` |
+
+## Activity logs
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/logs?page&perPage&actor&action&result&from&to&q` | admin sees all, users see their own |
+| GET | `/api/logs/actions` | filter options |
+| GET | `/api/logs/export` | CSV download |
+
+## Jobs
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/jobs?page&perPage&status` | own jobs (admin: all) |
+| GET | `/api/jobs/{id}` | `{id, kind, status, progress, total, message, result, error}` |
+| POST | `/api/jobs/{id}/cancel` | cooperative cancellation |
+
+## System & settings (admin)
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/system/info` | host, server, counts, database, storage |
+| GET | `/api/system/components` | component health list |
+| GET | `/api/settings` | control panel settings |
+| PATCH | `/api/settings` | `{siteName?, loginMessage?, auditRetentionDays?, trashRetentionDays?, defaultQuotaBytes?}` |
+| GET | `/api/settings/storage` | storage dirs, usage, shares |
+
+## Conventions for implementers
+
+* Authorisation is checked **server-side** on every object. Hiding UI is never
+  a control.
+* Filesystem handlers must resolve paths inside the allowed roots only, reject
+  `..`, and open with `O_NOFOLLOW` semantics where applicable.
+* Any long operation returns a `jobId`; the UI follows `job.*` SSE events.
+* Audit every mutation with `audit::record`.
