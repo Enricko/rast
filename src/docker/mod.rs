@@ -11,6 +11,7 @@
 pub mod compose;
 pub mod containers;
 pub mod protocol;
+pub mod reconcile;
 
 use std::{
     path::{Path, PathBuf},
@@ -22,7 +23,7 @@ use serde_json::{json, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
-    sync::Mutex,
+    sync::{Mutex, Notify},
 };
 
 use crate::{config::Config, error::AppError};
@@ -93,6 +94,9 @@ pub struct DockerManager {
     status_cache: Mutex<Option<(Instant, Value)>>,
     quick_timeout: Duration,
     compose_timeout: Duration,
+    /// Wakes the background reconciler for an immediate tick (published as
+    /// `app.changed`/`docker.changed` by [`reconcile`]).
+    reconcile: Arc<Notify>,
 }
 
 impl DockerManager {
@@ -104,6 +108,7 @@ impl DockerManager {
             status_cache: Mutex::new(None),
             quick_timeout: protocol::QUICK_OP_TIMEOUT,
             compose_timeout: protocol::COMPOSE_OP_TIMEOUT,
+            reconcile: Arc::new(Notify::new()),
         })
     }
 
@@ -189,9 +194,32 @@ impl DockerManager {
         }
     }
 
+    /// Ask the background reconciler to observe the managed apps immediately
+    /// (used after deploy/stop/restart/redeploy jobs and app delete/import).
+    /// Multiple requests before the next tick coalesce into one pass.
+    pub fn request_reconcile(&self) {
+        self.reconcile.notify_one();
+    }
+
+    /// Handle used by [`reconcile::reconciler_loop`] to wait for on-demand runs.
+    pub(crate) fn reconcile_notify(&self) -> Arc<Notify> {
+        self.reconcile.clone()
+    }
+
     /// Perform one whitelisted operation on the worker.
     pub async fn call(&self, request: WorkerRequest) -> Result<Value, DockerError> {
         self.send(&request).await
+    }
+
+    /// Like [`DockerManager::call`] but with a caller-provided deadline. Used by
+    /// the live log stream so a slow Docker daemon cannot stall an SSE stream for
+    /// the full per-operation timeout.
+    pub async fn call_with_timeout(
+        &self,
+        request: WorkerRequest,
+        timeout: Duration,
+    ) -> Result<Value, DockerError> {
+        self.send_with_timeout(&request, timeout).await
     }
 
     /// Convenience: containers of one managed app.
@@ -212,16 +240,24 @@ impl DockerManager {
 
     /// Send a request over the worker socket and parse the response.
     async fn send(&self, request: &WorkerRequest) -> Result<Value, DockerError> {
+        let timeout = match request.op {
+            op if op.is_app_op() => self.compose_timeout,
+            _ => self.quick_timeout,
+        };
+        self.send_with_timeout(request, timeout).await
+    }
+
+    async fn send_with_timeout(
+        &self,
+        request: &WorkerRequest,
+        timeout: Duration,
+    ) -> Result<Value, DockerError> {
         if !self.enabled {
             return Err(DockerError::Disabled("RAST_DOCKER_ENABLED is false".into()));
         }
         // Validate once more on the client side: this catches path handling
         // bugs before they reach the privileged process. The worker re-checks.
         validate_request(request, &self.apps_dir).map_err(DockerError::BadRequest)?;
-        let timeout = match request.op {
-            op if op.is_app_op() => self.compose_timeout,
-            _ => self.quick_timeout,
-        };
         match tokio::time::timeout(timeout, self.roundtrip(request)).await {
             Ok(result) => result,
             Err(_) => Err(DockerError::Timeout(timeout)),
@@ -407,6 +443,7 @@ mod tests {
             status_cache: Mutex::new(None),
             quick_timeout: timeout,
             compose_timeout: timeout,
+            reconcile: Arc::new(Notify::new()),
         })
     }
 

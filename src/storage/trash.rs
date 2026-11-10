@@ -322,10 +322,11 @@ pub async fn delete_permanent(
     storage: &Storage,
     user: &AuthUser,
     ids: &[String],
-) -> AppResult<(i64, i64)> {
+) -> AppResult<(i64, i64, Vec<String>)> {
     let records = load_records(pool, user.id, ids).await?;
     let mut deleted = 0i64;
     let mut bytes = 0i64;
+    let mut original_paths = Vec::with_capacity(records.len());
     for record in records {
         if let Ok(payload) = payload_path(storage, &record.trashed_path) {
             transfer::remove_path(&payload).await?;
@@ -337,12 +338,17 @@ pub async fn delete_permanent(
             .await?;
         deleted += 1;
         bytes = bytes.saturating_add(record.size_bytes);
+        original_paths.push(record.original_path);
     }
-    Ok((deleted, bytes))
+    Ok((deleted, bytes, original_paths))
 }
 
 /// Empty the user's recycle bin, permanently deleting every payload.
-pub async fn empty(pool: &SqlitePool, storage: &Storage, user: &AuthUser) -> AppResult<(i64, i64)> {
+pub async fn empty(
+    pool: &SqlitePool,
+    storage: &Storage,
+    user: &AuthUser,
+) -> AppResult<(i64, i64, Vec<String>)> {
     let rows = sqlx::query(
         "SELECT id, original_path, trashed_path, size_bytes, kind, deleted_at
          FROM trash WHERE user_id = ?",
@@ -354,6 +360,7 @@ pub async fn empty(pool: &SqlitePool, storage: &Storage, user: &AuthUser) -> App
     let mut deleted = 0i64;
     let mut bytes = 0i64;
     let mut removable: Vec<String> = Vec::new();
+    let mut original_paths = Vec::with_capacity(records.len());
     for record in &records {
         if let Ok(payload) = payload_path(storage, &record.trashed_path) {
             if let Err(error) = transfer::remove_path(&payload).await {
@@ -365,6 +372,7 @@ pub async fn empty(pool: &SqlitePool, storage: &Storage, user: &AuthUser) -> App
         deleted += 1;
         bytes = bytes.saturating_add(record.size_bytes);
         removable.push(record.id.clone());
+        original_paths.push(record.original_path.clone());
     }
     for id in removable {
         sqlx::query("DELETE FROM trash WHERE id = ? AND user_id = ?")
@@ -373,7 +381,7 @@ pub async fn empty(pool: &SqlitePool, storage: &Storage, user: &AuthUser) -> App
             .execute(pool)
             .await?;
     }
-    Ok((deleted, bytes))
+    Ok((deleted, bytes, original_paths))
 }
 
 /// Remove recycle-bin entries older than `retention_days` for one user. Used by
@@ -625,7 +633,7 @@ mod tests {
             .await
             .unwrap();
 
-        let (deleted, bytes) = delete_permanent(
+        let (deleted, bytes, paths) = delete_permanent(
             &ctx.pool,
             &ctx.storage,
             &ctx.user,
@@ -634,11 +642,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((deleted, bytes), (1, 3));
+        assert_eq!(paths, vec!["/a.txt".to_string()]);
         assert!(!ctx.storage.user_trash_dir(1).join(&row_a.id).exists());
         assert_eq!(list(&ctx.pool, 1, 1, 10).await.unwrap().1, 1);
 
-        let (deleted, bytes) = empty(&ctx.pool, &ctx.storage, &ctx.user).await.unwrap();
+        let (deleted, bytes, paths) = empty(&ctx.pool, &ctx.storage, &ctx.user).await.unwrap();
         assert_eq!((deleted, bytes), (1, 3));
+        assert_eq!(paths, vec!["/b.txt".to_string()]);
         assert!(!ctx.storage.user_trash_dir(1).join(&row_b.id).exists());
         assert_eq!(list(&ctx.pool, 1, 1, 10).await.unwrap().1, 0);
     }

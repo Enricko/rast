@@ -145,8 +145,12 @@ pub async fn update_settings(
         db::set_setting(&state.db, "defaultQuotaBytes", &quota.to_string()).await?;
         changed.push("defaultQuotaBytes");
     }
-    audit::record(
+    state
+        .events
+        .publish_admin("settings.changed", json!({"keys": changed}));
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("settings.update")
             .actor(&admin.0)
             .object("settings", changed.join(","))

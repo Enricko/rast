@@ -411,6 +411,29 @@ fn sanitize_log_line(line: &str) -> String {
     crate::docker::protocol::truncate_message(&cleaned, 4096)
 }
 
+/// Derive an application's display status from its actual containers, falling
+/// back to the stored status when the worker cannot be queried.
+///
+/// Shared by the Applications API and the realtime reconciler so both always
+/// report the same status for the same observation.
+pub fn derive_status(containers: &[Value], fallback: &str) -> String {
+    if containers.is_empty() {
+        return fallback.to_string();
+    }
+    let any_running = containers.iter().any(|container| {
+        container
+            .get("state")
+            .and_then(Value::as_str)
+            .map(|state| state.eq_ignore_ascii_case("running"))
+            .unwrap_or(false)
+    });
+    if any_running {
+        "running".to_string()
+    } else {
+        "stopped".to_string()
+    }
+}
+
 /// Convert `12.34%` to `12.34`.
 pub fn parse_percent(text: &str) -> Option<f64> {
     let text = text.trim().trim_end_matches('%').trim();
@@ -627,6 +650,20 @@ mod tests {
             (125_829_120, 8_053_063_680)
         );
         assert_eq!(parse_io_pair("3.5kB / 1.2kB"), (3500, 1200));
+    }
+
+    #[test]
+    fn status_derivation() {
+        assert_eq!(derive_status(&[], "running"), "running");
+        assert_eq!(derive_status(&[], "imported"), "imported");
+        assert_eq!(derive_status(&[], "deploying"), "deploying");
+        let containers = vec![serde_json::json!({"state": "exited"})];
+        assert_eq!(derive_status(&containers, "running"), "stopped");
+        let containers = vec![
+            serde_json::json!({"state": "running"}),
+            serde_json::json!({"state": "exited"}),
+        ];
+        assert_eq!(derive_status(&containers, "stopped"), "running");
     }
 
     #[test]

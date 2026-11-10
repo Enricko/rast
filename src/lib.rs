@@ -16,6 +16,7 @@ pub mod error;
 pub mod events;
 pub mod jobs;
 pub mod monitor;
+pub mod realtime;
 pub mod secrets;
 pub mod server;
 pub mod state;

@@ -223,20 +223,49 @@ Uploaded wallpapers are private: only the owner can read or delete them.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/appearance` | `{theme, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
-| PUT | `/api/appearance` | `{theme?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}}` (partial merge) |
+| GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
+| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}}` (partial merge; the three axes are independent) |
 | GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
 | POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
 | GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins); private immutable cache + ETag |
 | DELETE | `/api/appearance/wallpapers/{id}` | deletes the file; if it is the active wallpaper the account falls back to the default built-in |
-| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme is kept) |
+| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme and accent are kept) |
 
-Allowed values: theme `light|dark|system`, kind `builtin|upload|color`,
+Allowed values: theme `light|dark|system`, accent `ocean|forest|teal|sage|amber|terracotta|rose|plum|indigo|graphite`, kind `builtin|upload|color`,
 fit `cover|contain|center`, position `center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right`,
 overlay `0..60` (percent), built-in ids `alpine-dawn|forest-mist|coastal-calm|desert-dusk`,
 colors `#RRGGBB`. Limits: 10 MiB per image, 20 images and 100 MiB total per user.
-Theme and wallpaper survive restarts, logout/login and browser changes; the
-client keeps only a small per-user paint cache that is cleared on sign-out.
+Theme, accent and wallpaper survive restarts, logout/login and browser changes;
+the client keeps only a small per-user paint cache that is cleared on sign-out.
+Every successful change publishes an `appearance.changed` event to the owner's
+other sessions (`{reason, originSessionId, appearance}`).
+
+
+## Realtime events and live logs
+
+`GET /api/events` is an authenticated SSE stream scoped server-side:
+
+* `hello` first frame: `{seq, ts, userId, admin, sessionId, version}`,
+* filtered domain events (see `docs/REALTIME.md` for the catalogue and
+  authorization scopes; clients only receive events they may see),
+* `ping` every 15 s (staleness detection),
+* `resync` if the server-side broadcast buffer lagged; clients then fetch a
+  fresh authorized snapshot,
+* `session.revoked` followed by the stream closing when the session expires,
+  is revoked, the account is disabled or its role changes.
+
+The SSE `id` is a process-wide monotonic sequence number; clients drop
+duplicates, detect gaps and reconcile. Credentials stay in the cookie; tokens
+never appear in the event URL.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/events` | authenticated event stream (admin and user scope filtering) |
+| GET | `/api/apps/{id}/logs/stream?tail=200` | admin-only SSE log stream; bounded ring buffer, `app.logs` events with `{appId, lines:[{ts,stream,message}], reset?}` |
+
+Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
+`job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
+`audit.created`, `user.changed`, `settings.changed`, `appearance.changed`.
 
 ## Conventions for implementers
 

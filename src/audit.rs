@@ -5,7 +5,7 @@
 
 use sqlx::SqlitePool;
 
-use crate::{auth::AuthUser, db};
+use crate::{auth::AuthUser, db, events::EventBus};
 
 #[derive(Debug, Clone)]
 pub struct AuditLog {
@@ -84,26 +84,74 @@ impl AuditLog {
 }
 
 /// Persist an audit entry. Failures are logged but never fail the request.
+/// Write an audit row without publishing a realtime event (CLI/maintenance
+/// paths that have no event bus).
 pub async fn record(pool: &SqlitePool, log: AuditLog) {
-    let result = sqlx::query(
+    record_impl(pool, None, log).await
+}
+
+/// Write an audit row and publish `audit.created` to the actor and admins.
+pub async fn record_with_events(pool: &SqlitePool, events: &EventBus, log: AuditLog) {
+    record_impl(pool, Some(events), log).await
+}
+
+async fn record_impl(pool: &SqlitePool, bus: Option<&EventBus>, log: AuditLog) {
+    let user_id = log.user_id;
+    let username = sanitize(&log.username, 64);
+    let action = sanitize(&log.action, 64);
+    let object_type = sanitize(&log.object_type, 32);
+    let object_id = sanitize(&log.object_id, 128);
+    let object_path = sanitize(&log.object_path, 512);
+    let result = sanitize(&log.result, 16);
+    let detail = sanitize(&log.detail, 2000);
+    let ip = sanitize(&log.ip, 64);
+    let created_at = db::now_ms();
+    let write = sqlx::query(
         "INSERT INTO audit_logs
          (created_at, user_id, username, action, object_type, object_id, object_path, result, detail, ip)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(db::now_ms())
-    .bind(log.user_id)
-    .bind(sanitize(&log.username, 64))
-    .bind(sanitize(&log.action, 64))
-    .bind(sanitize(&log.object_type, 32))
-    .bind(sanitize(&log.object_id, 128))
-    .bind(sanitize(&log.object_path, 512))
-    .bind(sanitize(&log.result, 16))
-    .bind(sanitize(&log.detail, 2000))
-    .bind(sanitize(&log.ip, 64))
+    .bind(created_at)
+    .bind(user_id)
+    .bind(&username)
+    .bind(&action)
+    .bind(&object_type)
+    .bind(&object_id)
+    .bind(&object_path)
+    .bind(&result)
+    .bind(&detail)
+    .bind(&ip)
     .execute(pool)
     .await;
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "failed to write audit log");
+    match write {
+        Ok(outcome) => {
+            if let Some(bus) = bus {
+                let payload = serde_json::json!({
+                    "id": outcome.last_insert_rowid(),
+                    "createdAt": created_at,
+                    "userId": user_id,
+                    "username": username,
+                    "action": action,
+                    "objectType": object_type,
+                    "objectId": object_id,
+                    "objectPath": object_path,
+                    "result": result,
+                    "detail": detail,
+                    "ip": ip,
+                });
+                // The actor always sees their own audit events; administrators
+                // see every audit event.
+                match user_id {
+                    Some(uid) => {
+                        bus.publish_user_and_admin("audit.created", uid, payload);
+                    }
+                    None => {
+                        bus.publish_admin("audit.created", payload);
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to write audit log"),
     }
 }
 

@@ -169,6 +169,27 @@ pub async fn members(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<MemberD
         .collect())
 }
 
+/// Account ids that may observe a shared folder: the share owner plus every
+/// explicit member. Used for realtime event audiences.
+pub async fn member_ids(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<i64>> {
+    let mut ids: Vec<i64> =
+        sqlx::query_scalar("SELECT user_id FROM share_members WHERE share_id = ?")
+            .bind(share_id)
+            .fetch_all(pool)
+            .await?;
+    let created_by: Option<i64> = sqlx::query_scalar("SELECT created_by FROM shares WHERE id = ?")
+        .bind(share_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+    if let Some(creator) = created_by {
+        ids.push(creator);
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
 fn dto(record: ShareRecord, members: Vec<MemberDto>) -> ShareDto {
     ShareDto {
         path: format!("/shared/{}", record.name),
@@ -511,6 +532,38 @@ mod tests {
             .is_none());
         assert!(list_for_user(&pool, &carol).await.unwrap().is_empty());
         assert!(list_for_user(&pool, &bob).await.unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn member_ids_include_owner_and_members() {
+        let (_d, storage, pool, admin) = setup().await;
+        let share = create(
+            &pool,
+            &storage,
+            &admin,
+            CreateShareInput {
+                name: "team".into(),
+                description: None,
+                members: Some(vec![
+                    MemberInput {
+                        user_id: 2,
+                        perms: Some("write".into()),
+                    },
+                    MemberInput {
+                        user_id: 3,
+                        perms: Some("read".into()),
+                    },
+                ]),
+            },
+        )
+        .await
+        .unwrap();
+        // created_by (admin id 1) + both members, sorted and deduplicated.
+        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![1, 2, 3]);
+        assert_eq!(
+            member_ids(&pool, "missing").await.unwrap(),
+            Vec::<i64>::new()
+        );
     }
 
     #[tokio::test]

@@ -300,6 +300,73 @@ else
 fi
 
 ########################################################################
+info "Appearance accents (ten presets, independent axes)"
+########################################################################
+STATUS="$(api "$ALICE_JAR" GET /api/appearance)"
+DEFAULT_ACCENT="$(json_get "$WORK/body" "d['accent']")"
+DEFAULT_THEME="$(json_get "$WORK/body" "d['theme']")"
+if [ "$DEFAULT_ACCENT" = "ocean" ]; then pass "default accent is ocean"; else fail "default accent is $DEFAULT_ACCENT (expected ocean)"; fi
+STATUS="$(api "$ALICE_JAR" PUT /api/appearance '{"accent":"plum"}' "$ALICE_CSRF")"
+if [ "$STATUS" = "200" ]; then
+    STATUS="$(api "$ALICE_JAR" GET /api/appearance)"
+    if [ "$(json_get "$WORK/body" "d['accent']")" = "plum" ]; then pass "accent change persists"; else fail "accent did not persist"; fi
+    if [ "$(json_get "$WORK/body" "d['theme']")" = "$DEFAULT_THEME" ]; then pass "accent change preserves theme"; else fail "accent change modified theme"; fi
+    if [ "$(json_get "$WORK/body" "d['wallpaper']['kind']")" = "builtin" ]; then pass "accent change preserves wallpaper"; else fail "accent change modified wallpaper"; fi
+else
+    fail "PUT accent -> $STATUS: $(cat "$WORK/body")"
+fi
+STATUS="$(api "$ALICE_JAR" PUT /api/appearance '{"accent":"neon"}' "$ALICE_CSRF")"
+if [ "$STATUS" = "400" ]; then pass "invalid accent rejected"; else fail "invalid accent accepted ($STATUS)"; fi
+# A preset from the dark palette must also be accepted.
+STATUS="$(api "$ALICE_JAR" PUT /api/appearance '{"accent":"graphite"}' "$ALICE_CSRF")"
+if [ "$STATUS" = "200" ]; then pass "all accent ids accepted by validator"; else fail "accent preset rejected ($STATUS)"; fi
+api "$ALICE_JAR" PUT /api/appearance '{"accent":"ocean"}' "$ALICE_CSRF" >/dev/null
+
+########################################################################
+info "Realtime synchronization (SSE)"
+########################################################################
+# Liveness: hello + ping within one heartbeat interval.
+curl -sN --max-time 20 -b "$ALICE_JAR" "$BASE/api/events" > "$WORK/sse-live.txt" 2>/dev/null &
+SSE_PID=$!
+sleep 17
+kill "$SSE_PID" 2>/dev/null || true
+wait "$SSE_PID" 2>/dev/null || true
+if grep -q '^event: hello' "$WORK/sse-live.txt"; then pass "SSE sends hello snapshot"; else fail "SSE hello missing"; fi
+if grep -q '^event: ping' "$WORK/sse-live.txt"; then pass "SSE heartbeats (ping) arrive"; else fail "SSE heartbeats missing (proxy may buffer)"; fi
+if grep -q '^id: ' "$WORK/sse-live.txt"; then pass "SSE frames carry monotonic ids"; else fail "SSE ids missing"; fi
+
+# Live update: a completed upload (usage-changing) must be pushed to the stream.
+printf 'sse-live-payload\n' > "$WORK/sse-upload.txt"
+curl -sN --max-time 8 -b "$ALICE_JAR" "$BASE/api/events" > "$WORK/sse-file.txt" 2>/dev/null &
+SSE_PID=$!
+sleep 1
+STATUS="$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -b "$ALICE_JAR" -c "$ALICE_JAR" \
+    -H "X-CSRF-Token: $ALICE_CSRF" -H 'Content-Type: application/octet-stream' \
+    --data-binary "@$WORK/sse-upload.txt" "$BASE/api/files/upload?dir=%2F&name=sse-live-probe.txt" 2>/dev/null || echo 000)"
+sleep 3
+kill "$SSE_PID" 2>/dev/null || true
+wait "$SSE_PID" 2>/dev/null || true
+if [ "$STATUS" = "200" ] || [ "$STATUS" = "201" ]; then
+    if grep -q '^event: file\.changed' "$WORK/sse-file.txt"; then
+        pass "file operations are pushed over SSE"
+    else
+        fail "no file.changed event was pushed"
+    fi
+    if grep -q '^event: file\.quota' "$WORK/sse-file.txt"; then
+        pass "quota changes are pushed over SSE"
+    else
+        fail "no file.quota event was pushed"
+    fi
+    if grep -q '^event: audit\.created' "$WORK/sse-file.txt"; then
+        pass "audit events are pushed over SSE"
+    else
+        fail "no audit.created event was pushed"
+    fi
+else
+    fail "SSE probe mkdir failed ($STATUS)"
+fi
+
+########################################################################
 info "Monitoring and live events"
 ########################################################################
 STATUS="$(api "$ALICE_JAR" GET /api/monitor/snapshot)"

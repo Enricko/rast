@@ -43,6 +43,21 @@ pub const MAX_SIDE: u32 = 10_000;
 pub const MAX_PIXELS: u64 = 60_000_000;
 
 pub const DEFAULT_THEME: &str = "light";
+/// Accent presets. Ids are stable API values; the exact colours live in the
+/// frontend design tokens so both themes can pair a readable foreground.
+pub const ACCENTS: &[&str] = &[
+    "ocean",
+    "forest",
+    "teal",
+    "sage",
+    "amber",
+    "terracotta",
+    "rose",
+    "plum",
+    "indigo",
+    "graphite",
+];
+pub const DEFAULT_ACCENT: &str = "ocean";
 pub const DEFAULT_BUILTIN_ID: &str = "alpine-dawn";
 pub const DEFAULT_COLOR: &str = "#1B2430";
 pub const DEFAULT_FIT: &str = "cover";
@@ -113,6 +128,7 @@ pub struct LimitsDto {
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceDto {
     pub theme: String,
+    pub accent: String,
     pub wallpaper: WallpaperSettingsDto,
     pub uploads: Vec<AppearanceUploadDto>,
     pub limits: LimitsDto,
@@ -143,6 +159,8 @@ pub struct UpdateAppearanceRequest {
     #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
+    pub accent: Option<String>,
+    #[serde(default)]
     pub wallpaper: Option<WallpaperPatch>,
 }
 
@@ -164,6 +182,7 @@ impl Default for AppearanceDto {
     fn default() -> Self {
         Self {
             theme: DEFAULT_THEME.to_string(),
+            accent: DEFAULT_ACCENT.to_string(),
             wallpaper: WallpaperSettingsDto::default(),
             uploads: Vec::new(),
             limits: LimitsDto {
@@ -220,6 +239,17 @@ fn normalize_mime(raw: &str) -> AppResult<&'static str> {
         _ => Err(AppError::UnsupportedMediaType(
             "wallpaper must be a JPEG, PNG or WebP image",
         )),
+    }
+}
+
+fn normalize_accent(raw: &str) -> AppResult<String> {
+    let value = raw.trim().to_ascii_lowercase();
+    if ACCENTS.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(bad_request(
+            "invalid accent; expected one of ocean, forest, teal, sage, amber, terracotta, rose, plum, indigo, graphite",
+        ))
     }
 }
 
@@ -670,6 +700,7 @@ async fn write_file_atomic(path: &Path, bytes: &[u8]) -> AppResult<()> {
 #[derive(Debug, Clone)]
 struct StoredWallpaper {
     theme: String,
+    accent: String,
     kind: String,
     builtin_id: String,
     upload_id: Option<String>,
@@ -683,6 +714,7 @@ impl StoredWallpaper {
     fn defaults() -> Self {
         Self {
             theme: DEFAULT_THEME.to_string(),
+            accent: DEFAULT_ACCENT.to_string(),
             kind: "builtin".to_string(),
             builtin_id: DEFAULT_BUILTIN_ID.to_string(),
             upload_id: None,
@@ -697,6 +729,9 @@ impl StoredWallpaper {
     fn sanitized(mut self) -> Self {
         if !THEMES.contains(&self.theme.as_str()) {
             self.theme = DEFAULT_THEME.to_string();
+        }
+        if !ACCENTS.contains(&self.accent.as_str()) {
+            self.accent = DEFAULT_ACCENT.to_string();
         }
         if !WALLPAPER_KINDS.contains(&self.kind.as_str()) {
             self.kind = "builtin".to_string();
@@ -727,7 +762,7 @@ impl StoredWallpaper {
 
 async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpaper> {
     let row = sqlx::query(
-        "SELECT theme, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay
+        "SELECT theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay
          FROM user_appearance WHERE user_id = ?",
     )
     .bind(user_id)
@@ -736,6 +771,7 @@ async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpap
     Ok(match row {
         Some(row) => StoredWallpaper {
             theme: row.get("theme"),
+            accent: row.get("accent"),
             kind: row.get("wallpaper_kind"),
             builtin_id: row.get("builtin_id"),
             upload_id: row.get("upload_id"),
@@ -788,6 +824,7 @@ async fn upload_exists(pool: &SqlitePool, user_id: i64, upload_id: &str) -> AppR
 fn build_appearance(stored: StoredWallpaper, uploads: Vec<AppearanceUploadDto>) -> AppearanceDto {
     AppearanceDto {
         theme: stored.theme,
+        accent: stored.accent,
         wallpaper: WallpaperSettingsDto {
             kind: stored.kind,
             builtin_id: stored.builtin_id,
@@ -829,10 +866,11 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     let now = db::now_ms();
     sqlx::query(
         "INSERT INTO user_appearance
-            (user_id, theme, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id) DO UPDATE SET
             theme = excluded.theme,
+            accent = excluded.accent,
             wallpaper_kind = excluded.wallpaper_kind,
             builtin_id = excluded.builtin_id,
             upload_id = excluded.upload_id,
@@ -844,6 +882,7 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     )
     .bind(user_id)
     .bind(&stored.theme)
+    .bind(&stored.accent)
     .bind(&stored.kind)
     .bind(&stored.builtin_id)
     .bind(&stored.upload_id)
@@ -866,6 +905,9 @@ pub async fn update(
     let mut stored = load_stored(pool, user.id).await?;
     if let Some(theme) = patch.theme.as_deref() {
         stored.theme = normalize_theme(theme)?;
+    }
+    if let Some(accent) = patch.accent.as_deref() {
+        stored.accent = normalize_accent(accent)?;
     }
     if let Some(wallpaper) = patch.wallpaper {
         if let Some(kind) = wallpaper.kind.as_deref() {
@@ -919,6 +961,7 @@ pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDt
     let defaults = StoredWallpaper::defaults();
     stored = StoredWallpaper {
         theme: stored.theme,
+        accent: stored.accent,
         ..defaults
     };
     store(pool, user.id, &stored).await?;
@@ -1428,6 +1471,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                accent: None,
                 theme: Some("dark".into()),
                 wallpaper: Some(WallpaperPatch {
                     kind: Some("builtin".into()),
@@ -1490,6 +1534,7 @@ pub(crate) mod tests {
                 &pool,
                 &alice,
                 UpdateAppearanceRequest {
+                    accent: None,
                     theme: None,
                     wallpaper: Some(patch)
                 }
@@ -1501,6 +1546,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                accent: None,
                 theme: Some("sepia".into()),
                 wallpaper: None
             }
@@ -1578,6 +1624,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {
                     kind: Some("upload".into()),
@@ -1695,6 +1742,7 @@ pub(crate) mod tests {
             &pool,
             &bob,
             UpdateAppearanceRequest {
+                accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {
                     kind: Some("upload".into()),

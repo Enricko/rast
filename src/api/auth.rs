@@ -113,8 +113,9 @@ pub async fn login(
         // Burn comparable CPU for unknown users.
         let _ =
             password::verify_password_async(body.password.clone(), dummy_hash().to_string()).await;
-        audit::record(
+        audit::record_with_events(
             &state.db,
+            &state.events,
             AuditLog::new("auth.login")
                 .anonymous(&username_raw)
                 .failure()
@@ -134,8 +135,9 @@ pub async fn login(
     let now = db::now_ms();
 
     if !active {
-        audit::record(
+        audit::record_with_events(
             &state.db,
+            &state.events,
             AuditLog::new("auth.login")
                 .object("user", user_id.to_string())
                 .anonymous(&username)
@@ -172,8 +174,9 @@ pub async fn login(
         .bind(now)
         .execute(&state.db)
         .await?;
-        audit::record(
+        audit::record_with_events(
             &state.db,
+            &state.events,
             AuditLog::new("auth.login")
                 .object("user", user_id.to_string())
                 .anonymous(&username)
@@ -238,8 +241,9 @@ pub async fn login(
     .await?;
     let csrf_token = csrf::token(&state.secrets, &new_session.session_id);
 
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("auth.login")
             .object("user", user_id.to_string())
             .anonymous(&username)
@@ -323,8 +327,9 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
 /// POST /api/auth/logout
 pub async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<Response> {
     session::revoke(&state.db, &user.session_id).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("auth.logout").actor(&user).success(),
     )
     .await;
@@ -352,8 +357,9 @@ pub async fn change_password(
 ) -> AppResult<Json<serde_json::Value>> {
     let ok = users::verify_password(&state.db, user.id, &body.current_password).await?;
     if !ok {
-        audit::record(
+        audit::record_with_events(
             &state.db,
+            &state.events,
             AuditLog::new("auth.password_change").actor(&user).denied(),
         )
         .await;
@@ -372,8 +378,9 @@ pub async fn change_password(
         Some(&user.session_id),
     )
     .await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("auth.password_change").actor(&user).success(),
     )
     .await;
@@ -439,8 +446,9 @@ pub async fn revoke_session(
         _ => return Err(AppError::NotFound("session not found")),
     }
     session::revoke(&state.db, &session_id).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("auth.session_revoke")
             .actor(&user)
             .object("session", session_id)
@@ -456,8 +464,9 @@ pub async fn revoke_all_sessions(
     user: AuthUser,
 ) -> AppResult<Json<serde_json::Value>> {
     let n = session::revoke_all_for_user(&state.db, user.id, Some(&user.session_id)).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("auth.session_revoke_all")
             .actor(&user)
             .success()
@@ -536,8 +545,9 @@ pub async fn setup(
             _ => false,
         };
         if !valid {
-            audit::record(
+            audit::record_with_events(
                 &state.db,
+                &state.events,
                 AuditLog::new("setup")
                     .anonymous(&body.username)
                     .denied()
@@ -563,8 +573,9 @@ pub async fn setup(
     // Invalidate the token: one-shot.
     let _ = db::set_setting(&state.db, "setup_token_hash", "").await;
     let _ = db::set_setting(&state.db, "setup_token_expires", "0").await;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("setup")
             .object("user", user.id.to_string())
             .anonymous(&user.username)

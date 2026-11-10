@@ -20,13 +20,18 @@
 //!   import endpoint is the sole, explicit adoption path.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    convert::Infallible,
+    hash::{DefaultHasher, Hash, Hasher},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
 };
@@ -40,6 +45,7 @@ use crate::{
     db,
     docker::{
         compose,
+        containers::derive_status,
         protocol::{validate_slug, WorkerOp, WorkerRequest},
         DockerError,
     },
@@ -64,6 +70,24 @@ const MAX_COMPOSE_BYTES: usize = compose::MAX_COMPOSE_BYTES;
 /// Maximum number of containers accepted by one import request.
 const MAX_IMPORT_CONTAINERS: usize = 16;
 
+// --- Live application log stream (admin SSE, per-connection) -----------------
+/// How often the stream polls the worker for new lines.
+const LOG_STREAM_INTERVAL: Duration = Duration::from_secs(2);
+/// Per-poll worker deadline: a slow daemon must not stall the SSE stream.
+const LOG_STREAM_POLL_TIMEOUT: Duration = Duration::from_secs(8);
+/// Bounded server-side ring buffer per connection (contract: last ~500 lines).
+const LOG_STREAM_RING_CAPACITY: usize = 500;
+/// Dedupe window size for incremental `--since` reads (inclusive cursor).
+const LOG_STREAM_SEEN_CAPACITY: usize = 1000;
+/// SSE keep-alive interval (contract: 15 s).
+const LOG_STREAM_KEEPALIVE_SECS: u64 = 15;
+/// Default and maximum `?tail=` values for the initial seed.
+const LOG_STREAM_DEFAULT_TAIL: usize = 200;
+const LOG_STREAM_MAX_TAIL: usize = 500;
+/// Consecutive failed polls before the stream closes (client reconnects and
+/// gets a fresh 503/404 instead of a silently dead stream).
+const LOG_STREAM_MAX_FAILURES: u32 = 15;
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/docker/status", get(docker_status))
@@ -76,6 +100,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/apps/{id}/restart", post(restart_app))
         .route("/api/apps/{id}/redeploy", post(redeploy_app))
         .route("/api/apps/{id}/logs", get(app_logs))
+        .route("/api/apps/{id}/logs/stream", get(app_logs_stream))
         .route("/api/apps/{id}/history", get(app_history))
 }
 
@@ -408,8 +433,9 @@ pub async fn create_app(
             return Err(error);
         }
     };
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.create")
             .actor(&admin.0)
             .object("app", &id)
@@ -434,8 +460,9 @@ pub async fn start_app(
     state.docker.ensure_available().await?;
     let app = load_app(&state, &id).await?;
     let job_id = enqueue_for_existing(&state, &app, AppAction::Start, &admin.0).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.start")
             .actor(&admin.0)
             .object("app", &app.id)
@@ -456,8 +483,9 @@ pub async fn stop_app(
     state.docker.ensure_available().await?;
     let app = load_app(&state, &id).await?;
     let job_id = enqueue_for_existing(&state, &app, AppAction::Stop, &admin.0).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.stop")
             .actor(&admin.0)
             .object("app", &app.id)
@@ -478,8 +506,9 @@ pub async fn restart_app(
     state.docker.ensure_available().await?;
     let app = load_app(&state, &id).await?;
     let job_id = enqueue_for_existing(&state, &app, AppAction::Restart, &admin.0).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.restart")
             .actor(&admin.0)
             .object("app", &app.id)
@@ -545,8 +574,9 @@ pub async fn redeploy_app(
     .await?;
 
     let job_id = enqueue_app_job(&state, &app.id, &app.slug, AppAction::Redeploy, &admin.0).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.redeploy")
             .actor(&admin.0)
             .object("app", &app.id)
@@ -583,6 +613,344 @@ pub async fn app_logs(
         "tail": data.get("tail").cloned().unwrap_or(json!(tail)),
         "lines": data.get("lines").cloned().unwrap_or(json!([])),
     })))
+}
+
+/// Bounded log-line ring buffer with deduplication for inclusive `--since`
+/// polls. Kept per SSE connection; memory is constant regardless of log volume.
+#[derive(Debug)]
+pub struct LogRing {
+    capacity: usize,
+    lines: VecDeque<Value>,
+    seen: VecDeque<u64>,
+    last_ts: Option<i64>,
+}
+
+impl LogRing {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            lines: VecDeque::with_capacity(capacity.clamp(1, 512)),
+            seen: VecDeque::with_capacity(LOG_STREAM_SEEN_CAPACITY),
+            last_ts: None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.lines.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
+    /// Newest line timestamp in the buffer (epoch ms).
+    pub fn last_ts(&self) -> Option<i64> {
+        self.last_ts
+    }
+
+    /// Inclusive `--since` cursor in Unix seconds (worker converts it to an
+    /// RFC3339 argument; duplicate seconds are removed by deduplication).
+    pub fn since_secs(&self) -> Option<i64> {
+        self.last_ts.map(|ts| ts / 1000)
+    }
+
+    /// All buffered lines, oldest first.
+    pub fn snapshot(&self) -> Vec<Value> {
+        self.lines.iter().cloned().collect()
+    }
+
+    /// Replace the buffer with a fresh tail (initial connect or rotation).
+    pub fn seed(&mut self, lines: Vec<Value>) -> Vec<Value> {
+        self.lines.clear();
+        self.seen.clear();
+        self.last_ts = None;
+        for line in lines {
+            self.push(&line);
+        }
+        self.snapshot()
+    }
+
+    /// Append new lines, skipping duplicates from the inclusive `--since`
+    /// cursor. Returns the lines that were actually added.
+    pub fn append(&mut self, lines: Vec<Value>) -> Vec<Value> {
+        let mut added = Vec::new();
+        for line in lines {
+            if self.push(&line) {
+                added.push(line);
+            }
+        }
+        added
+    }
+
+    fn push(&mut self, line: &Value) -> bool {
+        let key = log_line_key(line);
+        if self.seen.contains(&key) {
+            return false;
+        }
+        while self.seen.len() >= LOG_STREAM_SEEN_CAPACITY {
+            self.seen.pop_front();
+        }
+        self.seen.push_back(key);
+        while self.lines.len() >= self.capacity {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line.clone());
+        let ts = line.get("ts").and_then(Value::as_i64).unwrap_or(0);
+        if ts > 0 {
+            self.last_ts = Some(self.last_ts.map_or(ts, |current: i64| current.max(ts)));
+        }
+        true
+    }
+}
+
+/// Stable, bounded-size identity for a log line: timestamp + service + message.
+fn log_line_key(line: &Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    line.get("ts")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .hash(&mut hasher);
+    line.get("service")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    line.get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One SSE payload produced by [`LogStreamState::poll`]. Kept as a small typed
+/// value (instead of an opaque `Event`) so the streaming logic is unit-testable
+/// without parsing SSE frames.
+#[derive(Debug, Clone, PartialEq)]
+struct LogStreamItem {
+    app_id: String,
+    lines: Vec<Value>,
+    reset: bool,
+}
+
+impl LogStreamItem {
+    fn to_event(&self) -> Event {
+        let mut data = json!({"appId": self.app_id, "lines": self.lines});
+        if self.reset {
+            if let Some(object) = data.as_object_mut() {
+                object.insert("reset".to_string(), json!(true));
+            }
+        }
+        Event::default().event("app.logs").data(data.to_string())
+    }
+}
+
+/// Mutable state of one live-log SSE connection.
+struct LogStreamState {
+    db: sqlx::SqlitePool,
+    docker: Arc<crate::docker::DockerManager>,
+    app_id: String,
+    slug: String,
+    tail: usize,
+    ring: LogRing,
+    seeded: bool,
+    container_ids: Vec<String>,
+    failures: u32,
+    interval: tokio::time::Interval,
+}
+
+impl LogStreamState {
+    fn new(state: &AppState, app_id: String, slug: String, tail: usize) -> Self {
+        // First tick after one full interval: the initial seed is fetched
+        // without waiting, later polls are spaced out.
+        let mut interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + LOG_STREAM_INTERVAL,
+            LOG_STREAM_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            db: state.db.clone(),
+            docker: state.docker.clone(),
+            app_id,
+            slug,
+            tail,
+            ring: LogRing::new(LOG_STREAM_RING_CAPACITY),
+            seeded: false,
+            container_ids: Vec::new(),
+            failures: 0,
+            interval,
+        }
+    }
+
+    fn poll_request(&self) -> WorkerRequest {
+        let request = WorkerRequest::new(WorkerOp::ComposeLogsSince).slug(&self.slug);
+        if self.seeded {
+            let request = request.tail(LOG_STREAM_RING_CAPACITY as u32);
+            match self.ring.since_secs() {
+                Some(since) => request.since_secs(since),
+                None => request,
+            }
+        } else {
+            request.tail(self.tail as u32)
+        }
+    }
+
+    /// Fetch one batch from the worker and return the SSE payload to send, if
+    /// any.
+    async fn poll(&mut self) -> Option<LogStreamItem> {
+        let response = self
+            .docker
+            .call_with_timeout(self.poll_request(), LOG_STREAM_POLL_TIMEOUT)
+            .await;
+        let data = match response {
+            Ok(data) => {
+                self.failures = 0;
+                data
+            }
+            Err(error) => {
+                self.failures = self.failures.saturating_add(1);
+                tracing::debug!(
+                    error = %error,
+                    app = %self.app_id,
+                    "application log stream poll failed"
+                );
+                return None;
+            }
+        };
+        let lines = data
+            .get("lines")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let container_ids: Vec<String> = data
+            .get("containerIds")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !self.seeded {
+            let seeded = self.ring.seed(lines);
+            self.container_ids = container_ids;
+            self.seeded = true;
+            return Some(LogStreamItem {
+                app_id: self.app_id.clone(),
+                lines: seeded,
+                reset: true,
+            });
+        }
+
+        // Container recreation / rotation: the incremental cursor belongs to
+        // the old containers, so reset the client from a fresh tail.
+        if self.container_ids != container_ids {
+            let reseed_request = WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                .slug(&self.slug)
+                .tail(self.tail as u32);
+            let reseed_lines = match self
+                .docker
+                .call_with_timeout(reseed_request, LOG_STREAM_POLL_TIMEOUT)
+                .await
+            {
+                Ok(data) => data
+                    .get("lines")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or(lines),
+                Err(_) => lines,
+            };
+            let seeded = self.ring.seed(reseed_lines);
+            self.container_ids = container_ids;
+            return Some(LogStreamItem {
+                app_id: self.app_id.clone(),
+                lines: seeded,
+                reset: true,
+            });
+        }
+
+        self.container_ids = container_ids;
+        let fresh = self.ring.append(lines);
+        if fresh.is_empty() {
+            return None;
+        }
+        Some(LogStreamItem {
+            app_id: self.app_id.clone(),
+            lines: fresh,
+            reset: false,
+        })
+    }
+}
+
+/// Build the per-connection SSE stream for one managed application.
+fn log_stream(
+    state: AppState,
+    app_id: String,
+    slug: String,
+    tail: usize,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    let initial = LogStreamState::new(&state, app_id, slug, tail);
+    futures::stream::unfold(initial, |mut stream_state| async move {
+        loop {
+            // End the stream when the application is deleted; the admin gets a
+            // final `app.changed` event from the reconciler.
+            let exists = sqlx::query_scalar::<_, i64>("SELECT 1 FROM apps WHERE id = ?")
+                .bind(&stream_state.app_id)
+                .fetch_optional(&stream_state.db)
+                .await;
+            match exists {
+                Ok(None) => return None,
+                Ok(Some(_)) => {}
+                Err(error) => {
+                    stream_state.failures = stream_state.failures.saturating_add(1);
+                    tracing::warn!(error = %error, "log stream app lookup failed");
+                    if stream_state.failures >= LOG_STREAM_MAX_FAILURES {
+                        return None;
+                    }
+                }
+            }
+            if stream_state.seeded {
+                stream_state.interval.tick().await;
+            }
+            if let Some(item) = stream_state.poll().await {
+                return Some((Ok(item.to_event()), stream_state));
+            }
+            if stream_state.failures >= LOG_STREAM_MAX_FAILURES {
+                return None;
+            }
+        }
+    })
+}
+
+/// GET /api/apps/{id}/logs/stream?tail=200 — admin-only SSE live log tail.
+///
+/// * 404 for unknown applications (checked before touching Docker);
+/// * 503 when the Docker worker is unavailable;
+/// * bounded ring buffer, incremental `--since` polling, rotation resets,
+///   15 s keep-alive, closes when the app is deleted or the worker stays down.
+pub async fn app_logs_stream(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    AxumPath(id): AxumPath<String>,
+    Query(query): Query<LogsQuery>,
+) -> AppResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
+    let app = load_app(&state, &id).await?;
+    state.docker.ensure_available().await?;
+    let tail = crate::api::parse_bounded(
+        query.tail.as_deref(),
+        LOG_STREAM_DEFAULT_TAIL,
+        LOG_STREAM_MAX_TAIL,
+    );
+    Ok(Sse::new(log_stream(
+        state.clone(),
+        app.id.clone(),
+        app.slug.clone(),
+        tail,
+    ))
+    .keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(LOG_STREAM_KEEPALIVE_SECS))
+            .text("keep-alive"),
+    ))
 }
 
 /// GET /api/apps/{id}/history
@@ -675,9 +1043,11 @@ pub async fn delete_app(
         .execute(&state.db)
         .await?;
     remove_app_dir(&state, &app.slug, remove_volumes);
+    state.docker.request_reconcile();
     // Keep the audit trail readable even after the app row is gone.
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("app.delete")
             .actor(&admin.0)
             .object("app", &app.id)
@@ -757,8 +1127,9 @@ pub async fn docker_import(
             .to_string();
         match import_one_container(&state, &admin.0, &container).await {
             Ok(app) => {
-                audit::record(
+                audit::record_with_events(
                     &state.db,
+                    &state.events,
                     AuditLog::new("docker.import")
                         .actor(&admin.0)
                         .object("app", &app.id)
@@ -788,6 +1159,7 @@ pub async fn docker_import(
             "no containers could be imported: {reasons}"
         )));
     }
+    state.docker.request_reconcile();
     Ok(Json(json!({
         "items": imported,
         "skipped": skipped,
@@ -1029,6 +1401,9 @@ async fn run_app_job(
             )
             .await;
             ctx.progress(3, 3, "done").await;
+            // Wake the reconciler so admins see the new state without waiting
+            // for the next 5 s tick (it coalesces duplicate notifications).
+            state.docker.request_reconcile();
             let _ = data;
             Ok(json!({
                 "appId": app_id,
@@ -1049,6 +1424,7 @@ async fn run_app_job(
             .execute(&state.db)
             .await?;
             finish_deployment(&state, deployment_id, "failed", &message).await;
+            state.docker.request_reconcile();
             Err(error.into())
         }
     }
@@ -1593,26 +1969,6 @@ async fn probe_app_resources(
     }
 }
 
-/// Derive the display status from actual containers, falling back to the stored
-/// status when the worker cannot be queried.
-pub fn derive_status(containers: &[Value], fallback: &str) -> String {
-    if containers.is_empty() {
-        return fallback.to_string();
-    }
-    let any_running = containers.iter().any(|container| {
-        container
-            .get("state")
-            .and_then(Value::as_str)
-            .map(|state| state.eq_ignore_ascii_case("running"))
-            .unwrap_or(false)
-    });
-    if any_running {
-        "running".to_string()
-    } else {
-        "stopped".to_string()
-    }
-}
-
 fn collect_ports(containers: &[Value]) -> Vec<Value> {
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut out = Vec::new();
@@ -2046,17 +2402,6 @@ mod tests {
         assert!(!is_default_container_env("DATABASE_URL"));
     }
 
-    #[test]
-    fn status_derivation() {
-        assert_eq!(derive_status(&[], "running"), "running");
-        assert_eq!(derive_status(&[], "imported"), "imported");
-        assert_eq!(derive_status(&[], "deploying"), "deploying");
-        let containers = vec![json!({"state": "exited"})];
-        assert_eq!(derive_status(&containers, "running"), "stopped");
-        let containers = vec![json!({"state": "running"}), json!({"state": "exited"})];
-        assert_eq!(derive_status(&containers, "stopped"), "running");
-    }
-
     #[tokio::test]
     async fn docker_unavailable_endpoints_return_503() {
         let dir = tempfile::tempdir().unwrap();
@@ -2192,5 +2537,385 @@ mod tests {
     fn endpoint_router_builds() {
         // Compile-time smoke test: all routes are registered without conflicts.
         let _router = routes();
+    }
+}
+
+/// Realtime tests for the live application log stream (bounded ring buffer,
+/// rotation resets, authorization and SSE transport). Kept in a separate module
+/// so the transport helpers stay close to the endpoint under test.
+#[cfg(test)]
+mod realtime_tests {
+    use super::*;
+    use axum::extract::FromRequestParts;
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+    use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn admin() -> AuthUser {
+        AuthUser {
+            id: 1,
+            username: "admin".into(),
+            display_name: "Admin".into(),
+            role: crate::auth::Role::Admin,
+            session_id: "test".into(),
+            quota_bytes: 0,
+            must_change_password: false,
+        }
+    }
+
+    fn admin_user() -> AdminUser {
+        AdminUser(admin())
+    }
+
+    fn test_config(dir: &Path, docker_socket: Option<&Path>) -> crate::config::Config {
+        let mut cfg =
+            crate::config::Config::from_parts(None, crate::config::FileConfig::default(), |_| None)
+                .unwrap();
+        cfg.data_dir = dir.join("data");
+        cfg.storage_dir = dir.join("storage");
+        cfg.worker_socket = docker_socket
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| dir.join("unavailable.sock"));
+        cfg.docker_enabled = docker_socket.is_some();
+        cfg.monitor_interval_secs = 5;
+        cfg.db_max_connections = 2;
+        cfg.job_concurrency = 1;
+        cfg
+    }
+
+    async fn insert_app_row(state: &AppState, id: &str, slug: &str) {
+        sqlx::query(
+            "INSERT INTO apps (id, name, slug, compose, env_json, status, last_error, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, 'services: {}', '[]', 'running', '', NULL, 1, 1)",
+        )
+        .bind(id)
+        .bind(slug)
+        .bind(slug)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    fn log_line(ts: i64, message: &str) -> Value {
+        json!({"ts": ts, "stream": "stdout", "service": "web", "message": message})
+    }
+
+    #[test]
+    fn log_ring_is_bounded_and_dedupes_inclusive_cursor() {
+        let mut ring = LogRing::new(3);
+        let seeded = ring.seed(
+            (1..=5)
+                .map(|i| log_line(i * 1000, &format!("m{i}")))
+                .collect(),
+        );
+        assert_eq!(ring.len(), 3, "ring is bounded to its capacity");
+        assert_eq!(seeded.len(), 3);
+        assert_eq!(seeded[2]["message"], "m5");
+        assert_eq!(ring.last_ts(), Some(5000));
+        assert_eq!(ring.since_secs(), Some(5));
+
+        // `--since` is inclusive: the newest line is re-delivered by Docker and
+        // must be deduped; only genuinely new lines are returned.
+        let fresh = ring.append(vec![log_line(5000, "m5"), log_line(6000, "m6")]);
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0]["message"], "m6");
+        // Same timestamp, different message is a distinct line.
+        assert_eq!(ring.append(vec![log_line(6000, "other")]).len(), 1);
+        // Re-seeding (initial connect / rotation) clears buffer and dedupe state.
+        let seeded = ring.seed(vec![log_line(9000, "fresh")]);
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(ring.len(), 1);
+        assert_eq!(ring.since_secs(), Some(9));
+    }
+
+    #[test]
+    fn log_ring_empty_state_has_no_cursor() {
+        let mut ring = LogRing::new(LOG_STREAM_RING_CAPACITY);
+        assert!(ring.is_empty());
+        assert_eq!(ring.since_secs(), None);
+        assert_eq!(ring.last_ts(), None);
+        assert!(ring.append(Vec::new()).is_empty());
+        assert!(ring.snapshot().is_empty());
+    }
+
+    #[test]
+    fn stream_limits_match_contract() {
+        // Compile-time bounds: the ring buffer is bounded and the exposed tail
+        // can never exceed it.
+        const { assert!(LOG_STREAM_RING_CAPACITY <= 500, "bounded ring buffer") };
+        const { assert!(LOG_STREAM_MAX_TAIL <= LOG_STREAM_RING_CAPACITY) };
+        assert_eq!(LOG_STREAM_KEEPALIVE_SECS, 15, "contract keep-alive");
+        assert!((1..=5).contains(&LOG_STREAM_INTERVAL.as_secs()));
+        assert_eq!(LOG_STREAM_DEFAULT_TAIL, 200);
+    }
+
+    #[tokio::test]
+    async fn logs_stream_unknown_app_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(test_config(dir.path(), None)).await.unwrap();
+        let result = app_logs_stream(
+            State(state),
+            admin_user(),
+            AxumPath("missing".into()),
+            Query(LogsQuery { tail: None }),
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("unknown app must be 404"),
+            Err(err) => assert_eq!(err.status(), StatusCode::NOT_FOUND),
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_stream_returns_503_when_docker_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(test_config(dir.path(), None)).await.unwrap();
+        insert_app_row(&state, "app1", "shop").await;
+        let result = app_logs_stream(
+            State(state),
+            admin_user(),
+            AxumPath("app1".into()),
+            Query(LogsQuery {
+                tail: Some("200".into()),
+            }),
+        )
+        .await;
+        match result {
+            Ok(_) => panic!("docker disabled must be 503"),
+            Err(err) => {
+                assert_eq!(err.status(), StatusCode::SERVICE_UNAVAILABLE);
+                let message = err.public_message().to_ascii_lowercase();
+                assert!(message.contains("docker"), "unexpected message: {message}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_stream_requires_authentication_via_router() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(test_config(dir.path(), None)).await.unwrap();
+        let router = crate::api::router(state);
+        let request = axum::http::Request::builder()
+            .method("GET")
+            .uri("/api/apps/whatever/logs/stream")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn logs_stream_rejects_non_admin_principal() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(test_config(dir.path(), None)).await.unwrap();
+        let non_admin = AuthUser {
+            role: crate::auth::Role::User,
+            ..admin()
+        };
+        let mut request = axum::http::Request::builder()
+            .uri("/api/apps/app1/logs/stream")
+            .body(())
+            .unwrap();
+        request.extensions_mut().insert(non_admin);
+        let (mut parts, _) = request.into_parts();
+        let result =
+            <AdminUser as FromRequestParts<AppState>>::from_request_parts(&mut parts, &state).await;
+        match result {
+            Ok(_) => panic!("non-admin must be forbidden"),
+            Err(err) => assert_eq!(err.status(), StatusCode::FORBIDDEN),
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_stream_sends_bounded_initial_event_over_sse() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "hello from stream".into(),
+            },
+        );
+        let state = AppState::new(test_config(dir.path(), Some(&socket)))
+            .await
+            .unwrap();
+        insert_app_row(&state, "app1", "shop").await;
+
+        let result = app_logs_stream(
+            State(state),
+            admin_user(),
+            AxumPath("app1".into()),
+            Query(LogsQuery {
+                tail: Some("200".into()),
+            }),
+        )
+        .await;
+        let sse = match result {
+            Ok(sse) => sse,
+            Err(err) => panic!("stream should open: {err}"),
+        };
+        let response = sse.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "unexpected content-type: {content_type}"
+        );
+
+        let mut body = response.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .expect("initial SSE frame must arrive promptly")
+            .expect("stream must yield a frame")
+            .expect("SSE frame must not be an error");
+        let data = frame.into_data().expect("data frame");
+        let text = String::from_utf8_lossy(&data).into_owned();
+        assert!(text.contains("app.logs"), "SSE event name: {text}");
+        assert!(text.contains("\"appId\":\"app1\""), "{text}");
+        assert!(text.contains("hello from stream"), "{text}");
+        assert!(
+            text.contains("\"reset\":true"),
+            "initial seed resets: {text}"
+        );
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn logs_stream_resets_when_containers_are_recreated() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(socket.clone(), FakeWorkerMode::Rotating);
+        let state = AppState::new(test_config(dir.path(), Some(&socket)))
+            .await
+            .unwrap();
+        let mut stream = LogStreamState::new(&state, "app1".into(), "shop".into(), 200);
+        let first = stream.poll().await.expect("initial seed event");
+        assert!(first.reset, "initial seed resets the client");
+        assert_eq!(first.app_id, "app1");
+        assert_eq!(first.lines[0]["message"], "old-container-line");
+
+        let second = stream.poll().await.expect("rotation event");
+        assert!(
+            second.reset,
+            "container recreation must reset the client: {second:?}"
+        );
+        assert_eq!(second.lines[0]["message"], "new-container-line");
+        assert_eq!(second.lines.len(), 1, "old buffer must be dropped on reset");
+        worker.abort();
+    }
+
+    // ------------------------------------------------------------------
+    // Fake Docker worker used by the transport tests (no Docker required)
+    // ------------------------------------------------------------------
+
+    enum FakeWorkerMode {
+        Initial { message: String },
+        Rotating,
+    }
+
+    fn start_fake_worker(socket: PathBuf, mode: FakeWorkerMode) -> tokio::task::JoinHandle<()> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _ = std::fs::remove_file(&socket);
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let mode = Arc::new(mode);
+        let calls = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let mode = mode.clone();
+                let calls = calls.clone();
+                tokio::spawn(async move {
+                    let mut raw = Vec::new();
+                    let mut byte = [0u8; 1];
+                    loop {
+                        match stream.read(&mut byte).await {
+                            Ok(0) => return,
+                            Ok(_) => {
+                                if byte[0] == b'\n' {
+                                    break;
+                                }
+                                raw.push(byte[0]);
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                    let Ok(request) = serde_json::from_slice::<Value>(&raw) else {
+                        return;
+                    };
+                    let id = request
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let op = request
+                        .get("op")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let data = match op {
+                        "version" => json!({"version": "26.1.4"}),
+                        "stats" => json!({"items": []}),
+                        "ps-all" => json!({"items": []}),
+                        "compose-logs-since" => {
+                            let call = calls.fetch_add(1, Ordering::SeqCst);
+                            match mode.as_ref() {
+                                FakeWorkerMode::Initial { message } => json!({
+                                    "lines": [
+                                        {"ts": 1_700_000_000_123i64, "stream": "stdout", "service": "web", "message": message}
+                                    ],
+                                    "containerIds": ["0123456789ab"],
+                                    "tail": 200,
+                                }),
+                                FakeWorkerMode::Rotating => {
+                                    // call 0: seed (old container), call 1: first
+                                    // incremental read (detects new container id),
+                                    // call 2: reseed from the new container.
+                                    let (line, container) = if call == 0 {
+                                        ("old-container-line", "0123456789ab")
+                                    } else if call == 1 {
+                                        ("ignored-transition-line", "abcdef012345")
+                                    } else {
+                                        ("new-container-line", "abcdef012345")
+                                    };
+                                    json!({
+                                        "lines": [
+                                            {"ts": 1_700_000_000_123i64 + call as i64 * 1000, "stream": "stdout", "service": "web", "message": line}
+                                        ],
+                                        "containerIds": [container],
+                                        "tail": 200,
+                                    })
+                                }
+                            }
+                        }
+                        _ => {
+                            let response = json!({
+                                "id": id,
+                                "ok": false,
+                                "error": {"code": "invalid_request", "message": format!("unsupported op {op}")}
+                            });
+                            let mut line = serde_json::to_vec(&response).unwrap();
+                            line.push(b'\n');
+                            let _ = stream.write_all(&line).await;
+                            let _ = stream.flush().await;
+                            return;
+                        }
+                    };
+                    let response = json!({"id": id, "ok": true, "data": data});
+                    let mut line = serde_json::to_vec(&response).unwrap();
+                    line.push(b'\n');
+                    let _ = stream.write_all(&line).await;
+                    let _ = stream.flush().await;
+                });
+            }
+        })
     }
 }

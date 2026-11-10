@@ -27,6 +27,7 @@ use crate::{
     db,
     error::{AppError, AppResult},
     jobs::JobSpec,
+    realtime,
     state::AppState,
     storage::{
         chunked, ops, safe_path, shares, transfer, trash, Access, EntryDto, LogicalPath,
@@ -202,8 +203,9 @@ async fn audit_file(
     path: &str,
     detail: String,
 ) {
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new(action)
             .actor(user)
             .object("file", path)
@@ -211,6 +213,29 @@ async fn audit_file(
             .success()
             .detail(detail)
             .ip(ip.as_string()),
+    )
+    .await;
+}
+
+/// Publish a committed File Station mutation (scoped `file.changed`) and, when
+/// the change touched storage usage, a `file.quota` snapshot. Realtime
+/// publication is best-effort: it never fails the request.
+async fn publish_file_mutation(
+    state: &AppState,
+    user: &AuthUser,
+    op: &str,
+    affected_paths: &[String],
+    entry: Option<&EntryDto>,
+    quota_changed: bool,
+) {
+    realtime::publish_commit(
+        &state.events,
+        &state.db,
+        user,
+        op,
+        affected_paths,
+        entry,
+        quota_changed,
     )
     .await;
 }
@@ -313,6 +338,15 @@ pub async fn mkdir(
         "created folder".to_string(),
     )
     .await;
+    publish_file_mutation(
+        &state,
+        &user,
+        "mkdir",
+        std::slice::from_ref(&entry.path),
+        Some(&entry),
+        false,
+    )
+    .await;
     Ok(Json(entry))
 }
 
@@ -331,6 +365,18 @@ pub async fn rename(
         "file.rename",
         &entry.path,
         format!("renamed from {}", body.path),
+    )
+    .await;
+    let old_path = LogicalPath::parse(&body.path)
+        .map(|path| path.as_string())
+        .unwrap_or_else(|_| body.path.clone());
+    publish_file_mutation(
+        &state,
+        &user,
+        "rename",
+        &[old_path, entry.path.clone()],
+        Some(&entry),
+        false,
     )
     .await;
     Ok(Json(entry))
@@ -425,6 +471,15 @@ pub async fn upload(
         format!("{written} bytes"),
     )
     .await;
+    publish_file_mutation(
+        &state,
+        &user,
+        "upload",
+        std::slice::from_ref(&entry.path),
+        Some(&entry),
+        true,
+    )
+    .await;
     Ok(Json(entry).into_response())
 }
 
@@ -495,6 +550,15 @@ pub async fn complete_chunked_upload(
         "file.upload",
         &entry.path,
         format!("chunked upload completed: {} bytes", entry.size),
+    )
+    .await;
+    publish_file_mutation(
+        &state,
+        &user,
+        "chunk_complete",
+        std::slice::from_ref(&entry.path),
+        Some(&entry),
+        true,
     )
     .await;
     Ok(Json(entry))
@@ -825,10 +889,11 @@ pub async fn delete_paths(
     let count = paths.len();
     let pool = state.db.clone();
     let storage = (*state.storage).clone();
+    let events = state.events.clone();
     let actor = user.clone();
     let job_paths = paths.clone();
     let spec = JobSpec::new("file.delete", move |ctx| async move {
-        transfer::run_delete_job(ctx, pool, storage, actor, job_paths).await
+        transfer::run_delete_job(ctx, pool, storage, actor, job_paths, events).await
     })
     .actor(&user)
     .message(format!("delete {count} item(s)"));
@@ -847,15 +912,16 @@ async fn submit_transfer_job(
     let count = paths.len();
     let pool = state.db.clone();
     let storage = (*state.storage).clone();
+    let events = state.events.clone();
     let actor = user.clone();
     let job_paths = paths;
     let dest = dest_dir.to_string();
     let kind_owned = kind.to_string();
     let spec = JobSpec::new(kind_owned, move |ctx| async move {
         if copy {
-            transfer::run_copy_job(ctx, pool, storage, actor, job_paths, dest).await
+            transfer::run_copy_job(ctx, pool, storage, actor, job_paths, dest, events).await
         } else {
-            transfer::run_move_job(ctx, pool, storage, actor, job_paths, dest).await
+            transfer::run_move_job(ctx, pool, storage, actor, job_paths, dest, events).await
         }
     })
     .actor(user)
@@ -948,6 +1014,8 @@ pub async fn trash_restore(
         )
         .await;
     }
+    let affected: Vec<String> = restored.iter().map(|item| item.path.clone()).collect();
+    publish_file_mutation(&state, &user, "restore", &affected, None, true).await;
     Ok(Json(json!({"ok": true, "restored": restored})))
 }
 
@@ -958,7 +1026,7 @@ pub async fn trash_delete(
     ip: ClientIp,
     Json(body): Json<IdsRequest>,
 ) -> AppResult<Json<Value>> {
-    let (deleted, bytes) =
+    let (deleted, bytes, original_paths) =
         trash::delete_permanent(&state.db, &state.storage, &user, &body.ids).await?;
     audit_file(
         &state,
@@ -969,6 +1037,7 @@ pub async fn trash_delete(
         format!("permanently deleted {deleted} recycle bin entries ({bytes} bytes)"),
     )
     .await;
+    publish_file_mutation(&state, &user, "trash_delete", &original_paths, None, true).await;
     Ok(Json(
         json!({"ok": true, "deleted": deleted, "bytes": bytes}),
     ))
@@ -980,7 +1049,7 @@ pub async fn trash_empty(
     user: AuthUser,
     ip: ClientIp,
 ) -> AppResult<Json<Value>> {
-    let (deleted, bytes) = trash::empty(&state.db, &state.storage, &user).await?;
+    let (deleted, bytes, original_paths) = trash::empty(&state.db, &state.storage, &user).await?;
     audit_file(
         &state,
         &user,
@@ -990,6 +1059,7 @@ pub async fn trash_empty(
         format!("emptied recycle bin: {deleted} entries ({bytes} bytes)"),
     )
     .await;
+    publish_file_mutation(&state, &user, "trash_empty", &original_paths, None, true).await;
     Ok(Json(
         json!({"ok": true, "deleted": deleted, "bytes": bytes}),
     ))
@@ -1016,8 +1086,9 @@ pub async fn create_share(
     Json(body): Json<shares::CreateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
     let dto = shares::create(&state.db, &state.storage, &admin.0, body).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("share.create")
             .actor(&admin.0)
             .object("share", dto.id.clone())
@@ -1039,8 +1110,9 @@ pub async fn update_share(
     Json(body): Json<shares::UpdateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
     let dto = shares::update(&state.db, &state.storage, &id, body).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("share.update")
             .actor(&admin.0)
             .object("share", dto.id.clone())
@@ -1061,8 +1133,9 @@ pub async fn delete_share(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let record = shares::delete(&state.db, &id).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("share.delete")
             .actor(&admin.0)
             .object("share", record.id)
@@ -1626,5 +1699,151 @@ mod tests {
         // Unicode names survive through the encoded form.
         let unicode = content_disposition(Disposition::Inline, "日本語.txt");
         assert!(unicode.to_str().unwrap().contains("filename*=UTF-8''"));
+    }
+
+    // ------------------------------------------------------------ realtime
+
+    async fn next_matching_event(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::events::Event>,
+        kind: &str,
+        predicate: impl Fn(&crate::events::Event) -> bool,
+    ) -> crate::events::Event {
+        let wait = async {
+            loop {
+                match rx.recv().await {
+                    Ok(event) if event.kind == kind && predicate(&event) => return Some(event),
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return None,
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), wait)
+            .await
+            .expect("timed out waiting for realtime event")
+            .expect("event bus closed")
+    }
+
+    #[tokio::test]
+    async fn mutations_publish_private_file_events() {
+        let ctx = setup(Role::User, 1_000_000).await;
+        let mut rx = ctx.state.events.subscribe();
+        upload_raw(&ctx.app, "/", "note.txt", b"hello").await;
+
+        let changed = next_matching_event(&mut rx, "file.changed", |event| {
+            event.data["path"] == "/note.txt"
+        })
+        .await;
+        assert_eq!(changed.scope, crate::events::EventScope::User(1));
+        assert_eq!(changed.data["op"], "upload");
+        assert_eq!(changed.data["source"], "api");
+        assert_eq!(changed.data["userId"], 1);
+        assert_eq!(changed.data["paths"], json!(["/"]));
+        assert_eq!(changed.data["entry"]["path"], "/note.txt");
+        // Homes are private: an administrator may not observe them.
+        assert!(!changed.scope.allows(9, true));
+
+        let quota =
+            next_matching_event(&mut rx, "file.quota", |event| event.data["usedBytes"] == 5).await;
+        assert_eq!(quota.scope, crate::events::EventScope::User(1));
+        assert_eq!(quota.data["quotaBytes"], 1_000_000);
+        assert_eq!(quota.data["trashBytes"], 0);
+        assert_eq!(quota.data["userId"], 1);
+    }
+
+    #[tokio::test]
+    async fn shared_mutations_publish_member_scoped_events() {
+        let ctx = setup(Role::User, 1_000_000).await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (2, 'bob', 'x', 'user', 1, 1)",
+        )
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+        std::fs::create_dir_all(ctx.state.storage.shared_container_dir("team")).unwrap();
+        sqlx::query(
+            "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
+             VALUES ('share-team', 'team', '', 'team', 1, 1, 1)",
+        )
+        .execute(&ctx.state.db)
+        .await
+        .unwrap();
+        for user_id in [1_i64, 2] {
+            sqlx::query(
+                "INSERT INTO share_members (share_id, user_id, perms) VALUES ('share-team', ?, 'write')",
+            )
+            .bind(user_id)
+            .execute(&ctx.state.db)
+            .await
+            .unwrap();
+        }
+
+        let mut rx = ctx.state.events.subscribe();
+        upload_raw(&ctx.app, "/shared/team", "team.txt", b"shared").await;
+        let changed = next_matching_event(&mut rx, "file.changed", |event| {
+            event.data["path"] == "/shared/team/team.txt"
+        })
+        .await;
+        match &changed.scope {
+            crate::events::EventScope::Users(ids) => {
+                assert!(ids.contains(&1));
+                assert!(ids.contains(&2));
+            }
+            other => panic!("expected Users scope, got {other:?}"),
+        }
+        assert_eq!(changed.data["source"], "api");
+        assert_eq!(changed.data["userId"], 1);
+        let user_ids = changed.data["userIds"].as_array().unwrap();
+        assert!(user_ids.iter().any(|id| id == 1));
+        assert!(user_ids.iter().any(|id| id == 2));
+    }
+
+    #[tokio::test]
+    async fn copy_job_publishes_file_events_after_commit() {
+        let ctx = setup(Role::User, 1_000_000).await;
+        upload_raw(&ctx.app, "/", "a.txt", b"payload").await;
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/mkdir",
+            Body::from(r#"{"path":"/dest"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut rx = ctx.state.events.subscribe();
+        let (status, _, body) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/copy",
+            Body::from(r#"{"paths":["/a.txt"],"destDir":"/dest"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let job_id = json_body(&body).await["jobId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for _ in 0..300 {
+            let job = crate::jobs::job_json(&ctx.state.db, &job_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let status = job["status"].as_str().unwrap_or_default();
+            if status == "done" {
+                break;
+            }
+            assert!(status != "failed", "copy job failed: {job}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let changed =
+            next_matching_event(&mut rx, "file.changed", |event| event.data["op"] == "copy").await;
+        assert_eq!(changed.scope, crate::events::EventScope::User(1));
+        assert_eq!(changed.data["path"], "/dest/a.txt");
+        assert_eq!(changed.data["paths"], json!(["/dest"]));
+        assert_eq!(changed.data["source"], "api");
+        let quota =
+            next_matching_event(&mut rx, "file.quota", |event| event.data["usedBytes"] == 14).await;
+        assert_eq!(quota.scope, crate::events::EventScope::User(1));
     }
 }

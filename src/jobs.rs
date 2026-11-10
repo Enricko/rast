@@ -31,6 +31,7 @@ pub struct JobContext {
     events: EventBus,
     cancel: Arc<AtomicBool>,
     last_write: Arc<AtomicU64>,
+    user_id: Option<i64>,
 }
 
 impl JobContext {
@@ -63,10 +64,19 @@ impl JobContext {
             .bind(&self.id)
             .execute(&self.db)
             .await;
-        self.events.publish(
-            "job.progress",
-            json!({"id": self.id, "progress": done, "total": total, "message": message}),
-        );
+        let payload = json!({
+            "id": self.id,
+            "progress": done,
+            "total": total,
+            "message": message,
+            "userId": self.user_id,
+        });
+        match self.user_id {
+            Some(uid) => self
+                .events
+                .publish_user_and_admin("job.progress", uid, payload),
+            None => self.events.publish_admin("job.progress", payload),
+        };
     }
 
     pub async fn set_message(&self, message: &str) {
@@ -183,8 +193,13 @@ impl JobManager {
         if let Ok(mut flags) = self.cancel_flags.lock() {
             flags.insert(id.clone(), cancel.clone());
         }
-        self.events
-            .publish("job.queued", json!({"id": id, "kind": spec.kind}));
+        let queued = json!({"id": id, "kind": spec.kind, "userId": spec.user_id});
+        match spec.user_id {
+            Some(uid) => self
+                .events
+                .publish_user_and_admin("job.queued", uid, queued),
+            None => self.events.publish_admin("job.queued", queued),
+        };
         match self
             .tx
             .try_send(Task {
@@ -275,7 +290,12 @@ async fn run_job(
         .bind(&id)
         .execute(&db)
         .await;
-    events.publish("job.start", json!({"id": id, "kind": spec.kind}));
+    let owner = spec.user_id;
+    let start_event = json!({"id": id, "kind": spec.kind, "userId": owner});
+    match owner {
+        Some(uid) => events.publish_user_and_admin("job.start", uid, start_event),
+        None => events.publish_admin("job.start", start_event),
+    };
 
     let ctx = JobContext {
         id: id.clone(),
@@ -283,6 +303,7 @@ async fn run_job(
         events: events.clone(),
         cancel,
         last_write: Arc::new(AtomicU64::new(0)),
+        user_id: owner,
     };
     let outcome = (spec.run)(ctx).await;
     let finished = db::now_ms();
@@ -297,7 +318,11 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            events.publish("job.done", json!({"id": id, "result": value}));
+            let done_event = json!({"id": id, "result": value, "userId": owner});
+            match owner {
+                Some(uid) => events.publish_user_and_admin("job.done", uid, done_event),
+                None => events.publish_admin("job.done", done_event),
+            };
         }
         Err(AppError::Cancelled) => {
             let _ = sqlx::query(
@@ -307,7 +332,11 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            events.publish("job.cancelled", json!({"id": id}));
+            let cancelled_event = json!({"id": id, "userId": owner});
+            match owner {
+                Some(uid) => events.publish_user_and_admin("job.cancelled", uid, cancelled_event),
+                None => events.publish_admin("job.cancelled", cancelled_event),
+            };
         }
         Err(err) => {
             let message = err.public_message();
@@ -319,7 +348,11 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            events.publish("job.failed", json!({"id": id, "error": message}));
+            let failed_event = json!({"id": id, "error": message, "userId": owner});
+            match owner {
+                Some(uid) => events.publish_user_and_admin("job.failed", uid, failed_event),
+                None => events.publish_admin("job.failed", failed_event),
+            };
         }
     }
     // Drop the cancellation flag now that the job is finished so the map stays

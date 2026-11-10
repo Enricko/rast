@@ -34,6 +34,13 @@ pub const MAX_LOG_TAIL: u32 = 2000;
 /// Default log tail when the client does not specify one.
 pub const DEFAULT_LOG_TAIL: u32 = 200;
 
+/// Default tail for incremental (`compose-logs-since`) log reads. Also the
+/// upper bound used by the live log stream's bounded ring buffer.
+pub const DEFAULT_LOGS_SINCE_TAIL: u32 = 500;
+
+/// How far into the future a `sinceSecs` cursor may point (clock tolerance).
+pub const MAX_SINCE_SKEW_SECS: i64 = 86_400;
+
 /// Longest accepted application slug.
 pub const MAX_SLUG_LEN: usize = 40;
 
@@ -72,6 +79,9 @@ pub enum WorkerOp {
     RemoveVolumes,
     /// `docker compose logs --tail N`.
     Logs,
+    /// Incremental `docker compose logs --since <ts> --tail N` used by the live
+    /// log stream. Structured numeric cursor only (no free-form timestamp).
+    ComposeLogsSince,
     /// `docker stats --no-stream` for all containers.
     Stats,
     /// `docker inspect` for the given container ids (subset of fields).
@@ -93,6 +103,7 @@ impl WorkerOp {
             Self::ComposeRestart => "compose-restart",
             Self::RemoveVolumes => "remove-volumes",
             Self::Logs => "logs",
+            Self::ComposeLogsSince => "compose-logs-since",
             Self::Stats => "stats",
             Self::Inspect => "inspect",
         }
@@ -109,7 +120,8 @@ impl WorkerOp {
             | Self::ComposeValidate
             | Self::Stats
             | Self::Inspect
-            | Self::RemoveVolumes => QUICK_OP_TIMEOUT,
+            | Self::RemoveVolumes
+            | Self::ComposeLogsSince => QUICK_OP_TIMEOUT,
             Self::ComposeUp
             | Self::ComposeDown
             | Self::ComposeStop
@@ -131,6 +143,7 @@ impl WorkerOp {
                 | Self::ComposeRestart
                 | Self::RemoveVolumes
                 | Self::Logs
+                | Self::ComposeLogsSince
         )
     }
 }
@@ -148,6 +161,10 @@ pub struct WorkerRequest {
     pub tail: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ids: Option<Vec<String>>,
+    /// Incremental log cursor: Unix seconds, validated and converted to an
+    /// RFC3339 `--since` argument by the worker. Never a shell string.
+    #[serde(default, rename = "sinceSecs", skip_serializing_if = "Option::is_none")]
+    pub since_secs: Option<i64>,
 }
 
 impl WorkerRequest {
@@ -158,6 +175,7 @@ impl WorkerRequest {
             slug: None,
             tail: None,
             ids: None,
+            since_secs: None,
         }
     }
 
@@ -173,6 +191,11 @@ impl WorkerRequest {
 
     pub fn ids(mut self, ids: Vec<String>) -> Self {
         self.ids = Some(ids);
+        self
+    }
+
+    pub fn since_secs(mut self, since_secs: i64) -> Self {
+        self.since_secs = Some(since_secs);
         self
     }
 }
@@ -237,6 +260,8 @@ pub enum ValidatedAction {
         env_path: PathBuf,
         project: String,
         tail: Option<u32>,
+        /// Only set for `compose-logs-since`: Unix seconds cursor.
+        since_secs: Option<i64>,
     },
     /// Container inspection by id.
     Inspect(Vec<String>),
@@ -265,7 +290,7 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
             Ok(ValidatedAction::Plain(req.op))
         }
         WorkerOp::Inspect => {
-            if req.slug.is_some() || req.tail.is_some() {
+            if req.slug.is_some() || req.tail.is_some() || req.since_secs.is_some() {
                 return Err("inspect accepts only `ids`".into());
             }
             let ids = req
@@ -294,11 +319,35 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
                 .as_deref()
                 .ok_or_else(|| format!("{} requires `slug`", op.as_str()))?;
             validate_slug(slug)?;
-            let tail = if op == WorkerOp::Logs {
-                Some(req.tail.unwrap_or(DEFAULT_LOG_TAIL).clamp(1, MAX_LOG_TAIL))
+            let tail = match op {
+                WorkerOp::Logs => Some(req.tail.unwrap_or(DEFAULT_LOG_TAIL).clamp(1, MAX_LOG_TAIL)),
+                WorkerOp::ComposeLogsSince => Some(
+                    req.tail
+                        .unwrap_or(DEFAULT_LOGS_SINCE_TAIL)
+                        .clamp(1, MAX_LOG_TAIL),
+                ),
+                _ => {
+                    if req.tail.is_some() {
+                        return Err(format!("{} does not accept `tail`", op.as_str()));
+                    }
+                    None
+                }
+            };
+            let since_secs = if op == WorkerOp::ComposeLogsSince {
+                let now = crate::db::now_secs();
+                let since = req.since_secs;
+                if let Some(secs) = since {
+                    if secs < 0 {
+                        return Err("sinceSecs must not be negative".into());
+                    }
+                    if secs > now.saturating_add(MAX_SINCE_SKEW_SECS) {
+                        return Err("sinceSecs is too far in the future".into());
+                    }
+                }
+                since
             } else {
-                if req.tail.is_some() {
-                    return Err(format!("{} does not accept `tail`", op.as_str()));
+                if req.since_secs.is_some() {
+                    return Err(format!("{} does not accept `sinceSecs`", op.as_str()));
                 }
                 None
             };
@@ -310,6 +359,7 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
                 env_path: apps_dir.join(slug).join(".env"),
                 project: project_name(slug),
                 tail,
+                since_secs,
             })
         }
         other => Err(format!("operation '{}' is not supported", other.as_str())),
@@ -317,7 +367,7 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
 }
 
 fn reject_extra_args(req: &WorkerRequest) -> Result<(), String> {
-    if req.slug.is_some() || req.tail.is_some() || req.ids.is_some() {
+    if req.slug.is_some() || req.tail.is_some() || req.ids.is_some() || req.since_secs.is_some() {
         return Err(format!("{} accepts no arguments", req.op.as_str()));
     }
     Ok(())
@@ -467,6 +517,8 @@ mod tests {
         assert!(validate_request(&req, &apps_dir()).is_err());
         let req = WorkerRequest::new(WorkerOp::Stats).tail(10);
         assert!(validate_request(&req, &apps_dir()).is_err());
+        let req = WorkerRequest::new(WorkerOp::Version).since_secs(1);
+        assert!(validate_request(&req, &apps_dir()).is_err());
         let req = WorkerRequest::new(WorkerOp::ComposeUp).slug("x").tail(5);
         assert!(validate_request(&req, &apps_dir()).is_err());
         let req = WorkerRequest::new(WorkerOp::Inspect).slug("x");
@@ -494,6 +546,78 @@ mod tests {
             ValidatedAction::App { tail, .. } => assert_eq!(tail, Some(DEFAULT_LOG_TAIL)),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn incremental_logs_op_is_strictly_validated() {
+        let now = crate::db::now_secs();
+        // Valid: past cursor + bounded tail; defaults when omitted.
+        for req in [
+            WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                .slug("shop")
+                .since_secs(now - 30)
+                .tail(500),
+            WorkerRequest::new(WorkerOp::ComposeLogsSince).slug("shop"),
+        ] {
+            match validate_request(&req, &apps_dir()).unwrap() {
+                ValidatedAction::App {
+                    op,
+                    tail,
+                    since_secs,
+                    ..
+                } => {
+                    assert_eq!(op, WorkerOp::ComposeLogsSince);
+                    assert!(tail.is_some());
+                    assert!(since_secs.is_none() || since_secs.unwrap() <= now);
+                }
+                other => panic!("unexpected action: {other:?}"),
+            }
+        }
+        // The op serialises with the documented kebab-case name and structured
+        // numeric cursor (never a free-form shell string).
+        assert_eq!(
+            serde_json::to_string(&WorkerOp::ComposeLogsSince).unwrap(),
+            "\"compose-logs-since\""
+        );
+        let line = serde_json::to_string(
+            &WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                .slug("shop")
+                .since_secs(1_700_000_000)
+                .tail(50),
+        )
+        .unwrap();
+        assert!(line.contains("\"sinceSecs\":1700000000"), "{line}");
+
+        // Rejections: negative / far-future cursors, missing slug, cursor on
+        // other ops, unknown extra fields.
+        for req in [
+            WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                .slug("shop")
+                .since_secs(-5),
+            WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                .slug("shop")
+                .since_secs(now + MAX_SINCE_SKEW_SECS + 10_000),
+            WorkerRequest::new(WorkerOp::ComposeLogsSince),
+            WorkerRequest::new(WorkerOp::ComposeLogsSince).since_secs(now - 5),
+        ] {
+            assert!(
+                validate_request(&req, &apps_dir()).is_err(),
+                "should be rejected: {req:?}"
+            );
+        }
+        let req = WorkerRequest::new(WorkerOp::ComposeUp)
+            .slug("shop")
+            .since_secs(now - 5);
+        assert!(validate_request(&req, &apps_dir()).is_err());
+        let req = WorkerRequest::new(WorkerOp::Logs)
+            .slug("shop")
+            .since_secs(now - 5);
+        assert!(validate_request(&req, &apps_dir()).is_err());
+        // Invalid slugs are rejected before the cursor is even considered.
+        let req = WorkerRequest::new(WorkerOp::ComposeLogsSince)
+            .slug("../etc")
+            .since_secs(now - 5);
+        assert!(validate_request(&req, &apps_dir()).is_err());
     }
 
     #[test]

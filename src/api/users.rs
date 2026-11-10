@@ -91,8 +91,18 @@ pub async fn create_user(
         body.quota_bytes,
     )
     .await?;
-    audit::record(
+    state.events.publish_admin(
+        "user.changed",
+        serde_json::json!({"userId": user.id, "event": "created"}),
+    );
+    state.events.publish_user(
+        "user.changed",
+        user.id,
+        serde_json::json!({"userId": user.id, "event": "created"}),
+    );
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("user.create")
             .actor(&admin.0)
             .object("user", user.id.to_string())
@@ -149,8 +159,18 @@ pub async fn update_user(
         body.must_change_password,
     )
     .await?;
-    audit::record(
+    state.events.publish_admin(
+        "user.changed",
+        serde_json::json!({"userId": id, "event": "updated"}),
+    );
+    state.events.publish_user(
+        "user.changed",
+        id,
+        serde_json::json!({"userId": id, "event": "updated"}),
+    );
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("user.update")
             .actor(&admin.0)
             .object("user", id.to_string())
@@ -180,8 +200,13 @@ pub async fn deactivate_user(
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
     users::deactivate(&state.db, id).await?;
-    audit::record(
+    state.events.publish_admin(
+        "user.changed",
+        serde_json::json!({"userId": id, "event": "deactivated"}),
+    );
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("user.deactivate")
             .actor(&admin.0)
             .object("user", id.to_string())
@@ -221,8 +246,9 @@ pub async fn admin_set_password(
         None,
     )
     .await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("user.password_reset")
             .actor(&admin.0)
             .object("user", id.to_string())
@@ -274,8 +300,9 @@ pub async fn revoke_user_sessions(
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
     let n = crate::auth::session::revoke_all_for_user(&state.db, id, None).await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("user.sessions_revoke")
             .actor(&admin.0)
             .object("user", id.to_string())

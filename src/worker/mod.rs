@@ -458,6 +458,7 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
             env_path,
             project,
             tail,
+            since_secs,
         } => {
             let context = AppContext {
                 slug,
@@ -503,6 +504,15 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
                 }
                 WorkerOp::RemoveVolumes => remove_project_volumes(options, &context).await,
                 WorkerOp::Logs => docker_compose_logs(options, &context, tail.unwrap_or(200)).await,
+                WorkerOp::ComposeLogsSince => {
+                    docker_compose_logs_since(
+                        options,
+                        &context,
+                        tail.unwrap_or(crate::docker::protocol::DEFAULT_LOGS_SINCE_TAIL),
+                        since_secs,
+                    )
+                    .await
+                }
                 WorkerOp::Ps | WorkerOp::AppContainers => {
                     project_containers(options, &context).await
                 }
@@ -633,8 +643,17 @@ async fn compose_exec(
     context: &AppContext,
     subcommand: &[&str],
 ) -> Result<CommandOutput, WorkerError> {
+    let args: Vec<OsString> = subcommand.iter().map(OsString::from).collect();
+    compose_exec_owned(options, context, args).await
+}
+
+async fn compose_exec_owned(
+    options: &WorkerOptions,
+    context: &AppContext,
+    subcommand: Vec<OsString>,
+) -> Result<CommandOutput, WorkerError> {
     let mut args = compose_base_args(context);
-    args.extend(subcommand.iter().map(OsString::from));
+    args.extend(subcommand);
     run_docker(
         options,
         args,
@@ -801,6 +820,103 @@ async fn docker_compose_logs(
     let mut lines = parse_compose_logs(&output.stdout);
     truncate_from_start(&mut lines, MAX_LOG_TAIL as usize);
     Ok(json!({"lines": lines, "tail": tail.parse::<u32>().unwrap_or(MAX_LOG_TAIL)}))
+}
+
+/// Container ids of one managed Compose project (used for rotation detection by
+/// the live log stream). Ids are internal hex strings; never user input.
+async fn project_container_ids(
+    options: &WorkerOptions,
+    context: &AppContext,
+) -> Result<Vec<String>, WorkerError> {
+    let args = os_args(&[
+        "ps",
+        "-a",
+        "--no-trunc",
+        "--filter",
+        &format!("label=com.docker.compose.project={}", context.project),
+        "--format",
+        "{{.ID}}",
+    ]);
+    let output = run_docker(options, args, None, options.quick_timeout, 256 * 1024).await?;
+    if !output.success {
+        return Err(WorkerError::unavailable(format!(
+            "docker is not reachable: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for id in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if validate_container_id(id).is_err() {
+            continue;
+        }
+        if !ids.iter().any(|existing| existing == id) {
+            ids.push(id.to_string());
+        }
+        if ids.len() >= MAX_CONTAINERS {
+            break;
+        }
+    }
+    Ok(ids)
+}
+
+/// Incremental logs for the live SSE stream: bounded tail, optional
+/// `--since <RFC3339>` cursor (converted from the structured Unix-seconds
+/// request field), plus the current container-id set so the web server can
+/// detect container recreation and reset its ring buffer.
+async fn docker_compose_logs_since(
+    options: &WorkerOptions,
+    context: &AppContext,
+    tail: u32,
+    since_secs: Option<i64>,
+) -> Result<Value, WorkerError> {
+    context.ensure_files(options)?;
+    let container_ids = project_container_ids(options, context).await?;
+    let tail = tail.clamp(1, MAX_LOG_TAIL);
+    if container_ids.is_empty() {
+        return Ok(json!({
+            "lines": [],
+            "containerIds": [],
+            "tail": tail,
+        }));
+    }
+    let mut subcommand: Vec<OsString> = vec![
+        OsString::from("logs"),
+        OsString::from("--no-color"),
+        OsString::from("--timestamps"),
+        OsString::from("--tail"),
+        OsString::from(tail.to_string()),
+    ];
+    if let Some(secs) = since_secs {
+        let since = format_rfc3339_secs(secs)
+            .ok_or_else(|| WorkerError::invalid("invalid sinceSecs log cursor"))?;
+        subcommand.push(OsString::from("--since"));
+        subcommand.push(OsString::from(since));
+    }
+    let output = compose_exec_owned(options, context, subcommand).await?;
+    if !output.success {
+        return Err(WorkerError::command_failed(format!(
+            "cannot read application logs: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let mut lines = parse_compose_logs(&output.stdout);
+    truncate_from_start(&mut lines, tail as usize);
+    Ok(json!({
+        "lines": lines,
+        "containerIds": container_ids,
+        "tail": tail,
+    }))
+}
+
+/// Format a Unix-seconds cursor as an RFC3339 UTC timestamp for `--since`.
+fn format_rfc3339_secs(secs: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 async fn remove_project_volumes(
@@ -1135,7 +1251,11 @@ printf '%s\n' "$line" >> "$log"
 case "$1" in
   version) echo "26.1.4" ;;
   info) echo '{"ServerVersion":"26.1.4","Containers":2,"ContainersRunning":1,"ContainersStopped":1,"Images":4,"Driver":"overlay2","OperatingSystem":"Ubuntu","Architecture":"x86_64","NCPU":8,"MemTotal":16000000000}' ;;
-  ps) echo '{"ID":"0123456789ab","Image":"nginx:alpine","Names":"shop-web-1","State":"running","Status":"Up 1 minute","Ports":"0.0.0.0:8080->80/tcp","Labels":"com.docker.compose.project=rast-shop,com.docker.compose.service=web"}' ;;
+  ps)
+    case "$*" in
+      *"{{.ID}}"*) echo "0123456789ab" ;;
+      *) echo '{"ID":"0123456789ab","Image":"nginx:alpine","Names":"shop-web-1","State":"running","Status":"Up 1 minute","Ports":"0.0.0.0:8080->80/tcp","Labels":"com.docker.compose.project=rast-shop,com.docker.compose.service=web"}' ;;
+    esac ;;
   stats) echo '{"BlockIO":"0B / 0B","CPUPerc":"1.50%","Container":"0123456789ab","ID":"0123456789ab","MemPerc":"0.50%","MemUsage":"10MiB / 1GiB","Name":"shop-web-1","NetIO":"1kB / 2kB","Pids":"3"}' ;;
   inspect) echo '[{"Id":"0123456789ab","Name":"/legacy","Config":{"Image":"nginx:alpine","Env":["A=1"],"Labels":{}},"State":{"Status":"running"},"HostConfig":{"RestartPolicy":{"Name":"always"}},"Mounts":[],"NetworkSettings":{"Ports":{}}}]' ;;
   volume) if [ "$2" = "ls" ]; then echo "rast-shop_data"; else echo "rast-shop_data"; fi ;;
@@ -1319,6 +1439,53 @@ exit 0
         let calls = env.logged_args();
         assert!(calls[0].contains(&"--tail".to_string()));
         assert!(calls[0].contains(&"2000".to_string()));
+    }
+
+    #[tokio::test]
+    async fn incremental_logs_use_structured_since_and_container_ids() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let response = env
+            .call(
+                WorkerRequest::new(WorkerOp::ComposeLogsSince)
+                    .slug("shop")
+                    .tail(500)
+                    .since_secs(1_700_000_000),
+            )
+            .await;
+        assert!(response.ok, "{response:?}");
+        let data = response.data.unwrap();
+        assert_eq!(data["tail"], 500);
+        assert_eq!(data["containerIds"][0], "0123456789ab");
+        assert_eq!(data["lines"][0]["message"], "hello");
+        let calls = env.logged_args();
+        let last = calls.last().unwrap();
+        assert!(last.contains(&"logs".to_string()));
+        assert!(last.contains(&"--since".to_string()));
+        assert!(last.contains(&"2023-11-14T22:13:20Z".to_string()));
+        assert!(last.contains(&"--tail".to_string()));
+        assert!(last.contains(&"500".to_string()));
+
+        // Without a cursor no --since flag is passed (initial tail read).
+        let env2 = TestEnv::start(OK_SCRIPT).await;
+        let response = env2
+            .call(WorkerRequest::new(WorkerOp::ComposeLogsSince).slug("shop"))
+            .await;
+        assert!(response.ok, "{response:?}");
+        let calls = env2.logged_args();
+        assert!(!calls.last().unwrap().contains(&"--since".to_string()));
+    }
+
+    #[test]
+    fn since_cursor_formatting() {
+        assert_eq!(
+            format_rfc3339_secs(1_700_000_000).as_deref(),
+            Some("2023-11-14T22:13:20Z")
+        );
+        assert_eq!(
+            format_rfc3339_secs(0).as_deref(),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert!(format_rfc3339_secs(i64::MAX).is_none());
     }
 
     #[tokio::test]

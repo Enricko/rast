@@ -740,3 +740,301 @@ fn state_is_send_sync() {
     assert_send_sync::<SocketAddr>();
     let _ = db::now_ms();
 }
+
+// ---------------------------------------------------------------------------
+// Appearance axes + realtime event authorization
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn appearance_theme_accent_and_wallpaper_are_independent() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+
+    // Defaults: light mode, Ocean Blue accent, bundled wallpaper.
+    let (status, _, body) = server
+        .request("GET", "/api/appearance", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["theme"], "light");
+    assert_eq!(body["accent"], "ocean");
+    assert_eq!(body["wallpaper"]["kind"], "builtin");
+
+    // Change only the accent; theme and wallpaper must be preserved.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"accent": "forest"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accent"], "forest");
+    assert_eq!(body["theme"], "light");
+    assert_eq!(body["wallpaper"]["builtinId"], "alpine-dawn");
+
+    // Change only the theme; accent stays.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"theme": "dark"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["theme"], "dark");
+    assert_eq!(body["accent"], "forest");
+
+    // Change only the wallpaper; both axes stay.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"wallpaper": {"kind": "builtin", "builtinId": "coastal-calm", "overlay": 35}})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["wallpaper"]["builtinId"], "coastal-calm");
+    assert_eq!(body["theme"], "dark");
+    assert_eq!(body["accent"], "forest");
+
+    // Invalid accent is rejected.
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"accent": "neon"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Another account keeps its own defaults (isolation).
+    let (_, _, other) = server
+        .request("GET", "/api/appearance", None, admin.headers())
+        .await;
+    assert_eq!(other["accent"], "ocean");
+    assert_eq!(other["theme"], "light");
+    assert_eq!(other["wallpaper"]["builtinId"], "alpine-dawn");
+
+    // Reset restores the wallpaper but keeps the chosen theme/accent.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/appearance/reset",
+            Some(json!({})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["wallpaper"]["builtinId"], "alpine-dawn");
+    assert_eq!(body["theme"], "dark");
+    assert_eq!(body["accent"], "forest");
+}
+
+#[tokio::test]
+async fn realtime_events_are_authorized_and_ordered() {
+    use std::time::Duration;
+
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    server
+        .create_user("bob", "Bob-Password-123!", Role::User)
+        .await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let bob = server.login("bob", "Bob-Password-123!").await;
+
+    // Subscribe an SSE stream for Alice and collect frames for a short window.
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/events")
+        .header(
+            header::COOKIE,
+            alice.cookie.parse::<axum::http::HeaderValue>().unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = server.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let collector = tokio::spawn(collect_sse(
+        response.into_body(),
+        Duration::from_millis(1600),
+    ));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // One event for Bob only, one global event.
+    server
+        .state
+        .events
+        .publish_user("test.private", bob.user_id, json!({"secret": "bob-only"}));
+    server
+        .state
+        .events
+        .publish("test.broadcast", json!({"hello": "everyone"}));
+
+    let joined = tokio::time::timeout(Duration::from_secs(5), collector)
+        .await
+        .expect("SSE collector timed out")
+        .expect("SSE collector panicked");
+    assert!(
+        joined.contains("event: hello"),
+        "missing hello frame: {joined}"
+    );
+    assert!(
+        joined.contains("test.broadcast"),
+        "missing broadcast frame: {joined}"
+    );
+    assert!(
+        !joined.contains("bob-only"),
+        "private event leaked to another user: {joined}"
+    );
+
+    // Every frame carries a strictly increasing sequence id.
+    let seq_ids: Vec<u64> = joined
+        .lines()
+        .filter(|line| line.starts_with("id: "))
+        .filter_map(|line| line.trim_start_matches("id: ").trim().parse::<u64>().ok())
+        .collect();
+    assert!(seq_ids.len() >= 2, "expected seq ids: {joined}");
+    assert!(
+        seq_ids.windows(2).all(|pair| pair[0] <= pair[1]),
+        "sequence ids are not monotonic: {seq_ids:?}"
+    );
+}
+
+/// Read an SSE body for a bounded window and return the raw concatenated text.
+async fn collect_sse(body: Body, duration: std::time::Duration) -> String {
+    use http_body_util::BodyExt;
+    use std::time::Instant;
+
+    let deadline = Instant::now() + duration;
+    let mut text = String::new();
+    tokio::pin!(body);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    text.push_str(&String::from_utf8_lossy(&data));
+                }
+            }
+            Ok(Some(Err(_))) | Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    text
+}
+
+#[tokio::test]
+async fn domain_mutations_publish_scoped_realtime_events() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let mut rx = server.state.events.subscribe();
+
+    // Appearance changes are user-scoped and carry the new accent.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"accent": "teal"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = drain_events(&mut rx, std::time::Duration::from_millis(400)).await;
+    let appearance = events
+        .iter()
+        .find(|event| event.kind == "appearance.changed")
+        .expect("no appearance.changed event");
+    assert_eq!(
+        appearance.scope,
+        rast::events::EventScope::User(alice.user_id),
+        "appearance event must be user-scoped"
+    );
+    assert_eq!(appearance.data["appearance"]["accent"], "teal");
+    let alice_audit = events
+        .iter()
+        .find(|event| event.kind == "audit.created" && event.data["userId"] == alice.user_id)
+        .expect("no audit event for alice's appearance change");
+    assert_eq!(
+        alice_audit.scope,
+        rast::events::EventScope::UserAndAdmin(alice.user_id),
+        "audit events must be visible to the actor and admins only"
+    );
+
+    // User management events are admin-scoped.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/users",
+            Some(json!({"username": "carol", "password": "Carol-Password-123!", "role": "user"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = drain_events(&mut rx, std::time::Duration::from_millis(400)).await;
+    let user_event = events
+        .iter()
+        .find(|event| event.kind == "user.changed")
+        .expect("no user.changed event");
+    assert_eq!(user_event.scope, rast::events::EventScope::Admin);
+    assert_eq!(user_event.data["event"], "created");
+
+    // Settings changes are admin-scoped.
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            "/api/settings",
+            Some(json!({"siteName": "Realtime Test"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let events = drain_events(&mut rx, std::time::Duration::from_millis(400)).await;
+    let settings = events
+        .iter()
+        .find(|event| event.kind == "settings.changed")
+        .expect("no settings.changed event");
+    assert_eq!(settings.scope, rast::events::EventScope::Admin);
+    assert!(settings.data["keys"]
+        .as_array()
+        .is_some_and(|keys| !keys.is_empty()));
+}
+
+/// Collect every event published within a bounded window.
+async fn drain_events(
+    rx: &mut tokio::sync::broadcast::Receiver<rast::events::Event>,
+    window: std::time::Duration,
+) -> Vec<rast::events::Event> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(event)) => events.push(event),
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+    events
+}

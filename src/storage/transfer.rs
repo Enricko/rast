@@ -19,7 +19,9 @@ use crate::{
     audit::{self, AuditLog},
     auth::AuthUser,
     error::{AppError, AppResult},
+    events::EventBus,
     jobs::JobContext,
+    realtime,
     storage::{
         quota, safe_path, trash, Access, LogicalPath, Storage, MAX_BATCH_PATHS, MAX_TREE_ENTRIES,
         TEMP_PREFIX,
@@ -480,8 +482,9 @@ pub async fn run_copy_job(
     user: AuthUser,
     paths: Vec<String>,
     dest_dir: String,
+    events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = copy_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir).await;
+    let outcome = copy_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir, &events).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -518,8 +521,10 @@ async fn copy_job_inner(
     user: &AuthUser,
     paths: &[String],
     dest_dir: &str,
+    events: &EventBus,
 ) -> AppResult<Value> {
     let plan = plan_batch(pool, storage, user, paths, dest_dir, false).await?;
+    let mut affected: Vec<String> = Vec::with_capacity(plan.sources.len());
     // Enumerate sources first: gives an accurate progress total and keeps the
     // copy loop simple.
     let mut trees: Vec<(usize, Vec<TreeEntry>)> = Vec::with_capacity(plan.sources.len());
@@ -585,7 +590,11 @@ async fn copy_job_inner(
             )
             .await;
         }
+        if let Ok(logical) = plan.dest_logical.child(&source.name) {
+            affected.push(logical.as_string());
+        }
     }
+    realtime::publish_commit(events, pool, user, "copy", &affected, None, true).await;
     Ok(json!({
         "copied": copied,
         "bytes": progress.bytes,
@@ -601,8 +610,9 @@ pub async fn run_move_job(
     user: AuthUser,
     paths: Vec<String>,
     dest_dir: String,
+    events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = move_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir).await;
+    let outcome = move_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir, &events).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -639,8 +649,10 @@ async fn move_job_inner(
     user: &AuthUser,
     paths: &[String],
     dest_dir: &str,
+    events: &EventBus,
 ) -> AppResult<Value> {
     let plan = plan_batch(pool, storage, user, paths, dest_dir, true).await?;
+    let mut affected: Vec<String> = Vec::new();
     let total = (plan.sources.len() as u64).max(1);
     let mut done: u64 = 0;
     let mut bytes: u64 = 0;
@@ -679,6 +691,10 @@ async fn move_job_inner(
                 }
                 done += 1;
                 bytes = bytes.saturating_add(size);
+                affected.push(source.logical.as_string());
+                if let Ok(logical) = plan.dest_logical.child(&source.name) {
+                    affected.push(logical.as_string());
+                }
                 ctx.progress(done, total, &format!("Moving {}", source.name))
                     .await;
             }
@@ -693,6 +709,7 @@ async fn move_job_inner(
             }
         }
     }
+    realtime::publish_commit(events, pool, user, "move", &affected, None, true).await;
     Ok(json!({
         "moved": done,
         "bytes": bytes,
@@ -707,8 +724,9 @@ pub async fn run_delete_job(
     storage: Storage,
     user: AuthUser,
     paths: Vec<String>,
+    events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = delete_job_inner(&ctx, &pool, &storage, &user, &paths).await;
+    let outcome = delete_job_inner(&ctx, &pool, &storage, &user, &paths, &events).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -744,6 +762,7 @@ async fn delete_job_inner(
     storage: &Storage,
     user: &AuthUser,
     paths: &[String],
+    events: &EventBus,
 ) -> AppResult<Value> {
     // Re-validate every path at execution time.
     let logicals = plan_delete(pool, storage, user, paths).await?;
@@ -765,10 +784,13 @@ async fn delete_job_inner(
         )
         .await;
     }
+    let affected: Vec<String> = logicals.iter().map(LogicalPath::as_string).collect();
+    realtime::publish_commit(events, pool, user, "delete", &affected, None, true).await;
     Ok(json!({"deleted": deleted, "bytes": bytes, "trashed": true}))
 }
 
 /// Run a copy/move/delete operation in the foreground (tests and maintenance).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_blocking_transfer(
     ctx: &JobContext,
     pool: &SqlitePool,
@@ -777,11 +799,12 @@ pub async fn run_blocking_transfer(
     paths: &[String],
     dest_dir: &str,
     copy: bool,
+    events: &EventBus,
 ) -> AppResult<Value> {
     if copy {
-        copy_job_inner(ctx, pool, storage, user, paths, dest_dir).await
+        copy_job_inner(ctx, pool, storage, user, paths, dest_dir, events).await
     } else {
-        move_job_inner(ctx, pool, storage, user, paths, dest_dir).await
+        move_job_inner(ctx, pool, storage, user, paths, dest_dir, events).await
     }
 }
 
@@ -865,10 +888,12 @@ mod tests {
     }
 
     async fn run_job(ctx: &Ctx, kind: &str, paths: Vec<String>, dest: &str) -> Value {
-        let manager = JobManager::new(ctx.pool.clone(), crate::events::EventBus::new(), 2);
+        let events = crate::events::EventBus::new();
+        let manager = JobManager::new(ctx.pool.clone(), events.clone(), 2);
         let pool = ctx.pool.clone();
         let storage = ctx.storage.clone();
         let user = ctx.user.clone();
+        let events = events.clone();
         let dest = dest.to_string();
         let kind_owned = kind.to_string();
         let id = manager
@@ -877,12 +902,14 @@ mod tests {
                 move |job_ctx| async move {
                     match kind_owned.as_str() {
                         "file.copy" => {
-                            run_copy_job(job_ctx, pool, storage, user, paths, dest).await
+                            run_copy_job(job_ctx, pool, storage, user, paths, dest, events).await
                         }
                         "file.move" => {
-                            run_move_job(job_ctx, pool, storage, user, paths, dest).await
+                            run_move_job(job_ctx, pool, storage, user, paths, dest, events).await
                         }
-                        "file.delete" => run_delete_job(job_ctx, pool, storage, user, paths).await,
+                        "file.delete" => {
+                            run_delete_job(job_ctx, pool, storage, user, paths, events).await
+                        }
                         _ => Err(AppError::internal("unknown job")),
                     }
                 },

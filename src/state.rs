@@ -69,6 +69,10 @@ impl AppState {
         );
         // Scheduled backups (disabled until the operator enables them).
         crate::backup::schedule::spawn(db.clone(), config.clone(), jobs.clone(), events.clone());
+        // Realtime filesystem watcher (external File Station changes).
+        crate::realtime::watch::spawn(&config, db.clone(), events.clone());
+        // Realtime container/application reconciler (external Docker changes).
+        crate::docker::reconcile::spawn(&config, db.clone(), docker.clone(), events.clone());
 
         Ok(Self {
             config,

@@ -173,8 +173,13 @@ pub async fn create_backup(
     .actor(&admin.0);
 
     let job_id = state.jobs.submit(spec).await?;
-    audit::record(
+    state.events.publish_admin(
+        "backup.changed",
+        json!({"reason": "queued", "jobId": job_id}),
+    );
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("backup.create")
             .actor(&admin.0)
             .object("job", job_id.clone())
@@ -262,8 +267,12 @@ pub async fn update_schedule(
         }
     }
     db::set_setting(&state.db, "backupRetentionCount", &retention.to_string()).await?;
-    audit::record(
+    state
+        .events
+        .publish_admin("backup.changed", json!({"reason": "schedule"}));
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("backup.schedule_update")
             .actor(&admin.0)
             .object("schedule", frequency.clone())
@@ -300,8 +309,12 @@ pub async fn delete_backup(
         .bind(&id)
         .execute(&state.db)
         .await?;
-    audit::record(
+    state
+        .events
+        .publish_admin("backup.changed", json!({"reason": "deleted", "id": id}));
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("backup.delete")
             .actor(&admin.0)
             .object("backup", id)
@@ -374,8 +387,9 @@ pub async fn verify_backup(
     }
     let result = backup::verify(&path_ref).await?;
     let ok = result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("backup.verify")
             .actor(&admin.0)
             .object("backup", id)

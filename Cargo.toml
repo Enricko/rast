@@ -1,6 +1,6 @@
 [package]
 name = "rast"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 rust-version = "1.94"
 description = "RAST — Resource Administration & Storage Toolkit"
@@ -56,6 +56,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 async-trait = "0.1"
 socket2 = "0.6"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+notify = "8.2.2"
 
 [dev-dependencies]
 tempfile = "3"

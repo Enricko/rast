@@ -29,6 +29,25 @@ use crate::{
 /// Immutable per-user wallpaper cache header (content-addressed by UUID).
 const WALLPAPER_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 
+/// Notify the user's other sessions (and their own open tabs) that appearance
+/// changed. The originating session id lets a preview dialog distinguish its own
+/// save from an external change.
+fn publish_appearance_changed(
+    state: &AppState,
+    user: &AuthUser,
+    reason: &str,
+    appearance: Option<&appearance::AppearanceDto>,
+) {
+    let data = serde_json::json!({
+        "reason": reason,
+        "originSessionId": user.session_id,
+        "appearance": appearance,
+    });
+    state
+        .events
+        .publish_user("appearance.changed", user.id, data);
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -69,8 +88,10 @@ pub async fn update_appearance(
     Json(body): Json<appearance::UpdateAppearanceRequest>,
 ) -> AppResult<Json<appearance::AppearanceDto>> {
     let updated = appearance::update(&state.db, &user, body).await?;
-    audit::record(
+    publish_appearance_changed(&state, &user, "update", Some(&updated));
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("appearance.update")
             .actor(&user)
             .object("appearance", user.id.to_string())
@@ -166,8 +187,9 @@ pub async fn upload_wallpaper(
         &data,
     )
     .await?;
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("appearance.wallpaper_upload")
             .actor(&user)
             .object("wallpaper", upload.id.clone())
@@ -276,8 +298,11 @@ pub async fn delete_wallpaper(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let updated = appearance::delete_upload(&state.db, &state.config.data_dir, &user, &id).await?;
-    audit::record(
+    let current = appearance::get(&state.db, user.id).await.ok();
+    publish_appearance_changed(&state, &user, "delete", current.as_ref());
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("appearance.wallpaper_delete")
             .actor(&user)
             .object("wallpaper", id)
@@ -296,8 +321,10 @@ pub async fn reset_appearance(
     ip: ClientIp,
 ) -> AppResult<Json<appearance::AppearanceDto>> {
     let updated = appearance::reset(&state.db, &user).await?;
-    audit::record(
+    publish_appearance_changed(&state, &user, "reset", Some(&updated));
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("appearance.reset")
             .actor(&user)
             .object("appearance", user.id.to_string())

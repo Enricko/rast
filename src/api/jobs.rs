@@ -140,8 +140,9 @@ pub async fn cancel_job(
         return Err(AppError::NotFound("job not found"));
     }
     let cancelled = state.jobs.cancel(&id);
-    audit::record(
+    audit::record_with_events(
         &state.db,
+        &state.events,
         AuditLog::new("job.cancel")
             .actor(&user)
             .object("job", id.clone())
