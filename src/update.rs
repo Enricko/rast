@@ -122,6 +122,12 @@ pub async fn run(
     // ---- database backup before any migration ------------------------------
     let backup_meta = backup_before_update(&cfg).await?;
     println!("database backup: {}", backup_meta["path"]);
+    // `rast update` runs as root but the data directory belongs to the service
+    // account; hand the new artifacts back to its owner so the running service
+    // (and retention pruning) can manage them.
+    if let Some(path) = backup_meta.get("path").and_then(Value::as_str) {
+        adopt_ownership(&cfg, Path::new(path));
+    }
 
     let current_bin = fs::read(BIN_PATH)?;
     let current_mode = fs::metadata(BIN_PATH)?.permissions();
@@ -171,6 +177,29 @@ pub async fn run(
         }))?
     );
     Ok(ExitCode::SUCCESS)
+}
+
+/// Give files created by a root CLI run back to the service account that owns
+/// the data directory (best effort; no-op when not root).
+fn adopt_ownership(cfg: &Config, path: &Path) {
+    if !is_root() {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let Ok(owner) = fs::metadata(&cfg.data_dir) else {
+        return;
+    };
+    let (uid, gid) = (owner.uid(), owner.gid());
+    for candidate in [
+        path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", cfg.db_path().display())),
+        PathBuf::from(format!("{}-shm", cfg.db_path().display())),
+        cfg.db_path(),
+    ] {
+        if candidate.exists() {
+            let _ = std::os::unix::fs::chown(&candidate, Some(uid), Some(gid));
+        }
+    }
 }
 
 async fn backup_before_update(cfg: &Config) -> AppResult<Value> {

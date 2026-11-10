@@ -469,42 +469,53 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
 
-    // Bind availability (does not require root; fails if address in use)
-    print!("[    ] listen address available ... ");
+    // Bind availability. If RAST itself is running, the address being in use is
+    // the expected state rather than a failure.
+    print!("[    ] listen address ... ");
     match tokio::net::TcpListener::bind(cfg.bind).await {
         Ok(listener) => {
             drop(listener);
-            println!("ok ({})", cfg.bind);
+            println!("available ({})", cfg.bind);
         }
         Err(e) => {
-            failures += 1;
-            println!("FAIL: {} ({e})", cfg.bind);
+            if service_state() == "active" {
+                println!("in use by rast.service ({})", cfg.bind);
+            } else {
+                failures += 1;
+                println!("FAIL: {} ({e})", cfg.bind);
+            }
         }
     }
 
-    // Docker (optional)
-    print!("[    ] docker CLI ... ");
+    // Docker (optional). The web service intentionally has no Docker socket
+    // access: administration is delegated to rast-worker.service, which owns the
+    // socket. Check the worker rather than the (unprivileged) CLI.
+    print!("[    ] docker worker ... ");
     if cfg.docker_enabled {
-        let docker_ok = std::process::Command::new("docker")
-            .arg("version")
-            .arg("--format")
-            .arg("{{.Server.Version}}")
+        let worker_unit = std::process::Command::new("systemctl")
+            .args(["is-active", "rast-worker.service"])
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if docker_ok {
-            println!("ok");
-        } else {
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let socket_ok = cfg.worker_socket.exists();
+        if worker_unit == "active" && socket_ok {
+            println!("ok (rast-worker.service + {})", cfg.worker_socket.display());
+        } else if socket_ok {
             warnings += 1;
-            println!("WARN: docker_enabled=true but the Docker daemon is not reachable");
-        }
-        print!("[    ] docker worker socket ... ");
-        if cfg.worker_socket.exists() {
-            println!("ok ({})", cfg.worker_socket.display());
+            println!(
+                "WARN: socket {} exists but rast-worker.service is {}",
+                cfg.worker_socket.display(),
+                if worker_unit.is_empty() {
+                    "not installed"
+                } else {
+                    worker_unit.as_str()
+                }
+            );
         } else {
             warnings += 1;
             println!(
-                "WARN: missing {} (is rast-worker.service running?)",
+                "WARN: docker_enabled=true but worker socket {} is missing (start rast-worker.service)",
                 cfg.worker_socket.display()
             );
         }

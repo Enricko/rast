@@ -22,6 +22,25 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.1] - 2026-11-10
+
+Maintenance release: two production-deployment fixes found while verifying the
+v0.1.0 installation on a real host. No schema, API or data changes.
+
+### Fixed
+
+- **`rast update` ownership of pre-update backups.** Because the update command
+  runs as root, the database snapshot (and any SQLite sidecar files it touched)
+  could end up owned by root inside the service data directory. They are now
+  handed back to the account that owns the data directory, so retention pruning
+  and later writes by `rast.service` keep working.
+- **`rast doctor` false alarms on a healthy installation.** The listen-address
+  check reported a failure when the running service legitimately held the port,
+  and the Docker check probed the unprivileged Docker CLI instead of the
+  privileged `rast-worker.service`/socket that the web server actually uses.
+  Both checks now describe the real state (and `doctor` exits 0 on a healthy
+  deployment).
+
 ## [0.1.0] - 2026-11-10
 
 Initial public release. RAST replaces a pile of ad-hoc scripts and web tools
