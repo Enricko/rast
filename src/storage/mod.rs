@@ -19,14 +19,19 @@
 //!
 //! OWNER: teammate `backend-storage`.
 
+pub mod chunked;
 pub mod ops;
 pub mod quota;
 pub mod safe_path;
 pub mod shares;
+pub mod transfer;
 pub mod trash;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
 use sqlx::SqlitePool;
 
@@ -36,6 +41,7 @@ use crate::{
     error::{AppError, AppResult},
 };
 
+pub use ops::EntryDto;
 pub use safe_path::{Access, LogicalPath, Perm, ResolvedPath, RootKind, StorageRoot};
 
 pub use safe_path::{MAX_LOGICAL_PATH_BYTES, MAX_NAME_BYTES, TEMP_PREFIX};
@@ -67,6 +73,13 @@ pub struct Storage {
     pub trash_root: PathBuf,
     /// Maximum size of a single uploaded file.
     pub max_upload_bytes: u64,
+    /// Temporary directory for chunked/resumable uploads
+    /// (`<data_dir>/tmp/uploads`); wiped on startup.
+    pub uploads_root: PathBuf,
+    /// In-memory chunked-upload sessions (bounded and owned by this process).
+    pub uploads: Arc<Mutex<HashMap<String, chunked::ChunkedUpload>>>,
+    /// Lifetime of a chunked-upload session (overridable in tests).
+    pub upload_ttl_ms: i64,
 }
 
 impl Storage {
@@ -79,6 +92,9 @@ impl Storage {
         let homes_root = canonical_root(&cfg.homes_dir())?;
         let shared_root = canonical_root(&cfg.shared_dir())?;
         let trash_root = canonical_root(&cfg.trash_dir())?;
+        let uploads_root = cfg.data_dir.join("tmp").join("uploads");
+        chunked::prepare_uploads_dir(&uploads_root)
+            .map_err(|e| AppError::internal(format!("cannot prepare upload directory: {e}")))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -91,6 +107,9 @@ impl Storage {
             shared_root,
             trash_root,
             max_upload_bytes: cfg.max_upload_bytes,
+            uploads_root,
+            uploads: Arc::new(Mutex::new(HashMap::new())),
+            upload_ttl_ms: chunked::UPLOAD_TTL_MS,
         })
     }
 
@@ -264,7 +283,7 @@ fn check_root_dir(path: &Path) -> AppResult<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::{Config, FileConfig};
 

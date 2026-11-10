@@ -269,7 +269,8 @@ impl ResolvedPath {
     /// True for `/` and for `/shared/<name>` (namespace roots cannot be
     /// renamed, copied, moved or deleted).
     pub fn is_storage_root(&self) -> bool {
-        self.logical.is_root() || (self.kind == RootKind::Share && self.logical.segments().len() == 2)
+        self.logical.is_root()
+            || (self.kind == RootKind::Share && self.logical.segments().len() == 2)
     }
 
     pub fn allows_write(&self) -> bool {
@@ -324,25 +325,91 @@ pub fn verify_no_symlinks(root: &Path, physical: &Path) -> AppResult<bool> {
     Ok(true)
 }
 
+/// Open a file for reading **without following a final symlink**.
+///
+/// On Linux this passes `O_NOFOLLOW`; on other platforms the caller still
+/// performs the [`verify_same_inode`] check after opening. A symlink planted
+/// between path validation and the `open` call therefore fails with `ELOOP`
+/// instead of leaking a file from outside the storage root.
+pub fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOFOLLOW is 0o400000 on the Linux architectures RAST ships for
+        // (x86_64 and aarch64).
+        options.custom_flags(0o400000);
+    }
+    options.open(path)
+}
+
+/// Async variant of [`open_read_no_follow`] returning a `tokio` file.
+pub async fn open_read_no_follow_async(path: &Path) -> AppResult<tokio::fs::File> {
+    let path = path.to_path_buf();
+    let opened = tokio::task::spawn_blocking(move || open_read_no_follow(&path))
+        .await
+        .map_err(AppError::from)?;
+    match opened {
+        Ok(file) => Ok(tokio::fs::File::from_std(file)),
+        Err(error) if error.raw_os_error() == Some(40) => {
+            // ELOOP: the final component is a symlink.
+            Err(AppError::Forbidden("symbolic links are not supported"))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Reopen-safe verification: the file actually opened must be the same inode
+/// that was validated before opening. Rejects a symlink/regular-file swap that
+/// happened in the TOCTOU window.
+pub fn verify_same_inode(
+    opened: &std::fs::Metadata,
+    expected: &std::fs::Metadata,
+) -> AppResult<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != expected.dev() || opened.ino() != expected.ino() {
+            return Err(AppError::Forbidden(
+                "file changed while it was being opened",
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (opened, expected);
+    }
+    Ok(())
+}
+
 /// Canonicalise the nearest existing ancestor of `physical` and verify it
 /// still lives below the (already canonical) storage `root`. This catches
 /// exotic escapes (bind mounts, mount points) that `lstat` alone cannot.
 pub fn verify_containment(root: &Path, physical: &Path) -> AppResult<()> {
     if !physical.starts_with(root) {
-        return Err(AppError::Forbidden("path escapes the permitted storage area"));
+        return Err(AppError::Forbidden(
+            "path escapes the permitted storage area",
+        ));
     }
     let mut probe = physical.to_path_buf();
     loop {
         match std::fs::canonicalize(&probe) {
             Ok(real) => {
                 if !real.starts_with(root) {
-                    return Err(AppError::Forbidden("path escapes the permitted storage area"));
+                    return Err(AppError::Forbidden(
+                        "path escapes the permitted storage area",
+                    ));
                 }
                 return Ok(());
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => match probe.parent() {
                 Some(parent) if parent.starts_with(root) => probe = parent.to_path_buf(),
-                _ => return Err(AppError::Forbidden("path escapes the permitted storage area")),
+                _ => {
+                    return Err(AppError::Forbidden(
+                        "path escapes the permitted storage area",
+                    ))
+                }
             },
             Err(e) => return Err(e.into()),
         }
@@ -457,6 +524,28 @@ mod tests {
         // Containment check passes for real children and fails for others.
         assert!(verify_containment(&root, &inside).is_ok());
         assert!(verify_containment(&root, &outside).is_err());
+    }
+
+    #[test]
+    fn no_follow_open_and_inode_check_reject_swaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        let other = dir.path().join("other.txt");
+        std::fs::write(&real, b"real").unwrap();
+        std::fs::write(&other, b"other").unwrap();
+        let expected = std::fs::symlink_metadata(&real).unwrap();
+        let first = open_read_no_follow(&real).unwrap();
+        let opened = first.metadata().unwrap();
+        assert!(verify_same_inode(&opened, &expected).is_ok());
+        let second = std::fs::File::open(&other).unwrap();
+        assert!(verify_same_inode(&second.metadata().unwrap(), &expected).is_err());
+
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&other, &link).unwrap();
+        assert!(
+            open_read_no_follow(&link).is_err(),
+            "O_NOFOLLOW must reject symlinks"
+        );
     }
 
     #[test]
