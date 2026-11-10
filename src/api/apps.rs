@@ -1432,10 +1432,14 @@ fn write_app_files(
     let dir = app_dir_path(state, slug);
     if !dir.exists() {
         std::fs::create_dir_all(&dir)?;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    write_atomic(&dir.join("compose.yaml"), compose_text.as_bytes(), 0o600)?;
-    write_atomic(&dir.join(".env"), env_file.as_bytes(), 0o600)?;
+    // The application directory and files must be readable by the privileged
+    // worker (User=rast-worker, Group=rast) which validates and deploys the
+    // compose file. Owner rast + group rast with 0640/0750 is enough — the
+    // worker never needs write access to the definitions.
+    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o750));
+    write_atomic(&dir.join("compose.yaml"), compose_text.as_bytes(), 0o640)?;
+    write_atomic(&dir.join(".env"), env_file.as_bytes(), 0o640)?;
     Ok(())
 }
 

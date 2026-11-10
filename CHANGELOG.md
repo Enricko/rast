@@ -22,6 +22,23 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.2] - 2026-11-10
+
+Deployment fix found while verifying managed application deployment on a real
+installation. No schema or API changes.
+
+### Fixed
+
+- **Managed applications could not be deployed when the privileged worker ran as
+  its own service account.** The Applications API wrote `compose.yaml`/`.env`
+  with owner-only permissions (`0600`) and the app directory `0700`, but the
+  Docker worker runs as `rast-worker` (group `rast`) and therefore could not read
+  the definitions; validation failed with `application '<slug>' has no
+  compose.yaml`. Definitions are now written `0640` inside a `0750` directory so
+  the worker can validate and deploy them without granting write access.
+  (Deploying on the same account as the web server — the earlier verification
+  setup — accidentally hid this.)
+
 ## [0.1.1] - 2026-11-10
 
 Maintenance release: two production-deployment fixes found while verifying the
