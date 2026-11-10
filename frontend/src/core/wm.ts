@@ -1,7 +1,9 @@
-// Desktop window manager: move, resize, minimize, maximize, close, focus.
+// Desktop window manager: move, resize, minimize, maximize, snap, close, focus.
 //
 // Windows are positioned absolutely inside the desktop layer. On small screens
 // they fill the available space (the shell behaves like a mobile app switcher).
+// Dragging a titlebar near the top/left/right edge previews a snap zone; the
+// drop tiles the window or maximizes it.
 
 import { h } from "./dom";
 import { iconSvg } from "./icons";
@@ -20,6 +22,7 @@ export interface WindowInfo {
   icon: string;
   minimized: boolean;
   maximized: boolean;
+  tiled: "left" | "right" | null;
   focused: boolean;
 }
 
@@ -42,6 +45,7 @@ export interface WindowHandle {
 interface WindowRecord {
   id: string;
   appId: string;
+  appIcon: string;
   el: HTMLElement;
   titlebar: HTMLElement;
   titleEl: HTMLElement;
@@ -49,6 +53,7 @@ interface WindowRecord {
   contentEl: HTMLElement;
   minimized: boolean;
   maximized: boolean;
+  tiled: "left" | "right" | null;
   prevRect: WindowRect | null;
   resizeCallbacks: Set<() => void>;
   closeCallbacks: Set<() => void>;
@@ -56,7 +61,7 @@ interface WindowRecord {
 }
 
 export interface WindowManagerOptions {
-  /** Height reserved at the bottom (taskbar). */
+  /** Height reserved at the bottom (taskbar) when the host spans the viewport. */
   taskbarHeight?: number;
   onChange?: (windows: WindowInfo[]) => void;
 }
@@ -64,6 +69,7 @@ export interface WindowManagerOptions {
 const MOBILE_BREAKPOINT = 820;
 const DEFAULT_SIZE = { w: 940, h: 620 };
 const MIN_SIZE = { w: 360, h: 260 };
+const SNAP_THRESHOLD = 18;
 
 let windowSeq = 0;
 
@@ -75,17 +81,28 @@ export class WindowManager {
   private readonly options: WindowManagerOptions;
   private mobileQuery: MediaQueryList | null = null;
   private readonly mobileHandler: () => void;
+  private readonly resizeHandler: () => void;
+  private resizeFrame: number | undefined;
   private cascade = 0;
+  private snapPreview: HTMLElement | null = null;
+  private snapZone: "left" | "right" | "top" | null = null;
 
   constructor(host: HTMLElement, options: WindowManagerOptions = {}) {
     this.host = host;
     this.options = options;
     this.mobileHandler = () => this.layoutAll();
+    this.resizeHandler = () => {
+      if (this.resizeFrame !== undefined) return;
+      this.resizeFrame = window.requestAnimationFrame(() => {
+        this.resizeFrame = undefined;
+        this.layoutAll();
+      });
+    };
     if (typeof window.matchMedia === "function") {
       this.mobileQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`);
       this.mobileQuery.addEventListener("change", this.mobileHandler);
     }
-    window.addEventListener("resize", this.mobileHandler);
+    window.addEventListener("resize", this.resizeHandler);
   }
 
   get isMobile(): boolean {
@@ -123,6 +140,7 @@ export class WindowManager {
     const el = h("section", { class: "window entering", role: "dialog", ariaLabel: app.name });
     el.dataset.windowId = id;
     el.dataset.appId = app.id;
+    el.tabIndex = -1;
 
     const iconEl = h("span", { class: "win-icon" });
     iconEl.appendChild(iconSvg(app.icon, 18));
@@ -151,6 +169,7 @@ export class WindowManager {
     const record: WindowRecord = {
       id,
       appId: app.id,
+      appIcon: app.icon,
       el,
       titlebar,
       titleEl,
@@ -158,6 +177,7 @@ export class WindowManager {
       contentEl,
       minimized: false,
       maximized: false,
+      tiled: null,
       prevRect: null,
       resizeCallbacks: new Set(),
       closeCallbacks: new Set(),
@@ -168,14 +188,13 @@ export class WindowManager {
     this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
 
     // Drag and resize.
-    this.records.get(id)?.cleanup.push(this.attachDrag(record));
-    this.records.get(id)?.cleanup.push(this.attachResize(record, app));
+    record.cleanup.push(this.attachDrag(record));
+    record.cleanup.push(this.attachResize(record, app));
     titlebar.addEventListener("dblclick", (event) => {
       if ((event.target as HTMLElement).closest(".win-control")) return;
       this.toggleMaximize(id);
     });
     el.addEventListener("pointerdown", () => this.focus(id), { capture: true });
-    record.cleanup.push(() => this.focus(id));
 
     const notifyResize = () => {
       for (const cb of record.resizeCallbacks) {
@@ -222,7 +241,37 @@ export class WindowManager {
     return handle;
   }
 
-  private controlButton(kind: "minimize" | "maximize" | "close", label: string, action: () => void): HTMLElement {
+  destroy(): void {
+    for (const record of this.records.values()) {
+      for (const cb of record.closeCallbacks) {
+        try {
+          cb();
+        } catch (error) {
+          console.error("dispose callback failed", error);
+        }
+      }
+      for (const cleanup of record.cleanup) {
+        try {
+          cleanup();
+        } catch {
+          /* ignore */
+        }
+      }
+      record.el.remove();
+    }
+    this.records.clear();
+    this.snapPreview?.remove();
+    this.snapPreview = null;
+    window.removeEventListener("resize", this.resizeHandler);
+    this.mobileQuery?.removeEventListener("change", this.mobileHandler);
+    this.emitChange();
+  }
+
+  private controlButton(
+    kind: "minimize" | "maximize" | "close",
+    label: string,
+    action: () => void,
+  ): HTMLElement {
     const btn = h("button", { class: `win-control win-control-${kind}`, type: "button", ariaLabel: label });
     btn.appendChild(iconSvg(kind === "maximize" ? "maximize" : kind, 14));
     btn.addEventListener("click", (event) => {
@@ -246,6 +295,7 @@ export class WindowManager {
       },
       setIcon(name: string) {
         record.iconEl.replaceChildren(iconSvg(name, 18));
+        record.appIcon = name;
         manager.emitChange();
       },
       close() {
@@ -288,6 +338,11 @@ export class WindowManager {
     return record ? this.handle(record) : null;
   }
 
+  focusedAppId(): string | null {
+    if (!this.focusedId) return null;
+    return this.records.get(this.focusedId)?.appId ?? null;
+  }
+
   focus(id: string): void {
     const record = this.records.get(id);
     if (!record) return;
@@ -311,18 +366,22 @@ export class WindowManager {
   minimize(id: string): void {
     const record = this.records.get(id);
     if (!record) return;
+    if (record.minimized) return;
     record.minimized = true;
     record.el.classList.add("is-minimized");
     if (this.focusedId === id) {
       this.focusedId = null;
-      // Focus the topmost remaining visible window.
-      let top: WindowRecord | null = null;
-      for (const other of this.records.values()) {
-        if (other.minimized) continue;
-        if (!top || Number(other.el.style.zIndex) > Number(top.el.style.zIndex)) top = other;
-      }
-      if (top) this.focus(top.id);
+      this.focusTopmost();
     }
+    this.emitChange();
+  }
+
+  minimizeAll(): void {
+    for (const record of this.records.values()) {
+      record.minimized = true;
+      record.el.classList.add("is-minimized");
+    }
+    this.focusedId = null;
     this.emitChange();
   }
 
@@ -350,10 +409,15 @@ export class WindowManager {
     if (record.maximized) {
       record.maximized = false;
       record.el.classList.remove("is-maximized");
+      record.tiled = null;
+      record.el.classList.remove("is-tiled");
       if (record.prevRect) this.setRect(record, record.prevRect);
+      record.prevRect = null;
     } else {
       record.prevRect = this.rectOf(record);
       record.maximized = true;
+      record.tiled = null;
+      record.el.classList.remove("is-tiled");
       record.el.classList.add("is-maximized");
       const bounds = this.bounds();
       this.setRect(record, { x: 0, y: 0, w: bounds.w, h: bounds.h });
@@ -379,11 +443,14 @@ export class WindowManager {
         /* ignore */
       }
     }
+    this.records.delete(id);
     record.el.classList.add("closing");
     const el = record.el;
     window.setTimeout(() => el.remove(), 130);
-    this.records.delete(id);
-    if (this.focusedId === id) this.focusedId = null;
+    if (this.focusedId === id) {
+      this.focusedId = null;
+      this.focusTopmost();
+    }
     this.emitChange();
   }
 
@@ -391,14 +458,24 @@ export class WindowManager {
     for (const id of Array.from(this.records.keys())) this.close(id);
   }
 
+  private focusTopmost(): void {
+    let top: WindowRecord | null = null;
+    for (const other of this.records.values()) {
+      if (other.minimized) continue;
+      if (!top || Number(other.el.style.zIndex) > Number(top.el.style.zIndex)) top = other;
+    }
+    if (top) this.focus(top.id);
+  }
+
   list(): WindowInfo[] {
     return Array.from(this.records.values()).map((record) => ({
       id: record.id,
       appId: record.appId,
       title: record.titleEl.textContent ?? "",
-      icon: "",
+      icon: record.appIcon,
       minimized: record.minimized,
       maximized: record.maximized,
+      tiled: record.tiled,
       focused: this.focusedId === record.id,
     }));
   }
@@ -413,6 +490,8 @@ export class WindowManager {
       if (!record.maximized) {
         record.prevRect = this.rectOf(record);
         record.maximized = true;
+        record.tiled = null;
+        record.el.classList.remove("is-tiled");
       }
       const bounds = this.bounds();
       record.el.classList.add("is-mobile", "is-maximized");
@@ -425,22 +504,43 @@ export class WindowManager {
         record.maximized = false;
         record.el.classList.remove("is-maximized");
         if (record.prevRect) this.setRect(record, record.prevRect);
+        record.prevRect = null;
       }
+    }
+    if (record.maximized) {
+      const bounds = this.bounds();
+      this.setRect(record, { x: 0, y: 0, w: bounds.w, h: bounds.h });
+      return;
+    }
+    // Keep windows reachable after a viewport resize.
+    const bounds = this.bounds();
+    const rect = this.rectOf(record);
+    const w = Math.min(rect.w, bounds.w - 16);
+    const h = Math.min(rect.h, bounds.h - 16);
+    const x = Math.min(Math.max(rect.x, -w + 140), Math.max(8, bounds.w - w - 8));
+    const y = Math.min(Math.max(rect.y, 0), Math.max(8, bounds.h - h - 8));
+    if (x !== rect.x || y !== rect.y || w !== rect.w || h !== rect.h) {
+      this.setRect(record, { x, y, w, h });
     }
   }
 
   private bounds(): { w: number; h: number } {
-    const taskbar = this.options.taskbarHeight ?? 56;
+    const hostW = this.host.clientWidth;
+    const hostH = this.host.clientHeight;
+    if (hostW > 0 && hostH > 0) {
+      return { w: Math.max(320, hostW), h: Math.max(240, hostH) };
+    }
+    const taskbar = this.options.taskbarHeight ?? 58;
     return {
-      w: Math.max(320, this.host.clientWidth),
-      h: Math.max(240, this.host.clientHeight - taskbar),
+      w: Math.max(320, window.innerWidth),
+      h: Math.max(240, window.innerHeight - taskbar),
     };
   }
 
   private applyDefaultRect(record: WindowRecord, size: { w: number; h: number }): void {
     const bounds = this.bounds();
-    const w = Math.min(size.w, bounds.w - 16);
-    const h = Math.min(size.h, bounds.h - 16);
+    const w = Math.min(size.w, Math.max(MIN_SIZE.w, bounds.w - 16));
+    const h = Math.min(size.h, Math.max(MIN_SIZE.h, bounds.h - 16));
     const offset = (this.cascade % 7) * 26;
     this.cascade += 1;
     const x = Math.min(Math.max(8 + offset, 8), Math.max(8, bounds.w - w - 8));
@@ -464,8 +564,87 @@ export class WindowManager {
     record.el.style.height = `${Math.round(rect.h)}px`;
   }
 
+  // --------------------------------------------------------------- snapping
+
+  private ensureSnapPreview(): HTMLElement {
+    if (!this.snapPreview) {
+      this.snapPreview = h("div", { class: "snap-preview", hidden: true });
+      this.snapPreview.setAttribute("aria-hidden", "true");
+      this.host.appendChild(this.snapPreview);
+    }
+    return this.snapPreview;
+  }
+
+  private updateSnap(clientX: number, clientY: number): void {
+    const hostRect = this.host.getBoundingClientRect();
+    let zone: "left" | "right" | "top" | null = null;
+    if (clientY <= hostRect.top + SNAP_THRESHOLD) {
+      zone = "top";
+    } else if (clientX <= hostRect.left + SNAP_THRESHOLD) {
+      zone = "left";
+    } else if (clientX >= hostRect.right - SNAP_THRESHOLD) {
+      zone = "right";
+    }
+    this.snapZone = zone;
+    const preview = this.ensureSnapPreview();
+    if (!zone) {
+      preview.hidden = true;
+      return;
+    }
+    const bounds = this.bounds();
+    const rect: WindowRect =
+      zone === "top"
+        ? { x: 0, y: 0, w: bounds.w, h: bounds.h }
+        : { x: zone === "left" ? 0 : Math.round(bounds.w / 2), y: 0, w: Math.round(bounds.w / 2), h: bounds.h };
+    preview.hidden = false;
+    preview.dataset.zone = zone;
+    preview.style.left = `${rect.x + 6}px`;
+    preview.style.top = `${rect.y + 6}px`;
+    preview.style.width = `${Math.max(80, rect.w - 12)}px`;
+    preview.style.height = `${Math.max(80, rect.h - 12)}px`;
+  }
+
+  private hideSnapPreview(): void {
+    this.snapZone = null;
+    if (this.snapPreview) this.snapPreview.hidden = true;
+  }
+
+  private applySnap(record: WindowRecord): void {
+    const zone = this.snapZone;
+    this.hideSnapPreview();
+    if (!zone) return;
+    const bounds = this.bounds();
+    if (zone === "top") {
+      if (!record.maximized) {
+        record.prevRect = this.rectOf(record);
+        record.maximized = true;
+      }
+      record.tiled = null;
+      record.el.classList.remove("is-tiled");
+      record.el.classList.add("is-maximized");
+      this.setRect(record, { x: 0, y: 0, w: bounds.w, h: bounds.h });
+    } else {
+      record.maximized = false;
+      record.el.classList.remove("is-maximized");
+      record.tiled = zone;
+      record.el.classList.add("is-tiled");
+      record.prevRect = null;
+      this.setRect(record, {
+        x: zone === "left" ? 0 : Math.round(bounds.w / 2),
+        y: 0,
+        w: Math.round(bounds.w / 2),
+        h: bounds.h,
+      });
+    }
+    record.resizeCallbacks.forEach((cb) => cb());
+    this.emitChange();
+  }
+
+  // ---------------------------------------------------------------- pointer
+
   private attachDrag(record: WindowRecord): () => void {
     let dragging = false;
+    let moved = false;
     let startX = 0;
     let startY = 0;
     let originX = 0;
@@ -476,17 +655,25 @@ export class WindowManager {
       if ((event.target as HTMLElement).closest(".win-control")) return;
       if (event.button !== 0) return;
       dragging = true;
+      moved = false;
       startX = event.clientX;
       startY = event.clientY;
       const rect = this.rectOf(record);
       originX = rect.x;
       originY = rect.y;
+      record.tiled = null;
+      record.el.classList.remove("is-tiled");
       record.titlebar.setPointerCapture(event.pointerId);
       record.el.classList.add("is-dragging");
       event.preventDefault();
-    };
+        };
+
     const onPointerMove = (event: PointerEvent) => {
       if (!dragging) return;
+      if (!moved && Math.abs(event.clientX - startX) + Math.abs(event.clientY - startY) < 4) return;
+      moved = true;
+      this.updateSnap(event.clientX, event.clientY);
+      if (this.snapZone) return;
       const bounds = this.bounds();
       const rect = this.rectOf(record);
       const maxX = bounds.w - 80;
@@ -496,6 +683,7 @@ export class WindowManager {
       record.el.style.left = `${Math.round(x)}px`;
       record.el.style.top = `${Math.round(y)}px`;
     };
+
     const onPointerUp = (event: PointerEvent) => {
       if (!dragging) return;
       dragging = false;
@@ -503,17 +691,31 @@ export class WindowManager {
       if (record.titlebar.hasPointerCapture(event.pointerId)) {
         record.titlebar.releasePointerCapture(event.pointerId);
       }
+      if (moved) this.applySnap(record);
+      this.hideSnapPreview();
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!dragging) return;
+      if (event.key === "Escape") {
+        dragging = false;
+        moved = false;
+        this.hideSnapPreview();
+        record.el.classList.remove("is-dragging");
+      }
     };
 
     record.titlebar.addEventListener("pointerdown", onPointerDown);
     record.titlebar.addEventListener("pointermove", onPointerMove);
     record.titlebar.addEventListener("pointerup", onPointerUp);
     record.titlebar.addEventListener("pointercancel", onPointerUp);
+    document.addEventListener("keydown", onKeyDown);
     return () => {
       record.titlebar.removeEventListener("pointerdown", onPointerDown);
       record.titlebar.removeEventListener("pointermove", onPointerMove);
       record.titlebar.removeEventListener("pointerup", onPointerUp);
       record.titlebar.removeEventListener("pointercancel", onPointerUp);
+      document.removeEventListener("keydown", onKeyDown);
     };
   }
 
@@ -534,6 +736,8 @@ export class WindowManager {
       startX = event.clientX;
       startY = event.clientY;
       origin = this.rectOf(record);
+      record.tiled = null;
+      record.el.classList.remove("is-tiled");
       target.setPointerCapture(event.pointerId);
       record.el.classList.add("is-resizing");
       event.preventDefault();

@@ -324,3 +324,42 @@ export interface BackupSchedule {
   lastRunAt: number | null;
   nextRunAt: number;
 }
+
+/** POST /api/auth/login response (note: features arrive via /api/auth/me). */
+export interface LoginResponse {
+  user: User;
+  csrfToken: string;
+  expiresAt: number;
+}
+
+/** GET /api/system/components */
+export interface ComponentStatusResponse {
+  components: ComponentHealth[];
+  jobsRunning: number;
+  serverTime: number;
+}
+
+/** GET /api/settings/storage */
+export interface StorageSettings {
+  dataDir: string;
+  storageDir: string;
+  homesDir: string;
+  sharedDir: string;
+  trashDir: string;
+  homes: string[];
+  sharedFolders: string[];
+  usedBytes: number;
+  filesystem: DiskUsage;
+}
+
+/** GET /api/users/{id}/sessions */
+export interface UserSessionList {
+  items: SessionInfo[];
+}
+
+/** POST/PATCH /api/shares body. */
+export interface ShareInput {
+  name?: string;
+  description?: string;
+  members?: Array<{ userId: number; perms: ShareMember["perms"] }>;
+}

@@ -96,7 +96,51 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+export function formatAge(ts: number | null | undefined): string {
+  return relativeTime(ts);
+}
+
 export function formatEta(secs: number | undefined | null): string {
   if (!secs || secs <= 0 || !Number.isFinite(secs)) return "";
   return formatDuration(secs);
+}
+
+/** "2024-05-01 14:32:07" — used in audit log detail views. */
+export function formatDateTimeSec(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  return `${formatDate(ts)} ${formatTime(ts)}`;
+}
+
+/** "Mon, 1 May 2024" — used by the taskbar clock popover. */
+export function formatWeekdayDate(ts: number): string {
+  const date = new Date(ts);
+  const weekday = date.toLocaleDateString(undefined, { weekday: "short" });
+  const rest = date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  return `${weekday}, ${rest}`;
+}
+
+/** "14:32:07" */
+export function formatClockSeconds(ts: number): string {
+  return formatTime(ts);
+}
+
+/** 1234567 → "1.2M" (compact counters for badges). */
+export function formatNumberCompact(value: number | undefined | null): string {
+  if (value === undefined || value === null) return "—";
+  if (Math.abs(value) < 1000) return String(value);
+  if (Math.abs(value) < 1_000_000) return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}k`;
+  if (Math.abs(value) < 1_000_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  return `${(value / 1_000_000_000).toFixed(1)}B`;
+}
+
+export function startOfDay(ts: number): number {
+  const date = new Date(ts);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+export function endOfDay(ts: number): number {
+  const date = new Date(ts);
+  date.setHours(23, 59, 59, 999);
+  return date.getTime();
 }

@@ -13,17 +13,36 @@ export interface ElementAttrs {
   href?: string;
   target?: string;
   rel?: string;
+  download?: string;
   disabled?: boolean;
   checked?: boolean;
   selected?: boolean;
   hidden?: boolean;
+  readOnly?: boolean;
+  required?: boolean;
+  noValidate?: boolean;
   tabIndex?: number;
   role?: string;
   ariaLabel?: string;
+  ariaModal?: boolean;
+  ariaHidden?: boolean;
+  ariaLive?: string;
+  ariaPressed?: boolean;
+  ariaSelected?: boolean;
+  ariaExpanded?: boolean;
+  ariaInvalid?: boolean;
+  ariaBusy?: boolean;
+  ariaDescribedBy?: string;
+  ariaValueNow?: string;
+  ariaValueMin?: string;
+  ariaValueMax?: string;
   name?: string;
   accept?: string;
   multiple?: boolean;
   autocomplete?: string;
+  inputMode?: string;
+  rows?: number;
+  spellcheck?: boolean;
   colspan?: number;
   rowspan?: number;
   min?: string;
@@ -32,9 +51,16 @@ export interface ElementAttrs {
   style?: string;
   dataset?: Record<string, string>;
   onClick?: (event: MouseEvent) => void;
+  onDblClick?: (event: MouseEvent) => void;
+  onContextMenu?: (event: MouseEvent) => void;
+  onPointerDown?: (event: PointerEvent) => void;
+  onPointerUp?: (event: PointerEvent) => void;
   onInput?: (event: Event) => void;
   onChange?: (event: Event) => void;
   onKeyDown?: (event: KeyboardEvent) => void;
+  onKeyUp?: (event: KeyboardEvent) => void;
+  onFocus?: (event: FocusEvent) => void;
+  onBlur?: (event: FocusEvent) => void;
   onSubmit?: (event: SubmitEvent) => void;
 }
 
@@ -55,6 +81,19 @@ export function applyAttrs(el: HTMLElement, attrs: ElementAttrs): void {
   if (attrs.title) el.title = attrs.title;
   if (attrs.role) el.setAttribute("role", attrs.role);
   if (attrs.ariaLabel) el.setAttribute("aria-label", attrs.ariaLabel);
+  if (attrs.ariaModal) el.setAttribute("aria-modal", "true");
+  if (attrs.ariaHidden !== undefined) el.setAttribute("aria-hidden", String(attrs.ariaHidden));
+  if (attrs.ariaLive) el.setAttribute("aria-live", attrs.ariaLive);
+  if (attrs.ariaPressed !== undefined) el.setAttribute("aria-pressed", String(attrs.ariaPressed));
+  if (attrs.ariaSelected !== undefined) el.setAttribute("aria-selected", String(attrs.ariaSelected));
+  if (attrs.ariaExpanded !== undefined) el.setAttribute("aria-expanded", String(attrs.ariaExpanded));
+  if (attrs.ariaInvalid !== undefined) el.setAttribute("aria-invalid", String(attrs.ariaInvalid));
+  if (attrs.ariaBusy !== undefined) el.setAttribute("aria-busy", String(attrs.ariaBusy));
+  if (attrs.ariaDescribedBy) el.setAttribute("aria-describedby", attrs.ariaDescribedBy);
+  if (attrs.ariaValueNow !== undefined) el.setAttribute("aria-valuenow", attrs.ariaValueNow);
+  if (attrs.ariaValueMin !== undefined) el.setAttribute("aria-valuemin", attrs.ariaValueMin);
+  if (attrs.ariaValueMax !== undefined) el.setAttribute("aria-valuemax", attrs.ariaValueMax);
+  if (attrs.hidden) el.hidden = true;
   if (attrs.tabIndex !== undefined) el.tabIndex = attrs.tabIndex;
   if (attrs.dataset) {
     for (const [key, value] of Object.entries(attrs.dataset)) el.dataset[key] = value;
@@ -69,19 +108,36 @@ export function applyAttrs(el: HTMLElement, attrs: ElementAttrs): void {
     if (attrs.accept) el.accept = attrs.accept;
     if (attrs.multiple) el.multiple = true;
     if (attrs.autocomplete) el.setAttribute("autocomplete", attrs.autocomplete);
+    if (attrs.inputMode) el.setAttribute("inputmode", attrs.inputMode);
     if (attrs.min !== undefined) el.min = attrs.min;
     if (attrs.max !== undefined) el.max = attrs.max;
     if (attrs.step !== undefined) el.step = attrs.step;
     if (attrs.disabled) el.disabled = true;
     if (attrs.checked) el.checked = true;
+    if (attrs.readOnly) el.readOnly = true;
+    if (attrs.required) el.required = true;
+    if (attrs.spellcheck !== undefined) el.spellcheck = attrs.spellcheck;
   }
   if (el instanceof HTMLButtonElement) {
     if (attrs.type) el.setAttribute("type", attrs.type);
     if (attrs.disabled) el.disabled = true;
   }
+  if (el instanceof HTMLFormElement) {
+    if (attrs.noValidate) el.noValidate = true;
+  }
   if (el instanceof HTMLSelectElement) {
     if (attrs.name) el.name = attrs.name;
     if (attrs.disabled) el.disabled = true;
+    if (attrs.required) el.required = true;
+  }
+  if (el instanceof HTMLTextAreaElement) {
+    if (attrs.name) el.name = attrs.name;
+    if (attrs.value !== undefined) el.value = attrs.value;
+    if (attrs.placeholder) el.placeholder = attrs.placeholder;
+    if (attrs.disabled) el.disabled = true;
+    if (attrs.rows !== undefined) el.rows = attrs.rows;
+    if (attrs.readOnly) el.readOnly = true;
+    if (attrs.spellcheck !== undefined) el.spellcheck = attrs.spellcheck;
   }
   if (el instanceof HTMLOptionElement) {
     if (attrs.value !== undefined) el.value = attrs.value;
@@ -91,6 +147,7 @@ export function applyAttrs(el: HTMLElement, attrs: ElementAttrs): void {
   if (attrs.href !== undefined && (el instanceof HTMLAnchorElement)) el.href = attrs.href;
   if (attrs.target && el instanceof HTMLAnchorElement) el.target = attrs.target;
   if (attrs.rel && el instanceof HTMLAnchorElement) el.rel = attrs.rel;
+  if (attrs.download && el instanceof HTMLAnchorElement) el.download = attrs.download;
 
   if (attrs.colspan !== undefined && el instanceof HTMLTableCellElement) {
     el.colSpan = attrs.colspan;
@@ -99,9 +156,16 @@ export function applyAttrs(el: HTMLElement, attrs: ElementAttrs): void {
     el.rowSpan = attrs.rowspan;
   }
   if (attrs.onClick) el.addEventListener("click", attrs.onClick as EventListener);
+  if (attrs.onDblClick) el.addEventListener("dblclick", attrs.onDblClick as EventListener);
+  if (attrs.onContextMenu) el.addEventListener("contextmenu", attrs.onContextMenu as EventListener);
+  if (attrs.onPointerDown) el.addEventListener("pointerdown", attrs.onPointerDown as EventListener);
+  if (attrs.onPointerUp) el.addEventListener("pointerup", attrs.onPointerUp as EventListener);
   if (attrs.onInput) el.addEventListener("input", attrs.onInput);
   if (attrs.onChange) el.addEventListener("change", attrs.onChange);
   if (attrs.onKeyDown) el.addEventListener("keydown", attrs.onKeyDown as EventListener);
+  if (attrs.onKeyUp) el.addEventListener("keyup", attrs.onKeyUp as EventListener);
+  if (attrs.onFocus) el.addEventListener("focus", attrs.onFocus as EventListener);
+  if (attrs.onBlur) el.addEventListener("blur", attrs.onBlur as EventListener);
   if (attrs.onSubmit) el.addEventListener("submit", attrs.onSubmit as EventListener);
 }
 

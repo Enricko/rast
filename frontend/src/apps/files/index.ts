@@ -1,7 +1,6 @@
 // File Station application. OWNER: teammate `frontend-apps`.
 import type { AppDefinition } from "../../core/app";
-import { h } from "../../core/dom";
-import { iconEl } from "../../core/icons";
+import { mountFileStation } from "./station";
 
 export const filesApp: AppDefinition = {
   id: "files",
@@ -9,10 +8,9 @@ export const filesApp: AppDefinition = {
   icon: "files",
   description: "Browse, upload, download and organise your files",
   singleton: true,
-  defaultSize: { w: 1040, h: 660 },
+  defaultSize: { w: 1080, h: 680 },
+  minSize: { w: 380, h: 300 },
   mount(ctx) {
-    ctx.root.appendChild(
-      h("div", { class: "empty-state" }, h("div", { class: "empty-title" }, "File Station"), h("div", { class: "empty-detail" }, "Loading…"), iconEl("folder", 32)),
-    );
+    return mountFileStation(ctx);
   },
 };

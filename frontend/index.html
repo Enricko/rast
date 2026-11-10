@@ -1,19 +1,147 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="description" content="RAST — Resource Administration & Storage Toolkit" />
+    <meta name="description" content="RAST — Resource Administration & Storage Toolkit. A self-hosted server administration workspace: files, users, containers, monitoring and backups." />
+    <meta name="theme-color" content="#070c18" />
     <title>RAST</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231d4ed8'/%3E%3Cpath d='M16 20h14l5 6h13v20H16z' fill='%2360a5fa'/%3E%3Ccircle cx='44' cy='20' r='7' fill='%23fbbf24'/%3E%3C/svg%3E" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%230b1222'/%3E%3Cpath d='M32 8 52 19.6v24.8L32 56 12 44.4V19.6z' fill='none' stroke='%234f8cff' stroke-width='3.4' stroke-linejoin='round'/%3E%3Cpath d='M32 22.4 40.4 27.4v10L32 42.4 23.6 37.4v-10z' fill='%234f8cff'/%3E%3C/svg%3E"
+    />
+    <!-- Critical splash styling is inlined so the boot screen is correct before
+         the module/CSS bundle is parsed. Scripts stay external (CSP: script-src 'self'). -->
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        background: #070c18;
+        color: #e8eefa;
+        font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+        overflow: hidden;
+      }
+      #app {
+        height: 100%;
+      }
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: grid;
+        place-content: center;
+        justify-items: center;
+        gap: 20px;
+        background: radial-gradient(1200px 700px at 12% -10%, #173a63 0%, transparent 60%),
+          radial-gradient(1000px 800px at 95% 10%, #0f3b3a 0%, transparent 55%),
+          linear-gradient(160deg, #070c18 0%, #0a1120 55%, #050a14 100%);
+        transition: opacity 0.38s ease, visibility 0.38s ease;
+      }
+      body.app-ready #boot-splash {
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+      }
+      .boot-logo {
+        width: 74px;
+        height: 74px;
+        border-radius: 20px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(145deg, rgba(79, 140, 255, 0.22), rgba(45, 212, 191, 0.14));
+        border: 1px solid rgba(148, 176, 224, 0.28);
+        animation: boot-float 2.4s ease-in-out infinite;
+      }
+      .boot-word {
+        font-size: 21px;
+        font-weight: 750;
+        letter-spacing: 0.34em;
+        padding-left: 0.34em;
+      }
+      .boot-sub {
+        font-size: 11.5px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: #6f819f;
+      }
+      .boot-bar {
+        width: 168px;
+        height: 3px;
+        border-radius: 999px;
+        background: rgba(148, 176, 224, 0.16);
+        overflow: hidden;
+      }
+      .boot-bar::after {
+        content: "";
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: 999px;
+        background: linear-gradient(90deg, #4f8cff, #2dd4bf);
+        animation: boot-progress 1.3s ease-in-out infinite;
+      }
+      @keyframes boot-float {
+        0%,
+        100% {
+          transform: translateY(0);
+        }
+        50% {
+          transform: translateY(-5px);
+        }
+      }
+      @keyframes boot-progress {
+        0% {
+          transform: translateX(-110%);
+        }
+        100% {
+          transform: translateX(320%);
+        }
+      }
+      @media (prefers-color-scheme: light) {
+        body {
+          background: #eef2fa;
+          color: #16233a;
+        }
+        #boot-splash {
+          background: radial-gradient(1100px 700px at 8% -10%, #bcd3f6 0%, transparent 60%),
+            radial-gradient(900px 700px at 100% 0%, #c7ece7 0%, transparent 55%),
+            linear-gradient(160deg, #e7eef9 0%, #dfe8f6 50%, #eef3fb 100%);
+        }
+        .boot-logo {
+          background: rgba(255, 255, 255, 0.72);
+          border-color: rgba(30, 58, 110, 0.16);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-logo,
+        .boot-bar::after {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="app" class="boot">
-      <div class="boot-mark" aria-hidden="true"></div>
-      <div class="boot-text">RAST</div>
-      <noscript>RAST requires JavaScript to run.</noscript>
+    <div id="boot-splash" aria-hidden="true">
+      <div class="boot-logo">
+        <svg viewBox="0 0 24 24" width="38" height="38" fill="none" aria-hidden="true">
+          <path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
+          <path d="M12 7.2 15.8 9.4v4.4L12 16l-3.8-2.2V9.4z" fill="currentColor" />
+        </svg>
+      </div>
+      <div class="boot-word">RAST</div>
+      <div class="boot-sub">Starting server workspace</div>
+      <div class="boot-bar"></div>
     </div>
+    <div id="app"></div>
+    <noscript>
+      <div style="padding: 24px; text-align: center">RAST requires JavaScript to run.</div>
+    </noscript>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

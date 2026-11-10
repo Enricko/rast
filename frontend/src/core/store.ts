@@ -37,7 +37,7 @@ export class Store {
   private state: AppState;
   private readonly listeners = new Set<StoreListener>();
   private mediaQuery: MediaQueryList | null = null;
-  private readonly mediaHandler: (event: MediaQueryListEvent) => void;
+  private mediaHandler: ((event: MediaQueryListEvent) => void) | null = null;
 
   constructor(initial?: Partial<AppState>) {
     const preference = readThemePreference();

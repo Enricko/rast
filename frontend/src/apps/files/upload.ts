@@ -1,5 +1,13 @@
 // Upload queue for File Station: sequential raw-stream uploads with per-file
 // progress, cancellation and conflict resolution (overwrite / skip / rename).
+//
+// Small files (<= 90 MiB) use the single-request streaming endpoint. Larger
+// files use the chunked/resumable endpoints so reverse proxies (e.g.
+// Cloudflare's 100 MB request cap) never see one huge body:
+//   POST /api/files/upload/init      -> uploadId + chunkSize
+//   POST /api/files/upload/chunk     -> raw chunk at the current offset
+//   POST /api/files/upload/complete  -> final file entry
+//   DELETE /api/files/upload         -> cancel + release the quota reservation
 
 import { ApiError } from "../../core/api";
 import type { AppContext } from "../../core/app";
@@ -13,6 +21,13 @@ import { validateFileName } from "./types";
 
 type UploadStatus = "queued" | "uploading" | "done" | "error" | "cancelled";
 
+/** Files above this size are uploaded with resumable chunks. */
+const CHUNKED_THRESHOLD = 90 * 1024 * 1024;
+/** Used when the server response omits a chunk size. */
+const FALLBACK_CHUNK_SIZE = 64 * 1024 * 1024;
+const MAX_CHUNK_RETRIES = 3;
+const CHUNK_RETRY_BASE_MS = 400;
+
 interface UploadItem {
   id: number;
   file: File;
@@ -22,6 +37,11 @@ interface UploadItem {
   total: number;
   error: string;
   controller: AbortController | null;
+  /** Server-side chunked upload session id (null for small uploads). */
+  uploadId: string | null;
+  /** Current chunk number / total chunks for chunked uploads. */
+  part: number;
+  parts: number;
 }
 
 interface RowRefs {
@@ -30,6 +50,21 @@ interface RowRefs {
   bar: { el: HTMLElement; update: (fraction: number, label?: string) => void; setError: (failed: boolean) => void };
   cancel: HTMLButtonElement;
   remove: () => void;
+}
+
+interface InitUploadResponse {
+  uploadId: string;
+  chunkSize: number;
+  offset: number;
+  size: number;
+  expiresAt: number;
+}
+
+interface ChunkResponse {
+  uploadId?: string;
+  received?: number;
+  size?: number;
+  offset?: number;
 }
 
 export interface UploadManagerOptions {
@@ -41,6 +76,17 @@ export interface UploadManagerOptions {
   onDrained: () => void;
   /** Human-readable max upload size from store; 0/undefined = unknown. */
   maxUploadBytes?: () => number;
+}
+
+/** Error thrown by a chunk request, optionally telling us where to resume. */
+class ChunkUploadError extends ApiError {
+  readonly expectedOffset: number | null;
+
+  constructor(status: number, code: string, message: string, expectedOffset: number | null) {
+    super(status, code, message);
+    this.name = "ChunkUploadError";
+    this.expectedOffset = expectedOffset;
+  }
 }
 
 let nextUploadId = 1;
@@ -109,6 +155,9 @@ export class UploadManager {
         total: file.size,
         error: "",
         controller: null,
+        uploadId: null,
+        part: 0,
+        parts: file.size > CHUNKED_THRESHOLD ? chunkCount(file.size, FALLBACK_CHUNK_SIZE) : 1,
       });
     }
     if (rejected.length > 0) {
@@ -165,7 +214,26 @@ export class UploadManager {
     item.status = "uploading";
     item.controller = new AbortController();
     this.patchRow(item);
+    try {
+      if (item.file.size > CHUNKED_THRESHOLD) {
+        await this.uploadChunked(item, dir);
+      } else {
+        await this.uploadSingle(item, dir);
+      }
+    } catch (error) {
+      if (item.status === "uploading") {
+        item.status = "error";
+        item.error = friendlyUploadError(error);
+        this.patchRow(item);
+      }
+    }
+  }
 
+  // ------------------------------------------------------- single request
+
+  private async uploadSingle(item: UploadItem, dir: string): Promise<void> {
+    const controller = item.controller;
+    if (!controller) return;
     let attemptName = item.name;
     let overwrite = false;
     for (;;) {
@@ -173,36 +241,26 @@ export class UploadManager {
         const entry = await this.ctx.api.upload(dir, item.file, {
           name: attemptName,
           overwrite,
-          signal: item.controller.signal,
+          signal: controller.signal,
           onProgress: (loaded, total) => {
             item.loaded = loaded;
             item.total = total || item.file.size;
             this.patchRowProgress(item);
           },
         });
-        item.status = "done";
-        item.loaded = item.total;
-        this.patchRow(item);
-        this.options.onUploaded(entry as FileEntry);
+        this.finishItem(item, entry as FileEntry);
         return;
       } catch (error) {
-        if (isAbortError(error) || (error instanceof ApiError && error.code === "aborted")) {
-          item.status = "cancelled";
-          this.patchRow(item);
-          return;
-        }
+        if (this.isCancelled(item, error)) return;
         if (error instanceof ApiError && error.status === 409) {
           const resolution = await this.resolveConflict(item.name);
           if (resolution === "cancel-all") {
-            item.status = "cancelled";
-            this.patchRow(item);
+            this.cancelItem(item, "Cancelled");
             this.cancelAll();
             return;
           }
           if (resolution === "skip") {
-            item.status = "cancelled";
-            item.error = "Skipped (name already exists)";
-            this.patchRow(item);
+            this.cancelItem(item, "Skipped (name already exists)");
             return;
           }
           if (resolution.overwrite) {
@@ -212,12 +270,203 @@ export class UploadManager {
           attemptName = resolution.name;
           continue;
         }
-        item.status = "error";
-        item.error = errorMessage(error);
+        throw error;
+      }
+    }
+  }
+
+  // ------------------------------------------------------- chunked request
+
+  private async uploadChunked(item: UploadItem, dir: string): Promise<void> {
+    const controller = item.controller;
+    if (!controller) return;
+    const init = await this.initChunked(item, dir, controller.signal);
+    if (!init) return; // cancelled/skipped while resolving conflicts
+    item.uploadId = init.uploadId;
+
+    const size = item.file.size;
+    const chunkSize = resolveChunkSize(init.chunkSize);
+    const parts = chunkCount(size, chunkSize);
+    item.parts = parts;
+    let offset = Math.min(size, Math.max(0, Number(init.offset) || 0));
+    item.loaded = offset;
+    let retries = 0;
+
+    while (offset < size) {
+      if (controller.signal.aborted) {
+        await this.cancelRemote(item);
+        item.status = "cancelled";
         this.patchRow(item);
         return;
       }
+      const end = Math.min(size, offset + chunkSize);
+      const blob = item.file.slice(offset, end);
+      item.part = Math.min(parts, Math.floor(offset / chunkSize) + 1);
+      this.patchRow(item);
+      try {
+        const result = await sendChunk(
+          init.uploadId,
+          offset,
+          blob,
+          this.ctx.api.getCsrfToken(),
+          controller.signal,
+          (loadedInChunk) => {
+            item.loaded = offset + Math.min(blob.size, loadedInChunk);
+            this.patchRowProgress(item);
+          },
+        );
+        const nextOffset =
+          typeof result?.offset === "number" && result.offset >= offset ? Math.min(size, result.offset) : offset + blob.size;
+        offset = nextOffset;
+        item.loaded = offset;
+        retries = 0;
+        this.patchRowProgress(item);
+      } catch (error) {
+        if (controller.signal.aborted || this.isCancelled(item, error)) {
+          await this.cancelRemote(item);
+          if (item.status === "uploading") {
+            item.status = "cancelled";
+            this.patchRow(item);
+          }
+          return;
+        }
+        if (error instanceof ApiError && error.status === 401) {
+          this.notifySessionLost();
+          await this.cancelRemote(item);
+          throw new Error("Your session expired. Sign in again to continue the upload.");
+        }
+        if (error instanceof ApiError && error.status === 413) {
+          await this.cancelRemote(item);
+          throw new Error("The server rejected this upload: storage quota exceeded.");
+        }
+        if (error instanceof ApiError && error.status === 404) {
+          item.uploadId = null;
+          throw new Error("The upload session expired on the server. Upload the file again.");
+        }
+        // Offset mismatch (409) carries the authoritative offset in the
+        // message; resume from there instead of resending from scratch.
+        if (error instanceof ChunkUploadError && error.status === 409 && error.expectedOffset !== null) {
+          offset = Math.min(size, Math.max(0, error.expectedOffset));
+          item.loaded = offset;
+          retries = 0;
+          this.patchRowProgress(item);
+          continue;
+        }
+        retries += 1;
+        if (retries > MAX_CHUNK_RETRIES) {
+          await this.cancelRemote(item);
+          throw error;
+        }
+        await abortableSleep(CHUNK_RETRY_BASE_MS * retries, controller.signal);
+      }
     }
+
+    // Finish the session (retry once on transient failures).
+    let entry: FileEntry | null = null;
+    let completeAttempt = 0;
+    while (entry === null) {
+      try {
+        entry = await this.ctx.api.post<FileEntry>(
+          `/api/files/upload/complete?uploadId=${encodeURIComponent(init.uploadId)}`,
+        );
+      } catch (error) {
+        if (this.isCancelled(item, error)) {
+          await this.cancelRemote(item);
+          item.status = "cancelled";
+          this.patchRow(item);
+          return;
+        }
+        completeAttempt += 1;
+        if (completeAttempt > 1) {
+          await this.cancelRemote(item);
+          throw error;
+        }
+        await abortableSleep(CHUNK_RETRY_BASE_MS, controller.signal);
+      }
+    }
+    item.uploadId = null;
+    item.loaded = size;
+    this.finishItem(item, entry);
+  }
+
+  private async initChunked(item: UploadItem, dir: string, signal: AbortSignal): Promise<InitUploadResponse | null> {
+    let attemptName = item.name;
+    let overwrite = false;
+    for (;;) {
+      if (signal.aborted) {
+        item.status = "cancelled";
+        this.patchRow(item);
+        return null;
+      }
+      try {
+        return await this.ctx.api.post<InitUploadResponse>("/api/files/upload/init", {
+          dir,
+          name: attemptName,
+          size: item.file.size,
+          overwrite,
+        });
+      } catch (error) {
+        if (this.isCancelled(item, error)) return null;
+        if (error instanceof ApiError && error.status === 409 && !overwrite) {
+          const resolution = await this.resolveConflict(item.name);
+          if (resolution === "cancel-all") {
+            this.cancelItem(item, "Cancelled");
+            this.cancelAll();
+            return null;
+          }
+          if (resolution === "skip") {
+            this.cancelItem(item, "Skipped (name already exists)");
+            return null;
+          }
+          if (resolution.overwrite) overwrite = true;
+          else attemptName = resolution.name;
+          continue;
+        }
+        if (error instanceof ApiError && error.status === 413) {
+          throw new Error("Not enough storage quota for this file. Free up space or ask an administrator.");
+        }
+        if (error instanceof ApiError && error.status === 401) {
+          this.notifySessionLost();
+          throw new Error("Your session expired. Sign in again to continue the upload.");
+        }
+        throw error;
+      }
+    }
+  }
+
+  private async cancelRemote(item: UploadItem): Promise<void> {
+    const uploadId = item.uploadId;
+    if (!uploadId) return;
+    item.uploadId = null;
+    try {
+      await this.ctx.api.del("/api/files/upload", { uploadId });
+    } catch {
+      // Best effort: the server expires abandoned sessions on its own.
+    }
+  }
+
+  private isCancelled(item: UploadItem, error: unknown): boolean {
+    if (item.controller?.signal.aborted) return true;
+    if (isAbortError(error)) return true;
+    return error instanceof ApiError && error.code === "aborted";
+  }
+
+  private cancelItem(item: UploadItem, reason: string): void {
+    item.status = "cancelled";
+    item.error = reason;
+    this.patchRow(item);
+  }
+
+  private finishItem(item: UploadItem, entry: FileEntry): void {
+    item.status = "done";
+    item.loaded = item.total;
+    this.patchRow(item);
+    this.options.onUploaded(entry as FileEntry);
+  }
+
+  private notifySessionLost(): void {
+    // A regular API request flips the shell's session-lost listener on 401.
+    void this.ctx.api.get("/api/auth/me").catch(() => undefined);
   }
 
   private resolveConflict(
@@ -356,7 +605,7 @@ export class UploadManager {
     if (!row) return;
     const fraction = item.total > 0 ? item.loaded / item.total : 0;
     row.bar.update(fraction);
-    row.state.textContent = `${formatBytes(item.loaded)} / ${formatBytes(item.total)}`;
+    row.state.textContent = progressLabel(item);
   }
 
   private updateHeader(): void {
@@ -374,12 +623,113 @@ export class UploadManager {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Chunk transport helpers
+// ---------------------------------------------------------------------------
+
+function resolveChunkSize(value: unknown): number {
+  const size = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : 0;
+  if (size <= 0) return FALLBACK_CHUNK_SIZE;
+  return Math.min(size, 256 * 1024 * 1024);
+}
+
+function chunkCount(size: number, chunkSize: number): number {
+  return Math.max(1, Math.ceil(size / chunkSize));
+}
+
+function parseExpectedOffset(message: string): number | null {
+  const match = /expected\s+(\d+)\s+bytes/i.exec(message);
+  if (!match) return null;
+  const value = Number(match[1]);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** Send one raw chunk with upload progress; resolves with the server offset. */
+function sendChunk(
+  uploadId: string,
+  offset: number,
+  blob: Blob,
+  csrfToken: string,
+  signal: AbortSignal,
+  onProgress: (loaded: number) => void,
+): Promise<ChunkResponse> {
+  return new Promise<ChunkResponse>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(
+      "POST",
+      `/api/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&offset=${offset}`,
+    );
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    xhr.withCredentials = true;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded);
+    };
+    xhr.onload = () => {
+      let payload: unknown = null;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch {
+        payload = null;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve((payload ?? {}) as ChunkResponse);
+        return;
+      }
+      const err = (payload as { error?: { code?: string; message?: string }; offset?: number } | null)?.error;
+      const message = err?.message ?? `Chunk upload failed (${xhr.status})`;
+      const expected =
+        typeof (payload as { offset?: unknown } | null)?.offset === "number"
+          ? Number((payload as { offset: number }).offset)
+          : parseExpectedOffset(message);
+      reject(new ChunkUploadError(xhr.status, err?.code ?? "chunk_failed", message, expected));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network_error", "Upload connection failed"));
+    xhr.onabort = () => reject(new ApiError(0, "aborted", "Upload cancelled"));
+    if (signal.aborted) {
+      xhr.abort();
+      return;
+    }
+    signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    xhr.send(blob);
+  });
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function friendlyUploadError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 413) return "Not enough storage quota for this upload.";
+    if (error.status === 429) return "Too many uploads right now — wait a moment and retry.";
+    if (error.status === 401) return "Your session expired. Sign in again.";
+    if (error.status === 409) return `Upload conflict: ${error.message}`;
+    return error.message || `Upload failed (${error.status})`;
+  }
+  return errorMessage(error);
+}
+
 function labelFor(item: UploadItem): string {
   switch (item.status) {
     case "queued":
       return "Queued";
     case "uploading":
-      return "Uploading…";
+      return progressLabel(item);
     case "done":
       return `Done · ${formatBytes(item.total || item.file.size)}`;
     case "cancelled":
@@ -389,6 +739,13 @@ function labelFor(item: UploadItem): string {
     default:
       return "";
   }
+}
+
+function progressLabel(item: UploadItem): string {
+  if (item.parts > 1) {
+    return `Part ${Math.max(1, item.part)}/${item.parts} · ${formatBytes(item.loaded)} / ${formatBytes(item.total)}`;
+  }
+  return `${formatBytes(item.loaded)} / ${formatBytes(item.total)}`;
 }
 
 function closeButton(onClick: () => void): HTMLButtonElement {
