@@ -128,7 +128,7 @@ fn spawn_maintenance(
             events.publish("monitor", snapshot);
             tick = tick.wrapping_add(1);
             // Every ~5 minutes: prune sessions, old rows and expired trash.
-            if tick % (300 / interval_secs.max(1)).max(1) == 0 {
+            if tick.is_multiple_of((300 / interval_secs.max(1)).max(1)) {
                 if let Err(e) = crate::auth::session::cleanup(&db).await {
                     tracing::warn!(error = %e, "session cleanup failed");
                 }
@@ -152,7 +152,7 @@ fn spawn_maintenance(
             // Once a week: rebuild per-user storage usage from the filesystem so
             // optimistic quota accounting can never drift permanently.
             let weekly_ticks = (7 * 24 * 3600 / interval_secs.max(1)).max(1);
-            if tick > 0 && tick % weekly_ticks == 0 {
+            if tick > 0 && tick.is_multiple_of(weekly_ticks) {
                 match crate::storage::quota::recalculate_all(&db, &storage).await {
                     Ok(users) => tracing::info!(users, "weekly quota recalculation finished"),
                     Err(e) => tracing::warn!(error = %e, "quota recalculation failed"),
