@@ -5,13 +5,19 @@ import { appsForRole, findApp } from "../apps/registry";
 import type { AppContext, AppDefinition } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
-import { iconSvg } from "../core/icons";
+import { appIconSvg, iconSvg } from "../core/icons";
 import type { MeResponse, Settings } from "../core/types";
+import {
+  DEFAULT_APPEARANCE,
+  applyAppearance,
+  getAppearanceService,
+  type Appearance,
+} from "../core/appearance";
 import { ToastCenter } from "../core/toast";
 import { confirmDialog, contextMenu, type ContextMenuEntry } from "../core/ui";
 import { WindowManager, type WindowInfo } from "../core/wm";
 import { setFavicon } from "./brand";
-import { forcePasswordChange, showAboutDialog, showShortcutsDialog, showWallpaperDialog } from "./dialogs";
+import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
   buildClockPanel,
   buildStartMenu,
@@ -21,7 +27,7 @@ import {
   type PanelContext,
 } from "./panels";
 import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } from "./shared";
-import { applyWallpaper, readWallpaper, WALLPAPERS } from "./wallpaper";
+import { openPersonalizeDialog } from "./personalize";
 
 const PINNED_KEY = "rast.pinnedApps";
 const DEFAULT_PINNED = ["files", "monitor", "controlpanel"];
@@ -70,13 +76,18 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   deps.root.className = "shell";
 
   const desktop = h("div", { class: "desktop" });
-  applyWallpaper(desktop, readWallpaper());
+  const wallpaperLayer = h(
+    "div",
+    { class: "wallpaper-layer", ariaHidden: true },
+    h("div", { class: "wallpaper-media" }),
+    h("div", { class: "wallpaper-overlay" }),
+  );
   const iconLayer = h("div", { class: "desktop-icons", role: "listbox", ariaLabel: "Desktop applications" });
   const hintLayer = h("div", { class: "desktop-hint-layer" });
   const windowsLayer = h("div", { class: "windows-layer" });
   const taskbar = h("div", { class: "taskbar", role: "toolbar", ariaLabel: "Taskbar" });
   const toast = new ToastCenter(desktop);
-  desktop.append(iconLayer, hintLayer, windowsLayer, taskbar);
+  desktop.append(wallpaperLayer, iconLayer, hintLayer, windowsLayer, taskbar);
   deps.root.appendChild(desktop);
 
   let pinned = readPinnedApps(isAdmin);
@@ -92,6 +103,30 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     onChange: () => renderTaskbar(),
   });
   disposers.push(() => wm.destroy());
+
+  // ------------------------------------------------------ per-user appearance
+  const appearance = getAppearanceService(deps.api);
+  applyAppearance(appearance.value);
+  disposers.push(appearance.subscribe((state) => applyAppearance(state)));
+  let persistedTheme = store.get().themePreference;
+  void appearance
+    .load(me.user.id)
+    .then((loaded) => {
+      persistedTheme = loaded.theme;
+      store.setThemePreference(loaded.theme);
+      applyAppearance(loaded);
+    })
+    .catch((error) => {
+      console.warn("appearance settings unavailable", error);
+    });
+  disposers.push(
+    store.subscribe((state) => {
+      if (!state.user) return;
+      if (state.themePreference === persistedTheme) return;
+      persistedTheme = state.themePreference;
+      void appearance.saveTheme(state.themePreference);
+    }),
+  );
 
   // ------------------------------------------------------------ app launch
   function openApp(appId: string, params?: unknown): void {
@@ -176,7 +211,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     requestSignOut: () => void requestSignOut(),
     showShortcuts: () => showShortcuts(),
     showAbout: () => showAbout(),
-    showWallpaper: () => showWallpaper(),
+    showPersonalize: () => showPersonalize(),
     notify: (message, kind) => {
       if (kind === "error") toast.error(message);
       else if (kind === "warning") toast.warning(message);
@@ -232,7 +267,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         ? { label: "Unpin from taskbar", icon: "unpin", onClick: () => unpinApp(app.id) }
         : { label: "Pin to taskbar", icon: "pin", onClick: () => pinApp(app.id) },
       "separator",
-      { label: "Change wallpaper…", icon: "wallpaper", onClick: () => showWallpaper() },
+      { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
     ];
   }
 
@@ -248,7 +283,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         tabIndex: index === 0 ? 0 : -1,
         onClick: () => selectIcon(index),
       },
-      h("span", { class: "desktop-icon-glyph" }, iconSvg(app.icon, 26)),
+      h("span", { class: "desktop-icon-glyph" }, appIconSvg(app.id, app.icon, 30)),
       h("span", { class: "desktop-icon-label" }, app.name),
     );
     button.addEventListener("dblclick", () => openApp(app.id));
@@ -338,11 +373,17 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     showAboutDialog(store.get().version, store.get().siteName);
   }
 
-  function showWallpaper(): void {
-    showWallpaperDialog(readWallpaper(), (id) => {
-      applyWallpaper(desktop, id);
-      const label = WALLPAPERS.find((wallpaper) => wallpaper.id === id)?.label ?? id;
-      toast.success(`Wallpaper changed to ${label}`);
+  function showPersonalize(): void {
+    closePanel();
+    openPersonalizeDialog({
+      api: deps.api,
+      toast,
+      restoreTheme: () => store.setThemePreference(appearance.value.theme),
+      onApplied: (saved: Appearance) => {
+        persistedTheme = saved.theme;
+        store.setThemePreference(saved.theme);
+        applyAppearance(saved);
+      },
     });
   }
 
@@ -360,6 +401,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     } catch {
       /* the session may already be gone */
     }
+    appearance.clear();
+    applyAppearance(DEFAULT_APPEARANCE);
     dispose();
     store.patch({ user: null, csrfToken: "" });
     options.onSignedOut("You have been signed out.");
@@ -371,7 +414,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (target.closest(".window, .taskbar, .menu-panel, .desktop-icon, .toast, .context-menu, .modal-backdrop")) return;
     event.preventDefault();
     const items: ContextMenuEntry[] = [
-      { label: "Change wallpaper…", icon: "wallpaper", onClick: () => showWallpaper() },
+      { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
       { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
       "separator",
       { label: "Open Control Panel", icon: "control", onClick: () => openAccount("profile"), disabled: !isAdmin },
@@ -476,7 +519,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           else wm.focus(win.id);
         },
       },
-      h("span", { class: "taskbar-app-icon" }, iconSvg(win.icon || app?.icon || "grid", 18)),
+      h(
+        "span",
+        { class: "taskbar-app-icon", dataset: { app: win.appId } },
+        appIconSvg(win.appId, win.icon || app?.icon || "grid", 17),
+      ),
       h("span", { class: "taskbar-app-label" }, win.title || app?.name || "Window"),
       h("span", { class: "taskbar-app-indicator", ariaHidden: true }),
     );
@@ -513,7 +560,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         title: `${app.name} — ${app.description}`,
         onClick: () => openApp(app.id),
       },
-      h("span", { class: "taskbar-app-icon" }, iconSvg(app.icon, 18)),
+      h(
+        "span",
+        { class: "taskbar-app-icon", dataset: { app: app.id } },
+        appIconSvg(app.id, app.icon, 17),
+      ),
       h("span", { class: "taskbar-app-label" }, app.name),
       h("span", { class: "taskbar-app-indicator", ariaHidden: true }),
     );
@@ -526,7 +577,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           { label: `Open ${app.name}`, icon: "arrowRight", onClick: () => openApp(app.id) },
           { label: "Unpin from taskbar", icon: "unpin", onClick: () => unpinApp(app.id) },
           "separator",
-          { label: "Change wallpaper…", icon: "wallpaper", onClick: () => showWallpaper() },
+          { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
         ],
         { ariaLabel: app.name },
       );
@@ -631,7 +682,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         h(
           "button",
           { class: "quick-launch", type: "button", onClick: () => openApp(app.id), title: app.description },
-          iconSvg(app.icon, 18),
+          appIconSvg(app.id, app.icon, 16),
           h("span", {}, app.name),
         ),
       );
@@ -640,12 +691,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       h(
         "div",
         { class: "desktop-hint" },
-        h("div", { class: "desktop-hint-mark" }, iconSvg("logo", 30)),
+        h("div", { class: "desktop-hint-mark" }, iconSvg("logo", 20)),
         h("div", { class: "desktop-hint-title" }, "No applications open"),
         h(
           "div",
           { class: "desktop-hint-detail muted" },
-          "Launch an application from the desktop or press Ctrl+Space to search. Right-click the desktop to personalise it.",
+          "Open an application from the desktop, or press Ctrl+Space to search. Right-click the desktop to personalize the wallpaper and theme.",
         ),
         quickRow,
         h("div", { class: "desktop-hint-tip small faint" }, "Tip: double-click a desktop icon to open it."),

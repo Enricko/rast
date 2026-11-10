@@ -8,7 +8,6 @@ import { iconSvg } from "../core/icons";
 import type { ToastCenter } from "../core/toast";
 import type { MeResponse, User } from "../core/types";
 import { modal } from "../core/ui";
-import { buildWallpaperPicker, type WallpaperId } from "./wallpaper";
 import type { ShellDeps } from "./shared";
 
 /** Blocking dialog shown when the account has mustChangePassword set. */
@@ -166,25 +165,5 @@ export function showAboutDialog(version: string, siteName: string): void {
       ),
       h("div", { class: "about-meta small faint" }, "Original interface design. No telemetry. All data stays on your server."),
     ),
-  });
-}
-
-export function showWallpaperDialog(current: WallpaperId, onPick: (id: WallpaperId) => void): void {
-  const close = modal({
-    title: "Desktop wallpaper",
-    body: h(
-      "div",
-      {},
-      h(
-        "p",
-        { class: "muted" },
-        "Pick a wallpaper for this browser. Wallpapers are CSS compositions — no image assets are downloaded.",
-      ),
-      buildWallpaperPicker(current, (id) => {
-        onPick(id);
-        close();
-      }),
-    ),
-    actions: [{ label: "Done", variant: "ghost", onClick: () => {} }],
   });
 }

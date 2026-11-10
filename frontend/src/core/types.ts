@@ -40,6 +40,7 @@ export interface Bootstrap {
   setupRequired: boolean;
   setupTokenRequired: boolean;
   registrationEnabled: boolean;
+  authenticated?: boolean;
   maxUploadBytes: number;
   sessionTtlHours: number;
   serverTime: number;

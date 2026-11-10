@@ -97,8 +97,12 @@ export async function boot(root: HTMLElement): Promise<void> {
     return;
   }
 
+  if (!bootstrap.authenticated) {
+    showLogin();
+    return;
+  }
   try {
-    const me = await api.get<MeResponse>("/api/auth/me", undefined, { allowUnauthorized: true });
+    const me = await api.get<MeResponse>("/api/auth/me");
     onAuthenticated(me);
   } catch (error) {
     if (error instanceof ApiError && (error.isUnauthorized || error.isForbidden)) {

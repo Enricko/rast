@@ -9,7 +9,7 @@ import {
   formatWeekdayDate,
   relativeTime,
 } from "../core/format";
-import { iconSvg } from "../core/icons";
+import { appIconSvg, iconSvg } from "../core/icons";
 import type { ThemePreference } from "../core/store";
 import { ApiError } from "../core/api";
 import type { ShellDeps } from "./shared";
@@ -24,7 +24,7 @@ export interface PanelContext {
   requestSignOut(): void;
   showShortcuts(): void;
   showAbout(): void;
-  showWallpaper(): void;
+  showPersonalize(): void;
   notify(message: string, kind: "info" | "success" | "warning" | "error"): void;
 }
 
@@ -89,7 +89,7 @@ function appTile(
   const tile = h(
     "button",
     { class: "menu-app", type: "button", onClick: open },
-    h("span", { class: "menu-app-glyph" }, iconSvg(app.icon, 22)),
+    h("span", { class: "menu-app-glyph" }, appIconSvg(app.id, app.icon, 24)),
     h(
       "span",
       { class: "menu-app-text" },
@@ -159,7 +159,7 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
         h(
           "button",
           { class: "recent-chip", type: "button", onClick: () => launch(app.id), title: app.description },
-          iconSvg(app.icon, 14),
+          appIconSvg(app.id, app.icon, 14),
           h("span", {}, app.name),
         ),
       );
@@ -208,9 +208,9 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
       onClose();
       ctx.openAccount("profile");
     }),
-    menuItem("wallpaper", "Change wallpaper", () => {
+    menuItem("wallpaper", "Personalize…", () => {
       onClose();
-      ctx.showWallpaper();
+      ctx.showPersonalize();
     }),
     menuItem("grid", "Keyboard shortcuts", () => {
       onClose();
@@ -308,6 +308,10 @@ export function buildUserMenu(ctx: PanelContext, onClose: () => void): HTMLEleme
     h("div", { class: "menu-section-title" }, "Appearance"),
     artwork.el,
     themeNote,
+    menuItem("wallpaper", "Personalize wallpaper…", () => {
+      onClose();
+      ctx.showPersonalize();
+    }),
     h("div", { class: "menu-sep" }),
     menuItem("user", "Account settings", () => {
       onClose();
