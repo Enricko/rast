@@ -20,9 +20,32 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.0 — first public release (2026-11-10). APIs and data formats
-> may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the exact
-> feature set and known limitations.
+> **Status:** v0.1.3 — first public release series (2026-11-10). APIs and data
+> formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
+> exact feature set and known limitations.
+
+## Verified deployment
+
+RAST 0.1.3 is deployed and publicly reachable at
+<https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
+reference host (Ubuntu 26.04, x86_64, 12 cores / 30 GiB RAM), 60-second idle
+window with the resource monitor running:
+
+| Process | CPU (idle) | RSS | Anonymous memory |
+| --- | --- | --- | --- |
+| `rast.service` (web + jobs + monitor + SQLite) | 0.13% | 32.1 MiB | 24.7 MB |
+| `rast-worker.service` (Docker operations) | 0.02% | 9.1 MiB | 1.4 MB |
+| **Total RAST** | **0.15%** | **41.2 MiB** | **~26 MB** |
+
+That is comfortably below the project budget of 100 MiB idle RAM (reverse
+proxy, Cloudflare Tunnel and Docker are excluded, as is reclaimable page
+cache). Verification performed on the live deployment: 52/52 end-to-end smoke
+checks (auth, CSRF, isolation, files, quota, trash, monitoring, SSE, backups,
+logs, Docker worker), a 150 MiB chunked upload through Cloudflare with a
+byte-identical download, a single-request 150 MiB upload through nginx, a
+managed nginx application deployed/restarted/deleted with data-volume
+persistence, a checksum-verified self-update, and the clean-container installer
+suite (64 checks).
 
 ## Quick start (installed server)
 
