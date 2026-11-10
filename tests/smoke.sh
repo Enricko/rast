@@ -32,6 +32,8 @@ trap 'rm -rf "$WORK"' EXIT
 PASS=0
 FAIL=0
 SKIP=0
+LOGIN_STATUS="000"
+LOGIN_CSRF=""
 declare -a FAILURES=()
 
 pass() { PASS=$((PASS + 1)); printf '  \033[32mPASS\033[0m %s\n' "$*"; }
@@ -75,12 +77,14 @@ api() {
     printf '%s' "${status:-000}"
 }
 
-# login <jar> <username> <password> -> prints csrf token, sets LOGIN_STATUS
+# login <jar> <username> <password> -> sets LOGIN_STATUS and LOGIN_CSRF globals
 login() {
     local jar="$1" user="$2" pass="$3"
+    : > "$jar"
+    LOGIN_CSRF=""
     LOGIN_STATUS="$(api "$jar" POST /api/auth/login "$(python3 -c 'import json,sys;print(json.dumps({"username":sys.argv[1],"password":sys.argv[2]}))' "$user" "$pass")")"
     if [ "$LOGIN_STATUS" = "200" ]; then
-        json_get "$WORK/body" "d['csrfToken']"
+        LOGIN_CSRF="$(json_get "$WORK/body" "d['csrfToken']")"
     fi
 }
 
@@ -130,7 +134,8 @@ done
 info "Administrator authentication"
 ########################################################################
 ADMIN_JAR="$WORK/admin.jar"
-ADMIN_CSRF="$(login "$ADMIN_JAR" "$ADMIN_USER" "$ADMIN_PASS")"
+login "$ADMIN_JAR" "$ADMIN_USER" "$ADMIN_PASS"
+ADMIN_CSRF="$LOGIN_CSRF"
 if [ "$LOGIN_STATUS" = "200" ] && [ -n "$ADMIN_CSRF" ]; then
     pass "admin login succeeded (session cookie + CSRF token issued)"
 else
@@ -167,10 +172,13 @@ for pair in "$ALICE:$ALICE_PASS" "$BOB:$BOB_PASS"; do
 done
 
 ALICE_JAR="$WORK/alice.jar"
-ALICE_CSRF="$(login "$ALICE_JAR" "$ALICE" "$ALICE_PASS")"
+login "$ALICE_JAR" "$ALICE" "$ALICE_PASS"
+ALICE_CSRF="$LOGIN_CSRF"
+ALICE_LOGIN_STATUS="$LOGIN_STATUS"
 BOB_JAR="$WORK/bob.jar"
-BOB_CSRF="$(login "$BOB_JAR" "$BOB" "$BOB_PASS")"
-if [ "$LOGIN_STATUS" = "200" ] && [ -n "$ALICE_CSRF" ] && [ -n "$BOB_CSRF" ]; then
+login "$BOB_JAR" "$BOB" "$BOB_PASS"
+BOB_CSRF="$LOGIN_CSRF"
+if [ "$ALICE_LOGIN_STATUS" = "200" ] && [ -n "$ALICE_CSRF" ] && [ -n "$BOB_CSRF" ]; then
     pass "both test users can sign in"
 else
     fail "test user login failed"

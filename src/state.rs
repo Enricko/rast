@@ -51,8 +51,10 @@ impl AppState {
         crate::backup::schedule::ensure_default(&db).await?;
 
         let monitor = crate::monitor::Monitor::new(&config)?;
-        let storage = crate::storage::Storage::new(&config)
-            .map_err(|e| AppError::internal(format!("cannot initialise storage: {e}")))?;
+        let storage = Arc::new(
+            crate::storage::Storage::new(&config)
+                .map_err(|e| AppError::internal(format!("cannot initialise storage: {e}")))?,
+        );
         let docker = crate::docker::DockerManager::new(&config);
 
         let config = Arc::new(config);
@@ -62,6 +64,8 @@ impl AppState {
             monitor.clone(),
             events.clone(),
             config.monitor_interval_secs,
+            storage.clone(),
+            config.clone(),
         );
         // Scheduled backups (disabled until the operator enables them).
         crate::backup::schedule::spawn(db.clone(), config.clone(), jobs.clone(), events.clone());
@@ -73,7 +77,7 @@ impl AppState {
             events,
             jobs,
             monitor,
-            storage: Arc::new(storage),
+            storage,
             docker,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
@@ -111,6 +115,8 @@ fn spawn_maintenance(
     monitor: Arc<crate::monitor::Monitor>,
     events: EventBus,
     interval_secs: u64,
+    storage: Arc<crate::storage::Storage>,
+    config: Arc<Config>,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs.max(1)));
@@ -121,15 +127,38 @@ fn spawn_maintenance(
             let snapshot = monitor.sample().await;
             events.publish("monitor", snapshot);
             tick = tick.wrapping_add(1);
-            // Every ~5 minutes: prune sessions and old rows.
+            // Every ~5 minutes: prune sessions, old rows and expired trash.
             if tick % (300 / interval_secs.max(1)).max(1) == 0 {
                 if let Err(e) = crate::auth::session::cleanup(&db).await {
                     tracing::warn!(error = %e, "session cleanup failed");
                 }
-                if let Err(e) = db::prune_old_rows(&db, 90, 30).await {
+                let audit_days = db::get_setting(&db, "auditRetentionDays")
+                    .await
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(90);
+                if let Err(e) = db::prune_old_rows(&db, audit_days, 30).await {
                     tracing::warn!(error = %e, "retention pruning failed");
                 }
+                let trash_days = db::get_setting(&db, "trashRetentionDays")
+                    .await
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .unwrap_or(30);
+                match crate::storage::trash::cleanup_all_expired(&db, &storage, trash_days).await {
+                    Ok(0) => {}
+                    Ok(removed) => tracing::info!(removed, "expired recycle-bin items purged"),
+                    Err(e) => tracing::warn!(error = %e, "trash cleanup failed"),
+                }
             }
+            // Once a week: rebuild per-user storage usage from the filesystem so
+            // optimistic quota accounting can never drift permanently.
+            let weekly_ticks = (7 * 24 * 3600 / interval_secs.max(1)).max(1);
+            if tick > 0 && tick % weekly_ticks == 0 {
+                match crate::storage::quota::recalculate_all(&db, &storage).await {
+                    Ok(users) => tracing::info!(users, "weekly quota recalculation finished"),
+                    Err(e) => tracing::warn!(error = %e, "quota recalculation failed"),
+                }
+            }
+            let _ = &config;
         }
     });
 }
