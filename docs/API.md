@@ -215,6 +215,29 @@ Cloudflare free plan). Clients split larger files into `chunkSize` pieces:
 Sessions expire after 24 hours (stale temp files and reservations are cleaned
 up automatically); only the initiating user may write to or complete an upload.
 
+
+## Appearance (per user)
+
+Every account has its own wallpaper and theme, stored server-side in SQLite.
+Uploaded wallpapers are private: only the owner can read or delete them.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/appearance` | `{theme, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
+| PUT | `/api/appearance` | `{theme?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}}` (partial merge) |
+| GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
+| POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
+| GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins); private immutable cache + ETag |
+| DELETE | `/api/appearance/wallpapers/{id}` | deletes the file; if it is the active wallpaper the account falls back to the default built-in |
+| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme is kept) |
+
+Allowed values: theme `light|dark|system`, kind `builtin|upload|color`,
+fit `cover|contain|center`, position `center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right`,
+overlay `0..60` (percent), built-in ids `alpine-dawn|forest-mist|coastal-calm|desert-dusk`,
+colors `#RRGGBB`. Limits: 10 MiB per image, 20 images and 100 MiB total per user.
+Theme and wallpaper survive restarts, logout/login and browser changes; the
+client keeps only a small per-user paint cache that is cleared on sign-out.
+
 ## Conventions for implementers
 
 * Authorisation is checked **server-side** on every object. Hiding UI is never

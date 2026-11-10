@@ -238,6 +238,21 @@ async fn login_sets_cookie_and_requires_csrf_for_mutations() {
     assert_eq!(body["user"]["role"], "admin");
     assert_eq!(body["csrfToken"], session.csrf);
 
+    // The public bootstrap endpoint tells the SPA whether the cookie is valid,
+    // so the boot path never has to probe a protected endpoint.
+    let (status, _, body) = server
+        .request("GET", "/api/bootstrap", None, session.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["authenticated"], true,
+        "bootstrap should see the session"
+    );
+    let (_, _, anon) = server
+        .request("GET", "/api/bootstrap", None, HeaderMap::new())
+        .await;
+    assert_eq!(anon["authenticated"], false);
+
     // Mutating without the CSRF header is rejected.
     let (status, _, _) = server
         .request(

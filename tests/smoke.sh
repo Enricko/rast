@@ -382,6 +382,87 @@ STATUS="$(api "$ALICE_JAR" GET /api/apps)"
 if [ "$STATUS" = "403" ]; then pass "applications are admin-only"; else fail "user accessed /api/apps ($STATUS)"; fi
 
 ########################################################################
+info "Appearance (per-user wallpaper and theme)"
+########################################################################
+STATUS="$(api "$ALICE_JAR" GET /api/appearance)"
+if [ "$STATUS" = "200" ]; then
+    THEME="$(json_get "$WORK/body" "d['theme']")"
+    KIND="$(json_get "$WORK/body" "d['wallpaper']['kind']")"
+    pass "appearance defaults readable (theme=$THEME kind=$KIND)"
+else
+    fail "GET /api/appearance -> $STATUS"
+fi
+
+# Build a small valid 400x240 PNG payload for the upload test.
+python3 - "$WORK/appearance.png" <<'PNGEOF'
+import struct, sys, zlib
+width, height = 400, 240
+def chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+rows = bytearray()
+for y in range(height):
+    rows.append(0)
+    for x in range(width):
+        rows += bytes((x * 255 // width, y * 255 // height, 120))
+ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(rows), 9)) + chunk(b"IEND", b"")
+open(sys.argv[1], "wb").write(png)
+PNGEOF
+UPLOAD_STATUS="$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -b "$ALICE_JAR" -c "$ALICE_JAR" -H "X-CSRF-Token: $ALICE_CSRF" -H 'Content-Type: image/png' --data-binary "@$WORK/appearance.png" "$BASE/api/appearance/wallpapers" 2>/dev/null || echo 000)"
+WALLPAPER_ID="$(json_get "$WORK/body" "d['id']")"
+if [ "$UPLOAD_STATUS" = "201" ] && [ -n "$WALLPAPER_ID" ]; then
+    pass "wallpaper upload accepted (id=$WALLPAPER_ID)"
+else
+    fail "wallpaper upload failed ($UPLOAD_STATUS: $(cat "$WORK/body"))"
+fi
+
+if [ -n "$WALLPAPER_ID" ]; then
+    STATUS="$(curl -sS -o "$WORK/wallpaper-download.png" -w '%{http_code}' -b "$ALICE_JAR" "$BASE/api/appearance/wallpapers/$WALLPAPER_ID" 2>/dev/null || echo 000)"
+    if [ "$STATUS" = "200" ] && cmp -s "$WORK/appearance.png" "$WORK/wallpaper-download.png"; then
+        pass "owner can download their wallpaper byte-exactly"
+    else
+        fail "owner wallpaper download mismatch ($STATUS)"
+    fi
+    STATUS="$(api "$BOB_JAR" GET "/api/appearance/wallpapers/$WALLPAPER_ID")"
+    if [ "$STATUS" = "404" ]; then pass "other user cannot read the wallpaper (404)"; else fail "wallpaper leaked to another user ($STATUS)"; fi
+    STATUS="$(api "$BOB_JAR" DELETE "/api/appearance/wallpapers/$WALLPAPER_ID" "" "$BOB_CSRF")"
+    if [ "$STATUS" = "404" ] || [ "$STATUS" = "403" ]; then pass "other user cannot delete the wallpaper ($STATUS)"; else fail "other user deleted the wallpaper ($STATUS)"; fi
+
+    STATUS="$(api "$ALICE_JAR" PUT /api/appearance "$(python3 -c 'import json,sys;print(json.dumps({"theme":"dark","wallpaper":{"kind":"upload","uploadId":sys.argv[1],"fit":"contain","position":"top-right","overlay":35}}))' "$WALLPAPER_ID")" "$ALICE_CSRF")"
+    if [ "$STATUS" = "200" ]; then
+        STATUS="$(api "$ALICE_JAR" GET /api/appearance)"
+        if [ "$(json_get "$WORK/body" "d['wallpaper']['uploadId']")" = "$WALLPAPER_ID" ] && [ "$(json_get "$WORK/body" "d['theme']")" = "dark" ]; then
+            pass "appearance changes persist server-side (theme=dark, upload active)"
+        else
+            fail "appearance did not persist"
+        fi
+    else
+        fail "PUT /api/appearance -> $STATUS: $(cat "$WORK/body")"
+    fi
+
+    STATUS="$(api "$BOB_JAR" GET /api/appearance)"
+    if [ "$STATUS" = "200" ] && [ "$(json_get "$WORK/body" "d['wallpaper']['kind']")" = "builtin" ] && [ "$(json_get "$WORK/body" "d['wallpaper']['uploadId']")" = "" ]; then
+        pass "other user has independent appearance settings"
+    else
+        fail "appearance settings are shared between users ($STATUS)"
+    fi
+
+    STATUS="$(api "$ALICE_JAR" DELETE "/api/appearance/wallpapers/$WALLPAPER_ID" "" "$ALICE_CSRF")"
+    if [ "$STATUS" = "200" ] && [ "$(json_get "$WORK/body" "d['appearance']['wallpaper']['kind']")" = "builtin" ]; then
+        pass "deleting the active wallpaper falls back to the default"
+    else
+        fail "wallpaper delete/fallback failed ($STATUS)"
+    fi
+    STATUS="$(api "$ALICE_JAR" POST /api/appearance/reset '{}' "$ALICE_CSRF")"
+    if [ "$STATUS" = "200" ] && [ "$(json_get "$WORK/body" "d['theme']")" = "dark" ]; then
+        pass "reset keeps the theme and restores the default wallpaper"
+    else
+        fail "appearance reset failed ($STATUS)"
+    fi
+    api "$ALICE_JAR" PUT /api/appearance '{"theme":"light"}' "$ALICE_CSRF" >/dev/null
+fi
+
+########################################################################
 info "Activity logs"
 ########################################################################
 STATUS="$(api "$ADMIN_JAR" GET '/api/logs?page=1&perPage=20')"

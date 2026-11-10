@@ -2,7 +2,7 @@
 
 use axum::{
     extract::State,
-    http::{header, HeaderValue},
+    http::{header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -45,13 +45,28 @@ pub struct Bootstrap {
     pub setup_required: bool,
     pub setup_token_required: bool,
     pub registration_enabled: bool,
+    /// True when the request carries a valid session cookie, so the SPA can go
+    /// straight to the desktop instead of probing a protected endpoint (which
+    /// would log a spurious 401 in the browser console).
+    pub authenticated: bool,
     pub max_upload_bytes: u64,
     pub session_ttl_hours: i64,
     pub server_time: i64,
 }
 
 /// GET /api/bootstrap — unauthenticated metadata needed by the login screen.
-pub async fn bootstrap(State(state): State<AppState>) -> Json<Bootstrap> {
+pub async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Json<Bootstrap> {
+    let authenticated =
+        match crate::auth::cookie_value(&headers, crate::auth::session::SESSION_COOKIE) {
+            Some(token) => {
+                crate::auth::session::validate(&state.db, &token, state.config.session_ttl_hours)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            }
+            None => false,
+        };
     Json(Bootstrap {
         product: crate::NAME,
         description: crate::DESCRIPTION,
@@ -59,6 +74,7 @@ pub async fn bootstrap(State(state): State<AppState>) -> Json<Bootstrap> {
         setup_required: !db::has_admin(&state.db).await,
         setup_token_required: state.config.setup_token_required,
         registration_enabled: false,
+        authenticated,
         max_upload_bytes: state.config.max_upload_bytes,
         session_ttl_hours: state.config.session_ttl_hours,
         server_time: db::now_ms(),

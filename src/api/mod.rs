@@ -8,6 +8,7 @@ use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, R
 
 use crate::{auth::middleware::require_auth, error::AppError, server, state::AppState};
 
+pub mod appearance;
 pub mod apps;
 pub mod auth;
 pub mod backup;
@@ -30,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .merge(jobs::routes())
         .merge(system::protected_routes())
         .merge(files::routes())
+        .merge(appearance::routes())
         .merge(apps::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
