@@ -22,6 +22,58 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.4] - 2026-11-10
+
+A visual and personalisation release: the desktop now follows a calm,
+NAS-inspired visual language and every account can choose its own wallpaper and
+theme, stored on the server.
+
+### Added
+
+- **Neutral NAS-inspired visual theme.** White windows and panels, `#F5F6F8`
+  toolbars, `#DDE1E6` borders, dark neutral text (`#27313D` / `#657180`) and a
+  single blue accent (`#2785D8`). The charcoal taskbar (`#303740`) keeps the
+  desktop readable on any wallpaper; the light theme is now the default and the
+  dark theme uses matching neutral charcoal surfaces. Oversized glows,
+  decorative gradients, heavy blur and the background grid pattern are gone.
+- **Original bundled nature wallpapers.** Alpine Dawn, Forest Mist, Coastal
+  Calm and Desert Dusk (1920×1080 JPEG, CC0-1.0, generated for the project; see
+  [docs/WALLPAPERS.md](docs/WALLPAPERS.md)).
+- **Per-user appearance settings stored in SQLite.** Wallpaper source (bundled
+  scene, solid colour or private upload), fit (cover/contain/center), position,
+  darkening overlay and theme are saved per account and survive restarts,
+  sign-out/sign-in and browser changes. See `GET/PUT /api/appearance`.
+- **Personalize dialog** (right-click the desktop → *Personalize…*, start menu,
+  account menu or Control Panel → **Appearance**): live preview, Apply, Cancel
+  and Reset to default, with the previous look restored when cancelling.
+- **Private wallpaper uploads.** JPEG/PNG/WebP up to 10 MiB, validated by
+  content (magic bytes + dimensions) and served only to the owner with
+  immutable private caching; server-generated identifiers, per-user storage and
+  ownership checks on read/delete. Limits: 20 images / 100 MiB per account.
+- **Coloured application icons** with one consistent icon language: amber folder
+  for File Station, blue grid for Applications, teal monitor, warm orange for
+  Backup Center, slate gear for Control Panel and a document for Activity Logs.
+- Documentation screenshots under `docs/screenshots/`.
+
+### Changed
+
+- Theme and wallpaper settings are consolidated into one server-backed
+  appearance system; the previous browser-only wallpaper picker and the
+  duplicate Appearance card in Profile are gone.
+- Desktop icon labels wrap between words instead of truncating mid-word, and
+  the "No applications open" card is smaller, calmer and no longer dominates
+  the wallpaper.
+- `GET /api/bootstrap` now reports whether the session cookie is valid, so a
+  signed-out boot no longer probes a protected endpoint (and no longer logs a
+  spurious 401 in the browser console).
+- Additive database migration `0002_appearance.sql` (new tables only); existing
+  installations upgrade automatically on start.
+
+### Fixed
+
+- Personalisation cache is cleared on sign-out and session expiry so a previous
+  account's wallpaper never appears for the next user on a shared browser.
+
 ## [0.1.3] - 2026-11-10
 
 Self-update fix found by running the real update flow on a live installation.
