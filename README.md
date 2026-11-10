@@ -12,7 +12,8 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **Applications** | Deploy and manage Docker Compose applications through a restricted administrative worker. |
 | **Resource Monitor** | Live CPU, memory, swap, disk, network and container metrics. |
 | **Control Panel** | Profile, password, users, roles, quotas, shared folders, storage locations, appearance and component health. |
-| **Appearance** | Per-user wallpaper (bundled nature scenes, solid colour or private upload), fit/position/overlay and light/dark/system theme, saved on the server. |
+| **Appearance** | Per-user wallpaper (bundled nature scenes, solid colour or private upload), fit/position/overlay, light/dark/system mode and ten accent presets, saved on the server. |
+| **Live updates** | One authenticated event stream per tab keeps files, applications, containers, backups, audit logs, control panel data and appearance synchronized automatically — including changes made outside RAST and in other sessions. |
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
@@ -21,7 +22,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.5 — first public release series (2026-11-10). APIs and data
+> **Status:** v0.1.6 — first public release series (2026-11-11). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
 
@@ -119,6 +120,8 @@ Environment variables use the `RAST_` prefix (see `.env.example`).
   protection enforced on the server for every endpoint.
 * Per-user appearance is private: uploaded wallpapers are validated, stored
   under server-generated identifiers and served only to their owner.
+* Realtime events are authorized server-side per account/role; sessions are
+  revalidated while streaming and credentials never appear in event URLs.
 * Docker operations run through a separate worker process with a strict
   message protocol — the web server never talks to the Docker socket.
 
@@ -132,6 +135,7 @@ See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 * [Operations: backup, restore, update, rollback](docs/OPERATIONS.md)
 * [API reference](docs/API.md)
 * [Wallpapers and their licence](docs/WALLPAPERS.md)
+* [Realtime synchronization contract](docs/REALTIME.md)
 
 ## License
 

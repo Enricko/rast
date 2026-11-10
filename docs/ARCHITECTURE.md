@@ -157,6 +157,43 @@ keeps it inactive in that case.
 * **Delete** moves the file tree into `.trash/<user_id>/<uuid>` and records it
   in the `trash` table; restore re-checks quota and conflicts.
 
+
+## Live updates
+
+One process-wide `EventBus` (`src/events.rs`) fans out to every authenticated
+SSE connection (`GET /api/events`). Events carry a monotonic sequence number and
+an authorization scope; the stream handler filters per principal and revalidates
+the session every 20 seconds, so expiry, revocation, deactivation and role
+changes close open connections. Clients (one connection per browser tab) detect
+gaps, reconnect with backoff and refetch authorized snapshots.
+
+Change sources:
+
+* API mutations publish domain events after their database/filesystem change
+  commits (files/quota, users/settings, jobs, backups, applications, appearance,
+  audit).
+* A bounded `notify` filesystem watcher covers only `storage_dir/homes` and
+  `storage_dir/shared`, coalesces bursts and maps paths to authorized accounts
+  (homes) or share members (shared); overflow triggers `files.resync`.
+* A low-frequency Docker reconciler compares managed application state and
+  emits `app.changed`; application logs stream through a bounded admin-only SSE
+  endpoint.
+* The resource monitor samples once per process (~5 s) and broadcasts snapshots.
+
+The frontend keeps a small shared store (`frontend/src/core/realtime.ts`) with a
+query cache; windows subscribe to event kinds or cache keys, debounce bursts and
+update only the affected view, preserving scroll, selection, filters and
+unsaved forms.
+
+## Appearance storage
+
+Per user in SQLite (`user_appearance` + `appearance_uploads`, migration 0003
+adds `accent`): mode, accent id, wallpaper source (bundled scene, private upload
+or solid colour), fit, position and overlay. Wallpapers are validated by content
+and stored under `<data_dir>/wallpapers/<user-id>/<uuid>.<ext>`; the owner-only
+API serves them with immutable private caching. The client keeps only a small
+per-user paint cache.
+
 ## Storage layout
 
 ```

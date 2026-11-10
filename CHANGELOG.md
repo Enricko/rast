@@ -22,6 +22,72 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.6] - 2026-11-11
+
+A coherence and live-updates release: one control system, ten accent presets and
+automatic synchronization for every window.
+
+### Added
+
+- **Ten accent presets** (Ocean Blue, Forest Green, Teal, Sage, Amber,
+  Terracotta, Rose, Plum, Indigo, Graphite) with coordinated light/dark values,
+  readable foregrounds, hover/pressed/focus/selection tokens and a small live
+  preview. Available in Control Panel → Appearance and the desktop Personalize
+  dialog; Ocean Blue is the default and settings persist per user.
+- **Shared realtime layer**: one authenticated SSE connection per browser tab
+  with sequence numbers, gap detection, heartbeats, exponential backoff with
+  jitter, online/visibility/wake handling and `resync` snapshots. A
+  subtle Live/Reconnecting/Offline indicator shows the real state and last
+  successful update.
+- **Live data everywhere**: File Station (own operations and external filesystem
+  changes via a bounded watcher, quota/usage), Applications (deployment
+  progress, container state, bounded live log stream), Resource Monitor,
+  Backup Center (queued/running/completed/failed jobs and history), Activity
+  Logs (new audit events), Control Panel (users, settings, shares, components)
+  and the desktop (notifications, appearance).
+- **Cross-session appearance sync**: changes saved in one session are applied in
+  the user's other sessions; a session editing appearance gets a conflict
+  notice instead of losing its draft.
+- Server-side event authorization: scoped events (`user`, `admin`, `users`,
+  broadcast), per-connection session revalidation (expiry, revocation,
+  deactivation, role change), and no credentials in event URLs.
+
+### Changed
+
+- **One control system** (`styles/controls.css` + `styles/tokens.css`): shared
+  default/hover/pressed/selected/focus-visible/disabled/loading states for
+  buttons, icon buttons, window controls, segmented controls, inputs, selects,
+  checkboxes, radios, switches, uploads, tabs, menus, context menus, tables,
+  dialogs, toasts, tooltips, scrollbars and chart accents.
+- **Neutral semantic light/dark palette** with solid application surfaces,
+  readable text over any wallpaper, thin borders, restrained accents and soft
+  shadows. Main surfaces stay neutral; status colours keep their meaning.
+- **Appearance save workflow**: Save is disabled with “All changes saved” when
+  the form is clean, enabled when dirty, shows Saving… and Saved states, inline
+  validation and a retry path on request failure. Preview applies instantly to
+  every open window; Cancel restores the saved appearance.
+- Routine Refresh buttons were removed where realtime synchronization replaced
+  them (File Station, Backup Center, Activity Logs, storage/components tabs);
+  contextual Retry/Reconnect remains for genuine failures.
+- Resource Monitor continues to use one shared backend sampler (default ~5 s);
+  live updates add one SSE connection per tab instead of polling loops per menu.
+
+### Fixed
+
+- **Theme mode buttons no longer use browser-default styling.** The old
+  hand-built Light/Dark/System buttons lacked the shared `.segment` class, so
+  the browser painted its default `2px outset` border and grey fill. The mode
+  and accent selectors now use the shared accessible segmented control and
+  swatch components; a defensive reset prevents any unclassed button in a
+  segmented group from leaking UA styles.
+- Unselected theme/accent options are no longer styled as disabled; selected
+  state is communicated by accent surface plus `aria-checked`.
+- Legacy pastel/blue-tinted hardcoded control colours were replaced with
+  semantic tokens across shell and applications, including Control Panel
+  navigation, menus, tables, toasts and overlays.
+- `appearance.changed` events update the user's other sessions, and audit
+  events are published for authorized subscribers only.
+
 ## [0.1.5] - 2026-11-10
 
 Appearance polish found while verifying v0.1.4 on a live deployment.
