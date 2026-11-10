@@ -22,6 +22,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.1.3] - 2026-11-10
+
+Self-update fix found by running the real update flow on a live installation.
+
+### Fixed
+
+- **`rast update` failed with `downloaded binary is not executable`.** The
+  release asset is downloaded to a temporary directory with mode `0644`; the
+  version self-check and the atomic installation step then tried to execute it.
+  The artifact is now made executable (`0755`) immediately after its checksum is
+  verified, before it is probed or installed.
+
 ## [0.1.2] - 2026-11-10
 
 Deployment fix found while verifying managed application deployment on a real

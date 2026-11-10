@@ -96,6 +96,13 @@ pub async fn run(
     println!("downloading {asset_name}…");
     let binary_path = work.join(&asset_name);
     let actual = download_file(&binary_url, &binary_path)?;
+    // The downloaded file is created 0644; it must be executable for the
+    // version self-check (and for the atomic replacement later).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&binary_path, fs::Permissions::from_mode(0o755))?;
+    }
     if !actual.eq_ignore_ascii_case(&expected) {
         return Err(format!(
             "checksum mismatch for {asset_name}: expected {expected}, got {actual}; aborting"
