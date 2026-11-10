@@ -21,7 +21,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.4 — first public release series (2026-11-10). APIs and data
+> **Status:** v0.1.5 — first public release series (2026-11-10). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
 
@@ -37,26 +37,31 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 
 ## Verified deployment
 
-RAST 0.1.3 is deployed and publicly reachable at
+RAST 0.1.5 is deployed and publicly reachable at
 <https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
-reference host (Ubuntu 26.04, x86_64, 12 cores / 30 GiB RAM), 60-second idle
-window with the resource monitor running:
+reference host (Ubuntu 26.04, x86_64, 12 cores / 30 GiB RAM) after a clean
+restart, 60-second idle window with the resource monitor sampling every 5 s:
 
-| Process | CPU (idle) | RSS | Anonymous memory |
-| --- | --- | --- | --- |
-| `rast.service` (web + jobs + monitor + SQLite) | 0.13% | 32.1 MiB | 24.7 MB |
-| `rast-worker.service` (Docker operations) | 0.02% | 9.1 MiB | 1.4 MB |
-| **Total RAST** | **0.15%** | **41.2 MiB** | **~26 MB** |
+| Process | CPU (idle) | RSS |
+| --- | --- | --- |
+| `rast.service` (web + jobs + monitor + SQLite) | 0.17% | 30.2 MiB |
+| `rast-worker.service` (Docker operations) | 0.00% | 9.2 MiB |
+| **Total RAST** | **0.17%** | **39.3 MiB** |
 
-That is comfortably below the project budget of 100 MiB idle RAM (reverse
-proxy, Cloudflare Tunnel and Docker are excluded, as is reclaimable page
-cache). Verification performed on the live deployment: 52/52 end-to-end smoke
-checks (auth, CSRF, isolation, files, quota, trash, monitoring, SSE, backups,
-logs, Docker worker), a 150 MiB chunked upload through Cloudflare with a
-byte-identical download, a single-request 150 MiB upload through nginx, a
-managed nginx application deployed/restarted/deleted with data-volume
-persistence, a checksum-verified self-update, and the clean-container installer
-suite (64 checks).
+That is well below the project budget of 100 MiB idle RAM (reverse proxy,
+Cloudflare Tunnel and Docker are excluded). Anonymous memory is ~22 MiB for the
+web service; the rest is file-backed pages that the kernel can reclaim. After
+long activity (large uploads, backups, container stats) the allocator keeps some
+resident memory, so an uptime-long measurement can read higher (e.g. 65 MiB)
+without any leak.
+
+Verification on the live deployment: **61/61 end-to-end smoke checks** (auth,
+CSRF, two-user isolation, files, quota, trash, monitoring, SSE, backups, logs,
+Docker worker, and the new appearance tests: upload byte-exactness, cross-user
+404, independent per-user settings, delete fallback), **224 automated Rust
+tests** (209 unit/integration + 15 HTTP end-to-end), a clean-systemd-container
+installer suite, and Playwright checks of the live UI in light/dark themes at
+1600×1000 and 390×844 with zero console errors.
 
 ## Quick start (installed server)
 
