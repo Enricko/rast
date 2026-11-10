@@ -170,9 +170,19 @@ async fn run(
     match command {
         Command::Serve { bind } => serve(config_path, log_level, bind).await,
         Command::Version => {
-            println!("{} {} ({})", rast::NAME, VERSION, env!("RAST_GIT_SHA"));
-            println!("{}", rast::DESCRIPTION);
-            println!("https://github.com/Enricko/rast");
+            // Render once and tolerate a closed stdout: release pipelines and
+            // shell recipes routinely run `rast version | head -n 1`, which is
+            // a broken pipe for the remaining lines. A closed pipe must never
+            // turn a successful version query into a panic/exit code 134.
+            use std::io::Write;
+            let banner = format!(
+                "{} {} ({})\n{}\nhttps://github.com/Enricko/rast\n",
+                rast::NAME,
+                VERSION,
+                env!("RAST_GIT_SHA"),
+                rast::DESCRIPTION
+            );
+            let _ = std::io::stdout().write_all(banner.as_bytes());
             Ok(ExitCode::SUCCESS)
         }
         other => {
