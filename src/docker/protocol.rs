@@ -198,7 +198,11 @@ impl WorkerResponse {
         }
     }
 
-    pub fn failure(id: impl Into<String>, code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn failure(
+        id: impl Into<String>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             ok: false,
@@ -342,7 +346,9 @@ pub fn validate_slug(slug: &str) -> Result<(), String> {
     }
     for b in bytes {
         if !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-') {
-            return Err("invalid app slug: only lowercase letters, digits and '-' are allowed".into());
+            return Err(
+                "invalid app slug: only lowercase letters, digits and '-' are allowed".into(),
+            );
         }
     }
     Ok(())
@@ -478,9 +484,7 @@ mod tests {
             ValidatedAction::App { tail, .. } => assert_eq!(tail, Some(1)),
             other => panic!("{other:?}"),
         }
-        let req = WorkerRequest::new(WorkerOp::Logs)
-            .slug("x")
-            .tail(u32::MAX);
+        let req = WorkerRequest::new(WorkerOp::Logs).slug("x").tail(u32::MAX);
         match validate_request(&req, &apps_dir()).unwrap() {
             ValidatedAction::App { tail, .. } => assert_eq!(tail, Some(MAX_LOG_TAIL)),
             other => panic!("{other:?}"),
@@ -512,13 +516,15 @@ mod tests {
     #[test]
     fn response_roundtrip() {
         let ok = WorkerResponse::success("abc", serde_json::json!({"v": 1}));
-        let back: WorkerResponse = serde_json::from_str(&serde_json::to_string(&ok).unwrap()).unwrap();
+        let back: WorkerResponse =
+            serde_json::from_str(&serde_json::to_string(&ok).unwrap()).unwrap();
         assert!(back.ok);
         assert_eq!(back.data.unwrap()["v"], 1);
         assert!(back.error.is_none());
 
         let err = WorkerResponse::failure("abc", "command_failed", "boom\nline2");
-        let back: WorkerResponse = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
+        let back: WorkerResponse =
+            serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
         assert!(!back.ok);
         assert_eq!(back.error.as_ref().unwrap().code, "command_failed");
         assert!(back.error.unwrap().message.contains("boom"));

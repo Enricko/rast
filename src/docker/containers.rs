@@ -65,10 +65,13 @@ pub fn parse_ports(text: &str) -> Vec<PortMapping> {
             if !host.is_empty() {
                 // forms: 0.0.0.0:8080  [::]:8080  :::8080  8080
                 if let Some((ip, port)) = host.rsplit_once(':') {
-                    if ip.is_empty() || ip == "::" || ip == "[::]" {
+                    let ip = ip.trim_matches(['[', ']']);
+                    // Wildcard binds (IPv4 `0.0.0.0`, IPv6 `::`) are reported
+                    // as "all interfaces" (`None`) and deduplicated.
+                    if ip.is_empty() || ip == "::" || ip == "0.0.0.0" {
                         host_ip = None;
                     } else {
-                        host_ip = Some(ip.trim_matches(['[', ']']).to_string());
+                        host_ip = Some(ip.to_string());
                     }
                     host_port = port.parse::<u16>().ok();
                 } else {
@@ -153,6 +156,19 @@ pub fn parse_ps_json(output: &str) -> Result<Vec<Value>, String> {
         if name.is_empty() {
             continue;
         }
+        let mounts_text = obj
+            .get("Mounts")
+            .map(|v| match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .unwrap_or_default();
+        let mounts: Vec<Value> = mounts_text
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| Value::String(entry.to_string()))
+            .collect();
         out.push(json!({
             "id": get("ID"),
             "name": name,
@@ -162,6 +178,7 @@ pub fn parse_ps_json(output: &str) -> Result<Vec<Value>, String> {
             "status": get("Status"),
             "runningFor": get("RunningFor"),
             "ports": parse_ports(&ports_text),
+            "mounts": mounts,
             "labels": labels,
             "project": project,
             "service": service,
@@ -172,10 +189,7 @@ pub fn parse_ps_json(output: &str) -> Result<Vec<Value>, String> {
 
 /// Parse a Docker `--format '{{json .}}'` stream into raw JSON values.
 fn parse_json_lines(output: &str) -> Vec<Value> {
-    output
-        .lines()
-        .filter_map(json_value_from_line)
-        .collect()
+    output.lines().filter_map(json_value_from_line).collect()
 }
 
 /// Parse `docker stats --no-stream --format '{{json .}}'` output into normalized
@@ -533,13 +547,21 @@ mod tests {
 
     #[test]
     fn port_parsing_handles_ipv4_ipv6_and_exposed_only() {
-        let ports = parse_ports("0.0.0.0:8080->80/tcp, :::8080->80/tcp, 127.0.0.1:5432->5432/tcp, 9000/tcp");
-        assert_eq!(ports.len(), 3);
+        let ports = parse_ports(
+            "0.0.0.0:8080->80/tcp, :::8080->80/tcp, 127.0.0.1:5432->5432/tcp, 9000/tcp",
+        );
+        assert_eq!(
+            ports.len(),
+            3,
+            "IPv4/IPv6 wildcard binds collapse: {ports:?}"
+        );
         assert_eq!(ports[0].host_port, Some(8080));
         assert_eq!(ports[0].container_port, 80);
-        assert_eq!(ports[0].host_ip.as_deref(), Some("0.0.0.0"));
-        assert_eq!(ports[2].host_ip.as_deref(), Some("127.0.0.1"));
-        assert_eq!(ports[2].protocol, "tcp");
+        assert_eq!(ports[0].host_ip, None, "wildcard binds are unspecified");
+        assert_eq!(ports[1].host_ip.as_deref(), Some("127.0.0.1"));
+        assert_eq!(ports[1].protocol, "tcp");
+        assert_eq!(ports[2].container_port, 9000);
+        assert_eq!(ports[2].host_port, None);
 
         let exposed = parse_ports("9000/tcp");
         assert_eq!(exposed.len(), 1);
@@ -549,7 +571,9 @@ mod tests {
 
     #[test]
     fn label_parsing() {
-        let labels = parse_labels("com.docker.compose.project=rast-shop,com.docker.compose.service=web,maintainer=me");
+        let labels = parse_labels(
+            "com.docker.compose.project=rast-shop,com.docker.compose.service=web,maintainer=me",
+        );
         assert_eq!(
             labels.get("com.docker.compose.project").map(String::as_str),
             Some("rast-shop")
@@ -598,13 +622,19 @@ mod tests {
         assert_eq!(parse_percent("12.34%"), Some(12.34));
         assert_eq!(parse_percent("0.00%"), Some(0.0));
         assert_eq!(parse_percent(""), None);
-        assert_eq!(parse_mem_usage("120MiB / 7.5GiB"), (125_829_120, 8_053_063_680));
+        assert_eq!(
+            parse_mem_usage("120MiB / 7.5GiB"),
+            (125_829_120, 8_053_063_680)
+        );
         assert_eq!(parse_io_pair("3.5kB / 1.2kB"), (3500, 1200));
     }
 
     #[test]
     fn rfc3339_parsing() {
-        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02Z"), Some(1_794_317_042_000));
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-10T13:24:02Z"),
+            Some(1_794_317_042_000)
+        );
         assert_eq!(
             parse_rfc3339_ms("2026-11-10T13:24:02.123456789Z"),
             Some(1_794_317_042_123)
@@ -613,7 +643,10 @@ mod tests {
             parse_rfc3339_ms("2026-11-10T14:24:02+01:00"),
             Some(1_794_317_042_000)
         );
-        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02"), Some(1_794_317_042_000));
+        assert_eq!(
+            parse_rfc3339_ms("2026-11-10T13:24:02"),
+            Some(1_794_317_042_000)
+        );
         assert_eq!(parse_rfc3339_ms("not-a-time"), None);
     }
 
