@@ -21,3 +21,8 @@
 .idea/
 .vscode/
 *.swp
+
+# Node
+/frontend/node_modules/
+/frontend/dist/
+npm-debug.log*
