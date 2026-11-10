@@ -60,6 +60,16 @@ export async function boot(root: HTMLElement): Promise<void> {
         pendingRestore = null;
         showLogin(notice);
       },
+      onSessionRevoked: (reason) => {
+        if (handlingLostSession) return;
+        handlingLostSession = true;
+        pendingRestore = null;
+        showLogin(
+          reason
+            ? `Your session was ended by the server (${reason}). Sign in again to continue.`
+            : "Your session was ended by the server. Sign in again to continue.",
+        );
+      },
     });
     pendingRestore = null;
   };
@@ -68,6 +78,9 @@ export async function boot(root: HTMLElement): Promise<void> {
     desktop?.dispose();
     desktop = null;
     events.stop();
+    // Dialogs live outside the desktop root; never leave one floating over the
+    // login screen after a forced sign-out.
+    document.querySelectorAll(".modal-backdrop").forEach((node) => node.remove());
     store.patch({ user: null, csrfToken: "" });
     renderLogin(deps, {
       onAuthenticated,

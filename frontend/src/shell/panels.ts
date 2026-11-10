@@ -11,6 +11,7 @@ import {
 } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
 import type { ThemePreference } from "../core/store";
+import { getRealtime } from "../core/realtime";
 import { ApiError } from "../core/api";
 import type { ShellDeps } from "./shared";
 
@@ -359,35 +360,34 @@ function cleanupWhenDetached(el: HTMLElement, cleanup: () => void): void {
 
 export function buildStatusPanel(ctx: PanelContext, onClose: () => void): HTMLElement {
   const deps = ctx.deps;
-  const state = deps.events.status;
-  const statusTone = state === "connected" ? "ok" : state === "connecting" ? "warn" : "error";
-  const statusLabel = state === "connected" ? "Connected" : state === "connecting" ? "Connecting…" : "Disconnected";
-  const lastEvent = deps.events.lastEventTimestamp;
-  const expires = deps.store.get().sessionExpiresAt;
+  const realtime = getRealtime(deps.events);
+  const statusBadge = h("span", { class: "badge" });
+  const lastUpdateEl = h("dd");
   const reconnect = h(
     "button",
     { class: "btn btn-sm", type: "button" },
     iconSvg("refresh", 15),
-    "Reconnect",
+    "Reconnect now",
   );
   reconnect.addEventListener("click", () => {
-    deps.events.stop();
-    deps.events.start();
+    deps.events.reconnectNow();
     ctx.notify("Reconnecting to the live event stream…", "info");
     onClose();
   });
+
   const serverTime = new Date(Date.now() + ctx.serverOffset);
-  return h(
+  const expires = deps.store.get().sessionExpiresAt;
+  const panel = h(
     "div",
     { class: "menu-panel status-panel", role: "dialog", ariaLabel: "Connection status" },
-    panelHeader("System status", deps.store.get().siteName || "RAST"),
+    panelHeader("Connection & session", deps.store.get().siteName || "RAST"),
     h(
       "dl",
       { class: "kv compact" },
-      h("dt", {}, "Live connection"),
-      h("dd", {}, h("span", { class: `badge ${statusTone}` }, statusLabel)),
-      h("dt", {}, "Last event"),
-      h("dd", {}, lastEvent ? relativeTime(lastEvent) : "none yet"),
+      h("dt", {}, "Connection"),
+      h("dd", {}, statusBadge),
+      h("dt", {}, "Last update"),
+      lastUpdateEl,
       h("dt", {}, "Session expires"),
       h("dd", {}, expires ? formatDateTime(expires) : "unknown"),
       h("dt", {}, "Server time"),
@@ -413,8 +413,34 @@ export function buildStatusPanel(ctx: PanelContext, onClose: () => void): HTMLEl
         "Manage sessions",
       ),
     ),
-    h("div", { class: "small faint status-note" }, "Live updates use a single shared event stream."),
+    h(
+      "div",
+      { class: "small faint status-note" },
+      "Live data uses one shared event stream per tab. Reconnecting and offline states recover automatically and refresh open views.",
+    ),
   );
+
+  const render = (): void => {
+    if (!panel.isConnected) return;
+    const state = realtime.status;
+    const label = state === "connected" ? "Live" : state === "offline" ? "Offline" : "Reconnecting";
+    statusBadge.textContent = label;
+    statusBadge.className = `badge ${state === "connected" ? "ok" : state === "offline" ? "error" : "warn"}`;
+    reconnect.disabled = state === "connected";
+    const last = realtime.lastUpdate;
+    lastUpdateEl.textContent = last ? `${relativeTime(last)} · ${formatClockSeconds(last)}` : "no updates received yet";
+  };
+  render();
+  const unsubscribe = realtime.onStatus(render);
+  const timer = window.setInterval(() => {
+    if (!panel.isConnected) {
+      window.clearInterval(timer);
+      unsubscribe();
+      return;
+    }
+    render();
+  }, 1000);
+  return panel;
 }
 
 export function buildClockPanel(ctx: PanelContext, onClose: () => void): HTMLElement {

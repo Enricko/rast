@@ -4,6 +4,8 @@
 
 import type { AppDefinition, AppContext } from "../../core/app";
 import { clear, h } from "../../core/dom";
+import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
+import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../components/live";
 import {
   formatBytes,
   formatDate,
@@ -55,6 +57,22 @@ interface RestoreGuideResponse {
   archive?: string;
 }
 
+/** `job.*` payload subset for backup jobs. */
+interface BackupJobEvent {
+  id?: string;
+  kind?: string;
+  progress?: number;
+  total?: number;
+  message?: string;
+  error?: string;
+}
+
+/** `backup.changed` payload. */
+interface BackupChangedEvent {
+  reason?: string;
+  id?: string;
+}
+
 const SCOPES: Array<{ id: string; label: string; description: string }> = [
   {
     id: "db",
@@ -95,6 +113,13 @@ class BackupCenterApp {
   private readonly createButton: HTMLButtonElement;
   private readonly scheduleButton: HTMLButtonElement;
   private readonly pager: Pager;
+  private readonly contentEl: HTMLElement;
+  private readonly jobStatusHost: HTMLElement;
+  private readonly realtime: RealtimeStore;
+  private readonly liveIndicator: LiveIndicator;
+  private readonly notice: NoticeBar;
+  private readonly syncList: { run: () => void; cancel: () => void };
+  private readonly syncSchedule: { run: () => void; cancel: () => void };
 
   private backups: Backup[] = [];
   private total = 0;
@@ -105,30 +130,39 @@ class BackupCenterApp {
   private schedule: BackupSchedule | null = null;
   private scheduleError: unknown = null;
   private unavailable: unknown = null;
-  private refreshTimer = 0;
+  private jobStatus: { jobId: string; progress: number; total: number; message: string } | null = null;
+  private scheduleEditorConflict: HTMLElement | null = null;
+  private scheduleEditorDirty = false;
   private disposed = false;
-  private readonly unsubscribeBackupDone: () => void;
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
+    this.realtime = getRealtime(ctx.events);
+    this.notice = new NoticeBar(this.lc);
+    this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
+    this.syncList = debounceTask(() => void this.loadBackups(), 250);
+    this.syncSchedule = debounceTask(() => void this.loadSchedule(), 300);
+    this.lc.add(() => {
+      this.syncList.cancel();
+      this.syncSchedule.cancel();
+    });
 
     this.createButton = h("button", { class: "btn btn-primary btn-sm", type: "button" }, iconSvg("plus", 14), document.createTextNode("Create backup"));
     this.createButton.addEventListener("click", () => void this.openCreateDialog());
     this.scheduleButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("clock", 14), document.createTextNode("Schedule"));
     this.scheduleButton.addEventListener("click", () => void this.openScheduleEditor());
-    const refresh = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("refresh", 14), document.createTextNode("Refresh"));
-    refresh.addEventListener("click", () => void this.refreshAll());
     const toolbar = h(
       "div",
       { class: "app-toolbar", role: "toolbar", ariaLabel: "Backup actions" },
       this.createButton,
       this.scheduleButton,
       h("div", { class: "app-toolbar-spacer" }),
-      refresh,
+      this.liveIndicator.el,
     );
 
     this.bannerHost = h("div", { class: "backup-banners" });
+    this.jobStatusHost = h("div", { class: "backup-job-status hidden", role: "status", ariaLive: "polite" });
     this.scheduleHost = h("div", { class: "backup-schedule" });
     this.listHost = h("div", { class: "backup-list" });
     this.pager = new Pager({
@@ -140,36 +174,126 @@ class BackupCenterApp {
       label: "Backup pages",
       perPageOptions: [10, 25, 50],
     });
+    this.contentEl = h(
+      "div",
+      { class: "app-content backup-content" },
+      this.bannerHost,
+      this.jobStatusHost,
+      this.scheduleHost,
+      this.listHost,
+    );
     ctx.root.classList.add("backup-app");
-    ctx.root.append(toolbar, h("div", { class: "app-content backup-content" }, this.bannerHost, this.scheduleHost, this.listHost));
+    ctx.root.append(toolbar, this.notice.el, this.contentEl);
 
-    this.unsubscribeBackupDone = ctx.events.on("backup.done", () => {
-      if (this.disposed) return;
-      this.ctx.toast.success("A backup finished");
-      void this.loadBackups();
-    });
     this.lc.add(() => {
       this.disposed = true;
-      this.unsubscribeBackupDone();
+      this.scheduleEditorConflict = null;
     });
+    this.subscribeRealtime();
+  }
+
+  // -------------------------------------------------------------- realtime
+
+  private subscribeRealtime(): void {
+    this.lc.add(
+      this.realtime.on<BackupChangedEvent>("backup.changed", (data) => {
+        if (this.disposed) return;
+        this.syncList.run();
+        this.syncSchedule.run();
+        if (data?.reason && this.scheduleEditorConflict) {
+          this.signalScheduleConflict(`The backup schedule changed on the server (${data.reason}). Review before saving.`);
+        }
+      }),
+    );
+    this.lc.add(
+      this.realtime.on("backup.done", () => {
+        if (this.disposed) return;
+        this.ctx.toast.success("A backup finished");
+        this.jobStatus = null;
+        this.renderJobStatus();
+        this.syncList.run();
+        this.syncSchedule.run();
+      }),
+    );
+    for (const kind of ["job.queued", "job.start", "job.progress"]) {
+      this.lc.add(this.realtime.on<BackupJobEvent>(kind, (data) => this.onBackupJob(kind, data)));
+    }
+    for (const kind of ["job.done", "job.failed", "job.cancelled"]) {
+      this.lc.add(this.realtime.on<BackupJobEvent>(kind, (data) => this.onBackupJob(kind, data)));
+    }
+    this.lc.add(
+      this.realtime.onResync(() => {
+        if (this.disposed) return;
+        this.syncList.run();
+        this.syncSchedule.run();
+      }),
+    );
+  }
+
+  private onBackupJob(kind: string, data: BackupJobEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object") return;
+    const jobKind = typeof data.kind === "string" ? data.kind : "";
+    if (!jobKind.startsWith("backup")) return;
+    const jobId = typeof data.id === "string" ? data.id : "";
+    if (kind === "job.progress" || kind === "job.start" || kind === "job.queued") {
+      if (!jobId) return;
+      this.jobStatus = {
+        jobId,
+        progress: typeof data.progress === "number" ? data.progress : 0,
+        total: typeof data.total === "number" ? data.total : 0,
+        message: typeof data.message === "string" ? data.message : "",
+      };
+      this.renderJobStatus();
+      return;
+    }
+    this.jobStatus = null;
+    this.renderJobStatus();
+    if (kind === "job.failed") {
+      this.ctx.toast.error(`Backup failed: ${data.error ?? "unknown error"}`);
+    } else if (kind === "job.done") {
+      this.ctx.toast.success("Backup finished");
+    }
+    this.syncList.run();
+    this.syncSchedule.run();
+  }
+
+  private renderJobStatus(): void {
+    clear(this.jobStatusHost);
+    const status = this.jobStatus;
+    if (!status) {
+      this.jobStatusHost.classList.add("hidden");
+      return;
+    }
+    this.jobStatusHost.classList.remove("hidden");
+    const fraction = status.total > 0 ? Math.min(1, status.progress / status.total) : 0;
+    const bar = h("div", { class: "progress backup-job-bar" });
+    const fill = h("div", { class: "progress-bar" });
+    fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+    bar.appendChild(fill);
+    this.jobStatusHost.append(
+      h("span", { class: "backup-job-label" }, "Backup job running"),
+      bar,
+      h(
+        "span",
+        { class: "small muted backup-job-message" },
+        status.total > 0
+          ? `${Math.min(status.progress, status.total)} / ${status.total}${status.message ? ` · ${status.message}` : ""}`
+          : status.message || "Queued…",
+      ),
+    );
+  }
+
+  private signalScheduleConflict(message: string): void {
+    const target = this.scheduleEditorConflict;
+    if (!target || !this.scheduleEditorDirty) return;
+    target.textContent = message;
+    target.classList.remove("hidden");
+    this.notice.show(message, { kind: "warning" });
   }
 
   async start(): Promise<void> {
     this.ctx.setTitle("Backup Center");
     this.render();
-    await Promise.all([this.loadBackups(), this.loadSchedule()]);
-  }
-
-  private scheduleRefreshIfRunning(): void {
-    if (this.refreshTimer) return;
-    if (!this.backups.some((backup) => backup.status === "running")) return;
-    this.refreshTimer = this.lc.setTimeout(() => {
-      this.refreshTimer = 0;
-      void this.loadBackups();
-    }, 4000);
-  }
-
-  private async refreshAll(): Promise<void> {
     await Promise.all([this.loadBackups(), this.loadSchedule()]);
   }
 
@@ -196,10 +320,7 @@ class BackupCenterApp {
       if (isUnavailableError(error)) this.unavailable = error;
     } finally {
       this.loading = false;
-      if (!this.disposed) {
-        this.render();
-        this.scheduleRefreshIfRunning();
-      }
+      if (!this.disposed) this.render();
     }
   }
 
@@ -223,12 +344,14 @@ class BackupCenterApp {
 
   private render(): void {
     if (this.disposed) return;
+    const scrollTop = this.contentEl?.scrollTop ?? 0;
     this.renderBanners();
     this.renderSchedule();
     this.renderList();
     this.createButton.disabled = this.unavailable !== null;
     this.createButton.title = this.unavailable !== null ? "Backup creation is not available on this server yet" : "";
     this.scheduleButton.disabled = this.unavailable !== null;
+    if (this.contentEl) this.contentEl.scrollTop = scrollTop;
   }
 
   private renderBanners(): void {
@@ -655,6 +778,16 @@ class BackupCenterApp {
       return { scope, checkbox };
     });
     const validation = formError("");
+    const conflict = h("div", { class: "realtime-conflict hidden", role: "status", ariaLive: "polite" });
+    this.scheduleEditorConflict = conflict;
+    this.scheduleEditorDirty = false;
+    const markDirty = (): void => {
+      this.scheduleEditorDirty = true;
+    };
+    for (const control of [enabled, frequency, time, weekday, retention, ...scopeChecks.map((entry) => entry.checkbox)]) {
+      control.addEventListener("change", markDirty);
+      control.addEventListener("input", markDirty);
+    }
     const timeField = h("label", { class: "field backup-time-field" }, h("span", { class: "field-label" }, "Time of day"), time);
     const weekdayField = h("label", { class: "field backup-weekday-field" }, h("span", { class: "field-label" }, "Weekday"), weekday);
     const syncVisibility = () => {
@@ -710,6 +843,7 @@ class BackupCenterApp {
         { class: "backup-retention-note small muted" },
         "Scheduled backups run server-side. This page shows the next scheduled run after saving; RAST never triggers an online restore from the browser.",
       ),
+      conflict,
       validation,
     );
 
@@ -717,7 +851,10 @@ class BackupCenterApp {
       title: "Backup schedule",
       body,
       wide: true,
-      onClose: () => undefined,
+      onClose: () => {
+        this.scheduleEditorConflict = null;
+        this.scheduleEditorDirty = false;
+      },
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
         {

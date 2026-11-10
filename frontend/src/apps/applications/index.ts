@@ -3,7 +3,10 @@
 // OWNER: teammate `frontend-apps`.
 
 import type { AppDefinition, AppContext } from "../../core/app";
+import type { ConnectionState } from "../../core/sse";
 import { h, clear } from "../../core/dom";
+import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
+import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../components/live";
 import { formatBytes, formatPercent, formatDateTime, relativeTime, formatTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import type {
@@ -61,10 +64,6 @@ interface LogLine {
   message: string;
 }
 
-interface LogsResponse {
-  lines?: LogLine[];
-}
-
 interface DeploymentRecord {
   id?: number | string;
   action: string;
@@ -82,6 +81,44 @@ interface HistoryResponse {
 interface ActionResponse {
   jobId?: string;
   app?: ManagedApp;
+}
+
+/** `app.changed` payload (docs/REALTIME.md). */
+interface AppChangedEvent {
+  appId?: string;
+  status?: string;
+  containers?: unknown[];
+}
+
+/** `docker.changed` payload (docs/REALTIME.md). */
+interface DockerChangedEvent {
+  enabled?: boolean;
+  available?: boolean;
+  version?: string | null;
+  reason?: string | null;
+}
+
+/** `job.*` payload subset used for application jobs. */
+interface AppJobEvent {
+  id?: string;
+  kind?: string;
+  progress?: number;
+  total?: number;
+  message?: string;
+  error?: string;
+}
+
+/** `app.logs` SSE event payload. */
+interface AppLogsEvent {
+  appId?: string;
+  lines?: LogLine[];
+  reset?: boolean;
+}
+
+interface LogStreamUi {
+  pre: HTMLElement;
+  status: HTMLElement;
+  reconnect: HTMLButtonElement;
 }
 
 type DetailTab = "overview" | "logs" | "history";
@@ -104,8 +141,14 @@ class ApplicationsApp {
   private readonly statusBadge: HTMLElement;
   private readonly deployButton: HTMLButtonElement;
   private readonly importButton: HTMLButtonElement;
-  private readonly refreshButton: HTMLButtonElement;
   private readonly importLabel: HTMLElement;
+  private readonly contentEl: HTMLElement;
+  private readonly realtime: RealtimeStore;
+  private readonly liveIndicator: LiveIndicator;
+  private readonly notice: NoticeBar;
+  private readonly syncApps: { run: () => void; cancel: () => void };
+  private readonly syncContainers: { run: () => void; cancel: () => void };
+  private detailChangedHook: ((data: AppChangedEvent) => void) | null = null;
 
   private docker: DockerStatus | null = null;
   private dockerError: unknown = null;
@@ -116,12 +159,20 @@ class ApplicationsApp {
   private containersLoading = false;
   private containersError: unknown = null;
   private importSelection = new Set<string>();
-  private refreshTimer = 0;
   private disposed = false;
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
+    this.realtime = getRealtime(ctx.events);
+    this.notice = new NoticeBar(this.lc);
+    this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
+    this.syncApps = debounceTask(() => void this.reloadAfterEvent(), 250);
+    this.syncContainers = debounceTask(() => void this.loadContainers(), 400);
+    this.lc.add(() => {
+      this.syncApps.cancel();
+      this.syncContainers.cancel();
+    });
 
     this.statusBadge = h("span", { class: "badge app-docker-badge" }, "Checking Docker…");
     this.deployButton = h(
@@ -139,15 +190,13 @@ class ApplicationsApp {
       this.importLabel,
     );
     this.importButton.addEventListener("click", () => void this.importSelected());
-    this.refreshButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("refresh", 14), document.createTextNode("Refresh"));
-    this.refreshButton.addEventListener("click", () => void this.refreshAll());
 
     const toolbar = h(
       "div",
       { class: "app-toolbar", role: "toolbar", ariaLabel: "Application actions" },
       this.statusBadge,
+      this.liveIndicator.el,
       h("div", { class: "app-toolbar-spacer" }),
-      this.refreshButton,
       this.importButton,
       this.deployButton,
     );
@@ -156,36 +205,104 @@ class ApplicationsApp {
     this.appsHost = h("div", { class: "appmgmt-apps" });
     this.containersHost = h("div", { class: "appmgmt-containers" });
 
+    this.contentEl = h("div", { class: "app-content appmgmt-content" }, this.bannerHost, this.appsHost, this.containersHost);
     ctx.root.classList.add("applications-app");
-    ctx.root.append(toolbar, h("div", { class: "app-content appmgmt-content" }, this.bannerHost, this.appsHost, this.containersHost));
+    ctx.root.append(toolbar, this.notice.el, this.contentEl);
 
-    document.addEventListener("visibilitychange", this.visibilityHandler);
-    const unsubStatus = ctx.events.on("app.status", () => this.scheduleRefresh());
     this.lc.add(() => {
       this.disposed = true;
-      document.removeEventListener("visibilitychange", this.visibilityHandler);
-      unsubStatus();
+      this.detailChangedHook = null;
     });
-    this.lc.setInterval(() => {
-      if (document.visibilityState === "visible") this.scheduleRefresh();
-    }, 15000);
+    this.subscribeRealtime();
   }
 
-  private readonly visibilityHandler = (): void => {
-    if (document.visibilityState === "visible") this.scheduleRefresh();
-  };
+  // -------------------------------------------------------------- realtime
+
+  private subscribeRealtime(): void {
+    this.lc.add(this.realtime.on<AppChangedEvent>("app.changed", (data) => this.onAppChanged(data)));
+    this.lc.add(this.realtime.on<DockerChangedEvent>("docker.changed", (data) => this.onDockerChanged(data)));
+    for (const kind of ["job.done", "job.failed", "job.cancelled"]) {
+      this.lc.add(
+        this.realtime.on<AppJobEvent>(kind, (data) => this.onAppJobEvent(kind, data)),
+      );
+    }
+    // Older backends emitted `app.status`; keep the list in sync when it arrives.
+    this.lc.add(this.realtime.on("app.status", () => this.syncApps.run()));
+    this.lc.add(
+      this.realtime.onResync(() => {
+        void this.refreshAll(true);
+        this.detailChangedHook?.({});
+      }),
+    );
+  }
+
+  private onAppChanged(data: AppChangedEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object") return;
+    const appId = typeof data.appId === "string" ? data.appId : "";
+    if (!appId) {
+      this.syncApps.run();
+      return;
+    }
+    const index = this.apps.findIndex((app) => app.id === appId);
+    if (index < 0) {
+      // A new application (deployed from another session).
+      this.syncApps.run();
+      return;
+    }
+    const current = this.apps[index];
+    if (!current) {
+      this.syncApps.run();
+      return;
+    }
+    const containers = normalizeContainers(data.containers) ?? current.containers;
+    this.apps[index] = {
+      ...current,
+      status: normalizeStatus(data.status, current.status),
+      containers,
+      updatedAt: Date.now(),
+    };
+    const scrollTop = this.contentEl?.scrollTop ?? 0;
+    this.renderApps(this.dockerUsable());
+    this.renderContainers(this.dockerUsable());
+    if (this.contentEl) this.contentEl.scrollTop = scrollTop;
+    this.detailChangedHook?.(data);
+  }
+
+  private onDockerChanged(data: DockerChangedEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object") return;
+    const enabled = typeof data.enabled === "boolean" ? data.enabled : this.docker?.enabled ?? true;
+    const available = typeof data.available === "boolean" ? data.available : this.docker?.available ?? false;
+    this.docker = {
+      enabled,
+      available,
+      version: typeof data.version === "string" ? data.version : this.docker?.version,
+      reason: typeof data.reason === "string" ? data.reason : available ? "" : this.docker?.reason,
+    };
+    this.dockerError = null;
+    this.render();
+    this.syncContainers.run();
+  }
+
+  private onAppJobEvent(kind: string, data: AppJobEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object") return;
+    const jobKind = typeof data.kind === "string" ? data.kind : "";
+    if (!jobKind.startsWith("app")) return;
+    if (kind === "job.failed") {
+      this.notice.show(`Application job failed: ${data.error ?? "unknown error"}`, { kind: "error" });
+    }
+    this.syncApps.run();
+    this.syncContainers.run();
+  }
+
+  /** Reconcile the list after an event that we cannot apply in place. */
+  private async reloadAfterEvent(): Promise<void> {
+    if (this.disposed) return;
+    await Promise.all([this.loadApps(), this.loadDockerStatus()]);
+  }
 
   async start(): Promise<void> {
     this.ctx.setTitle("Applications");
     await this.refreshAll();
-  }
-
-  private scheduleRefresh(): void {
-    if (this.disposed || this.refreshTimer) return;
-    this.refreshTimer = this.lc.setTimeout(() => {
-      this.refreshTimer = 0;
-      void this.refreshAll(true);
-    }, 1500);
   }
 
   private async refreshAll(silent = false): Promise<void> {
@@ -255,6 +372,7 @@ class ApplicationsApp {
 
   private render(): void {
     if (this.disposed) return;
+    const scrollTop = this.contentEl?.scrollTop ?? 0;
     const usable = this.dockerUsable();
     this.statusBadge.className = `badge app-docker-badge ${usable ? "ok" : this.docker?.enabled === false ? "" : "warn"}`;
     this.statusBadge.textContent = !this.docker
@@ -271,6 +389,7 @@ class ApplicationsApp {
     this.renderBanners(usable);
     this.renderApps(usable);
     this.renderContainers(usable);
+    if (this.contentEl) this.contentEl.scrollTop = scrollTop;
   }
 
   private renderBanners(usable: boolean): void {
@@ -775,11 +894,10 @@ class ApplicationsApp {
     const summary = this.findApp(appId);
     if (!summary) return;
     const localCleanups: Array<() => void> = [];
+    let closed = false;
     let tab: DetailTab = "overview";
     let logsTail = 200;
-    let autoRefresh = true;
     let detail: AppDetail = { ...summary };
-    let logsController: AbortController | null = null;
     let detailController: AbortController | null = null;
     let historyLoaded = false;
 
@@ -787,16 +905,8 @@ class ApplicationsApp {
     const overviewHost = h("div", { class: "appmgmt-tab-body" });
     const logsHost = h("div", { class: "appmgmt-tab-body" });
     const historyHost = h("div", { class: "appmgmt-tab-body" });
-    const tabs: Array<{ id: DetailTab; label: string }> = [
-      { id: "overview", label: "Overview" },
-      { id: "logs", label: "Logs" },
-      { id: "history", label: "History" },
-    ];
     const tabBar = h("div", { class: "tabs appmgmt-detail-tabs" });
     const actionRow = h("div", { class: "appmgmt-detail-actions" });
-    const refreshButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("refresh", 13), document.createTextNode("Refresh"));
-    refreshButton.addEventListener("click", () => void refreshDetail());
-    actionRow.append(refreshButton);
     const actionButton = (icon: string, label: string, variant: "ghost" | "danger", onClick: () => void) => {
       const btn = h("button", { class: `btn btn-${variant} btn-sm`, type: "button" }, iconSvg(icon, 13), document.createTextNode(label));
       btn.addEventListener("click", onClick);
@@ -823,7 +933,220 @@ class ApplicationsApp {
       historyHost,
     );
 
-    const setTab = (next: DetailTab) => {
+    // Connection badge for this window (same semantics as the toolbar badge).
+    const detailLiveDot = h("span", { class: "live-dot" });
+    const detailLiveLabel = h("span", { class: "live-label" });
+    const detailLive = h(
+      "span",
+      { class: "live-badge", role: "status", ariaLive: "polite", title: "Realtime update status" },
+      detailLiveDot,
+      detailLiveLabel,
+    );
+    const renderDetailLive = (state: ConnectionState): void => {
+      detailLive.dataset.state = state;
+      detailLiveLabel.textContent =
+        state === "connected" ? "Live" : state === "offline" ? "Offline" : state === "connecting" ? "Connecting…" : "Reconnecting…";
+    };
+    localCleanups.push(this.realtime.onStatus(renderDetailLive));
+    renderDetailLive(this.realtime.status);
+
+    const detailSync = debounceTask(() => void refreshDetail(), 350);
+    localCleanups.push(() => detailSync.cancel());
+
+    // ------------------------------------------------------- logs streaming
+    const LOG_BUFFER_MAX_LINES = 500;
+    const LOG_BUFFER_MAX_CHARS = 500_000;
+    const logBuffer: LogLine[] = [];
+    let logBufferChars = 0;
+    let logStream: EventSource | null = null;
+    let logAttempts = 0;
+    let logRetryTimer = 0;
+    let logWatchdog = 0;
+    let logUi: LogStreamUi | null = null;
+    let logState: "idle" | "connecting" | "live" | "reconnecting" | "unavailable" = "idle";
+    let logsVisible = false;
+
+    const formatLine = (line: LogLine): string =>
+      `${formatTime(line.ts)} ${String(line.stream || "out").slice(0, 5).padEnd(5)} ${line.message}`;
+
+    const renderLogStatus = (): void => {
+      if (!logUi) return;
+      const labels: Record<typeof logState, string> = {
+        idle: "Idle",
+        connecting: "Connecting…",
+        live: "Live",
+        reconnecting: "Reconnecting…",
+        unavailable: "Unavailable",
+      };
+      logUi.status.dataset.state = logState;
+      logUi.status.textContent = labels[logState];
+      logUi.reconnect.classList.toggle("hidden", logState === "live" || logState === "connecting");
+    };
+
+    const renderLogs = (): void => {
+      if (!logUi) return;
+      const pre = logUi.pre;
+      const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 6;
+      pre.textContent = logBuffer.length > 0 ? logBuffer.map(formatLine).join("\n") : "(no log output yet)";
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+      renderLogStatus();
+    };
+
+    const appendLogs = (lines: LogLine[], reset: boolean): void => {
+      if (reset) {
+        logBuffer.length = 0;
+        logBufferChars = 0;
+      }
+      for (const line of lines) {
+        if (!line || typeof line !== "object") continue;
+        const message = typeof line.message === "string" ? line.message : "";
+        logBuffer.push({
+          ts: typeof line.ts === "number" ? line.ts : 0,
+          stream: typeof line.stream === "string" ? line.stream : "stdout",
+          message,
+        });
+        logBufferChars += message.length + 24;
+      }
+      while (logBuffer.length > LOG_BUFFER_MAX_LINES) {
+        const dropped = logBuffer.shift();
+        logBufferChars -= (dropped?.message.length ?? 0) + 24;
+      }
+      while (logBufferChars > LOG_BUFFER_MAX_CHARS && logBuffer.length > 1) {
+        const dropped = logBuffer.shift();
+        logBufferChars -= (dropped?.message.length ?? 0) + 24;
+      }
+      if (logBufferChars < 0) logBufferChars = 0;
+      renderLogs();
+    };
+
+    const stopLogStream = (): void => {
+      if (logStream) {
+        logStream.close();
+        logStream = null;
+      }
+      if (logRetryTimer) {
+        this.lc.clearTimeout(logRetryTimer);
+        logRetryTimer = 0;
+      }
+      if (logWatchdog) {
+        this.lc.clearTimeout(logWatchdog);
+        logWatchdog = 0;
+      }
+    };
+
+    const scheduleLogRetry = (): void => {
+      logAttempts += 1;
+      if (logAttempts > 3) {
+        logState = "unavailable";
+        renderLogStatus();
+        return;
+      }
+      logState = "reconnecting";
+      renderLogStatus();
+      const delay = Math.min(8000, 800 * 2 ** (logAttempts - 1));
+      logRetryTimer = this.lc.setTimeout(() => {
+        logRetryTimer = 0;
+        connectLogStream();
+      }, delay);
+    };
+
+    const connectLogStream = (): void => {
+      if (closed || this.disposed || !logsVisible) return;
+      stopLogStream();
+      logState = "connecting";
+      renderLogStatus();
+      const url = `/api/apps/${encodeURIComponent(detail.id)}/logs/stream?tail=${logsTail}`;
+      let source: EventSource;
+      try {
+        source = new EventSource(url, { withCredentials: true });
+      } catch {
+        logState = "unavailable";
+        renderLogStatus();
+        return;
+      }
+      logStream = source;
+      let opened = false;
+      source.addEventListener("open", () => {
+        if (logStream !== source) return;
+        opened = true;
+        logAttempts = 0;
+        logState = "live";
+        renderLogStatus();
+      });
+      source.addEventListener("app.logs", ((event: MessageEvent<string>) => {
+        if (logStream !== source) return;
+        let payload: AppLogsEvent | null = null;
+        try {
+          payload = JSON.parse(event.data) as AppLogsEvent;
+        } catch {
+          payload = null;
+        }
+        if (!payload || typeof payload !== "object") return;
+        if (typeof payload.appId === "string" && payload.appId !== detail.id) return;
+        logAttempts = 0;
+        logState = "live";
+        const lines = Array.isArray(payload.lines) ? payload.lines : [];
+        appendLogs(lines, payload.reset === true);
+      }) as EventListener);
+      source.addEventListener("error", () => {
+        if (logStream !== source) return;
+        if (source.readyState === EventSource.CLOSED) {
+          stopLogStream();
+          scheduleLogRetry();
+        } else {
+          logState = "reconnecting";
+          renderLogStatus();
+        }
+      });
+      logWatchdog = this.lc.setTimeout(() => {
+        logWatchdog = 0;
+        if (!opened && logStream === source) {
+          stopLogStream();
+          scheduleLogRetry();
+        }
+      }, 6000);
+    };
+
+    const buildLogsUi = (): void => {
+      clear(logsHost);
+      const controls = h("div", { class: "appmgmt-log-controls row wrap" });
+      const tailSelect = h("select", { class: "select appmgmt-tail-select", ariaLabel: "Log tail length" });
+      for (const size of TAIL_OPTIONS) {
+        const option = h("option", { value: String(size) }, `${size} lines`);
+        if (size === logsTail) option.selected = true;
+        tailSelect.appendChild(option);
+      }
+      tailSelect.addEventListener("change", () => {
+        logsTail = Number(tailSelect.value) || 200;
+        logAttempts = 0;
+        if (logsVisible) connectLogStream();
+      });
+      const status = h("span", { class: "live-badge app-log-live", role: "status", ariaLive: "polite" }, h("span", { class: "live-dot" }), h("span", { class: "live-label" }, "Connecting…"));
+      const reconnect = h("button", { class: "btn btn-ghost btn-sm hidden", type: "button" }, "Reconnect");
+      reconnect.addEventListener("click", () => {
+        logAttempts = 0;
+        connectLogStream();
+      });
+      const download = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("download", 13), document.createTextNode("Download logs"));
+      const pre = h("pre", { class: "appmgmt-logs mono", ariaLabel: "Application log stream" });
+      download.addEventListener("click", () => {
+        const blob = new Blob([pre.textContent ?? ""], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = `${detail.slug || "application"}-logs.txt`;
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 4000);
+      });
+      const bufferHint = h("span", { class: "small muted app-log-buffer" }, "Live stream · last 500 lines kept");
+      controls.append(tailSelect, status, reconnect, download, bufferHint);
+      logsHost.append(controls, pre);
+      logUi = { pre, status, reconnect };
+      renderLogs();
+    };
+
+    // --------------------------------------------------------------- tabs
+    const setTab = (next: DetailTab): void => {
       tab = next;
       for (const button of Array.from(tabBar.children)) {
         const el = button as HTMLElement;
@@ -832,26 +1155,38 @@ class ApplicationsApp {
       overviewHost.classList.toggle("hidden", next !== "overview");
       logsHost.classList.toggle("hidden", next !== "logs");
       historyHost.classList.toggle("hidden", next !== "history");
-      if (next === "logs") void loadLogs();
+      logsVisible = next === "logs";
+      if (next === "logs") {
+        if (!logUi) buildLogsUi();
+        connectLogStream();
+      } else {
+        stopLogStream();
+      }
       if (next === "history") void loadHistory();
     };
+    const tabs: Array<{ id: DetailTab; label: string }> = [
+      { id: "overview", label: "Overview" },
+      { id: "logs", label: "Logs" },
+      { id: "history", label: "History" },
+    ];
     for (const entry of tabs) {
       const btn = h("button", { class: `tab${entry.id === tab ? " is-active" : ""}`, type: "button", dataset: { tab: entry.id } }, entry.label);
       btn.addEventListener("click", () => setTab(entry.id));
       tabBar.appendChild(btn);
     }
 
-    const renderStatus = () => {
+    const renderStatus = (): void => {
       clear(statusLine);
       statusLine.append(
         h("span", { class: `badge ${statusClass(detail.status)}` }, statusLabel(detail.status)),
         h("span", { class: "mono small muted" }, detail.slug),
         h("span", { class: "small muted" }, `Updated ${relativeTime(detail.updatedAt)}`),
+        detailLive,
       );
       if (detail.lastError) statusLine.appendChild(h("span", { class: "badge error" }, "last error"));
     };
 
-    const renderOverview = () => {
+    const renderOverview = (): void => {
       clear(overviewHost);
       if (detail.lastError) {
         overviewHost.appendChild(banner("error", "Last deployment error", detail.lastError));
@@ -961,78 +1296,16 @@ class ApplicationsApp {
       }
     };
 
-    const loadLogs = async (): Promise<void> => {
-      logsController?.abort();
-      logsController = this.lc.trackController(new AbortController());
-      const request = logsController;
-      clear(logsHost);
-      const controls = h("div", { class: "appmgmt-log-controls row wrap" });
-      const tailSelect = h("select", { class: "select appmgmt-tail-select", ariaLabel: "Log tail length" });
-      for (const size of TAIL_OPTIONS) {
-        const option = h("option", { value: String(size) }, `${size} lines`);
-        if (size === logsTail) option.selected = true;
-        tailSelect.appendChild(option);
-      }
-      tailSelect.addEventListener("change", () => {
-        logsTail = Number(tailSelect.value) || 200;
-        void loadLogs();
-      });
-      const autoLabel = h("label", { class: "checkbox small" });
-      const autoBox = h("input", { type: "checkbox" });
-      autoBox.checked = autoRefresh;
-      autoBox.addEventListener("change", () => {
-        autoRefresh = autoBox.checked;
-      });
-      autoLabel.append(autoBox, h("span", {}, "Auto-refresh (5 s)"));
-      const download = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("download", 13), document.createTextNode("Download logs"));
-      const pre = h("pre", { class: "appmgmt-logs mono" });
-      pre.textContent = "Loading logs…";
-      download.addEventListener("click", () => {
-        const blob = new Blob([pre.textContent ?? ""], { type: "text/plain;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = url;
-        anchor.download = `${detail.slug || "application"}-logs.txt`;
-        anchor.click();
-        window.setTimeout(() => URL.revokeObjectURL(url), 4000);
-      });
-      controls.append(tailSelect, autoLabel, download);
-      logsHost.append(controls, pre);
-      try {
-        const payload = await this.ctx.api.get<LogsResponse>(
-          `/api/apps/${encodeURIComponent(detail.id)}/logs`,
-          { tail: logsTail },
-          { signal: request.signal },
-        );
-        if (request.signal.aborted) return;
-        const lines = Array.isArray(payload?.lines) ? payload.lines : [];
-        pre.textContent =
-          lines.length > 0
-            ? lines
-                .map((line) => `${formatTime(line.ts)} ${String(line.stream || "out").slice(0, 5).padEnd(5)} ${line.message}`)
-                .join("\n")
-            : "(no log output)";
-        pre.scrollTop = pre.scrollHeight;
-      } catch (error) {
-        if (isAbortError(error) || request.signal.aborted) return;
-        pre.textContent = isUnavailableError(error)
-          ? `Application logs are not available: ${unavailableReason(error)}`
-          : `Could not load logs: ${errorMessage(error)}`;
-      } finally {
-        this.lc.releaseController(request);
-      }
-    };
-
     const loadHistory = async (): Promise<void> => {
-      if (historyLoaded) return;
-      historyLoaded = true;
       clear(historyHost);
       historyHost.appendChild(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading deployment history…"));
       try {
         const payload = await this.ctx.api.get<HistoryResponse | DeploymentRecord[]>(
           `/api/apps/${encodeURIComponent(detail.id)}/history`,
         );
+        if (closed) return;
         const records = listOf<DeploymentRecord>(payload, "history");
+        historyLoaded = true;
         clear(historyHost);
         if (records.length === 0) {
           historyHost.appendChild(h("div", { class: "small muted" }, "No deployments recorded yet."));
@@ -1062,13 +1335,11 @@ class ApplicationsApp {
         }
         historyHost.appendChild(timeline);
       } catch (error) {
+        if (closed) return;
         clear(historyHost);
         renderLoadFailure(historyHost, error, {
           title: "Could not load deployment history",
-          retry: () => {
-            historyLoaded = false;
-            void loadHistory();
-          },
+          retry: () => void loadHistory(),
         });
       }
     };
@@ -1081,14 +1352,14 @@ class ApplicationsApp {
         const fresh = await this.ctx.api.get<AppDetail>(`/api/apps/${encodeURIComponent(appId)}`, undefined, {
           signal: request.signal,
         });
-        if (request.signal.aborted) return;
+        if (request.signal.aborted || closed) return;
         detail = { ...detail, ...fresh };
       } catch (error) {
-        if (isAbortError(error) || request.signal.aborted) return;
+        if (isAbortError(error) || request.signal.aborted || closed) return;
         if (isUnavailableError(error)) {
           statusLine.appendChild(h("span", { class: "badge warn" }, unavailableReason(error)));
-          return;
         }
+        return;
       } finally {
         this.lc.releaseController(request);
       }
@@ -1096,25 +1367,44 @@ class ApplicationsApp {
       if (tab === "overview") renderOverview();
     };
 
+    // Live updates while the modal is open.
+    const offChanged = this.realtime.on<AppChangedEvent>("app.changed", (data) => {
+      if (!data || (data.appId && data.appId !== appId)) return;
+      if (typeof data.status === "string") detail.status = normalizeStatus(data.status, detail.status);
+      const containers = normalizeContainers(data.containers);
+      if (containers) detail.containers = containers;
+      detail.updatedAt = Date.now();
+      renderStatus();
+      if (tab === "overview") renderOverview();
+      if (tab === "history") {
+        historyLoaded = false;
+        void loadHistory();
+      }
+      detailSync.run();
+    });
+    localCleanups.push(offChanged);
+    const offResync = this.realtime.onResync(() => {
+      detailSync.run();
+      if (tab === "history") {
+        historyLoaded = false;
+        void loadHistory();
+      }
+      if (tab === "logs") {
+        logAttempts = 0;
+        connectLogStream();
+      }
+    });
+    localCleanups.push(offResync);
+
     renderStatus();
     renderOverview();
-
-    const interval = window.setInterval(() => {
-      if (document.visibilityState === "hidden") return;
-      void refreshDetail();
-      if (tab === "logs" && autoRefresh) void loadLogs();
-    }, 5000);
-    localCleanups.push(() => window.clearInterval(interval));
-    const unsub = this.ctx.events.on("app.status", () => {
-      if (detail.id) void refreshDetail();
-    });
-    localCleanups.push(unsub);
 
     const close = modal({
       title: `Application — ${detail.name || detail.slug}`,
       body,
       wide: true,
       onClose: () => {
+        closed = true;
         for (const cleanup of localCleanups) {
           try {
             cleanup();
@@ -1123,11 +1413,28 @@ class ApplicationsApp {
           }
         }
         localCleanups.length = 0;
-        logsController?.abort();
+        stopLogStream();
         detailController?.abort();
+        if (this.detailChangedHook) this.detailChangedHook = null;
       },
     });
     this.lc.add(close);
+
+    // Expose partial updates to the list subscriber (single active modal).
+    this.detailChangedHook = (data) => {
+      if (data.appId && data.appId !== appId) return;
+      if (typeof data.status === "string") detail.status = normalizeStatus(data.status, detail.status);
+      const containers = normalizeContainers(data.containers);
+      if (containers) detail.containers = containers;
+      detail.updatedAt = Date.now();
+      renderStatus();
+      if (tab === "overview") renderOverview();
+      detailSync.run();
+    };
+
+    // Load history lazily when the user opens the tab, but preload quietly so
+    // a deployment event can refresh it in the background.
+    void historyLoaded;
     setTab("overview");
   }
 
@@ -1278,6 +1585,37 @@ function publishedPorts(app: { ports?: unknown; containers?: Array<{ ports?: unk
     }
   }
   return out;
+}
+
+function normalizeContainers(value: unknown): ManagedApp["containers"] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: NonNullable<ManagedApp["containers"]> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    if (typeof record.name !== "string") continue;
+    out.push({
+      name: record.name,
+      state: typeof record.state === "string" ? record.state : "",
+      image: typeof record.image === "string" ? record.image : "",
+      ports: Array.isArray(record.ports) ? portLabels(record.ports) : undefined,
+    });
+  }
+  return out;
+}
+
+function normalizeStatus(value: unknown, fallback: ManagedApp["status"]): ManagedApp["status"] {
+  switch (value) {
+    case "running":
+    case "stopped":
+    case "partial":
+    case "error":
+    case "deploying":
+    case "unknown":
+      return value;
+    default:
+      return fallback;
+  }
 }
 
 function statusLabel(status: string): string {

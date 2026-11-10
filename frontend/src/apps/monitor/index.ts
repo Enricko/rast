@@ -19,13 +19,21 @@ import type {
   MonitorSnapshot,
 } from "../../core/types";
 import { sparkline } from "../../core/ui";
+import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
+import { createLiveIndicator, type LiveIndicator } from "../../components/live";
 import { banner, renderLoadFailure } from "../../components/states";
 
 const SERIES_POINTS = 60;
 const MIN_RENDER_GAP_MS = 1000;
-const FALLBACK_POLL_MS = 5000;
-const HISTORY_REFRESH_MS = 60_000;
+
+/** `docker.changed` payload (docs/REALTIME.md). */
+interface DockerChangedEvent {
+  enabled?: boolean;
+  available?: boolean;
+  version?: string | null;
+  reason?: string | null;
+}
 
 interface MetricCard {
   el: HTMLElement;
@@ -56,7 +64,9 @@ class MonitorApp {
   private readonly ticker: HTMLElement;
   private readonly staleBadge: HTMLElement;
   private readonly pauseButton: HTMLButtonElement;
-  private readonly refreshButton: HTMLButtonElement;
+  private readonly realtime: RealtimeStore;
+  private readonly liveIndicator: LiveIndicator;
+  private readonly syncSnapshot: { run: () => void; cancel: () => void };
 
   private lastGood: MonitorSnapshot | null = null;
   private latestReceivedAt = 0;
@@ -71,7 +81,6 @@ class MonitorApp {
   private fallbackContainers: ContainerMetric[] | null = null;
   private fallbackComponents: ComponentHealth[] | null = null;
   private fallbackFetched = false;
-  private historyRequested = false;
   private disposed = false;
 
   private readonly series: MonitorSeries = { cpu: [], memory: [], swap: [], rx: [], tx: [] };
@@ -86,18 +95,20 @@ class MonitorApp {
   constructor(ctx: AppContext) {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
+    this.realtime = getRealtime(ctx.events);
+    this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
+    this.syncSnapshot = debounceTask(() => void this.refreshSnapshot(), 250);
+    this.lc.add(() => this.syncSnapshot.cancel());
 
     this.ticker = h("span", { class: "mon-ticker small muted", role: "status", ariaLive: "polite" }, "Waiting for first sample…");
     this.staleBadge = h("span", { class: "badge mon-stale hidden" }, "stale");
     this.pauseButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("stop", 13), document.createTextNode("Pause"));
     this.pauseButton.addEventListener("click", () => this.togglePause());
-    this.refreshButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("refresh", 13), document.createTextNode("Refresh"));
-    this.refreshButton.addEventListener("click", () => void this.refreshSnapshot());
     const toolbar = h(
       "div",
       { class: "app-toolbar mon-toolbar", role: "toolbar", ariaLabel: "Monitor controls" },
       this.pauseButton,
-      this.refreshButton,
+      this.liveIndicator.el,
       h("div", { class: "app-toolbar-spacer" }),
       this.staleBadge,
       this.ticker,
@@ -133,19 +144,33 @@ class MonitorApp {
     this.ctx.setTitle("Resource Monitor");
     this.buildLayout();
     this.subscribe();
-    this.startTimers();
+    this.lc.setInterval(() => this.tick(), 1000);
     await this.refreshSnapshot();
     void this.loadAllHistory();
+    void this.loadFallbackData();
   }
 
   // ------------------------------------------------------------- data flow
 
   private subscribe(): void {
     this.unsubMonitor?.();
-    this.unsubMonitor = this.ctx.events.onMonitor((event) => {
+    this.unsubMonitor = this.realtime.on<MonitorSnapshot>("monitor", (snapshot) => {
       if (this.paused || this.disposed) return;
-      this.onSample(event.data);
+      this.onSample(snapshot);
     });
+    this.lc.add(
+      this.realtime.on<DockerChangedEvent>("docker.changed", (data) => {
+        if (this.disposed || !data || typeof data !== "object") return;
+        if (!this.paused) this.syncSnapshot.run();
+      }),
+    );
+    this.lc.add(
+      this.realtime.onResync(() => {
+        if (this.disposed || this.paused) return;
+        void this.refreshSnapshot();
+        void this.loadAllHistory();
+      }),
+    );
   }
 
   private onSample(raw: unknown): void {
@@ -189,8 +214,6 @@ class MonitorApp {
   }
 
   private async loadAllHistory(): Promise<void> {
-    if (this.historyRequested) return;
-    this.historyRequested = true;
     await Promise.all([this.loadHistory("cpu"), this.loadHistory("memory"), this.loadNetworkHistory()]);
   }
 
@@ -265,26 +288,11 @@ class MonitorApp {
 
   // --------------------------------------------------------------- timers
 
-  private startTimers(): void {
-    this.lc.setInterval(() => this.tick(), 1000);
-    this.lc.setInterval(() => {
-      if (this.paused || this.disposed) return;
-      if (this.isStale()) void this.refreshSnapshot();
-    }, FALLBACK_POLL_MS);
-    this.lc.setInterval(() => {
-      if (this.paused || this.disposed) return;
-      void this.loadHistory("cpu");
-      void this.loadHistory("memory");
-      void this.loadNetworkHistory();
-    }, HISTORY_REFRESH_MS);
-  }
-
   private tick(): void {
     if (this.disposed) return;
     this.renderTicker();
     if (this.paused) return;
     if (!this.layoutBuilt && this.lastGood) this.buildLayout();
-    if (this.fallbackFetched === false) void this.loadFallbackData();
   }
 
   private isStale(): boolean {
@@ -302,11 +310,8 @@ class MonitorApp {
     this.pauseButton.appendChild(document.createTextNode(this.paused ? "Resume" : "Pause"));
     this.staleBadge.classList.add("hidden");
     if (this.paused) {
-      this.unsubMonitor?.();
-      this.unsubMonitor = null;
       this.ticker.textContent = "Updates paused";
     } else {
-      this.subscribe();
       void this.refreshSnapshot();
       this.scheduleRender();
     }
@@ -451,7 +456,7 @@ class MonitorApp {
         ),
       );
     }
-    if (!this.paused && !this.ctx.events.isConnected() && this.latestReceivedAt > 0) {
+    if (!this.paused && !this.ctx.events.isConnected && this.latestReceivedAt > 0) {
       this.bannerHost.appendChild(
         banner("info", "Live connection interrupted", "The event stream is reconnecting; a polling fallback runs every 5 seconds."),
       );

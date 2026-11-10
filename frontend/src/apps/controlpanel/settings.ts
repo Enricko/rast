@@ -2,7 +2,8 @@
 // configuration that comes from the server config file/environment.
 
 import { apiErrorMessage } from "../../core/api";
-import { card, iconButton } from "../../core/components";
+import { card } from "../../core/components";
+import { getRealtime } from "../../core/realtime";
 import { h } from "../../core/dom";
 import {
   bytesToGib,
@@ -40,15 +41,13 @@ function formatConfigValue(key: string, value: unknown): string {
   return String(value);
 }
 
-export async function renderSettingsTab(tab: TabRenderContext): Promise<void> {
+export async function renderSettingsTab(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
-  const settings = await ctx.api.get<Settings>("/api/settings");
+  let settings = await ctx.api.get<Settings>("/api/settings");
   host.replaceChildren();
   actions.replaceChildren();
-
-  actions.appendChild(
-    iconButton("refresh", "Reload settings", () => void renderSettingsTab(tab), { title: "Reload settings" }),
-  );
+  const realtime = getRealtime(ctx.events);
+  let saving = false;
 
   const intro = pageIntro(
     "Server preferences",
@@ -179,6 +178,7 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<void> {
       invalid = true;
     }
     if (invalid) return;
+    saving = true;
     void withButtonBusy(saveButton, "Saving…", async () => {
       try {
         const updated = await ctx.api.patch<Settings>("/api/settings", {
@@ -205,14 +205,76 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<void> {
       } catch (error) {
         alert.hidden = false;
         alert.textContent = apiErrorMessage(error);
+      } finally {
+        saving = false;
       }
     });
   });
+
+  const conflictHost = h("div", { class: "cp-conflict", hidden: true });
+
+  /** Replace the form baseline with the latest server copy. */
+  function adoptServerSettings(fresh: Settings): void {
+    settings = fresh;
+    snapshot = {
+      siteName: fresh.siteName,
+      loginMessage: fresh.loginMessage,
+      auditRetentionDays: fresh.auditRetentionDays,
+      trashRetentionDays: fresh.trashRetentionDays,
+      defaultQuotaBytes: fresh.defaultQuotaBytes,
+    };
+    siteName.value = fresh.siteName;
+    loginMessage.value = fresh.loginMessage;
+    auditDays.value = String(fresh.auditRetentionDays);
+    trashDays.value = String(fresh.trashRetentionDays);
+    defaultQuota.value = String(bytesToGib(fresh.defaultQuotaBytes));
+    ctx.store.patch({ siteName: fresh.siteName, loginMessage: fresh.loginMessage });
+    conflictHost.hidden = true;
+    alert.hidden = true;
+    refreshDirty();
+  }
+
+  function showConflict(): void {
+    conflictHost.hidden = false;
+    conflictHost.replaceChildren(
+      h(
+        "div",
+        { class: "banner banner-warn", role: "status" },
+        h("span", { class: "banner-icon" }, iconSvg("warning", 16)),
+        h(
+          "div",
+          { class: "banner-body" },
+          h("div", { class: "banner-title" }, "Server settings changed in another session"),
+          h(
+            "div",
+            { class: "banner-message" },
+            "Your unsaved edits were kept. Reload to review the latest saved values, or save to overwrite them.",
+          ),
+          h(
+            "button",
+            { class: "btn btn-sm", type: "button", onClick: () => void reloadFromServer() },
+            "Reload",
+          ),
+        ),
+      ),
+    );
+  }
+
+  async function reloadFromServer(): Promise<void> {
+    try {
+      const fresh = await ctx.api.get<Settings>("/api/settings");
+      adoptServerSettings(fresh);
+      ctx.toast.success("Settings reloaded from the server");
+    } catch (error) {
+      ctx.toast.error(apiErrorMessage(error));
+    }
+  }
 
   const formCard = card({
     title: "Preferences",
     subtitle: "Changes apply immediately to all users",
     children: [
+      conflictHost,
       siteNameField.el,
       loginMessageField.el,
       h(
@@ -274,4 +336,28 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<void> {
 
   host.append(intro, h("div", { class: "cp-grid" }, formCard, readOnlyCard));
   scrollToSection(host, tab.section);
+
+  const unsubscribe = realtime.on<{ keys?: string[] }>("settings.changed", (data) => {
+    if (saving) return;
+    const keys = Array.isArray(data?.keys) ? data.keys : [];
+    const relevant = ["siteName", "loginMessage", "auditRetentionDays", "trashRetentionDays", "defaultQuotaBytes"];
+    if (keys.length > 0 && !keys.some((key) => relevant.includes(key))) return;
+    void (async () => {
+      try {
+        const fresh = await ctx.api.get<Settings>("/api/settings");
+        if (saving) return;
+        if (isDirty()) showConflict();
+        else adoptServerSettings(fresh);
+      } catch {
+        /* the tab keeps its current values; a manual reload is still possible */
+      }
+    })();
+  });
+  const unsubscribeResync = realtime.onResync(() => {
+    if (!isDirty()) void reloadFromServer();
+  });
+  return () => {
+    unsubscribe();
+    unsubscribeResync();
+  };
 }

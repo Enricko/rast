@@ -2,13 +2,21 @@
 // content and per-user quota usage.
 
 import { apiErrorMessage } from "../../core/api";
-import { card, codeValue, iconButton, usageBar } from "../../core/components";
+import { card, codeValue, usageBar } from "../../core/components";
 import { h } from "../../core/dom";
 import { formatBytes, formatDateTime } from "../../core/format";
+import { debounceTask, getRealtime } from "../../core/realtime";
 import { iconSvg } from "../../core/icons";
 import type { Page, StorageSettings, SystemInfo, User } from "../../core/types";
 import { errorMessage } from "../../core/ui";
-import { pageIntro, quotaCell, scrollToSection, type TabRenderContext } from "./common";
+import {
+  attachTabRealtime,
+  disposeTabRealtime,
+  pageIntro,
+  quotaCell,
+  scrollToSection,
+  type TabRenderContext,
+} from "./common";
 
 function diskBar(
   disk: { available: boolean; reason?: string; mountPoint?: string; filesystem?: string; totalBytes?: number; usedBytes?: number; availableBytes?: number },
@@ -40,14 +48,10 @@ function diskBar(
   );
 }
 
-export async function renderStorageTab(tab: TabRenderContext): Promise<void> {
+export async function renderStorageTab(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
   host.replaceChildren();
   actions.replaceChildren();
-
-  actions.appendChild(
-    iconButton("refresh", "Refresh storage data", () => void load(), { title: "Refresh" }),
-  );
 
   const results = await Promise.allSettled([
     ctx.api.get<SystemInfo>("/api/system/info"),
@@ -250,9 +254,38 @@ export async function renderStorageTab(tab: TabRenderContext): Promise<void> {
 
   host.appendChild(grid);
 
-  async function load(): Promise<void> {
-    await renderStorageTab(tab);
+  // Realtime: quota/file/account events change the numbers shown here. Views
+  // refetch in place (debounced); there is no routine Refresh button.
+  attachTabRealtime(host, () => {
+    const realtime = getRealtime(ctx.events);
+    const refresh = debounceTask(() => {
+      void renderStorageTab(tab);
+    }, 1200);
+    const unsubscribers = [
+      realtime.on("file.quota", () => refresh.run()),
+      realtime.on("user.changed", () => refresh.run()),
+      realtime.on("settings.changed", () => refresh.run()),
+      realtime.on<{ action?: string }>("audit.created", (data) => {
+        const action = typeof data?.action === "string" ? data.action : "";
+        if (action.startsWith("file.") || action.startsWith("share.") || action.startsWith("user.")) {
+          refresh.run();
+        }
+      }),
+      realtime.onResync(() => refresh.run()),
+    ];
+    return () => {
+      refresh.cancel();
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+  });
+
+  if (!host.dataset.sectionScrolled) {
+    host.dataset.sectionScrolled = "1";
+    scrollToSection(host, tab.section);
   }
 
-  scrollToSection(host, tab.section);
+  return () => {
+    disposeTabRealtime(host);
+    delete host.dataset.sectionScrolled;
+  };
 }

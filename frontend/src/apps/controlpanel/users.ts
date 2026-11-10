@@ -17,6 +17,7 @@ import {
 } from "../../core/forms";
 import { formatDateTime, relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
+import { debounceTask, getRealtime } from "../../core/realtime";
 import type { Page, SessionInfo, SystemInfo, User, UserSessionList } from "../../core/types";
 import { confirmDialog, contextMenu, modal } from "../../core/ui";
 import { activeBadge, describeUserAgent, lastLoginCell, quotaCell, roleBadge, type TabRenderContext } from "./common";
@@ -24,7 +25,7 @@ import { activeBadge, describeUserAgent, lastLoginCell, quotaCell, roleBadge, ty
 const PER_PAGE_OPTIONS = [10, 25, 50, 100];
 const DEFAULT_PER_PAGE = 25;
 
-export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
+export async function renderUsersTab(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
   const viewer = ctx.store.get().user;
   if (!viewer) throw new Error("not authenticated");
@@ -34,6 +35,8 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
   let query = "";
   let adminCount: number | null = null;
   let loadToken = 0;
+  let openEditUserId: number | null = null;
+  let editConflictHost: HTMLElement | null = null;
 
   host.replaceChildren();
   actions.replaceChildren();
@@ -392,7 +395,13 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
   function openEditModal(user: User): void {
     const isSelf = user.id === viewerId;
     const isLastAdmin = adminCount === 1 && user.role === "admin" && user.active;
-    const displayInput = h("input", { class: "input", type: "text", value: user.displayName, autocomplete: "off" });
+    const displayInput = h("input", {
+      class: "input",
+      type: "text",
+      value: user.displayName,
+      autocomplete: "off",
+      dataset: { editField: "display" },
+    });
     const displayField = formField({ label: "Display name", control: displayInput, required: true });
     const role = h(
       "select",
@@ -426,6 +435,7 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
       min: "0",
       step: "1",
       value: String(bytesToGib(user.quotaBytes)),
+      dataset: { editField: "quota" },
     });
     const quotaField = formField({ label: "Storage quota (GiB)", control: quota, hint: "0 means unlimited." });
     const forceChange = switchControl({
@@ -433,6 +443,30 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
       checked: user.mustChangePassword,
     });
     const alert = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
+    const conflictHost = h(
+      "div",
+      { class: "banner banner-warn", hidden: true, role: "status" },
+      h("span", { class: "banner-icon" }, iconSvg("warning", 16)),
+      h(
+        "div",
+        { class: "banner-body" },
+        h("div", { class: "banner-title" }, "This account changed in another session"),
+        h(
+          "div",
+          { class: "banner-message" },
+          "Reload the fields to review the latest role, status and quota before saving.",
+        ),
+        h(
+          "button",
+          {
+            class: "btn btn-sm",
+            type: "button",
+            onClick: () => void reloadEditedUser(user),
+          },
+          "Reload account",
+        ),
+      ),
+    );
     const warning = (isSelf || isLastAdmin)
       ? h(
           "div",
@@ -454,7 +488,18 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
 
     modal({
       title: `Edit ${user.username}`,
-      body: h("div", { class: "col" }, warning ?? null, displayField.el, roleField.el, activeSwitch.el, quotaField.el, forceChange.el, alert),
+      body: h(
+        "div",
+        { class: "col" },
+        conflictHost,
+        warning ?? null,
+        displayField.el,
+        roleField.el,
+        activeSwitch.el,
+        quotaField.el,
+        forceChange.el,
+        alert,
+      ),
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
         {
@@ -502,8 +547,39 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
           },
         },
       ],
+      onClose: () => {
+        openEditUserId = null;
+        editConflictHost = null;
+      },
     });
+    openEditUserId = user.id;
+    editConflictHost = conflictHost;
     window.setTimeout(() => displayInput.focus(), 40);
+  }
+
+  async function reloadEditedUser(user: User): Promise<void> {
+    try {
+      const response = await ctx.api.get<Page<User>>("/api/users", { page: 1, perPage: 100, q: user.username });
+      const fresh = response.items.find((candidate) => candidate.id === user.id);
+      if (!fresh) {
+        ctx.toast.warning("This account no longer exists.");
+        return;
+      }
+      const dialog = editConflictHost?.closest(".modal");
+      const display = dialog?.querySelector<HTMLInputElement>('[data-edit-field="display"]');
+      const quotaInput = dialog?.querySelector<HTMLInputElement>('[data-edit-field="quota"]');
+      if (display) display.value = fresh.displayName;
+      if (quotaInput) quotaInput.value = String(bytesToGib(fresh.quotaBytes));
+      const roleSelect = dialog?.querySelector<HTMLSelectElement>(".modal-body select");
+      if (roleSelect && !roleSelect.disabled) roleSelect.value = fresh.role;
+      const switches = dialog?.querySelectorAll<HTMLInputElement>(".switch-input");
+      if (switches && switches[0] && !switches[0].disabled) switches[0].checked = fresh.active;
+      if (switches && switches[1]) switches[1].checked = fresh.mustChangePassword;
+      if (editConflictHost) editConflictHost.hidden = true;
+      ctx.toast.success("Account reloaded from the server");
+    } catch (error) {
+      ctx.toast.error(apiErrorMessage(error));
+    }
   }
 
   function openResetPasswordModal(user: User): void {
@@ -660,6 +736,26 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<void> {
     }
   }
 
+  const realtime = getRealtime(ctx.events);
+  const reloadUsers = debounceTask(() => {
+    void refreshAdminCount();
+    void load();
+  }, 350);
+  const unsubscribeUsers = realtime.on<{ userId: number; event: string }>("user.changed", (data) => {
+    reloadUsers.run();
+    if (data && openEditUserId !== null && data.userId === openEditUserId && editConflictHost) {
+      editConflictHost.hidden = false;
+    }
+  });
+  const unsubscribeResync = realtime.onResync(() => reloadUsers.run());
+
   await refreshAdminCount();
   await load();
+
+  return () => {
+    reloadUsers.cancel();
+    unsubscribeUsers();
+    unsubscribeResync();
+    loadToken += 1;
+  };
 }

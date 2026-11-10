@@ -29,6 +29,7 @@ export interface ElementAttrs {
   ariaLive?: string;
   ariaPressed?: boolean;
   ariaSelected?: boolean;
+  ariaChecked?: boolean;
   ariaExpanded?: boolean;
   ariaInvalid?: boolean;
   ariaBusy?: boolean;
@@ -86,6 +87,7 @@ export function applyAttrs(el: HTMLElement, attrs: ElementAttrs): void {
   if (attrs.ariaLive) el.setAttribute("aria-live", attrs.ariaLive);
   if (attrs.ariaPressed !== undefined) el.setAttribute("aria-pressed", String(attrs.ariaPressed));
   if (attrs.ariaSelected !== undefined) el.setAttribute("aria-selected", String(attrs.ariaSelected));
+  if (attrs.ariaChecked !== undefined) el.setAttribute("aria-checked", String(attrs.ariaChecked));
   if (attrs.ariaExpanded !== undefined) el.setAttribute("aria-expanded", String(attrs.ariaExpanded));
   if (attrs.ariaInvalid !== undefined) el.setAttribute("aria-invalid", String(attrs.ariaInvalid));
   if (attrs.ariaBusy !== undefined) el.setAttribute("aria-busy", String(attrs.ariaBusy));

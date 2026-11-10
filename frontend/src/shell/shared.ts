@@ -28,6 +28,11 @@ export interface DesktopOptions {
   restore?: SessionSnapshot | null;
   /** Called after the user signs out (desktop is already disposed). */
   onSignedOut(notice: string): void;
+  /**
+   * The server revoked this session (expired, revoked elsewhere, disabled or
+   * role change). The desktop is already disposed; show the login screen.
+   */
+  onSessionRevoked?(reason: string): void;
 }
 
 export interface AuthOptions {

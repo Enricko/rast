@@ -11,10 +11,13 @@ import {
   DEFAULT_APPEARANCE,
   applyAppearance,
   getAppearanceService,
+  getAppearanceSync,
+  isAppearancePreviewActive,
   type Appearance,
 } from "../core/appearance";
 import { ToastCenter } from "../core/toast";
 import { confirmDialog, contextMenu, type ContextMenuEntry } from "../core/ui";
+import { getRealtime } from "../core/realtime";
 import { WindowManager, type WindowInfo } from "../core/wm";
 import { setFavicon } from "./brand";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
@@ -106,8 +109,34 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
+  const appearanceSync = getAppearanceSync(deps.api, deps.events);
+  let appliedSignature = JSON.stringify(appearance.value);
   applyAppearance(appearance.value);
-  disposers.push(appearance.subscribe((state) => applyAppearance(state)));
+  disposers.push(
+    appearance.subscribe((state) => {
+      // An open editor owns the document while it previews a draft.
+      if (isAppearancePreviewActive()) return;
+      appliedSignature = JSON.stringify(state);
+      applyAppearance(state);
+      setFavicon(state.theme);
+    }),
+  );
+  disposers.push(
+    appearanceSync.onAdopt((state) => {
+      const signature = JSON.stringify(state);
+      const changed = signature !== appliedSignature;
+      appliedSignature = signature;
+      persistedTheme = state.theme;
+      store.setThemePreference(state.theme);
+      // A reconnect/resync can "adopt" an identical snapshot: only announce a
+      // visible change, never toast on every reconnect.
+      if (changed && !isAppearancePreviewActive()) {
+        applyAppearance(state);
+        setFavicon(state.theme);
+        toast.info("Appearance updated from another session");
+      }
+    }),
+  );
   let persistedTheme = store.get().themePreference;
   void appearance
     .load(me.user.id)
@@ -377,6 +406,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     closePanel();
     openPersonalizeDialog({
       api: deps.api,
+      events: deps.events,
+      userId: me.user.id,
       toast,
       restoreTheme: () => store.setThemePreference(appearance.value.theme),
       onApplied: (saved: Appearance) => {
@@ -631,13 +662,14 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
 
   function updateConnectionButton(): void {
     const state = deps.events.status;
-    const label = state === "connected" ? "Connected" : state === "connecting" ? "Connecting" : "Offline";
+    const label = state === "connected" ? "Live" : state === "offline" ? "Offline" : "Reconnecting";
     connectionButton.replaceChildren(iconSvg(state === "connected" ? "wifi" : "wifiOff", 18));
     connectionButton.dataset.state = state;
-    connectionButton.classList.toggle("is-offline", state === "disconnected");
-    connectionButton.classList.toggle("is-connecting", state === "connecting");
+    connectionButton.classList.toggle("is-connected", state === "connected");
+    connectionButton.classList.toggle("is-connecting", state === "connecting" || state === "reconnecting");
+    connectionButton.classList.toggle("is-disconnected", state === "offline");
     connectionButton.setAttribute("aria-label", `Live connection: ${label}`);
-    connectionButton.title = `Live connection: ${label} — click for details`;
+    connectionButton.title = `Live connection: ${label} — click for status and last update`;
   }
 
   function updateTray(): void {
@@ -731,16 +763,15 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }, 30_000);
   disposers.push(() => window.clearInterval(expiryTimer));
 
-  // --------------------------------------------------------- event stream
-  // Connection notices are debounced: a brief disconnect/reconnect (network
-  // blip, sleeping tab) should not spam the notification stack.
+  // --------------------------------------------------------- realtime stream
+  const realtime = getRealtime(deps.events);
   let everConnected = deps.events.status === "connected";
   let warnedDisconnected = false;
   let disconnectTimer: number | undefined;
   updateConnectionButton();
   deps.events.start();
   disposers.push(
-    deps.events.onStatus((state) => {
+    realtime.onStatus((state) => {
       updateConnectionButton();
       if (state === "connected") {
         if (disconnectTimer !== undefined) {
@@ -754,18 +785,81 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         everConnected = true;
         return;
       }
-      if (state !== "disconnected" || !everConnected || warnedDisconnected) return;
+      if (state !== "offline" || !everConnected || warnedDisconnected) return;
       if (disconnectTimer !== undefined) return;
       disconnectTimer = window.setTimeout(() => {
         disconnectTimer = undefined;
         if (deps.events.status === "connected") return;
         warnedDisconnected = true;
-        toast.warning("Live updates disconnected — reconnecting…");
-      }, 5000);
+        toast.warning("Live updates are offline — reconnecting…");
+      }, 6000);
     }),
   );
   disposers.push(() => {
     if (disconnectTimer !== undefined) window.clearTimeout(disconnectTimer);
+  });
+
+  // The server ends revoked/expired sessions with a dedicated event and then
+  // closes the stream: show the login screen with a clear explanation.
+  disposers.push(
+    realtime.on<{ reason?: string }>("session.revoked", (data) => {
+      if (disposed) return;
+      options.onSessionRevoked?.(typeof data?.reason === "string" ? data.reason : "");
+    }),
+  );
+
+  // Background job notifications for the signed-in user, coalesced so a burst
+  // of finished jobs is one toast and progress events never toast.
+  interface JobNoticePayload {
+    id?: string;
+    kind?: string;
+    userId?: number | null;
+    message?: string;
+    error?: string | null;
+  }
+  const jobQueue: Array<{ kind: string; failed: boolean; error: string }> = [];
+  let jobTimer: number | undefined;
+  const jobLabel = (kind: string): string => {
+    const labels: Record<string, string> = {
+      upload: "File upload",
+      copy: "File copy",
+      move: "File move",
+      delete: "File delete",
+      trash: "Recycle bin cleanup",
+      backup: "Backup",
+      deploy: "App deployment",
+      import: "App import",
+      restore: "Restore",
+    };
+    return labels[kind] ?? (kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Background job");
+  };
+  const flushJobs = (): void => {
+    jobTimer = undefined;
+    if (disposed || jobQueue.length === 0) return;
+    const jobs = jobQueue.splice(0);
+    if (jobs.length === 1) {
+      const job = jobs[0]!;
+      if (job.failed) toast.error(`${jobLabel(job.kind)} failed${job.error ? `: ${job.error}` : ""}`);
+      else toast.success(`${jobLabel(job.kind)} finished`);
+      return;
+    }
+    const failed = jobs.filter((job) => job.failed).length;
+    if (failed > 0) toast.warning(`${jobs.length - failed} jobs finished, ${failed} failed`);
+    else toast.success(`${jobs.length} background jobs finished`);
+  };
+  const queueJob = (failed: boolean, data: JobNoticePayload): void => {
+    if (disposed) return;
+    const currentUserId = store.get().user?.id;
+    if (typeof data?.userId === "number" && data.userId !== currentUserId) return;
+    jobQueue.push({ kind: data?.kind ?? "", failed, error: data?.error ?? "" });
+    if (jobQueue.length > 20) jobQueue.shift();
+    if (jobTimer !== undefined) window.clearTimeout(jobTimer);
+    jobTimer = window.setTimeout(flushJobs, 650);
+  };
+  disposers.push(realtime.on<JobNoticePayload>("job.done", (data) => queueJob(false, data)));
+  disposers.push(realtime.on<JobNoticePayload>("job.failed", (data) => queueJob(true, data)));
+  disposers.push(() => {
+    if (jobTimer !== undefined) window.clearTimeout(jobTimer);
   });
 
   // ------------------------------------------------------ global bindings

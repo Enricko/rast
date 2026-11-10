@@ -127,6 +127,29 @@ export function flashSaved(target: HTMLElement, message = "Saved"): void {
   }, 2400);
 }
 
+// ---------------------------------------------------------------------------
+// Realtime helpers for tabs that rebuild their content on events.
+// ---------------------------------------------------------------------------
+
+const TAB_REALTIME = new WeakMap<HTMLElement, () => void>();
+
+/**
+ * Attach live-update subscriptions to a tab. Re-attaching (e.g. after the tab
+ * rebuilds its content) replaces the previous subscriptions so nothing leaks.
+ */
+export function attachTabRealtime(host: HTMLElement, setup: () => () => void): void {
+  const previous = TAB_REALTIME.get(host);
+  previous?.();
+  TAB_REALTIME.set(host, setup());
+}
+
+export function disposeTabRealtime(host: HTMLElement): void {
+  const cleanup = TAB_REALTIME.get(host);
+  if (!cleanup) return;
+  cleanup();
+  TAB_REALTIME.delete(host);
+}
+
 export function scrollToSection(host: HTMLElement, section: string | undefined): void {
   if (!section) return;
   window.setTimeout(() => {

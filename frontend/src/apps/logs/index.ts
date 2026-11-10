@@ -1,19 +1,27 @@
 // Activity Logs: the server's audit trail with server-side filters, pagination,
-// CSV export and auto-refresh. All values come from /api/logs.
+// row details and CSV export — updated live from `audit.created` events.
+//
+// Live behaviour:
+//   * page 1 + matching filters + scrolled to the top  -> prepend the new row
+//   * page 1 + matching filters + scrolled down        -> "new activity" pill
+//   * other page / filters exclude the entry           -> one-click jump pill
+// The routine Refresh button and auto-refresh toggle are gone; `resync` after a
+// reconnect refetches the current page.
 
 import type { AppContext, AppDefinition } from "../../core/app";
 import { apiErrorMessage } from "../../core/api";
-import { badge, iconButton, pager, switchControl, type Pager } from "../../core/components";
+import { badge, pager, type Pager } from "../../core/components";
 import { clear, debounce, h } from "../../core/dom";
-import { endOfDay, formatDateTimeSec, formatDateTime, formatNumberCompact, relativeTime, startOfDay } from "../../core/format";
+import { endOfDay, formatDateTime, formatDateTimeSec, formatNumberCompact, formatTime, relativeTime, startOfDay } from "../../core/format";
 import { iconSvg } from "../../core/icons";
+import { getRealtime } from "../../core/realtime";
 import type { LogEntry, Page } from "../../core/types";
 import { copyText, modal } from "../../core/ui";
 
 const PER_PAGE_OPTIONS = [25, 50, 100];
 const DEFAULT_PER_PAGE = 50;
-const AUTO_REFRESH_MS = 20_000;
 const MAX_ACTIONS = 200;
+const MAX_PENDING = 100;
 
 interface Filters {
   actor: string;
@@ -25,6 +33,8 @@ interface Filters {
 }
 
 const EMPTY_FILTERS: Filters = { actor: "", action: "", result: "", q: "", from: "", to: "" };
+
+type NewActivityReason = "scroll" | "page" | "filters";
 
 export const logsApp: AppDefinition = {
   id: "logs",
@@ -70,6 +80,12 @@ function humanizeAction(action: string): string {
     "app.start": "App started",
     "app.stop": "App stopped",
     "app.delete": "App deleted",
+    "share.create": "Shared folder created",
+    "share.update": "Shared folder updated",
+    "share.delete": "Shared folder deleted",
+    "appearance.update": "Appearance updated",
+    "appearance.wallpaper_upload": "Wallpaper uploaded",
+    "appearance.wallpaper_delete": "Wallpaper deleted",
   };
   if (known[action]) return known[action];
   return action
@@ -87,15 +103,17 @@ function resultBadge(result: string): HTMLElement {
 
 async function mountLogs(ctx: AppContext): Promise<() => void> {
   const isAdmin = ctx.store.isAdmin();
+  const viewerId = ctx.store.get().user?.id ?? null;
   const filters: Filters = { ...EMPTY_FILTERS };
   let page = 1;
   let perPage = DEFAULT_PER_PAGE;
+  let total = 0;
   let loading = false;
   let loadToken = 0;
-  let autoRefresh = false;
-  let timer: number | undefined;
   let disposed = false;
-  let lastLoadedAt: number | null = null;
+  let entries: LogEntry[] = [];
+  let pending: LogEntry[] = [];
+  const seenIds = new Set<number>();
   let actionOptions: string[] = [];
   ctx.setTitle("Activity Logs");
   ctx.root.classList.add("app-logs");
@@ -148,22 +166,8 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
   );
 
   const countLabel = h("div", { class: "small muted logs-count" });
-  const refreshedLabel = h("div", { class: "small faint logs-refreshed" });
-  const autoSwitch = switchControl({
-    label: "Auto-refresh (20s)",
-    checked: false,
-    onChange: (checked) => {
-      autoRefresh = checked;
-      scheduleAutoRefresh();
-    },
-  });
-  const refreshButton = iconButton("refresh", "Refresh activity", () => void load(), { title: "Refresh" });
-  const exportButton = h(
-    "button",
-    { class: "btn btn-sm", type: "button" },
-    iconSvg("download", 15),
-    "Export CSV",
-  );
+  const liveLabel = h("div", { class: "small faint logs-refreshed" });
+  const exportButton = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("download", 15), "Export CSV");
   const perPageSelect = h(
     "select",
     { class: "select select-sm", ariaLabel: "Entries per page" },
@@ -172,14 +176,32 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
   const actionsRow = h(
     "div",
     { class: "logs-actions-bar" },
-    h("div", { class: "row" }, autoSwitch.el, isAdmin ? null : h("span", { class: "badge info" }, "Your activity only")),
+    h("div", { class: "row" }, isAdmin ? null : h("span", { class: "badge info" }, "Your activity only")),
     countLabel,
     h("div", { class: "cp-toolbar-spacer" }),
-    refreshedLabel,
+    liveLabel,
     perPageSelect,
-    refreshButton,
     exportButton,
   );
+
+  // ---------------------------------------------------------- new activity pill
+  const newActivityButton = h("button", { class: "logs-new-indicator", type: "button", hidden: true });
+  let newActivityReason: NewActivityReason = "scroll";
+  newActivityButton.addEventListener("click", () => {
+    hideNewActivity();
+    if (newActivityReason === "page") {
+      page = 1;
+      void load();
+      return;
+    }
+    if (newActivityReason === "filters") {
+      applyFilterInputs(EMPTY_FILTERS);
+      page = 1;
+      void load();
+      return;
+    }
+    flushPending();
+  });
 
   // ------------------------------------------------------------------ table
   const tableBody = h("tbody");
@@ -206,12 +228,14 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
   const tableWrap = h("div", { class: "table-wrap logs-table-wrap" }, table);
   const pagerControl: Pager = pager((nextPage) => {
     page = nextPage;
+    hideNewActivity();
     void load();
   });
   const footer = h("div", { class: "logs-footer" }, pagerControl.el);
   const errorHost = h("div", { class: "logs-error", hidden: true });
 
-  ctx.root.append(filtersRow, actionsRow, errorHost, tableWrap, footer);
+  const indicatorRow = h("div", { class: "logs-live-row" }, newActivityButton);
+  ctx.root.append(filtersRow, actionsRow, errorHost, indicatorRow, tableWrap, footer);
 
   // ------------------------------------------------------------------ data
   async function loadActions(): Promise<void> {
@@ -268,6 +292,7 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
     if (disposed || loading) return;
     const dateError = validateDateRange();
     errorHost.hidden = true;
+    hideNewActivity();
     if (dateError) {
       errorHost.hidden = false;
       errorHost.replaceChildren(
@@ -277,7 +302,6 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
     }
     loading = true;
     const token = ++loadToken;
-    refreshButton.disabled = true;
     if (!silent) renderLoading();
     try {
       const response = await ctx.api.get<Page<LogEntry>>("/api/logs", buildQuery());
@@ -286,24 +310,31 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
       if (page > pageCount && response.total > 0) {
         page = pageCount;
         loading = false;
-        refreshButton.disabled = false;
         void load(silent);
         return;
       }
-      renderRows(response.items);
+      total = response.total;
+      entries = response.items.slice(0, perPage);
+      seenIds.clear();
+      let newestId = 0;
+      for (const entry of entries) {
+        seenIds.add(entry.id);
+        if (entry.id > newestId) newestId = entry.id;
+      }
+      pending = pending.filter((entry) => entry.id > newestId && !seenIds.has(entry.id));
+      renderRows(entries);
+      if (pending.length > 0) showNewActivity(tableWrap.scrollTop > 6 ? "scroll" : "scroll", pending.length);
+      else hideNewActivity();
       pagerControl.update({ page: response.page, totalPages: pageCount, totalItems: response.total });
       countLabel.textContent =
         response.total === 0
           ? "No matching entries"
           : `${formatNumberCompact(response.total)} ${response.total === 1 ? "entry" : "entries"}${activeFilterCount() > 0 ? " matching filters" : ""}`;
-      lastLoadedAt = Date.now();
-      refreshedLabel.textContent = `Updated ${relativeTime(lastLoadedAt)}`;
     } catch (error) {
       if (token !== loadToken || disposed) return;
       renderError(error);
     } finally {
       loading = false;
-      refreshButton.disabled = false;
     }
   }
 
@@ -338,13 +369,45 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
       ),
     );
     countLabel.textContent = "";
-    refreshedLabel.textContent = "";
     pagerControl.update({ page: 1, totalPages: 1, totalItems: 0, label: "—" });
   }
 
-  function renderRows(entries: LogEntry[]): void {
+  function buildLogRow(entry: LogEntry): HTMLTableRowElement {
+    const objectLabel = entry.objectPath || entry.objectId || entry.objectType || "—";
+    const row = h(
+      "tr",
+      {
+        class: "log-row",
+        tabIndex: 0,
+        role: "button",
+        ariaLabel: `${humanizeAction(entry.action)} by ${entry.username || "anonymous"} — ${entry.result} — open details`,
+      },
+      h("td", { class: "col-time mono small", title: formatDateTimeSec(entry.createdAt) }, formatDateTime(entry.createdAt)),
+      h("td", { class: "col-user" }, entry.username || h("span", { class: "muted" }, "anonymous")),
+      h("td", { title: entry.action }, h("span", { class: "log-action" }, humanizeAction(entry.action))),
+      h(
+        "td",
+        { class: "col-object" },
+        h("span", { class: "log-object mono small", title: objectLabel }, objectLabel),
+        entry.objectType ? h("span", { class: "log-object-type small faint" }, entry.objectType) : null,
+      ),
+      h("td", {}, resultBadge(entry.result)),
+      h("td", { class: "col-detail hide-md small muted", title: entry.detail }, entry.detail || "—"),
+      h("td", { class: "col-ip hide-lg mono small" }, entry.ip || "—"),
+    );
+    row.addEventListener("click", () => showDetails(entry));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        showDetails(entry);
+      }
+    });
+    return row;
+  }
+
+  function renderRows(list: LogEntry[]): void {
     tableBody.replaceChildren();
-    if (entries.length === 0) {
+    if (list.length === 0) {
       tableBody.appendChild(
         h(
           "tr",
@@ -360,7 +423,7 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
                 "div",
                 { class: "empty-detail" },
                 activeFilterCount() > 0
-                  ? "Try clearing the filters or widening the date range."
+                  ? "Try clearing the filters or widening the date range. New matching activity appears here automatically."
                   : "Actions such as sign-ins, file operations and settings changes will appear here.",
               ),
               activeFilterCount() > 0
@@ -372,42 +435,107 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
       );
       return;
     }
-    for (const entry of entries) {
-      const objectLabel = entry.objectPath || entry.objectId || entry.objectType || "—";
-      const row = h(
-        "tr",
-        {
-          class: "log-row",
-          tabIndex: 0,
-          role: "button",
-          ariaLabel: `${humanizeAction(entry.action)} by ${entry.username || "anonymous"} — ${entry.result} — open details`,
-        },
-        h("td", { class: "col-time mono small", title: formatDateTimeSec(entry.createdAt) }, formatDateTime(entry.createdAt)),
-        h("td", { class: "col-user" }, entry.username || h("span", { class: "muted" }, "anonymous")),
-        h(
-          "td",
-          { title: entry.action },
-          h("span", { class: "log-action" }, humanizeAction(entry.action)),
-        ),
-        h(
-          "td",
-          { class: "col-object" },
-          h("span", { class: "log-object mono small", title: objectLabel }, objectLabel),
-          entry.objectType ? h("span", { class: "log-object-type small faint" }, entry.objectType) : null,
-        ),
-        h("td", {}, resultBadge(entry.result)),
-        h("td", { class: "col-detail hide-md small muted", title: entry.detail }, entry.detail || "—"),
-        h("td", { class: "col-ip hide-lg mono small" }, entry.ip || "—"),
-      );
-      row.addEventListener("click", () => showDetails(entry));
-      row.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          showDetails(entry);
-        }
-      });
-      tableBody.appendChild(row);
+    const fragment = document.createDocumentFragment();
+    for (const entry of list) fragment.appendChild(buildLogRow(entry));
+    tableBody.appendChild(fragment);
+  }
+
+  // -------------------------------------------------------------- live updates
+  function matchesFilters(entry: LogEntry): boolean {
+    if (!isAdmin && viewerId !== null && entry.userId !== null && entry.userId !== viewerId) return false;
+    if (filters.action && entry.action !== filters.action) return false;
+    if (filters.result && entry.result !== filters.result) return false;
+    if (filters.actor && !entry.username.toLowerCase().includes(filters.actor.toLowerCase())) return false;
+    if (filters.q) {
+      const q = filters.q.toLowerCase();
+      if (!`${entry.objectPath} ${entry.detail}`.toLowerCase().includes(q)) return false;
     }
+    if (filters.from) {
+      const fromTs = startOfDay(new Date(`${filters.from}T00:00:00`).getTime());
+      if (Number.isFinite(fromTs) && entry.createdAt < fromTs) return false;
+    }
+    if (filters.to) {
+      const toTs = endOfDay(new Date(`${filters.to}T00:00:00`).getTime());
+      if (Number.isFinite(toTs) && entry.createdAt > toTs) return false;
+    }
+    return true;
+  }
+
+  function showNewActivity(reason: NewActivityReason, count: number): void {
+    newActivityReason = reason;
+    newActivityButton.hidden = false;
+    const label =
+      reason === "page"
+        ? "New activity — jump to page 1"
+        : reason === "filters"
+          ? "New activity outside these filters — show latest"
+          : `New activity${count > 1 ? ` (${count})` : ""} — show`;
+    newActivityButton.replaceChildren(
+      h("span", { class: "logs-new-dot", ariaHidden: true }),
+      h("span", {}, label),
+    );
+  }
+
+  function hideNewActivity(): void {
+    newActivityButton.hidden = true;
+    newActivityButton.replaceChildren();
+  }
+
+  function flushPending(): void {
+    if (pending.length === 0) return;
+    const buffered = pending.splice(0);
+    for (const entry of buffered) {
+      entries.unshift(entry);
+      seenIds.add(entry.id);
+      total += 1;
+      tableBody.insertBefore(buildLogRow(entry), tableBody.firstChild);
+    }
+    while (entries.length > perPage) {
+      entries.pop();
+      tableBody.lastElementChild?.remove();
+    }
+    tableWrap.scrollTop = 0;
+    const pageCount = Math.max(1, Math.ceil(total / perPage));
+    pagerControl.update({ page: 1, totalPages: pageCount, totalItems: total });
+    countLabel.textContent = `${formatNumberCompact(total)} ${total === 1 ? "entry" : "entries"}${activeFilterCount() > 0 ? " matching filters" : ""}`;
+  }
+
+  function onAuditEntry(entry: LogEntry | null | undefined): void {
+    if (disposed || !entry || typeof entry.id !== "number") return;
+    if (seenIds.has(entry.id) || pending.some((candidate) => candidate.id === entry.id)) return;
+    if (!matchesFilters(entry)) {
+      showNewActivity("filters", 1);
+      return;
+    }
+    if (page !== 1) {
+      showNewActivity("page", 1);
+      return;
+    }
+    if (loading) {
+      // A refetch is in flight; keep the entry and reconcile after it settles
+      // so we never show a stale "new activity" pill for data already loaded.
+      pending.push(entry);
+      if (pending.length > MAX_PENDING) pending.shift();
+      return;
+    }
+    if (tableWrap.scrollTop > 6) {
+      pending.push(entry);
+      if (pending.length > MAX_PENDING) pending.shift();
+      showNewActivity("scroll", pending.length);
+      return;
+    }
+    // At the top: prepend immediately without a refetch and keep focus/scroll.
+    entries.unshift(entry);
+    seenIds.add(entry.id);
+    total += 1;
+    tableBody.insertBefore(buildLogRow(entry), tableBody.firstChild);
+    while (entries.length > perPage) {
+      entries.pop();
+      tableBody.lastElementChild?.remove();
+    }
+    const pageCount = Math.max(1, Math.ceil(total / perPage));
+    pagerControl.update({ page: 1, totalPages: pageCount, totalItems: total });
+    countLabel.textContent = `${formatNumberCompact(total)} ${total === 1 ? "entry" : "entries"}${activeFilterCount() > 0 ? " matching filters" : ""}`;
   }
 
   function showDetails(entry: LogEntry): void {
@@ -474,19 +602,23 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
     modal({ title: `Activity #${entry.id}`, body, wide: true });
   }
 
+  function applyFilterInputs(next: Filters): void {
+    filters.actor = next.actor;
+    filters.action = next.action;
+    filters.result = next.result;
+    filters.q = next.q;
+    filters.from = next.from;
+    filters.to = next.to;
+    actorInput.value = next.actor;
+    actionSelect.value = next.action;
+    resultSelect.value = next.result;
+    searchInput.value = next.q;
+    fromInput.value = next.from;
+    toInput.value = next.to;
+  }
+
   function resetFilters(): void {
-    filters.actor = "";
-    filters.action = "";
-    filters.result = "";
-    filters.q = "";
-    filters.from = "";
-    filters.to = "";
-    actorInput.value = "";
-    actionSelect.value = "";
-    resultSelect.value = "";
-    searchInput.value = "";
-    fromInput.value = "";
-    toInput.value = "";
+    applyFilterInputs(EMPTY_FILTERS);
     page = 1;
     void load();
   }
@@ -514,7 +646,6 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
     page = 1;
     void load();
   });
-  refreshButton.addEventListener("click", () => void load());
   exportButton.addEventListener("click", () => {
     const dateError = validateDateRange();
     if (dateError) {
@@ -536,30 +667,50 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
     ctx.toast.info("Export started — up to 10,000 matching entries");
   });
 
-  function scheduleAutoRefresh(): void {
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      timer = undefined;
+  // ------------------------------------------------------------------ realtime
+  const realtime = getRealtime(ctx.events);
+  const updateLiveLabel = (): void => {
+    if (disposed) return;
+    const state = realtime.status;
+    const last = realtime.lastUpdate;
+    if (state === "connected") {
+      liveLabel.textContent = last ? `Live · updated ${formatTime(last)}` : "Live updates on";
+    } else if (state === "offline") {
+      liveLabel.textContent = "Live updates offline";
+    } else {
+      liveLabel.textContent = "Reconnecting…";
     }
-    if (autoRefresh && !disposed) {
-      timer = window.setInterval(() => {
-        if (document.visibilityState === "hidden") return;
-        void load(true);
-      }, AUTO_REFRESH_MS);
-      refreshedLabel.textContent = "Auto-refresh every 20s";
-    } else if (lastLoadedAt) {
-      refreshedLabel.textContent = `Updated ${relativeTime(lastLoadedAt)}`;
+  };
+  updateLiveLabel();
+  const unsubscribeStatus = realtime.onStatus(updateLiveLabel);
+  const unsubscribeAudit = realtime.on<LogEntry>("audit.created", (entry) => onAuditEntry(entry));
+  const unsubscribeResync = realtime.onResync(() => {
+    if (disposed) return;
+    void load(true);
+  });
+  const liveTimer = window.setInterval(() => {
+    if (disposed) return;
+    const last = realtime.lastUpdate;
+    if (last === 0) return;
+    liveLabel.textContent = `${realtime.status === "connected" ? "Live" : "Offline"} · updated ${relativeTime(last)}`;
+  }, 30_000);
+  tableWrap.addEventListener("scroll", () => {
+    if (!newActivityButton.hidden && newActivityReason === "scroll" && tableWrap.scrollTop <= 6) {
+      hideNewActivity();
+      flushPending();
     }
-  }
+  });
 
   await loadActions();
   await load();
-  scheduleAutoRefresh();
   window.setTimeout(() => searchInput.focus(), 60);
 
   const cleanup = (): void => {
     disposed = true;
-    if (timer !== undefined) window.clearInterval(timer);
+    window.clearInterval(liveTimer);
+    unsubscribeStatus();
+    unsubscribeAudit();
+    unsubscribeResync();
     loadToken += 1;
   };
   ctx.onDispose(cleanup);

@@ -6,6 +6,7 @@ import { ApiError, apiErrorMessage } from "../../core/api";
 import { badge, card } from "../../core/components";
 import { h } from "../../core/dom";
 import { formatDateTime } from "../../core/format";
+import { debounceTask, getRealtime } from "../../core/realtime";
 import { formField, validateRequiredText } from "../../core/forms";
 import { iconSvg } from "../../core/icons";
 import type { Page, Share, ShareMember, User } from "../../core/types";
@@ -27,7 +28,7 @@ const PERMS: Array<{ value: Perm; label: string }> = [
 
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
+export async function renderSharesTab(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
   host.replaceChildren();
   actions.replaceChildren();
@@ -47,6 +48,8 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
 
   let users: User[] | null = null;
   let unavailable = false;
+  let shareDialogOpen = false;
+  let pendingReload = false;
 
   const addButton = h(
     "button",
@@ -63,14 +66,19 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
     return users;
   }
 
+  let loadToken = 0;
+
   async function load(): Promise<void> {
+    const token = ++loadToken;
     container.replaceChildren(h("div", { class: "loading-block" }, h("span", { class: "spinner" }), h("span", { class: "muted" }, "Loading shared folders…")));
     try {
       const shares = await ctx.api.get<Share[]>("/api/shares");
+      if (token !== loadToken) return;
       unavailable = false;
       addButton.disabled = false;
       renderList(shares);
     } catch (error) {
+      if (token !== loadToken) return;
       renderUnavailableState(error);
     }
   }
@@ -119,7 +127,6 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
       { class: "cp-toolbar" },
       h("div", { class: "small muted" }, shares.length === 0 ? "No shared folders yet" : `${shares.length} shared folder${shares.length === 1 ? "" : "s"}`),
       h("div", { class: "cp-toolbar-spacer" }),
-      h("button", { class: "btn btn-sm", type: "button", onClick: () => void load() }, iconSvg("refresh", 15), "Refresh"),
     );
     container.appendChild(head);
     if (shares.length === 0) {
@@ -332,10 +339,18 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
       alert,
     );
 
+    shareDialogOpen = true;
     modal({
       title: existing ? `Edit shared folder — ${existing.name}` : "New shared folder",
       body,
       wide: true,
+      onClose: () => {
+        shareDialogOpen = false;
+        if (pendingReload) {
+          pendingReload = false;
+          void load();
+        }
+      },
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
         {
@@ -392,6 +407,29 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<void> {
     window.setTimeout(() => nameInput.focus(), 40);
   }
 
+  const realtime = getRealtime(ctx.events);
+  const reloadShares = debounceTask(() => {
+    if (shareDialogOpen) {
+      pendingReload = true;
+      return;
+    }
+    void load();
+  }, 300);
+  const unsubscribeAudit = realtime.on<{ action?: string }>("audit.created", (data) => {
+    const action = typeof data?.action === "string" ? data.action : "";
+    if (action.startsWith("share.")) reloadShares.run();
+  });
+  const unsubscribeUsers = realtime.on("user.changed", () => reloadShares.run());
+  const unsubscribeResync = realtime.onResync(() => reloadShares.run());
+
   void unavailable;
   await load();
+
+  return () => {
+    reloadShares.cancel();
+    unsubscribeAudit();
+    unsubscribeUsers();
+    unsubscribeResync();
+    loadToken += 1;
+  };
 }

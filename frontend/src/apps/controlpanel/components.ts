@@ -1,23 +1,21 @@
 // Control Panel → Components: component health, host resources, database and
-// job counts, with manual and automatic refresh.
+// job counts. Realtime events refresh the affected numbers; there is no routine
+// Refresh button or polling timer.
 
 import { apiErrorMessage } from "../../core/api";
-import { card, iconButton, statusBadge, switchControl, usageBar } from "../../core/components";
+import { card, statusBadge, usageBar } from "../../core/components";
+import { debounceTask, getRealtime } from "../../core/realtime";
 import { h } from "../../core/dom";
 import { formatBytes, formatDateTime, formatDuration, formatTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import type { ComponentStatusResponse, SystemInfo } from "../../core/types";
 import { pageIntro, scrollToSection, type TabRenderContext } from "./common";
 
-const AUTO_REFRESH_MS = 10_000;
-
 export async function renderComponentsTab(tab: TabRenderContext): Promise<(() => void) | void> {
   const { ctx, host, actions } = tab;
   host.replaceChildren();
   actions.replaceChildren();
 
-  let autoRefresh = false;
-  let timer: number | undefined;
   let lastUpdated: number | null = null;
   let loading = false;
   let disposed = false;
@@ -28,35 +26,14 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
   );
 
   const lastUpdatedLabel = h("span", { class: "small muted" });
-  const autoSwitch = switchControl({
-    label: "Auto-refresh (10s)",
-    checked: false,
-    onChange: (checked) => {
-      autoRefresh = checked;
-      schedule();
-    },
-  });
-  const refreshButton = iconButton("refresh", "Refresh now", () => void load(), { title: "Refresh now" });
   const toolbar = h(
     "div",
     { class: "cp-toolbar" },
     h("div", { class: "cp-toolbar-spacer" }),
     lastUpdatedLabel,
-    refreshButton,
   );
-  actions.appendChild(autoSwitch.el);
   const content = h("div", { class: "components-content" });
   host.append(intro, toolbar, content);
-
-  function schedule(): void {
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      timer = undefined;
-    }
-    if (autoRefresh && !disposed) {
-      timer = window.setInterval(() => void load(true), AUTO_REFRESH_MS);
-    }
-  }
 
   async function load(silent = false): Promise<void> {
     if (loading || disposed) return;
@@ -64,7 +41,6 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
     if (!silent) {
       content.replaceChildren(h("div", { class: "loading-block" }, h("span", { class: "spinner" }), h("span", { class: "muted" }, "Loading component health…")));
     }
-    refreshButton.disabled = true;
     try {
       const [components, info] = await Promise.all([
         ctx.api.get<ComponentStatusResponse>("/api/system/components"),
@@ -88,7 +64,6 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
       );
     } finally {
       loading = false;
-      refreshButton.disabled = false;
     }
   }
 
@@ -125,7 +100,6 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
       card({
         title: "Component health",
         subtitle: `${components.components.filter((component) => component.status === "ok").length} of ${components.components.length} healthy`,
-        actions: iconButton("refresh", "Refresh health", () => void load(), { size: "sm" }),
         children: [healthList],
       }),
     );
@@ -238,10 +212,29 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
   }
 
   await load();
-  schedule();
   scrollToSection(host, tab.section);
+
+  // Realtime: jobs, backups, apps, docker, settings and account changes all
+  // affect something shown here. Progress events are ignored on purpose.
+  const realtime = getRealtime(ctx.events);
+  const refresh = debounceTask(() => void load(true), 600);
+  const unsubscribers: Array<() => void> = [
+    realtime.on("job.queued", () => refresh.run()),
+    realtime.on("job.start", () => refresh.run()),
+    realtime.on("job.done", () => refresh.run()),
+    realtime.on("job.failed", () => refresh.run()),
+    realtime.on("job.cancelled", () => refresh.run()),
+    realtime.on("backup.changed", () => refresh.run()),
+    realtime.on("app.changed", () => refresh.run()),
+    realtime.on("docker.changed", () => refresh.run()),
+    realtime.on("settings.changed", () => refresh.run()),
+    realtime.on("user.changed", () => refresh.run()),
+    realtime.onResync(() => refresh.run()),
+  ];
+
   return () => {
     disposed = true;
-    if (timer !== undefined) window.clearInterval(timer);
+    refresh.cancel();
+    for (const unsubscribe of unsubscribers) unsubscribe();
   };
 }

@@ -3443,3 +3443,178 @@ kbd {
     box-shadow: 0 0 0 2px var(--accent);
   }
 }
+
+/* ==========================================================================
+   Realtime + appearance save workflow (semantic-token based)
+   ========================================================================== */
+
+/* Shared save bar used by Control Panel → Appearance and Personalize. */
+.appearance-save {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.appearance-save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-popover, var(--shadow-sm));
+}
+
+.appearance-save-bar .appearance-actions {
+  gap: var(--gap-sm);
+}
+
+.appearance-actions-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.appearance-save .form-status {
+  margin-right: 4px;
+}
+
+.appearance-save .form-status.is-dirty {
+  color: var(--warning-strong);
+}
+
+.appearance-save .form-status.is-saved {
+  color: var(--ok-strong);
+}
+
+.appearance-save .form-status.is-error {
+  color: var(--danger-strong);
+}
+
+.appearance-save .form-status.is-saving {
+  color: var(--text-dim);
+}
+
+.appearance-save .banner {
+  margin: 0;
+}
+
+/* Cross-session conflict notice (appearance + settings + users). */
+.cp-conflict {
+  margin-bottom: 12px;
+}
+
+.cp-conflict .banner {
+  margin: 0;
+}
+
+.cp-conflict .banner .row {
+  margin-top: 8px;
+}
+
+.cp-conflict[hidden] {
+  display: none;
+}
+
+/* Appearance mode / fit controls must never fall back to UA button chrome. */
+.appearance-section .segmented > button,
+.appearance-section .segment {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+
+.appearance-section .segmented > button.is-active,
+.appearance-section .segment.is-active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* Activity Logs live indicator */
+.logs-live-row {
+  display: flex;
+  justify-content: center;
+  padding: 6px 12px 0;
+  flex: 0 0 auto;
+}
+
+.logs-live-row[hidden] {
+  display: none;
+}
+
+.logs-new-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: var(--font-size-xs, 11.5px);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+
+.logs-new-indicator:hover {
+  background: var(--selection-strong, var(--accent-soft));
+}
+
+.logs-new-indicator:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.logs-new-indicator[hidden] {
+  display: none;
+}
+
+.logs-new-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.logs-refreshed {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 700px) {
+  .appearance-save-bar {
+    position: static;
+    padding: 8px 10px;
+  }
+
+  .appearance-save-bar .appearance-actions {
+    flex-wrap: wrap;
+  }
+
+  .appearance-save-bar .appearance-actions .spacer {
+    display: none;
+  }
+
+  .appearance-actions-leading {
+    width: 100%;
+  }
+
+  .logs-live-row {
+    padding: 4px 8px 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .logs-new-dot {
+    box-shadow: none;
+  }
+}

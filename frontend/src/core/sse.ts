@@ -1,23 +1,34 @@
-// Server-sent events with lifecycle management.
+// Server-sent events with sequencing, gap detection, heartbeats and resilient
+// reconnection.
 //
-// One EventSource is shared by every app window. The connection is closed when
-// no app is listening, when the tab is hidden for a while, and re-opened on
-// demand — this keeps subscription cost bounded regardless of tab/window count.
+// There is exactly one authenticated EventSource per browser tab. Applications
+// subscribe through `core/realtime.ts`; this module owns the transport:
+//   * monotonic server sequence numbers (duplicates dropped, gaps -> resync),
+//   * ping heartbeats and stale detection (force reconnect),
+//   * exponential backoff with jitter,
+//   * online/offline + visibility/wake handling,
+//   * lifecycle: idle disconnect when nothing listens, resume on demand.
 
 export interface RastEvent<T = unknown> {
   kind: string;
   ts: number;
+  seq: number;
   data: T;
 }
 
-export type ConnectionState = "connected" | "connecting" | "disconnected";
+export type ConnectionState = "connected" | "connecting" | "reconnecting" | "offline";
 
 type Listener = (event: RastEvent) => void;
 type StatusListener = (state: ConnectionState) => void;
+type LifecycleListener = (reason: string) => void;
 
 const KNOWN_EVENTS = [
+  "hello",
+  "ping",
+  "resync",
   "monitor",
   "notice",
+  "session.revoked",
   "job.queued",
   "job.start",
   "job.progress",
@@ -25,22 +36,47 @@ const KNOWN_EVENTS = [
   "job.failed",
   "job.cancelled",
   "backup.done",
+  "backup.changed",
   "app.status",
+  "app.changed",
+  "app.deploy",
+  "app.logs",
+  "docker.changed",
+  "file.changed",
+  "file.quota",
+  "files.resync",
+  "audit.created",
+  "user.changed",
+  "settings.changed",
+  "appearance.changed",
 ];
 
 const IDLE_DISCONNECT_MS = 30_000;
 const HIDDEN_DISCONNECT_MS = 45_000;
+const STALE_AFTER_MS = 45_000;
+const STALE_CHECK_MS = 10_000;
+const BACKOFF_BASE_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
 
 export class EventStream {
   private source: EventSource | null = null;
   private readonly listeners = new Map<string, Set<Listener>>();
   private readonly statusListeners = new Set<StatusListener>();
+  private readonly lifecycleListeners = new Set<LifecycleListener>();
   private idleTimer: number | undefined;
   private hiddenTimer: number | undefined;
+  private reconnectTimer: number | undefined;
+  private staleTimer: number | undefined;
   private visibilityHandler: (() => void) | null = null;
+  private onlineHandler: (() => void) | null = null;
+  private offlineHandler: (() => void) | null = null;
   private lastEventAt = 0;
-  private state: ConnectionState = "disconnected";
+  private seq = 0;
+  private attempt = 0;
+  private everConnected = false;
+  private state: ConnectionState = "offline";
   private disposed = false;
+  private manualStop = false;
 
   on(kind: string, listener: Listener): () => void {
     let set = this.listeners.get(kind);
@@ -71,24 +107,72 @@ export class EventStream {
     return () => this.statusListeners.delete(listener);
   }
 
+  /**
+   * Called after a reconnection or detected sequence gap: subscribers should
+   * fetch a fresh authorized snapshot instead of trusting missed events.
+   */
+  onResync(listener: LifecycleListener): () => void {
+    this.lifecycleListeners.add(listener);
+    return () => this.lifecycleListeners.delete(listener);
+  }
+
   get status(): ConnectionState {
     return this.state;
   }
 
+  get isConnected(): boolean {
+    return this.state === "connected";
+  }
+
+  get lastEventTimestamp(): number {
+    return this.lastEventAt;
+  }
+
+  get lastSequence(): number {
+    return this.seq;
+  }
+
+  get isStale(): boolean {
+    return this.state === "connected" && this.lastEventAt > 0 && Date.now() - this.lastEventAt > STALE_AFTER_MS;
+  }
+
   start(): void {
     if (this.disposed) return;
+    this.manualStop = false;
     if (!this.visibilityHandler) {
       this.visibilityHandler = () => this.handleVisibility();
       document.addEventListener("visibilitychange", this.visibilityHandler);
+    }
+    if (!this.onlineHandler && typeof window !== "undefined") {
+      this.onlineHandler = () => this.handleWake("browser online");
+      this.offlineHandler = () => this.setStatus("offline");
+      window.addEventListener("online", this.onlineHandler);
+      window.addEventListener("offline", this.offlineHandler);
+    }
+    if (!this.staleTimer) {
+      this.staleTimer = window.setInterval(() => this.checkStale(), STALE_CHECK_MS);
     }
     this.ensureConnected();
   }
 
   stop(): void {
+    this.manualStop = true;
     this.disconnect();
     if (this.visibilityHandler) {
       document.removeEventListener("visibilitychange", this.visibilityHandler);
       this.visibilityHandler = null;
+    }
+    if (this.onlineHandler) {
+      window.removeEventListener("online", this.onlineHandler);
+      this.onlineHandler = null;
+    }
+    if (this.offlineHandler) {
+      window.removeEventListener("offline", this.offlineHandler);
+      this.offlineHandler = null;
+    }
+    if (this.staleTimer) {
+      window.clearInterval(this.staleTimer);
+      this.staleTimer = undefined;
     }
   }
 
@@ -97,14 +181,15 @@ export class EventStream {
     this.stop();
     this.listeners.clear();
     this.statusListeners.clear();
+    this.lifecycleListeners.clear();
   }
 
-  isConnected(): boolean {
-    return this.state === "connected";
-  }
-
-  get lastEventTimestamp(): number {
-    return this.lastEventAt;
+  /** Force an immediate reconnect (used by the status popover "Reconnect"). */
+  reconnectNow(): void {
+    if (this.disposed) return;
+    this.disconnect();
+    this.attempt = 0;
+    this.ensureConnected();
   }
 
   private listenerCount(): number {
@@ -113,20 +198,8 @@ export class EventStream {
     return count;
   }
 
-  private setState(state: ConnectionState): void {
-    if (this.state === state) return;
-    this.state = state;
-    for (const listener of this.statusListeners) {
-      try {
-        listener(state);
-      } catch (error) {
-        console.error("status listener failed", error);
-      }
-    }
-  }
-
   private ensureConnected(): void {
-    if (this.disposed) return;
+    if (this.disposed || this.manualStop) return;
     if (this.idleTimer !== undefined) {
       window.clearTimeout(this.idleTimer);
       this.idleTimer = undefined;
@@ -137,42 +210,93 @@ export class EventStream {
     }
     if (this.source) return;
     if (typeof EventSource === "undefined") {
-      this.setState("disconnected");
+      this.setStatus("offline");
       return;
     }
 
-    this.setState("connecting");
-    const source = new EventSource("/api/events", { withCredentials: true });
+    this.setStatus(this.everConnected ? "reconnecting" : "connecting");
+    let source: EventSource;
+    try {
+      // Same-origin cookie auth: credentials never appear in the URL.
+      source = new EventSource("/api/events", { withCredentials: true });
+    } catch {
+      this.scheduleReconnect();
+      return;
+    }
     this.source = source;
+    let opened = false;
 
     source.addEventListener("open", () => {
-      this.setState("connected");
-    });
-    source.addEventListener("error", () => {
-      this.setState("disconnected");
-      // EventSource reconnects automatically; close on fatal auth errors.
-      if (source.readyState === EventSource.CLOSED) {
-        this.source = null;
-        this.setState("connecting");
-        window.setTimeout(() => this.ensureConnected(), 5000);
+      opened = true;
+      this.attempt = 0;
+      this.setStatus("connected");
+      this.lastEventAt = Date.now();
+      if (this.everConnected) {
+        this.emitResync("reconnected");
       }
+      this.everConnected = true;
     });
+
+    source.addEventListener("error", () => {
+      if (this.source !== source) return;
+      // EventSource retries on its own; take control so backoff is bounded.
+      this.disconnect();
+      this.setStatus("offline");
+      this.scheduleReconnect();
+    });
+
     const dispatch = (kind: string) => (event: MessageEvent<string>) => {
       this.lastEventAt = Date.now();
+      const rawId = event.lastEventId;
+      const seq = rawId ? Number.parseInt(rawId, 10) : 0;
+      if (Number.isFinite(seq) && seq > 0) {
+        if (seq <= this.seq) return; // duplicate or out of order
+        if (this.seq > 0 && seq > this.seq + 1) {
+          this.emitResync("gap");
+        }
+        this.seq = seq;
+      }
       let data: unknown = null;
       try {
         data = JSON.parse(event.data);
       } catch {
         data = event.data;
       }
-      const rastEvent: RastEvent = { kind, ts: Date.now(), data };
+      if (kind === "resync") {
+        this.emitResync("server");
+      }
+      const rastEvent: RastEvent = { kind, ts: Date.now(), seq, data };
       this.emit(rastEvent);
     };
+
     for (const kind of KNOWN_EVENTS) {
       source.addEventListener(kind, dispatch(kind) as EventListener);
     }
-    // Fallback for unnamed events.
     source.onmessage = dispatch("message");
+
+    // If the connection never opens (proxy/cookie problem), back off instead of
+    // silently looping forever.
+    window.setTimeout(() => {
+      if (!opened && this.source === source) {
+        this.disconnect();
+        this.setStatus("offline");
+        this.scheduleReconnect();
+      }
+    }, 8_000);
+  }
+
+  private scheduleReconnect(): void {
+    if (this.disposed || this.manualStop) return;
+    if (this.reconnectTimer !== undefined) return;
+    const exp = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** Math.min(this.attempt, 5));
+    const jitter = Math.floor(exp * 0.25 * Math.random());
+    const delay = exp + jitter;
+    this.attempt += 1;
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.listenerCount() === 0) return;
+      this.ensureConnected();
+    }, delay);
   }
 
   private emit(event: RastEvent): void {
@@ -189,6 +313,50 @@ export class EventStream {
     }
   }
 
+  private emitResync(reason: string): void {
+    for (const listener of this.lifecycleListeners) {
+      try {
+        listener(reason);
+      } catch (error) {
+        console.error("resync listener failed", error);
+      }
+    }
+  }
+
+  private setStatus(state: ConnectionState): void {
+    if (this.state === state) return;
+    this.state = state;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(state);
+      } catch (error) {
+        console.error("status listener failed", error);
+      }
+    }
+  }
+
+  private checkStale(): void {
+    if (this.state !== "connected") return;
+    if (this.lastEventAt > 0 && Date.now() - this.lastEventAt > STALE_AFTER_MS) {
+      // The proxy may have silently dropped the stream (heartbeats missing).
+      this.disconnect();
+      this.setStatus("offline");
+      this.emitResync("stale");
+      this.ensureConnected();
+    }
+  }
+
+  private handleWake(reason: string): void {
+    if (this.disposed) return;
+    this.attempt = 0;
+    if (this.listenerCount() === 0) return;
+    if (this.state !== "connected") {
+      this.disconnect();
+      this.ensureConnected();
+      this.emitResync(reason);
+    }
+  }
+
   private scheduleIdleDisconnect(): void {
     if (this.idleTimer !== undefined) window.clearTimeout(this.idleTimer);
     this.idleTimer = window.setTimeout(() => {
@@ -202,9 +370,7 @@ export class EventStream {
       if (this.hiddenTimer !== undefined) window.clearTimeout(this.hiddenTimer);
       this.hiddenTimer = window.setTimeout(() => {
         this.hiddenTimer = undefined;
-        if (this.listenerCount() === 0) {
-          this.disconnect();
-        }
+        if (this.listenerCount() === 0) this.disconnect();
       }, HIDDEN_DISCONNECT_MS);
       return;
     }
@@ -212,7 +378,9 @@ export class EventStream {
       window.clearTimeout(this.hiddenTimer);
       this.hiddenTimer = undefined;
     }
-    if (this.listenerCount() > 0) this.ensureConnected();
+    if (this.listenerCount() > 0) {
+      this.handleWake("tab visible");
+    }
   }
 
   private disconnect(): void {
@@ -220,6 +388,10 @@ export class EventStream {
       this.source.close();
       this.source = null;
     }
-    this.setState("disconnected");
+    if (this.reconnectTimer !== undefined) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+    if (this.state === "connected") this.setStatus("offline");
   }
 }

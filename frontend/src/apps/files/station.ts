@@ -3,7 +3,10 @@
 // textContent through h() — never innerHTML.
 
 import type { AppContext } from "../../core/app";
+import { ApiError } from "../../core/api";
 import { clear, h } from "../../core/dom";
+import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
+import { createLiveIndicator, NoticeBar, quotedPath, type LiveIndicator } from "../../components/live";
 import {
   formatBytes,
   formatBytesShort,
@@ -29,6 +32,7 @@ import { UploadManager } from "./upload";
 import {
   joinPath,
   listingItems,
+  parentPath,
   previewKind,
   sortEntries,
   validateFileName,
@@ -43,6 +47,25 @@ type SortKey = "name" | "size" | "modified";
 
 const VIEW_KEY = "rast.files.view";
 const PER_PAGE_DEFAULT = 50;
+
+/** `file.changed` payload (docs/REALTIME.md). */
+interface FileChangedEvent {
+  op?: string;
+  path?: string;
+  paths?: string[];
+  userId?: number;
+  userIds?: number[];
+  entry?: { kind?: string } | null;
+  source?: "api" | "external";
+}
+
+/** `file.quota` payload (docs/REALTIME.md). */
+interface FileQuotaEvent {
+  usedBytes?: number;
+  quotaBytes?: number;
+  trashBytes?: number;
+  userId?: number;
+}
 
 export class FileStation {
   private readonly ctx: AppContext;
@@ -79,6 +102,11 @@ export class FileStation {
   private readonly split: HTMLElement;
   private readonly dropOverlay: HTMLElement;
   private readonly uploads: UploadManager;
+  private readonly realtime: RealtimeStore;
+  private readonly liveIndicator: LiveIndicator;
+  private readonly notice: NoticeBar;
+  private readonly syncListing: { run: () => void; cancel: () => void };
+  private readonly syncUsage: { run: () => void; cancel: () => void };
 
   // State.
   private section: Section = "files";
@@ -115,12 +143,28 @@ export class FileStation {
   private searchTimer = 0;
   private dragDepth = 0;
   private disposed = false;
+  /** Ignore realtime echoes for a short window after our own refetch. */
+  private quietUntil = 0;
+  /** Open edit dialog context: background changes touching it are deferred. */
+  private editContext: { paths: Set<string>; label: string } | null = null;
+  private syncDeferred = false;
+  /** Set when an event says the current directory disappeared. */
+  private checkMissingCurrent = false;
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
     this.view = readViewPreference();
     this.jobBar = progressBar();
+    this.realtime = getRealtime(ctx.events);
+    this.notice = new NoticeBar(this.lc);
+    this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
+    this.syncListing = debounceTask(() => this.runBackgroundSync(), 250);
+    this.syncUsage = debounceTask(() => void this.loadUsage(), 900);
+    this.lc.add(() => {
+      this.syncListing.cancel();
+      this.syncUsage.cancel();
+    });
 
     // ------------------------------------------------------------- toolbar
     this.uploadButton = toolButton("Upload", "upload", () => this.fileInput.click(), "primary");
@@ -188,7 +232,6 @@ export class FileStation {
       this.trashGroup,
       h("div", { class: "app-toolbar-spacer" }),
       this.searchInput,
-      toolButton("", "refresh", () => this.refresh(), "subtle", "Refresh"),
       this.listViewButton,
       this.gridViewButton,
     );
@@ -244,7 +287,14 @@ export class FileStation {
     const main = h(
       "main",
       { class: "app-main fs-main" },
-      h("div", { class: "fs-crumbs" }, this.crumbs, h("div", { class: "fs-crumbs-spacer" }), this.statusLine),
+      h(
+        "div",
+        { class: "fs-crumbs" },
+        this.crumbs,
+        h("div", { class: "fs-crumbs-spacer" }),
+        this.liveIndicator.el,
+        this.statusLine,
+      ),
       this.panel,
       h("div", { class: "fs-footer" }, this.selectionInfo, this.pager.el),
     );
@@ -271,8 +321,9 @@ export class FileStation {
     });
 
     ctx.root.classList.add("fs-app");
-    ctx.root.append(this.toolbar, this.split, this.dropOverlay, this.uploads.el, this.fileInput);
+    ctx.root.append(this.toolbar, this.notice.el, this.split, this.dropOverlay, this.uploads.el, this.fileInput);
     this.registerInteractions();
+    this.subscribeRealtime();
     this.setView(this.view, false);
     this.renderChrome();
   }
@@ -324,6 +375,144 @@ export class FileStation {
       if (event.target instanceof HTMLElement && event.target.closest(".fs-table, .fs-grid")) return;
       if (this.selection.size > 0) this.clearSelection();
     });
+  }
+
+  // -------------------------------------------------------------- realtime
+
+  private subscribeRealtime(): void {
+    this.lc.add(
+      this.realtime.on<FileChangedEvent>("file.changed", (data) => this.onFileChanged(data)),
+    );
+    this.lc.add(
+      this.realtime.on<FileQuotaEvent>("file.quota", (data) => this.onFileQuota(data)),
+    );
+    this.lc.add(
+      this.realtime.on("files.resync", (data) => {
+        const reason = (data as { reason?: string } | null)?.reason;
+        this.onFilesResync(typeof reason === "string" ? reason : "server");
+      }),
+    );
+    // Reconnect, sequence gap, tab wake or sign-in refresh.
+    this.lc.add(this.realtime.onResync((reason) => this.onFilesResync(reason)));
+  }
+
+  private onFileChanged(data: FileChangedEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object") return;
+    if (this.isQuiet()) return;
+    const changedPath = typeof data.path === "string" ? data.path : "";
+    const parents = Array.isArray(data.paths)
+      ? data.paths.filter((candidate): candidate is string => typeof candidate === "string")
+      : [];
+    const op = typeof data.op === "string" ? data.op : "";
+
+    if (this.editContext && this.touchesEditContext(changedPath, parents)) {
+      this.syncDeferred = true;
+      this.notice.show(
+        `A background change affected ${quotedPath(changedPath || parents[0] || this.path)} while the ${this.editContext.label} dialog is open. Review before applying.`,
+        { kind: "warning", timeoutMs: 0 },
+      );
+      return;
+    }
+
+    if (this.section === "trash") {
+      this.requestListingSync();
+      this.scheduleUsageSync();
+      return;
+    }
+
+    if (changedPath === this.path && (op === "delete" || op === "rename" || op === "move")) {
+      this.checkMissingCurrent = true;
+    }
+    if (this.pathRelevant(changedPath, parents)) this.requestListingSync();
+    this.scheduleUsageSync();
+  }
+
+  private onFileQuota(data: FileQuotaEvent | null): void {
+    if (this.disposed || !data || typeof data !== "object" || this.isQuiet()) return;
+    const fallback = this.usage ?? null;
+    const quota = numberOr(data.quotaBytes, fallback?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0);
+    const used = numberOr(data.usedBytes, fallback?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0);
+    const trash = numberOr(data.trashBytes, fallback?.trashBytes ?? 0);
+    this.usage = { quotaBytes: quota, usedBytes: used, trashBytes: trash, byType: fallback?.byType };
+    this.usageError = null;
+    this.renderUsage();
+    this.scheduleUsageSync();
+  }
+
+  private onFilesResync(_reason: string): void {
+    if (this.disposed) return;
+    this.renderRoots();
+    if (this.section === "trash") void this.loadTrash();
+    else void this.loadListing({ preserveScroll: true, silent: true });
+    void this.loadUsage();
+  }
+
+  private requestListingSync(): void {
+    this.syncListing.run();
+  }
+
+  private scheduleUsageSync(): void {
+    this.syncUsage.run();
+  }
+
+  /** Debounced 250 ms; skips while quiet or while an edit dialog is open. */
+  private runBackgroundSync(): void {
+    if (this.disposed || this.isQuiet()) return;
+    if (this.editContext) {
+      this.syncDeferred = true;
+      return;
+    }
+    if (this.section === "trash") void this.loadTrash();
+    else void this.loadListing({ preserveScroll: true, silent: true });
+  }
+
+  private pathRelevant(changedPath: string, parents: string[]): boolean {
+    if (changedPath === this.path || parents.includes(this.path)) return true;
+    if (!changedPath) return false;
+    if (this.path.startsWith(changedPath === "/" ? "/" : `${changedPath}/`)) return true;
+    if (changedPath.startsWith(this.path === "/" ? "/" : `${this.path}/`)) return true;
+    return false;
+  }
+
+  private touchesEditContext(changedPath: string, parents: string[]): boolean {
+    const context = this.editContext;
+    if (!context) return false;
+    for (const candidate of [changedPath, ...parents]) {
+      if (!candidate) continue;
+      for (const edited of context.paths) {
+        if (
+          candidate === edited ||
+          candidate.startsWith(edited === "/" ? "/" : `${edited}/`) ||
+          edited.startsWith(candidate === "/" ? "/" : `${candidate}/`)
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** Run a dialog that edits `paths`; background changes are deferred meanwhile. */
+  private async withEditContext<T>(label: string, paths: string[], run: () => Promise<T>): Promise<T> {
+    this.editContext = { paths: new Set(paths), label };
+    try {
+      return await run();
+    } finally {
+      this.editContext = null;
+      if (this.syncDeferred) {
+        this.syncDeferred = false;
+        this.syncListing.run();
+      }
+    }
+  }
+
+  private isQuiet(): boolean {
+    return Date.now() < this.quietUntil;
+  }
+
+  /** Our own materialised change; ignore the echo events that follow. */
+  private markSelfChange(): void {
+    this.quietUntil = Date.now() + 1200;
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -393,13 +582,17 @@ export class FileStation {
     this.renderChrome();
   }
 
-  private async loadListing(): Promise<void> {
+  private async loadListing(options: { preserveScroll?: boolean; silent?: boolean } = {}): Promise<void> {
     if (this.disposed || this.section !== "files") return;
+    const previousScroll = options.preserveScroll ? this.captureScroll() : null;
     this.listingRequest?.abort();
     const request = this.lc.trackController(new AbortController());
     this.listingRequest = request;
-    this.loading = true;
-    this.renderStatusLine();
+    if (!options.silent) {
+      this.loading = true;
+      this.renderStatusLine();
+    }
+    let missingFolder: string | null = null;
     try {
       const listing = await this.ctx.api.get<FileListing>(
         "/api/files",
@@ -416,6 +609,7 @@ export class FileStation {
       if (request.signal.aborted || this.disposed) return;
       this.listing = listing;
       this.loadError = null;
+      this.checkMissingCurrent = false;
       this.page = typeof listing?.page === "number" ? listing.page : this.page;
       this.perPage = typeof listing?.perPage === "number" ? listing.perPage : this.perPage;
       this.total = typeof listing?.total === "number" ? listing.total : listingItems(listing).length;
@@ -425,10 +619,18 @@ export class FileStation {
       this.pager.set(this.page, this.perPage, this.total);
     } catch (error) {
       if (isAbortError(error) || request.signal.aborted || this.disposed) return;
-      this.loadError = error;
-      this.listing = null;
-      this.selection.clear();
-      this.anchorPath = null;
+      if (this.checkMissingCurrent && error instanceof ApiError && error.status === 404 && this.path !== "/") {
+        this.checkMissingCurrent = false;
+        missingFolder = this.path;
+      } else if (options.silent && this.listing) {
+        // Background refresh failed: keep showing the last good listing.
+        this.notice.show(`Could not refresh this folder: ${errorMessage(error)}`, { kind: "warning" });
+      } else {
+        this.loadError = error;
+        this.listing = null;
+        this.selection.clear();
+        this.anchorPath = null;
+      }
     } finally {
       if (this.listingRequest === request) {
         this.listingRequest = null;
@@ -440,8 +642,32 @@ export class FileStation {
         this.renderCrumbs();
         this.renderStatusLine();
         this.updateSelectionUi();
+        if (previousScroll) this.restoreScroll(previousScroll);
       }
     }
+    if (missingFolder && !this.disposed) {
+      this.ctx.toast.warning(`The folder ${quotedPath(missingFolder)} is no longer available.`);
+      await this.navigate(parentPath(missingFolder));
+    }
+  }
+
+  /** The table wrapper is the actual scroll container; the grid scrolls in the panel. */
+  private captureScroll(): { el: HTMLElement; top: number } | null {
+    const table = this.panel.querySelector<HTMLElement>(".fs-table-wrap");
+    if (table) return { el: table, top: table.scrollTop };
+    const grid = this.panel.querySelector<HTMLElement>(".fs-grid");
+    if (grid) return { el: this.panel, top: this.panel.scrollTop };
+    return { el: this.panel, top: this.panel.scrollTop };
+  }
+
+  private restoreScroll(saved: { el: HTMLElement; top: number } | null): void {
+    if (!saved) return;
+    if (saved.el === this.panel) {
+      this.panel.scrollTop = saved.top;
+      return;
+    }
+    const current = this.panel.querySelector<HTMLElement>(".fs-table-wrap, .fs-grid");
+    (current ?? saved.el).scrollTop = saved.top;
   }
 
   private async loadUsage(): Promise<void> {
@@ -499,10 +725,11 @@ export class FileStation {
   }
 
   private refresh(): void {
+    this.markSelfChange();
     this.renderRoots();
     this.renderUsage();
     if (this.section === "trash") void this.loadTrash();
-    else void this.loadListing();
+    else void this.loadListing({ preserveScroll: true });
     void this.loadUsage();
   }
 
@@ -1193,17 +1420,20 @@ export class FileStation {
 
   private async newFolder(): Promise<void> {
     if (this.section !== "files") return;
-    const name = await promptDialog({
-      title: "New folder",
-      label: "Folder name",
-      placeholder: "New folder",
-      confirmLabel: "Create",
-      validate: validateFileName,
-    });
+    const name = await this.withEditContext("new folder", [this.path], () =>
+      promptDialog({
+        title: "New folder",
+        label: "Folder name",
+        placeholder: "New folder",
+        confirmLabel: "Create",
+        validate: validateFileName,
+      }),
+    );
     if (!name) return;
     try {
       await this.ctx.api.post("/api/files/mkdir", { path: joinPath(this.path, name.trim()) });
       this.ctx.toast.success("Folder created");
+      this.markSelfChange();
       await this.loadListing();
       void this.loadUsage();
     } catch (error) {
@@ -1215,17 +1445,20 @@ export class FileStation {
     if (this.selection.size !== 1) return;
     const entry = listingItems(this.listing).find((candidate) => this.selection.has(candidate.path));
     if (!entry) return;
-    const name = await promptDialog({
-      title: "Rename",
-      label: "New name",
-      value: entry.name,
-      confirmLabel: "Rename",
-      validate: validateFileName,
-    });
+    const name = await this.withEditContext("rename", [entry.path], () =>
+      promptDialog({
+        title: "Rename",
+        label: "New name",
+        value: entry.name,
+        confirmLabel: "Rename",
+        validate: validateFileName,
+      }),
+    );
     if (!name || name.trim() === entry.name) return;
     try {
       await this.ctx.api.post("/api/files/rename", { path: entry.path, newName: name.trim() });
       this.ctx.toast.success("Renamed");
+      this.markSelfChange();
       this.selection.clear();
       await this.loadListing();
       void this.loadUsage();
@@ -1247,12 +1480,17 @@ export class FileStation {
     if (this.selection.size === 0) return;
     const entries = listingItems(this.listing).filter((entry) => this.selection.has(entry.path));
     if (entries.length === 0) return;
-    const destDir = await pickDestination(this.ctx, this.lc, {
-      title: kind === "copy" ? "Copy to folder" : "Move to folder",
-      confirmLabel: kind === "copy" ? "Copy here" : "Move here",
-      startPath: this.path,
-      exclude: new Set(entries.filter((entry) => entry.kind === "dir").map((entry) => entry.path)),
-    });
+    const destDir = await this.withEditContext(
+      kind === "copy" ? "copy" : "move",
+      [this.path, ...entries.map((entry) => entry.path)],
+      () =>
+        pickDestination(this.ctx, this.lc, {
+          title: kind === "copy" ? "Copy to folder" : "Move to folder",
+          confirmLabel: kind === "copy" ? "Copy here" : "Move here",
+          startPath: this.path,
+          exclude: new Set(entries.filter((entry) => entry.kind === "dir").map((entry) => entry.path)),
+        }),
+    );
     if (!destDir) return;
     const paths = entries.map((entry) => entry.path);
     try {
@@ -1265,6 +1503,7 @@ export class FileStation {
       if (response?.jobId) {
         await this.runJob(kind === "copy" ? "Copy" : "Move", response.jobId);
       } else {
+        this.markSelfChange();
         await this.loadListing();
       }
     } catch (error) {
@@ -1275,12 +1514,14 @@ export class FileStation {
   private async deleteSelected(): Promise<void> {
     if (this.selection.size === 0) return;
     const count = this.selection.size;
-    const confirmed = await confirmDialog({
-      title: "Move to recycle bin",
-      message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
-      confirmLabel: "Move to recycle bin",
-      danger: true,
-    });
+    const confirmed = await this.withEditContext("delete", [...this.selection], () =>
+      confirmDialog({
+        title: "Move to recycle bin",
+        message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
+        confirmLabel: "Move to recycle bin",
+        danger: true,
+      }),
+    );
     if (!confirmed) return;
     const paths = [...this.selection];
     try {
@@ -1288,7 +1529,10 @@ export class FileStation {
       this.selection.clear();
       this.updateSelectionUi();
       if (response?.jobId) await this.runJob("Delete", response.jobId);
-      else await this.loadListing();
+      else {
+        this.markSelfChange();
+        await this.loadListing();
+      }
       void this.loadUsage();
     } catch (error) {
       this.ctx.toast.error(`Delete failed: ${errorMessage(error)}`);
@@ -1307,6 +1551,7 @@ export class FileStation {
     } else {
       this.ctx.toast.warning(`${label} was cancelled`);
     }
+    this.markSelfChange();
     await this.loadListing();
     void this.loadUsage();
   }
@@ -1334,6 +1579,7 @@ export class FileStation {
     try {
       await this.ctx.api.post("/api/files/trash/restore", { ids });
       this.ctx.toast.success(`${ids.length} item(s) restored`);
+      this.markSelfChange();
       this.trashSelection.clear();
       await this.loadTrash();
       void this.loadUsage();
@@ -1360,6 +1606,7 @@ export class FileStation {
     try {
       await this.ctx.api.post("/api/files/trash/delete", { ids });
       this.ctx.toast.success("Permanently deleted");
+      this.markSelfChange();
       this.trashSelection.clear();
       await this.loadTrash();
       void this.loadUsage();
@@ -1381,6 +1628,7 @@ export class FileStation {
     try {
       await this.ctx.api.del("/api/files/trash");
       this.ctx.toast.success("Recycle bin emptied");
+      this.markSelfChange();
       this.trashSelection.clear();
       await this.loadTrash();
       void this.loadUsage();
@@ -1439,6 +1687,10 @@ function sortHeader(
   const th = h("th", { class: className });
   th.appendChild(btn);
   return th;
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
 function hasFileDrag(event: DragEvent): boolean {
