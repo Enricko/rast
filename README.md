@@ -22,7 +22,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.6 — first public release series (2026-11-11). APIs and data
+> **Status:** v0.1.8 — first public release series (2026-11-11). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
 
@@ -38,31 +38,44 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 
 ## Verified deployment
 
-RAST 0.1.5 is deployed and publicly reachable at
+RAST 0.1.8 is deployed and publicly reachable at
 <https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
-reference host (Ubuntu 26.04, x86_64, 12 cores / 30 GiB RAM) after a clean
-restart, 60-second idle window with the resource monitor sampling every 5 s:
+reference host (Ubuntu, x86_64, 12 cores / 30 GiB RAM) after a clean restart,
+60-second idle window with the shared sampler running at ~5 s:
 
 | Process | CPU (idle) | RSS |
 | --- | --- | --- |
-| `rast.service` (web + jobs + monitor + SQLite) | 0.17% | 30.2 MiB |
-| `rast-worker.service` (Docker operations) | 0.00% | 9.2 MiB |
-| **Total RAST** | **0.17%** | **39.3 MiB** |
+| `rast.service` (web + jobs + monitor + realtime bus + SQLite) | 0.23% | 11.8 MiB |
+| `rast-worker.service` (Docker operations) | 0.05% | 11.0 MiB |
+| **Total RAST** | **0.23%** | **22.8 MiB** |
 
-That is well below the project budget of 100 MiB idle RAM (reverse proxy,
-Cloudflare Tunnel and Docker are excluded). Anonymous memory is ~22 MiB for the
-web service; the rest is file-backed pages that the kernel can reclaim. After
-long activity (large uploads, backups, container stats) the allocator keeps some
-resident memory, so an uptime-long measurement can read higher (e.g. 65 MiB)
-without any leak.
+With one browser tab connected and File Station + Resource Monitor open (live
+SSE + filesystem watcher active), `rast.service` measured 0.23% CPU / 12.5 MiB
+RSS over the same window. That is below the project budget of 100 MiB idle RAM
+and below the previous v0.1.5 baseline (39.3 MiB) even with live updates: the
+realtime layer adds one authenticated SSE connection per tab and a single
+bounded filesystem watcher/Docker reconciler, not per-menu polling loops.
+Anonymous memory is ~2–3 MiB after a fresh start; the remainder is file-backed
+pages the kernel can reclaim. After long activity (large uploads, backups,
+container stats) allocator retention can read ~30–65 MiB without any leak.
 
-Verification on the live deployment: **61/61 end-to-end smoke checks** (auth,
-CSRF, two-user isolation, files, quota, trash, monitoring, SSE, backups, logs,
-Docker worker, and the new appearance tests: upload byte-exactness, cross-user
-404, independent per-user settings, delete fallback), **224 automated Rust
-tests** (209 unit/integration + 15 HTTP end-to-end), a clean-systemd-container
-installer suite, and Playwright checks of the live UI in light/dark themes at
-1600×1000 and 390×844 with zero console errors.
+Verification on the live deployment: **73/73 end-to-end smoke checks** (auth,
+CSRF, two-user isolation, files/quota/trash, monitoring, SSE, backups, logs,
+Docker worker, ten accent presets, and realtime: hello/ping/ids plus
+file.changed/file.quota/audit pushed over the public proxy), **272 automated
+Rust tests** (254 unit/integration + 18 HTTP end-to-end), a
+**64/64 clean-systemd-container installer suite**, and **73 live Playwright
+checks** — 62 UI checks (all ten accents in light and dark, save states
+clean/dirty/saving/saved/failure, theme/wallpaper changes with windows and a
+dialog open, System mode following the OS, cross-session appearance sync and
+conflict handling, offline/reconnect reconciliation, external filesystem
+changes, activity-log and backup live updates, user isolation, desktop and
+390×844 mobile) plus 11 application checks (deploy a managed app, capture its
+live log stream in the browser, stop/start its container outside RAST and see
+both states update without refresh, then remove it). CI is green on `main`
+(the tagged v0.1.6 commit itself had a stale third-party-license inventory
+check that was fixed in the immediately following commit; release artifacts
+verified separately; v0.1.7/v0.1.8 release runs are fully green).
 
 ## Quick start (installed server)
 
