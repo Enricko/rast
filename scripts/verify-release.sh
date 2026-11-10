@@ -6,8 +6,8 @@
 #   * every expected asset exists (both architectures, SHA256SUMS, install.sh,
 #     uninstall.sh; rast.toml.example is optional),
 #   * SHA256SUMS covers every asset and every checksum matches,
-#   * installers are syntactically valid POSIX sh and shellcheck-clean when
-#     shellcheck is available,
+#   * installers are syntactically valid POSIX sh and ShellCheck-clean when
+#     the ShellCheck tool is available,
 #   * the binary for this machine's architecture runs and reports the expected
 #     version (skip with --no-run; binaries for other architectures are only
 #     checksum-verified).
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 DIR="$ROOT/dist"
 EXPECTED_VERSION=""
 RUN_CHECK=1
@@ -70,7 +70,7 @@ ok() { echo "verify-release: ok: $*"; }
     echo "verify-release: directory not found: $DIR" >&2
     exit 1
 }
-DIR=$(CDPATH= cd -- "$DIR" && pwd)
+DIR=$(cd -- "$DIR" && pwd)
 
 if [[ -z "$EXPECTED_VERSION" ]]; then
     EXPECTED_VERSION=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' "$ROOT/Cargo.toml" | head -n 1)

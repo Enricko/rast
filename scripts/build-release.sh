@@ -18,7 +18,7 @@
 
 set -euo pipefail
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 OUT_DIR="$ROOT/dist"
 SKIP_FRONTEND=0
 CARGO_LOCKED="--locked"

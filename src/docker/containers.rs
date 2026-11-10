@@ -604,16 +604,16 @@ mod tests {
 
     #[test]
     fn rfc3339_parsing() {
-        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02Z"), Some(1_762_781_042_000));
+        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02Z"), Some(1_794_317_042_000));
         assert_eq!(
             parse_rfc3339_ms("2026-11-10T13:24:02.123456789Z"),
-            Some(1_762_781_042_123)
+            Some(1_794_317_042_123)
         );
         assert_eq!(
             parse_rfc3339_ms("2026-11-10T14:24:02+01:00"),
-            Some(1_762_781_042_000)
+            Some(1_794_317_042_000)
         );
-        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02"), Some(1_762_781_042_000));
+        assert_eq!(parse_rfc3339_ms("2026-11-10T13:24:02"), Some(1_794_317_042_000));
         assert_eq!(parse_rfc3339_ms("not-a-time"), None);
     }
 
@@ -624,7 +624,7 @@ mod tests {
                       \n";
         let lines = parse_compose_logs(output);
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["ts"], 1_762_781_042_123i64);
+        assert_eq!(lines[0]["ts"], 1_794_317_042_123i64);
         assert_eq!(lines[0]["message"], "request served");
         assert_eq!(lines[1]["ts"], 0);
         assert_eq!(lines[1]["message"], "plain message without timestamp");

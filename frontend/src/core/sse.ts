@@ -10,7 +10,10 @@ export interface RastEvent<T = unknown> {
   data: T;
 }
 
+export type ConnectionState = "connected" | "connecting" | "disconnected";
+
 type Listener = (event: RastEvent) => void;
+type StatusListener = (state: ConnectionState) => void;
 
 const KNOWN_EVENTS = [
   "monitor",
@@ -31,11 +34,12 @@ const HIDDEN_DISCONNECT_MS = 45_000;
 export class EventStream {
   private source: EventSource | null = null;
   private readonly listeners = new Map<string, Set<Listener>>();
+  private readonly statusListeners = new Set<StatusListener>();
   private idleTimer: number | undefined;
   private hiddenTimer: number | undefined;
   private visibilityHandler: (() => void) | null = null;
   private lastEventAt = 0;
-  private connected = false;
+  private state: ConnectionState = "disconnected";
   private disposed = false;
 
   on(kind: string, listener: Listener): () => void {
@@ -60,6 +64,17 @@ export class EventStream {
     return this.on("monitor", listener);
   }
 
+  /** Observe connection state (used by the shell system tray). */
+  onStatus(listener: StatusListener): () => void {
+    this.statusListeners.add(listener);
+    listener(this.state);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  get status(): ConnectionState {
+    return this.state;
+  }
+
   start(): void {
     if (this.disposed) return;
     if (!this.visibilityHandler) {
@@ -81,10 +96,11 @@ export class EventStream {
     this.disposed = true;
     this.stop();
     this.listeners.clear();
+    this.statusListeners.clear();
   }
 
   isConnected(): boolean {
-    return this.connected;
+    return this.state === "connected";
   }
 
   get lastEventTimestamp(): number {
@@ -95,6 +111,18 @@ export class EventStream {
     let count = 0;
     for (const set of this.listeners.values()) count += set.size;
     return count;
+  }
+
+  private setState(state: ConnectionState): void {
+    if (this.state === state) return;
+    this.state = state;
+    for (const listener of this.statusListeners) {
+      try {
+        listener(state);
+      } catch (error) {
+        console.error("status listener failed", error);
+      }
+    }
   }
 
   private ensureConnected(): void {
@@ -108,19 +136,24 @@ export class EventStream {
       return;
     }
     if (this.source) return;
-    if (typeof EventSource === "undefined") return;
+    if (typeof EventSource === "undefined") {
+      this.setState("disconnected");
+      return;
+    }
 
+    this.setState("connecting");
     const source = new EventSource("/api/events", { withCredentials: true });
     this.source = source;
 
     source.addEventListener("open", () => {
-      this.connected = true;
+      this.setState("connected");
     });
     source.addEventListener("error", () => {
-      this.connected = false;
+      this.setState("disconnected");
       // EventSource reconnects automatically; close on fatal auth errors.
       if (source.readyState === EventSource.CLOSED) {
         this.source = null;
+        this.setState("connecting");
         window.setTimeout(() => this.ensureConnected(), 5000);
       }
     });
@@ -187,6 +220,6 @@ export class EventStream {
       this.source.close();
       this.source = null;
     }
-    this.connected = false;
+    this.setState("disconnected");
   }
 }

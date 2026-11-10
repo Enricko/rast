@@ -265,9 +265,12 @@ impl Config {
             ));
         }
 
+        // Safe default: the first-run web setup requires an operator-generated
+        // token unless an operator explicitly opts out. This prevents the first
+        // visitor of a public deployment from taking over the installation.
         let setup_token_required =
             parse_env_bool(&env, "RAST_SETUP_TOKEN_REQUIRED", file.setup_token_required)?
-                .unwrap_or(false);
+                .unwrap_or(true);
 
         let trust_forwarded_headers = parse_env_bool(
             &env,
@@ -510,6 +513,18 @@ mod tests {
         let cfg = Config::from_parts(None, file, env).unwrap();
         assert_eq!(cfg.bind, "0.0.0.0:8721".parse().unwrap());
         assert_eq!(cfg.log_level, "warn");
+    }
+
+    #[test]
+    fn setup_token_required_by_default() {
+        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
+        assert!(cfg.setup_token_required);
+        let env = |k: &str| match k {
+            "RAST_SETUP_TOKEN_REQUIRED" => Some("false".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
+        assert!(!cfg.setup_token_required);
     }
 
     #[test]
