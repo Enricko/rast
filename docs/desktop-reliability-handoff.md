@@ -23,7 +23,7 @@ neutral values, such as `rast-demo` and `/var/lib/rast`.
 | `main` | `878b042` | `e03fee4` + this handoff commit |
 | SQLite schema | v5 (`0005_share_rule_ids`) | **v6** (`0006_appearance_widgets`) |
 | Release | v0.3.0 | v0.3.0 (no new tag) |
-| Production (desktop.lufria.tech) | `rast 0.3.0` | `rast 0.3.0`, **not updated** (see §10) |
+| Production (desktop.lufria.tech) | `rast 0.3.0` | **`rast 0.4.0`, schema v6** (2026-11-11 10:30 UTC; see §10) |
 | Tests | 297 lib + 27 e2e | **305 lib + 30 e2e**, 18 frontend unit tests |
 
 | Commit | Change |
@@ -368,29 +368,46 @@ Watch for a recurrence in CI.
   touch-sizing rules remain viewport-based on purpose.
 - **Open test failure.** The intermittent test failure in §8 has no proven
   cause.
-- **Not deployed.** This work is not deployed (§10). Deploying it runs
-  migration 0006, which makes a binary-only rollback to 0.3.0 impossible.
+- **No binary-only rollback.** Production now has schema v6 (§10), so a
+  binary-only rollback to 0.3.0 is impossible; roll back by restoring the
+  pre-update backup.
 
 ## 10. Push and deployment status
 
 **Push.** Every commit listed in §1, plus this handoff, is on `origin/main`,
 and CI (`ci.yml`, triggered by pushes to `main`) passed for each one.
 
-**Deployment: not performed.** desktop.lufria.tech still runs these at the
-time of writing:
-- `/usr/local/bin/rast --version` reports `rast 0.3.0`. The service has been
-  active since 2026-11-11 05:51 UTC, before the first commit of this work
-  (07:07 UTC).
-- The site serves the 0.3.0 bundle (`index-BLadPFq9.js`), not the bundle
-  built from `main` (`index-9l9wdSlw.js`).
+**Deployment: v0.4.0 is live** (released from `d6e25ec` at the owner's
+request). The steps were:
+1. Tag `v0.4.0`. `release.yml` built and published both binaries and
+   `SHA256SUMS`.
+2. Take a pre-upgrade backup:
+   `sudo -u rast rast backup --scope db,config --note "pre-upgrade 0.3.0 -> 0.4.0"`.
+3. Run `sudo rast update --version 0.4.0`. It verified the checksum, made its
+   own database backup (`/var/lib/rast/backups/rast-20261111-103015-db-config.tar.gz`),
+   kept the old binary as `/usr/local/bin/rast.rollback-0.3.0` and restarted
+   the service at 10:30 UTC.
+4. Verify. Production reported:
+   - `rast --version` → `rast 0.4.0`;
+   - `rast doctor` → schema v6, 0 warnings;
+   - `/healthz` → 200, and a clean service log;
+   - the site serves the new bundle (`index-9l9wdSlw.js`).
 
-The existing workflow does not deploy on push:
-1. `release.yml` builds release artifacts only for a `v*` tag.
-2. Production changes only when `rast update` runs on the host.
-3. `rast update` takes a pre-update database backup and applies migration
-   0006 (schema v5 → v6).
+**Known message.** `rast update` ended with `database migration failed:
+migration 6 was previously applied but is missing in the resolved
+migrations`, even though the update had succeeded. The updater runs as the
+*previous* binary. It opened the database with that binary's own migrations
+to report the schema, after the new service had already applied migration 6.
 
-Releasing and updating production is left to the owner.
+This is fixed in `09fe04f`, but the fix only helps updates *run by* a binary
+that contains it. The update from 0.4.0 to the next release can therefore
+still print the message once. Check the result with `rast doctor`.
+
+**Follow-up: v0.4.1** (`fca92c9`, CI passed) is prepared but not yet tagged.
+It contains:
+- the stable taskbar slots with per-account pins (three default pins);
+- the default widgets (migration 0007, schema v7);
+- the updater fix.
 
 ## 11. Verification summary (final build `e03fee4`)
 
