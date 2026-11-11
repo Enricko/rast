@@ -24,6 +24,68 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.5.0] - 2026-11-11
+
+Package Center: verified runtimes installed side by side. Upgrade with a
+database backup: migration `0008` (schema v8) is not reversible by an older
+binary. Package Center needs the signed catalog published by
+[Enricko/rast-packages](https://github.com/Enricko/rast-packages); until it
+exists the application reports that the catalog could not be verified. See
+[docs/package-center-handoff.md](docs/package-center-handoff.md).
+
+### Added
+
+- **Package Center** (administrators; a group `allow` grant gives read-only
+  access): install **Python, PHP CLI, Go and Node.js** from a signed catalog,
+  several versions side by side under `<data_dir>/packages/runtimes/<id>/<version>/`,
+  with a selectable RAST default (`runtimes/<id>/current` and shims in
+  `packages/bin/`). RAST never changes the system `PATH` or the operating
+  system's own runtimes.
+- Staged installs: download over HTTPS from the catalog's allowed hosts, size
+  and SHA-256 check, safe extraction (no absolute paths, `..`, devices or
+  escaping links), version checks before and after the move; a failed install
+  or update leaves the installed versions untouched.
+- Updates install next to the current version and keep it for rollback
+  (*Make default*). *New upstream version detected* (still being verified by
+  the catalog workflow) is distinguished from *Update ready to install*.
+  Automatic checks (`packages_check_interval_minutes`, default 6 h) plus
+  *Check updates*; a failed check marks the catalog stale and keeps the last
+  verified one.
+- Catalog security: Ed25519 signature, anti-rollback by sequence (also for
+  the cached copy), expiry (an expired catalog is refused and drives no
+  installs); extra keys for your own mirror (`packages_catalog_keys`).
+- Archive limits: GNU long-name/PAX records over 64 KiB are refused before
+  they are read into memory, and downloads and extraction must leave 512 MiB
+  of free disk space. Reinstalling a version keeps the old files until the new
+  ones are recorded (restored after a crash); a failed *Make default* is
+  rolled back.
+- Consumers: record what uses a runtime, follow the default or pin a version;
+  pinned and default versions cannot be removed; removal requires typing the
+  version.
+- **Install from GitHub**: inspect a repository or release link, review the
+  preview, approve the source and install. Imports are pinned to the inspected
+  release and digests, bound to one repository and publisher (checked again
+  when the install starts and when it is recorded), cannot take an official
+  package id or command name, and are validated like official packages.
+  Importing needs a verified catalog and a kernel with Landlock. Starter:
+  [Enricko/rast-package-template](https://github.com/Enricko/rast-package-template).
+- Version checks run in a sandbox: own process group (killed on timeout and
+  after exit), seccomp (no sockets, io_uring or ptrace), Landlock (read only
+  the package and system libraries, write only a scratch home, no TCP), no
+  core dumps, a file size limit. A third-party package still runs its author's
+  code on the server; the import preview says so.
+- Live job progress and live catalog/package updates in every open window;
+  every action is audited (`package.*`).
+- API: `/api/packages…` (see [docs/API.md](docs/API.md)); manifest schema
+  [docs/rast-package.schema.json](docs/rast-package.schema.json).
+- Configuration: `packages_catalog_url`, `packages_catalog_keys`,
+  `packages_check_interval_minutes`, `packages_github_token`
+  (`RAST_PACKAGES_*`).
+
+### Fixed
+
+- Relative times no longer read "0 min ago" between 45 and 59 seconds.
+
 ## [0.4.1] - 2026-11-11
 
 Taskbar and widget defaults, and a complete Add user dialog. Upgrade with a
