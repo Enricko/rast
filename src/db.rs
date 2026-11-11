@@ -202,6 +202,36 @@ pub async fn schema_version(pool: &SqlitePool) -> i64 {
     .unwrap_or(0)
 }
 
+/// Schema version recorded in the existing database at `path`, read
+/// *without* running this binary's migrations.
+///
+/// `rast update` runs as the previous binary: after the new service starts,
+/// the database may carry migrations this binary does not know, and opening
+/// it with [`connect`] would fail ("migration N was previously applied but is
+/// missing") although the update succeeded.
+pub async fn recorded_schema_version(path: &Path) -> AppResult<i64> {
+    use sqlx::{ConnectOptions, Connection};
+    let mut conn = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .busy_timeout(Duration::from_secs(10))
+        .connect()
+        .await
+        .map_err(|e| {
+            crate::error::AppError::internal(format!(
+                "cannot open database {}: {e}",
+                path.display()
+            ))
+        })?;
+    let version = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations WHERE success = 1",
+    )
+    .fetch_one(&mut conn)
+    .await?;
+    let _ = conn.close().await;
+    Ok(version)
+}
+
 /// Highest migration version compiled into this binary.
 pub fn embedded_schema_version() -> i64 {
     MIGRATOR.iter().map(|m| m.version).max().unwrap_or(0)
@@ -210,6 +240,25 @@ pub fn embedded_schema_version() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn recorded_schema_version_reads_newer_databases_without_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("newer.db");
+        let pool = connect(&path, 2).await.unwrap();
+        // Simulate a newer binary that applied a migration this one lacks.
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, installed_on, success, checksum, execution_time)
+             VALUES (9999, 'future', CURRENT_TIMESTAMP, 1, x'00', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        let error = connect(&path, 1).await.unwrap_err().to_string();
+        assert!(error.contains("previously applied"), "{error}");
+        assert_eq!(recorded_schema_version(&path).await.unwrap(), 9999);
+    }
 
     #[tokio::test]
     async fn migrations_apply_and_are_idempotent() {

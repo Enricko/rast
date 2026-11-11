@@ -167,10 +167,8 @@ pub async fn run(
 
     // Schema compatibility: the new binary may have applied migrations. Only
     // report; automatic DB rollback is intentionally NOT performed.
-    let db_schema = {
-        let pool = db::connect(&cfg.db_path(), 2).await?;
-        db::schema_version(&pool).await
-    };
+    // Read it without running this (previous) binary's migrations.
+    let db_schema = db::recorded_schema_version(&cfg.db_path()).await?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
