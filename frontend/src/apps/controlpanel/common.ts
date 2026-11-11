@@ -27,8 +27,18 @@ export interface TabRenderContext {
 
 export type TabRenderer = (tab: TabRenderContext) => Promise<(() => void) | void> | (() => void) | void;
 
-export function pageIntro(title: string, detail: string): HTMLElement {
-  return h("div", { class: "cp-intro" }, h("h2", { class: "cp-intro-title" }, title), h("p", { class: "cp-intro-detail muted" }, detail));
+/**
+ * Lead-in for a Control Panel page. Pass `null` as the title when the page has
+ * no sub-heading of its own: the Control Panel header already shows the
+ * section name, and repeating it as a second heading adds nothing.
+ */
+export function pageIntro(title: string | null, detail: string): HTMLElement {
+  return h(
+    "div",
+    { class: "cp-intro" },
+    ...(title ? [h("h2", { class: "cp-intro-title" }, title)] : []),
+    h("p", { class: "cp-intro-detail muted" }, detail),
+  );
 }
 
 export function sectionErrorState(message: string, retry: () => void): HTMLElement {

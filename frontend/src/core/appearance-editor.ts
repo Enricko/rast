@@ -705,12 +705,17 @@ export function validateAppearanceDraft(appearance: Appearance): string | null {
 // same finite-state machine so the button, status line, spinner and error
 // handling always agree:
 //
-//   clean  -> Save disabled, label "All changes saved"
-//   dirty  -> Save enabled, label "Save changes"
-//   saving -> Save disabled + spinner, label "Saving…"
+//   clean  -> Save disabled (neutral), status "All changes saved"
+//   dirty  -> Save enabled (accent), status "Unsaved changes"
+//   saving -> Save keeps the accent + spinner, ignores further clicks
 //   saved  -> label "Saved" for a moment, then back to clean
 //   invalid-> Save disabled, inline validation message
-//   error  -> error banner + label "Try again" (still enabled)
+//   error  -> draft kept, error banner + "Try again" (enabled)
+//
+// "Disabled" is aria-disabled, not the native attribute: a natively disabled
+// button drops keyboard focus to <body> the moment it is pressed, so keyboard
+// users would lose their place on every save. Clicks are ignored while it is
+// aria-disabled, and the shared .btn styles render both forms identically.
 // ---------------------------------------------------------------------------
 
 export type AppearanceSaveState = "clean" | "dirty" | "saving" | "saved" | "invalid" | "error";
@@ -762,7 +767,7 @@ export function createAppearanceSaveWorkflow(options: AppearanceSaveWorkflowOpti
 
   const error = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
   const status = h("div", { class: "form-status" });
-  const saveButton = h("button", { class: "btn btn-primary", type: "button", disabled: true });
+  const saveButton = h("button", { class: "btn btn-primary", type: "button" });
   const actions = h(
     "div",
     { class: "appearance-actions" },
@@ -772,6 +777,10 @@ export function createAppearanceSaveWorkflow(options: AppearanceSaveWorkflowOpti
     saveButton,
   );
   const el = h("div", { class: "appearance-save" }, error, actions);
+
+  function setActionable(actionable: boolean): void {
+    saveButton.setAttribute("aria-disabled", String(!actionable));
+  }
 
   function setButtonContent(label: string, iconName?: string, loading = false): void {
     saveButton.classList.toggle("is-loading", loading);
@@ -795,31 +804,31 @@ export function createAppearanceSaveWorkflow(options: AppearanceSaveWorkflowOpti
     saveButton.removeAttribute("aria-busy");
     switch (state) {
       case "clean":
-        saveButton.disabled = true;
+        setActionable(false);
         setButtonContent(labels.dirty);
         status.textContent = labels.clean;
         status.classList.add("is-saved");
         break;
       case "dirty":
-        saveButton.disabled = false;
+        setActionable(true);
         setButtonContent(labels.dirty, "check");
         status.textContent = "Unsaved changes";
         status.classList.add("is-dirty");
         break;
       case "saving":
-        saveButton.disabled = true;
+        setActionable(false);
         setButtonContent(labels.saving, undefined, true);
         status.textContent = labels.saving;
         status.classList.add("is-saving");
         break;
       case "saved":
-        saveButton.disabled = true;
+        setActionable(false);
         setButtonContent(labels.saved, "check");
         status.textContent = labels.saved;
         status.classList.add("is-saved");
         break;
       case "invalid":
-        saveButton.disabled = true;
+        setActionable(false);
         setButtonContent(labels.dirty, "check");
         status.textContent = validation ?? "Fix the highlighted fields";
         status.classList.add("is-error");
@@ -829,7 +838,7 @@ export function createAppearanceSaveWorkflow(options: AppearanceSaveWorkflowOpti
         }
         break;
       case "error":
-        saveButton.disabled = false;
+        setActionable(true);
         setButtonContent(labels.retry, "refresh");
         status.textContent = "Could not save";
         status.classList.add("is-error");
@@ -899,7 +908,7 @@ export function createAppearanceSaveWorkflow(options: AppearanceSaveWorkflowOpti
   }
 
   saveButton.addEventListener("click", () => {
-    if (state === "saving") return;
+    if (saveButton.getAttribute("aria-disabled") === "true") return;
     void runSave();
   });
 

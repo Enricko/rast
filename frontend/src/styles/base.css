@@ -1098,29 +1098,8 @@ pre {
   border-color: var(--border-strong);
 }
 
-.btn:active {
-  transform: translateY(1px);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .btn .icon-wrap {
   display: inline-flex;
-}
-
-.btn-primary {
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 6px 18px rgba(47, 111, 228, 0.35);
-}
-
-.btn-primary:hover {
-  filter: brightness(1.07);
-  background: linear-gradient(160deg, var(--accent), var(--accent-strong));
 }
 
 .btn-danger {
@@ -3457,15 +3436,52 @@ kbd {
   bottom: 0;
   z-index: 6;
   margin: 10px 0 4px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--surface);
-  box-shadow: var(--shadow-popover, var(--shadow-sm));
+  /* Flat: a hairline shadow only separates it from content scrolling under it. */
+  box-shadow: var(--shadow-sm);
+  /* Wrap by the bar's own width (window size), not the browser viewport. */
+  container-type: inline-size;
 }
 
 .appearance-save-bar .appearance-actions {
   gap: var(--gap-sm);
+}
+
+/* Narrow window: secondary actions on the first row, status + Save on the
+   second, so every action stays reachable. */
+@container (max-width: 560px) {
+  .appearance-save-bar .appearance-actions {
+    justify-content: flex-start;
+  }
+
+  .appearance-save-bar .appearance-actions .spacer {
+    display: none;
+  }
+
+  .appearance-save-bar .appearance-actions-leading {
+    flex: 1 1 100%;
+  }
+
+  .appearance-save-bar .form-status {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+}
+
+/* Very narrow: one action per row, labels may wrap instead of clipping. */
+@container (max-width: 300px) {
+  .appearance-save-bar .appearance-actions-leading .btn,
+  .appearance-save-bar .appearance-actions > .btn {
+    flex: 1 1 100%;
+    height: auto;
+    min-height: var(--control-h);
+    padding-block: 6px;
+    white-space: normal;
+    text-align: center;
+  }
 }
 
 .appearance-actions-leading {
@@ -3590,18 +3606,6 @@ kbd {
   .appearance-save-bar {
     position: static;
     padding: 8px 10px;
-  }
-
-  .appearance-save-bar .appearance-actions {
-    flex-wrap: wrap;
-  }
-
-  .appearance-save-bar .appearance-actions .spacer {
-    display: none;
-  }
-
-  .appearance-actions-leading {
-    width: 100%;
   }
 
   .logs-live-row {

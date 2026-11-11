@@ -47,15 +47,6 @@
   outline-offset: 2px;
 }
 
-.btn:disabled,
-.btn[aria-disabled="true"] {
-  background: var(--surface-2);
-  border-color: var(--border-subtle);
-  color: var(--text-faint);
-  cursor: not-allowed;
-  opacity: 1;
-}
-
 .btn .icon {
   width: 15px;
   height: 15px;
@@ -79,14 +70,6 @@
   background: var(--accent-active);
   border-color: var(--accent-active);
   color: var(--accent-fg);
-}
-
-.btn-primary:disabled {
-  /* Same accessible disabled palette as other buttons: the translucent accent
-     mix made the label unreadable (≈2.1:1). */
-  background: var(--surface-2);
-  border-color: var(--border-subtle);
-  color: var(--text-faint);
 }
 
 /* Secondary is the default `.btn`; explicit class for readability. */
@@ -135,6 +118,31 @@
   color: var(--danger-strong);
 }
 
+/* Disabled (any variant): flat and neutral. No fill, so a disabled button can
+   never look hovered (hover fills with --surface-hover) or pressed; a subtle
+   outline keeps its shape and the label stays readable (≥4.5:1). Declared
+   after every variant and covering :hover/:active so nothing overrides it. */
+.btn:disabled,
+.btn:disabled:hover,
+.btn:disabled:active,
+.btn[aria-disabled="true"],
+.btn[aria-disabled="true"]:hover,
+.btn[aria-disabled="true"]:active {
+  background: transparent;
+  border-color: var(--border-subtle);
+  color: var(--text-faint);
+  box-shadow: none;
+  filter: none;
+  transform: none;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.btn:is(.btn-subtle, .btn-ghost, .btn-text):is(:disabled, [aria-disabled="true"]),
+.btn:is(.btn-subtle, .btn-ghost, .btn-text):is(:disabled, [aria-disabled="true"]):is(:hover, :active) {
+  border-color: transparent;
+}
+
 .btn:disabled .icon,
 .btn[aria-disabled="true"] .icon {
   opacity: 0.75;
@@ -165,6 +173,7 @@
 .btn.is-loading {
   position: relative;
   pointer-events: none;
+  opacity: 1;
 }
 
 .btn.is-loading::before {
@@ -179,6 +188,23 @@
 
 .btn.is-loading > .icon {
   display: none;
+}
+
+/* A primary action in progress keeps the accent and shows the spinner; it is
+   aria-disabled meanwhile, so it cannot be submitted twice. */
+.btn-primary.is-loading,
+.btn-primary.is-loading[aria-disabled="true"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  cursor: progress;
+}
+
+.btn.is-loading:not(.btn-primary)[aria-disabled="true"] {
+  background: var(--surface);
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+  cursor: progress;
 }
 
 @keyframes rast-spin {

@@ -67,7 +67,7 @@ function renderLoadError(tab: TabRenderContext, error: unknown, retry: () => voi
     "Retry",
   );
   tab.host.replaceChildren(
-    pageIntro("Appearance", INTRO_TEXT),
+    pageIntro(null, INTRO_TEXT),
     h(
       "div",
       { class: "banner banner-error", role: "alert" },
@@ -130,20 +130,27 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
   };
 
   // Buttons are created first so the workflow state callback can update them.
+  // Save, Discard and Reset share the standard button styles (Save is the
+  // primary action); none of them can start while a save or reset runs.
   const discardButton = h(
     "button",
-    { class: "btn btn-ghost", type: "button", disabled: true },
+    { class: "btn", type: "button", disabled: true },
     iconSvg("restore", 15),
     "Discard changes",
   );
   const resetButton = h(
     "button",
-    { class: "btn btn-ghost", type: "button" },
+    { class: "btn", type: "button" },
     iconSvg("wallpaper", 15),
     "Reset to default",
   );
 
   let editor: ReturnType<typeof createAppearanceEditor> | null = null;
+  let resetting = false;
+  const syncSecondaryActions = (state: string): void => {
+    discardButton.disabled = resetting || ["clean", "saving", "saved"].includes(state);
+    resetButton.disabled = resetting || state === "saving";
+  };
   let workflow: ReturnType<typeof createAppearanceSaveWorkflow> | null = null;
 
   editor = createAppearanceEditor({
@@ -173,9 +180,7 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
       ctx.store.setThemePreference(saved.theme);
       applyAppearance(saved);
     },
-    onStateChange: (state) => {
-      discardButton.disabled = ["clean", "saving", "saved"].includes(state);
-    },
+    onStateChange: (state) => syncSecondaryActions(state),
   });
 
   discardButton.addEventListener("click", () => {
@@ -192,8 +197,9 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
           "Restore the default wallpaper, fit, position and overlay? Your saved theme and accent are kept. This also clears unsaved preview changes.",
         confirmLabel: "Reset wallpaper",
       });
-      if (!ok) return;
-      resetButton.disabled = true;
+      if (!ok || workflow?.state === "saving") return;
+      resetting = true;
+      syncSecondaryActions(workflow?.state ?? "clean");
       try {
         const reset = await editor!.reset();
         sync.markLocalSave();
@@ -206,7 +212,8 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
         ctx.toast.error(errorMessage(error));
         workflow?.setDirty(true);
       } finally {
-        resetButton.disabled = false;
+        resetting = false;
+        syncSecondaryActions(workflow?.state ?? "clean");
       }
     })();
   });
@@ -289,7 +296,7 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
   const unsubscribeDirty = sync.registerDirtySource(() => workflow?.isDirty() ?? false);
 
   // ------------------------------------------------------------------- layout
-  const intro = pageIntro("Appearance", INTRO_TEXT);
+  const intro = pageIntro(null, INTRO_TEXT);
 
   const saveHost = workflow.el;
   saveHost.classList.add("appearance-save-bar");

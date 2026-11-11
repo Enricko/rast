@@ -67,14 +67,15 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
   applyAppearance(previous);
   setRootTheme(previous.theme);
 
+  // Same shared button styles as Control Panel → Appearance.
   const cancelButton = h(
     "button",
-    { class: "btn btn-ghost", type: "button" },
+    { class: "btn", type: "button" },
     "Cancel",
   );
   const resetButton = h(
     "button",
-    { class: "btn btn-ghost", type: "button" },
+    { class: "btn", type: "button" },
     iconSvg("wallpaper", 15),
     "Reset to default",
   );
@@ -181,6 +182,9 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
       return editor!.save();
     },
     labels: { clean: "All changes saved", dirty: "Apply", saving: "Applying…", saved: "Applied", retry: "Try again" },
+    onStateChange: (state) => {
+      resetButton.disabled = state === "saving";
+    },
     onSaved: (saved) => {
       sync.markLocalSave();
       exitPreview();
@@ -193,6 +197,7 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
     },
   });
 
+  const isSaving = (): boolean => workflow?.state === "saving";
   resetButton.addEventListener("click", () => {
     void (async () => {
       const ok = await confirmDialog({
@@ -200,7 +205,7 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
         message: "Restore the default wallpaper, fit, position and overlay? Your theme and accent are kept.",
         confirmLabel: "Reset wallpaper",
       });
-      if (!ok) return;
+      if (!ok || isSaving()) return;
       resetButton.disabled = true;
       try {
         const reset = await editor!.reset();
@@ -213,7 +218,7 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
       } catch (error) {
         options.toast.error(errorMessage(error));
       } finally {
-        resetButton.disabled = false;
+        resetButton.disabled = isSaving();
       }
     })();
   });
