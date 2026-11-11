@@ -3,7 +3,7 @@
 This is the shared contract for the NAS-style **Users & Groups** feature. It is
 read by the Rust backend, the Control Panel UI and the application windows.
 
-## 1. Data model (migration `0004_groups.sql`, purely additive)
+## 1. Data model (`0004_groups.sql` additive; `0005_share_rule_ids.sql` rekeys folder rules)
 
 ```sql
 CREATE TABLE groups (
@@ -21,11 +21,11 @@ CREATE TABLE group_members (
     PRIMARY KEY (group_id, user_id)
 );
 
-CREATE TABLE group_folder_rules (
-    group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
-    share_name TEXT NOT NULL COLLATE NOCASE,           -- logical resource
-    rule       TEXT NOT NULL CHECK (rule IN ('inherit','none','read','write')),
-    PRIMARY KEY (group_id, share_name)
+CREATE TABLE group_folder_rules ( -- schema v5 (0005): keyed by stable share id
+    group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+    share_id TEXT    NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    rule     TEXT    NOT NULL CHECK (rule IN ('inherit','none','read','write')),
+    PRIMARY KEY (group_id, share_id)
 );
 
 CREATE TABLE group_app_rules (
@@ -35,11 +35,12 @@ CREATE TABLE group_app_rules (
     PRIMARY KEY (group_id, app_id)
 );
 
-CREATE TABLE user_folder_rules ( -- direct user rules (explicit denials/grants)
+CREATE TABLE user_folder_rules ( -- direct user rules (schema v5: share id)
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    share_name TEXT NOT NULL COLLATE NOCASE,
-    rule       TEXT NOT NULL CHECK (rule IN ('inherit','none','read','write')),
-    PRIMARY KEY (user_id, share_name)
+    share_id   TEXT    NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+    rule       TEXT    NOT NULL CHECK (rule IN ('inherit','none','read','write')),
+    updated_at INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, share_id)
 );
 
 CREATE TABLE user_app_rules (
@@ -48,12 +49,18 @@ CREATE TABLE user_app_rules (
     rule    TEXT NOT NULL CHECK (rule IN ('inherit','none','allow')),
     PRIMARY KEY (user_id, app_id)
 );
--- indexes: group_members(user_id), group_folder_rules(share_name), group_app_rules(app_id)
+-- indexes: group_members(user_id), group_folder_rules(share_id),
+--          user_folder_rules(share_id), group_app_rules(app_id)
 ```
 
-Existing tables (`users`, `shares`, `share_members`) are untouched. Rules reference
-shared folders by display **name**; share rename/delete must rewrite/delete the
-rules in the same transaction. Group ids are stable across renames.
+Existing tables (`users`, `shares`, `share_members`) are untouched. Since
+schema v5 folder rules reference shared folders by their **stable id**: a rename
+does not touch rules, deleting a share cascades its rules. Migration 0005 maps
+the v4 name-keyed rows by `shares.name COLLATE NOCASE`; rows whose name matches
+no share (they had no effect) are dropped and counted in
+`settings['migration.0005.orphaned_rules']`, duplicate collisions in
+`settings['migration.0005.conflicts']` (structurally 0). Group ids are stable
+across renames.
 
 ## 2. Apps (fixed ids, enforceable capabilities)
 
@@ -63,8 +70,8 @@ rules in the same transaction. Group ids are stable across renames.
 | `monitor` | Resource Monitor | allowed | — |
 | `logs` | Activity Logs | allowed (own events; admins see all) | — |
 | `controlpanel` | Control Panel | allowed (own profile/appearance only; admin tabs stay role-gated) | — |
-| `applications` | Applications | **denied** (admin-only today) | read-only list/detail/logs/history; deploy/start/stop/delete remain admin-only |
-| `backup` | Backup Center | **denied** (admin-only today) | read-only list/download/guide; create/delete/verify/schedule-write remain admin-only |
+| `applications` | Applications | **denied** (admin-only) | read-only status metadata: list/detail (no env values → `envCount`/`secretCount`, no compose), history without `detail`, container inventory in Resource Monitor. Logs, log stream, deploy/start/stop/delete remain admin-only |
+| `backup` | Backup Center | **denied** (admin-only) | read-only status metadata: list (no file name/checksum/note, `downloadable:false`) and schedule. Archive download, restore guide, create/delete/verify/schedule-write remain admin-only (archives contain the account DB, the master key and possibly every user's files) |
 
 Explicit `none` always wins and blocks the API prefix + live events + launcher.
 
@@ -73,13 +80,16 @@ Explicit `none` always wins and blocks the API prefix + live events + launcher.
 Folder (`/shared/<name>`) decision for a non-admin user:
 
 1. Collect direct (`user_folder_rules`) + group (`group_folder_rules` of all
-   groups the user belongs to) rules for the share name.
+   groups the user belongs to) rules for the share id.
 2. Any `none` → **No Access**.
 3. Else strongest grant: `write` > `read` > (`inherit` ignored).
-4. If no grant is present → **fallback to the pre-groups behaviour**:
-   * share owner (`shares.created_by`) → full/write,
-   * legacy `share_members.perms` (`read`/`write`/`admin`) → that level,
-   * otherwise No Access.
+4. If no grant is present → **fallback to the pre-groups (v0.1.x) behaviour**:
+   * legacy `share_members.perms` (`read`/`write`/`admin`) → that level
+     (`fallback:"legacy-acl"`),
+   * otherwise No Access (`fallback:"none"`).
+   There is **no owner fallback**: `shares.created_by` grants nothing (v0.2.0
+   granted Admin to the creator, so a demoted former administrator kept full
+   access — removed in 0.3.0, matching v0.1.8).
 5. Admins bypass everything (full access). Personal homes keep ownership rules
    (owner full, admins full, others hidden).
 6. "New restricted resources require an explicit grant": a new share with no
@@ -144,32 +154,34 @@ resources (do not leak existence).
 | Method | Path | Body / response |
 | --- | --- | --- |
 | GET | `/api/groups?page=1&perPage=25&q=` | `{items:[GroupSummary],page,perPage,total}` |
-| POST | `/api/groups` | `{name,description?,members?:[userId],folderRules?:[{shareName,rule}],appRules?:[{appId,rule}]}` → GroupDetail (201) |
+| POST | `/api/groups` | `{name,description?,members?:[userId],folderRules?:[{shareId?,shareName?,rule}],appRules?:[{appId,rule}]}` → GroupDetail (201); `shareId` preferred |
 | GET | `/api/groups/{id}` | GroupDetail |
 | PUT | `/api/groups/{id}` | same body as POST (sets replace, single save) → GroupDetail |
 | DELETE | `/api/groups/{id}` | `{deleted:true,affectedUsers,affectedFolderRules,affectedAppRules}` |
+| GET | `/api/groups/{id}/members?q=&page=&perPage=` | `{items:[{userId,username,displayName,role,active}],page,perPage,total,inactiveTotal}` (deactivated members included) |
+| GET | `/api/groups/{id}/impact` | deletion preview: `{groupId,groupName,members,folderRules,appRules,users:[{userId,username,displayName,active,changes:[{kind,resourceId,resource,before,after}]}],evaluated,truncated,retained}` (≤50 members evaluated, read-only) |
 
 `GroupSummary`: `{id,name,description,memberCount,folderRuleCount,appRuleCount,createdAt,updatedAt}`
 `GroupDetail`: summary fields + `members:[{userId,username,displayName}]`,
-`folderRules:[{shareName,rule}]`, `appRules:[{appId,rule}]`.
+`folderRules:[{shareId,shareName,rule}]`, `appRules:[{appId,rule}]`.
 
 ### Users & access
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/users` | now each user also has `groups:[{id,name}]` and `groupIds:[..]` |
+| GET | `/api/users?q=&page=&perPage=&active=all\|active\|inactive` | each user also has `groups:[{id,name}]` and `groupIds:[..]`; search works for any non-empty query |
 | GET | `/api/users/{id}/groups` | `{groupIds,groups:[{id,name}]}` |
 | PUT | `/api/users/{id}/groups` | `{groupIds:[..]}` (atomic replace, audit `user.groups_update`) |
-| GET | `/api/users/{id}/access-rules` | `{folderRules:[{shareName,rule}],appRules:[{appId,rule}]}` (direct rules) |
+| GET | `/api/users/{id}/access-rules` | `{folderRules:[{shareId,shareName,rule}],appRules:[{appId,rule}]}` (direct rules) |
 | PUT | `/api/users/{id}/access-rules` | same shape; replaces direct rules, audit `user.access_update` |
-| GET | `/api/users/{id}/effective-access` | `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback}],apps:[{appId,label,allowed,readOnly,sources,fallback}]}` |
-| GET | `/api/access/me` | same shape for the caller (for launcher/effective view) |
+| GET | `/api/users/{id}/effective-access?q=&level=all\|none\|read\|write\|admin&page=&perPage=` | `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback,conflict?}],foldersTotal,foldersAll,page,perPage,levelCounts,apps:[{appId,label,allowed,readOnly,sources,fallback}]}`; `conflict:{deniedBy,overriddenGrants}` when an explicit No Access overrode grants; apps always complete |
+| GET | `/api/access/me` | same query/shape for the caller; hidden (No Access) folders are never listed |
 
 `GET /api/auth/me` additionally returns
 `permissions: { apps: { "<appId>": {allowed, readOnly} }, groups: [{id,name}] }`.
 
 ### Shares
-Existing endpoints unchanged; `GET /api/shares` is the source of share names for
-the group editor. Rename/delete rewrites/deletes rules referenced by name.
+Existing endpoints unchanged; `GET /api/shares` is the source of share ids/names
+for the group editor. Rename keeps rules (stable ids); delete cascades rules.
 
 ## 6. Enforcement
 
@@ -244,8 +256,10 @@ for deliveries immediately (generation cache) and the API emits
 ## 9. Required tests
 
 * evaluator precedence: direct deny vs group grant (both orders), strongest
-  grant, RW includes read, inherit fallback to legacy `share_members`, owner,
-  admins, hidden shares; app defaults/deny/allow/read-only.
+  grant, RW includes read, inherit fallback to legacy `share_members`, no
+  owner fallback (demoted creator), admins, hidden shares; app
+  defaults/deny/allow/read-only; Effective Access ⇔ API decisions for every
+  (account, folder) pair.
 * groups API: CRUD, validation, membership replace, rules replace, delete counts,
   audit rows, `group.changed`/`access.changed` scopes, last-admin untouched.
 * enforcement: listing/search/preview/download, viewer read/deny write, editor
@@ -253,4 +267,6 @@ for deliveries immediately (generation cache) and the API emits
   revocation, direct URL for denied app (403), allowed app read-only vs write,
   SSE event filtering.
 * migration: existing share membership keeps exactly the same effective access
-  with no rules (upgrade behaviour), fresh install schema v4.
+  with no rules (upgrade behaviour); 0005 keeps identical effective
+  permissions for every (user, share), counts orphans/conflicts, preserves
+  `updated_at`; fresh install schema v5.

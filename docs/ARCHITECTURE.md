@@ -162,14 +162,22 @@ keeps it inactive in that case.
 
 Group policy lives in `groups`, `group_members`, `group_folder_rules`,
 `group_app_rules` plus per-user `user_folder_rules`/`user_app_rules`
-(migration `0004`, additive). A single evaluator (`src/access/mod.rs`) is used
+(migration `0004`, additive; migration `0005` keys folder rules by the stable
+`shares.id` with `ON DELETE CASCADE`, so renames never touch rules). A single evaluator (`src/access/mod.rs`) is used
 by API enforcement, storage resolution, SSE filtering, the `/api/auth/me`
 launcher permissions and the admin Effective Access view, so the UI always
 explains the decision the backend actually makes. Decisions are cached per
 account/resource and invalidated by a generation counter after every committed
 membership/rule/share change. Legacy `share_members` produces the fallback
 level when no new rule grants access, which preserves existing access on
-upgrade. See `docs/GROUPS.md` for the full contract.
+upgrade; share creators get no implicit grant. `src/access/review.rs` builds
+the administrator views (paginated Effective Access with conflict
+explanations, group member pages, group-deletion impact) on top of the same
+evaluator and its pure precedence helpers. Read-only Applications/Backup
+grants expose status metadata only (no environment values, container logs,
+archive downloads or host paths); Resource Monitor container inventory is
+redacted per account and per live sample. See `docs/GROUPS.md` for the full
+contract.
 
 ## Live updates
 

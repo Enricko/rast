@@ -61,6 +61,11 @@ All list endpoints accept `page` and `perPage` (bounded server-side).
 | DELETE | `/api/auth/sessions/{id}` | revoke one session |
 | DELETE | `/api/auth/sessions` | revoke all other sessions |
 
+While `mustChangePassword` is set (administrator reset or temporary password),
+every protected endpoint except `/api/auth/me`, `/api/auth/password`,
+`/api/auth/logout` and `/api/events` answers `403 password change required
+before using RAST`.
+
 ## Users (admin)
 
 | Method | Path | Body |
@@ -133,15 +138,15 @@ and `/api/docker/status` reports why.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/docker/status` | `{enabled, available, version, reason}` |
-| GET | `/api/apps` | managed apps with status |
+| GET | `/api/apps` | managed apps with status (read-only grant: no `env`/`compose`; `envCount`, `secretCount`, first line of `lastError`) |
 | POST | `/api/apps` | `{name, compose, env:[{key,value,secret}]}` → validates compose then `{app, jobId}` |
 | GET | `/api/apps/{id}` | detail: status, containers, ports, volumes, resources, lastError |
 | POST | `/api/apps/{id}/start` | |
 | POST | `/api/apps/{id}/stop` | |
 | POST | `/api/apps/{id}/restart` | |
 | POST | `/api/apps/{id}/redeploy` | `{compose?, env?}` |
-| GET | `/api/apps/{id}/logs?tail=200` | `{lines:[{ts,stream,message}]}` |
-| GET | `/api/apps/{id}/history` | deployment history |
+| GET | `/api/apps/{id}/logs?tail=200` | `{lines:[{ts,stream,message}]}` (admin only) |
+| GET | `/api/apps/{id}/history` | deployment history (read-only grant: no `detail`) |
 | DELETE | `/api/apps/{id}?removeVolumes=false` | confirmation required; volumes kept by default |
 | GET | `/api/docker/containers` | discovered containers, flagged `managed:true|false` |
 | POST | `/api/docker/import` | `{containerIds:[]}` explicit import |
@@ -157,22 +162,35 @@ Env values marked `secret:true` are encrypted at rest and returned masked
 | GET | `/api/monitor/history?metric=cpu&points=120` | ring buffer, bounded retention |
 | GET | `/api/monitor/containers` | container resources (empty when Docker unavailable) |
 
+Container inventory (names/ids/resources) is returned only to administrators
+and accounts allowed to use Applications; other accounts receive
+`containers: []` with `containersRestricted: true` — in REST responses and in
+live `monitor` events, re-evaluated per sample. Disks exclude overlay,
+container-runtime and virtual filesystems for everyone.
+
 Live updates: `GET /api/events` (SSE). Events: `monitor` (every interval),
 `job.queued|start|progress|done|failed|cancelled`, `notice`.
 Each event has `event: <kind>`, `data: {...}`; include `id` for `Last-Event-ID`.
 
-## Backup Center (admin)
+## Backup Center (admin; read-only grant sees status metadata)
+
+Archives contain the account database (password/session hashes), the server
+master key, configuration and optionally every user's files, so downloading,
+the restore guide and every mutation are administrator-only regardless of
+group grants. A read-only `backup` grant receives status metadata only:
+`fileName`, `sha256` and `note` are empty, `error` is generic and
+`downloadable` is `false`.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error}], total}` |
+| GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error,downloadable}], total}` |
 | POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}` |
 | DELETE | `/api/backups/{id}` | delete archive |
-| GET | `/api/backups/{id}/download` | streamed archive |
+| GET | `/api/backups/{id}/download` | streamed archive (admin only, audited as `backup.download`) |
 | GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
 | PUT | `/api/backups/schedule` | update schedule |
 | POST | `/api/backups/{id}/verify` | integrity check |
-| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...]}` |
+| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
 
 ## Activity logs
 
@@ -247,29 +265,34 @@ other sessions (`{reason, originSessionId, appearance}`).
 NAS-style groups with per-group shared-folder and application rules. Precedence:
 explicit **No Access** (user or any group) wins; otherwise the strongest grant
 wins (`write` includes `read`); when no rule grants anything the legacy
-`share_members` ACL / share owner decide, so upgraded installations keep their
-existing access. Personal homes keep ownership rules; administrators bypass
+`share_members` ACL decides (there is no implicit owner grant), so upgraded
+installations keep their v0.1.x access. Personal homes keep ownership rules; administrators bypass
 folder policy, and group permissions never grant administrator capabilities.
 
 Folder rules: `inherit | none | read | write`. Application rules:
 `inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
-`logs`, `controlpanel` (group `allow` for Applications/Backup is read-only;
-deploy/config/mutations remain admin-only).
+`logs`, `controlpanel` (group `allow` for Applications/Backup is read-only
+status metadata: no env values, logs, archive downloads or restore guide;
+deploy/config/mutations remain admin-only). Folder rules reference shared
+folders by stable id (`shareId`); `shareName` is accepted on input and always
+returned with the current name.
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/groups?page=&perPage=&q=` | `{items:[{id,name,description,memberCount,folderRuleCount,appRuleCount,createdAt,updatedAt}],page,perPage,total}` |
-| POST | `/api/groups` | `{name, description?, members:[userId], folderRules:[{shareName,rule}], appRules:[{appId,rule}]}` → GroupDetail |
+| POST | `/api/groups` | `{name, description?, members:[userId], folderRules:[{shareId?,shareName?,rule}], appRules:[{appId,rule}]}` → GroupDetail |
 | GET | `/api/groups/{id}` | GroupDetail with `members`, `folderRules`, `appRules` |
 | PUT | `/api/groups/{id}` | same body; replaces the sets in one save; stable id across rename |
 | DELETE | `/api/groups/{id}` | `{deleted,groupId,affectedUsers,affectedFolderRules,affectedAppRules,retained}`; users/folders/files are kept |
-| GET | `/api/users` | items additionally expose `groups:[{id,name}]` and `groupIds` |
+| GET | `/api/groups/{id}/members?q=&page=&perPage=` | searchable member page incl. deactivated accounts: `{items:[{userId,username,displayName,role,active}],page,perPage,total,inactiveTotal}` |
+| GET | `/api/groups/{id}/impact` | deletion preview per member: `{members,folderRules,appRules,users:[{userId,username,displayName,active,changes:[{kind,resourceId,resource,before,after}]}],evaluated,truncated,retained}` |
+| GET | `/api/users?q=&active=all\|active\|inactive` | items additionally expose `groups:[{id,name}]` and `groupIds` |
 | GET | `/api/users/{id}/groups` | `{groupIds, groups:[{id,name}]}` |
 | PUT | `/api/users/{id}/groups` | `{groupIds}` (atomic replace) |
 | GET | `/api/users/{id}/access-rules` | direct user overrides: `{folderRules,appRules}` |
 | PUT | `/api/users/{id}/access-rules` | replace direct overrides (explicit deny/grant) |
-| GET | `/api/users/{id}/effective-access` | code-level explanation: `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback}],apps:[{appId,label,allowed,readOnly,sources,fallback}]}` |
-| GET | `/api/access/me` | caller's own effective access (hidden shares omitted) |
+| GET | `/api/users/{id}/effective-access?q=&level=&page=&perPage=` | evaluator explanation: `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback,conflict?}],foldersTotal,foldersAll,page,perPage,levelCounts,apps:[...]}`; `fallback` is `admin`, `explicit`, `legacy-acl` or `none` |
+| GET | `/api/access/me` | caller's own effective access, same query (hidden shares omitted) |
 
 `GET /api/auth/me` includes `permissions: {apps: {<id>:{allowed,readOnly,label}},
 groups:[{id,name}]}` used by the launcher. Live updates: `group.changed`
@@ -299,7 +322,7 @@ never appear in the event URL.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/events` | authenticated event stream (admin and user scope filtering) |
-| GET | `/api/apps/{id}/logs/stream?tail=200` | admin-only SSE log stream; bounded ring buffer, `app.logs` events with `{appId, lines:[{ts,stream,message}], reset?}` |
+| GET | `/api/apps/{id}/logs/stream?tail=200` | admin-only SSE log stream; bounded ring buffer, `app.logs` events with `{appId, lines:[{ts,stream,message}], reset?}`; the session and active-admin status are revalidated before every poll |
 
 Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
 `job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
