@@ -501,7 +501,11 @@ pre {
   color: #fff;
 }
 
+/* Every window body (and dialog body) is a size container named "win", so
+   app layouts respond to the window's own width (@container win …) even when
+   the browser is wide. */
 .win-body {
+  container: win / inline-size;
   flex: 1;
   overflow: auto;
   position: relative;
@@ -1647,6 +1651,16 @@ pre.code {
     display: none;
   }
 
+  .toast-center {
+    left: 8px;
+    right: 8px;
+    bottom: calc(var(--taskbar-h) + 8px);
+    width: auto;
+  }
+}
+
+/* Inside a window: follow the window's width, not the browser's. */
+@container win (max-width: 820px) {
   .app-split {
     grid-template-columns: 1fr;
   }
@@ -1655,13 +1669,6 @@ pre.code {
     border-right: 0;
     border-bottom: 1px solid var(--border);
     max-height: 30vh;
-  }
-
-  .toast-center {
-    left: 8px;
-    right: 8px;
-    bottom: calc(var(--taskbar-h) + 8px);
-    width: auto;
   }
 
   .table th,
@@ -3092,13 +3099,15 @@ kbd {
   display: block;
 }
 
+/* Label and value side by side while the value can have ~200px; otherwise
+   the value moves to its own line under the label (never squeezed). */
 .readonly-list .readonly-row {
-  display: grid;
-  grid-template-columns: minmax(150px, 210px) minmax(0, 1fr) auto;
-  gap: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
   padding: 7px 0;
   border-bottom: 1px dashed var(--border);
-  align-items: baseline;
 }
 
 .readonly-list .readonly-row:last-child {
@@ -3106,6 +3115,8 @@ kbd {
 }
 
 .readonly-row dt {
+  /* Grows only when alone on its line (the value takes ~all spare space). */
+  flex: 1 1 clamp(120px, 34%, 210px);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3114,9 +3125,17 @@ kbd {
 }
 
 .readonly-row dd {
+  flex: 999 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
   margin: 0;
   font-size: 12.5px;
-  word-break: break-word;
+}
+
+.readonly-value {
+  overflow-wrap: anywhere;
 }
 
 .lock-icon {
@@ -3125,8 +3144,7 @@ kbd {
 }
 
 .readonly-marker {
-  text-align: right;
-  white-space: nowrap;
+  text-align: left;
 }
 
 /* ==========================================================================
@@ -3281,46 +3299,14 @@ kbd {
   }
 }
 
-@media (max-width: 820px) {
-  .app-controlpanel {
-    grid-template-columns: 1fr;
-  }
-
-  .app-controlpanel .cp-nav {
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
-    flex-direction: row;
-    overflow-x: auto;
-    padding: 8px;
-    gap: 6px;
-  }
-
-  .cp-nav-list {
-    flex-direction: row;
-  }
-
-  .cp-nav-item {
-    height: 34px;
-  }
-
-  .cp-nav-note {
-    display: none;
-  }
-
+/* Control Panel navigation rail and card stacking: see responsive.css. */
+@container win (max-width: 820px) {
   .cp-header {
     padding: 11px 14px;
   }
 
   .cp-content {
     padding: 14px;
-  }
-
-  .cp-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .cp-span-2 {
-    grid-column: auto;
   }
 
   .form-grid-2 {
@@ -3369,7 +3355,7 @@ kbd {
   }
 }
 
-@media (max-width: 480px) {
+@container win (max-width: 480px) {
   .cp-header-title {
     font-size: 15px;
   }
@@ -3387,15 +3373,6 @@ kbd {
     height: 52px;
     border-radius: 15px;
     font-size: 20px;
-  }
-
-  .readonly-list .readonly-row {
-    grid-template-columns: 1fr;
-    gap: 2px;
-  }
-
-  .readonly-marker {
-    text-align: left;
   }
 
   .logs-actions-bar {
@@ -3602,9 +3579,9 @@ kbd {
   font-variant-numeric: tabular-nums;
 }
 
-@media (max-width: 700px) {
+@container win (max-width: 700px) {
+  /* Stays sticky: Save/Apply must remain reachable in short dialogs too. */
   .appearance-save-bar {
-    position: static;
     padding: 8px 10px;
   }
 
@@ -3858,7 +3835,7 @@ kbd {
   margin-bottom: 10px;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .checklist {
     grid-template-columns: 1fr;
     max-height: 200px;
@@ -4084,7 +4061,7 @@ kbd {
   color: var(--text-dim);
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .picker-chip-label {
     max-width: 130px;
   }

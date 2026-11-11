@@ -1,0 +1,126 @@
+/* ==========================================================================
+   Window-size responsiveness (loaded last).
+
+   Window bodies and dialog bodies are size containers named "win" (base.css,
+   controls.css) and the Control Panel content pane is "cp" (below), so these
+   layouts follow the space an application actually has — a narrow window on a
+   wide screen gets the compact layout too. Viewport media queries remain only
+   for the shell (desktop, taskbar, sign-in) and touch-sized controls.
+   ========================================================================== */
+
+.cp-content {
+  container: cp / inline-size;
+}
+
+/* ------------------------------------------------- Control Panel navigation */
+
+/* Narrow window: the sidebar becomes an icon rail. Every section stays one
+   click away; names remain the buttons' accessible names and tooltips. */
+@container win (max-width: 820px) {
+  .app-controlpanel {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .app-controlpanel .cp-nav {
+    padding: 10px 7px;
+    overflow-x: hidden;
+  }
+
+  .cp-nav-item {
+    justify-content: center;
+    height: 40px;
+    padding: 0;
+    gap: 0;
+  }
+
+  .cp-nav-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .cp-nav-note {
+    display: none;
+  }
+}
+
+/* --------------------------------------------------------------- card grid */
+
+/* Two cards side by side only while each keeps ~330px. */
+@container cp (max-width: 680px) {
+  .cp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cp-span-2 {
+    grid-column: auto;
+  }
+}
+
+/* Card headings keep their width; header actions move to the next line. */
+.card-head {
+  flex-wrap: wrap;
+}
+
+.card-heading {
+  flex: 1 1 12rem;
+}
+
+/* ------------------------------------------------ label / value rows */
+
+/* Component health: the status badge moves under the name instead of
+   squeezing it. */
+.component-row {
+  flex-wrap: wrap;
+}
+
+.component-main {
+  flex: 1 1 9rem;
+}
+
+/* Host resources: the value moves to its own line when it does not fit. */
+.resource-head {
+  flex-wrap: wrap;
+  row-gap: 2px;
+}
+
+/* --------------------------------------------------------------- Appearance */
+
+.appearance-section-head {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+@container win (max-width: 620px) {
+  .appearance-section-hint {
+    flex: 1 1 100%;
+    max-width: none;
+    text-align: left;
+  }
+}
+
+/* Segmented controls wrap instead of overflowing their container. */
+.segmented {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------- toolbars and tables */
+
+.fs-toolbar-group {
+  flex-wrap: wrap;
+}
+
+/* Short windows: the file list keeps a usable height and the window body
+   scrolls, instead of the toolbar squeezing the list to nothing. */
+.fs-split {
+  min-height: 300px;
+}
+
+/* Wide tables scroll inside their own area instead of widening the page. */
+.cp-table-wrap {
+  overflow-x: auto;
+}

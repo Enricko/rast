@@ -956,7 +956,7 @@
   display: none;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .fs-split,
   .fs-split.has-detail {
     grid-template-columns: minmax(0, 1fr);
@@ -996,6 +996,13 @@
     display: none;
   }
 
+  /* The roots list sits inside the sidebar: lay it out as the same chip row. */
+  .fs-sidebar .nav-list {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 4px;
+  }
+
   .fs-sidebar .nav-item {
     flex: 0 0 auto;
     white-space: nowrap;
@@ -1022,11 +1029,12 @@
   }
 
   .fs-split.has-detail .fs-detail.is-open {
-    position: fixed;
+    /* Overlay inside the window body (the size container is its containing block). */
+    position: absolute;
     left: 8px;
     right: 8px;
-    bottom: calc(var(--taskbar-h) + 8px);
-    max-height: 55vh;
+    bottom: 8px;
+    max-height: 70%;
     z-index: 55;
     display: flex;
     border: 1px solid var(--border-strong);
@@ -1083,7 +1091,9 @@
   }
 }
 
-@media (max-width: 1024px) {
+/* Medium windows: narrower sidebar and detail panel. Bounded below so it
+   cannot override the single-column layout above (it comes later). */
+@container win (min-width: 821px) and (max-width: 1024px) {
   .fs-split.has-detail {
     grid-template-columns: 184px minmax(0, 1fr) 224px;
   }
@@ -1482,7 +1492,7 @@
   padding: 6px 2px 2px;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .appmgmt-col-containers,
   .appmgmt-col-ports,
   .appmgmt-col-updated {
@@ -1667,7 +1677,7 @@
   min-width: 0;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .mon-stat-grid {
     grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     padding: 8px;
@@ -1942,7 +1952,7 @@
   gap: 6px;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .backup-schedule {
     padding: 8px 8px 0;
   }
@@ -2181,7 +2191,7 @@
   min-height: 240px;
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .live-badge {
     font-size: 10px;
     padding: 0 6px;
@@ -2251,7 +2261,7 @@
   color: var(--warning-strong, var(--warning));
 }
 
-@media (max-width: 820px) {
+@container win (max-width: 820px) {
   .app-access-state,
   .fs-access-state {
     margin: 8px;

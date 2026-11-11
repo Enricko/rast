@@ -20,10 +20,8 @@ export async function renderComponentsTab(tab: TabRenderContext): Promise<(() =>
   let loading = false;
   let disposed = false;
 
-  const intro = pageIntro(
-    "Components",
-    "Live health of RAST internals plus host resources and database footprint.",
-  );
+  // The Control Panel header already names the page; no second heading.
+  const intro = pageIntro(null, "Live health of RAST internals plus host resources and database footprint.");
 
   const lastUpdatedLabel = h("span", { class: "small muted" });
   const toolbar = h(

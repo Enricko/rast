@@ -87,6 +87,8 @@ async function mountControlPanel(ctx: AppContext): Promise<void> {
         {
           class: `cp-nav-item${activeTab ? " is-active" : ""}`,
           type: "button",
+          // Tooltip for the narrow-window icon rail (the label stays the accessible name).
+          title: tab.label,
           role: "tab",
           ariaSelected: activeTab,
           tabIndex: activeTab ? 0 : -1,

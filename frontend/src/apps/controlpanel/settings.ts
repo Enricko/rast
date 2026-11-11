@@ -300,11 +300,15 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<() => vo
         "div",
         { class: "readonly-row" },
         h("dt", {}, h("span", { class: "lock-icon" }, iconSvg("lock", 13)), label),
-        h("dd", {}, formatConfigValue(key, value)),
+        // The note sits under the value, so the value keeps the row's width
+        // instead of sharing it with a third column.
         h(
-          "span",
-          { class: "readonly-marker small faint" },
-          readOnlyKeys.includes(key) ? "controlled by server configuration" : "",
+          "dd",
+          {},
+          h("span", { class: "readonly-value" }, formatConfigValue(key, value)),
+          ...(readOnlyKeys.includes(key)
+            ? [h("span", { class: "readonly-marker small faint" }, "Controlled by server configuration")]
+            : []),
         ),
       ),
     );

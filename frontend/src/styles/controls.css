@@ -1026,6 +1026,7 @@ input[type="radio"]:disabled {
 }
 
 .modal-body {
+  container: win / inline-size;
   padding: 14px 16px;
   background: var(--surface);
 }
@@ -1557,7 +1558,9 @@ input[type="radio"]:disabled {
     height: 30px;
     padding: 0 10px;
   }
+}
 
+@container win (max-width: 820px) {
   .accent-grid {
     grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
   }
