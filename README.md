@@ -23,7 +23,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.2.0 — first public release series (2026-11-11). APIs and data
+> **Status:** v0.3.0 — first public release series (2026-11-11). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
 
@@ -40,40 +40,32 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 
 ## Verified deployment
 
-RAST 0.2.0 is deployed and publicly reachable at
+RAST 0.3.0 is deployed and publicly reachable at
 <https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
 reference host (Ubuntu, x86_64, 12 cores / 30 GiB RAM) after a clean restart,
 60-second idle window:
 
 | Process | CPU (idle) | RSS |
 | --- | --- | --- |
-| `rast.service` (web + jobs + monitor + realtime + access policy + SQLite) | 0.13% | 11.4 MiB |
-| `rast-worker.service` (Docker operations) | 0.03% | 9.9 MiB |
-| **Total RAST** | **0.13%** | **21.4 MiB** |
+| `rast.service` (web + jobs + monitor + realtime + access policy + SQLite) | 0.22% | 10.7 MiB |
+| `rast-worker.service` (Docker operations) | 0.03% | 7.6 MiB |
+| **Total RAST** | **0.25%** | **18.3 MiB** |
 
-Well below the project budget of 100 MiB idle RAM. The Users & Groups feature
-adds one evaluator with an in-process decision cache (invalidated after policy
-changes) and no per-request polling. After long activity, allocator retention
-can read somewhat higher (≈30–65 MiB) without a leak.
+Well below the project budget of 100 MiB idle RAM. An equivalent-conditions
+comparison against v0.2.0 (same data, idle + 3 SSE clients + 400 API requests,
+alternating rounds) showed no measurable difference.
 
-Verification on the live deployment: **85/85 end-to-end smoke checks**
-(auth/CSRF, two-user isolation, files/quota/trash, monitoring, SSE, backups,
-logs, Docker worker, appearance, accents and the new group policy: grant,
-read-only denial, effective-access provenance, live revocation and group-delete
-retention), **306 automated Rust tests** (284 unit/integration + 22 HTTP
-end-to-end), a **64/64 clean-systemd-container installer suite** for the v0.2.0
-tree, an independent migration check from a real v0.1.8 legacy-ACL database
-(schema v4 applied, users/appearance/share rows byte-identical, effective access
-still `write` through the legacy fallback), and **44/44 live Playwright checks**
-for the Users & Groups workflow (create/edit/delete groups,
-members and rules, single-save, user group membership + effective access with
-provenance and deny conflicts, launcher permissions, read-only Applications,
-live membership revocation in an already signed-in File Station, fictional
-accounts/files only). CI is green on `main` and the v0.2.0 release run is green;
-the production database was backed up before applying the additive schema-v4
-migration (`0004_groups`) and the previous appearance/user rows were verified
-intact. See [docs/user-groups-handoff.md](docs/user-groups-handoff.md) for the
-full feature handoff.
+Verification of the 0.3.0 security audit and hardening release: **91/91
+production smoke checks** through the reverse proxy (including read-only
+Applications/Backup boundaries), **297 + 27 automated Rust tests** (unit/
+integration + HTTP end-to-end, including an Effective-Access-versus-API
+cross-check), **38/38 live browser checks** with fictional accounts, an
+isolated v0.2.0 → v0.3.0 upgrade with 0 differences in effective access and
+appearance, rollback/restore drills, Sigstore build-provenance attestations
+verified in CI and independently, native runtime smoke on x86_64 and arm64,
+and a **65/65 clean-systemd-container installer suite** with in-container
+attestation verification. See
+[docs/audit-hardening-handoff.md](docs/audit-hardening-handoff.md).
 
 ## Quick start (installed server)
 
@@ -148,6 +140,7 @@ See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 * [Wallpapers and their licence](docs/WALLPAPERS.md)
 * [Realtime synchronization contract](docs/REALTIME.md)
 * [Users & Groups handoff](docs/user-groups-handoff.md)
+* [Audit & hardening handoff (0.3.0)](docs/audit-hardening-handoff.md)
 
 ## License
 

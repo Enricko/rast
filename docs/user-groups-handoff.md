@@ -9,6 +9,12 @@ Everything below uses fictional accounts, groups and folders (`Ada Lovelace`,
 `ada`, `Ben Carter`, `Project Editors`, `Projects`, `Finance`, …). No real
 customer data is used in the tests, screenshots or documentation.
 
+> **Superseded in part (0.3.0 audit):** the rollback statement in section 4
+> ("the old binary can typically run on a schema-v4 database") is wrong — an
+> older binary refuses to start on a newer schema. Read-only Applications /
+> Backup grants and folder-rule keys also changed. See
+> [audit-hardening-handoff.md](audit-hardening-handoff.md).
+
 ## 1. What was implemented
 
 ### Control Panel → Users & Groups
