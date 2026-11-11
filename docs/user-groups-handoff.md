@@ -6,7 +6,7 @@ administrator uses it, the permission rules and their exact precedence, the
 database/upgrade story, verification evidence and the release/deployment state.
 
 Everything below uses fictional accounts, groups and folders (`Ada Lovelace`,
-`adа`, `Ben Carter`, `Project Editors`, `Projects`, `Finance`, …). No real
+`ada`, `Ben Carter`, `Project Editors`, `Projects`, `Finance`, …). No real
 customer data is used in the tests, screenshots or documentation.
 
 ## 1. What was implemented
@@ -327,13 +327,67 @@ Current tree: **284 lib tests + 22 HTTP end-to-end tests**, all passing, with
   - `a85499f` — `feat(groups): add group policy schema, evaluator and management API`
   - `2a9e8e1` — `feat(access): enforce group folder and application permissions`
   - `8d9cae4` — `feat(ui): add Users & Groups management and permission-aware surfaces`
-- Release: **RAST v0.2.0** (this document and the version/changelog commit are
-  part of the same release; the tag commit and release asset URLs are recorded
-  in the repository tags and GitHub Releases).
-- Push status: feature commits pushed to `origin/main`; CI is expected green
-  (frontend build, Rust lint/tests, installer/scripts/YAML, secrets audit,
-  release builds) — see the latest workflow run for the exact status.
-- Deployment: verified on **https://desktop.lufria.tech** running RAST 0.2.0,
-  schema v4 after the production database backup; `rast doctor` reports 0
-  warnings and the 84-check production smoke + Users & Groups browser workflow
-  pass. Details are appended in the final documentation commit.
+  - `7513dc7` — `docs(release): prepare v0.2.0 with Users & Groups handoff`
+    (version 0.2.0, changelog, README, this handout)
+- Tag / release: **v0.2.0** → tag commit `7513dc7ecfe663c57651c8291cab01ad7a2a84b4`,
+  published at <https://github.com/Enricko/rast/releases/tag/v0.2.0> (6 assets:
+  x86_64 + aarch64 binaries, SHA256SUMS, install.sh, uninstall.sh,
+  rast.toml.example).
+- Push status: all commits above pushed to `origin/main` (HEAD == origin/main).
+  Release workflow run `42952430209` and CI run `42952428565` for the tag
+  commit both succeeded.
+- Deployment: **https://desktop.lufria.tech** runs **RAST 0.2.0**
+  (`7513dc7`), schema **v4** (`1|init, 2|appearance, 3|appearance accent,
+  4|groups`), `rast doctor` 0 warnings, `rast.service`/`rast-worker.service`
+  active.
+  - Pre-migration production backup:
+    `/root/rast-db-pre-v0.2.0.sqlite`, sha256
+    `d9c7e2d434ef8aa0c0f01ae99bf27a668d3d873875925eae439b7d89f3949a19`,
+    integrity `ok`, 1 user, 0 shares, migrations 1–3. Post-migration row checks
+    confirmed users, appearance settings and shared-folder data were preserved.
+  - Live verification after deploy: **85/85 production smoke checks**
+    (0 failed, 0 skipped, Docker worker included), **44/44 Playwright Users &
+    Groups checks** on the live URL using fictional accounts/folders (all
+    screenshots in this document and `docs/screenshots/user-groups-*.jpg` come
+    from that run), and an independent clean-systemd-container installer run
+    (**64 PASS / 0 FAIL / 0 SKIP**, Ubuntu 24.04 systemd container, binary
+    reports `RAST 0.2.0 (7513dc7ecfe6)`).
+  - Independent migration adjudication: a real **v0.1.8** database was built with
+    the published v0.1.8 binary (admin + user + appearance row + legacy share +
+    `share_members=write`), then upgraded with v0.2.0 — schema v4, migration
+    `0004` only, all legacy rows byte-identical, groups tables empty, and the
+    legacy user's effective access stayed `write` via the documented
+    `legacy-acl` fallback (roots/list/create all still 200). Fresh install is
+    schema v4. Release notes start with the CHANGELOG `[0.2.0]` section and this
+    handout is present in the release tree.
+  - Resource measurement after a clean restart (`rast.service` 11.4 MiB /
+    0.13% CPU + worker 9.9 MiB / 0.03% CPU ≈ 21.4 MiB total idle).
+  - Test artifacts were removed after verification: only the real `admin`
+    account remains, groups/shares created by the tests were deleted, shared
+    test directories and home directories of fictional users were removed, and
+    the pre-existing `/srv/rast/shared/team` directory was left untouched.
+
+### Where to look in the UI
+
+- Control Panel → **Users & Groups** (Users tab: accounts/membership/effective
+  access; Groups tab: group policy).
+- Shared folders are defined in **Control Panel → Shared folders**; their
+  group rules are edited inside each group.
+- Activity Logs → filter by `group.` / `user.groups_update` /
+  `user.access_update` actions for the audit trail.
+- Launcher and window-open permissions follow `/api/auth/me.permissions`;
+  revoked access closes affected windows with a clear message.
+- API contract: `docs/API.md` (Users, groups and access policy section);
+  internal design contract: `docs/GROUPS.md`.
+
+### Screenshots
+
+| | |
+| --- | --- |
+| ![Users & Groups — Groups](screenshots/user-groups-groups.jpg) | ![Group editor](screenshots/user-groups-editor.jpg) |
+| ![Effective Access](screenshots/user-groups-effective-access.jpg) | ![Users tab](screenshots/user-groups-users.jpg) |
+| ![Read-only Applications](screenshots/user-groups-readonly-applications.jpg) | ![Live revocation](screenshots/user-groups-revoked.jpg) |
+
+Additional captures: `docs/screenshots/user-groups-editor-applications.jpg`
+(group editor Applications section) and
+`docs/screenshots/user-groups-conflict.jpg` (explicit-deny conflict explanation).

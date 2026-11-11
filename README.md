@@ -23,7 +23,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.1.8 — first public release series (2026-11-11). APIs and data
+> **Status:** v0.2.0 — first public release series (2026-11-11). APIs and data
 > formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
 > exact feature set and known limitations.
 
@@ -36,47 +36,44 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | ![Login](docs/screenshots/login.jpg) | ![File Station](docs/screenshots/file-station.jpg) |
 | ![Personalize](docs/screenshots/personalize.jpg) | ![Appearance](docs/screenshots/control-panel-appearance.jpg) |
 | ![Resource Monitor](docs/screenshots/resource-monitor.jpg) | ![Mobile](docs/screenshots/mobile.jpg) |
+| ![Users & Groups](docs/screenshots/user-groups-groups.jpg) | ![Effective Access](docs/screenshots/user-groups-effective-access.jpg) |
 
 ## Verified deployment
 
-RAST 0.1.8 is deployed and publicly reachable at
+RAST 0.2.0 is deployed and publicly reachable at
 <https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
 reference host (Ubuntu, x86_64, 12 cores / 30 GiB RAM) after a clean restart,
-60-second idle window with the shared sampler running at ~5 s:
+60-second idle window:
 
 | Process | CPU (idle) | RSS |
 | --- | --- | --- |
-| `rast.service` (web + jobs + monitor + realtime bus + SQLite) | 0.23% | 11.8 MiB |
-| `rast-worker.service` (Docker operations) | 0.05% | 11.0 MiB |
-| **Total RAST** | **0.23%** | **22.8 MiB** |
+| `rast.service` (web + jobs + monitor + realtime + access policy + SQLite) | 0.13% | 11.4 MiB |
+| `rast-worker.service` (Docker operations) | 0.03% | 9.9 MiB |
+| **Total RAST** | **0.13%** | **21.4 MiB** |
 
-With one browser tab connected and File Station + Resource Monitor open (live
-SSE + filesystem watcher active), `rast.service` measured 0.23% CPU / 12.5 MiB
-RSS over the same window. That is below the project budget of 100 MiB idle RAM
-and below the previous v0.1.5 baseline (39.3 MiB) even with live updates: the
-realtime layer adds one authenticated SSE connection per tab and a single
-bounded filesystem watcher/Docker reconciler, not per-menu polling loops.
-Anonymous memory is ~2–3 MiB after a fresh start; the remainder is file-backed
-pages the kernel can reclaim. After long activity (large uploads, backups,
-container stats) allocator retention can read ~30–65 MiB without any leak.
+Well below the project budget of 100 MiB idle RAM. The Users & Groups feature
+adds one evaluator with an in-process decision cache (invalidated after policy
+changes) and no per-request polling. After long activity, allocator retention
+can read somewhat higher (≈30–65 MiB) without a leak.
 
-Verification on the live deployment: **73/73 end-to-end smoke checks** (auth,
-CSRF, two-user isolation, files/quota/trash, monitoring, SSE, backups, logs,
-Docker worker, ten accent presets, and realtime: hello/ping/ids plus
-file.changed/file.quota/audit pushed over the public proxy), **272 automated
-Rust tests** (254 unit/integration + 18 HTTP end-to-end), a
-**64/64 clean-systemd-container installer suite**, and **73 live Playwright
-checks** — 62 UI checks (all ten accents in light and dark, save states
-clean/dirty/saving/saved/failure, theme/wallpaper changes with windows and a
-dialog open, System mode following the OS, cross-session appearance sync and
-conflict handling, offline/reconnect reconciliation, external filesystem
-changes, activity-log and backup live updates, user isolation, desktop and
-390×844 mobile) plus 11 application checks (deploy a managed app, capture its
-live log stream in the browser, stop/start its container outside RAST and see
-both states update without refresh, then remove it). CI is green on `main`
-(the tagged v0.1.6 commit itself had a stale third-party-license inventory
-check that was fixed in the immediately following commit; release artifacts
-verified separately; v0.1.7/v0.1.8 release runs are fully green).
+Verification on the live deployment: **85/85 end-to-end smoke checks**
+(auth/CSRF, two-user isolation, files/quota/trash, monitoring, SSE, backups,
+logs, Docker worker, appearance, accents and the new group policy: grant,
+read-only denial, effective-access provenance, live revocation and group-delete
+retention), **306 automated Rust tests** (284 unit/integration + 22 HTTP
+end-to-end), a **64/64 clean-systemd-container installer suite** for the v0.2.0
+tree, an independent migration check from a real v0.1.8 legacy-ACL database
+(schema v4 applied, users/appearance/share rows byte-identical, effective access
+still `write` through the legacy fallback), and **44/44 live Playwright checks**
+for the Users & Groups workflow (create/edit/delete groups,
+members and rules, single-save, user group membership + effective access with
+provenance and deny conflicts, launcher permissions, read-only Applications,
+live membership revocation in an already signed-in File Station, fictional
+accounts/files only). CI is green on `main` and the v0.2.0 release run is green;
+the production database was backed up before applying the additive schema-v4
+migration (`0004_groups`) and the previous appearance/user rows were verified
+intact. See [docs/user-groups-handoff.md](docs/user-groups-handoff.md) for the
+full feature handoff.
 
 ## Quick start (installed server)
 
