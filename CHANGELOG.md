@@ -24,6 +24,61 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.4.0] - 2026-11-11
+
+Desktop reliability: live shared-folder updates across accounts, desktop
+resource widgets, per-account appearance that cannot be overwritten, and
+layouts that follow the window size. Upgrade with a database backup: migration
+`0006` is not reversible by an older binary (see "Upgrade and rollback").
+
+### Security
+
+- **Private wallpapers** were cached by the browser for a year
+  (`max-age=31536000, immutable`), so the next account signing in to the same
+  browser could see the previous account's uploaded wallpaper. Uploads are now
+  served `private, no-cache` and revalidated with the current session; other
+  accounts get `404`.
+- **Access-decision cache**: a decision read just before a policy change could
+  be cached as current and keep a revoked grant working until the next change.
+  Decisions now carry the policy generation observed before their rules were
+  read.
+
+### Added
+
+- **Desktop widgets** (right-click the desktop → Widgets…): System Health,
+  CPU & Memory, Storage and Network. They use the Resource Monitor data and
+  access check, show loading/live/stale/unavailable/no-access/error states,
+  can be dragged or moved with the arrow keys, and their layout is saved per
+  account (`widgets` in `GET`/`PUT /api/appearance`).
+
+### Fixed
+
+- Shared-folder changes (upload, rename, move, copy, delete) now reach every
+  account that can read the folder, including administrators, without a
+  reload; the event stream survives server restarts (fresh cursor per
+  connection) and restarts no longer hang on open streams.
+- A failed appearance load, implicit saves, late responses after an account
+  switch or concurrent partial saves could overwrite an account's theme,
+  accent or wallpaper. Saves are now explicit and partial, scoped to the
+  account and serialised on the server.
+- Taskbar: labels were unreadable on hover (a pinned app took the page text
+  colour) and the accent never reached the taskbar; it now follows the
+  selected mode and accent in every state with themed tooltips.
+- Appearance: disabled Save/Discard looked hovered; disabled buttons are now
+  flat and neutral, Save is the primary action, and saving keeps focus.
+- Narrow windows on wide screens kept desktop layouts (words broke into single
+  letters, values were clipped). Window and dialog contents now respond to
+  their own size; the Control Panel uses an icon rail in narrow windows.
+
+### Upgrade and rollback
+
+- Migration `0006_appearance_widgets.sql` adds `user_appearance.widgets`
+  (JSON array, default `[]`); existing accounts start without widgets.
+- Migrations are forward-only: the 0.3.0 binary refuses to start on a
+  schema-v6 database. Roll back by stopping the service, restoring the
+  pre-upgrade database backup and then installing 0.3.0. See
+  `docs/OPERATIONS.md`.
+
 ## [0.3.0] - 2026-11-11
 
 Security audit and hardening of the v0.2.0 access policy, plus usability work
