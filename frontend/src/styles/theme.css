@@ -276,6 +276,9 @@ pre {
 .app-icon--backup {
   color: #d9772a;
 }
+.app-icon--packages {
+  color: #7b5bd6;
+}
 .app-icon--controlpanel {
   color: #5a6673;
 }

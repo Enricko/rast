@@ -55,6 +55,8 @@ const KNOWN_EVENTS = [
   "appearance.changed",
   "group.changed",
   "access.changed",
+  "package.changed",
+  "package.catalog",
 ];
 
 const IDLE_DISCONNECT_MS = 30_000;

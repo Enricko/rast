@@ -8,12 +8,14 @@ import { controlPanelApp } from "./controlpanel";
 import { filesApp } from "./files";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
+import { packagesApp } from "./packages";
 
 export const APPS: AppDefinition[] = [
   filesApp,
   applicationsApp,
   monitorApp,
   backupApp,
+  packagesApp,
   controlPanelApp,
   logsApp,
 ];

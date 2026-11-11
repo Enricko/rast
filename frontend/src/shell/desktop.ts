@@ -940,6 +940,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       deploy: "App deployment",
       import: "App import",
       restore: "Restore",
+      "package.install": "Package install",
+      "package.update": "Package update",
     };
     return labels[kind] ?? (kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Background job");
   };

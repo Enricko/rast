@@ -440,6 +440,7 @@ export const RULE_APPS: Array<{ id: string; label: string }> = [
   { id: "applications", label: "Applications" },
   { id: "monitor", label: "Resource Monitor" },
   { id: "backup", label: "Backup Center" },
+  { id: "packages", label: "Package Center" },
   { id: "logs", label: "Activity Logs" },
   { id: "controlpanel", label: "Control Panel" },
 ];
