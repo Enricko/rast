@@ -599,6 +599,48 @@ STATUS="$(api "$ALICE_JAR" GET '/api/apps?page=1&perPage=5')"
 if [ "$STATUS" = "200" ]; then pass "group grant allows read-only Applications access"; else fail "read-only Applications access -> $STATUS"; fi
 STATUS="$(api "$ALICE_JAR" POST /api/apps '{"name":"smoke-policy-app","compose":"services: {web: {image: nginx}}"}' "$ALICE_CSRF")"
 if [ "$STATUS" = "403" ]; then pass "read-only Applications grant cannot deploy"; else fail "read-only deploy -> $STATUS"; fi
+# Read-only Applications grants expose status metadata only (audit F2).
+STATUS="$(api "$ALICE_JAR" GET '/api/apps?page=1&perPage=5')"
+if [ "$STATUS" = "200" ] && python3 - "$WORK/body" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert all("env" not in app and "compose" not in app for app in d.get("items", [])), d
+PY
+then pass "read-only Applications list carries no env values or compose"; else fail "read-only Applications payload exposes env/compose"; fi
+# Backup Center read-only: metadata only, no archive download/guide (audit F1).
+api "$ADMIN_JAR" PUT "/api/groups/$GROUP_ID" "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"members":[int(sys.argv[2])],"folderRules":[{"shareName":sys.argv[3],"rule":"read"}],"appRules":[{"appId":"applications","rule":"allow"},{"appId":"backup","rule":"allow"}]}))' "$GROUP_NAME" "$ALICE_ID" "$SHARE_NAME")" "$ADMIN_CSRF" >/dev/null
+STATUS="$(api "$ALICE_JAR" GET '/api/backups?page=1')"
+if [ "$STATUS" = "200" ] && python3 - "$WORK/body" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert all(b.get("fileName") == "" and b.get("sha256") == "" and b.get("downloadable") is False for b in d.get("items", [])), d
+PY
+then pass "read-only Backup Center list hides archive names/checksums"; else fail "read-only Backup Center list exposes archive details ($STATUS)"; fi
+STATUS="$(api "$ALICE_JAR" GET /api/backups/restore-guide)"
+if [ "$STATUS" = "403" ]; then pass "read-only Backup Center cannot read the restore guide"; else fail "restore guide for read-only -> $STATUS"; fi
+# A dedicated db-only archive for the download boundary (removed afterwards).
+STATUS="$(api "$ADMIN_JAR" POST /api/backups '{"scope":["db"],"note":"smoke read-only boundary"}' "$ADMIN_CSRF")"
+POLICY_JOB="$(json_get "$WORK/body" "d.get('jobId','')")"
+for _ in $(seq 1 60); do
+    api "$ADMIN_JAR" GET "/api/jobs/$POLICY_JOB" >/dev/null
+    STATE="$(json_get "$WORK/body" "d['status']")"
+    [ "$STATE" = "done" ] || [ "$STATE" = "failed" ] && break
+    sleep 0.3
+done
+api "$ADMIN_JAR" GET '/api/backups?page=1&perPage=1' >/dev/null
+POLICY_BACKUP="$(json_get "$WORK/body" "d['items'][0]['id'] if d['items'] else ''")"
+if [ -n "$POLICY_BACKUP" ]; then
+    STATUS="$(api "$ALICE_JAR" GET "/api/backups/$POLICY_BACKUP/download")"
+    if [ "$STATUS" = "403" ]; then pass "read-only Backup Center cannot download archives"; else fail "archive download for read-only -> $STATUS"; fi
+    STATUS="$(curl -sS -o /dev/null -w '%{http_code}' -b "$ADMIN_JAR" "$BASE/api/backups/$POLICY_BACKUP/download")"
+    if [ "$STATUS" = "200" ]; then pass "administrator can still download the archive"; else fail "admin archive download -> $STATUS"; fi
+    api "$ADMIN_JAR" DELETE "/api/backups/$POLICY_BACKUP" "" "$ADMIN_CSRF" >/dev/null
+else
+    fail "could not create a backup for the read-only download check"
+fi
+# Effective Access pagination + conflict explanation (same evaluator).
+STATUS="$(api "$ADMIN_JAR" GET "/api/users/$ALICE_ID/effective-access?q=$SHARE_NAME&level=read&perPage=5")"
+if [ "$STATUS" = "200" ] && [ "$(json_get "$WORK/body" "d['foldersTotal']")" = "1" ]; then pass "Effective Access search/filter returns the granted folder"; else fail "Effective Access paging -> $STATUS $(head -c 200 "$WORK/body")"; fi
 # Revoke membership: access disappears immediately from the signed-in session.
 api "$ADMIN_JAR" PUT "/api/groups/$GROUP_ID" "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"members":[],"folderRules":[{"shareName":sys.argv[2],"rule":"read"}]}))' "$GROUP_NAME" "$SHARE_NAME")" "$ADMIN_CSRF" >/dev/null
 STATUS="$(api "$ALICE_JAR" GET /api/files/roots)"
