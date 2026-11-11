@@ -333,7 +333,10 @@ RAST (`main`):
 * `404faf3` feat(packages): verified runtimes side by side from a signed catalog
 * `b1a5cb1` feat(desktop): Package Center application
 * `aa4539c` fix(format): never show "0 min ago"
-* this handoff and the documentation, then `chore(release): prepare v0.5.0`
+* `4dda58d` docs: document Package Center
+* `c25bc96` chore(release): prepare v0.5.0 (version 0.5.0 and changelog; **not tagged**)
+* `652bf21` test(packages): keep the fictional test password out of JSON literals
+* the commit that records this list
 
 rast-packages (local, not pushed): `5966ffb` signed catalog with discover/verify/build/publish workflow · `acc67dc` optional executables only when shipped · `8194487` keep re-verified versions installable · `ec0af98` no invented workflow run URL.
 
@@ -341,7 +344,10 @@ rast-package-template (local, not pushed): `ce85da7` forkable template with a st
 
 ## Push and deploy status
 
-* RAST: pushed to `main` after the release-preparation commit (see the follow-up commit for the exact state).
+* RAST: pushed to `main` (`ce5b6ad..c25bc96`, then `652bf21` and this commit).
+  CI for `c25bc96` was green except the secrets scan, where gitleaks flagged
+  the fictional e2e test password (false positive, fixed in `652bf21`; `cargo
+  audit`, skipped by that failure, passes locally).
 * rast-packages, rast-package-template: not pushed (repositories not created).
 * Deploy: **not done.** It needs approval for the `v0.5.0` tag, and is only
   useful once the catalog repository exists. Then follow the existing workflow
