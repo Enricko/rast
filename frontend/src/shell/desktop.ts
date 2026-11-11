@@ -6,9 +6,10 @@ import type { AppContext, AppDefinition } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
-import type { MeResponse, Permissions, Settings } from "../core/types";
+import type { MeResponse, Settings } from "../core/types";
 import {
   DEFAULT_APPEARANCE,
+  DEFAULT_TASKBAR_PINS,
   applyAppearance,
   getAppearanceService,
   getAppearanceSync,
@@ -33,38 +34,13 @@ import {
 } from "./panels";
 import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } from "./shared";
 import { openPersonalizeDialog } from "./personalize";
+import { taskbarSlots } from "./taskbar-order";
 import { createWidgetLayer } from "./widgets";
 
-const PINNED_KEY = "rast.pinnedApps";
-const DEFAULT_PINNED = ["files", "monitor", "controlpanel"];
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
 const MAX_TASKBAR_WINDOWS = 10;
 const SESSION_WARNING_MS = 10 * 60_000;
-
-function readPinnedApps(permissions: Permissions | null, isAdmin: boolean): string[] {
-  const available = new Set(appsForPermissions(permissions, isAdmin).map((app) => app.id));
-  let stored: string[] | null = null;
-  try {
-    const raw = window.localStorage.getItem(PINNED_KEY);
-    if (raw) {
-      const parsed: unknown = JSON.parse(raw);
-      if (Array.isArray(parsed)) stored = parsed.filter((value): value is string => typeof value === "string");
-    }
-  } catch {
-    stored = null;
-  }
-  const source = stored ?? DEFAULT_PINNED;
-  return source.filter((id) => available.has(id)).slice(0, MAX_PINNED);
-}
-
-function writePinnedApps(ids: string[]): void {
-  try {
-    window.localStorage.setItem(PINNED_KEY, JSON.stringify(ids.slice(0, MAX_PINNED)));
-  } catch {
-    /* ignore */
-  }
-}
 
 export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOptions): DesktopController {
   deps.api.setCsrfToken(me.csrfToken);
@@ -99,7 +75,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   desktop.append(wallpaperLayer, iconLayer, widgetLayer, windowsLayer, taskbar);
   deps.root.appendChild(desktop);
 
-  let pinned = readPinnedApps(me.permissions ?? null, isAdmin);
+  // The account's pins (saved with its appearance); defaults until loaded.
+  let pinned: string[] = [...DEFAULT_TASKBAR_PINS];
   let panel: HTMLElement | null = null;
   let panelKind: string | null = null;
   let disposed = false;
@@ -125,6 +102,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     openMonitor: () => openApp("monitor"),
   });
   disposers.push(() => widgets.dispose());
+  /** Show the pins being saved, else the account's saved pins. */
+  function showSavedPins(): void {
+    if (!appearance.isKnown) return;
+    const next = appearance.pendingTaskbarPins ?? appearance.value.taskbarPins;
+    if (JSON.stringify(next) === JSON.stringify(pinned)) return;
+    pinned = [...next];
+    renderTaskbar();
+  }
+  // The taskbar is built further down; its first render uses these pins.
+  if (appearance.isKnown) pinned = [...(appearance.pendingTaskbarPins ?? appearance.value.taskbarPins)];
   let appliedSignature = JSON.stringify(appearance.value);
   applyAppearance(appearance.value);
   /** Show the account's saved theme (never while the user's own choice is still being saved). */
@@ -136,7 +123,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     appearance.subscribe((state) => {
       // Widgets are not part of any editor preview: always show the layout
       // being saved (newest first) or the saved one.
-      if (appearance.isKnown) widgets.sync(appearance.pendingWidgets ?? state.widgets);
+      if (appearance.isKnown) {
+        widgets.showSaved();
+        showSavedPins();
+      }
       // An open editor owns the document while it previews a draft.
       if (isAppearancePreviewActive()) return;
       appliedSignature = JSON.stringify(state);
@@ -298,19 +288,29 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     return pinned.includes(appId);
   }
 
+  function savePins(next: string[]): boolean {
+    if (!appearance.isKnown) {
+      toast.error("Your saved desktop could not be loaded yet, so the taskbar cannot be changed. Try again in a moment.");
+      return false;
+    }
+    pinned = next;
+    renderTaskbar();
+    void appearance.saveTaskbarPins(next).then((ok) => {
+      if (ok || disposed) return;
+      toast.warning("Could not save the taskbar to your account. Showing the saved pins.");
+      showSavedPins();
+    });
+    return true;
+  }
+
   function pinApp(appId: string): void {
     if (isPinned(appId) || pinned.length >= MAX_PINNED) return;
-    pinned = [...pinned, appId];
-    writePinnedApps(pinned);
-    renderTaskbar();
-    toast.success(`Pinned ${findApp(appId)?.name ?? appId} to the taskbar`);
+    if (savePins([...pinned, appId])) toast.success(`Pinned ${findApp(appId)?.name ?? appId} to the taskbar`);
   }
 
   function unpinApp(appId: string): void {
     if (!isPinned(appId)) return;
-    pinned = pinned.filter((id) => id !== appId);
-    writePinnedApps(pinned);
-    renderTaskbar();
+    savePins(pinned.filter((id) => id !== appId));
   }
 
   function iconContextItems(app: AppDefinition): ContextMenuEntry[] {
@@ -767,18 +767,19 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (disposed) return;
     taskbarApps.replaceChildren();
     const windows = wm.list();
-    const openApps = new Set(windows.map((win) => win.appId));
-    let rendered = 0;
-    for (const appId of pinned) {
-      const app = findApp(appId);
-      if (!app || openApps.has(appId) || !isAppAllowed(appId, store.get().permissions, store.isAdmin())) continue;
-      if (rendered >= MAX_TASKBAR_WINDOWS + MAX_PINNED) break;
-      taskbarApps.appendChild(pinnedButton(app));
-      rendered += 1;
-    }
-    for (const [index, win] of windows.entries()) {
-      if (index >= MAX_TASKBAR_WINDOWS) {
-        const remaining = windows.slice(MAX_TASKBAR_WINDOWS);
+    const slots = taskbarSlots(pinned, windows, (appId) =>
+      Boolean(findApp(appId)) && isAppAllowed(appId, store.get().permissions, store.isAdmin()),
+    );
+    let shownWindows = 0;
+    for (const [index, slot] of slots.entries()) {
+      if (slot.kind === "launcher") {
+        taskbarApps.appendChild(pinnedButton(findApp(slot.appId)!));
+        continue;
+      }
+      if (shownWindows >= MAX_TASKBAR_WINDOWS) {
+        const remaining = slots
+          .slice(index)
+          .flatMap((entry) => (entry.kind === "window" ? [entry.win] : []));
         const more = h(
           "button",
           {
@@ -806,8 +807,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         taskbarApps.appendChild(more);
         break;
       }
-      taskbarApps.appendChild(taskbarWindowButton(win));
-      rendered += 1;
+      taskbarApps.appendChild(taskbarWindowButton(slot.win));
+      shownWindows += 1;
     }
     // The anchor of an open tooltip may have been replaced by this render.
     if (tooltipAnchor && !tooltipAnchor.isConnected) hideTaskbarTooltip();

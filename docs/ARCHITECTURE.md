@@ -209,10 +209,12 @@ unsaved forms.
 ## Appearance storage
 
 Per user in SQLite (`user_appearance` + `appearance_uploads`, migration 0003
-adds `accent`, migration 0006 adds `widgets`): mode, accent id, wallpaper source
-(bundled scene, private upload or solid colour), fit, position, overlay and the
-enabled desktop widgets with their preferred position (a JSON array checked by
-SQLite, re-validated and sanitised on read). Wallpapers are validated by content
+adds `accent`, migration 0006 adds `widgets`, migration 0007 adds
+`widgets_customized` and `taskbar_pins`): mode, accent id, wallpaper source
+(bundled scene, private upload or solid colour), fit, position, overlay, the
+enabled desktop widgets with their preferred position, whether the account ever
+chose its widgets, and its ordered taskbar pins (JSON arrays checked by SQLite,
+re-validated and sanitised on read). Wallpapers are validated by content
 and stored under `<data_dir>/wallpapers/<user-id>/<uuid>.<ext>`; the owner-only
 API serves them as `private, no-cache` with an ETag: every use revalidates with
 the current session (304 for the owner), so another account signing in to the
@@ -245,7 +247,21 @@ Monitor access or a `403`; no data is requested) and `error` (retryable).
 Positions are stored as fractions of the free desktop area and clamped on every
 resize, so cards stay inside the usable area above the taskbar. Layout changes
 are saved through the coalesced `saveWidgets` path, which sends only
-`{widgets}`.
+`{widgets}`. An account that never saved a list (`widgetsCustomized: false`)
+sees System Health (top right) and CPU & Memory (bottom right) if it may use
+Resource Monitor; nothing is stored until the user changes them, and removing
+both is stored as an empty list.
+
+## Taskbar
+
+Pinned applications are part of the account's appearance (`taskbarPins`,
+default File Station, Resource Monitor, Control Panel) and follow it to any
+browser. `frontend/src/shell/taskbar-order.ts` gives every pinned application a
+fixed slot in the user's order: opening it shows its window(s) in that slot
+instead of moving it, and windows of unpinned applications follow the pins in
+opening order. Pin and unpin from a taskbar button's or desktop icon's menu;
+changes are saved through the coalesced `saveTaskbarPins` path (`{taskbarPins}`
+only).
 
 ## Storage layout
 

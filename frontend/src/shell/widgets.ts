@@ -19,7 +19,7 @@
 
 import type { ApiClient } from "../core/api";
 import { ApiError } from "../core/api";
-import type { AppearanceService, DesktopWidget, WidgetId } from "../core/appearance";
+import type { Appearance, AppearanceService, DesktopWidget, WidgetId } from "../core/appearance";
 import { h } from "../core/dom";
 import { formatBytes, formatDuration, formatPercent, formatSpeed, relativeTime } from "../core/format";
 import { iconSvg } from "../core/icons";
@@ -408,6 +408,25 @@ function renderBody(id: WidgetId, state: FeedState): Node[] {
 // Layer controller
 // ---------------------------------------------------------------------------
 
+/**
+ * Widgets shown to an account that never chose its own (and may use Resource
+ * Monitor): System Health top-right, CPU & Memory bottom-right. Opposite
+ * corners keep them apart whatever their content height.
+ */
+export const DEFAULT_WIDGETS: ReadonlyArray<DesktopWidget> = [
+  { id: "health", x: 1, y: 0 },
+  { id: "cpu-memory", x: 1, y: 1 },
+];
+
+/** The layout to show: the account's own list, or the defaults it never replaced. */
+export function effectiveWidgets(
+  appearance: Pick<Appearance, "widgets" | "widgetsCustomized">,
+  monitorAllowed: boolean,
+): DesktopWidget[] {
+  if (appearance.widgetsCustomized) return appearance.widgets.map((widget) => ({ ...widget }));
+  return monitorAllowed ? DEFAULT_WIDGETS.map((widget) => ({ ...widget })) : [];
+}
+
 export interface WidgetLayerOptions {
   layer: HTMLElement;
   api: ApiClient;
@@ -419,8 +438,10 @@ export interface WidgetLayerOptions {
 }
 
 export interface WidgetLayer {
-  /** Show the saved (or pending) layout. */
+  /** Show exactly this layout. */
   sync(widgets: DesktopWidget[]): void;
+  /** Show the layout being saved, else the account's saved (or default) layout. */
+  showSaved(): void;
   openCatalog(): void;
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
@@ -486,7 +507,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     void appearance.saveWidgets(layout).then((ok) => {
       if (ok || disposed) return;
       toast.warning("Could not save the widget layout to your account. Showing the saved layout.");
-      sync(appearance.value.widgets);
+      showSaved();
     });
   }
 
@@ -764,6 +785,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     catalogRefresh?.();
   }
 
+  function showSaved(): void {
+    if (!appearance.isKnown) return;
+    sync(appearance.pendingWidgets ?? effectiveWidgets(appearance.value, options.isMonitorAllowed()));
+  }
+
   // ------------------------------------------------------------- catalog
   function openCatalog(): void {
     const list = h("ul", { class: "widget-catalog", role: "list" });
@@ -829,6 +855,9 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   }
 
   function permissionsChanged(): void {
+    // Defaults depend on access: show them once Resource Monitor is granted,
+    // drop them when it is revoked (a saved layout shows "No access" instead).
+    showSaved();
     if (feed.isRunning) void feed.refresh(true);
     catalogRefresh?.();
   }
@@ -844,5 +873,5 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     cards.clear();
   }
 
-  return { sync, openCatalog, permissionsChanged, dispose };
+  return { sync, showSaved, openCatalog, permissionsChanged, dispose };
 }

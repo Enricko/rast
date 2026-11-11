@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { ApiError, type ApiClient } from "../src/core/api";
 import type { RealtimeStore } from "../src/core/realtime";
 import type { MonitorSnapshot } from "../src/core/types";
-import { MonitorFeed, sampleAge, staleAfterMs } from "../src/shell/widgets";
+import { DEFAULT_WIDGETS, MonitorFeed, effectiveWidgets, sampleAge, staleAfterMs } from "../src/shell/widgets";
 
 // The feed only needs window timers.
 (globalThis as unknown as { window: typeof globalThis }).window ??= globalThis;
@@ -110,4 +110,13 @@ test("staleness follows the sampling interval and shows the real age", () => {
   assert.equal(staleAfterMs(snapshot({ intervalSecs: 10 })), 30_000);
   assert.equal(sampleAge(1_000, 22_000), "21 s");
   assert.equal(sampleAge(0, 5 * 60_000), "5 min");
+});
+
+test("accounts that never chose widgets get the default set, only with Resource Monitor access", () => {
+  const fresh = { widgets: [], widgetsCustomized: false };
+  assert.deepEqual(effectiveWidgets(fresh, true), DEFAULT_WIDGETS);
+  assert.deepEqual(effectiveWidgets(fresh, false), [], "no 'No access' cards for a default nobody chose");
+  const own = { widgets: [{ id: "network" as const, x: 0.5, y: 0.5 }], widgetsCustomized: true };
+  assert.deepEqual(effectiveWidgets(own, true), own.widgets);
+  assert.deepEqual(effectiveWidgets({ widgets: [], widgetsCustomized: true }, true), [], "an emptied desktop stays empty");
 });

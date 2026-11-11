@@ -77,9 +77,20 @@ export interface Appearance {
   accent: AccentId;
   wallpaper: WallpaperSettings;
   widgets: DesktopWidget[];
+  /**
+   * False until the account saves its own widget list: the desktop then shows
+   * {@link DEFAULT_WIDGETS}-style defaults (see shell/widgets.ts). Missing in
+   * older responses or caches, where it reads as true (no defaults).
+   */
+  widgetsCustomized: boolean;
+  /** Pinned taskbar application ids, in order (the account's own choice). */
+  taskbarPins: string[];
   uploads: AppearanceUpload[];
   limits?: { maxBytes: number; maxUploads: number };
 }
+
+/** Taskbar pins of an account that never changed them (server default). */
+export const DEFAULT_TASKBAR_PINS: ReadonlyArray<string> = ["files", "monitor", "controlpanel"];
 
 /** Payload of the `appearance.changed` realtime event. */
 export interface AppearanceChangedEvent {
@@ -197,6 +208,8 @@ export const DEFAULT_APPEARANCE: Appearance = {
     overlay: 20,
   },
   widgets: [],
+  widgetsCustomized: true,
+  taskbarPins: [...DEFAULT_TASKBAR_PINS],
   uploads: [],
   limits: { maxBytes: 10 * 1024 * 1024, maxUploads: 20 },
 };
@@ -311,6 +324,17 @@ export function normalizeWidgets(input: unknown): DesktopWidget[] {
   return out.slice(0, WIDGET_IDS.length);
 }
 
+/** Unique application ids in order; defaults when the field is missing. */
+export function normalizeTaskbarPins(input: unknown): string[] {
+  if (!Array.isArray(input)) return [...DEFAULT_TASKBAR_PINS];
+  const out: string[] = [];
+  for (const item of input) {
+    if (typeof item !== "string" || !/^[a-z]+$/.test(item) || out.includes(item)) continue;
+    out.push(item);
+  }
+  return out;
+}
+
 /** Fill in missing fields defensively (older cache entries, partial responses). */
 export function normalizeAppearance(input: Partial<Appearance> | null | undefined): Appearance {
   const wallpaper = { ...DEFAULT_APPEARANCE.wallpaper, ...(input?.wallpaper ?? {}) };
@@ -328,6 +352,8 @@ export function normalizeAppearance(input: Partial<Appearance> | null | undefine
       overlay,
     },
     widgets: normalizeWidgets(input?.widgets),
+    widgetsCustomized: input?.widgetsCustomized !== false,
+    taskbarPins: normalizeTaskbarPins(input?.taskbarPins),
     uploads: Array.isArray(input?.uploads) ? input!.uploads! : [],
     limits: input?.limits ?? DEFAULT_APPEARANCE.limits,
   };
@@ -429,6 +455,8 @@ export interface AppearancePatch {
   wallpaper?: Partial<WallpaperSettings>;
   /** The complete widget list (replaces the saved one). */
   widgets?: DesktopWidget[];
+  /** The complete ordered pin list (replaces the saved one). */
+  taskbarPins?: string[];
 }
 
 /**
@@ -457,13 +485,30 @@ export function appearancePatch(baseline: Appearance, draft: Appearance): Appear
 
 function isEmptyPatch(patch: AppearancePatch): boolean {
   return (
-    patch.theme === undefined && patch.accent === undefined && patch.wallpaper === undefined && patch.widgets === undefined
+    patch.theme === undefined &&
+    patch.accent === undefined &&
+    patch.wallpaper === undefined &&
+    patch.widgets === undefined &&
+    patch.taskbarPins === undefined
   );
 }
 
 /** True when `draft` changes a saved setting (uploads and limits are not settings). */
 export function hasAppearanceChanges(baseline: Appearance, draft: Appearance): boolean {
   return !isEmptyPatch(appearancePatch(normalizeAppearance(baseline), normalizeAppearance(draft)));
+}
+
+/** Fields arranged on the desktop itself and saved with coalescing. */
+type DesktopField = "widgets" | "taskbarPins";
+
+interface DesktopQueue<T> {
+  wanted: T | null;
+  latest: T | null;
+  saving: Promise<boolean> | null;
+}
+
+function emptyQueue<T>(): DesktopQueue<T> {
+  return { wanted: null, latest: null, saving: null };
 }
 
 /**
@@ -483,9 +528,11 @@ export class AppearanceService {
   private listeners = new Set<(appearance: Appearance) => void>();
   private themeWanted: ThemeSetting | null = null;
   private themeSaving: Promise<boolean> | null = null;
-  private widgetsWanted: DesktopWidget[] | null = null;
-  private widgetsLatest: DesktopWidget[] | null = null;
-  private widgetsSaving: Promise<boolean> | null = null;
+  /** Coalesced saves of desktop-arranged fields (not part of any editor). */
+  private desktopQueues: { [K in DesktopField]: DesktopQueue<NonNullable<AppearancePatch[K]>> } = {
+    widgets: emptyQueue(),
+    taskbarPins: emptyQueue(),
+  };
 
   constructor(private readonly api: ApiClient) {}
 
@@ -521,7 +568,14 @@ export class AppearanceService {
 
   /** The widget layout being saved (newest wins), or null when idle. */
   get pendingWidgets(): DesktopWidget[] | null {
-    return this.widgetsSaving ? this.widgetsLatest : null;
+    const queue = this.desktopQueues.widgets;
+    return queue.saving ? queue.latest : null;
+  }
+
+  /** The pin list being saved (newest wins), or null when idle. */
+  get pendingTaskbarPins(): string[] | null {
+    const queue = this.desktopQueues.taskbarPins;
+    return queue.saving ? queue.latest : null;
   }
 
   subscribe(listener: (appearance: Appearance) => void): () => void {
@@ -564,9 +618,7 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
-    this.widgetsWanted = null;
-    this.widgetsLatest = null;
-    this.widgetsSaving = null;
+    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue() };
   }
 
   /**
@@ -633,6 +685,7 @@ export class AppearanceService {
     if (patch.accent !== undefined) payload.accent = patch.accent;
     if (patch.wallpaper && Object.keys(patch.wallpaper).length > 0) payload.wallpaper = { ...patch.wallpaper };
     if (patch.widgets !== undefined) payload.widgets = normalizeWidgets(patch.widgets);
+    if (patch.taskbarPins !== undefined) payload.taskbarPins = normalizeTaskbarPins(patch.taskbarPins);
     const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
     return this.commit(generation, updated, options);
   }
@@ -748,40 +801,60 @@ export class AppearanceService {
    * the final response is announced. Resolves `false` when it failed.
    */
   saveWidgets(widgets: DesktopWidget[]): Promise<boolean> {
-    this.widgetsWanted = normalizeWidgets(widgets);
-    this.widgetsLatest = this.widgetsWanted;
-    if (this.widgetsSaving) return this.widgetsSaving;
+    // An account showing the default set has not saved a list yet: even an
+    // unchanged (or empty) list must be stored to make it the account's own.
+    return this.saveDesktopField("widgets", normalizeWidgets(widgets), (current, next) =>
+      current.widgetsCustomized && JSON.stringify(current.widgets) === JSON.stringify(next),
+    );
+  }
+
+  /** Persist the complete ordered taskbar pin list (same coalescing as widgets). */
+  saveTaskbarPins(pins: string[]): Promise<boolean> {
+    return this.saveDesktopField("taskbarPins", normalizeTaskbarPins(pins), (current, next) =>
+      JSON.stringify(current.taskbarPins) === JSON.stringify(next),
+    );
+  }
+
+  private saveDesktopField<K extends DesktopField>(
+    field: K,
+    value: NonNullable<AppearancePatch[K]>,
+    alreadySaved: (current: Appearance, next: NonNullable<AppearancePatch[K]>) => boolean,
+  ): Promise<boolean> {
+    const queue = this.desktopQueues[field] as DesktopQueue<NonNullable<AppearancePatch[K]>>;
+    queue.wanted = value;
+    queue.latest = value;
+    if (queue.saving) return queue.saving;
     const generation = this.generation;
     let saved = false;
     const run = async (): Promise<boolean> => {
       await Promise.resolve();
       try {
-        while (this.widgetsWanted !== null && generation === this.generation) {
-          const next = this.widgetsWanted;
-          this.widgetsWanted = null;
-          if (this.statusValue === "ready" && JSON.stringify(this.current.widgets) === JSON.stringify(next)) continue;
-          await this.save({ widgets: next }, { emit: false });
+        while (queue.wanted !== null && generation === this.generation) {
+          const next = queue.wanted;
+          queue.wanted = null;
+          if (this.statusValue === "ready" && alreadySaved(this.current, next)) continue;
+          await this.save({ [field]: next } as AppearancePatch, { emit: false });
           saved = true;
         }
         return true;
       } catch (error) {
         if (isStaleAppearanceError(error)) return true;
-        if (generation === this.generation) this.widgetsWanted = null;
-        console.warn("could not save desktop widgets", error);
+        if (generation === this.generation) queue.wanted = null;
+        console.warn(`could not save desktop ${field}`, error);
         return false;
       } finally {
-        if (this.widgetsSaving === promise) {
-          this.widgetsSaving = null;
-          this.widgetsLatest = null;
+        if (queue.saving === promise) {
+          queue.saving = null;
+          queue.latest = null;
         }
         if (generation === this.generation) {
-          // Announce the final state; on failure listeners fall back to the saved layout.
+          // Announce the final state; on failure listeners fall back to the saved value.
           if (saved || this.statusValue === "ready") this.emit();
         }
       }
     };
     const promise = run();
-    this.widgetsSaving = promise;
+    queue.saving = promise;
     return promise;
   }
 
@@ -796,9 +869,7 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
-    this.widgetsWanted = null;
-    this.widgetsLatest = null;
-    this.widgetsSaving = null;
+    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue() };
   }
 }
 

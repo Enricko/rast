@@ -1644,8 +1644,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6],
-        "0004, 0005 and 0006 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7],
+        "0004 to 0007 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -1662,14 +1662,19 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
 
     // Existing rows are intact; the new policy is empty and 0006 gives the
     // saved appearance an empty widget list.
-    let (theme, widgets): (String, String) =
-        sqlx::query_as("SELECT theme, widgets FROM user_appearance WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .expect("appearance row");
+    let (theme, widgets, customized, pins): (String, String, i64, String) = sqlx::query_as(
+        "SELECT theme, widgets, widgets_customized, taskbar_pins
+         FROM user_appearance WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .expect("appearance row");
     assert_eq!(theme, "dark");
     assert_eq!(widgets, "[]");
+    // Never chose widgets: the desktop offers the default set (0007).
+    assert_eq!(customized, 0);
+    assert_eq!(pins, r#"["files","monitor","controlpanel"]"#);
     let perms: String = sqlx::query_scalar("SELECT perms FROM share_members WHERE user_id = ?")
         .bind(user_id)
         .fetch_one(&pool)

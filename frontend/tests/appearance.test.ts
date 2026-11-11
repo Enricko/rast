@@ -14,6 +14,7 @@ import {
   appearancePatch,
   hasAppearanceChanges,
   normalizeAppearance,
+  normalizeTaskbarPins,
   type Appearance,
 } from "../src/core/appearance";
 import type { ApiClient } from "../src/core/api";
@@ -217,4 +218,65 @@ test("a resync with an unchanged snapshot raises no conflict", async () => {
   await tick();
   assert.equal(conflicts, 1, "a real change still reports a conflict to a dirty editor");
   sync.dispose();
+});
+
+test("desktop defaults: missing fields read as customised widgets and the default pins", () => {
+  const legacy = normalizeAppearance({ theme: "dark" } as Partial<Appearance>);
+  assert.equal(legacy.widgetsCustomized, true, "no default widgets from an old response or cache");
+  assert.deepEqual(legacy.taskbarPins, ["files", "monitor", "controlpanel"]);
+  assert.equal(normalizeAppearance({ widgetsCustomized: false } as Partial<Appearance>).widgetsCustomized, false);
+  assert.deepEqual(normalizeTaskbarPins([]), [], "nothing pinned is a choice");
+  assert.deepEqual(normalizeTaskbarPins(["logs", "logs", 3, "Bad Id", "files"]), ["logs", "files"]);
+});
+
+test("removing every default widget is saved; an unchanged customised list is not", async () => {
+  const { api, calls } = fakeApi();
+  const service = new AppearanceService(api);
+  const loading = service.load(21);
+  calls.shift()!.resolve({ ...saved(), widgets: [], widgetsCustomized: false });
+  await loading;
+
+  // The desktop shows defaults; removing both leaves an empty list, which must
+  // still be stored or the defaults would return on the next visit.
+  const removing = service.saveWidgets([]);
+  await tick();
+  const put = calls.shift()!;
+  assert.equal(put.method, "PUT");
+  assert.deepEqual(put.body, { widgets: [] });
+  put.resolve({ ...saved(), widgets: [], widgetsCustomized: true });
+  assert.equal(await removing, true);
+  assert.equal(service.value.widgetsCustomized, true);
+
+  // Now customised and unchanged: no request.
+  assert.equal(await service.saveWidgets([]), true);
+  assert.equal(calls.length, 0);
+});
+
+test("taskbar pin changes send only the pin list and the newest list wins", async () => {
+  const { api, calls } = fakeApi();
+  const service = new AppearanceService(api);
+  const loading = service.load(22);
+  calls.shift()!.resolve(saved());
+  await loading;
+
+  const first = service.saveTaskbarPins(["files"]);
+  const second = service.saveTaskbarPins(["files", "logs"]);
+  assert.deepEqual(service.pendingTaskbarPins, ["files", "logs"]);
+  await tick();
+  // Both changes arrived before the request left: one PUT with the newest list.
+  const put = calls.shift()!;
+  assert.deepEqual(put.body, { taskbarPins: ["files", "logs"] });
+  assert.equal(calls.length, 0);
+  // A change while that request is in flight is sent after it.
+  const third = service.saveTaskbarPins(["logs"]);
+  put.resolve({ ...saved(), taskbarPins: ["files", "logs"] });
+  await tick();
+  const next = calls.shift()!;
+  assert.deepEqual(next.body, { taskbarPins: ["logs"] });
+  next.resolve({ ...saved(), taskbarPins: ["logs"] });
+  assert.equal(await third, true);
+  assert.equal(await first, true);
+  assert.equal(await second, true);
+  assert.deepEqual(service.value.taskbarPins, ["logs"]);
+  assert.equal(service.pendingTaskbarPins, null);
 });

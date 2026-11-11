@@ -241,13 +241,13 @@ Uploaded wallpapers are private: only the owner can read or delete them.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, widgets:[{id,x,y}], uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
-| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}, widgets?:[{id,x,y}]}` (partial merge: omitted fields keep their saved value; `widgets`, when present, replaces the whole list; concurrent updates are serialised) |
+| GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, widgets:[{id,x,y}], widgetsCustomized, taskbarPins:[appId], uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
+| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}, widgets?:[{id,x,y}], taskbarPins?:[appId]}` (partial merge: omitted fields keep their saved value; `widgets` and `taskbarPins`, when present, replace the whole list; concurrent updates are serialised) |
 | GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
 | POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
 | GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins, also when revalidating); `Cache-Control: private, no-cache` + ETag, so a shared browser never reuses a previous account's image without the owner check |
 | DELETE | `/api/appearance/wallpapers/{id}` | deletes the file; if it is the active wallpaper the account falls back to the default built-in |
-| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme, accent and widgets are kept) |
+| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme, accent, widgets and taskbar pins are kept) |
 
 Allowed values: theme `light|dark|system`, accent `ocean|forest|teal|sage|amber|terracotta|rose|plum|indigo|graphite`, kind `builtin|upload|color`,
 fit `cover|contain|center`, position `center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right`,
@@ -257,7 +257,14 @@ Widgets: ids `health|cpu-memory|storage|network`, each at most once, at most 4;
 `x`/`y` are the card's preferred position as fractions (`0..1`) of the free
 desktop area, so the layout scales with the browser and cards stay on screen
 (rounded to 4 decimals; unknown ids or out-of-range values are `400`).
-Theme, accent, wallpaper and widgets survive restarts, logout/login and browser changes;
+`widgetsCustomized` is `false` until the account saves a widget list (any
+`widgets` value, including `[]`); until then the desktop shows System Health and
+CPU & Memory when the account may use Resource Monitor.
+Taskbar pins: application ids (`files|applications|monitor|backup|logs|controlpanel`)
+in taskbar order, each at most once; `[]` means nothing pinned. Every account
+starts with `["files","monitor","controlpanel"]`. Pins for applications the
+account cannot open are kept but not shown.
+Theme, accent, wallpaper, widgets and taskbar pins survive restarts, logout/login and browser changes;
 the client keeps only a small per-user paint cache that is cleared on sign-out.
 Every successful change publishes an `appearance.changed` event to the owner's
 other sessions (`{reason, originSessionId, appearance}`).

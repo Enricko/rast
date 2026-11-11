@@ -86,6 +86,9 @@ pub const POSITIONS: &[&str] = &[
 pub const WIDGET_IDS: &[&str] = &["health", "cpu-memory", "storage", "network"];
 /// At most one of each widget.
 pub const MAX_WIDGETS: usize = 4;
+/// Taskbar pins of an account that never changed them (also the column
+/// default in migration 0007).
+pub const DEFAULT_TASKBAR_PINS: &[&str] = &["files", "monitor", "controlpanel"];
 
 pub const MIME_JPEG: &str = "image/jpeg";
 pub const MIME_PNG: &str = "image/png";
@@ -149,6 +152,12 @@ pub struct AppearanceDto {
     pub wallpaper: WallpaperSettingsDto,
     /// Enabled desktop widgets in stacking order (last is on top).
     pub widgets: Vec<WidgetDto>,
+    /// False until the account saves its own widget list; the desktop then
+    /// shows a default set (when the account may use Resource Monitor).
+    pub widgets_customized: bool,
+    /// Pinned taskbar applications in order (ids may include applications the
+    /// account cannot open right now; the taskbar hides those).
+    pub taskbar_pins: Vec<String>,
     pub uploads: Vec<AppearanceUploadDto>,
     pub limits: LimitsDto,
 }
@@ -184,6 +193,9 @@ pub struct UpdateAppearanceRequest {
     /// The complete widget list (replaces the stored one when present).
     #[serde(default)]
     pub widgets: Option<Vec<WidgetDto>>,
+    /// The complete ordered pin list (replaces the stored one when present).
+    #[serde(default)]
+    pub taskbar_pins: Option<Vec<String>>,
 }
 
 impl Default for WallpaperSettingsDto {
@@ -207,6 +219,8 @@ impl Default for AppearanceDto {
             accent: DEFAULT_ACCENT.to_string(),
             wallpaper: WallpaperSettingsDto::default(),
             widgets: Vec::new(),
+            widgets_customized: false,
+            taskbar_pins: default_taskbar_pins(),
             uploads: Vec::new(),
             limits: LimitsDto {
                 max_bytes: MAX_UPLOAD_BYTES,
@@ -385,6 +399,46 @@ pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
         });
     }
     Ok(out)
+}
+
+fn default_taskbar_pins() -> Vec<String> {
+    DEFAULT_TASKBAR_PINS
+        .iter()
+        .map(|id| id.to_string())
+        .collect()
+}
+
+/// Validate a complete pin list: known application ids, each at most once,
+/// order preserved. An empty list is valid (nothing pinned).
+pub fn validate_taskbar_pins(pins: Vec<String>) -> AppResult<Vec<String>> {
+    let mut out: Vec<String> = Vec::with_capacity(pins.len());
+    for pin in pins {
+        let id = pin.trim().to_ascii_lowercase();
+        if !crate::access::APP_IDS.contains(&id.as_str()) {
+            return Err(bad_request(format!("unknown application {:?}", pin.trim())));
+        }
+        if out.contains(&id) {
+            return Err(bad_request("each application can be pinned once"));
+        }
+        out.push(id);
+    }
+    Ok(out)
+}
+
+/// Stored pins, dropping unknown or repeated ids instead of failing.
+fn parse_stored_pins(raw: &str) -> Vec<String> {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return default_taskbar_pins();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for item in items {
+        if let Some(id) = item.as_str() {
+            if crate::access::APP_IDS.contains(&id) && !out.iter().any(|known| known == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Defensive parse of the stored JSON: drop anything invalid instead of
@@ -801,6 +855,8 @@ struct StoredWallpaper {
     position: String,
     overlay: i64,
     widgets: Vec<WidgetDto>,
+    widgets_customized: bool,
+    taskbar_pins: Vec<String>,
 }
 
 impl StoredWallpaper {
@@ -816,6 +872,8 @@ impl StoredWallpaper {
             position: DEFAULT_POSITION.to_string(),
             overlay: DEFAULT_OVERLAY,
             widgets: Vec::new(),
+            widgets_customized: false,
+            taskbar_pins: default_taskbar_pins(),
         }
     }
 
@@ -857,7 +915,7 @@ impl StoredWallpaper {
 async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpaper> {
     let row = sqlx::query(
         "SELECT theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
-                widgets
+                widgets, widgets_customized, taskbar_pins
          FROM user_appearance WHERE user_id = ?",
     )
     .bind(user_id)
@@ -875,6 +933,8 @@ async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpap
             position: row.get("position"),
             overlay: row.get("overlay"),
             widgets: parse_stored_widgets(row.get::<String, _>("widgets").as_str()),
+            widgets_customized: row.get::<i64, _>("widgets_customized") != 0,
+            taskbar_pins: parse_stored_pins(row.get::<String, _>("taskbar_pins").as_str()),
         }
         .sanitized(),
         None => StoredWallpaper::defaults(),
@@ -931,6 +991,8 @@ fn build_appearance(stored: StoredWallpaper, uploads: Vec<AppearanceUploadDto>) 
             overlay: stored.overlay,
         },
         widgets: stored.widgets,
+        widgets_customized: stored.widgets_customized,
+        taskbar_pins: stored.taskbar_pins,
         uploads,
         limits: LimitsDto {
             max_bytes: MAX_UPLOAD_BYTES,
@@ -964,8 +1026,8 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     sqlx::query(
         "INSERT INTO user_appearance
             (user_id, theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
-             widgets, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             widgets, widgets_customized, taskbar_pins, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id) DO UPDATE SET
             theme = excluded.theme,
             accent = excluded.accent,
@@ -977,6 +1039,8 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
             position = excluded.position,
             overlay = excluded.overlay,
             widgets = excluded.widgets,
+            widgets_customized = excluded.widgets_customized,
+            taskbar_pins = excluded.taskbar_pins,
             updated_at = excluded.updated_at",
     )
     .bind(user_id)
@@ -990,6 +1054,8 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     .bind(&stored.position)
     .bind(stored.overlay)
     .bind(serde_json::to_string(&stored.widgets).unwrap_or_else(|_| "[]".to_string()))
+    .bind(i64::from(stored.widgets_customized))
+    .bind(serde_json::to_string(&stored.taskbar_pins).unwrap_or_else(|_| "[]".to_string()))
     .bind(now)
     .execute(pool)
     .await?;
@@ -1041,7 +1107,12 @@ pub async fn update(
         }
     }
     if let Some(widgets) = patch.widgets {
+        // Any explicit list - even an empty one - is the account's own choice.
         stored.widgets = validate_widgets(widgets)?;
+        stored.widgets_customized = true;
+    }
+    if let Some(pins) = patch.taskbar_pins {
+        stored.taskbar_pins = validate_taskbar_pins(pins)?;
     }
     match stored.kind.as_str() {
         "upload" => {
@@ -1076,6 +1147,8 @@ pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDt
         theme: stored.theme,
         accent: stored.accent,
         widgets: stored.widgets,
+        widgets_customized: stored.widgets_customized,
+        taskbar_pins: stored.taskbar_pins,
         ..defaults
     };
     store(pool, user.id, &stored).await?;
@@ -1625,7 +1698,22 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pool = pool_with_users(dir.path()).await;
         let alice = auth_user(1, "alice");
-        assert!(get(&pool, 1).await.unwrap().widgets.is_empty());
+        let fresh = get(&pool, 1).await.unwrap();
+        assert!(fresh.widgets.is_empty());
+        assert!(!fresh.widgets_customized, "never chose widgets");
+
+        // A theme-only save does not count as choosing widgets.
+        let themed = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                theme: Some("light".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!themed.widgets_customized);
 
         let saved = update(
             &pool,
@@ -1641,6 +1729,7 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert_eq!(saved.widgets.len(), 2);
+        assert!(saved.widgets_customized);
 
         // Theme-only and wallpaper-only updates and a wallpaper reset keep them.
         update(
@@ -1655,10 +1744,12 @@ pub(crate) mod tests {
         .unwrap();
         let after_reset = reset(&pool, &alice).await.unwrap();
         assert_eq!(after_reset.widgets, saved.widgets);
+        assert!(after_reset.widgets_customized);
         assert_eq!(after_reset.theme, "dark");
 
         // Another account is unaffected.
-        assert!(get(&pool, 2).await.unwrap().widgets.is_empty());
+        let bob = get(&pool, 2).await.unwrap();
+        assert!(bob.widgets.is_empty() && !bob.widgets_customized);
 
         // An empty list removes every widget.
         let cleared = update(
@@ -1672,6 +1763,79 @@ pub(crate) mod tests {
         .await
         .unwrap();
         assert!(cleared.widgets.is_empty());
+        // ...and is remembered as a choice, so no default set comes back.
+        assert!(cleared.widgets_customized);
+        assert!(get(&pool, 1).await.unwrap().widgets_customized);
+    }
+
+    #[tokio::test]
+    async fn taskbar_pins_default_persist_per_account_and_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool_with_users(dir.path()).await;
+        let alice = auth_user(1, "alice");
+        let pins = |ids: &[&str]| Some(ids.iter().map(|id| id.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            get(&pool, 1).await.unwrap().taskbar_pins,
+            ["files", "monitor", "controlpanel"]
+        );
+
+        // Order is the user's; other settings keep the pins.
+        let saved = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                taskbar_pins: pins(&["controlpanel", "files", "logs"]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.taskbar_pins, ["controlpanel", "files", "logs"]);
+        update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                theme: Some("dark".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let after_reset = reset(&pool, &alice).await.unwrap();
+        assert_eq!(after_reset.taskbar_pins, saved.taskbar_pins);
+        assert_eq!(
+            get(&pool, 2).await.unwrap().taskbar_pins,
+            ["files", "monitor", "controlpanel"],
+            "another account keeps the defaults"
+        );
+
+        // Nothing pinned is a valid choice and is remembered.
+        let cleared = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                taskbar_pins: pins(&[]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cleared.taskbar_pins.is_empty());
+        assert!(get(&pool, 1).await.unwrap().taskbar_pins.is_empty());
+
+        for bad in [&["files", "files"][..], &["weather"][..]] {
+            let result = update(
+                &pool,
+                &alice,
+                UpdateAppearanceRequest {
+                    taskbar_pins: pins(bad),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(result.is_err(), "{bad:?} must be rejected");
+        }
+        assert_eq!(parse_stored_pins(r#"["logs","nope","logs",3]"#), ["logs"]);
     }
 
     #[tokio::test]
@@ -1694,6 +1858,7 @@ pub(crate) mod tests {
             &alice,
             UpdateAppearanceRequest {
                 widgets: None,
+                taskbar_pins: None,
                 accent: None,
                 theme: Some("dark".into()),
                 wallpaper: Some(WallpaperPatch {
@@ -1758,6 +1923,7 @@ pub(crate) mod tests {
                 &alice,
                 UpdateAppearanceRequest {
                     widgets: None,
+                    taskbar_pins: None,
                     accent: None,
                     theme: None,
                     wallpaper: Some(patch)
@@ -1771,6 +1937,7 @@ pub(crate) mod tests {
             &alice,
             UpdateAppearanceRequest {
                 widgets: None,
+                taskbar_pins: None,
                 accent: None,
                 theme: Some("sepia".into()),
                 wallpaper: None
@@ -1850,6 +2017,7 @@ pub(crate) mod tests {
             &alice,
             UpdateAppearanceRequest {
                 widgets: None,
+                taskbar_pins: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {
@@ -1969,6 +2137,7 @@ pub(crate) mod tests {
             &bob,
             UpdateAppearanceRequest {
                 widgets: None,
+                taskbar_pins: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {

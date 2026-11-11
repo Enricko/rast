@@ -103,10 +103,11 @@ pub async fn update_appearance(
             .object("appearance", user.id.to_string())
             .success()
             .detail(format!(
-                "theme={} wallpaper={} widgets={}",
+                "theme={} wallpaper={} widgets={} pins={}",
                 updated.theme,
                 updated.wallpaper.kind,
-                updated.widgets.len()
+                updated.widgets.len(),
+                updated.taskbar_pins.join(",")
             ))
             .ip(ip.as_string()),
     )
@@ -500,6 +501,12 @@ mod tests {
         assert_eq!(body["wallpaper"]["position"], "center");
         assert_eq!(body["wallpaper"]["overlay"], 20);
         assert_eq!(body["uploads"], json!([]));
+        // Desktop defaults: no widgets chosen yet, the three standard pins.
+        assert_eq!(body["widgetsCustomized"], false);
+        assert_eq!(
+            body["taskbarPins"],
+            json!(["files", "monitor", "controlpanel"])
+        );
         assert_eq!(body["limits"]["maxBytes"], appearance::MAX_UPLOAD_BYTES);
         assert_eq!(
             body["limits"]["maxUploads"],
@@ -532,11 +539,23 @@ mod tests {
         assert_eq!(body["wallpaper"]["position"], "bottom-right");
         assert_eq!(body["wallpaper"]["overlay"], 35);
 
+        // Pins are the account's own, in its order.
+        let (status, body) = json_call(
+            &app,
+            Method::PUT,
+            "/api/appearance",
+            json!({"taskbarPins": ["logs", "files"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["taskbarPins"], json!(["logs", "files"]));
+
         // Persisted across requests.
         let (status, body) = json_call(&app, Method::GET, "/api/appearance", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["theme"], "dark");
         assert_eq!(body["wallpaper"]["builtinId"], "forest-mist");
+        assert_eq!(body["taskbarPins"], json!(["logs", "files"]));
 
         // Invalid payloads are rejected with our JSON error shape.
         for payload in [
@@ -549,6 +568,8 @@ mod tests {
             json!({"wallpaper": {"overlay": 61}}),
             json!({"wallpaper": {"overlay": -1}}),
             json!({"wallpaper": {"kind": "upload"}}),
+            json!({"taskbarPins": ["weather"]}),
+            json!({"taskbarPins": ["files", "files"]}),
         ] {
             let (status, body) = json_call(&app, Method::PUT, "/api/appearance", payload).await;
             assert_eq!(
