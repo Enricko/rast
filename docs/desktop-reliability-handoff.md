@@ -403,7 +403,7 @@ This is fixed in `09fe04f`, but the fix only helps updates *run by* a binary
 that contains it. The update from 0.4.0 to the next release can therefore
 still print the message once. Check the result with `rast doctor`.
 
-**Follow-up: v0.4.1** is prepared on `main` (CI passed) but not yet tagged.
+**Follow-up: v0.4.1** (tag on `d210233`) was deployed on 2026-11-11 at 11:33.
 It contains:
 - the stable taskbar slots with per-account pins (three default pins);
 - the default widgets (migration 0007, schema v7);
@@ -414,6 +414,17 @@ It contains:
   account's transaction (`POST /api/users`);
 - the fix for quota 0 (unlimited) being rejected in Add user, Edit user and
   Settings, and two-column user dialogs.
+
+v0.4.1 deployment record:
+- backup before the update: `/var/lib/rast/backups/rast-20261111-113041-db-config.tar.gz`;
+  the updater also saved `rast-20261111-113314-db-config.tar.gz`;
+- rollback binary: `/usr/local/bin/rast.rollback-0.4.0` (0.4.0 cannot open a
+  schema v7 database: restore the backup first);
+- `rast update` printed the expected one-time message from the 0.4.0 updater
+  (`migration 7 was previously applied but is missing`);
+- verified: `rast 0.4.1`, `rast doctor` ok with schema v7 and 0 warnings,
+  `/healthz` 200, and `index-pnDm9R34.js` served both locally and through
+  desktop.lufria.tech. The journal shows a clean start.
 
 ## 11. Verification summary (final build `e03fee4`)
 
