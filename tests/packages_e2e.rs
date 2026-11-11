@@ -52,6 +52,9 @@ impl Signer {
     }
 }
 
+/// Fictional password of the throwaway accounts these tests create.
+const TEST_PASSWORD: &str = "Secret-pass-123";
+
 fn version(v: &str, min_rast: Option<&str>) -> Value {
     let artifact = |target: &str| {
         json!({
@@ -192,7 +195,7 @@ impl Server {
             &self.state.db,
             &self.state.config,
             username,
-            "Secret-pass-123",
+            TEST_PASSWORD,
             role,
             None,
             None,
@@ -204,7 +207,7 @@ impl Server {
             .uri("/api/auth/login")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(
-                serde_json::to_vec(&json!({"username": username, "password": "Secret-pass-123"}))
+                serde_json::to_vec(&json!({"username": username, "password": TEST_PASSWORD}))
                     .unwrap(),
             ))
             .unwrap();
