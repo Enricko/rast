@@ -31,6 +31,7 @@ use std::{
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
+    http::HeaderMap,
     response::sse::{Event, KeepAlive, Sse},
     routing::{get, post},
     Json, Router,
@@ -204,8 +205,13 @@ pub async fn docker_status(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> AppResult<Json<Value>> {
-    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
-    Ok(Json(state.docker.status().await))
+    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let status = state.docker.status().await;
+    Ok(Json(if access.read_only {
+        docker_status_for_read_only(status)
+    } else {
+        status
+    }))
 }
 
 /// GET /api/docker/containers — discovered containers flagged `managed`.
@@ -307,7 +313,7 @@ pub async fn list_apps(
 ) -> AppResult<Json<Value>> {
     // Defence in depth: the policy middleware also gates /api/apps, but the
     // handler must never rely on the route layer alone.
-    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * per_page;
@@ -336,23 +342,36 @@ pub async fn list_apps(
             .map(|containers| derive_status(containers, &app.status))
             .unwrap_or_else(|| app.status.clone());
         let containers = grouped.cloned().unwrap_or_default();
-        items.push(app_json(
-            &app,
-            &state.secrets,
-            false,
-            &containers,
-            &refreshed,
-        ));
+        if access.read_only {
+            items.push(app_json_restricted(&app, &containers, &refreshed));
+        } else {
+            items.push(app_json(
+                &app,
+                &state.secrets,
+                false,
+                &containers,
+                &refreshed,
+            ));
+        }
     }
+    let docker = if access.read_only {
+        json!({
+            "available": docker_ok,
+            "reason": if docker_ok {
+                Value::Null
+            } else {
+                json!("Docker integration is unavailable")
+            },
+        })
+    } else {
+        json!({"available": docker_ok, "reason": docker_reason})
+    };
     Ok(Json(json!({
         "items": items,
         "page": page,
         "perPage": per_page,
         "total": total,
-        "docker": {
-            "available": docker_ok,
-            "reason": docker_reason,
-        },
+        "docker": docker,
     })))
 }
 
@@ -367,10 +386,13 @@ pub async fn get_app(
     let (containers, docker_reason) = probe_app_containers(&state, &app.slug).await;
     let status = derive_status(&containers, &app.status);
     // The Compose document may contain inline values an administrator typed
-    // (e.g. a literal API key); it is only returned to administrators. Read-only
-    // viewers get the same metadata/logs but not the editable definition.
-    let include_compose = !access.read_only;
-    let mut detail = app_json(&app, &state.secrets, include_compose, &containers, &status);
+    // (e.g. a literal API key); F2 also hides environment values and deployment
+    // error detail from read-only viewers.
+    let mut detail = if access.read_only {
+        app_json_restricted(&app, &containers, &status)
+    } else {
+        app_json(&app, &state.secrets, true, &containers, &status)
+    };
     if let Some(object) = detail.as_object_mut() {
         object.insert("containers".to_string(), Value::Array(containers.clone()));
         object.insert(
@@ -383,9 +405,18 @@ pub async fn get_app(
         );
         let (resources, resources_reason) = probe_app_resources(&state, &containers).await;
         object.insert("resources".to_string(), Value::Array(resources));
+        let available = docker_reason.is_none();
+        let reason = resources_reason.or(docker_reason);
         object.insert(
             "docker".to_string(),
-            json!({"available": docker_reason.is_none(), "reason": resources_reason.or(docker_reason)}),
+            if access.read_only {
+                json!({
+                    "available": available,
+                    "reason": if available { Value::Null } else { json!("Docker integration is unavailable") },
+                })
+            } else {
+                json!({"available": available, "reason": reason})
+            },
         );
     }
     Ok(Json(detail))
@@ -617,6 +648,13 @@ pub async fn app_logs(
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Json<Value>> {
     crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    // F2: container logs commonly contain credentials/tokens; only
+    // administrators may read them (read-only grants get a clear 403).
+    if !user.is_admin() {
+        return Err(AppError::Forbidden(
+            "container logs require an administrator",
+        ));
+    }
     state.docker.ensure_available().await?;
     let app = load_app(&state, &id).await?;
     let tail = crate::api::parse_bounded(query.tail.as_deref(), 200, 2000) as u32;
@@ -765,10 +803,66 @@ impl LogStreamItem {
     }
 }
 
+/// Identity captured when the log stream connects. F7: the session and the
+/// administrator role are revalidated on every poll so a revoked session or a
+/// demoted/disabled account stops receiving container logs immediately.
+struct LogStreamIdentity {
+    user_id: i64,
+    session_id: String,
+    token: String,
+    ttl_hours: i64,
+}
+
+enum IdentityCheck {
+    Valid,
+    Revoked,
+    Unknown,
+}
+
+/// Re-check session validity and the current account role/active flag.
+async fn check_stream_identity(
+    db: &sqlx::SqlitePool,
+    identity: &LogStreamIdentity,
+) -> IdentityCheck {
+    match crate::auth::session::validate(db, &identity.token, identity.ttl_hours).await {
+        Ok(Some(record)) => {
+            if record.session_id != identity.session_id {
+                return IdentityCheck::Revoked;
+            }
+        }
+        Ok(None) => return IdentityCheck::Revoked,
+        Err(error) => {
+            tracing::warn!(error = %error, "log stream session revalidation failed");
+            return IdentityCheck::Unknown;
+        }
+    }
+    match sqlx::query_as::<_, (crate::auth::Role, bool)>(
+        "SELECT role, active FROM users WHERE id = ?",
+    )
+    .bind(identity.user_id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some((role, active))) => {
+            if active && role == crate::auth::Role::Admin {
+                IdentityCheck::Valid
+            } else {
+                IdentityCheck::Revoked
+            }
+        }
+        Ok(None) => IdentityCheck::Revoked,
+        Err(error) => {
+            tracing::warn!(error = %error, "log stream user revalidation failed");
+            IdentityCheck::Unknown
+        }
+    }
+}
+
 /// Mutable state of one live-log SSE connection.
 struct LogStreamState {
     db: sqlx::SqlitePool,
     docker: Arc<crate::docker::DockerManager>,
+    identity: LogStreamIdentity,
     app_id: String,
     slug: String,
     tail: usize,
@@ -780,7 +874,13 @@ struct LogStreamState {
 }
 
 impl LogStreamState {
-    fn new(state: &AppState, app_id: String, slug: String, tail: usize) -> Self {
+    fn new(
+        state: &AppState,
+        identity: LogStreamIdentity,
+        app_id: String,
+        slug: String,
+        tail: usize,
+    ) -> Self {
         // First tick after one full interval: the initial seed is fetched
         // without waiting, later polls are spaced out.
         let mut interval = tokio::time::interval_at(
@@ -791,6 +891,7 @@ impl LogStreamState {
         Self {
             db: state.db.clone(),
             docker: state.docker.clone(),
+            identity,
             app_id,
             slug,
             tail,
@@ -906,11 +1007,12 @@ impl LogStreamState {
 /// Build the per-connection SSE stream for one managed application.
 fn log_stream(
     state: AppState,
+    identity: LogStreamIdentity,
     app_id: String,
     slug: String,
     tail: usize,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
-    let initial = LogStreamState::new(&state, app_id, slug, tail);
+    let initial = LogStreamState::new(&state, identity, app_id, slug, tail);
     futures::stream::unfold(initial, |mut stream_state| async move {
         loop {
             // End the stream when the application is deleted; the admin gets a
@@ -932,6 +1034,21 @@ fn log_stream(
             }
             if stream_state.seeded {
                 stream_state.interval.tick().await;
+                // F7: revalidate the session and the active-administrator
+                // status immediately before every incremental poll (after the
+                // wait, so a revocation during the interval is never followed
+                // by another batch). The initial tail was authorized at connect.
+                match check_stream_identity(&stream_state.db, &stream_state.identity).await {
+                    IdentityCheck::Valid => {}
+                    IdentityCheck::Revoked => return None,
+                    IdentityCheck::Unknown => {
+                        stream_state.failures = stream_state.failures.saturating_add(1);
+                        if stream_state.failures >= LOG_STREAM_MAX_FAILURES {
+                            return None;
+                        }
+                        continue;
+                    }
+                }
             }
             if let Some(item) = stream_state.poll().await {
                 return Some((Ok(item.to_event()), stream_state));
@@ -953,9 +1070,22 @@ pub async fn app_logs_stream(
     State(state): State<AppState>,
     user: AuthUser,
     AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
     crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    // F2: container logs are administrator-only; F7 revalidates this identity on
+    // every poll and closes the stream if the account loses the role.
+    if !user.is_admin() {
+        return Err(AppError::Forbidden(
+            "container logs require an administrator",
+        ));
+    }
+    let token = crate::auth::cookie_value(&headers, crate::auth::session::SESSION_COOKIE)
+        .unwrap_or_default();
+    if token.is_empty() {
+        return Err(AppError::Unauthorized("authentication required"));
+    }
     let app = load_app(&state, &id).await?;
     state.docker.ensure_available().await?;
     let tail = crate::api::parse_bounded(
@@ -963,8 +1093,15 @@ pub async fn app_logs_stream(
         LOG_STREAM_DEFAULT_TAIL,
         LOG_STREAM_MAX_TAIL,
     );
+    let identity = LogStreamIdentity {
+        user_id: user.id,
+        session_id: user.session_id.clone(),
+        token,
+        ttl_hours: state.config.session_ttl_hours,
+    };
     Ok(Sse::new(log_stream(
         state.clone(),
+        identity,
         app.id.clone(),
         app.slug.clone(),
         tail,
@@ -982,7 +1119,7 @@ pub async fn app_history(
     user: AuthUser,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
-    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let _app = load_app(&state, &id).await?;
     let rows = sqlx::query(
         "SELECT id, action, status, detail, created_at, finished_at
@@ -994,15 +1131,22 @@ pub async fn app_history(
     let items: Vec<Value> = rows
         .iter()
         .map(|row| {
-            json!({
+            let mut item = json!({
                 "id": row.get::<i64, _>("id"),
                 "appId": id,
                 "action": row.get::<String, _>("action"),
                 "status": row.get::<String, _>("status"),
-                "detail": row.get::<String, _>("detail"),
                 "createdAt": row.get::<i64, _>("created_at"),
                 "finishedAt": row.get::<Option<i64>, _>("finished_at"),
-            })
+            });
+            // F2: deployment error detail can include host paths / container
+            // stderr; only administrators receive it.
+            if !access.read_only {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("detail".to_string(), json!(row.get::<String, _>("detail")));
+                }
+            }
+            item
         })
         .collect();
     Ok(Json(json!({"items": items, "total": items.len()})))
@@ -1773,6 +1917,56 @@ pub fn quote_env_value(value: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// Maximum length of the sanitized `lastError` shown to read-only viewers.
+const RESTRICTED_LAST_ERROR_MAX: usize = 200;
+
+/// Sanitize deployment error text for read-only viewers: first line only,
+/// control characters stripped, bounded length.
+pub fn sanitize_last_error(text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or_default().trim();
+    audit::sanitize(first_line, RESTRICTED_LAST_ERROR_MAX)
+}
+
+/// Read-only application payload (F2): status/metadata only. Environment
+/// variables are never included (only their counts), and the Compose document
+/// and history details are administrator-only.
+fn app_json_restricted(app: &AppRecord, containers: &[Value], status: &str) -> Value {
+    let secret_count = app.env.iter().filter(|entry| entry.secret).count();
+    json!({
+        "id": app.id,
+        "name": app.name,
+        "slug": app.slug,
+        "status": status,
+        "lastError": sanitize_last_error(&app.last_error),
+        "envCount": app.env.len(),
+        "secretCount": secret_count,
+        "createdAt": app.created_at,
+        "updatedAt": app.updated_at,
+        "containers": containers,
+    })
+}
+
+/// Read-only-safe Docker status: never expose host paths or worker socket
+/// locations in `reason` (F2).
+fn docker_status_for_read_only(status: Value) -> Value {
+    let available = status
+        .get("available")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut out = status;
+    if let Some(object) = out.as_object_mut() {
+        object.insert(
+            "reason".to_string(),
+            if available {
+                Value::Null
+            } else {
+                Value::String("Docker integration is unavailable".to_string())
+            },
+        );
+    }
     out
 }
 
@@ -2589,6 +2783,24 @@ mod realtime_tests {
         }
     }
 
+    fn admin_cookie_headers() -> axum::http::HeaderMap {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            axum::http::HeaderValue::from_static("rast_session=test-session"),
+        );
+        headers
+    }
+
+    fn test_identity() -> LogStreamIdentity {
+        LogStreamIdentity {
+            user_id: 1,
+            session_id: "test-session".into(),
+            token: "test-session".into(),
+            ttl_hours: 168,
+        }
+    }
+
     fn test_config(dir: &Path, docker_socket: Option<&Path>) -> crate::config::Config {
         let mut cfg =
             crate::config::Config::from_parts(None, crate::config::FileConfig::default(), |_| None)
@@ -2679,6 +2891,7 @@ mod realtime_tests {
             State(state),
             admin(),
             AxumPath("missing".into()),
+            admin_cookie_headers(),
             Query(LogsQuery { tail: None }),
         )
         .await;
@@ -2697,6 +2910,7 @@ mod realtime_tests {
             State(state),
             admin(),
             AxumPath("app1".into()),
+            admin_cookie_headers(),
             Query(LogsQuery {
                 tail: Some("200".into()),
             }),
@@ -2768,6 +2982,7 @@ mod realtime_tests {
             State(state),
             admin(),
             AxumPath("app1".into()),
+            admin_cookie_headers(),
             Query(LogsQuery {
                 tail: Some("200".into()),
             }),
@@ -2816,7 +3031,8 @@ mod realtime_tests {
         let state = AppState::new(test_config(dir.path(), Some(&socket)))
             .await
             .unwrap();
-        let mut stream = LogStreamState::new(&state, "app1".into(), "shop".into(), 200);
+        let mut stream =
+            LogStreamState::new(&state, test_identity(), "app1".into(), "shop".into(), 200);
         let first = stream.poll().await.expect("initial seed event");
         assert!(first.reset, "initial seed resets the client");
         assert_eq!(first.app_id, "app1");
@@ -3168,27 +3384,6 @@ pub(crate) mod access_test_support {
             self.request("GET", path, None, HeaderMap::new()).await
         }
 
-        /// Perform a request but only return status/headers (used for SSE
-        /// endpoints whose body never ends on its own).
-        pub async fn request_headers(
-            &self,
-            method: &str,
-            path: &str,
-            session: &Session,
-        ) -> (StatusCode, HeaderMap) {
-            let mut builder = Request::builder().method(method).uri(path);
-            for (key, value) in session.headers().iter() {
-                builder = builder.header(key, value);
-            }
-            let response = self
-                .router
-                .clone()
-                .oneshot(builder.body(Body::empty()).expect("request"))
-                .await
-                .expect("router response");
-            (response.status(), response.headers().clone())
-        }
-
         /// Grant an app rule through a group the user belongs to.
         pub async fn grant_group_app(&self, user_id: i64, app_id: &str, rule: &str) {
             let now = crate::db::now_ms();
@@ -3236,16 +3431,68 @@ pub(crate) mod access_test_support {
         }
 
         pub async fn insert_app(&self, id: &str, slug: &str) {
+            self.insert_app_full(id, slug, "[]", "", "running").await;
+        }
+
+        /// Insert an app row with a JSON environment and `last_error` so
+        /// confidentiality tests can assert exactly what is (not) returned.
+        pub async fn insert_app_full(
+            &self,
+            id: &str,
+            slug: &str,
+            env_json: &str,
+            last_error: &str,
+            status: &str,
+        ) {
             sqlx::query(
                 "INSERT INTO apps (id, name, slug, compose, env_json, status, last_error, created_by, created_at, updated_at)
-                 VALUES (?, ?, ?, 'services: {}', '[]', 'running', '', NULL, 1, 1)",
+                 VALUES (?, ?, ?, 'services:\n  web:\n    image: nginx:alpine\n', ?, ?, ?, NULL, 1, 1)",
             )
             .bind(id)
             .bind(slug)
             .bind(slug)
+            .bind(env_json)
+            .bind(status)
+            .bind(last_error)
             .execute(&self.state.db)
             .await
             .expect("insert app");
+        }
+
+        pub async fn insert_deployment(
+            &self,
+            app_id: &str,
+            action: &str,
+            status: &str,
+            detail: &str,
+        ) {
+            sqlx::query(
+                "INSERT INTO app_deployments (app_id, action, status, detail, created_at, finished_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(app_id)
+            .bind(action)
+            .bind(status)
+            .bind(detail)
+            .bind(crate::db::now_ms())
+            .bind(crate::db::now_ms())
+            .execute(&self.state.db)
+            .await
+            .expect("insert deployment");
+        }
+
+        /// Perform a GET request and hand back the raw (possibly streaming)
+        /// response body so tests can read SSE frames.
+        pub async fn raw_get(&self, path: &str, session: &Session) -> axum::response::Response {
+            let mut builder = Request::builder().method("GET").uri(path);
+            for (key, value) in session.headers().iter() {
+                builder = builder.header(key, value);
+            }
+            self.router
+                .clone()
+                .oneshot(builder.body(Body::empty()).expect("request"))
+                .await
+                .expect("router response")
         }
     }
 }
@@ -3255,7 +3502,8 @@ pub(crate) mod access_test_support {
 mod access_policy_tests {
     use super::access_test_support::TestServer;
     use super::realtime_tests::{start_fake_worker, FakeWorkerMode};
-    use axum::http::{header, StatusCode};
+    use super::MASKED_ENV_VALUE;
+    use axum::http::StatusCode;
     use serde_json::json;
 
     const ADMIN_PASSWORD: &str = "Admin-Password-123!";
@@ -3291,8 +3539,13 @@ mod access_policy_tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
+    const ENV_JSON: &str = r#"[{"key":"PUBLIC_URL","secret":false,"value":"https://example.test"},{"key":"DB_PASSWORD","secret":true,"value":"v1:not-a-real-ciphertext"}]"#;
+    const LAST_ERROR: &str =
+        "deploy failed: exit code 1\nfull stderr with /var/lib/rast/apps/shop/secret.key";
+    const DEPLOY_DETAIL: &str = "command failed: SECRET_TOKEN=abcd at /var/lib/rast/secret.key";
+
     #[tokio::test]
-    async fn read_only_grant_allows_application_reads() {
+    async fn read_only_grant_receives_metadata_only() {
         let dir = tempfile::tempdir().expect("socket dir");
         let socket = dir.path().join("worker.sock");
         let worker = start_fake_worker(
@@ -3306,25 +3559,114 @@ mod access_policy_tests {
             .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
             .await;
         server.grant_group_app(alice, "applications", "allow").await;
-        server.insert_app("app1", "shop").await;
+        server
+            .insert_app_full("app1", "shop", ENV_JSON, LAST_ERROR, "error")
+            .await;
+        server
+            .insert_deployment("app1", "deploy", "failed", DEPLOY_DETAIL)
+            .await;
         let session = server.login("alice", USER_PASSWORD).await;
 
+        // List: status/metadata only, env values replaced by counts.
         let (status, _, body) = server.get("/api/apps", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+        let item = &body["items"][0];
+        assert!(item.get("env").is_none(), "env values leaked: {item}");
+        assert!(item.get("compose").is_none(), "compose leaked: {item}");
+        assert_eq!(item["envCount"], 2, "{item}");
+        assert_eq!(item["secretCount"], 1, "{item}");
+        assert_eq!(item["lastError"], "deploy failed: exit code 1", "{item}");
+        assert!(!item.to_string().contains("not-a-real-ciphertext"));
+
+        // Detail: same restriction, plus containers/resources metadata.
+        let (status, _, body) = server.get("/api/apps/app1", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("env").is_none(), "env values leaked: {body}");
+        assert!(body.get("compose").is_none(), "compose leaked: {body}");
+        assert_eq!(body["envCount"], 2);
+        assert_eq!(body["secretCount"], 1);
+        assert_eq!(body["lastError"], "deploy failed: exit code 1");
+        assert!(body.get("containers").is_some());
+
+        // History: action/status/timestamps, no free-form detail.
+        let (status, _, body) = server.get("/api/apps/app1/history", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let entry = &body["items"][0];
+        assert!(
+            entry.get("detail").is_none(),
+            "history detail leaked: {entry}"
+        );
+        assert_eq!(entry["action"], "deploy");
+        assert_eq!(entry["status"], "failed");
+        assert!(entry["createdAt"].as_i64().is_some());
+
+        // F2: container logs and the live log stream are administrator-only.
+        let (status, _, body) = server.get("/api/apps/app1/logs?tail=10", &session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "container logs require an administrator"
+        );
+        let (status, _, body) = server
+            .get("/api/apps/app1/logs/stream?tail=10", &session)
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(
+            body["error"]["message"],
+            "container logs require an administrator"
+        );
+
+        // Docker status stays readable but without host-path reason details.
+        let (status, _, body) = server.get("/api/docker/status", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["available"], true);
+        assert!(
+            body["reason"].is_null(),
+            "reason leaked host detail: {body}"
+        );
+
+        // Host-wide container discovery stays administrator-only (import flow).
+        let (status, _, _) = server.get("/api/docker/containers", &session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_keeps_full_application_payload() {
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "admin log".into(),
+            },
+        );
+        let server = TestServer::start_with_docker(&socket).await;
+        server
+            .create_user("admin", ADMIN_PASSWORD, crate::auth::Role::Admin)
+            .await;
+        server
+            .insert_app_full("app1", "shop", ENV_JSON, LAST_ERROR, "error")
+            .await;
+        server
+            .insert_deployment("app1", "deploy", "failed", DEPLOY_DETAIL)
+            .await;
+        let session = server.login("admin", ADMIN_PASSWORD).await;
 
         let (status, _, body) = server.get("/api/apps/app1", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        // Read-only viewers do not receive the editable Compose document.
+        assert!(body.get("compose").is_some(), "admins keep compose: {body}");
+        assert_eq!(body["env"][0]["value"], "https://example.test");
+        assert_eq!(body["env"][1]["value"], MASKED_ENV_VALUE);
         assert!(
-            body.get("compose").is_none(),
-            "compose must stay admin-only: {body}"
+            body["lastError"].as_str().unwrap().contains("full stderr"),
+            "admins keep full error text: {body}"
         );
-        assert!(body.get("env").is_some(), "masked env list is safe: {body}");
 
         let (status, _, body) = server.get("/api/apps/app1/history", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(body["items"].is_array());
+        assert_eq!(body["items"][0]["detail"], DEPLOY_DETAIL);
 
         let (status, _, body) = server.get("/api/apps/app1/logs?tail=10", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -3332,26 +3674,138 @@ mod access_policy_tests {
 
         let (status, _, body) = server.get("/api/docker/status", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["available"], true, "{body}");
-
-        // The live log stream opens for a read-only grant (SSE body is not
-        // consumed here so the test can finish; content-type proves transport).
-        let (status, headers) = server
-            .request_headers("GET", "/api/apps/app1/logs/stream?tail=10", &session)
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default(),
-            "text/event-stream"
+        assert!(
+            body["reason"].as_str().is_some(),
+            "admins keep reason: {body}"
         );
 
-        // Host-wide container discovery stays administrator-only (import flow).
-        let (status, _, _) = server.get("/api/docker/containers", &session).await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
+        worker.abort();
+    }
 
+    fn auth_user(id: i64, username: &str, role: crate::auth::Role) -> super::AuthUser {
+        super::AuthUser {
+            id,
+            username: username.into(),
+            display_name: username.into(),
+            role,
+            session_id: "test".into(),
+            quota_bytes: 0,
+            must_change_password: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_list_hides_docker_socket_paths() {
+        let server = TestServer::start().await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "applications", "allow").await;
+        let session = server.login("alice", USER_PASSWORD).await;
+        let (status, _, body) = server.get("/api/apps", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["docker"]["available"], false);
+        let reason = body["docker"]["reason"].as_str().unwrap_or_default();
+        assert!(
+            !reason.contains('/') && !reason.contains("socket") && !reason.contains("worker"),
+            "read-only docker reason leaked host detail: {reason:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn applications_grant_controls_monitor_container_inventory() {
+        use axum::extract::State;
+
+        let server = TestServer::start().await;
+        let allowed_id = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server
+            .grant_group_app(allowed_id, "applications", "allow")
+            .await;
+        let denied_id = server
+            .create_user("bob", "Bob-Password-123!", crate::auth::Role::User)
+            .await;
+
+        // Accounts allowed to use Applications keep the (possibly empty)
+        // container inventory shape; others get it redacted.
+        let allowed = auth_user(allowed_id, "alice", crate::auth::Role::User);
+        let snapshot = crate::api::monitor::snapshot(State(server.state.clone()), allowed)
+            .await
+            .0;
+        assert!(
+            snapshot.get("containersRestricted").is_none(),
+            "applications grant should keep container inventory: {snapshot}"
+        );
+        assert!(snapshot["containers"].is_array());
+
+        let denied = auth_user(denied_id, "bob", crate::auth::Role::User);
+        let snapshot = crate::api::monitor::snapshot(State(server.state.clone()), denied)
+            .await
+            .0;
+        assert_eq!(snapshot["containers"], json!([]));
+        assert_eq!(snapshot["containersRestricted"], json!(true));
+
+        let denied = auth_user(denied_id, "bob", crate::auth::Role::User);
+        let containers = crate::api::monitor::containers(State(server.state.clone()), denied)
+            .await
+            .0;
+        assert_eq!(containers["containers"], json!([]));
+        assert_eq!(containers["containersRestricted"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn log_stream_ends_when_admin_is_demoted() {
+        use http_body_util::BodyExt;
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "revocation log".into(),
+            },
+        );
+        let server = TestServer::start_with_docker(&socket).await;
+        let admin_id = server
+            .create_user("admin", ADMIN_PASSWORD, crate::auth::Role::Admin)
+            .await;
+        server.insert_app("app1", "shop").await;
+        let session = server.login("admin", ADMIN_PASSWORD).await;
+
+        let response = server
+            .raw_get("/api/apps/app1/logs/stream?tail=10", &session)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let first = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("initial SSE frame must arrive")
+            .expect("stream must yield a frame")
+            .expect("frame must be ok");
+        let text = String::from_utf8_lossy(&first.into_data().expect("data frame")).into_owned();
+        assert!(text.contains("app.logs"), "initial frame: {text}");
+
+        // Demote the account between polls: F7 must close the stream.
+        sqlx::query("UPDATE users SET role = 'user' WHERE id = ?")
+            .bind(admin_id)
+            .execute(&server.state.db)
+            .await
+            .expect("demote admin");
+
+        let ended = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(frame) = body.frame().await {
+                if frame.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            ended.is_ok(),
+            "log stream kept delivering after the administrator was demoted"
+        );
         worker.abort();
     }
 
