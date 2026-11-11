@@ -97,8 +97,10 @@ pub async fn update_appearance(
             .object("appearance", user.id.to_string())
             .success()
             .detail(format!(
-                "theme={} wallpaper={}",
-                updated.theme, updated.wallpaper.kind
+                "theme={} wallpaper={} widgets={}",
+                updated.theme,
+                updated.wallpaper.kind,
+                updated.widgets.len()
             ))
             .ip(ip.as_string()),
     )

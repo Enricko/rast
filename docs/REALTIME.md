@@ -66,7 +66,7 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 
 | Kind | Scope | Data |
 | --- | --- | --- |
-| `monitor` | Broadcast | host/container snapshot (already implemented) |
+| `monitor` | Broadcast | host/container snapshot, redacted per account by the stream (Resource Monitor and the desktop widgets share it) |
 | `job.queued/start/progress/done/failed/cancelled` | UserAndAdmin(owner) | `{id, kind, progress, total, message, userId, result?, error?}` |
 | `file.changed` | `User(owner)` for homes; `Share(shareId)` for shared folders; recycle-bin purges `User(actor)` | `{op, path, paths:[parent dirs to refetch], userId (actor, `null` for external), shareId? , entry? (without the actor's `readable`/`writable`), source:"api"|"external"}` — copy/move/delete jobs publish the source and destination entries that changed, also when the job fails or is cancelled part-way |
 | `file.quota` | owner | `{usedBytes, quotaBytes, trashBytes, userId}` |
@@ -80,7 +80,7 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `settings.changed` | Admin | `{keys:[...]}` |
 | `group.changed` | Admin | `{reason, groupId}` (group list/editor refresh) |
 | `access.changed` | User | `{reason, groupId?, userId, changedBy}` (launcher/File Station/apps reauthorize) |
-| `appearance.changed` | User | `{reason, originSessionId, appearance?}` |
+| `appearance.changed` | User | `{reason, originSessionId, appearance?}` (a change that only moves widgets is applied silently in other tabs) |
 | `session.revoked` | stream-local | `{reason}` (connection closes afterwards) |
 
 Rules:

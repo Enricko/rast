@@ -57,10 +57,26 @@ export interface AppearanceUpload {
   url: string;
 }
 
+/** Desktop widget ids (stable API values). */
+export type WidgetId = "health" | "cpu-memory" | "storage" | "network";
+export const WIDGET_IDS: ReadonlyArray<WidgetId> = ["health", "cpu-memory", "storage", "network"];
+
+/**
+ * An enabled desktop widget. `x`/`y` are fractions (0..1) of the free desktop
+ * area (desktop size minus widget size), so the widget stays fully visible at
+ * any browser size. Array order is stacking order (last on top).
+ */
+export interface DesktopWidget {
+  id: WidgetId;
+  x: number;
+  y: number;
+}
+
 export interface Appearance {
   theme: ThemeSetting;
   accent: AccentId;
   wallpaper: WallpaperSettings;
+  widgets: DesktopWidget[];
   uploads: AppearanceUpload[];
   limits?: { maxBytes: number; maxUploads: number };
 }
@@ -180,6 +196,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
     position: "center",
     overlay: 20,
   },
+  widgets: [],
   uploads: [],
   limits: { maxBytes: 10 * 1024 * 1024, maxUploads: 20 },
 };
@@ -275,6 +292,25 @@ export function clearCachedAppearance(userId?: number | null): void {
   }
 }
 
+function clampFraction(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0;
+  return Math.round(Math.max(0, Math.min(1, number)) * 10_000) / 10_000;
+}
+
+/** Known, unique widgets (at most one of each) with clamped placement. */
+export function normalizeWidgets(input: unknown): DesktopWidget[] {
+  if (!Array.isArray(input)) return [];
+  const out: DesktopWidget[] = [];
+  for (const item of input) {
+    const id = (item as { id?: unknown } | null)?.id;
+    if (typeof id !== "string" || !WIDGET_IDS.includes(id as WidgetId)) continue;
+    if (out.some((widget) => widget.id === id)) continue;
+    out.push({ id: id as WidgetId, x: clampFraction((item as DesktopWidget).x), y: clampFraction((item as DesktopWidget).y) });
+  }
+  return out.slice(0, WIDGET_IDS.length);
+}
+
 /** Fill in missing fields defensively (older cache entries, partial responses). */
 export function normalizeAppearance(input: Partial<Appearance> | null | undefined): Appearance {
   const wallpaper = { ...DEFAULT_APPEARANCE.wallpaper, ...(input?.wallpaper ?? {}) };
@@ -291,6 +327,7 @@ export function normalizeAppearance(input: Partial<Appearance> | null | undefine
       position: (wallpaper.position as WallpaperPosition) ?? "center",
       overlay,
     },
+    widgets: normalizeWidgets(input?.widgets),
     uploads: Array.isArray(input?.uploads) ? input!.uploads! : [],
     limits: input?.limits ?? DEFAULT_APPEARANCE.limits,
   };
@@ -390,10 +427,14 @@ export interface AppearancePatch {
   theme?: ThemeSetting;
   accent?: AccentId;
   wallpaper?: Partial<WallpaperSettings>;
+  /** The complete widget list (replaces the saved one). */
+  widgets?: DesktopWidget[];
 }
 
 /**
- * The fields of `draft` that differ from `baseline`, as an update payload.
+ * The editor settings (theme, accent, wallpaper) of `draft` that differ from
+ * `baseline`, as an update payload. Widgets are arranged on the desktop, not
+ * in the editors, so they are never part of an editor's changes.
  * Saving only what the user changed means a stale baseline (cached copy,
  * another device saved meanwhile) can never overwrite untouched settings.
  */
@@ -415,7 +456,9 @@ export function appearancePatch(baseline: Appearance, draft: Appearance): Appear
 }
 
 function isEmptyPatch(patch: AppearancePatch): boolean {
-  return patch.theme === undefined && patch.accent === undefined && patch.wallpaper === undefined;
+  return (
+    patch.theme === undefined && patch.accent === undefined && patch.wallpaper === undefined && patch.widgets === undefined
+  );
 }
 
 /** True when `draft` changes a saved setting (uploads and limits are not settings). */
@@ -440,6 +483,9 @@ export class AppearanceService {
   private listeners = new Set<(appearance: Appearance) => void>();
   private themeWanted: ThemeSetting | null = null;
   private themeSaving: Promise<boolean> | null = null;
+  private widgetsWanted: DesktopWidget[] | null = null;
+  private widgetsLatest: DesktopWidget[] | null = null;
+  private widgetsSaving: Promise<boolean> | null = null;
 
   constructor(private readonly api: ApiClient) {}
 
@@ -471,6 +517,11 @@ export class AppearanceService {
   /** True while a quick theme save is queued or in flight. */
   get savingTheme(): boolean {
     return this.themeSaving !== null;
+  }
+
+  /** The widget layout being saved (newest wins), or null when idle. */
+  get pendingWidgets(): DesktopWidget[] | null {
+    return this.widgetsSaving ? this.widgetsLatest : null;
   }
 
   subscribe(listener: (appearance: Appearance) => void): () => void {
@@ -513,6 +564,9 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
+    this.widgetsWanted = null;
+    this.widgetsLatest = null;
+    this.widgetsSaving = null;
   }
 
   /**
@@ -578,6 +632,7 @@ export class AppearanceService {
     if (patch.theme !== undefined) payload.theme = patch.theme;
     if (patch.accent !== undefined) payload.accent = patch.accent;
     if (patch.wallpaper && Object.keys(patch.wallpaper).length > 0) payload.wallpaper = { ...patch.wallpaper };
+    if (patch.widgets !== undefined) payload.widgets = normalizeWidgets(patch.widgets);
     const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
     return this.commit(generation, updated, options);
   }
@@ -687,6 +742,49 @@ export class AppearanceService {
     return promise;
   }
 
+  /**
+   * Persist the complete desktop widget list (add, remove, move). Like
+   * {@link saveTheme}: one request at a time, the latest layout wins, and only
+   * the final response is announced. Resolves `false` when it failed.
+   */
+  saveWidgets(widgets: DesktopWidget[]): Promise<boolean> {
+    this.widgetsWanted = normalizeWidgets(widgets);
+    this.widgetsLatest = this.widgetsWanted;
+    if (this.widgetsSaving) return this.widgetsSaving;
+    const generation = this.generation;
+    let saved = false;
+    const run = async (): Promise<boolean> => {
+      await Promise.resolve();
+      try {
+        while (this.widgetsWanted !== null && generation === this.generation) {
+          const next = this.widgetsWanted;
+          this.widgetsWanted = null;
+          if (this.statusValue === "ready" && JSON.stringify(this.current.widgets) === JSON.stringify(next)) continue;
+          await this.save({ widgets: next }, { emit: false });
+          saved = true;
+        }
+        return true;
+      } catch (error) {
+        if (isStaleAppearanceError(error)) return true;
+        if (generation === this.generation) this.widgetsWanted = null;
+        console.warn("could not save desktop widgets", error);
+        return false;
+      } finally {
+        if (this.widgetsSaving === promise) {
+          this.widgetsSaving = null;
+          this.widgetsLatest = null;
+        }
+        if (generation === this.generation) {
+          // Announce the final state; on failure listeners fall back to the saved layout.
+          if (saved || this.statusValue === "ready") this.emit();
+        }
+      }
+    };
+    const promise = run();
+    this.widgetsSaving = promise;
+    return promise;
+  }
+
   /** Forget the signed-in account (sign-out): pending responses are dropped. */
   clear(): void {
     if (this.userId !== null) clearCachedAppearance(this.userId);
@@ -698,6 +796,9 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
+    this.widgetsWanted = null;
+    this.widgetsLatest = null;
+    this.widgetsSaving = null;
   }
 }
 
@@ -812,10 +913,17 @@ export class AppearanceSync {
     }
     if (this.isOwnEcho(event)) return;
     const appearance = normalizeAppearance(event.appearance);
+    const current = normalizeAppearance(this.service.value);
     // The event may echo a save whose response we already applied (different
     // tab of the same session, or a race before the grace window was marked).
     // Identical state needs no adoption and must never look like a conflict.
-    if (JSON.stringify(appearance) === JSON.stringify(normalizeAppearance(this.service.value))) return;
+    if (JSON.stringify(appearance) === JSON.stringify(current)) return;
+    // Only widgets (or the upload list) changed: no editor edits those, so
+    // take the new state without disturbing an open draft.
+    if (!hasAppearanceChanges(current, appearance)) {
+      this.service.adopt(appearance);
+      return;
+    }
     if (this.hasDirtyDraft()) {
       for (const listener of this.conflictListeners) {
         try {
@@ -832,11 +940,12 @@ export class AppearanceSync {
   private async resync(): Promise<void> {
     if (this.disposed || this.service.currentUserId === null) return;
     try {
-      const before = this.service.status === "ready" ? JSON.stringify(normalizeAppearance(this.service.value)) : null;
+      const before = this.service.status === "ready" ? normalizeAppearance(this.service.value) : null;
       const fresh = await this.service.reload();
-      // Every reconnect resyncs: an unchanged snapshot is not news and must
-      // never raise a conflict over an open editor's draft.
-      if (before !== null && JSON.stringify(fresh) === before) return;
+      // Every reconnect resyncs: an unchanged snapshot (or one where only
+      // widgets moved, which reload() already announced) is not news for the
+      // editors and must never raise a conflict over an open draft.
+      if (before !== null && !hasAppearanceChanges(before, fresh)) return;
       if (this.hasDirtyDraft()) {
         for (const listener of this.conflictListeners) {
           try {

@@ -81,6 +81,12 @@ pub const POSITIONS: &[&str] = &[
     "bottom-right",
 ];
 
+/// Desktop widgets (ids are stable API values; content lives in the frontend
+/// and reuses the Resource Monitor data and permissions).
+pub const WIDGET_IDS: &[&str] = &["health", "cpu-memory", "storage", "network"];
+/// At most one of each widget.
+pub const MAX_WIDGETS: usize = 4;
+
 pub const MIME_JPEG: &str = "image/jpeg";
 pub const MIME_PNG: &str = "image/png";
 pub const MIME_WEBP: &str = "image/webp";
@@ -124,12 +130,25 @@ pub struct LimitsDto {
     pub max_uploads: i64,
 }
 
+/// One desktop widget and its preferred placement. `x`/`y` are fractions of
+/// the free desktop area (desktop size minus widget size): 0 = left/top edge,
+/// 1 = right/bottom edge, so the widget stays fully visible at any size.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WidgetDto {
+    pub id: String,
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceDto {
     pub theme: String,
     pub accent: String,
     pub wallpaper: WallpaperSettingsDto,
+    /// Enabled desktop widgets in stacking order (last is on top).
+    pub widgets: Vec<WidgetDto>,
     pub uploads: Vec<AppearanceUploadDto>,
     pub limits: LimitsDto,
 }
@@ -162,6 +181,9 @@ pub struct UpdateAppearanceRequest {
     pub accent: Option<String>,
     #[serde(default)]
     pub wallpaper: Option<WallpaperPatch>,
+    /// The complete widget list (replaces the stored one when present).
+    #[serde(default)]
+    pub widgets: Option<Vec<WidgetDto>>,
 }
 
 impl Default for WallpaperSettingsDto {
@@ -184,6 +206,7 @@ impl Default for AppearanceDto {
             theme: DEFAULT_THEME.to_string(),
             accent: DEFAULT_ACCENT.to_string(),
             wallpaper: WallpaperSettingsDto::default(),
+            widgets: Vec::new(),
             uploads: Vec::new(),
             limits: LimitsDto {
                 max_bytes: MAX_UPLOAD_BYTES,
@@ -321,6 +344,75 @@ fn validate_overlay(value: i64) -> AppResult<i64> {
     } else {
         Err(bad_request("overlay must be between 0 and 60"))
     }
+}
+
+/// Round a placement fraction to 4 decimals (sub-pixel on any screen).
+fn round_fraction(value: f64) -> f64 {
+    (value.clamp(0.0, 1.0) * 10_000.0).round() / 10_000.0
+}
+
+/// Validate a widget list from the client: known ids, no duplicates, at most
+/// [`MAX_WIDGETS`], finite placement fractions within [0, 1] (a hair of float
+/// tolerance is clamped).
+pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
+    if widgets.len() > MAX_WIDGETS {
+        return Err(bad_request(format!(
+            "at most {MAX_WIDGETS} desktop widgets are allowed"
+        )));
+    }
+    let mut seen: Vec<String> = Vec::with_capacity(widgets.len());
+    let mut out = Vec::with_capacity(widgets.len());
+    for widget in widgets {
+        let id = widget.id.trim().to_ascii_lowercase();
+        if !WIDGET_IDS.contains(&id.as_str()) {
+            return Err(bad_request(
+                "unknown widget; expected health, cpu-memory, storage or network",
+            ));
+        }
+        if seen.contains(&id) {
+            return Err(bad_request("each widget can be added once"));
+        }
+        for value in [widget.x, widget.y] {
+            if !value.is_finite() || !(-0.01..=1.01).contains(&value) {
+                return Err(bad_request("widget position must be between 0 and 1"));
+            }
+        }
+        seen.push(id.clone());
+        out.push(WidgetDto {
+            id,
+            x: round_fraction(widget.x),
+            y: round_fraction(widget.y),
+        });
+    }
+    Ok(out)
+}
+
+/// Defensive parse of the stored JSON: drop anything invalid instead of
+/// failing the whole appearance.
+fn parse_stored_widgets(raw: &str) -> Vec<WidgetDto> {
+    let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
+        return Vec::new();
+    };
+    let mut out: Vec<WidgetDto> = Vec::new();
+    for item in items {
+        let Ok(widget) = serde_json::from_value::<WidgetDto>(item) else {
+            continue;
+        };
+        if out.len() >= MAX_WIDGETS
+            || !WIDGET_IDS.contains(&widget.id.as_str())
+            || out.iter().any(|existing| existing.id == widget.id)
+            || !widget.x.is_finite()
+            || !widget.y.is_finite()
+        {
+            continue;
+        }
+        out.push(WidgetDto {
+            x: round_fraction(widget.x),
+            y: round_fraction(widget.y),
+            ..widget
+        });
+    }
+    out
 }
 
 /// File extension used on disk for a supported MIME type.
@@ -708,6 +800,7 @@ struct StoredWallpaper {
     fit: String,
     position: String,
     overlay: i64,
+    widgets: Vec<WidgetDto>,
 }
 
 impl StoredWallpaper {
@@ -722,6 +815,7 @@ impl StoredWallpaper {
             fit: DEFAULT_FIT.to_string(),
             position: DEFAULT_POSITION.to_string(),
             overlay: DEFAULT_OVERLAY,
+            widgets: Vec::new(),
         }
     }
 
@@ -762,7 +856,8 @@ impl StoredWallpaper {
 
 async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpaper> {
     let row = sqlx::query(
-        "SELECT theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay
+        "SELECT theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
+                widgets
          FROM user_appearance WHERE user_id = ?",
     )
     .bind(user_id)
@@ -779,6 +874,7 @@ async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpap
             fit: row.get("fit"),
             position: row.get("position"),
             overlay: row.get("overlay"),
+            widgets: parse_stored_widgets(row.get::<String, _>("widgets").as_str()),
         }
         .sanitized(),
         None => StoredWallpaper::defaults(),
@@ -834,6 +930,7 @@ fn build_appearance(stored: StoredWallpaper, uploads: Vec<AppearanceUploadDto>) 
             position: stored.position,
             overlay: stored.overlay,
         },
+        widgets: stored.widgets,
         uploads,
         limits: LimitsDto {
             max_bytes: MAX_UPLOAD_BYTES,
@@ -866,8 +963,9 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     let now = db::now_ms();
     sqlx::query(
         "INSERT INTO user_appearance
-            (user_id, theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (user_id, theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
+             widgets, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id) DO UPDATE SET
             theme = excluded.theme,
             accent = excluded.accent,
@@ -878,6 +976,7 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
             fit = excluded.fit,
             position = excluded.position,
             overlay = excluded.overlay,
+            widgets = excluded.widgets,
             updated_at = excluded.updated_at",
     )
     .bind(user_id)
@@ -890,6 +989,7 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     .bind(&stored.fit)
     .bind(&stored.position)
     .bind(stored.overlay)
+    .bind(serde_json::to_string(&stored.widgets).unwrap_or_else(|_| "[]".to_string()))
     .bind(now)
     .execute(pool)
     .await?;
@@ -940,6 +1040,9 @@ pub async fn update(
             stored.overlay = validate_overlay(overlay)?;
         }
     }
+    if let Some(widgets) = patch.widgets {
+        stored.widgets = validate_widgets(widgets)?;
+    }
     match stored.kind.as_str() {
         "upload" => {
             let upload_id = stored
@@ -963,7 +1066,8 @@ pub async fn update(
     get(pool, user.id).await
 }
 
-/// Reset the wallpaper to defaults while keeping the chosen theme.
+/// Reset the wallpaper to defaults while keeping the chosen theme, accent and
+/// desktop widgets.
 pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDto> {
     let _write = WRITE_LOCK.lock().await;
     let mut stored = load_stored(pool, user.id).await?;
@@ -971,6 +1075,7 @@ pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDt
     stored = StoredWallpaper {
         theme: stored.theme,
         accent: stored.accent,
+        widgets: stored.widgets,
         ..defaults
     };
     store(pool, user.id, &stored).await?;
@@ -1445,6 +1550,58 @@ pub(crate) mod tests {
         }
     }
 
+    // ----------------------------------------------------------------- widgets
+
+    fn widget(id: &str, x: f64, y: f64) -> WidgetDto {
+        WidgetDto {
+            id: id.to_string(),
+            x,
+            y,
+        }
+    }
+
+    #[test]
+    fn widget_lists_are_validated() {
+        let valid = validate_widgets(vec![
+            widget("health", 1.0, 0.0),
+            widget("CPU-Memory", 0.123456, 1.004),
+        ])
+        .unwrap();
+        assert_eq!(valid[1].id, "cpu-memory");
+        assert_eq!(valid[1].x, 0.1235);
+        assert_eq!(valid[1].y, 1.0, "float noise above 1 is clamped");
+        assert!(validate_widgets(vec![]).unwrap().is_empty());
+
+        // Unknown ids, duplicates, too many, out-of-range or non-finite positions.
+        assert!(validate_widgets(vec![widget("weather", 0.0, 0.0)]).is_err());
+        assert!(validate_widgets(vec![
+            widget("storage", 0.0, 0.0),
+            widget("storage", 1.0, 1.0)
+        ])
+        .is_err());
+        let five: Vec<WidgetDto> = ["health", "cpu-memory", "storage", "network", "health"]
+            .iter()
+            .map(|id| widget(id, 0.5, 0.5))
+            .collect();
+        assert!(validate_widgets(five).is_err());
+        assert!(validate_widgets(vec![widget("network", 1.5, 0.0)]).is_err());
+        assert!(validate_widgets(vec![widget("network", 0.0, -0.2)]).is_err());
+        assert!(validate_widgets(vec![widget("network", f64::NAN, 0.0)]).is_err());
+    }
+
+    #[test]
+    fn stored_widget_json_is_sanitised() {
+        assert!(parse_stored_widgets("not json").is_empty());
+        assert!(parse_stored_widgets("{}").is_empty());
+        let parsed = parse_stored_widgets(
+            r#"[{"id":"storage","x":2,"y":0.5},{"id":"storage","x":0,"y":0},{"id":"weather","x":0,"y":0},{"id":"network"},{"id":"health","x":0.25,"y":0.75}]"#,
+        );
+        assert_eq!(
+            parsed,
+            vec![widget("storage", 1.0, 0.5), widget("health", 0.25, 0.75)]
+        );
+    }
+
     // --------------------------------------------------------------- db tests
 
     async fn pool_with_users(dir: &std::path::Path) -> SqlitePool {
@@ -1461,6 +1618,60 @@ pub(crate) mod tests {
             .unwrap();
         }
         pool
+    }
+
+    #[tokio::test]
+    async fn widgets_persist_per_account_and_survive_other_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool_with_users(dir.path()).await;
+        let alice = auth_user(1, "alice");
+        assert!(get(&pool, 1).await.unwrap().widgets.is_empty());
+
+        let saved = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                widgets: Some(vec![
+                    widget("cpu-memory", 1.0, 0.0),
+                    widget("network", 0.5, 1.0),
+                ]),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.widgets.len(), 2);
+
+        // Theme-only and wallpaper-only updates and a wallpaper reset keep them.
+        update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                theme: Some("dark".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let after_reset = reset(&pool, &alice).await.unwrap();
+        assert_eq!(after_reset.widgets, saved.widgets);
+        assert_eq!(after_reset.theme, "dark");
+
+        // Another account is unaffected.
+        assert!(get(&pool, 2).await.unwrap().widgets.is_empty());
+
+        // An empty list removes every widget.
+        let cleared = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                widgets: Some(Vec::new()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cleared.widgets.is_empty());
     }
 
     #[tokio::test]
@@ -1482,6 +1693,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                widgets: None,
                 accent: None,
                 theme: Some("dark".into()),
                 wallpaper: Some(WallpaperPatch {
@@ -1545,6 +1757,7 @@ pub(crate) mod tests {
                 &pool,
                 &alice,
                 UpdateAppearanceRequest {
+                    widgets: None,
                     accent: None,
                     theme: None,
                     wallpaper: Some(patch)
@@ -1557,6 +1770,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                widgets: None,
                 accent: None,
                 theme: Some("sepia".into()),
                 wallpaper: None
@@ -1635,6 +1849,7 @@ pub(crate) mod tests {
             &pool,
             &alice,
             UpdateAppearanceRequest {
+                widgets: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {
@@ -1753,6 +1968,7 @@ pub(crate) mod tests {
             &pool,
             &bob,
             UpdateAppearanceRequest {
+                widgets: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {

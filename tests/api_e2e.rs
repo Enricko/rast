@@ -1644,8 +1644,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5],
-        "0004 and 0005 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6],
+        "0004, 0005 and 0006 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -1660,13 +1660,16 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
         assert_eq!(value, expected, "{key}");
     }
 
-    // Existing rows are intact; the new policy is empty.
-    let theme: String = sqlx::query_scalar("SELECT theme FROM user_appearance WHERE user_id = ?")
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await
-        .expect("appearance row");
+    // Existing rows are intact; the new policy is empty and 0006 gives the
+    // saved appearance an empty widget list.
+    let (theme, widgets): (String, String) =
+        sqlx::query_as("SELECT theme, widgets FROM user_appearance WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .expect("appearance row");
     assert_eq!(theme, "dark");
+    assert_eq!(widgets, "[]");
     let perms: String = sqlx::query_scalar("SELECT perms FROM share_members WHERE user_id = ?")
         .bind(user_id)
         .fetch_one(&pool)

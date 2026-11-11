@@ -718,101 +718,7 @@ body.app-ready #boot-splash {
   transform: scale(0.95);
 }
 
-/* ------------------------------------------------------------ empty desktop */
-
-.desktop-hint-layer {
-  position: absolute;
-  inset: 0 0 var(--taskbar-total) 0;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  z-index: 1;
-  padding: 20px;
-}
-
-.desktop-hint-layer[hidden] {
-  display: none;
-}
-
-.desktop-hint {
-  pointer-events: auto;
-  width: min(440px, 100%);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 8px;
-  padding: 28px 26px 22px;
-  border-radius: var(--radius-xl);
-  border: 1px solid var(--border);
-  background: var(--surface);
-  backdrop-filter: blur(24px) saturate(1.15);
-  box-shadow: var(--shadow);
-  animation: hint-in 0.4s cubic-bezier(0.22, 0.8, 0.3, 1);
-}
-
-@keyframes hint-in {
-  from {
-    opacity: 0;
-    transform: translateY(10px) scale(0.99);
-  }
-}
-
-.desktop-hint-mark {
-  width: 56px;
-  height: 56px;
-  border-radius: 17px;
-  display: grid;
-  place-items: center;
-  color: var(--accent);
-  background: var(--accent-soft);
-  border: 1px solid var(--border);
-  margin-bottom: 6px;
-}
-
-.desktop-hint-title {
-  font-size: 16px;
-  font-weight: 680;
-  letter-spacing: -0.01em;
-}
-
-.desktop-hint-detail {
-  font-size: 12.5px;
-  line-height: 1.5;
-  max-width: 360px;
-}
-
-.desktop-hint-quick {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: center;
-  margin-top: 10px;
-}
-
-.quick-launch {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 560;
-  cursor: pointer;
-}
-
-.quick-launch:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-3);
-}
-
-.desktop-hint-tip {
-  margin-top: 6px;
-}
+/* The empty desktop shows only wallpaper, icons, taskbar and widgets.css. */
 
 /* ==========================================================================
    Windows
@@ -834,7 +740,6 @@ body.app-ready #boot-splash {
 .win-titlebar,
 .taskbar,
 .desktop-icons,
-.desktop-hint,
 .menu-panel {
   user-select: none;
 }
@@ -1831,10 +1736,6 @@ body.app-ready #boot-splash {
     -webkit-line-clamp: 2;
   }
 
-  .desktop-hint {
-    display: none;
-  }
-
   .window.is-mobile + .window.is-mobile {
     display: none;
   }
@@ -1873,9 +1774,6 @@ body.app-ready #boot-splash {
     font-size: 13.5px;
   }
 
-  .quick-launch {
-    height: 40px;
-  }
 }
 
 @media (max-width: 480px) {
@@ -1911,7 +1809,6 @@ body.app-ready #boot-splash {
   .window,
   .menu-panel,
   .auth-card,
-  .desktop-hint,
   .context-menu,
   .toast,
   #boot-splash {

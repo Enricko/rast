@@ -209,8 +209,10 @@ unsaved forms.
 ## Appearance storage
 
 Per user in SQLite (`user_appearance` + `appearance_uploads`, migration 0003
-adds `accent`): mode, accent id, wallpaper source (bundled scene, private upload
-or solid colour), fit, position and overlay. Wallpapers are validated by content
+adds `accent`, migration 0006 adds `widgets`): mode, accent id, wallpaper source
+(bundled scene, private upload or solid colour), fit, position, overlay and the
+enabled desktop widgets with their preferred position (a JSON array checked by
+SQLite, re-validated and sanitised on read). Wallpapers are validated by content
 and stored under `<data_dir>/wallpapers/<user-id>/<uuid>.<ext>`; the owner-only
 API serves them with immutable private caching. The client keeps only a small
 per-user paint cache.
@@ -225,6 +227,23 @@ tracks whether its value is server-confirmed (`ready`), the account's own paint
 cache (`cached`) or unknown (`error`, defaults for painting only), drops any
 response that arrives after sign-out or an account switch, and the editors
 refuse to open on an unknown state (Control Panel shows Retry instead).
+
+## Desktop widgets
+
+`frontend/src/shell/widgets.ts` renders System Health, CPU & Memory, Storage
+and Network cards on the desktop (desktop menu → **Widgets…**). They read the
+same data as Resource Monitor: one shared `MonitorFeed` loads
+`/api/monitor/snapshot` and `/api/monitor/history`, then follows the existing
+`monitor` SSE broadcast, so widgets add no polling and no new endpoint and get
+the same per-account access check and container redaction. Feed states come
+from the data itself: `loading`, `live`, `stale` (no sample for
+`max(15 s, 3 × interval)`; the card dims and shows the age), `unavailable` (the
+monitor reports it cannot sample, with its reason), `denied` (no Resource
+Monitor access or a `403`; no data is requested) and `error` (retryable).
+Positions are stored as fractions of the free desktop area and clamped on every
+resize, so cards stay inside the usable area above the taskbar. Layout changes
+are saved through the coalesced `saveWidgets` path, which sends only
+`{widgets}`.
 
 ## Storage layout
 

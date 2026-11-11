@@ -33,6 +33,7 @@ import {
 } from "./panels";
 import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } from "./shared";
 import { openPersonalizeDialog } from "./personalize";
+import { createWidgetLayer } from "./widgets";
 
 const PINNED_KEY = "rast.pinnedApps";
 const DEFAULT_PINNED = ["files", "monitor", "controlpanel"];
@@ -89,18 +90,19 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     h("div", { class: "wallpaper-overlay" }),
   );
   const iconLayer = h("div", { class: "desktop-icons", role: "listbox", ariaLabel: "Desktop applications" });
-  const hintLayer = h("div", { class: "desktop-hint-layer" });
+  // Resource widgets sit above the icons and below windows; nothing else is
+  // shown on an empty desktop (wallpaper, icons, taskbar and widgets only).
+  const widgetLayer = h("div", { class: "widget-layer", role: "region", ariaLabel: "Desktop widgets" });
   const windowsLayer = h("div", { class: "windows-layer" });
   const taskbar = h("div", { class: "taskbar", role: "toolbar", ariaLabel: "Taskbar" });
   const toast = new ToastCenter(desktop);
-  desktop.append(wallpaperLayer, iconLayer, hintLayer, windowsLayer, taskbar);
+  desktop.append(wallpaperLayer, iconLayer, widgetLayer, windowsLayer, taskbar);
   deps.root.appendChild(desktop);
 
   let pinned = readPinnedApps(me.permissions ?? null, isAdmin);
   let panel: HTMLElement | null = null;
   let panelKind: string | null = null;
   let disposed = false;
-  let lastWindowCount = -1;
   const windowParams = new Map<string, unknown>();
   const disposers: Array<() => void> = [];
 
@@ -113,6 +115,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
   const appearanceSync = getAppearanceSync(deps.api, deps.events);
+  const widgets = createWidgetLayer({
+    layer: widgetLayer,
+    api: deps.api,
+    realtime: getRealtime(deps.events),
+    appearance,
+    toast,
+    isMonitorAllowed: () => isAppAllowed("monitor", store.get().permissions, store.isAdmin()),
+    openMonitor: () => openApp("monitor"),
+  });
+  disposers.push(() => widgets.dispose());
   let appliedSignature = JSON.stringify(appearance.value);
   applyAppearance(appearance.value);
   /** Show the account's saved theme (never while the user's own choice is still being saved). */
@@ -122,6 +134,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
   disposers.push(
     appearance.subscribe((state) => {
+      // Widgets are not part of any editor preview: always show the layout
+      // being saved (newest first) or the saved one.
+      if (appearance.isKnown) widgets.sync(appearance.pendingWidgets ?? state.widgets);
       // An open editor owns the document while it previews a draft.
       if (isAppearancePreviewActive()) return;
       appliedSignature = JSON.stringify(state);
@@ -476,6 +491,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     event.preventDefault();
     const items: ContextMenuEntry[] = [
       { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
+      { label: "Widgets…", icon: "activity", onClick: () => widgets.openCatalog() },
       { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
       "separator",
       { label: "Open Control Panel", icon: "control", onClick: () => openAccount("profile"), disabled: !isAdmin },
@@ -796,7 +812,6 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     // The anchor of an open tooltip may have been replaced by this render.
     if (tooltipAnchor && !tooltipAnchor.isConnected) hideTaskbarTooltip();
     updateTaskbarDensity();
-    renderDesktopHint();
   }
 
   function updateConnectionButton(): void {
@@ -826,54 +841,6 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     updateConnectionButton();
     setFavicon(theme);
     renderTaskbar();
-  }
-
-  // ----------------------------------------------------------- empty hint
-  function renderDesktopHint(): void {
-    if (disposed) return;
-    const count = wm.list().length;
-    if (count > 0) {
-      if (lastWindowCount !== count) {
-        hintLayer.replaceChildren();
-        hintLayer.hidden = true;
-        lastWindowCount = count;
-      }
-      return;
-    }
-    if (lastWindowCount === 0) return;
-    lastWindowCount = 0;
-    hintLayer.hidden = false;
-    const quick = pinned
-      .filter((id) => isAppAllowed(id, store.get().permissions, store.isAdmin()))
-      .map((id) => findApp(id))
-      .filter((app): app is AppDefinition => Boolean(app))
-      .slice(0, 3);
-    const quickRow = h("div", { class: "desktop-hint-quick" });
-    for (const app of quick) {
-      quickRow.appendChild(
-        h(
-          "button",
-          { class: "quick-launch", type: "button", onClick: () => openApp(app.id), title: app.description },
-          appIconSvg(app.id, app.icon, 16),
-          h("span", {}, app.name),
-        ),
-      );
-    }
-    hintLayer.replaceChildren(
-      h(
-        "div",
-        { class: "desktop-hint" },
-        h("div", { class: "desktop-hint-mark" }, iconSvg("logo", 20)),
-        h("div", { class: "desktop-hint-title" }, "No applications open"),
-        h(
-          "div",
-          { class: "desktop-hint-detail muted" },
-          "Open an application from the desktop, or press Ctrl+Space to search. Right-click the desktop to personalize the wallpaper and theme.",
-        ),
-        quickRow,
-        h("div", { class: "desktop-hint-tip small faint" }, "Tip: double-click a desktop icon to open it."),
-      ),
-    );
   }
 
   // ------------------------------------------------------- clock & timers
@@ -1120,7 +1087,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);
     }
     renderTaskbar();
-    renderDesktopHint();
+    widgets.permissionsChanged();
   }
 
   disposers.push(
@@ -1171,7 +1138,6 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   renderTaskbar();
-  renderDesktopHint();
   updateTray();
 
   // Tiny debug handle used by integration checks and troubleshooting.

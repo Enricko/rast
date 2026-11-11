@@ -1288,12 +1288,17 @@ mod tests {
 
         // Reopening runs the embedded migrator, which applies 0005.
         let pool = db::connect(&path, 4).await.unwrap();
-        let version: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(version, 5);
+        let applied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 5 AND success = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(applied, 1);
+        assert_eq!(
+            db::schema_version(&pool).await,
+            db::embedded_schema_version()
+        );
         let columns: Vec<String> =
             sqlx::query_scalar("SELECT name FROM pragma_table_info('group_folder_rules')")
                 .fetch_all(&pool)
