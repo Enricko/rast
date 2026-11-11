@@ -22,6 +22,50 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.2.0] - 2026-11-11
+
+NAS-style **Users & Groups** with an enforced access policy.
+
+### Added
+
+- Control Panel → **Users & Groups**: Users tab (search, group membership chips,
+  direct overrides, Effective Access explanation) and Groups tab (create,
+  search, edit, delete groups with General / Members / Shared Folders /
+  Applications sections and a single save action). Deleting a group reports how
+  many users and rules it affects and keeps users, shared folders and files.
+- Group policy for shared folders (`Inherit`, `No Access`, `Read Only`,
+  `Read & Write`) and applications (`Inherit`, `No Access`, `Allow`) for File
+  Station, Applications, Resource Monitor, Backup Center, Activity Logs and
+  Control Panel. Ten catalogued app ids; group grants for Applications/Backup are
+  read-only, and management/deployment actions stay administrator-only.
+- One permission evaluator used by API enforcement, storage, SSE filtering, the
+  launcher permissions in `/api/auth/me` and the Effective Access view:
+  explicit No Access wins, otherwise strongest grant, otherwise the legacy
+  `share_members` ACL/owner fallback (so upgrades preserve effective access).
+  Personal homes keep ownership rules; admins bypass folder policy.
+- Per-user direct rules (explicit grant/deny) for conflict handling, provenance
+  in Effective Access ("read through Project Viewers, write through Project
+  Editors"), and live `group.changed`/`access.changed` events (open windows,
+  launcher and sessions reauthorize without a refresh).
+- Audit events for group/membership/rule changes and the last-active-admin
+  safeguard now runs inside the same SQLite transaction as account/role
+  changes.
+
+### Changed
+
+- File Station, search, previews, downloads and mutations now resolve shared
+  folders through the evaluator; background copy/move/delete jobs re-check
+  permissions when they start.
+- Applications/Backup read endpoints accept administrators or read-only group
+  grants; mutations remain admin-only.
+- SSE subscriptions are filtered by the current application policy.
+
+### Database
+
+- Additive migration `0004_groups.sql` (new tables/indexes only); legacy ACL
+  rows and appearance data are preserved. Production upgrades take a database
+  backup before applying the migration.
+
 ## [0.1.8] - 2026-11-11
 
 Follow-up layout polish from screenshot review.
