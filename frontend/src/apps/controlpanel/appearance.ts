@@ -11,6 +11,7 @@ import {
   endAppearancePreview,
   getAppearanceService,
   getAppearanceSync,
+  isStaleAppearanceError,
   normalizeAppearance,
   resolveTheme,
   type Appearance,
@@ -32,7 +33,62 @@ function setRootTheme(theme: ThemeSetting): void {
   document.documentElement.style.colorScheme = resolved;
 }
 
+const INTRO_TEXT =
+  "Choose how your desktop looks. Theme, accent and wallpaper are stored with your account, so they follow you to any browser. Changes preview instantly; Save applies them.";
+
 export async function renderAppearanceTab(tab: TabRenderContext): Promise<() => void> {
+  let cleanup: () => void = () => {};
+  let disposed = false;
+  const mount = async (): Promise<void> => {
+    cleanup();
+    cleanup = () => {};
+    const next = await mountAppearance(tab, () => {
+      if (!disposed) void mount();
+    });
+    if (disposed) next();
+    else cleanup = next;
+  };
+  await mount();
+  return () => {
+    disposed = true;
+    cleanup();
+  };
+}
+
+/** Shown instead of the editor while the account's appearance is unknown. */
+function renderLoadError(tab: TabRenderContext, error: unknown, retry: () => void): () => void {
+  const retryButton = h(
+    "button",
+    { class: "btn btn-primary", type: "button", onClick: () => {
+      retryButton.disabled = true;
+      retry();
+    } },
+    iconSvg("refresh", 15),
+    "Retry",
+  );
+  tab.host.replaceChildren(
+    pageIntro("Appearance", INTRO_TEXT),
+    h(
+      "div",
+      { class: "banner banner-error", role: "alert" },
+      h("span", { class: "banner-icon" }, iconSvg("warning", 16)),
+      h(
+        "div",
+        { class: "banner-body" },
+        h("div", { class: "banner-title" }, "Your saved appearance could not be loaded"),
+        h(
+          "div",
+          { class: "banner-message" },
+          `${errorMessage(error)}. Nothing was changed: your theme, accent and wallpaper are still saved with your account.`,
+        ),
+        h("div", { class: "row wrap" }, retryButton),
+      ),
+    ),
+  );
+  return () => {};
+}
+
+async function mountAppearance(tab: TabRenderContext, retry: () => void): Promise<() => void> {
   const { ctx, host, actions } = tab;
   host.replaceChildren();
   actions.replaceChildren();
@@ -45,7 +101,13 @@ export async function renderAppearanceTab(tab: TabRenderContext): Promise<() => 
   try {
     await service.load(userId);
   } catch (error) {
-    ctx.toast.warning(`Showing cached appearance: ${errorMessage(error)}`);
+    if (isStaleAppearanceError(error)) return () => {};
+  }
+  // Never seed the editor with defaults: saving them would replace the
+  // account's real settings.
+  if (!service.isKnown) return renderLoadError(tab, service.lastError, retry);
+  if (service.status === "cached") {
+    ctx.toast.warning(`Showing the copy saved in this browser: ${errorMessage(service.lastError)}`);
   }
 
   let previewing = false;
@@ -63,7 +125,7 @@ export async function renderAppearanceTab(tab: TabRenderContext): Promise<() => 
     exitPreview();
     const saved = normalizeAppearance(service.value);
     applyAppearance(saved);
-    ctx.store.setThemePreference(saved.theme);
+    if (service.isKnown) ctx.store.setThemePreference(saved.theme);
     return saved;
   };
 
@@ -96,7 +158,7 @@ export async function renderAppearanceTab(tab: TabRenderContext): Promise<() => 
       setRootTheme(draft.theme);
       const invalid = validateAppearanceDraft(draft);
       if (invalid) workflow?.setValidationError(invalid);
-      else workflow?.setDirty(true);
+      else workflow?.setDirty(editor?.isDirty() ?? true);
     },
   });
 
@@ -227,10 +289,7 @@ export async function renderAppearanceTab(tab: TabRenderContext): Promise<() => 
   const unsubscribeDirty = sync.registerDirtySource(() => workflow?.isDirty() ?? false);
 
   // ------------------------------------------------------------------- layout
-  const intro = pageIntro(
-    "Appearance",
-    "Choose how your desktop looks. Theme, accent and wallpaper are stored with your account, so they follow you to any browser. Changes preview instantly; Save applies them.",
-  );
+  const intro = pageIntro("Appearance", INTRO_TEXT);
 
   const saveHost = workflow.el;
   saveHost.classList.add("appearance-save-bar");

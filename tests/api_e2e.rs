@@ -870,6 +870,71 @@ async fn appearance_theme_accent_and_wallpaper_are_independent() {
 }
 
 #[tokio::test]
+async fn concurrent_partial_appearance_updates_keep_every_field() {
+    // The tray theme toggle saves only `theme` while an editor in another tab
+    // saves only the fields it changed: neither may undo the other's change.
+    let server = TestServer::start().await;
+    server.create_user("ada", USER_PASSWORD, Role::User).await;
+    server.create_user("ben", USER_PASSWORD, Role::User).await;
+    let ada = server.login("ada", USER_PASSWORD).await;
+    let ben = server.login("ben", USER_PASSWORD).await;
+
+    let rounds = [
+        ("dark", "plum", 35),
+        ("light", "teal", 10),
+        ("system", "amber", 55),
+        ("dark", "rose", 0),
+    ];
+    for (theme, accent, overlay) in rounds {
+        let theme_put = server.request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"theme": theme})),
+            ada.headers_with_csrf(),
+        );
+        let editor_put = server.request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"accent": accent, "wallpaper": {"builtinId": "desert-dusk", "overlay": overlay}})),
+            ada.headers_with_csrf(),
+        );
+        let ((theme_status, _, _), (editor_status, _, _)) = tokio::join!(theme_put, editor_put);
+        assert_eq!(theme_status, StatusCode::OK);
+        assert_eq!(editor_status, StatusCode::OK);
+        let (_, _, body) = server
+            .request("GET", "/api/appearance", None, ada.headers())
+            .await;
+        assert_eq!(body["theme"], theme, "{body}");
+        assert_eq!(body["accent"], accent, "{body}");
+        assert_eq!(body["wallpaper"]["builtinId"], "desert-dusk", "{body}");
+        assert_eq!(body["wallpaper"]["overlay"], overlay, "{body}");
+    }
+
+    // A theme-only save never resets the rest of the account's settings.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/appearance",
+            Some(json!({"theme": "light"})),
+            ada.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accent"], "rose");
+    assert_eq!(body["wallpaper"]["builtinId"], "desert-dusk");
+    assert_eq!(body["wallpaper"]["overlay"], 0);
+
+    // Another account is untouched by all of the above.
+    let (_, _, other) = server
+        .request("GET", "/api/appearance", None, ben.headers())
+        .await;
+    assert_eq!(other["theme"], "light");
+    assert_eq!(other["accent"], "ocean");
+    assert_eq!(other["wallpaper"]["builtinId"], "alpine-dawn");
+    assert_eq!(other["wallpaper"]["overlay"], 20);
+}
+
+#[tokio::test]
 async fn realtime_events_are_authorized_and_ordered() {
     use std::time::Duration;
 

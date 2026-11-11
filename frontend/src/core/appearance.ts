@@ -357,11 +357,89 @@ export function restoreWallpaper(snapshot: Partial<CSSStyleDeclaration> | null):
   }
 }
 
-/** API client for /api/appearance. */
+/**
+ * Thrown when an appearance request finishes after the signed-in account
+ * changed (sign-out, account switch). Callers ignore it: the response belongs
+ * to the previous account and must never reach the new one.
+ */
+export class StaleAppearanceError extends Error {
+  constructor() {
+    super("appearance request belongs to a previous account");
+    this.name = "StaleAppearanceError";
+  }
+}
+
+export function isStaleAppearanceError(error: unknown): boolean {
+  return error instanceof StaleAppearanceError;
+}
+
+/**
+ * Where `AppearanceService.value` came from:
+ *   idle    -> no account loaded yet (defaults, paint only)
+ *   loading -> first fetch for this account in progress, nothing cached
+ *   cached  -> this account's paint cache, server not confirmed yet
+ *   ready   -> confirmed by the server
+ *   error   -> the server could not be reached and nothing is cached:
+ *              the value is the default look and must never seed an editor
+ *              or a save.
+ */
+export type AppearanceStatus = "idle" | "loading" | "cached" | "ready" | "error";
+
+/** Fields of an appearance update; omitted fields keep their saved value. */
+export interface AppearancePatch {
+  theme?: ThemeSetting;
+  accent?: AccentId;
+  wallpaper?: Partial<WallpaperSettings>;
+}
+
+/**
+ * The fields of `draft` that differ from `baseline`, as an update payload.
+ * Saving only what the user changed means a stale baseline (cached copy,
+ * another device saved meanwhile) can never overwrite untouched settings.
+ */
+export function appearancePatch(baseline: Appearance, draft: Appearance): AppearancePatch {
+  const patch: AppearancePatch = {};
+  if (draft.theme !== baseline.theme) patch.theme = draft.theme;
+  if (draft.accent !== baseline.accent) patch.accent = draft.accent;
+  const wallpaper: Partial<WallpaperSettings> = {};
+  const keys: Array<keyof WallpaperSettings> = ["kind", "builtinId", "uploadId", "color", "fit", "position", "overlay"];
+  for (const key of keys) {
+    if (draft.wallpaper[key] !== baseline.wallpaper[key]) {
+      (wallpaper as Record<string, unknown>)[key] = draft.wallpaper[key];
+    }
+  }
+  // An uploaded wallpaper is only valid together with its id.
+  if (wallpaper.kind === "upload" && wallpaper.uploadId === undefined) wallpaper.uploadId = draft.wallpaper.uploadId;
+  if (Object.keys(wallpaper).length > 0) patch.wallpaper = wallpaper;
+  return patch;
+}
+
+function isEmptyPatch(patch: AppearancePatch): boolean {
+  return patch.theme === undefined && patch.accent === undefined && patch.wallpaper === undefined;
+}
+
+/** True when `draft` changes a saved setting (uploads and limits are not settings). */
+export function hasAppearanceChanges(baseline: Appearance, draft: Appearance): boolean {
+  return !isEmptyPatch(appearancePatch(normalizeAppearance(baseline), normalizeAppearance(draft)));
+}
+
+/**
+ * API client for /api/appearance, scoped to the signed-in account.
+ *
+ * Every asynchronous operation remembers the account generation it started
+ * in; a response that arrives after sign-out or an account switch is dropped
+ * (never cached, never emitted) and the call rejects with
+ * {@link StaleAppearanceError}.
+ */
 export class AppearanceService {
-  private current: Appearance = { ...DEFAULT_APPEARANCE };
+  private current: Appearance = normalizeAppearance(DEFAULT_APPEARANCE);
   private userId: number | null = null;
+  private generation = 0;
+  private statusValue: AppearanceStatus = "idle";
+  private lastErrorValue: unknown = null;
   private listeners = new Set<(appearance: Appearance) => void>();
+  private themeWanted: ThemeSetting | null = null;
+  private themeSaving: Promise<boolean> | null = null;
 
   constructor(private readonly api: ApiClient) {}
 
@@ -371,6 +449,28 @@ export class AppearanceService {
 
   get currentUserId(): number | null {
     return this.userId;
+  }
+
+  get status(): AppearanceStatus {
+    return this.statusValue;
+  }
+
+  /** The last load error while the status is `error` or `cached`. */
+  get lastError(): unknown {
+    return this.lastErrorValue;
+  }
+
+  /**
+   * True when `value` is this account's saved appearance (server-confirmed
+   * or its own paint cache): only then may it seed an editor or the theme.
+   */
+  get isKnown(): boolean {
+    return this.statusValue === "ready" || this.statusValue === "cached";
+  }
+
+  /** True while a quick theme save is queued or in flight. */
+  get savingTheme(): boolean {
+    return this.themeSaving !== null;
   }
 
   subscribe(listener: (appearance: Appearance) => void): () => void {
@@ -388,22 +488,61 @@ export class AppearanceService {
     }
   }
 
-  /** Load the signed-in user's appearance (cache-first, then server). */
-  async load(userId: number): Promise<Appearance> {
+  private assertCurrent(generation: number): void {
+    if (generation !== this.generation) throw new StaleAppearanceError();
+  }
+
+  /** Adopt a server snapshot for the account of `generation`. */
+  private commit(generation: number, next: Appearance, options: { emit?: boolean } = {}): Appearance {
+    this.assertCurrent(generation);
+    this.current = next;
+    this.statusValue = "ready";
+    this.lastErrorValue = null;
+    if (this.userId !== null) writeCachedAppearance(this.userId, next);
+    if (options.emit !== false) this.emit();
+    return next;
+  }
+
+  /** Switch to `userId` (dropping everything that belonged to another account). */
+  private bind(userId: number): void {
+    if (this.userId === userId) return;
+    this.generation += 1;
     this.userId = userId;
-    const cached = readCachedAppearance(userId);
-    if (cached) {
-      this.current = cached;
-      this.emit();
+    this.current = normalizeAppearance(DEFAULT_APPEARANCE);
+    this.statusValue = "idle";
+    this.lastErrorValue = null;
+    this.themeWanted = null;
+    this.themeSaving = null;
+  }
+
+  /**
+   * Load the signed-in account's appearance: its paint cache first (if not
+   * yet confirmed), then the server. Resolves with the best known value; a
+   * failure only rejects when nothing is known for this account (`error`).
+   */
+  async load(userId: number): Promise<Appearance> {
+    this.bind(userId);
+    const generation = this.generation;
+    if (this.statusValue !== "ready") {
+      const cached = readCachedAppearance(userId);
+      if (cached) {
+        this.current = cached;
+        this.statusValue = "cached";
+        this.emit();
+      } else if (this.statusValue !== "cached") {
+        this.statusValue = "loading";
+      }
     }
     try {
       const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
-      this.current = fresh;
-      writeCachedAppearance(userId, fresh);
-      this.emit();
-      return fresh;
+      return this.commit(generation, fresh);
     } catch (error) {
-      if (cached) return cached;
+      this.assertCurrent(generation);
+      if (isStaleAppearanceError(error)) throw error;
+      this.lastErrorValue = error;
+      if (this.isKnown) return this.current;
+      this.statusValue = "error";
+      this.emit();
       throw error;
     }
   }
@@ -413,51 +552,40 @@ export class AppearanceService {
    * refreshed snapshot) without making a network request.
    */
   adopt(input: Appearance): Appearance {
-    const next = normalizeAppearance(input);
-    this.current = next;
-    if (this.userId !== null) writeCachedAppearance(this.userId, next);
-    this.emit();
-    return next;
+    return this.commit(this.generation, normalizeAppearance(input));
   }
 
-  /** Re-read the signed-in user's appearance from the server. */
+  /** Re-read the signed-in account's appearance from the server. */
   async reload(): Promise<Appearance> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
     const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
-    this.current = fresh;
-    if (this.userId !== null) writeCachedAppearance(this.userId, fresh);
-    this.emit();
-    return fresh;
+    return this.commit(generation, fresh);
   }
 
-  /** Save wallpaper/theme changes to the server. */
-  async save(patch: {
-    theme?: ThemeSetting;
-    accent?: AccentId;
-    wallpaper?: Partial<WallpaperSettings>;
-  }): Promise<Appearance> {
-    const wallpaper = { ...this.current.wallpaper, ...(patch.wallpaper ?? {}) };
-    const payload = {
-      theme: patch.theme ?? this.current.theme,
-      accent: patch.accent ?? this.current.accent,
-      wallpaper: {
-        kind: wallpaper.kind,
-        builtinId: wallpaper.builtinId,
-        uploadId: wallpaper.uploadId,
-        color: wallpaper.color,
-        fit: wallpaper.fit,
-        position: wallpaper.position,
-        overlay: wallpaper.overlay,
-      },
-    };
+  /**
+   * Save the given fields. Only what is in `patch` is sent: omitted fields
+   * keep their saved value on the server, whatever this tab believes.
+   */
+  async save(patch: AppearancePatch, options: { emit?: boolean } = {}): Promise<Appearance> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
+    if (isEmptyPatch(patch)) {
+      if (this.statusValue === "ready") return this.current;
+      return this.reload();
+    }
+    const payload: Record<string, unknown> = {};
+    if (patch.theme !== undefined) payload.theme = patch.theme;
+    if (patch.accent !== undefined) payload.accent = patch.accent;
+    if (patch.wallpaper && Object.keys(patch.wallpaper).length > 0) payload.wallpaper = { ...patch.wallpaper };
     const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
-    this.current = updated;
-    if (this.userId !== null) writeCachedAppearance(this.userId, updated);
-    this.emit();
-    return updated;
+    return this.commit(generation, updated, options);
   }
 
   /** Upload a wallpaper file (raw body). Returns the created upload. */
   async upload(file: File): Promise<AppearanceUpload> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
     const response = await fetch("/api/appearance/wallpapers", {
       method: "POST",
       headers: {
@@ -480,58 +608,96 @@ export class AppearanceService {
       throw new ApiError(response.status, code, message);
     }
     const upload = (await response.json()) as AppearanceUpload;
+    this.assertCurrent(generation);
     this.current = {
       ...this.current,
       uploads: [upload, ...this.current.uploads.filter((item) => item.id !== upload.id)],
     };
+    if (this.statusValue === "ready" && this.userId !== null) writeCachedAppearance(this.userId, this.current);
     this.emit();
     return upload;
   }
 
   async removeUpload(uploadId: string): Promise<Appearance> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
     const result = await this.api.del<{ ok: boolean; appearance?: Appearance }>(
       `/api/appearance/wallpapers/${encodeURIComponent(uploadId)}`,
     );
-    const updated = normalizeAppearance(result.appearance ?? this.current);
-    this.current = updated;
-    if (this.userId !== null) writeCachedAppearance(this.userId, updated);
-    this.emit();
-    return updated;
+    if (result.appearance) return this.commit(generation, normalizeAppearance(result.appearance));
+    this.assertCurrent(generation);
+    return this.reload();
   }
 
   async reset(): Promise<Appearance> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
     const updated = normalizeAppearance(await this.api.post<Appearance>("/api/appearance/reset"));
-    this.current = updated;
-    if (this.userId !== null) writeCachedAppearance(this.userId, updated);
-    this.emit();
-    return updated;
+    return this.commit(generation, updated);
   }
 
-  /** Update the accent through the server. */
-  async saveAccent(accent: AccentId): Promise<void> {
-    if (this.current.accent === accent) return;
+  /** Persist only the accent (quick action); resolves `false` on failure. */
+  async saveAccent(accent: AccentId): Promise<boolean> {
+    if (this.statusValue === "ready" && this.current.accent === accent) return true;
     try {
       await this.save({ accent });
+      return true;
     } catch (error) {
+      if (isStaleAppearanceError(error)) return true;
       console.warn("could not persist accent preference", error);
+      return false;
     }
   }
 
-  /** Update the theme through the server (debounced by the caller). */
-  async saveTheme(theme: ThemeSetting): Promise<void> {
-    if (this.current.theme === theme) return;
-    try {
-      await this.save({ theme });
-    } catch (error) {
-      console.warn("could not persist theme preference", error);
-    }
+  /**
+   * Persist only the theme (tray toggle, account menu). Rapid changes are
+   * coalesced: one request at a time, the latest choice wins, and only the
+   * final response is announced so the UI never flips back in between.
+   * Resolves `false` when the choice could not be saved.
+   */
+  saveTheme(theme: ThemeSetting): Promise<boolean> {
+    this.themeWanted = theme;
+    if (this.themeSaving) return this.themeSaving;
+    const generation = this.generation;
+    let saved = false;
+    const run = async (): Promise<boolean> => {
+      // Let the caller's synchronous code finish before the first request.
+      await Promise.resolve();
+      try {
+        while (this.themeWanted !== null && generation === this.generation) {
+          const next = this.themeWanted;
+          this.themeWanted = null;
+          if (this.statusValue === "ready" && this.current.theme === next) continue;
+          await this.save({ theme: next }, { emit: false });
+          saved = true;
+        }
+        return true;
+      } catch (error) {
+        if (isStaleAppearanceError(error)) return true;
+        if (generation === this.generation) this.themeWanted = null;
+        console.warn("could not persist theme preference", error);
+        return false;
+      } finally {
+        if (this.themeSaving === promise) this.themeSaving = null;
+        if (saved && generation === this.generation) this.emit();
+      }
+    };
+    const promise = run();
+    this.themeSaving = promise;
+    return promise;
   }
 
+  /** Forget the signed-in account (sign-out): pending responses are dropped. */
   clear(): void {
     if (this.userId !== null) clearCachedAppearance(this.userId);
     else clearCachedAppearance();
+    this.generation += 1;
     this.userId = null;
-    this.current = { ...DEFAULT_APPEARANCE };
+    this.current = normalizeAppearance(DEFAULT_APPEARANCE);
+    this.statusValue = "idle";
+    this.lastErrorValue = null;
+    this.themeWanted = null;
+    this.themeSaving = null;
   }
 }
 
@@ -638,7 +804,7 @@ export class AppearanceSync {
   }
 
   private handleChanged(event: AppearanceChangedEvent): void {
-    if (this.disposed || !event) return;
+    if (this.disposed || !event || this.service.currentUserId === null) return;
     if (!event.appearance) {
       // Some events (e.g. a deletion from elsewhere) only carry the reason.
       void this.resync();
@@ -664,9 +830,13 @@ export class AppearanceSync {
   }
 
   private async resync(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.service.currentUserId === null) return;
     try {
+      const before = this.service.status === "ready" ? JSON.stringify(normalizeAppearance(this.service.value)) : null;
       const fresh = await this.service.reload();
+      // Every reconnect resyncs: an unchanged snapshot is not news and must
+      // never raise a conflict over an open editor's draft.
+      if (before !== null && JSON.stringify(fresh) === before) return;
       if (this.hasDirtyDraft()) {
         for (const listener of this.conflictListeners) {
           try {
@@ -685,7 +855,7 @@ export class AppearanceSync {
         }
       }
     } catch {
-      /* the next reconnect will retry */
+      /* stale (account changed) or offline: the next reconnect will retry */
     }
   }
 

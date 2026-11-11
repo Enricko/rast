@@ -171,7 +171,7 @@ export function openPersonalizeDialog(options: PersonalizeOptions): void {
       setRootTheme(draft.theme);
       const invalid = validateAppearanceDraft(draft);
       if (invalid) workflow?.setValidationError(invalid);
-      else workflow?.setDirty(true);
+      else workflow?.setDirty(editor?.isDirty() ?? true);
     },
   });
 

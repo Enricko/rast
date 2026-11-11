@@ -896,12 +896,20 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     Ok(())
 }
 
-/// Apply a partial update to a user's appearance settings.
+/// Serialises appearance read-modify-write cycles. Updates are partial (the
+/// tray theme toggle sends only `theme`, an editor only what changed), so two
+/// concurrent requests from different tabs must not both start from the same
+/// stored row and silently drop each other's field.
+static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Apply a partial update to a user's appearance settings: fields that are
+/// absent from `patch` keep their stored value.
 pub async fn update(
     pool: &SqlitePool,
     user: &AuthUser,
     patch: UpdateAppearanceRequest,
 ) -> AppResult<AppearanceDto> {
+    let _write = WRITE_LOCK.lock().await;
     let mut stored = load_stored(pool, user.id).await?;
     if let Some(theme) = patch.theme.as_deref() {
         stored.theme = normalize_theme(theme)?;
@@ -957,6 +965,7 @@ pub async fn update(
 
 /// Reset the wallpaper to defaults while keeping the chosen theme.
 pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDto> {
+    let _write = WRITE_LOCK.lock().await;
     let mut stored = load_stored(pool, user.id).await?;
     let defaults = StoredWallpaper::defaults();
     stored = StoredWallpaper {
@@ -1092,6 +1101,7 @@ pub async fn delete_upload(
         .await?
         .ok_or(AppError::NotFound("wallpaper not found"))?;
     let mime: String = row.get("mime");
+    let write = WRITE_LOCK.lock().await;
     sqlx::query("DELETE FROM appearance_uploads WHERE id = ? AND user_id = ?")
         .bind(upload_id)
         .bind(user.id)
@@ -1114,6 +1124,7 @@ pub async fn delete_upload(
     .bind(upload_id)
     .execute(pool)
     .await?;
+    drop(write);
     if let Some(ext) = ext_for_mime(&mime) {
         let path = wallpapers_root(data_dir)
             .join(user.id.to_string())

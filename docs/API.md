@@ -242,7 +242,7 @@ Uploaded wallpapers are private: only the owner can read or delete them.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
-| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}}` (partial merge; the three axes are independent) |
+| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}}` (partial merge: omitted fields keep their saved value; concurrent updates are serialised) |
 | GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
 | POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
 | GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins); private immutable cache + ETag |

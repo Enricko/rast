@@ -215,6 +215,17 @@ and stored under `<data_dir>/wallpapers/<user-id>/<uuid>.<ext>`; the owner-only
 API serves them with immutable private caching. The client keeps only a small
 per-user paint cache.
 
+Writes are partial and explicit. `PUT /api/appearance` merges only the fields
+it receives (serialised server-side, so concurrent partial saves from two tabs
+never drop each other's field). The tray toggle and account menu send only
+`{theme}`; the Appearance editors send only the fields that differ from the
+saved baseline. Nothing is saved implicitly (no store subscription writes the
+theme). The client `AppearanceService` is scoped to the signed-in account: it
+tracks whether its value is server-confirmed (`ready`), the account's own paint
+cache (`cached`) or unknown (`error`, defaults for painting only), drops any
+response that arrives after sign-out or an account switch, and the editors
+refuse to open on an unknown state (Control Panel shows Retry instead).
+
 ## Storage layout
 
 ```

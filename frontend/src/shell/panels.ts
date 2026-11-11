@@ -26,6 +26,8 @@ export interface PanelContext {
   showShortcuts(): void;
   showAbout(): void;
   showPersonalize(): void;
+  /** Change the theme from a shell control and save it to the account. */
+  setTheme(preference: ThemePreference): void;
   notify(message: string, kind: "info" | "success" | "warning" | "error"): void;
 }
 
@@ -282,7 +284,7 @@ export function buildUserMenu(ctx: PanelContext, onClose: () => void): HTMLEleme
     ],
     value: store.get().themePreference,
     ariaLabel: "Theme preference",
-    onChange: (value) => store.setThemePreference(value),
+    onChange: (value) => ctx.setTheme(value),
   });
   const themeNote = h("div", { class: "small faint theme-note" }, themeDescription(store.get().themePreference, store.get().theme));
 

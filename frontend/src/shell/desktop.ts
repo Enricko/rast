@@ -13,10 +13,12 @@ import {
   getAppearanceService,
   getAppearanceSync,
   isAppearancePreviewActive,
+  isStaleAppearanceError,
   type Appearance,
+  type ThemeSetting,
 } from "../core/appearance";
 import { ToastCenter } from "../core/toast";
-import { confirmDialog, contextMenu, type ContextMenuEntry } from "../core/ui";
+import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from "../core/ui";
 import { getRealtime } from "../core/realtime";
 import { WindowManager, type WindowInfo } from "../core/wm";
 import { setFavicon } from "./brand";
@@ -113,6 +115,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   const appearanceSync = getAppearanceSync(deps.api, deps.events);
   let appliedSignature = JSON.stringify(appearance.value);
   applyAppearance(appearance.value);
+  /** Show the account's saved theme (never while the user's own choice is still being saved). */
+  const adoptSavedTheme = (theme: ThemeSetting): void => {
+    if (!appearance.isKnown || appearance.savingTheme) return;
+    if (store.get().themePreference !== theme) store.setThemePreference(theme);
+  };
   disposers.push(
     appearance.subscribe((state) => {
       // An open editor owns the document while it previews a draft.
@@ -120,6 +127,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       appliedSignature = JSON.stringify(state);
       applyAppearance(state);
       setFavicon(state.theme);
+      adoptSavedTheme(state.theme);
     }),
   );
   disposers.push(
@@ -127,36 +135,31 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       const signature = JSON.stringify(state);
       const changed = signature !== appliedSignature;
       appliedSignature = signature;
-      persistedTheme = state.theme;
-      store.setThemePreference(state.theme);
       // A reconnect/resync can "adopt" an identical snapshot: only announce a
       // visible change, never toast on every reconnect.
       if (changed && !isAppearancePreviewActive()) {
         applyAppearance(state);
         setFavicon(state.theme);
+        adoptSavedTheme(state.theme);
         toast.info("Appearance updated from another session");
       }
     }),
   );
-  let persistedTheme = store.get().themePreference;
-  void appearance
-    .load(me.user.id)
-    .then((loaded) => {
-      persistedTheme = loaded.theme;
-      store.setThemePreference(loaded.theme);
-      applyAppearance(loaded);
-    })
-    .catch((error) => {
-      console.warn("appearance settings unavailable", error);
+  // This account's paint cache applies synchronously (through the
+  // subscription above), then the server copy. Nothing here ever saves:
+  // only explicit user actions (theme controls, editors) write appearance.
+  void appearance.load(me.user.id).catch((error) => {
+    if (isStaleAppearanceError(error)) return;
+    console.warn("appearance settings unavailable", error);
+  });
+
+  /** The tray toggle and account menu: show the choice now, save only the theme. */
+  function setShellTheme(preference: ThemeSetting): void {
+    store.setThemePreference(preference);
+    void appearance.saveTheme(preference).then((ok) => {
+      if (!ok && !disposed) toast.warning("Could not save the theme to your account. It will apply in this browser until you reload.");
     });
-  disposers.push(
-    store.subscribe((state) => {
-      if (!state.user) return;
-      if (state.themePreference === persistedTheme) return;
-      persistedTheme = state.themePreference;
-      void appearance.saveTheme(state.themePreference);
-    }),
-  );
+  }
 
   // ------------------------------------------------------------ app launch
   function openApp(appId: string, params?: unknown): void {
@@ -243,6 +246,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     showShortcuts: () => showShortcuts(),
     showAbout: () => showAbout(),
     showPersonalize: () => showPersonalize(),
+    setTheme: (preference) => setShellTheme(preference),
     notify: (message, kind) => {
       if (kind === "error") toast.error(message);
       else if (kind === "warning") toast.warning(message);
@@ -415,14 +419,29 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
 
   function showPersonalize(): void {
     closePanel();
+    if (!appearance.isKnown) {
+      // Never open an editor seeded with defaults: saving it would replace
+      // the account's real settings.
+      void appearance
+        .load(me.user.id)
+        .then(() => {
+          if (!disposed && appearance.isKnown) showPersonalize();
+        })
+        .catch((error) => {
+          if (isStaleAppearanceError(error) || disposed) return;
+          toast.error(`Could not load your saved appearance: ${errorMessage(error)}. Try again in a moment.`);
+        });
+      return;
+    }
     openPersonalizeDialog({
       api: deps.api,
       events: deps.events,
       userId: me.user.id,
       toast,
-      restoreTheme: () => store.setThemePreference(appearance.value.theme),
+      restoreTheme: () => {
+        if (appearance.isKnown) store.setThemePreference(appearance.value.theme);
+      },
       onApplied: (saved: Appearance) => {
-        persistedTheme = saved.theme;
         store.setThemePreference(saved.theme);
         applyAppearance(saved);
       },
@@ -502,7 +521,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     type: "button",
     ariaLabel: "Switch theme",
     title: "Switch dark / light mode",
-    onClick: () => store.toggleTheme(),
+    onClick: () => setShellTheme(store.get().theme === "dark" ? "light" : "dark"),
   });
 
   const clockTime = h("span", { class: "tray-clock-time" });

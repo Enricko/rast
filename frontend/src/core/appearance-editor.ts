@@ -9,6 +9,8 @@ import {
   BUILTIN_WALLPAPERS,
   WALLPAPER_POSITIONS,
   accentPreset,
+  appearancePatch,
+  hasAppearanceChanges,
   normalizeAppearance,
   resolveTheme,
   uploadUrl,
@@ -477,7 +479,14 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
                 options.onLocalMutation?.();
                 try {
                   const updated = await service.removeUpload(upload.id);
-                  draft = normalizeAppearance(updated);
+                  // Keep the rest of the draft; only a draft that pointed at
+                  // the deleted image falls back to the saved wallpaper.
+                  const usedDeleted = draft.wallpaper.kind === "upload" && draft.wallpaper.uploadId === upload.id;
+                  draft = normalizeAppearance({
+                    ...draft,
+                    uploads: updated.uploads,
+                    wallpaper: usedDeleted ? updated.wallpaper : draft.wallpaper,
+                  });
                   emitChange();
                   toast.success("Wallpaper deleted");
                 } catch (error) {
@@ -625,7 +634,7 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
       draft = normalizeAppearance(appearance);
       refresh();
     },
-    isDirty: () => JSON.stringify(normalizeAppearance(draft)) !== JSON.stringify(normalizeAppearance(service.value)),
+    isDirty: () => hasAppearanceChanges(service.value, draft),
     discard: () => {
       draft = normalizeAppearance(service.value);
       refresh();
@@ -633,11 +642,9 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
     },
     save: async () => {
       options.onLocalMutation?.();
-      const saved = await service.save({
-        theme: draft.theme,
-        accent: draft.accent,
-        wallpaper: draft.wallpaper,
-      });
+      // Only what the user changed: settings this tab did not touch keep
+      // whatever the server has (another device may have saved meanwhile).
+      const saved = await service.save(appearancePatch(normalizeAppearance(service.value), normalizeAppearance(draft)));
       draft = normalizeAppearance(saved);
       refresh();
       return saved;
