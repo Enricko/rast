@@ -15,12 +15,86 @@ this file by `scripts/changelog-section.sh`.
 
 ### Planned
 
-- Published release signatures (minisign/cosign) and installer enforcement via
-  `RAST_REQUIRE_SIGNATURE`; the installer already supports fail-closed
-  verification once signatures are published.
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
 - Automated restore drills and a documented JSON schema for backup manifests.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.3.0] - 2026-11-11
+
+Security audit and hardening of the v0.2.0 access policy, plus usability work
+for large installations. Upgrade with a database backup: migration `0005` is
+not reversible by an older binary (see "Upgrade and rollback").
+
+### Security
+
+- **Backup Center**: archive downloads and the restore guide are
+  administrator-only. A read-only Backup Center grant previously allowed
+  downloading archives that contain the account database, the server master
+  key and (with the users scope) every user's files. Read-only viewers now see
+  status metadata only (`downloadable: false`); downloads are audited.
+- **Applications**: read-only grants no longer receive environment values,
+  container logs (REST or live stream), deployment-history details or Docker
+  reasons with host paths; they get `envCount`/`secretCount` and status.
+- **Shared-folder rules** reference the stable share id instead of the display
+  name (migration `0005`). Renames no longer rewrite rules (the previous
+  rewrite could silently drop a conflicting rule); deleting a share cascades.
+- **No implicit owner access**: v0.2.0 granted full access to a shared
+  folder's creator when no rule applied, so a demoted former administrator kept
+  it. Access now comes only from rules or legacy memberships (as in v0.1.x).
+- **Resource Monitor** container names/ids are limited to administrators and
+  accounts allowed to use Applications (REST and live samples, re-evaluated per
+  sample); overlay/container-runtime mounts are hidden from the disk list.
+- **Live log streams** revalidate the session and administrator status before
+  every poll and end on revocation, demotion or deactivation.
+- **Forced password changes** are enforced by the server, not only the UI.
+- **Release provenance**: binaries and `SHA256SUMS` carry GitHub/Sigstore
+  build-provenance attestations, verified in the release workflow; both
+  architectures are smoke-tested at runtime on native runners; the installer
+  can enforce provenance with `--verify-attestation`.
+
+### Added
+
+- Paginated, server-searched member pickers that keep selections across
+  searches and pages and show deactivated members for review/removal
+  (`GET /api/groups/{id}/members`, `GET /api/users?active=`).
+- Effective Access search, level filter and pagination with conflict
+  explanations from the evaluator; group-deletion impact preview per member
+  (`GET /api/groups/{id}/impact`).
+- Clearer separation of Group Membership, Direct Overrides and Effective Access
+  in the editors.
+
+### Fixed
+
+- Restore guide extracted user files into `/`; it now restores into the
+  storage roots. `rast restore` and `rast serve` use a data-directory lock
+  (`rast.lock`) instead of `systemctl is-active rast.service`, so a restore can
+  never replace the database under a live server, and two servers cannot share
+  a data directory.
+- Failed saves (e.g. duplicate group name) were silently swallowed by the
+  Control Panel save workflow; the server message now stays visible.
+- Account search ignored one- and two-character queries.
+- Effective Access labelled folders without any grant as "legacy membership".
+- Text contrast: light `--text-faint` and disabled primary buttons were below
+  WCAG AA; all shared tokens and control states now meet 4.5:1 for small text
+  in light and dark themes with every accent preset.
+
+### Upgrade and rollback
+
+- Migration `0005_share_rule_ids.sql` rebuilds the two folder-rule tables keyed
+  by share id. Effective permissions are identical before and after for every
+  (account, folder); rules whose share no longer existed (they had no effect)
+  are dropped and counted in `settings` (`migration.0005.orphaned_rules`,
+  `migration.0005.conflicts`).
+- Migrations are forward-only: an older binary refuses to start on a newer
+  database. Roll back by stopping the service, restoring the pre-upgrade
+  database backup and then installing the older binary. Binaries older than
+  0.2.0 do not evaluate group rules at all, so rolling back below 0.2.0 widens
+  access. See `docs/OPERATIONS.md`.
 
 ## [0.2.0] - 2026-11-11
 
