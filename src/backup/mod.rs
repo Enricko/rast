@@ -544,11 +544,15 @@ pub async fn verify(path: &Path) -> AppResult<Value> {
 /// Restore the database from an archive. The caller must stop the service
 /// first; the previous database is preserved as a pre-restore copy.
 pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> {
-    if service_running() {
-        return Err(AppError::conflict(
-            "rast.service is running; stop it before restoring the database",
-        ));
-    }
+    // A running server holds `<data_dir>/rast.lock`; hold it ourselves for the
+    // whole replacement so no server can start mid-restore either.
+    let _instance = db::InstanceLock::try_acquire(cfg)
+        .map_err(|e| AppError::internal(format!("cannot open the instance lock: {e}")))?
+        .ok_or_else(|| {
+            AppError::conflict(
+                "a RAST server is running on this data directory; stop it (sudo systemctl stop rast.service) before restoring the database",
+            )
+        })?;
     let tmp_dir = cfg
         .data_dir
         .join("tmp")
@@ -746,14 +750,6 @@ fn tempfile_dir() -> AppResult<PathBuf> {
     Ok(dir)
 }
 
-fn service_running() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "rast.service"])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 struct TempDirGuard(PathBuf);
 
 impl Drop for TempDirGuard {
@@ -929,9 +925,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restore_refuses_when_service_running() {
-        // This test only asserts the archive parsing path; service check is
-        // environment dependent, so we verify the DB extraction error instead.
+    async fn restore_rejects_corrupt_archives() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_cfg(dir.path());
         cfg.ensure_dirs().unwrap();
@@ -939,5 +933,32 @@ mod tests {
         std::fs::write(&fake, b"not a gzip archive").unwrap();
         let result = restore_database(&cfg, &fake).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_while_a_server_holds_the_instance_lock() {
+        // Regression: the guard used `systemctl is-active rast.service`, which
+        // missed servers started any other way and blocked unrelated data
+        // directories. A running server holds `<data_dir>/rast.lock`.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        cfg.ensure_dirs().unwrap();
+        let pool = db::init(&cfg).await.unwrap();
+        let meta = create(&cfg, Some(&pool), &["db".into()], "lock test", None, None)
+            .await
+            .unwrap();
+        let archive = PathBuf::from(&meta.path);
+
+        let server = db::InstanceLock::try_acquire(&cfg).unwrap().expect("lock");
+        let err = restore_database(&cfg, &archive).await.unwrap_err();
+        assert!(err.to_string().contains("server is running"), "{err}");
+        // A second holder is refused while the first is alive.
+        assert!(db::InstanceLock::try_acquire(&cfg).unwrap().is_none());
+
+        drop(server);
+        let restored = restore_database(&cfg, &archive).await.unwrap();
+        assert_eq!(restored["restored"], true);
+        // The lock is released after the restore finished.
+        assert!(db::InstanceLock::try_acquire(&cfg).unwrap().is_some());
     }
 }

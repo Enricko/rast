@@ -288,6 +288,20 @@ async fn serve(
         tracing::warn!("{warning}");
     }
 
+    // One server per data directory; also lets `rast restore` detect a live
+    // server regardless of how it was started.
+    cfg.ensure_dirs()
+        .map_err(|e| format!("cannot create data directories: {e}"))?;
+    let _instance = db::InstanceLock::try_acquire(&cfg)
+        .map_err(|e| format!("cannot open the instance lock: {e}"))?
+        .ok_or_else(|| {
+            format!(
+                "another RAST server is already running on data directory {} (lock {})",
+                cfg.data_dir.display(),
+                db::InstanceLock::path(&cfg).display()
+            )
+        })?;
+
     let state = AppState::new(cfg.clone()).await?;
     let app = rast::api::router(state.clone());
 

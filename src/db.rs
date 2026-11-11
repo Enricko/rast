@@ -1,7 +1,7 @@
 //! Database bootstrap and small shared helpers.
 
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -68,6 +68,49 @@ pub async fn connect(path: &Path, max_connections: u32) -> AppResult<SqlitePool>
         .await
         .map_err(|e| crate::error::AppError::internal(format!("database migration failed: {e}")))?;
     Ok(pool)
+}
+
+/// Exclusive lock on `<data_dir>/rast.lock` held by a running server.
+///
+/// Offline maintenance (`rast restore`) must never replace the database under
+/// a live server. Checking `systemctl is-active rast.service` is not enough:
+/// it misses servers started manually or in containers and blocks restores of
+/// unrelated data directories. The OS releases the lock automatically when the
+/// process exits (including crashes), so it can never go stale.
+#[derive(Debug)]
+pub struct InstanceLock {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl InstanceLock {
+    pub fn path(cfg: &Config) -> PathBuf {
+        cfg.data_dir.join("rast.lock")
+    }
+
+    /// Acquire the lock without blocking. `Ok(None)` means another process
+    /// (normally a running server) holds it.
+    pub fn try_acquire(cfg: &Config) -> std::io::Result<Option<Self>> {
+        let path = Self::path(cfg);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file, path })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
+
+    pub fn lock_path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Read a setting from the `settings` table.
