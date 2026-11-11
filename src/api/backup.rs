@@ -1,4 +1,11 @@
-//! Backup Center API (administrator only).
+//! Backup Center API.
+//!
+//! Archives contain the full account database (password and session hashes),
+//! the server master key, configuration and optionally every user's files, so
+//! downloading an archive, reading the restore guide (host paths) and every
+//! mutation are administrator-only. A read-only `backup` group grant exposes
+//! status metadata only: backup ids, timestamps, sizes, scopes and outcome,
+//! plus the schedule summary — never archive bytes, file names or host paths.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,15 +58,21 @@ pub struct BackupQuery {
 #[serde(rename_all = "camelCase")]
 pub struct BackupDto {
     pub id: String,
+    /// Archive file name (admins only; empty for read-only viewers).
     pub file_name: String,
     pub size_bytes: i64,
+    /// Archive checksum (admins only; empty for read-only viewers).
     pub sha256: String,
     pub scope: Vec<String>,
     pub status: String,
+    /// Free-form operator note (admins only; empty for read-only viewers).
     pub note: String,
     pub created_at: i64,
     pub finished_at: Option<i64>,
+    /// Failure text (admins only; read-only viewers get a generic marker).
     pub error: String,
+    /// Whether the caller may download the archive.
+    pub downloadable: bool,
 }
 
 /// GET /api/backups
@@ -69,7 +82,9 @@ pub async fn list_backups(
     Query(q): Query<BackupQuery>,
 ) -> AppResult<Json<Value>> {
     // Read handler: admins or non-admins with the read-only `backup` grant.
+    // Read-only viewers receive status metadata only (see module docs).
     access::app_surface(&state.db, &state, &user, "backup").await?;
+    let is_admin = user.is_admin();
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(25).clamp(1, 100);
     let offset = (page - 1) * per_page;
@@ -86,18 +101,38 @@ pub async fn list_backups(
     .await?;
     let items: Vec<BackupDto> = rows
         .into_iter()
-        .map(|row| BackupDto {
-            id: row.get("id"),
-            file_name: row.get("file_name"),
-            size_bytes: row.get("size_bytes"),
-            sha256: row.get("sha256"),
-            scope: serde_json::from_str::<Vec<String>>(&row.get::<String, _>("scope"))
-                .unwrap_or_default(),
-            status: row.get("status"),
-            note: row.get("note"),
-            created_at: row.get("created_at"),
-            finished_at: row.get("finished_at"),
-            error: row.get("error"),
+        .map(|row| {
+            let error: String = row.get("error");
+            BackupDto {
+                id: row.get("id"),
+                file_name: if is_admin {
+                    row.get("file_name")
+                } else {
+                    String::new()
+                },
+                size_bytes: row.get("size_bytes"),
+                sha256: if is_admin {
+                    row.get("sha256")
+                } else {
+                    String::new()
+                },
+                scope: serde_json::from_str::<Vec<String>>(&row.get::<String, _>("scope"))
+                    .unwrap_or_default(),
+                status: row.get("status"),
+                note: if is_admin {
+                    row.get("note")
+                } else {
+                    String::new()
+                },
+                created_at: row.get("created_at"),
+                finished_at: row.get("finished_at"),
+                error: if is_admin || error.is_empty() {
+                    error
+                } else {
+                    "backup failed".to_string()
+                },
+                downloadable: is_admin,
+            }
         })
         .collect();
     let schedule = schedule::list(&state.db).await?;
@@ -329,10 +364,11 @@ pub async fn delete_backup(
 /// GET /api/backups/{id}/download — streamed archive download.
 pub async fn download_backup(
     State(state): State<AppState>,
-    user: AuthUser,
+    admin: AdminUser,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
-    access::app_surface(&state.db, &state, &user, "backup").await?;
+    // Archives contain the account database, the master key and possibly
+    // every user's files: operator-only, regardless of group grants.
     let row = sqlx::query("SELECT path, file_name FROM backups WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -362,6 +398,16 @@ pub async fn download_backup(
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    audit::record_with_events(
+        &state.db,
+        &state.events,
+        AuditLog::new("backup.download")
+            .actor(&admin.0)
+            .object("backup", id)
+            .path(safe_file_name(&file_name))
+            .success(),
+    )
+    .await;
     Ok(response)
 }
 
@@ -410,10 +456,9 @@ pub async fn verify_backup(
 /// GET /api/backups/restore-guide?backupId=...
 pub async fn restore_guide(
     State(state): State<AppState>,
-    user: AuthUser,
+    _admin: AdminUser,
     Query(q): Query<RestoreGuideQuery>,
 ) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "backup").await?;
     let file_name = if let Some(id) = &q.backup_id {
         sqlx::query_scalar::<_, String>("SELECT file_name FROM backups WHERE id = ?")
             .bind(id)
@@ -439,9 +484,15 @@ pub async fn restore_guide(
              "detail": "The previous database is preserved under /var/lib/rast/backups/pre-restore-*."},
             {"title": "Restart and verify", "command": "sudo systemctl start rast.service && rast status",
              "detail": "Sign in and check File Station, users and Activity Logs."},
-            {"title": "Restore user files (optional)", "command": format!("tar -xzf {} -C / --strip-components=2 users/", archive.display()),
-             "detail": "Only needed if the backup included the users scope; stop RAST first and mind file ownership (rast:rast)."}
+            {"title": "Restore user files (optional)", "command": format!(
+                "sudo tar -xzf {archive} -C {homes} --strip-components=2 users/homes && sudo tar -xzf {archive} -C {shared} --strip-components=2 users/shared && sudo chown -R rast:rast {homes} {shared}",
+                archive = archive.display(),
+                homes = state.config.homes_dir().display(),
+                shared = state.config.shared_dir().display(),
+             ),
+             "detail": "Only for backups that include the users scope. Stop RAST first and try the command on an isolated copy before restoring over live data; existing files with the same names are overwritten."}
         ],
+        "rollback": "Database migrations are forward-only: a RAST binary older than the database schema refuses to start. To roll back a release, stop the service, restore the database backup taken before the upgrade, then install the older binary. Binaries older than 0.2.0 do not enforce group policy (only legacy shared-folder memberships), so review access after such a rollback; writes made after the backup are lost.",
         "warning": "Deployed application data (container volumes) is NOT part of a RAST backup; back it up with the application's own procedure."
     })))
 }
@@ -512,7 +563,11 @@ mod access_policy_tests {
     }
 
     #[tokio::test]
-    async fn read_only_grant_allows_backup_reads() {
+    async fn read_only_grant_sees_status_metadata_but_no_archive_or_paths() {
+        // Regression for audit finding F1: archives contain the account
+        // database, the master key and possibly every user's files, so a
+        // read-only Backup Center grant must never expose archive bytes,
+        // file names, checksums, operator notes or host paths.
         let server = TestServer::start().await;
         let alice = server
             .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
@@ -524,17 +579,46 @@ mod access_policy_tests {
         let (status, _, body) = server.get("/api/backups", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
-        assert_eq!(body["items"][0]["fileName"], "b1.tar.gz");
+        let item = &body["items"][0];
+        assert_eq!(item["id"], "b1");
+        assert_eq!(item["fileName"], "", "file name hidden: {item}");
+        assert_eq!(item["sha256"], "", "checksum hidden: {item}");
+        assert_eq!(item["note"], "", "operator note hidden: {item}");
+        assert_eq!(item["downloadable"], false, "{item}");
+        assert!(item["status"].is_string() && item["sizeBytes"].is_number());
 
         let (status, _, body) = server.get("/api/backups/schedule", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.get("schedule").is_some(), "{body}");
 
         let (status, _, body) = server.get("/api/backups/restore-guide", &session).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "restore guide exposes host paths: {body}"
+        );
+
+        let (status, _, body) = server.get("/api/backups/b1/download", &session).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "read-only grant must not download archives: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn admin_downloads_archive_and_gets_safe_restore_commands() {
+        let server = TestServer::start().await;
+        server
+            .create_user("root", ADMIN_PASSWORD, crate::auth::Role::Admin)
+            .await;
+        seed_backup(&server).await;
+        let session = server.login("root", ADMIN_PASSWORD).await;
+
+        let (status, _, body) = server.get("/api/backups", &session).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(body["steps"]
-            .as_array()
-            .is_some_and(|steps| !steps.is_empty()));
+        assert_eq!(body["items"][0]["fileName"], "b1.tar.gz");
+        assert_eq!(body["items"][0]["downloadable"], true);
 
         let (status, headers, _) = server.get("/api/backups/b1/download", &session).await;
         assert_eq!(status, StatusCode::OK);
@@ -545,6 +629,35 @@ mod access_policy_tests {
                 .unwrap_or_default(),
             "application/gzip"
         );
+
+        // Regression for audit finding F4: user files must be restored into the
+        // storage roots, never extracted into `/`.
+        let (status, _, guide) = server.get("/api/backups/restore-guide", &session).await;
+        assert_eq!(status, StatusCode::OK, "{guide}");
+        let commands: Vec<String> = guide["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|step| step["command"].as_str().map(str::to_string))
+            .collect();
+        let files = commands
+            .iter()
+            .find(|command| command.contains("users/homes"))
+            .expect("user file restore command");
+        assert!(!files.contains("-C / "), "must not extract into /: {files}");
+        assert!(files.contains("users/shared"), "{files}");
+        let homes = server.state.config.homes_dir().display().to_string();
+        assert!(files.contains(&homes), "targets storage homes: {files}");
+        assert!(guide["rollback"]
+            .as_str()
+            .is_some_and(|text| text.contains("refuses to start")));
+
+        let audited: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE action = 'backup.download'")
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap();
+        assert_eq!(audited, 1, "archive downloads are audited");
     }
 
     #[tokio::test]
