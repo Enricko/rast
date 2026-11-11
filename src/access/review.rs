@@ -421,9 +421,11 @@ fn app_state_label(allowed: bool, read_only: bool) -> &'static str {
 }
 
 /// Compute the access each member would lose or gain if `group_id` were
-/// deleted. The "after" state is evaluated inside a transaction that removes
-/// the group and is rolled back, so the comparison uses the real evaluator
-/// against a real database state instead of a re-implementation.
+/// deleted. "Before" is the enforcement evaluator's decision; "after" applies
+/// the same precedence ([`super::merge_folder`] / [`super::merge_app`]) to the
+/// committed rules with this group's memberships and rules excluded — exactly
+/// what deletion removes. The preview is read-only (no write transaction, no
+/// SQLite write lock).
 pub async fn group_deletion_impact(pool: &SqlitePool, group_id: i64) -> AppResult<GroupImpact> {
     let group_name: String = sqlx::query_scalar("SELECT name FROM groups WHERE id = ?")
         .bind(group_id)
@@ -493,27 +495,18 @@ pub async fn group_deletion_impact(pool: &SqlitePool, group_id: i64) -> AppResul
 
     let before = snapshot(pool, &accounts, &folder_targets, &app_targets).await?;
 
-    // Evaluate the post-deletion state in a rolled-back transaction on a
-    // dedicated connection. The decision cache must not be consulted (it
-    // reflects the committed state), so evaluate directly with SQL helpers.
-    let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM groups WHERE id = ?")
-        .bind(group_id)
-        .execute(&mut *tx)
-        .await?;
     let mut after = Vec::with_capacity(accounts.len());
     for (user, _) in &accounts {
         let mut folders = Vec::with_capacity(folder_targets.len());
         for (share_id, _) in &folder_targets {
-            folders.push(evaluate_folder_in_tx(&mut tx, user, share_id).await?);
+            folders.push(evaluate_folder_without_group(pool, user, share_id, group_id).await?);
         }
         let mut apps = Vec::with_capacity(app_targets.len());
         for app_id in &app_targets {
-            apps.push(evaluate_app_in_tx(&mut tx, user, app_id).await?);
+            apps.push(evaluate_app_without_group(pool, user, app_id, group_id).await?);
         }
         after.push((folders, apps));
     }
-    tx.rollback().await?;
 
     let mut users = Vec::new();
     for (index, (user, active)) in accounts.iter().enumerate() {
@@ -594,12 +587,13 @@ async fn snapshot(
     Ok(out)
 }
 
-/// Folder decision inside an uncommitted transaction. Mirrors the evaluator's
-/// precedence exactly by delegating the rule merge to [`super::merge_folder`].
-async fn evaluate_folder_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+/// Folder decision with one group's memberships/rules excluded, using the
+/// evaluator's precedence ([`super::merge_folder`]).
+async fn evaluate_folder_without_group(
+    pool: &SqlitePool,
     user: &AuthUser,
     share_id: &str,
+    excluded_group: i64,
 ) -> AppResult<Option<Perm>> {
     if user.is_admin() {
         return Ok(Some(Perm::Admin));
@@ -608,22 +602,23 @@ async fn evaluate_folder_in_tx(
         sqlx::query_scalar("SELECT rule FROM user_folder_rules WHERE user_id = ? AND share_id = ?")
             .bind(user.id)
             .bind(share_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(pool)
             .await?;
     let group_rules: Vec<String> = sqlx::query_scalar(
         "SELECT r.rule FROM group_members gm
          JOIN group_folder_rules r ON r.group_id = gm.group_id
-         WHERE gm.user_id = ? AND r.share_id = ?",
+         WHERE gm.user_id = ? AND r.share_id = ? AND gm.group_id <> ?",
     )
     .bind(user.id)
     .bind(share_id)
-    .fetch_all(&mut **tx)
+    .bind(excluded_group)
+    .fetch_all(pool)
     .await?;
     let legacy: Option<String> =
         sqlx::query_scalar("SELECT perms FROM share_members WHERE share_id = ? AND user_id = ?")
             .bind(share_id)
             .bind(user.id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(pool)
             .await?;
     Ok(super::merge_folder(
         direct.as_deref(),
@@ -632,10 +627,13 @@ async fn evaluate_folder_in_tx(
     ))
 }
 
-async fn evaluate_app_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+/// Application decision with one group's memberships/rules excluded
+/// ([`super::merge_app`]).
+async fn evaluate_app_without_group(
+    pool: &SqlitePool,
     user: &AuthUser,
     app_id: &str,
+    excluded_group: i64,
 ) -> AppResult<&'static str> {
     if user.is_admin() {
         return Ok("allowed");
@@ -644,16 +642,17 @@ async fn evaluate_app_in_tx(
         sqlx::query_scalar("SELECT rule FROM user_app_rules WHERE user_id = ? AND app_id = ?")
             .bind(user.id)
             .bind(app_id)
-            .fetch_optional(&mut **tx)
+            .fetch_optional(pool)
             .await?;
     let group_rules: Vec<String> = sqlx::query_scalar(
         "SELECT r.rule FROM group_members gm
          JOIN group_app_rules r ON r.group_id = gm.group_id
-         WHERE gm.user_id = ? AND r.app_id = ?",
+         WHERE gm.user_id = ? AND r.app_id = ? AND gm.group_id <> ?",
     )
     .bind(user.id)
     .bind(app_id)
-    .fetch_all(&mut **tx)
+    .bind(excluded_group)
+    .fetch_all(pool)
     .await?;
     let (allowed, read_only) = super::merge_app(
         app_id,
