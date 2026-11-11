@@ -12,6 +12,7 @@
 //! every committed membership/rule/share change.
 
 pub mod middleware;
+pub mod review;
 
 use std::{
     collections::HashMap,
@@ -870,6 +871,68 @@ pub fn role_name(role: Role) -> &'static str {
     match role {
         Role::Admin => "admin",
         Role::User => "user",
+    }
+}
+
+/// Pure folder precedence used by previews that evaluate an uncommitted
+/// state (see [`review::group_deletion_impact`]). Same order as the
+/// enforcement evaluator: explicit `none` wins, then the strongest grant,
+/// then the legacy `share_members` level. Administrators are handled by the
+/// caller.
+pub fn merge_folder<'a>(
+    direct: Option<&str>,
+    group_rules: impl IntoIterator<Item = &'a str>,
+    legacy: Option<&str>,
+) -> Option<Perm> {
+    let mut deny = false;
+    let mut granted: Option<Perm> = None;
+    let mut consider = |rule: &str| match FolderRule::parse(rule) {
+        Some(FolderRule::None) => deny = true,
+        Some(FolderRule::Write) => granted = Some(Perm::Write),
+        Some(FolderRule::Read) => {
+            if granted.is_none() {
+                granted = Some(Perm::Read);
+            }
+        }
+        Some(FolderRule::Inherit) | None => {}
+    };
+    if let Some(rule) = direct {
+        consider(rule);
+    }
+    for rule in group_rules {
+        consider(rule);
+    }
+    if deny {
+        return None;
+    }
+    if granted.is_some() {
+        return granted;
+    }
+    legacy.and_then(Perm::parse)
+}
+
+/// Pure application precedence (see [`merge_folder`]): returns
+/// `(allowed, read_only)` for a non-administrator.
+pub fn merge_app<'a>(
+    app_id: &str,
+    direct: Option<&'a str>,
+    group_rules: impl IntoIterator<Item = &'a str>,
+) -> (bool, bool) {
+    let mut deny = false;
+    let mut allow = false;
+    for rule in direct.into_iter().chain(group_rules) {
+        match AppRule::parse(rule) {
+            Some(AppRule::None) => deny = true,
+            Some(AppRule::Allow) => allow = true,
+            Some(AppRule::Inherit) | None => {}
+        }
+    }
+    if deny {
+        (false, false)
+    } else if allow {
+        (true, !app_default_allowed(app_id))
+    } else {
+        (app_default_allowed(app_id), app_default_read_only(app_id))
     }
 }
 

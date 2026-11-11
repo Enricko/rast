@@ -46,6 +46,8 @@ pub fn routes() -> Router<AppState> {
             get(get_user_effective_access),
         )
         .route("/api/access/me", get(my_effective_access))
+        .route("/api/groups/{id}/members", get(get_group_members))
+        .route("/api/groups/{id}/impact", get(get_group_impact))
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,26 +1170,97 @@ fn auth_user_from_record(record: &users::UserRecord) -> AuthUser {
     }
 }
 
-/// GET /api/users/{id}/effective-access — admin explanation view.
+/// Query for the paginated Effective Access views.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveAccessQuery {
+    pub q: Option<String>,
+    /// `all` (default), `none`, `read`, `write` or `admin`.
+    pub level: Option<String>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+}
+
+impl EffectiveAccessQuery {
+    fn review(&self, include_hidden: bool) -> access::review::ReviewQuery {
+        access::review::ReviewQuery {
+            search: self.q.clone(),
+            level: access::review::LevelFilter::parse(self.level.as_deref()),
+            page: self.page.unwrap_or(1),
+            per_page: self.per_page.unwrap_or(access::review::DEFAULT_PER_PAGE),
+            include_hidden,
+        }
+    }
+}
+
+/// GET /api/users/{id}/effective-access?q=&level=&page=&perPage= — admin
+/// explanation view. Folders are searched, filtered and paginated; every row
+/// is computed by the enforcement evaluator and carries a `conflict`
+/// explanation when an explicit No Access overrides grants.
 pub async fn get_user_effective_access(
     State(state): State<AppState>,
     _admin: AdminUser,
     Path(id): Path<i64>,
-) -> AppResult<Json<access::EffectiveAccessDto>> {
+    Query(query): Query<EffectiveAccessQuery>,
+) -> AppResult<Json<access::review::EffectiveAccessPage>> {
     let record = ensure_user_exists(&state.db, id).await?;
     let user = auth_user_from_record(&record);
     Ok(Json(
-        access::effective_access(&state.db, &user, true).await?,
+        access::review::effective_access_page(&state.db, &user, &query.review(true)).await?,
     ))
 }
 
 /// GET /api/access/me — the caller's own effective access (launcher/help).
+/// Hidden (No Access) folders are never listed.
 pub async fn my_effective_access(
     State(state): State<AppState>,
     user: AuthUser,
-) -> AppResult<Json<access::EffectiveAccessDto>> {
+    Query(query): Query<EffectiveAccessQuery>,
+) -> AppResult<Json<access::review::EffectiveAccessPage>> {
     Ok(Json(
-        access::effective_access(&state.db, &user, false).await?,
+        access::review::effective_access_page(&state.db, &user, &query.review(false)).await?,
+    ))
+}
+
+/// Query for `GET /api/groups/{id}/members`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MembersQuery {
+    pub q: Option<String>,
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+}
+
+/// GET /api/groups/{id}/members?q=&page=&perPage= — searchable member list
+/// including deactivated accounts (flagged `active: false`).
+pub async fn get_group_members(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+    Query(query): Query<MembersQuery>,
+) -> AppResult<Json<access::review::GroupMembersPage>> {
+    load_group_summary(&state.db, id).await?;
+    Ok(Json(
+        access::review::group_members_page(
+            &state.db,
+            id,
+            query.q.as_deref(),
+            query.page.unwrap_or(1),
+            query.per_page.unwrap_or(access::review::DEFAULT_PER_PAGE),
+        )
+        .await?,
+    ))
+}
+
+/// GET /api/groups/{id}/impact — what deleting the group would change for
+/// its members (computed with the evaluator in a rolled-back transaction).
+pub async fn get_group_impact(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<i64>,
+) -> AppResult<Json<access::review::GroupImpact>> {
+    Ok(Json(
+        access::review::group_deletion_impact(&state.db, id).await?,
     ))
 }
 

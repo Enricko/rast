@@ -2013,3 +2013,582 @@ async fn group_folder_and_app_permissions_are_enforced() {
         "restored app receives monitor events: {seen}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Audit hardening regressions (v0.2.0 → v0.3.0)
+// ---------------------------------------------------------------------------
+
+async fn sse_frames_for(server: &TestServer, session: &Session, window_ms: u64) -> String {
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/events")
+        .header(
+            header::COOKIE,
+            session.cookie.parse::<axum::http::HeaderValue>().unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = server.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    collect_sse(
+        response.into_body(),
+        std::time::Duration::from_millis(window_ms),
+    )
+    .await
+}
+
+async fn upload_status(
+    server: &TestServer,
+    session: &Session,
+    dir: &str,
+    name: &str,
+) -> StatusCode {
+    let path = format!(
+        "/api/files/upload?dir={}&name={}",
+        urlencode(dir),
+        urlencode(name)
+    );
+    let (status, _) = server
+        .request_raw(
+            "POST",
+            &path,
+            b"fictional content".to_vec(),
+            "text/plain",
+            session.headers_with_csrf(),
+        )
+        .await;
+    status
+}
+
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Effective Access (admin view) must agree with what the API actually lets
+/// each fictional account do: hidden ⇔ 404, read ⇔ list 200 + upload 403,
+/// write ⇔ list 200 + upload 200 — for every (account, folder) pair, including
+/// direct-deny conflicts, legacy ACL rows and a demoted share creator (F6).
+#[tokio::test]
+async fn effective_access_matches_api_decisions_for_every_account() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    for name in ["ada", "ben", "cara", "dina", "erin"] {
+        server.create_user(name, USER_PASSWORD, Role::User).await;
+    }
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let mut sessions = Vec::new();
+    for name in ["ada", "ben", "cara", "dina", "erin"] {
+        sessions.push((name, server.login(name, USER_PASSWORD).await));
+    }
+    let id = |name: &str| {
+        sessions
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, s)| s.user_id)
+            .unwrap()
+    };
+
+    let projects = create_share(&server, &admin, "Projects").await;
+    let finance = create_share(&server, &admin, "Finance").await;
+    let _archive = create_share(&server, &admin, "Archive").await;
+    let finance_id = finance["id"].as_str().unwrap().to_string();
+    let projects_id = projects["id"].as_str().unwrap().to_string();
+
+    // Legacy ACL: erin is a write member of Finance (no group rules apply).
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            &format!("/api/shares/{finance_id}"),
+            Some(json!({"members": [{"userId": id("erin"), "perms": "write"}]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for (name, members, folder_rules) in [
+        (
+            "Project Editors",
+            vec![id("ada"), id("dina")],
+            json!([{"shareId": projects_id, "rule": "write"}, {"shareName": "Finance", "rule": "read"}]),
+        ),
+        (
+            "Project Viewers",
+            vec![id("ben")],
+            json!([{"shareName": "Projects", "rule": "read"}, {"shareName": "Finance", "rule": "none"}]),
+        ),
+    ] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/groups",
+                Some(json!({"name": name, "members": members, "folderRules": folder_rules})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body["folderRules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|rule| rule["shareId"].is_string() && rule["shareName"].is_string()),
+            "rules return stable ids and current names: {body}"
+        );
+    }
+    // Dina: direct No Access on Projects overrides her group write grant.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{}/access-rules", id("dina")),
+            Some(
+                json!({"folderRules": [{"shareName": "Projects", "rule": "none"}], "appRules": []}),
+            ),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let mut checked = 0;
+    for (name, session) in &sessions {
+        let review = effective_access_for(&server, &admin, session.user_id).await;
+        assert_eq!(review["foldersAll"], 3, "{review}");
+        for folder in review["folders"].as_array().unwrap() {
+            let share = folder["shareName"].as_str().unwrap();
+            let level = folder["level"].as_str().unwrap();
+            let dir = format!("/shared/{share}");
+            let (list_status, _, _) = server
+                .request(
+                    "GET",
+                    &format!("/api/files?path={}&page=1&perPage=10", urlencode(&dir)),
+                    None,
+                    session.headers(),
+                )
+                .await;
+            let upload = upload_status(&server, session, &dir, &format!("{name}.txt")).await;
+            match level {
+                "none" => {
+                    assert_eq!(list_status, StatusCode::NOT_FOUND, "{name} {share}");
+                    assert_eq!(upload, StatusCode::NOT_FOUND, "{name} {share}");
+                }
+                "read" => {
+                    assert_eq!(list_status, StatusCode::OK, "{name} {share}");
+                    assert_eq!(upload, StatusCode::FORBIDDEN, "{name} {share}");
+                }
+                "write" | "admin" => {
+                    assert_eq!(list_status, StatusCode::OK, "{name} {share}");
+                    assert_eq!(upload, StatusCode::OK, "{name} {share}");
+                }
+                other => panic!("unexpected level {other}"),
+            }
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 15, "5 accounts × 3 folders cross-checked");
+
+    // Spot-check the expected decisions and the conflict explanation.
+    let dina = effective_access_for(&server, &admin, id("dina")).await;
+    let dina_projects = dina["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["shareName"] == "Projects")
+        .unwrap()
+        .clone();
+    assert_eq!(dina_projects["level"], "none");
+    assert_eq!(dina_projects["conflict"]["deniedBy"][0]["kind"], "direct");
+    assert_eq!(
+        dina_projects["conflict"]["overriddenGrants"][0]["groupName"],
+        "Project Editors"
+    );
+    let erin = effective_access_for(&server, &admin, id("erin")).await;
+    let erin_finance = erin["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["shareName"] == "Finance")
+        .unwrap()
+        .clone();
+    assert_eq!(erin_finance["level"], "write");
+    assert_eq!(erin_finance["fallback"], "legacy-acl");
+
+    // Search, level filter and pagination use the same evaluator.
+    let (status, _, page) = server
+        .request(
+            "GET",
+            &format!(
+                "/api/users/{}/effective-access?q=proj&level=all&page=1&perPage=1",
+                id("ada")
+            ),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["foldersTotal"], 1);
+    assert_eq!(page["folders"][0]["shareName"], "Projects");
+    assert_eq!(page["folders"][0]["level"], "write");
+    assert_eq!(
+        page["apps"].as_array().unwrap().len(),
+        6,
+        "apps always complete"
+    );
+    let (_, _, none_only) = server
+        .request(
+            "GET",
+            &format!(
+                "/api/users/{}/effective-access?level=none&perPage=2",
+                id("ben")
+            ),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(
+        none_only["foldersTotal"], 2,
+        "Finance + Archive: {none_only}"
+    );
+    assert_eq!(none_only["levelCounts"]["read"], 1);
+
+    // The caller's own view never lists hidden folders.
+    let ben = &sessions.iter().find(|(n, _)| *n == "ben").unwrap().1;
+    let (status, _, mine) = server
+        .request("GET", "/api/access/me", None, ben.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{mine}");
+    let names: Vec<&str> = mine["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["shareName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["Projects"]);
+}
+
+/// F6: a former administrator who created a shared folder must not keep an
+/// implicit owner grant after demotion (v0.1.8 never had one).
+#[tokio::test]
+async fn demoted_share_creator_has_no_implicit_access() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("frank", USER_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let frank = server.login("frank", USER_PASSWORD).await;
+    let _share = create_share(&server, &frank, "Frank Projects").await;
+
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            &format!("/api/users/{}", frank.user_id),
+            Some(json!({"role": "user"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let frank = server.login("frank", USER_PASSWORD).await;
+    let (status, _, _) = server
+        .request(
+            "GET",
+            "/api/files?path=%2Fshared%2FFrank%20Projects&page=1&perPage=10",
+            None,
+            frank.headers(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "demoted creator keeps no access"
+    );
+    let review = effective_access_for(&server, &admin, frank.user_id).await;
+    assert_eq!(review["folders"][0]["level"], "none", "{review}");
+    assert_ne!(review["folders"][0]["fallback"], "owner");
+}
+
+/// F12/F13 support endpoints: searchable member pages (incl. deactivated
+/// members) and a deletion impact computed with the real evaluator.
+#[tokio::test]
+async fn group_members_page_and_deletion_impact() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let mut ids = Vec::new();
+    for index in 0..30 {
+        let name = format!("member{index:02}");
+        server.create_user(&name, USER_PASSWORD, Role::User).await;
+        ids.push(
+            users::find_by_username(&server.state.db, &name)
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+        );
+    }
+    create_share(&server, &admin, "Projects").await;
+    let (status, _, group) = server
+        .request(
+            "POST",
+            "/api/groups",
+            Some(json!({
+                "name": "Project Editors",
+                "members": ids,
+                "folderRules": [{"shareName": "Projects", "rule": "write"}],
+                "appRules": [{"appId": "backup", "rule": "allow"}]
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{group}");
+    let group_id = group["id"].as_i64().unwrap();
+    // Deactivate one member: it stays listed (flagged) for review/removal.
+    let (status, _, _) = server
+        .request(
+            "PATCH",
+            &format!("/api/users/{}", ids[3]),
+            Some(json!({"active": false})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _, page1) = server
+        .request(
+            "GET",
+            &format!("/api/groups/{group_id}/members?page=1&perPage=25"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page1}");
+    assert_eq!(page1["total"], 30);
+    assert_eq!(page1["inactiveTotal"], 1);
+    assert_eq!(page1["items"].as_array().unwrap().len(), 25);
+    let (_, _, page2) = server
+        .request(
+            "GET",
+            &format!("/api/groups/{group_id}/members?page=2&perPage=25"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(page2["items"].as_array().unwrap().len(), 5);
+    let inactive: Vec<&Value> = page1["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(page2["items"].as_array().unwrap().iter())
+        .filter(|m| m["active"] == false)
+        .collect();
+    assert_eq!(inactive.len(), 1);
+    assert_eq!(inactive[0]["username"], "member03");
+    let (_, _, search) = server
+        .request(
+            "GET",
+            &format!("/api/groups/{group_id}/members?q=r0"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(search["total"], 10, "two-character search works: {search}");
+
+    // Account search: short queries and the active filter.
+    let (_, _, active_users) = server
+        .request(
+            "GET",
+            "/api/users?q=member0&active=active&perPage=100",
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(
+        active_users["total"], 9,
+        "member00..09 minus the disabled one"
+    );
+
+    let (status, _, impact) = server
+        .request(
+            "GET",
+            &format!("/api/groups/{group_id}/impact"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{impact}");
+    assert_eq!(impact["members"], 30);
+    assert_eq!(impact["folderRules"], 1);
+    assert_eq!(impact["appRules"], 1);
+    let first = &impact["users"][0];
+    let changes = first["changes"].as_array().unwrap();
+    assert!(changes.iter().any(|c| c["kind"] == "folder"
+        && c["resource"] == "Projects"
+        && c["before"] == "write"
+        && c["after"] == "none"));
+    assert!(changes.iter().any(|c| c["kind"] == "app"
+        && c["resourceId"] == "backup"
+        && c["before"] == "read-only"
+        && c["after"] == "none"));
+    // The preview never changes anything.
+    let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_members WHERE group_id = ?")
+        .bind(group_id)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(still, 30, "impact preview is read-only");
+}
+
+/// F9: a pending forced password change is enforced by the server, not only
+/// by the UI dialog.
+#[tokio::test]
+async fn forced_password_change_is_enforced_server_side() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("gwen", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let gwen = server.login("gwen", USER_PASSWORD).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/users/{}/password", gwen.user_id),
+            Some(json!({"password": "Temporary-Password-1!", "mustChangePassword": true})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gwen = server.login("gwen", "Temporary-Password-1!").await;
+
+    let (status, _, me) = server
+        .request("GET", "/api/auth/me", None, gwen.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["user"]["mustChangePassword"], true);
+    let (status, _, body) = server
+        .request(
+            "GET",
+            "/api/files?path=%2F&page=1&perPage=5",
+            None,
+            gwen.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("password change required"));
+
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/auth/password",
+            Some(json!({"currentPassword": "Temporary-Password-1!", "newPassword": "Gwen-New-Password-9!"})),
+            gwen.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, _) = server
+        .request(
+            "GET",
+            "/api/files?path=%2F&page=1&perPage=5",
+            None,
+            gwen.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "access restored after the change");
+}
+
+/// F8 + live revocation: monitor samples delivered over SSE carry container
+/// inventory only for accounts allowed to use Applications, and a grant or
+/// revocation applies to the next sample on an already-open stream.
+#[tokio::test]
+async fn sse_monitor_container_inventory_follows_current_access() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("hana", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let hana = server.login("hana", USER_PASSWORD).await;
+    let sample = json!({
+        "ts": 1,
+        "containers": [{"id": "c0ffee", "name": "fictional-db", "cpuPercent": 1.0}],
+        "components": []
+    });
+
+    // Restricted: no inventory.
+    let stream = {
+        let server_app = server.app.clone();
+        let cookie = hana.cookie.clone();
+        tokio::spawn(async move {
+            let request = Request::builder()
+                .method("GET")
+                .uri("/api/events")
+                .header(
+                    header::COOKIE,
+                    cookie.parse::<axum::http::HeaderValue>().unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap();
+            let response = server_app.oneshot(request).await.unwrap();
+            collect_sse(response.into_body(), std::time::Duration::from_millis(1500)).await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    server.state.events.publish("monitor", sample.clone());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Grant Applications while the stream is open; the next sample includes it.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{}/access-rules", hana.user_id),
+            Some(json!({"folderRules": [], "appRules": [{"appId": "applications", "rule": "allow"}]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    server.state.events.publish("monitor", sample.clone());
+    let frames = stream.await.unwrap();
+    let monitor_frames: Vec<&str> = frames
+        .split("\n\n")
+        .filter(|frame| frame.contains("event: monitor"))
+        .collect();
+    // initial snapshot + two live samples
+    assert!(monitor_frames.len() >= 3, "{frames}");
+    let live: Vec<&&str> = monitor_frames
+        .iter()
+        .filter(|frame| frame.contains("\"ts\":1}") || frame.contains("\"ts\":1,"))
+        .collect();
+    assert_eq!(live.len(), 2, "{frames}");
+    assert!(
+        !live[0].contains("fictional-db"),
+        "restricted sample leaked inventory"
+    );
+    assert!(live[0].contains("containersRestricted"));
+    assert!(
+        live[1].contains("fictional-db"),
+        "grant applies to the next sample"
+    );
+    assert!(
+        frames.contains("access.changed"),
+        "live access.changed delivered"
+    );
+
+    // Admin streams are never redacted.
+    let admin_frames = sse_frames_for(&server, &admin, 300).await;
+    assert!(!admin_frames.contains("containersRestricted"));
+}
