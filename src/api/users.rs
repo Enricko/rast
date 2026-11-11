@@ -58,12 +58,27 @@ pub async fn list_users(
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.or(q.per_page_camel).unwrap_or(25).clamp(1, 100);
     let (rows, total) = users::list(&state.db, q.q.as_deref(), page, per_page).await?;
+    let mut items: Vec<UserDto> = rows.into_iter().map(UserDto::from).collect();
+    attach_groups(&state.db, &mut items).await?;
     Ok(Json(UserPage {
-        items: rows.into_iter().map(UserDto::from).collect(),
+        items,
         page,
         per_page,
         total,
     }))
+}
+
+/// Fill group memberships (one batched query) for user rows.
+async fn attach_groups(pool: &sqlx::SqlitePool, items: &mut [UserDto]) -> AppResult<()> {
+    let ids: Vec<i64> = items.iter().map(|user| user.id).collect();
+    let mut groups = crate::access::group_refs_for_users(pool, &ids).await?;
+    for item in items.iter_mut() {
+        if let Some(list) = groups.remove(&item.id) {
+            item.group_ids = list.iter().map(|group| group.id).collect();
+            item.groups = list;
+        }
+    }
+    Ok(())
 }
 
 /// POST /api/users

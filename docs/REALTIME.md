@@ -28,6 +28,11 @@ publish_users(kind, user_ids, data)       // explicit audience (e.g. share membe
 publish_admin(kind, data)                 // administrators
 ```
 
+Events are additionally filtered by the account's current **application access**
+(group policy): a user who cannot use File Station, Applications, Backup Center or
+Activity Logs receives none of that app's events, and `access.changed` is always
+delivered so clients can reauthorize.
+
 `GET /api/events` (protected) sends `hello` (seq, identity, `sessionId`),
 then filtered events, `ping` heartbeats every 15 s and `resync` when the
 broadcast receiver lagged. Sessions are revalidated every 20 s; revoked,
@@ -51,6 +56,8 @@ change committed.
 | `audit.created` | UserAndAdmin(actor) / Admin | audit row (already emitted by `audit::record`) |
 | `user.changed` | Admin | `{userId, event:"created"|"updated"|"deactivated"}` |
 | `settings.changed` | Admin | `{keys:[...]}` |
+| `group.changed` | Admin | `{reason, groupId}` (group list/editor refresh) |
+| `access.changed` | User | `{reason, groupId?, userId, changedBy}` (launcher/File Station/apps reauthorize) |
 | `appearance.changed` | User | `{reason, originSessionId, appearance?}` |
 | `session.revoked` | stream-local | `{reason}` (connection closes afterwards) |
 

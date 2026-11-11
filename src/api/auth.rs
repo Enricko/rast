@@ -1,6 +1,6 @@
 //! Authentication, session and first-run setup endpoints.
 
-use std::sync::OnceLock;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use axum::{
     extract::{Path, State},
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::{
+    access::{self, app_label, APP_IDS},
     audit::{self, AuditLog},
     auth::{self, csrf, password, session, AuthUser, PeerAddr, Role},
     db,
@@ -254,7 +255,7 @@ pub async fn login(
 
     let record = users::find_by_id(&state.db, user_id)
         .await?
-        .ok_or_else(|| AppError::internal("user vanished during login"))?;
+        .ok_or(AppError::internal("user vanished during login"))?;
     let cookie = auth::session_cookie(
         &new_session.token,
         state.config.session_ttl_hours,
@@ -283,7 +284,25 @@ pub struct MeResponse {
     pub csrf_token: String,
     pub session_expires_at: i64,
     pub features: Features,
+    /// Effective application permissions and group memberships for the
+    /// launcher/UI. Group policy can hide or read-only-limit an application.
+    pub permissions: PermissionsDto,
     pub server_time: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPermissionDto {
+    pub allowed: bool,
+    pub read_only: bool,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsDto {
+    pub apps: BTreeMap<String, AppPermissionDto>,
+    pub groups: Vec<access::GroupRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -308,17 +327,32 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
             .fetch_optional(&state.db)
             .await?
             .unwrap_or_else(|| db::now_ms() + state.config.session_ttl_hours * 3_600_000);
+    let mut apps = BTreeMap::new();
+    for app_id in APP_IDS {
+        let grant = access::app_access(&state.db, &user, app_id).await?;
+        apps.insert(
+            (*app_id).to_string(),
+            AppPermissionDto {
+                allowed: grant.allowed,
+                read_only: grant.read_only,
+                label: app_label(app_id).to_string(),
+            },
+        );
+    }
+    let allowed = |app: &str| apps.get(app).is_some_and(|entry| entry.allowed);
+    let groups = access::group_refs_for_user(&state.db, user.id).await?;
     Ok(Json(MeResponse {
         csrf_token: csrf::token(&state.secrets, &user.session_id),
         session_expires_at: expires_at,
         features: Features {
             docker: state.docker.enabled,
-            apps: state.docker.enabled,
-            backup: true,
-            monitor: true,
-            activity_logs: true,
-            file_station: true,
+            apps: state.docker.enabled && allowed("applications"),
+            backup: allowed("backup"),
+            monitor: allowed("monitor"),
+            activity_logs: allowed("logs"),
+            file_station: allowed("files"),
         },
+        permissions: PermissionsDto { apps, groups },
         server_time: db::now_ms(),
         user: UserDto::from(record),
     }))

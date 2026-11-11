@@ -241,6 +241,44 @@ Every successful change publishes an `appearance.changed` event to the owner's
 other sessions (`{reason, originSessionId, appearance}`).
 
 
+
+## Users, groups and access policy (admin)
+
+NAS-style groups with per-group shared-folder and application rules. Precedence:
+explicit **No Access** (user or any group) wins; otherwise the strongest grant
+wins (`write` includes `read`); when no rule grants anything the legacy
+`share_members` ACL / share owner decide, so upgraded installations keep their
+existing access. Personal homes keep ownership rules; administrators bypass
+folder policy, and group permissions never grant administrator capabilities.
+
+Folder rules: `inherit | none | read | write`. Application rules:
+`inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
+`logs`, `controlpanel` (group `allow` for Applications/Backup is read-only;
+deploy/config/mutations remain admin-only).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/groups?page=&perPage=&q=` | `{items:[{id,name,description,memberCount,folderRuleCount,appRuleCount,createdAt,updatedAt}],page,perPage,total}` |
+| POST | `/api/groups` | `{name, description?, members:[userId], folderRules:[{shareName,rule}], appRules:[{appId,rule}]}` → GroupDetail |
+| GET | `/api/groups/{id}` | GroupDetail with `members`, `folderRules`, `appRules` |
+| PUT | `/api/groups/{id}` | same body; replaces the sets in one save; stable id across rename |
+| DELETE | `/api/groups/{id}` | `{deleted,groupId,affectedUsers,affectedFolderRules,affectedAppRules,retained}`; users/folders/files are kept |
+| GET | `/api/users` | items additionally expose `groups:[{id,name}]` and `groupIds` |
+| GET | `/api/users/{id}/groups` | `{groupIds, groups:[{id,name}]}` |
+| PUT | `/api/users/{id}/groups` | `{groupIds}` (atomic replace) |
+| GET | `/api/users/{id}/access-rules` | direct user overrides: `{folderRules,appRules}` |
+| PUT | `/api/users/{id}/access-rules` | replace direct overrides (explicit deny/grant) |
+| GET | `/api/users/{id}/effective-access` | code-level explanation: `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback}],apps:[{appId,label,allowed,readOnly,sources,fallback}]}` |
+| GET | `/api/access/me` | caller's own effective access (hidden shares omitted) |
+
+`GET /api/auth/me` includes `permissions: {apps: {<id>:{allowed,readOnly,label}},
+groups:[{id,name}]}` used by the launcher. Live updates: `group.changed`
+(admin, `{reason,groupId}`) and `access.changed` (user-scoped,
+`{reason,groupId?,userId,changedBy}`); SSE events are additionally filtered by
+the account's current application access. Audit actions: `group.create`,
+`group.update`, `group.members_update`, `group.permissions_update`,
+`group.delete`, `user.groups_update`, `user.access_update`.
+
 ## Realtime events and live logs
 
 `GET /api/events` is an authenticated SSE stream scoped server-side:

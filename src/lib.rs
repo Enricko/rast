@@ -4,6 +4,7 @@
 //! file station, application deployment, resource monitoring, control panel,
 //! backups and audit logs — shipped as a single Rust binary.
 
+pub mod access;
 pub mod api;
 pub mod appearance;
 pub mod audit;

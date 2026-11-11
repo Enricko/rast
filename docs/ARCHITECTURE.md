@@ -158,6 +158,19 @@ keeps it inactive in that case.
   in the `trash` table; restore re-checks quota and conflicts.
 
 
+## Access policy
+
+Group policy lives in `groups`, `group_members`, `group_folder_rules`,
+`group_app_rules` plus per-user `user_folder_rules`/`user_app_rules`
+(migration `0004`, additive). A single evaluator (`src/access/mod.rs`) is used
+by API enforcement, storage resolution, SSE filtering, the `/api/auth/me`
+launcher permissions and the admin Effective Access view, so the UI always
+explains the decision the backend actually makes. Decisions are cached per
+account/resource and invalidated by a generation counter after every committed
+membership/rule/share change. Legacy `share_members` produces the fallback
+level when no new rule grants access, which preserves existing access on
+upgrade. See `docs/GROUPS.md` for the full contract.
+
 ## Live updates
 
 One process-wide `EventBus` (`src/events.rs`) fans out to every authenticated

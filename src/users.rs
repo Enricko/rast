@@ -132,7 +132,7 @@ pub async fn create(
 
     find_by_id(pool, id)
         .await?
-        .ok_or_else(|| AppError::internal("user disappeared after creation"))
+        .ok_or(AppError::internal("user disappeared after creation"))
 }
 
 pub async fn find_by_username(pool: &SqlitePool, username: &str) -> AppResult<Option<UserRecord>> {
@@ -229,6 +229,11 @@ pub async fn active_admin_count(pool: &SqlitePool) -> AppResult<i64> {
 }
 
 /// Update mutable profile fields. Returns the updated record.
+///
+/// The last-active-admin safeguard runs inside the same transaction as the
+/// account/role change: the first statement inside the transaction takes the
+/// SQLite write lock, so a concurrent demotion/deactivation cannot observe a
+/// stale admin count and end up removing the last administrator.
 pub async fn update(
     pool: &SqlitePool,
     id: i64,
@@ -238,17 +243,42 @@ pub async fn update(
     quota_bytes: Option<i64>,
     must_change_password: Option<bool>,
 ) -> AppResult<UserRecord> {
-    let current = find_by_id(pool, id)
-        .await?
-        .ok_or(AppError::NotFound("user not found"))?;
-    // Never allow removing the last active admin.
+    let mut tx = pool.begin().await?;
+    // Take the write lock before reading the admin count.
+    let reserved = sqlx::query("UPDATE users SET updated_at = updated_at WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if reserved.rows_affected() == 0 {
+        return Err(AppError::NotFound("user not found"));
+    }
+    let current = sqlx::query(
+        "SELECT u.id, u.username, u.display_name, u.role, u.active, u.quota_bytes,
+                u.must_change_password, u.created_at, u.updated_at, u.last_login_at,
+                COALESCE(s.used_bytes, 0) AS used_bytes
+         FROM users u LEFT JOIN storage_usage s ON s.user_id = u.id
+         WHERE u.id = ?",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(AppError::NotFound("user not found"))
+    .map(map_user)?;
+
     let losing_admin = current.role == Role::Admin
         && (role.is_some_and(|r| r != Role::Admin) || active == Some(false));
-    if losing_admin && active_admin_count(pool).await? <= 1 {
-        return Err(AppError::bad_request(
-            "cannot demote or deactivate the last active administrator",
-        ));
+    if losing_admin {
+        let admins: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1")
+                .fetch_one(&mut *tx)
+                .await?;
+        if admins <= 1 {
+            return Err(AppError::bad_request(
+                "cannot demote or deactivate the last active administrator",
+            ));
+        }
     }
+
     let now = db::now_ms();
     sqlx::query(
         "UPDATE users SET display_name = ?, role = ?, active = ?, quota_bytes = ?,
@@ -265,8 +295,9 @@ pub async fn update(
     .bind(must_change_password.unwrap_or(current.must_change_password))
     .bind(now)
     .bind(id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     if active == Some(false) {
         crate::auth::session::revoke_all_for_user(pool, id, None).await?;
     }
@@ -314,20 +345,39 @@ pub async fn password_hash(pool: &SqlitePool, id: i64) -> AppResult<Option<Strin
 
 /// Deactivate an account (default admin action; data is preserved).
 pub async fn deactivate(pool: &SqlitePool, id: i64) -> AppResult<()> {
-    let current = find_by_id(pool, id)
-        .await?
-        .ok_or(AppError::NotFound("user not found"))?;
-    if current.role == Role::Admin && current.active && active_admin_count(pool).await? <= 1 {
-        return Err(AppError::bad_request(
-            "cannot deactivate the last active administrator",
-        ));
+    let mut tx = pool.begin().await?;
+    // Same transaction/locking discipline as `update`: write lock first, then
+    // count, then flip the row.
+    let reserved = sqlx::query("UPDATE users SET updated_at = updated_at WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if reserved.rows_affected() == 0 {
+        return Err(AppError::NotFound("user not found"));
+    }
+    let (role, active): (String, bool) =
+        sqlx::query_as("SELECT role, active FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if role == "admin" && active {
+        let admins: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1")
+                .fetch_one(&mut *tx)
+                .await?;
+        if admins <= 1 {
+            return Err(AppError::bad_request(
+                "cannot deactivate the last active administrator",
+            ));
+        }
     }
     let now = db::now_ms();
     sqlx::query("UPDATE users SET active = 0, updated_at = ? WHERE id = ?")
         .bind(now)
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     crate::auth::session::revoke_all_for_user(pool, id, None).await?;
     Ok(())
 }
@@ -363,6 +413,10 @@ pub struct UserDto {
     pub created_at: i64,
     pub updated_at: i64,
     pub last_login_at: Option<i64>,
+    /// Groups the account belongs to (filled by the users endpoints).
+    pub groups: Vec<crate::access::GroupRef>,
+    /// Convenience id list for editors that only need memberships.
+    pub group_ids: Vec<i64>,
 }
 
 impl From<UserRecord> for UserDto {
@@ -379,6 +433,8 @@ impl From<UserRecord> for UserDto {
             created_at: u.created_at,
             updated_at: u.updated_at,
             last_login_at: u.last_login_at,
+            groups: Vec::new(),
+            group_ids: Vec::new(),
         }
     }
 }

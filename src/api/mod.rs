@@ -14,6 +14,7 @@ pub mod auth;
 pub mod backup;
 pub mod events;
 pub mod files;
+pub mod groups;
 pub mod jobs;
 pub mod logs;
 pub mod monitor;
@@ -31,11 +32,16 @@ pub fn router(state: AppState) -> Router {
         .merge(jobs::routes())
         .merge(system::protected_routes())
         .merge(files::routes())
+        .merge(groups::routes())
         .merge(appearance::routes())
         .merge(apps::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
         .route("/api/events", get(events::stream))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::middleware::enforce_app_policy,
+        ))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     Router::new()

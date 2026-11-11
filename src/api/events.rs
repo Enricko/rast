@@ -21,6 +21,7 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{
+    access,
     auth::{self, session, AuthUser},
     db,
     state::AppState,
@@ -32,8 +33,7 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 struct StreamState {
     rx: tokio::sync::broadcast::Receiver<crate::events::Event>,
-    user_id: i64,
-    is_admin: bool,
+    user: AuthUser,
     role: String,
     db: sqlx::SqlitePool,
     token: String,
@@ -55,6 +55,7 @@ pub async fn stream(
     let rx = state.events.subscribe();
     let hello_seq = state.events.sequence();
 
+    let monitor_allowed = access::event_allowed(&state.db, &user, "monitor", &json!({})).await;
     let initial = {
         let snapshot = state.monitor.latest().unwrap_or_else(
             || json!({"ts": db::now_ms(), "unavailable": true, "reason": "no sample yet"}),
@@ -77,7 +78,11 @@ pub async fn stream(
             .event("monitor")
             .id(hello_seq.to_string())
             .data(snapshot.to_string());
-        futures::stream::iter(vec![Ok::<Event, Infallible>(hello), Ok(monitor)])
+        if monitor_allowed {
+            futures::stream::iter(vec![Ok::<Event, Infallible>(hello), Ok(monitor)])
+        } else {
+            futures::stream::iter(vec![Ok::<Event, Infallible>(hello)])
+        }
     };
 
     let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -89,14 +94,14 @@ pub async fn stream(
     ping.tick().await;
     session_check.tick().await;
 
+    let session_id = user.session_id.clone();
     let state_data = StreamState {
         rx,
-        user_id: user.id,
-        is_admin: user.is_admin(),
+        user,
         role,
         db: state.db.clone(),
         token,
-        session_id: user.session_id.clone(),
+        session_id,
         ttl_hours: state.config.session_ttl_hours,
         last_seq: hello_seq,
         ping,
@@ -124,7 +129,14 @@ pub async fn stream(
                                         .data(json!({"reason": "gap", "seq": event.seq}).to_string());
                                     return Some((Ok(resync), st));
                                 }
-                                if !event.scope.allows(st.user_id, st.is_admin) {
+                                if !event.scope.allows(st.user.id, st.user.is_admin()) {
+                                    continue;
+                                }
+                                // Application policy: only deliver events for apps the
+                                // account may currently use (cached, generation-aware).
+                                if !access::event_allowed(&st.db, &st.user, &event.kind, &event.data)
+                                    .await
+                                {
                                     continue;
                                 }
                                 let sse = Event::default()
@@ -190,7 +202,7 @@ async fn check_session(st: &StreamState) -> SessionState {
         return SessionState::Revoked("session replaced");
     }
     let row = sqlx::query_as::<_, (bool, String)>("SELECT active, role FROM users WHERE id = ?")
-        .bind(st.user_id)
+        .bind(st.user.id)
         .fetch_optional(&st.db)
         .await;
     match row {
