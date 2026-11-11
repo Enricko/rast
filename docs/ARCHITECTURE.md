@@ -214,7 +214,9 @@ adds `accent`, migration 0006 adds `widgets`): mode, accent id, wallpaper source
 enabled desktop widgets with their preferred position (a JSON array checked by
 SQLite, re-validated and sanitised on read). Wallpapers are validated by content
 and stored under `<data_dir>/wallpapers/<user-id>/<uuid>.<ext>`; the owner-only
-API serves them with immutable private caching. The client keeps only a small
+API serves them as `private, no-cache` with an ETag: every use revalidates with
+the current session (304 for the owner), so another account signing in to the
+same browser cannot reuse a cached copy. The client keeps only a small
 per-user paint cache.
 
 Writes are partial and explicit. `PUT /api/appearance` merges only the fields

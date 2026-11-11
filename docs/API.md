@@ -245,7 +245,7 @@ Uploaded wallpapers are private: only the owner can read or delete them.
 | PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}, widgets?:[{id,x,y}]}` (partial merge: omitted fields keep their saved value; `widgets`, when present, replaces the whole list; concurrent updates are serialised) |
 | GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
 | POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
-| GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins); private immutable cache + ETag |
+| GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins, also when revalidating); `Cache-Control: private, no-cache` + ETag, so a shared browser never reuses a previous account's image without the owner check |
 | DELETE | `/api/appearance/wallpapers/{id}` | deletes the file; if it is the active wallpaper the account falls back to the default built-in |
 | POST | `/api/appearance/reset` | reset wallpaper to defaults (theme, accent and widgets are kept) |
 

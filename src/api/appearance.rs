@@ -26,8 +26,14 @@ use crate::{
     state::AppState,
 };
 
-/// Immutable per-user wallpaper cache header (content-addressed by UUID).
-const WALLPAPER_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
+/// Private wallpapers may be cached but must be revalidated on every use.
+///
+/// The browser cache is shared by every account that signs in to the same
+/// browser. A long-lived `immutable` entry would let the next account load the
+/// previous one's image from cache, bypassing the owner check. With `no-cache`
+/// each use revalidates with the current session: the owner gets a cheap 304
+/// (the ETag is the upload id), everyone else the usual 404.
+const WALLPAPER_CACHE_CONTROL: &str = "private, no-cache";
 
 /// Notify the user's other sessions (and their own open tabs) that appearance
 /// changed. The originating session id lets a preview dialog distinguish its own
@@ -623,8 +629,11 @@ mod tests {
         assert_eq!(headers[header::CONTENT_DISPOSITION], "inline");
         let cache = headers[header::CACHE_CONTROL].to_str().unwrap();
         assert!(cache.contains("private"));
-        assert!(cache.contains("max-age=31536000"));
-        assert!(cache.contains("immutable"));
+        assert!(cache.contains("no-cache"), "{cache}");
+        assert!(
+            !cache.contains("immutable") && !cache.contains("max-age"),
+            "{cache}"
+        );
         let etag = headers[header::ETAG].to_str().unwrap().to_string();
         assert_eq!(etag, format!("\"{id}\""));
         assert_eq!(
@@ -647,7 +656,9 @@ mod tests {
         assert!(bytes.is_empty());
         assert_eq!(headers[header::ETAG], etag);
 
-        // Other users (including admins) must not be able to fetch it.
+        // Other users (including admins) must not be able to fetch it, and
+        // revalidating the owner's cached copy (same browser, next account)
+        // must not get a 304 that would let the browser reuse it.
         for other in [&bob_app, &admin_app] {
             let (status, _, _) = request(
                 other,
@@ -658,6 +669,18 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::NOT_FOUND);
+            let mut revalidate = HeaderMap::new();
+            revalidate.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
+            let (status, _, bytes) = request(
+                other,
+                Method::GET,
+                &format!("/api/appearance/wallpapers/{id}"),
+                revalidate,
+                Body::empty(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert!(bytes.is_empty() || !bytes.starts_with(b"\x89PNG"));
         }
         // Traversal-looking ids are just 404s.
         let (status, _, _) = request(
