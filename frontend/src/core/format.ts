@@ -78,7 +78,8 @@ export function relativeTime(ts: number | null | undefined): string {
   if (diff < 0) return "just now";
   const seconds = Math.floor(diff / 1000);
   if (seconds < 45) return "just now";
-  const minutes = Math.floor(seconds / 60);
+  // 45–59 s rounds down to 0 minutes; say "1 min ago", never "0 min ago".
+  const minutes = Math.max(1, Math.floor(seconds / 60));
   if (minutes < 60) return `${minutes} min ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
