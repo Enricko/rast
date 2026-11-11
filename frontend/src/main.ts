@@ -9,6 +9,7 @@ import "./styles/apps.css";
 import "./styles/theme.css";
 import "./styles/tokens.css";
 import "./styles/controls.css";
+import "./styles/taskbar.css";
 import { boot } from "./shell";
 
 const SPLASH_TIMEOUT_MS = 12_000;

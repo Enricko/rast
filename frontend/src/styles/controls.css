@@ -1499,11 +1499,6 @@ input[type="radio"]:disabled {
   border-width: 2px;
 }
 
-/* Accent-tinted active desktop taskbar indicator. */
-.taskbar-app.is-active::after {
-  background: var(--accent);
-}
-
 /* Reduced motion: no continuous shimmer/spin unless necessary. */
 @media (prefers-reduced-motion: reduce) {
   .skeleton-line,

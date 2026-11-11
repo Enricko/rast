@@ -496,9 +496,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       class: "taskbar-start",
       type: "button",
       ariaLabel: "Open start menu",
-      title: "Start menu (Ctrl+Space)",
       ariaExpanded: false,
-      dataset: { panelTrigger: "start" },
+      dataset: { tip: "Start menu (Ctrl+Space)", panelTrigger: "start" },
       onClick: () => toggleStartPanel(startButton),
     },
     iconSvg("logo", 23),
@@ -510,9 +509,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     class: "tray-button tray-connection",
     type: "button",
     ariaLabel: "Connection status",
-    title: "Live connection status",
     ariaExpanded: false,
-    dataset: { panelTrigger: "status" },
+    dataset: { panelTrigger: "status", tip: "Live connection status" },
     onClick: () => toggleStatusPanel(connectionButton),
   });
 
@@ -520,7 +518,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     class: "tray-button",
     type: "button",
     ariaLabel: "Switch theme",
-    title: "Switch dark / light mode",
+    dataset: { tip: "Switch dark / light mode" },
     onClick: () => setShellTheme(store.get().theme === "dark" ? "light" : "dark"),
   });
 
@@ -532,9 +530,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       class: "tray-clock",
       type: "button",
       ariaLabel: "Date and time",
-      title: "Date, time and server time",
       ariaExpanded: false,
-      dataset: { panelTrigger: "clock" },
+      dataset: { panelTrigger: "clock", tip: "Date, time and server time" },
       onClick: () => toggleClockPanel(clockButton),
     },
     clockTime,
@@ -550,9 +547,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       class: "user-chip",
       type: "button",
       ariaLabel: "Account menu",
-      title: "Account menu",
       ariaExpanded: false,
-      dataset: { panelTrigger: "user" },
+      dataset: { panelTrigger: "user", tip: "Account menu" },
       onClick: () => toggleUserPanel(userButton),
     },
     userAvatar,
@@ -565,6 +561,111 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     h("div", { class: "taskbar-tray" }, connectionButton, themeButton, clockButton, userButton),
   );
 
+  // ------------------------------------------------------ taskbar tooltips
+  // One themed tooltip for every taskbar control (`data-tip`), shown on hover
+  // after a short delay and immediately on keyboard focus, always kept inside
+  // the viewport (above the control, or below if there is no room).
+  const taskbarTooltip = h("div", { class: "taskbar-tooltip", role: "tooltip", ariaHidden: true });
+  document.body.appendChild(taskbarTooltip);
+  disposers.push(() => taskbarTooltip.remove());
+  let tooltipAnchor: HTMLElement | null = null;
+  let tooltipTimer: number | undefined;
+  const TOOLTIP_DELAY_MS = 450;
+  const TOOLTIP_MARGIN = 8;
+
+  function placeTaskbarTooltip(anchor: HTMLElement): void {
+    const text = anchor.dataset.tip;
+    if (!text || !anchor.isConnected) {
+      hideTaskbarTooltip();
+      return;
+    }
+    taskbarTooltip.textContent = text;
+    taskbarTooltip.style.left = "0px";
+    taskbarTooltip.style.top = "0px";
+    const anchorRect = anchor.getBoundingClientRect();
+    const tipRect = taskbarTooltip.getBoundingClientRect();
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    const maxLeft = Math.max(TOOLTIP_MARGIN, viewportWidth - tipRect.width - TOOLTIP_MARGIN);
+    const left = Math.min(Math.max(anchorRect.left + anchorRect.width / 2 - tipRect.width / 2, TOOLTIP_MARGIN), maxLeft);
+    let top = anchorRect.top - tipRect.height - TOOLTIP_MARGIN;
+    if (top < TOOLTIP_MARGIN) top = anchorRect.bottom + TOOLTIP_MARGIN;
+    taskbarTooltip.style.left = `${Math.round(left)}px`;
+    taskbarTooltip.style.top = `${Math.round(top)}px`;
+    taskbarTooltip.classList.add("is-visible");
+  }
+
+  function showTaskbarTooltip(anchor: HTMLElement, delay: number): void {
+    window.clearTimeout(tooltipTimer);
+    tooltipAnchor = anchor;
+    // Moving between controls while a tooltip is open switches immediately.
+    const wait = taskbarTooltip.classList.contains("is-visible") ? 0 : delay;
+    tooltipTimer = window.setTimeout(() => {
+      if (tooltipAnchor === anchor && !disposed) placeTaskbarTooltip(anchor);
+    }, wait);
+  }
+
+  function hideTaskbarTooltip(): void {
+    window.clearTimeout(tooltipTimer);
+    tooltipTimer = undefined;
+    tooltipAnchor = null;
+    taskbarTooltip.classList.remove("is-visible");
+  }
+
+  const tipTarget = (target: EventTarget | null): HTMLElement | null =>
+    target instanceof Element ? target.closest<HTMLElement>("[data-tip]") : null;
+  taskbar.addEventListener("pointerover", (event) => {
+    if (event.pointerType === "touch") return;
+    const anchor = tipTarget(event.target);
+    if (anchor && anchor !== tooltipAnchor) showTaskbarTooltip(anchor, TOOLTIP_DELAY_MS);
+  });
+  taskbar.addEventListener("pointerout", (event) => {
+    const next = tipTarget(event.relatedTarget);
+    if (next && next === tooltipAnchor) return;
+    if (!next) hideTaskbarTooltip();
+  });
+  taskbar.addEventListener("focusin", (event) => {
+    const anchor = tipTarget(event.target);
+    if (anchor && anchor.matches(":focus-visible")) showTaskbarTooltip(anchor, 0);
+  });
+  taskbar.addEventListener("focusout", () => hideTaskbarTooltip());
+  taskbar.addEventListener("pointerdown", () => hideTaskbarTooltip());
+  const onTooltipKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape" && tooltipAnchor) hideTaskbarTooltip();
+  };
+  document.addEventListener("keydown", onTooltipKey);
+  disposers.push(() => document.removeEventListener("keydown", onTooltipKey));
+
+  // ------------------------------------------------------- taskbar density
+  // When the app strip runs out of room the buttons become icon-only
+  // (`is-compact`); if that is still not enough the tray drops its secondary
+  // text (`is-tight`). Names stay available as tooltips and accessible names.
+  let densityFrame = 0;
+  function updateTaskbarDensity(): void {
+    densityFrame = 0;
+    if (disposed) return;
+    const overflowing = (): boolean => taskbarApps.scrollWidth > taskbarApps.clientWidth + 1;
+    taskbar.classList.remove("is-compact", "is-tight");
+    if (!overflowing()) return;
+    taskbar.classList.add("is-compact");
+    if (!overflowing()) return;
+    taskbar.classList.add("is-tight");
+  }
+  function scheduleTaskbarDensity(): void {
+    if (densityFrame || disposed) return;
+    densityFrame = window.requestAnimationFrame(updateTaskbarDensity);
+  }
+  if (typeof ResizeObserver === "function") {
+    const densityObserver = new ResizeObserver(() => scheduleTaskbarDensity());
+    densityObserver.observe(taskbar);
+    disposers.push(() => densityObserver.disconnect());
+  } else {
+    window.addEventListener("resize", scheduleTaskbarDensity);
+    disposers.push(() => window.removeEventListener("resize", scheduleTaskbarDensity));
+  }
+  disposers.push(() => {
+    if (densityFrame) window.cancelAnimationFrame(densityFrame);
+  });
+
   function taskbarWindowButton(win: WindowInfo): HTMLButtonElement {
     const app = findApp(win.appId);
     const button = h(
@@ -573,7 +674,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         class: `taskbar-app${win.focused && !win.minimized ? " is-active" : ""}${win.minimized ? " is-minimized" : ""}`,
         type: "button",
         ariaLabel: `${app?.name ?? win.title}${win.minimized ? " (minimized)" : ""}`,
-        title: win.title,
+        dataset: { tip: win.minimized ? `${win.title} (minimized)` : win.title },
         onClick: () => {
           if (win.minimized) wm.toggleMinimize(win.id);
           else if (win.focused) wm.minimize(win.id);
@@ -618,7 +719,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         class: "taskbar-app is-pinned",
         type: "button",
         ariaLabel: `Open ${app.name}`,
-        title: `${app.name} — ${app.description}`,
+        dataset: { tip: `${app.name} — ${app.description}` },
         onClick: () => openApp(app.id),
       },
       h(
@@ -664,7 +765,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         const remaining = windows.slice(MAX_TASKBAR_WINDOWS);
         const more = h(
           "button",
-          { class: "taskbar-app is-more", type: "button", ariaLabel: `${remaining.length} more windows` },
+          {
+            class: "taskbar-app is-more",
+            type: "button",
+            ariaLabel: `${remaining.length} more windows`,
+            dataset: { tip: `${remaining.length} more windows` },
+          },
           iconSvg("more", 18),
           h("span", { class: "taskbar-app-label" }, `+${remaining.length}`),
         );
@@ -687,6 +793,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       taskbarApps.appendChild(taskbarWindowButton(win));
       rendered += 1;
     }
+    // The anchor of an open tooltip may have been replaced by this render.
+    if (tooltipAnchor && !tooltipAnchor.isConnected) hideTaskbarTooltip();
+    updateTaskbarDensity();
     renderDesktopHint();
   }
 
@@ -699,7 +808,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     connectionButton.classList.toggle("is-connecting", state === "connecting" || state === "reconnecting");
     connectionButton.classList.toggle("is-disconnected", state === "offline");
     connectionButton.setAttribute("aria-label", `Live connection: ${label}`);
-    connectionButton.title = `Live connection: ${label} — click for status and last update`;
+    connectionButton.dataset.tip = `Live connection: ${label} — click for status and last update`;
   }
 
   function updateTray(): void {
@@ -713,7 +822,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     const theme = store.get().theme;
     themeButton.replaceChildren(iconSvg(theme === "dark" ? "sun" : "moon", 18));
     themeButton.setAttribute("aria-label", theme === "dark" ? "Switch to light mode" : "Switch to dark mode");
-    themeButton.title = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
+    themeButton.dataset.tip = theme === "dark" ? "Switch to light mode" : "Switch to dark mode";
     updateConnectionButton();
     setFavicon(theme);
     renderTaskbar();
@@ -774,7 +883,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     clockTime.textContent = formatClock(now);
     const date = new Date(now);
     clockDate.textContent = `${date.toLocaleDateString(undefined, { weekday: "short" })}, ${pad(date.getDate())} ${date.toLocaleDateString(undefined, { month: "short" })}`;
-    clockButton.title = `${date.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })} · ${formatClock(now)}`;
+    clockButton.dataset.tip = `${date.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" })} · ${formatClock(now)}`;
   }
   updateClock();
   const clockTimer = window.setInterval(updateClock, 1000);

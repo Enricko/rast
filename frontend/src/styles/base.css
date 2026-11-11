@@ -596,10 +596,6 @@ pre {
   z-index: 50;
 }
 
-:root[data-theme="light"] .taskbar {
-  background: rgba(255, 255, 255, 0.82);
-}
-
 .taskbar-start {
   width: 42px;
   height: 42px;

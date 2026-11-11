@@ -965,10 +965,6 @@ body.app-ready #boot-splash {
   z-index: 80;
 }
 
-:root[data-theme="light"] .taskbar {
-  background: rgba(255, 255, 255, 0.78);
-}
-
 .taskbar-start {
   width: 42px;
   height: 42px;
@@ -978,11 +974,6 @@ body.app-ready #boot-splash {
 
 .taskbar-start:active {
   transform: scale(0.95);
-}
-
-.taskbar-start[aria-expanded="true"] {
-  filter: brightness(1.12);
-  box-shadow: 0 0 0 2px var(--accent-soft), 0 8px 22px rgba(47, 111, 228, 0.4);
 }
 
 .taskbar-apps {
@@ -999,33 +990,6 @@ body.app-ready #boot-splash {
   border: 1px solid transparent;
   gap: 8px;
   transition: background 0.13s ease, border-color 0.13s ease, opacity 0.13s ease;
-}
-
-.taskbar-app:hover {
-  background: var(--surface-2);
-  border-color: var(--border);
-}
-
-.taskbar-app.is-pinned {
-  color: var(--text-dim);
-}
-
-.taskbar-app.is-pinned:hover {
-  color: var(--text);
-}
-
-.taskbar-app.is-active {
-  background: var(--accent-soft);
-  border-color: rgba(120, 170, 255, 0.35);
-  color: var(--text);
-}
-
-.taskbar-app.is-minimized {
-  opacity: 0.62;
-}
-
-.taskbar-app.is-active::after {
-  display: none;
 }
 
 .taskbar-app-icon {
@@ -1046,25 +1010,6 @@ body.app-ready #boot-splash {
   opacity: 0;
 }
 
-.taskbar-app:not(.is-pinned) .taskbar-app-indicator {
-  opacity: 0.85;
-}
-
-.taskbar-app.is-active .taskbar-app-indicator {
-  background: var(--accent);
-  opacity: 1;
-  width: 12px;
-  border-radius: 999px;
-}
-
-.taskbar-app.is-minimized .taskbar-app-indicator {
-  opacity: 0.5;
-}
-
-.taskbar-app.is-more {
-  color: var(--text-dim);
-}
-
 .taskbar-tray {
   gap: 4px;
 }
@@ -1075,23 +1020,6 @@ body.app-ready #boot-splash {
   border-radius: 10px;
   color: var(--text-dim);
   position: relative;
-}
-
-.tray-button:hover {
-  color: var(--text);
-}
-
-.tray-connection[data-state="connected"] {
-  color: var(--ok);
-}
-
-.tray-connection[data-state="connecting"] {
-  color: var(--warning);
-  animation: tray-pulse 1.6s ease-in-out infinite;
-}
-
-.tray-connection.is-offline {
-  color: var(--danger);
 }
 
 @keyframes tray-pulse {
@@ -1120,11 +1048,6 @@ body.app-ready #boot-splash {
   height: 40px;
 }
 
-.tray-clock:hover {
-  background: var(--surface-2);
-  border-color: var(--border);
-}
-
 .user-chip {
   border: 1px solid var(--border);
   background: var(--surface-2);
@@ -1132,18 +1055,6 @@ body.app-ready #boot-splash {
   height: 40px;
   gap: 8px;
   cursor: pointer;
-  color: var(--text);
-}
-
-.user-chip:hover {
-  border-color: var(--border-strong);
-}
-
-.user-chip[aria-expanded="true"],
-.tray-clock[aria-expanded="true"],
-.tray-button[aria-expanded="true"] {
-  background: var(--surface-3);
-  border-color: var(--border-strong);
   color: var(--text);
 }
 
