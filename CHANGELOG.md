@@ -24,6 +24,46 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.4.1] - 2026-11-11
+
+Taskbar and widget defaults. Upgrade with a database backup: migration `0007`
+is not reversible by an older binary (see "Upgrade and rollback").
+
+### Changed
+
+- **Taskbar**: pinned applications keep their place. Opening a pinned
+  application shows its window in the pinned slot instead of moving it to the
+  end; windows of unpinned applications follow the pins in opening order.
+- **Taskbar pins are saved per account** (`taskbarPins` in
+  `GET`/`PUT /api/appearance`) instead of per browser, so they follow the
+  account to any browser and are no longer shared by accounts using the same
+  browser. Every account starts with File Station, Resource Monitor and
+  Control Panel pinned and can pin or unpin any application.
+- **Default widgets**: accounts that never set up widgets see System Health and
+  CPU & Memory (when they may use Resource Monitor). Changing or removing them
+  saves the account's own layout; removing both is remembered.
+- Widgets keep a small margin from the screen edges and the taskbar.
+
+### Fixed
+
+- `rast update` reported `database migration failed: migration N was
+  previously applied but is missing` after a successful update that added a
+  migration: the previous binary opened the database with its own migrations
+  to report the schema. It now reads the recorded schema version without
+  migrating. (An update *from* 0.4.0 still runs the 0.4.0 updater and can show
+  the message once; verify with `rast doctor`.)
+
+### Upgrade and rollback
+
+- Migration `0007_desktop_defaults.sql` adds `user_appearance.widgets_customized`
+  (accounts that already saved widgets count as customised) and
+  `user_appearance.taskbar_pins` (default `["files","monitor","controlpanel"]`).
+  Pins previously kept in a browser's local storage are not imported.
+- Migrations are forward-only: the 0.4.0 binary refuses to start on a
+  schema-v7 database. Roll back by stopping the service, restoring the
+  pre-upgrade database backup and then installing 0.4.0. See
+  `docs/OPERATIONS.md`.
+
 ## [0.4.0] - 2026-11-11
 
 Desktop reliability: live shared-folder updates across accounts, desktop
