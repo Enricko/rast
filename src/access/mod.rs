@@ -155,7 +155,9 @@ pub struct FolderAccess {
     /// `None` means No Access; otherwise the granted read/write/admin level.
     pub level: Option<Perm>,
     pub sources: Vec<RuleSource>,
-    /// `admin`, `legacy-acl`, `explicit` or `none`.
+    /// `admin`, `legacy-acl` (a legacy share membership decided), `explicit`
+    /// (an explicit deny decided) or `none` (no rule or membership grants
+    /// access).
     pub fallback: Option<String>,
 }
 
@@ -424,12 +426,19 @@ async fn compute_folder(
             .fetch_optional(pool)
             .await?;
     let level = legacy.as_deref().and_then(Perm::parse);
+    // `legacy-acl` only when a legacy membership actually decided; otherwise
+    // nothing granted access (`none`), which the UI explains as "No grant".
+    let fallback = if level.is_some() {
+        "legacy-acl"
+    } else {
+        "none"
+    };
     Ok(FolderAccess {
         share_id,
         share_name,
         level,
         sources,
-        fallback: Some("legacy-acl".into()),
+        fallback: Some(fallback.into()),
     })
 }
 

@@ -1414,10 +1414,10 @@ async fn effective_access_precedence_and_legacy_fallback() {
         .unwrap()
         .iter()
         .any(|source| source["rule"] == "none" && source["groupName"] == "Project Viewers"));
-    // No rules at all: legacy ACL fallback (no member row on Archive => none).
+    // No rules and no legacy membership on Archive: nothing grants access.
     let archive_row = find("Archive");
     assert_eq!(archive_row["level"], "none");
-    assert_eq!(archive_row["fallback"], "legacy-acl");
+    assert_eq!(archive_row["fallback"], "none");
 
     // Direct explicit deny beats a stronger group grant.
     let (status, _, _) = server
