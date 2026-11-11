@@ -1087,12 +1087,18 @@ mod tests {
     }
 
     async fn set_user_rule(pool: &SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        let share_id: String =
+            sqlx::query_scalar("SELECT id FROM shares WHERE name = ? COLLATE NOCASE")
+                .bind(share_name)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         sqlx::query(
-            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
-             VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_id, rule, updated_at)
+             VALUES (?, ?, ?, 0)",
         )
         .bind(user_id)
-        .bind(share_name)
+        .bind(share_id)
         .bind(rule)
         .execute(pool)
         .await

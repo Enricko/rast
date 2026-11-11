@@ -163,31 +163,30 @@ pub async fn members(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<MemberD
 }
 
 /// Account ids that may observe a shared folder. Candidates come from the
-/// legacy ACL (members + owner), direct folder rules and group folder rules;
-/// each candidate is then confirmed through the access evaluator so explicit
-/// denials are excluded and group-granted users are included. Used for realtime
-/// event audiences.
+/// legacy ACL (members), direct folder rules and group folder rules (all keyed
+/// by stable share id); each candidate is then confirmed through the access
+/// evaluator so explicit denials are excluded and group-granted users are
+/// included. Used for realtime event audiences.
+///
+/// The share creator is deliberately not a candidate: creators get no implicit
+/// access (audit F6); administrators still receive `Users`-scoped events through
+/// the event scope rules.
 pub async fn member_ids(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<i64>> {
-    let row = sqlx::query("SELECT name, created_by FROM shares WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM shares WHERE id = ?")
         .bind(share_id)
         .fetch_optional(pool)
         .await?;
-    let Some(row) = row else {
+    if exists.is_none() {
         return Ok(Vec::new());
-    };
-    let name: String = row.get("name");
-    let created_by: Option<i64> = row.get("created_by");
+    }
     let mut candidates: Vec<i64> =
         sqlx::query_scalar("SELECT user_id FROM share_members WHERE share_id = ?")
             .bind(share_id)
             .fetch_all(pool)
             .await?;
-    if let Some(creator) = created_by {
-        candidates.push(creator);
-    }
     candidates.extend(
-        sqlx::query_scalar::<_, i64>("SELECT user_id FROM user_folder_rules WHERE share_name = ?")
-            .bind(&name)
+        sqlx::query_scalar::<_, i64>("SELECT user_id FROM user_folder_rules WHERE share_id = ?")
+            .bind(share_id)
             .fetch_all(pool)
             .await?,
     );
@@ -195,9 +194,9 @@ pub async fn member_ids(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<i64>
         sqlx::query_scalar::<_, i64>(
             "SELECT gm.user_id FROM group_members gm
              JOIN group_folder_rules r ON r.group_id = gm.group_id
-             WHERE r.share_name = ?",
+             WHERE r.share_id = ?",
         )
-        .bind(&name)
+        .bind(share_id)
         .fetch_all(pool)
         .await?,
     );
@@ -463,20 +462,8 @@ pub async fn update(
                 .await?;
         }
     }
-    // Group policy rules reference shared folders by display name: rewrite
-    // them in the same transaction so a rename never orphans access rules.
-    if name != current.name {
-        sqlx::query("UPDATE OR REPLACE group_folder_rules SET share_name = ? WHERE share_name = ?")
-            .bind(&name)
-            .bind(&current.name)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE OR REPLACE user_folder_rules SET share_name = ? WHERE share_name = ?")
-            .bind(&name)
-            .bind(&current.name)
-            .execute(&mut *tx)
-            .await?;
-    }
+    // Folder rules reference stable share ids, so a rename keeps them without
+    // any rewrite; only the display name in `shares` changes.
     tx.commit().await?;
     crate::access::bump_generation();
 
@@ -489,26 +476,17 @@ pub async fn update(
     load_dto(pool, record).await
 }
 
-/// Delete a shared folder definition; the data on disk is preserved. Access
-/// rules that reference it by name are removed in the same transaction.
+/// Delete a shared folder definition; the data on disk is preserved. Folder
+/// rules reference `shares.id` with `ON DELETE CASCADE`, so they are removed by
+/// the same statement.
 pub async fn delete(pool: &SqlitePool, id: &str) -> AppResult<ShareRecord> {
     let record = find_by_id(pool, id)
         .await?
         .ok_or(AppError::NotFound("shared folder not found"))?;
-    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM shares WHERE id = ?")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(pool)
         .await?;
-    sqlx::query("DELETE FROM group_folder_rules WHERE share_name = ?")
-        .bind(&record.name)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("DELETE FROM user_folder_rules WHERE share_name = ?")
-        .bind(&record.name)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
     crate::access::bump_generation();
     Ok(record)
 }
@@ -623,35 +601,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn member_ids_include_owner_and_members() {
+    async fn member_ids_include_legacy_members_but_not_implicit_creator() {
         let (_d, storage, pool, admin) = setup().await;
         let share = create(
             &pool,
             &storage,
             &admin,
             CreateShareInput {
-                name: "team".into(),
+                name: "team-aud".into(),
                 description: None,
                 members: Some(vec![
                     MemberInput {
                         user_id: 2,
-                        perms: Some("write".into()),
+                        perms: Some("read".into()),
                     },
                     MemberInput {
                         user_id: 3,
-                        perms: Some("read".into()),
+                        perms: Some("write".into()),
                     },
                 ]),
             },
         )
         .await
         .unwrap();
-        // created_by (admin id 1) + both members, sorted and deduplicated.
-        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![1, 2, 3]);
-        assert_eq!(
-            member_ids(&pool, "missing").await.unwrap(),
-            Vec::<i64>::new()
-        );
+        // F6: the admin creator is not added as an extra candidate; admins are
+        // still delivered Users-scoped events by the event scope rules.
+        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![2, 3]);
+        assert!(member_ids(&pool, "missing").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -683,8 +659,9 @@ mod tests {
         set_user_rule(&pool, 4, &share.name, "none").await;
         crate::access::bump_generation();
 
-        // Owner (admin bypass) + group-granted bob; denied carol excluded.
-        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![1, 3]);
+        // Group-granted bob is included; denied carol and the (admin) creator
+        // are not implicit candidates (admins get Users events via scope).
+        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![3]);
         assert!(member_ids(&pool, "missing-share").await.unwrap().is_empty());
     }
 
@@ -819,13 +796,22 @@ mod tests {
             .unwrap();
     }
 
+    async fn share_id_for_name(pool: &SqlitePool, share_name: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM shares WHERE name = ? COLLATE NOCASE")
+            .bind(share_name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     async fn set_group_rule(pool: &SqlitePool, group_id: i64, share_name: &str, rule: &str) {
+        let share_id = share_id_for_name(pool, share_name).await;
         sqlx::query(
-            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_name, rule)
+            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_id, rule)
              VALUES (?, ?, ?)",
         )
         .bind(group_id)
-        .bind(share_name)
+        .bind(share_id)
         .bind(rule)
         .execute(pool)
         .await
@@ -833,12 +819,13 @@ mod tests {
     }
 
     async fn set_user_rule(pool: &SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        let share_id = share_id_for_name(pool, share_name).await;
         sqlx::query(
-            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
-             VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_id, rule, updated_at)
+             VALUES (?, ?, ?, 0)",
         )
         .bind(user_id)
-        .bind(share_name)
+        .bind(share_id)
         .bind(rule)
         .execute(pool)
         .await
@@ -853,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owner_and_admin_get_full_access() {
+    async fn admin_bypass_and_no_implicit_creator_access() {
         let (_d, storage, pool, admin) = setup().await;
         let alice = user(2, "alice", Role::User);
         let bob = user(3, "bob", Role::User);
@@ -870,20 +857,28 @@ mod tests {
         )
         .await
         .unwrap();
-        // Owner fallback: full access without a share_members row.
-        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Admin));
+        // F6: being the creator grants nothing on its own.
+        assert_eq!(level(&pool, &alice, &share.name).await, None);
         assert_eq!(level(&pool, &bob, &share.name).await, None);
-        // Admin bypass, even when an explicit deny rule targets them.
+        assert!(list_for_user(&pool, &alice).await.unwrap().is_empty());
+        // Admin bypass still works, even with an explicit deny rule targeting
+        // an administrator.
         set_user_rule(&pool, 1, &share.name, "none").await;
         crate::access::bump_generation();
         assert_eq!(level(&pool, &admin, &share.name).await, Some(Perm::Admin));
-        // Root listings follow the evaluator: owner sees it with its level,
-        // others do not see it at all.
-        let alice_shares = list_for_user_with_levels(&pool, &alice).await.unwrap();
-        assert_eq!(alice_shares.len(), 1);
-        assert_eq!(alice_shares[0].1, Perm::Admin);
-        assert_eq!(alice_shares[0].0.name, "alice-share");
-        assert!(list_for_user(&pool, &bob).await.unwrap().is_empty());
+        let admin_shares = list_for_user_with_levels(&pool, &admin).await.unwrap();
+        assert_eq!(admin_shares.len(), 1);
+        assert_eq!(admin_shares[0].1, Perm::Admin);
+
+        // A legacy member still keeps exactly the pre-groups permission.
+        sqlx::query("INSERT INTO share_members (share_id, user_id, perms) VALUES (?, 2, 'read')")
+            .bind(&share.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Read));
+        assert_eq!(list_for_user(&pool, &alice).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -975,7 +970,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rename_rewrites_rules_and_delete_removes_them() {
+    async fn rename_keeps_rules_by_stable_id_and_delete_cascades() {
         let (_d, storage, pool, admin) = setup().await;
         let alice = user(2, "alice", Role::User);
         let share = create(
@@ -998,7 +993,6 @@ mod tests {
         set_group_rule(&pool, 20, "docs", "write").await;
         set_user_rule(&pool, 2, "docs", "read").await;
         crate::access::bump_generation();
-        // Cache the decision under the old name first.
         assert_eq!(level(&pool, &alice, "docs").await, Some(Perm::Write));
 
         let updated = update(
@@ -1014,51 +1008,414 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(updated.name, "documents");
-        // Rules were rewritten in the same transaction.
+        // Rename does not touch rules: they are keyed by the stable share id.
         let group_rules: Vec<(String, String)> =
-            sqlx::query_as("SELECT share_name, rule FROM group_folder_rules ORDER BY share_name")
+            sqlx::query_as("SELECT share_id, rule FROM group_folder_rules ORDER BY share_id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            group_rules,
-            vec![("documents".to_string(), "write".to_string())]
-        );
+        assert_eq!(group_rules, vec![(share.id.clone(), "write".to_string())]);
         let user_rules: Vec<(String, String)> =
-            sqlx::query_as("SELECT share_name, rule FROM user_folder_rules ORDER BY share_name")
+            sqlx::query_as("SELECT share_id, rule FROM user_folder_rules ORDER BY share_id")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
-        assert_eq!(
-            user_rules,
-            vec![("documents".to_string(), "read".to_string())]
-        );
-        // The evaluator cache was invalidated: the new mount name works and the
-        // old one no longer exists.
+        assert_eq!(user_rules, vec![(share.id.clone(), "read".to_string())]);
+        // Evaluator follows the current name; the old mount name is gone.
         assert_eq!(level(&pool, &alice, "documents").await, Some(Perm::Write));
         assert!(crate::access::folder_access_by_name(&pool, &alice, "docs")
             .await
             .is_err());
 
-        // Deleting the share removes every rule that referenced it.
+        // Deleting the share cascades every rule that referenced its id.
         delete(&pool, &share.id).await.unwrap();
-        let group_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM group_folder_rules WHERE share_name = 'documents'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        let user_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_folder_rules WHERE share_name = 'documents'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let group_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM group_folder_rules WHERE share_id = ?")
+                .bind(&share.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let user_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_folder_rules WHERE share_id = ?")
+                .bind(&share.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!((group_count, user_count), (0, 0));
         assert!(
             crate::access::folder_access_by_name(&pool, &alice, "documents")
                 .await
                 .is_err()
         );
+    }
+
+    // ------------------------------------------------- F5 migration (0005)
+
+    /// Pre-0005 evaluator semantics used only to compare effective access:
+    /// explicit deny > strongest grant > legacy `share_members`. (The v0.2.0
+    /// owner fallback is irrelevant here: fixture shares are created by an
+    /// admin and the compared users are non-admins.)
+    async fn pre_migration_level(
+        pool: &SqlitePool,
+        user_id: i64,
+        share_id: &str,
+        share_name: &str,
+    ) -> Option<Perm> {
+        let direct: Option<String> = sqlx::query_scalar(
+            "SELECT rule FROM user_folder_rules WHERE user_id = ? AND share_name = ?",
+        )
+        .bind(user_id)
+        .bind(share_name)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        let group_rules: Vec<String> = sqlx::query_scalar(
+            "SELECT r.rule FROM group_members gm
+             JOIN group_folder_rules r ON r.group_id = gm.group_id
+             WHERE gm.user_id = ? AND r.share_name = ?",
+        )
+        .bind(user_id)
+        .bind(share_name)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        let mut all: Vec<String> = group_rules;
+        all.extend(direct);
+        let mut deny = false;
+        let mut write = false;
+        let mut read = false;
+        for raw in all {
+            match crate::access::FolderRule::parse(&raw) {
+                Some(crate::access::FolderRule::None) => deny = true,
+                Some(crate::access::FolderRule::Write) => write = true,
+                Some(crate::access::FolderRule::Read) => read = true,
+                _ => {}
+            }
+        }
+        if deny {
+            return None;
+        }
+        if write {
+            return Some(Perm::Write);
+        }
+        if read {
+            return Some(Perm::Read);
+        }
+        let legacy: Option<String> = sqlx::query_scalar(
+            "SELECT perms FROM share_members WHERE share_id = ? AND user_id = ?",
+        )
+        .bind(share_id)
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .unwrap();
+        legacy.as_deref().and_then(Perm::parse)
+    }
+
+    fn auth_for(id: i64, username: &str, role: Role) -> AuthUser {
+        user(id, username, role)
+    }
+
+    #[tokio::test]
+    async fn migration_0005_converts_rules_to_share_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("migrate-0005.db");
+        let pool = db::connect(&path, 4).await.unwrap();
+        // Fresh installs run 0005 too and record zeroed statistics.
+        for key in ["migration.0005.orphaned_rules", "migration.0005.conflicts"] {
+            let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+                .bind(key)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(value, "0", "fresh install {key}");
+        }
+
+        // Simulate a schema-v4 installation: recreate the name-keyed rule
+        // tables and pretend migration 0005 has not run yet.
+        sqlx::query("DROP TABLE group_folder_rules")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE user_folder_rules")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE group_folder_rules (
+                group_id   INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+                share_name TEXT    NOT NULL COLLATE NOCASE,
+                rule       TEXT    NOT NULL CHECK (rule IN ('inherit', 'none', 'read', 'write')),
+                PRIMARY KEY (group_id, share_name)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_group_folder_rules_share ON group_folder_rules(share_name)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE user_folder_rules (
+                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                share_name TEXT    NOT NULL COLLATE NOCASE,
+                rule       TEXT    NOT NULL CHECK (rule IN ('inherit', 'none', 'read', 'write')),
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, share_name)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE INDEX idx_user_folder_rules_share ON user_folder_rules(share_name)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 5")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM settings WHERE key LIKE 'migration.0005.%'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Fixture: 3 users, 2 groups, 2 shares, legacy ACL, direct + group
+        // rules (including an explicit deny) and two orphaned rule names.
+        for (id, username, role) in [
+            (1_i64, "admin", "admin"),
+            (2, "alice", "user"),
+            (3, "bob", "user"),
+        ] {
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+                 VALUES (?, ?, 'x', ?, 1, 1)",
+            )
+            .bind(id)
+            .bind(username)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (id, name) in [(1_i64, "staff"), (2, "ops")] {
+            sqlx::query(
+                "INSERT INTO groups (id, name, description, created_at, updated_at)
+                 VALUES (?, ?, '', 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (group_id, user_id) in [(1_i64, 2_i64), (2, 3)] {
+            sqlx::query("INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, 1)")
+                .bind(group_id)
+                .bind(user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (id, name) in [("mig5-alpha", "Mig5 Alpha"), ("mig5-beta", "Mig5 Beta")] {
+            sqlx::query(
+                "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
+                 VALUES (?, ?, '', ?, 1, 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO share_members (share_id, user_id, perms) VALUES ('mig5-beta', 2, 'read')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Name-keyed rules (v4 layout).
+        for (group_id, share_name, rule) in [
+            (1_i64, "Mig5 Alpha", "write"),
+            (1, "Mig5 Beta", "read"),
+            (2, "Mig5 Alpha", "read"),
+            (2, "Mig5 Beta", "none"),
+            (1, "Ghost", "none"), // orphan (no such share)
+        ] {
+            sqlx::query(
+                "INSERT INTO group_folder_rules (group_id, share_name, rule) VALUES (?, ?, ?)",
+            )
+            .bind(group_id)
+            .bind(share_name)
+            .bind(rule)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for (user_id, share_name, rule, updated_at) in [
+            (2_i64, "Mig5 Alpha", "read", 1111_i64),
+            (2, "Mig5 Beta", "write", 2222),
+            (3, "Ghost", "read", 3333), // orphan (no such share)
+        ] {
+            sqlx::query(
+                "INSERT INTO user_folder_rules (user_id, share_name, rule, updated_at)
+                 VALUES (?, ?, ?, ?)",
+            )
+            .bind(user_id)
+            .bind(share_name)
+            .bind(rule)
+            .bind(updated_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Effective access before the migration, v4 semantics.
+        let users = [(2_i64, "alice", Role::User), (3, "bob", Role::User)];
+        let shares = [("mig5-alpha", "Mig5 Alpha"), ("mig5-beta", "Mig5 Beta")];
+        let mut before = std::collections::BTreeMap::new();
+        for (user_id, _, _) in users {
+            for (share_id, share_name) in shares {
+                before.insert(
+                    (user_id, share_id.to_string()),
+                    pre_migration_level(&pool, user_id, share_id, share_name).await,
+                );
+            }
+        }
+        pool.close().await;
+
+        // Reopening runs the embedded migrator, which applies 0005.
+        let pool = db::connect(&path, 4).await.unwrap();
+        let version: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(version, 5);
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('group_folder_rules')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(columns.iter().any(|c| c == "share_id"));
+        assert!(!columns.iter().any(|c| c == "share_name"));
+        let user_columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('user_folder_rules')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(user_columns.iter().any(|c| c == "share_id"));
+        assert!(user_columns.iter().any(|c| c == "updated_at"));
+
+        // Counts: two orphaned rows dropped, no duplicate collisions.
+        let orphaned: String = sqlx::query_scalar(
+            "SELECT value FROM settings WHERE key = 'migration.0005.orphaned_rules'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let conflicts: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'migration.0005.conflicts'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(orphaned, "2");
+        assert_eq!(conflicts, "0");
+
+        // Migrated rows are keyed by id.
+        let group_rules: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT group_id, share_id, rule FROM group_folder_rules ORDER BY group_id, share_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(group_rules.len(), 4);
+        assert!(group_rules
+            .iter()
+            .any(|(g, s, r)| *g == 1 && s == "mig5-alpha" && r == "write"));
+        let user_rules: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT user_id, share_id, rule FROM user_folder_rules ORDER BY user_id, share_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(user_rules.len(), 2);
+        assert!(user_rules
+            .iter()
+            .any(|(u, s, r)| *u == 2 && s == "mig5-beta" && r == "write"));
+        // Original per-row timestamps are preserved by the migration.
+        let migrated_updated_at: i64 = sqlx::query_scalar(
+            "SELECT updated_at FROM user_folder_rules WHERE user_id = 2 AND share_id = 'mig5-beta'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(migrated_updated_at, 2222);
+
+        // Effective access is identical before/after for every fixture pair.
+        crate::access::bump_generation();
+        for (user_id, username, role) in users {
+            let auth = auth_for(user_id, username, role);
+            for (share_id, share_name) in shares {
+                let after = crate::access::folder_access_by_id(&pool, &auth, share_id)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    after.level,
+                    before[&(user_id, share_id.to_string())],
+                    "access changed for user {user_id} on {share_name}"
+                );
+                assert_eq!(after.share_name, share_name);
+            }
+        }
+        // Admin bypass is unaffected.
+        let admin = auth_for(1, "admin", Role::Admin);
+        assert_eq!(
+            crate::access::folder_access_by_id(&pool, &admin, "mig5-alpha")
+                .await
+                .unwrap()
+                .level,
+            Some(Perm::Admin)
+        );
+
+        // Renaming after migration keeps the rules (ids are stable).
+        let storage = Storage::new(&crate::storage::tests::test_config(dir.path())).unwrap();
+        update(
+            &pool,
+            &storage,
+            "mig5-alpha",
+            UpdateShareInput {
+                name: Some("Mig5 Renamed".into()),
+                description: None,
+                members: None,
+            },
+        )
+        .await
+        .unwrap();
+        let alice = auth_for(2, "alice", Role::User);
+        let renamed = crate::access::folder_access_by_name(&pool, &alice, "Mig5 Renamed")
+            .await
+            .unwrap();
+        assert_eq!(renamed.level, Some(Perm::Write));
+        assert_eq!(renamed.share_id, "mig5-alpha");
+
+        // Deleting a share cascades its rules.
+        delete(&pool, "mig5-beta").await.unwrap();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM group_folder_rules WHERE share_id = ?")
+                .bind("mig5-beta")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0);
+        let user_remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_folder_rules WHERE share_id = ?")
+                .bind("mig5-beta")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(user_remaining, 0);
     }
 }

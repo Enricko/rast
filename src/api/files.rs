@@ -1117,8 +1117,8 @@ pub async fn update_share(
     Path(id): Path<String>,
     Json(body): Json<shares::UpdateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
-    // Capture the affected audience *before* the rename rewrite moves rules to
-    // the new name (legacy members/owner are found by the current name).
+    // Capture the affected audience before the rename (rules are keyed by the
+    // stable share id; legacy members are resolved through the current name).
     let before = shares::find_by_id(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound("shared folder not found"))?;
@@ -1955,13 +1955,22 @@ mod tests {
             .unwrap();
     }
 
+    async fn share_id_for_name(pool: &sqlx::SqlitePool, share_name: &str) -> String {
+        sqlx::query_scalar("SELECT id FROM shares WHERE name = ? COLLATE NOCASE")
+            .bind(share_name)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
     async fn set_group_rule(pool: &sqlx::SqlitePool, group_id: i64, share_name: &str, rule: &str) {
+        let share_id = share_id_for_name(pool, share_name).await;
         sqlx::query(
-            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_name, rule)
+            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_id, rule)
              VALUES (?, ?, ?)",
         )
         .bind(group_id)
-        .bind(share_name)
+        .bind(share_id)
         .bind(rule)
         .execute(pool)
         .await
@@ -1970,12 +1979,13 @@ mod tests {
     }
 
     async fn set_user_rule(pool: &sqlx::SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        let share_id = share_id_for_name(pool, share_name).await;
         sqlx::query(
-            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
-             VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_id, rule, updated_at)
+             VALUES (?, ?, ?, 0)",
         )
         .bind(user_id)
-        .bind(share_name)
+        .bind(share_id)
         .bind(rule)
         .execute(pool)
         .await
@@ -2163,7 +2173,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn share_rename_delete_rewrite_rules_and_notify_access_changed() {
+    async fn share_rename_keeps_rules_by_id_and_delete_cascades_with_events() {
         let ctx = setup(Role::User, 1_000_000).await;
         add_user_row(&ctx.state.db, 9, "owner-admin", "admin").await;
         let share_id = add_share_row(&ctx.state, "team-api-rules", Some(9), &[(1, "read")]).await;
@@ -2194,15 +2204,14 @@ mod tests {
             json_body(&body).await["path"],
             "/shared/team-api-rules-renamed"
         );
+        // Rules are keyed by the stable share id, so the rename did not move
+        // or rewrite them.
         let rules: Vec<(String, String)> =
-            sqlx::query_as("SELECT share_name, rule FROM group_folder_rules")
+            sqlx::query_as("SELECT share_id, rule FROM group_folder_rules")
                 .fetch_all(&ctx.state.db)
                 .await
                 .unwrap();
-        assert_eq!(
-            rules,
-            vec![("team-api-rules-renamed".to_string(), "write".to_string())]
-        );
+        assert_eq!(rules, vec![(share_id.clone(), "write".to_string())]);
         let mut saw_access_changed = false;
         for _ in 0..20 {
             let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
@@ -2240,11 +2249,13 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_folder_rules")
-            .fetch_one(&ctx.state.db)
-            .await
-            .unwrap();
-        assert_eq!(remaining, 0);
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM group_folder_rules WHERE share_id = ?")
+                .bind(&share_id)
+                .fetch_one(&ctx.state.db)
+                .await
+                .unwrap();
+        assert_eq!(remaining, 0, "share delete must cascade folder rules");
         let mut saw_deleted = false;
         for _ in 0..20 {
             let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;

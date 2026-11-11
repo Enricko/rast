@@ -76,6 +76,7 @@ pub struct GroupMemberDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderRuleDto {
+    pub share_id: String,
     pub share_name: String,
     pub rule: String,
 }
@@ -109,7 +110,12 @@ pub struct GroupPage {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderRuleInput {
+    /// Legacy/display identity; still accepted and returned for clients.
+    #[serde(default)]
     pub share_name: String,
+    /// Stable share id (preferred when present).
+    #[serde(default)]
+    pub share_id: Option<String>,
     #[serde(default)]
     pub rule: String,
 }
@@ -261,7 +267,9 @@ async fn validate_folder_rules(
     if rules.len() > MAX_RULES {
         return Err(AppError::bad_request("too many shared-folder rules"));
     }
-    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    // Deduplicate by stable share id; the last rule for a share wins (same
+    // behaviour as before, but keyed by id so a rename cannot split a rule).
+    let mut merged: BTreeMap<String, (String, String)> = BTreeMap::new();
     for input in rules {
         let rule = FolderRule::parse(&input.rule).ok_or_else(|| {
             AppError::bad_request(format!(
@@ -269,33 +277,63 @@ async fn validate_folder_rules(
                 input.rule
             ))
         })?;
-        let share_name = input.share_name.trim().to_string();
-        if share_name.is_empty() {
-            return Err(AppError::bad_request("shareName is required"));
-        }
-        let exists: Option<String> =
-            sqlx::query_scalar("SELECT name FROM shares WHERE name = ? COLLATE NOCASE")
-                .bind(&share_name)
-                .fetch_optional(pool)
-                .await?;
-        let canonical = exists.ok_or_else(|| {
-            AppError::bad_request(format!("unknown shared folder {share_name:?}"))
-        })?;
-        merged.insert(
-            canonical.to_ascii_lowercase(),
-            format!("{}:{}", canonical, rule.as_str()),
-        );
-    }
-    Ok(merged
-        .into_values()
-        .map(|value| {
-            let (share_name, rule) = value.split_once(':').unwrap_or((value.as_str(), ""));
-            FolderRuleDto {
-                share_name: share_name.to_string(),
-                rule: rule.to_string(),
+        let share_id = match input
+            .share_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            // Prefer the stable id when the client supplies it.
+            Some(share_id) => {
+                let exists: Option<(String, String)> =
+                    sqlx::query_as("SELECT id, name FROM shares WHERE id = ?")
+                        .bind(share_id)
+                        .fetch_optional(pool)
+                        .await?;
+                exists
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!("unknown shared folder id {share_id:?}"))
+                    })?
+                    .0
             }
+            None => {
+                let share_name = input.share_name.trim();
+                if share_name.is_empty() {
+                    return Err(AppError::bad_request("shareName or shareId is required"));
+                }
+                let exists: Option<(String, String)> =
+                    sqlx::query_as("SELECT id, name FROM shares WHERE name = ? COLLATE NOCASE")
+                        .bind(share_name)
+                        .fetch_optional(pool)
+                        .await?;
+                exists
+                    .ok_or_else(|| {
+                        AppError::bad_request(format!("unknown shared folder {share_name:?}"))
+                    })?
+                    .0
+            }
+        };
+        // Re-read the canonical current name for the response.
+        let canonical: String = sqlx::query_scalar("SELECT name FROM shares WHERE id = ?")
+            .bind(&share_id)
+            .fetch_one(pool)
+            .await?;
+        merged.insert(share_id, (canonical, rule.as_str().to_string()));
+    }
+    let mut out: Vec<FolderRuleDto> = merged
+        .into_iter()
+        .map(|(share_id, (share_name, rule))| FolderRuleDto {
+            share_id,
+            share_name,
+            rule,
         })
-        .collect())
+        .collect();
+    out.sort_by(|a, b| {
+        a.share_name
+            .to_ascii_lowercase()
+            .cmp(&b.share_name.to_ascii_lowercase())
+    });
+    Ok(out)
 }
 
 fn validate_app_rules(rules: &[AppRuleInput]) -> AppResult<Vec<AppRuleDto>> {
@@ -444,13 +482,18 @@ async fn load_group_detail(pool: &sqlx::SqlitePool, id: i64) -> AppResult<GroupD
     })
     .collect();
     let folder_rules = sqlx::query(
-        "SELECT share_name, rule FROM group_folder_rules WHERE group_id = ? ORDER BY share_name COLLATE NOCASE",
+        "SELECT r.share_id, s.name AS share_name, r.rule
+         FROM group_folder_rules r
+         JOIN shares s ON s.id = r.share_id
+         WHERE r.group_id = ?
+         ORDER BY s.name COLLATE NOCASE",
     )
     .bind(id)
     .fetch_all(pool)
     .await?
     .into_iter()
     .map(|row| FolderRuleDto {
+        share_id: row.get("share_id"),
         share_name: row.get("share_name"),
         rule: row.get("rule"),
     })
@@ -589,9 +632,9 @@ pub async fn create_group(
             .await?;
     }
     for rule in &folder_rules {
-        sqlx::query("INSERT INTO group_folder_rules (group_id, share_name, rule) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO group_folder_rules (group_id, share_id, rule) VALUES (?, ?, ?)")
             .bind(group_id)
-            .bind(&rule.share_name)
+            .bind(&rule.share_id)
             .bind(&rule.rule)
             .execute(&mut *tx)
             .await?;
@@ -709,9 +752,9 @@ pub async fn update_group(
         .execute(&mut *tx)
         .await?;
     for rule in &folder_rules {
-        sqlx::query("INSERT INTO group_folder_rules (group_id, share_name, rule) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO group_folder_rules (group_id, share_id, rule) VALUES (?, ?, ?)")
             .bind(id)
-            .bind(&rule.share_name)
+            .bind(&rule.share_id)
             .bind(&rule.rule)
             .execute(&mut *tx)
             .await?;
@@ -1011,13 +1054,18 @@ pub async fn get_user_access_rules(
 
 async fn load_direct_rules(pool: &sqlx::SqlitePool, user_id: i64) -> AppResult<AccessRulesDto> {
     let folder_rules = sqlx::query(
-        "SELECT share_name, rule FROM user_folder_rules WHERE user_id = ? ORDER BY share_name COLLATE NOCASE",
+        "SELECT r.share_id, s.name AS share_name, r.rule
+         FROM user_folder_rules r
+         JOIN shares s ON s.id = r.share_id
+         WHERE r.user_id = ?
+         ORDER BY s.name COLLATE NOCASE",
     )
     .bind(user_id)
     .fetch_all(pool)
     .await?
     .into_iter()
     .map(|row| FolderRuleDto {
+        share_id: row.get("share_id"),
         share_name: row.get("share_name"),
         rule: row.get("rule"),
     })
@@ -1059,10 +1107,10 @@ pub async fn set_user_access_rules(
         .await?;
     for rule in &folder_rules {
         sqlx::query(
-            "INSERT INTO user_folder_rules (user_id, share_name, rule, updated_at) VALUES (?, ?, ?, ?)",
+            "INSERT INTO user_folder_rules (user_id, share_id, rule, updated_at) VALUES (?, ?, ?, ?)",
         )
         .bind(id)
-        .bind(&rule.share_name)
+        .bind(&rule.share_id)
         .bind(&rule.rule)
         .bind(now)
         .execute(&mut *tx)
@@ -1156,7 +1204,7 @@ fn sorted_i64(values: &[i64]) -> Vec<i64> {
 fn normalized_folder_rules(rules: &[FolderRuleDto]) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = rules
         .iter()
-        .map(|rule| (rule.share_name.to_ascii_lowercase(), rule.rule.clone()))
+        .map(|rule| (rule.share_id.clone(), rule.rule.clone()))
         .collect();
     out.sort();
     out
@@ -1220,10 +1268,12 @@ mod tests {
     fn normalizes_rule_order_for_change_detection() {
         let a = vec![
             FolderRuleDto {
+                share_id: "share-projects".into(),
                 share_name: "Projects".into(),
                 rule: "write".into(),
             },
             FolderRuleDto {
+                share_id: "share-finance".into(),
                 share_name: "Finance".into(),
                 rule: "none".into(),
             },
@@ -1231,5 +1281,104 @@ mod tests {
         let mut b = a.clone();
         b.reverse();
         assert_eq!(normalized_folder_rules(&a), normalized_folder_rules(&b));
+    }
+
+    #[tokio::test]
+    async fn folder_rules_accept_names_or_ids_and_return_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::connect(&dir.path().join("rules.db"), 2)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
+             VALUES ('share-projects', 'Projects', '', 'projects-container', NULL, 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Legacy clients send shareName; the canonical name + stable id return.
+        let by_name = validate_folder_rules(
+            &pool,
+            &[FolderRuleInput {
+                share_name: "projects".into(),
+                share_id: None,
+                rule: "read".into(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].share_id, "share-projects");
+        assert_eq!(by_name[0].share_name, "Projects");
+        assert_eq!(by_name[0].rule, "read");
+
+        // New clients may send shareId (preferred over shareName).
+        let by_id = validate_folder_rules(
+            &pool,
+            &[FolderRuleInput {
+                share_name: String::new(),
+                share_id: Some("share-projects".into()),
+                rule: "write".into(),
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(by_id[0].share_id, "share-projects");
+        assert_eq!(by_id[0].share_name, "Projects");
+        assert_eq!(by_id[0].rule, "write");
+
+        // Duplicate references to the same share collapse by id (last wins).
+        let merged = validate_folder_rules(
+            &pool,
+            &[
+                FolderRuleInput {
+                    share_name: "Projects".into(),
+                    share_id: None,
+                    rule: "read".into(),
+                },
+                FolderRuleInput {
+                    share_name: String::new(),
+                    share_id: Some("share-projects".into()),
+                    rule: "none".into(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].rule, "none");
+
+        // Neither identity, unknown name or unknown id are rejected.
+        for input in [
+            FolderRuleInput {
+                share_name: String::new(),
+                share_id: None,
+                rule: "read".into(),
+            },
+            FolderRuleInput {
+                share_name: "Missing".into(),
+                share_id: None,
+                rule: "read".into(),
+            },
+            FolderRuleInput {
+                share_name: String::new(),
+                share_id: Some("missing-id".into()),
+                rule: "read".into(),
+            },
+        ] {
+            assert!(validate_folder_rules(&pool, &[input]).await.is_err());
+        }
+        // Invalid rule values are rejected too.
+        assert!(validate_folder_rules(
+            &pool,
+            &[FolderRuleInput {
+                share_name: "Projects".into(),
+                share_id: None,
+                rule: "read-write".into(),
+            }],
+        )
+        .await
+        .is_err());
     }
 }

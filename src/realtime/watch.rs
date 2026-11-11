@@ -409,10 +409,10 @@ impl PathMapper {
         for row in share_rows {
             let id: String = row.get("id");
             let container_path: String = row.get("container_path");
-            // The evaluator-filtered audience includes legacy members, the
-            // owner, direct-rule holders and members of groups with folder
-            // rules (explicit denials excluded), so external filesystem
-            // changes reach every account that can currently read the share.
+            // The evaluator-filtered audience includes legacy members,
+            // direct-rule holders and members of groups with folder rules
+            // (explicit denials excluded). Share creators get no implicit
+            // access (F6); administrators still receive Users-scoped events.
             let audience = match crate::storage::shares::member_ids(pool, &id).await {
                 Ok(audience) => audience,
                 Err(error) => {
@@ -738,15 +738,20 @@ mod tests {
         assert!(!event.scope.allows(2, false));
         assert!(!event.scope.allows(9, true));
 
-        // Shared change -> owner + member event.
+        // Shared change -> member event (creator has no implicit access, F6).
         let shared_file = cfg.shared_dir().join("team/doc.txt");
         let event = wait_for_event(&mut rx, &shared_file, b"shared", "/shared/team/doc.txt")
             .await
             .expect("watcher did not publish a shared event");
         match &event.scope {
             EventScope::Users(ids) => {
-                assert!(ids.contains(&1), "share owner must receive the event");
                 assert!(ids.contains(&2), "share member must receive the event");
+                assert!(
+                    !ids.contains(&1),
+                    "creator without a grant is not an implicit audience (F6)"
+                );
+                // Admins are still delivered Users-scoped events by scope rules.
+                assert!(event.scope.allows(9, true));
             }
             other => panic!("expected Users scope, got {other:?}"),
         }

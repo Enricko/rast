@@ -4,7 +4,7 @@
 //! Precedence (documented in `docs/GROUPS.md`):
 //! 1. explicit `none` from the user or any of their groups wins;
 //! 2. otherwise the strongest grant wins (`write` includes `read`);
-//! 3. with no grant the legacy ACL (`share_members`, share owner) decides, so
+//! 3. with no grant the legacy ACL (`share_members`) decides, so
 //!    upgrading installations keep exactly the same effective access;
 //! 4. administrators bypass folder policy; personal homes keep ownership rules.
 //!
@@ -154,7 +154,7 @@ pub struct FolderAccess {
     /// `None` means No Access; otherwise the granted read/write/admin level.
     pub level: Option<Perm>,
     pub sources: Vec<RuleSource>,
-    /// `admin`, `legacy-acl`, `owner`, `explicit` or `none`.
+    /// `admin`, `legacy-acl`, `explicit` or `none`.
     pub fallback: Option<String>,
 }
 
@@ -229,8 +229,8 @@ fn cache_put(user_id: i64, key: &str, value: Cached) {
     }
 }
 
-fn folder_cache_key(share_name: &str) -> String {
-    format!("folder:{}", share_name.to_ascii_lowercase())
+fn folder_cache_key(share_id: &str) -> String {
+    format!("folder:{share_id}")
 }
 
 fn app_cache_key(app_id: &str) -> String {
@@ -261,23 +261,17 @@ pub async fn folder_access_by_name(
             fallback: Some("admin".into()),
         });
     }
-    let key = folder_cache_key(share_name);
-    if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
-        return Ok(access);
-    }
-    let row = sqlx::query("SELECT id, name, created_by FROM shares WHERE name = ?")
+    let row = sqlx::query("SELECT id, name FROM shares WHERE name = ?")
         .bind(share_name)
         .fetch_optional(pool)
         .await?
         .ok_or(AppError::NotFound("path not found"))?;
-    let access = compute_folder(
-        pool,
-        user,
-        row.get::<String, _>("id"),
-        row.get::<String, _>("name"),
-        row.get::<Option<i64>, _>("created_by"),
-    )
-    .await?;
+    let share_id: String = row.get("id");
+    let key = folder_cache_key(&share_id);
+    if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
+        return Ok(access);
+    }
+    let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
     cache_put(user.id, &key, Cached::Folder(access.clone()));
     Ok(access)
 }
@@ -302,24 +296,17 @@ pub async fn folder_access_by_id(
             fallback: Some("admin".into()),
         });
     }
-    let row = sqlx::query("SELECT id, name, created_by FROM shares WHERE id = ?")
+    let row = sqlx::query("SELECT id, name FROM shares WHERE id = ?")
         .bind(share_id)
         .fetch_optional(pool)
         .await?
         .ok_or(AppError::NotFound("path not found"))?;
-    let name: String = row.get("name");
-    let key = folder_cache_key(&name);
+    let share_id: String = row.get("id");
+    let key = folder_cache_key(&share_id);
     if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
-    let access = compute_folder(
-        pool,
-        user,
-        row.get::<String, _>("id"),
-        name,
-        row.get::<Option<i64>, _>("created_by"),
-    )
-    .await?;
+    let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
     cache_put(user.id, &key, Cached::Folder(access.clone()));
     Ok(access)
 }
@@ -329,7 +316,6 @@ async fn compute_folder(
     user: &AuthUser,
     share_id: String,
     share_name: String,
-    created_by: Option<i64>,
 ) -> AppResult<FolderAccess> {
     if user.is_admin() {
         return Ok(FolderAccess {
@@ -341,23 +327,22 @@ async fn compute_folder(
         });
     }
 
-    let direct: Option<String> = sqlx::query_scalar(
-        "SELECT rule FROM user_folder_rules WHERE user_id = ? AND share_name = ?",
-    )
-    .bind(user.id)
-    .bind(&share_name)
-    .fetch_optional(pool)
-    .await?;
+    let direct: Option<String> =
+        sqlx::query_scalar("SELECT rule FROM user_folder_rules WHERE user_id = ? AND share_id = ?")
+            .bind(user.id)
+            .bind(&share_id)
+            .fetch_optional(pool)
+            .await?;
     let group_rows = sqlx::query(
         "SELECT g.id AS group_id, g.name AS group_name, r.rule AS rule
          FROM group_members gm
          JOIN groups g ON g.id = gm.group_id
          JOIN group_folder_rules r ON r.group_id = g.id
-         WHERE gm.user_id = ? AND r.share_name = ?
+         WHERE gm.user_id = ? AND r.share_id = ?
          ORDER BY g.name COLLATE NOCASE",
     )
     .bind(user.id)
-    .bind(&share_name)
+    .bind(&share_id)
     .fetch_all(pool)
     .await?;
 
@@ -429,16 +414,8 @@ async fn compute_folder(
         });
     }
 
-    // No explicit grant: preserve the pre-groups behaviour.
-    if created_by == Some(user.id) {
-        return Ok(FolderAccess {
-            share_id,
-            share_name,
-            level: Some(Perm::Admin),
-            sources,
-            fallback: Some("owner".into()),
-        });
-    }
+    // No explicit grant: preserve the pre-groups behaviour (legacy ACL only —
+    // share creators get no implicit access; admins already bypass above).
     let legacy: Option<String> =
         sqlx::query_scalar("SELECT perms FROM share_members WHERE share_id = ? AND user_id = ?")
             .bind(&share_id)
@@ -691,22 +668,14 @@ pub async fn effective_access(
     include_hidden: bool,
 ) -> AppResult<EffectiveAccessDto> {
     let groups = group_refs_for_user(pool, user.id).await?;
-    let share_rows =
-        sqlx::query("SELECT id, name, created_by FROM shares ORDER BY name COLLATE NOCASE")
-            .fetch_all(pool)
-            .await?;
+    let share_rows = sqlx::query("SELECT id, name FROM shares ORDER BY name COLLATE NOCASE")
+        .fetch_all(pool)
+        .await?;
     let mut folders = Vec::with_capacity(share_rows.len());
     for row in &share_rows {
         let share_id: String = row.get("id");
         let share_name: String = row.get("name");
-        let access = compute_folder(
-            pool,
-            user,
-            share_id.clone(),
-            share_name.clone(),
-            row.get::<Option<i64>, _>("created_by"),
-        )
-        .await?;
+        let access = compute_folder(pool, user, share_id.clone(), share_name.clone()).await?;
         if !include_hidden && access.level.is_none() {
             continue;
         }
@@ -798,11 +767,18 @@ pub async fn group_refs_for_users(
 /// Accounts affected by a change to `share_name`'s rules: legacy members,
 /// direct-rule holders and members of every group with a rule on the share.
 pub async fn affected_users_for_share(pool: &SqlitePool, share_name: &str) -> AppResult<Vec<i64>> {
+    let Some(share_id) = sqlx::query_scalar::<_, String>("SELECT id FROM shares WHERE name = ?")
+        .bind(share_name)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(Vec::new());
+    };
     let mut ids: Vec<i64> = Vec::new();
     let mut push = |values: Vec<i64>| ids.extend(values);
     push(
-        sqlx::query_scalar("SELECT user_id FROM user_folder_rules WHERE share_name = ?")
-            .bind(share_name)
+        sqlx::query_scalar("SELECT user_id FROM user_folder_rules WHERE share_id = ?")
+            .bind(&share_id)
             .fetch_all(pool)
             .await?,
     );
@@ -810,28 +786,17 @@ pub async fn affected_users_for_share(pool: &SqlitePool, share_name: &str) -> Ap
         sqlx::query_scalar(
             "SELECT gm.user_id FROM group_members gm
              JOIN group_folder_rules r ON r.group_id = gm.group_id
-             WHERE r.share_name = ?",
+             WHERE r.share_id = ?",
         )
-        .bind(share_name)
+        .bind(&share_id)
         .fetch_all(pool)
         .await?,
     );
     push(
-        sqlx::query_scalar(
-            "SELECT m.user_id FROM share_members m JOIN shares s ON s.id = m.share_id
-             WHERE s.name = ?",
-        )
-        .bind(share_name)
-        .fetch_all(pool)
-        .await?,
-    );
-    push(
-        sqlx::query_scalar(
-            "SELECT created_by FROM shares WHERE name = ? AND created_by IS NOT NULL",
-        )
-        .bind(share_name)
-        .fetch_all(pool)
-        .await?,
+        sqlx::query_scalar("SELECT user_id FROM share_members WHERE share_id = ?")
+            .bind(&share_id)
+            .fetch_all(pool)
+            .await?,
     );
     ids.sort_unstable();
     ids.dedup();

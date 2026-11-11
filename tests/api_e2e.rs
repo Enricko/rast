@@ -1577,7 +1577,23 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .fetch_all(&pool)
             .await
             .expect("versions");
-    assert_eq!(applied, vec![1, 2, 3, 4], "0004 is the only new migration");
+    assert_eq!(
+        applied,
+        vec![1, 2, 3, 4, 5],
+        "0004 and 0005 are the new migrations"
+    );
+    // Migration 0005 runs on the same upgrade and records rule-mapping stats.
+    for (key, expected) in [
+        ("migration.0005.orphaned_rules", "0"),
+        ("migration.0005.conflicts", "0"),
+    ] {
+        let value: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_one(&pool)
+            .await
+            .expect("migration 0005 stats");
+        assert_eq!(value, expected, "{key}");
+    }
 
     // Existing rows are intact; the new policy is empty.
     let theme: String = sqlx::query_scalar("SELECT theme FROM user_appearance WHERE user_id = ?")

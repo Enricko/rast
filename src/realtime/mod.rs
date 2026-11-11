@@ -382,13 +382,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_mutation_reaches_owner_members_and_actor_only() {
+    async fn shared_mutation_reaches_members_and_actor_only() {
         let (_dir, pool) = pool().await;
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
         let admin = auth_user(9, "root", Role::Admin);
 
-        // Admin (not a member) writes into the share: owner + member + actor.
+        // Admin (not a member) writes into the share: members + actor. The
+        // creator (user 1, a regular user here) gets no implicit access (F6);
+        // administrators still receive Users-scoped events via scope rules.
         publish_mutation(
             &bus,
             &pool,
@@ -402,9 +404,12 @@ mod tests {
         assert_eq!(event.kind, FILE_CHANGED);
         match &event.scope {
             EventScope::Users(ids) => {
-                assert!(ids.contains(&1), "owner must receive the event");
                 assert!(ids.contains(&2), "member must receive the event");
                 assert!(ids.contains(&9), "actor must receive the event");
+                assert!(
+                    !ids.contains(&1),
+                    "creator without a grant is not an implicit audience (F6)"
+                );
             }
             other => panic!("expected Users scope, got {other:?}"),
         }
