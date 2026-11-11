@@ -146,9 +146,10 @@ impl Storage {
             let share = shares::find_by_name(pool, share_name)
                 .await?
                 .ok_or(AppError::NotFound("path not found"))?;
-            let perm = shares::effective_perm(pool, user, &share.id)
-                .await?
-                .ok_or(AppError::NotFound("path not found"))?;
+            // Group policy evaluator: explicit rules > grants > legacy ACL/owner
+            // fallback; admins bypass. No access => 404 (hidden, not 403).
+            let access = crate::access::folder_access_by_id(pool, user, &share.id).await?;
+            let perm = access.level.ok_or(AppError::NotFound("path not found"))?;
             let container = shares::validated_container(&share.container_path)?;
             let physical = self.shared_root.join(container);
             check_root_dir(&physical)?;

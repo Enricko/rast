@@ -12,12 +12,12 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
     audit::{self, AuditLog},
-    auth::AuthUser,
+    auth::{AuthUser, Role},
     error::{AppError, AppResult},
     events::EventBus,
     jobs::JobContext,
@@ -456,6 +456,41 @@ struct Progress {
     bytes: u64,
 }
 
+/// Re-load the job actor before doing any work: account state and role may have
+/// changed since the job was queued (deactivated, demoted, or folder access
+/// revoked). Jobs must never mutate with stale privileges.
+async fn revalidate_actor(pool: &SqlitePool, actor: &AuthUser) -> AppResult<AuthUser> {
+    let row = sqlx::query(
+        "SELECT username, display_name, role, active, quota_bytes, must_change_password
+         FROM users WHERE id = ?",
+    )
+    .bind(actor.id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::Forbidden(
+        "your account is no longer available; the operation was cancelled",
+    ))?;
+    let active: bool = row.get("active");
+    if !active {
+        return Err(AppError::Forbidden(
+            "your account is disabled; the operation was cancelled",
+        ));
+    }
+    let role_raw: String = row.get("role");
+    let role = Role::parse(&role_raw).ok_or(AppError::Forbidden(
+        "your account role is invalid; the operation was cancelled",
+    ))?;
+    Ok(AuthUser {
+        id: actor.id,
+        username: row.get("username"),
+        display_name: row.get("display_name"),
+        role,
+        session_id: actor.session_id.clone(),
+        quota_bytes: row.get("quota_bytes"),
+        must_change_password: row.get("must_change_password"),
+    })
+}
+
 async fn audit_job(
     pool: &SqlitePool,
     action: &str,
@@ -523,6 +558,8 @@ async fn copy_job_inner(
     dest_dir: &str,
     events: &EventBus,
 ) -> AppResult<Value> {
+    let actor = revalidate_actor(pool, user).await?;
+    let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, false).await?;
     let mut affected: Vec<String> = Vec::with_capacity(plan.sources.len());
     // Enumerate sources first: gives an accurate progress total and keeps the
@@ -651,6 +688,8 @@ async fn move_job_inner(
     dest_dir: &str,
     events: &EventBus,
 ) -> AppResult<Value> {
+    let actor = revalidate_actor(pool, user).await?;
+    let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, true).await?;
     let mut affected: Vec<String> = Vec::new();
     let total = (plan.sources.len() as u64).max(1);
@@ -764,7 +803,10 @@ async fn delete_job_inner(
     paths: &[String],
     events: &EventBus,
 ) -> AppResult<Value> {
-    // Re-validate every path at execution time.
+    // Re-validate the actor and every path at execution time: a revoked share
+    // ACL or disabled account aborts the job before any mutation.
+    let actor = revalidate_actor(pool, user).await?;
+    let user = &actor;
     let logicals = plan_delete(pool, storage, user, paths).await?;
     let total = (logicals.len() as u64).max(1);
     let mut deleted: u64 = 0;
@@ -989,5 +1031,293 @@ mod tests {
         let entries = enumerate_tree_blocking(&root).unwrap();
         assert_eq!(entries.len(), 3); // dir + 2 files
         assert_eq!(tree_size_blocking(&root), 7);
+    }
+
+    // ----------------------------------------- group policy (task-13)
+
+    async fn add_user(pool: &SqlitePool, id: i64, username: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, quota_bytes, created_at, updated_at)
+             VALUES (?, ?, 'x', 'user', 0, 1, 1)",
+        )
+        .bind(id)
+        .bind(username)
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::access::bump_generation();
+    }
+
+    async fn add_share(pool: &SqlitePool, storage: &Storage, container: &str) -> String {
+        let id = format!("share-{container}");
+        sqlx::query(
+            "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
+             VALUES (?, ?, '', ?, NULL, 1, 1)",
+        )
+        .bind(&id)
+        .bind(container)
+        .bind(container)
+        .execute(pool)
+        .await
+        .unwrap();
+        std::fs::create_dir_all(storage.shared_container_dir(container)).unwrap();
+        crate::access::bump_generation();
+        id
+    }
+
+    async fn add_share_member(pool: &SqlitePool, share_id: &str, user_id: i64, perms: &str) {
+        sqlx::query("INSERT INTO share_members (share_id, user_id, perms) VALUES (?, ?, ?)")
+            .bind(share_id)
+            .bind(user_id)
+            .bind(perms)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::access::bump_generation();
+    }
+
+    async fn plan_for(
+        ctx: &Ctx,
+        who: &AuthUser,
+        paths: &[String],
+        dest: &str,
+        moving: bool,
+    ) -> AppResult<BatchPlan> {
+        plan_batch(&ctx.pool, &ctx.storage, who, paths, dest, moving).await
+    }
+
+    async fn set_user_rule(pool: &SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
+             VALUES (?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(share_name)
+        .bind(rule)
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::access::bump_generation();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn copy_and_move_require_expected_folder_levels() {
+        let ctx = setup().await;
+        add_user(&ctx.pool, 2, "bob").await;
+        let share_id = add_share(&ctx.pool, &ctx.storage, "team-xfer").await;
+        // Legacy ACL: alice read-only, bob write.
+        add_share_member(&ctx.pool, &share_id, 1, "read").await;
+        add_share_member(&ctx.pool, &share_id, 2, "write").await;
+        let alice_home = ctx.storage.home_dir("alice");
+        let bob_home = ctx.storage.home_dir("bob");
+        std::fs::create_dir_all(&bob_home).unwrap();
+        let team_dir = ctx.storage.shared_container_dir("team-xfer");
+        write(&alice_home.join("home.txt"), 5);
+        write(&bob_home.join("bob-home.txt"), 5);
+        write(&team_dir.join("shared.txt"), 5);
+
+        let alice = &ctx.user;
+        let bob = auth_user(2, "bob");
+        // read-only alice: copy out of the share into her home is allowed...
+        plan_for(
+            &ctx,
+            alice,
+            &["/shared/team-xfer/shared.txt".into()],
+            "/",
+            false,
+        )
+        .await
+        .unwrap();
+        // ...but writing into the share is denied (copy dest needs write).
+        let error = plan_for(
+            &ctx,
+            alice,
+            &["/home.txt".into()],
+            "/shared/team-xfer",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::FORBIDDEN);
+        // Move needs write on both sides: read-only source is denied.
+        let error = plan_for(
+            &ctx,
+            alice,
+            &["/shared/team-xfer/shared.txt".into()],
+            "/",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::FORBIDDEN);
+        let error = plan_for(
+            &ctx,
+            alice,
+            &["/home.txt".into()],
+            "/shared/team-xfer",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::FORBIDDEN);
+
+        // Writer (legacy ACL) passes both the copy and the move matrix.
+        plan_for(
+            &ctx,
+            &bob,
+            &["/bob-home.txt".into()],
+            "/shared/team-xfer",
+            false,
+        )
+        .await
+        .unwrap();
+        plan_for(
+            &ctx,
+            &bob,
+            &["/shared/team-xfer/shared.txt".into()],
+            "/",
+            true,
+        )
+        .await
+        .unwrap();
+
+        // A direct write rule upgrades alice to write on the share too.
+        set_user_rule(&ctx.pool, 1, "team-xfer", "write").await;
+        plan_for(
+            &ctx,
+            alice,
+            &["/home.txt".into()],
+            "/shared/team-xfer",
+            false,
+        )
+        .await
+        .unwrap();
+        plan_for(
+            &ctx,
+            alice,
+            &["/home.txt".into()],
+            "/shared/team-xfer",
+            true,
+        )
+        .await
+        .unwrap();
+        plan_for(
+            &ctx,
+            alice,
+            &["/shared/team-xfer/shared.txt".into()],
+            "/",
+            true,
+        )
+        .await
+        .unwrap();
+
+        // A user with no grant cannot even see the share (404, not 403).
+        add_user(&ctx.pool, 3, "carol").await;
+        std::fs::create_dir_all(ctx.storage.home_dir("carol")).unwrap();
+        let carol = auth_user(3, "carol");
+        let error = plan_for(
+            &ctx,
+            &carol,
+            &["/shared/team-xfer/shared.txt".into()],
+            "/",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn jobs_recheck_permissions_at_start() {
+        let ctx = setup().await;
+        let share_id = add_share(&ctx.pool, &ctx.storage, "team-job").await;
+        add_share_member(&ctx.pool, &share_id, 1, "write").await;
+        let team_dir = ctx.storage.shared_container_dir("team-job");
+        write(&team_dir.join("doomed.txt"), 10);
+
+        let events = crate::events::EventBus::new();
+        let manager = JobManager::new(ctx.pool.clone(), events.clone(), 2);
+
+        // Queue the job but hold it at the gate; revoke access while pending.
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let (pool, storage, user, events_for_job) = (
+            ctx.pool.clone(),
+            ctx.storage.clone(),
+            ctx.user.clone(),
+            events.clone(),
+        );
+        let id = manager
+            .submit(JobSpec::new("file.delete", move |job_ctx| async move {
+                let _ = gate_rx.await;
+                run_delete_job(
+                    job_ctx,
+                    pool,
+                    storage,
+                    user,
+                    vec!["/shared/team-job/doomed.txt".into()],
+                    events_for_job,
+                )
+                .await
+            }))
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM share_members WHERE share_id = ? AND user_id = 1")
+            .bind(&share_id)
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        crate::access::bump_generation();
+        gate_tx.send(()).unwrap();
+        let job = wait_for_job(&ctx.pool, &id).await.unwrap();
+        assert_eq!(
+            job["status"], "failed",
+            "job must fail after revocation: {job}"
+        );
+        let error = job["error"].as_str().unwrap_or("").to_string();
+        assert!(
+            error.contains("not found") || error.contains("forbidden"),
+            "unexpected job error: {error}"
+        );
+        // No partial mutation: the file is still in the share, not in the bin.
+        assert!(team_dir.join("doomed.txt").is_file());
+        assert_eq!(trash::list(&ctx.pool, 1, 1, 10).await.unwrap().1, 0);
+
+        // A disabled account aborts before touching the filesystem.
+        write(&team_dir.join("second.txt"), 10);
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let (pool, storage, user, events_for_job) = (
+            ctx.pool.clone(),
+            ctx.storage.clone(),
+            ctx.user.clone(),
+            events.clone(),
+        );
+        let id = manager
+            .submit(JobSpec::new("file.delete", move |job_ctx| async move {
+                let _ = gate_rx.await;
+                run_delete_job(
+                    job_ctx,
+                    pool,
+                    storage,
+                    user,
+                    vec!["/shared/team-job/second.txt".into()],
+                    events_for_job,
+                )
+                .await
+            }))
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET active = 0 WHERE id = 1")
+            .execute(&ctx.pool)
+            .await
+            .unwrap();
+        gate_tx.send(()).unwrap();
+        let job = wait_for_job(&ctx.pool, &id).await.unwrap();
+        assert_eq!(
+            job["status"], "failed",
+            "disabled account must fail the job: {job}"
+        );
+        let error = job["error"].as_str().unwrap_or("").to_string();
+        assert!(error.contains("disabled"), "unexpected job error: {error}");
+        assert!(team_dir.join("second.txt").is_file());
     }
 }

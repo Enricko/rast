@@ -240,6 +240,22 @@ async fn publish_file_mutation(
     .await;
 }
 
+/// Notify affected accounts that their effective access changed (share rename,
+/// member change or deletion). Clients refetch `/api/auth/me` / effective views.
+fn publish_access_changed(state: &AppState, user_ids: &[i64], reason: &str, changed_by: i64) {
+    for user_id in user_ids {
+        state.events.publish_user(
+            "access.changed",
+            *user_id,
+            json!({
+                "reason": reason,
+                "userId": user_id,
+                "changedBy": changed_by,
+            }),
+        );
+    }
+}
+
 fn map_upload_io_error(error: std::io::Error) -> AppError {
     // ENOSPC / EDQUOT: surface a clear (but non-internal) failure.
     match error.raw_os_error() {
@@ -279,22 +295,14 @@ pub async fn list_files(
 /// GET /api/files/roots
 pub async fn list_roots(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     let mut roots = vec![json!({"name": "Home", "path": "/", "kind": "home"})];
-    for share in shares::list_for_user(&state.db, &user).await? {
-        let perms = if user.is_admin() {
-            "admin".to_string()
-        } else {
-            share
-                .members
-                .iter()
-                .find(|member| member.user_id == user.id)
-                .map(|member| member.perms.clone())
-                .unwrap_or_else(|| "read".to_string())
-        };
+    // The evaluator decides both visibility (group rules, legacy membership,
+    // ownership) and the advertised permission level.
+    for (share, level) in shares::list_for_user_with_levels(&state.db, &user).await? {
         roots.push(json!({
             "name": share.name,
             "path": share.path,
             "kind": "share",
-            "perms": perms,
+            "perms": level.as_str(),
         }));
     }
     Ok(Json(Value::Array(roots)))
@@ -1109,7 +1117,29 @@ pub async fn update_share(
     Path(id): Path<String>,
     Json(body): Json<shares::UpdateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
+    // Capture the affected audience *before* the rename rewrite moves rules to
+    // the new name (legacy members/owner are found by the current name).
+    let before = shares::find_by_id(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("shared folder not found"))?;
+    let members_changed = body.members.is_some();
+    let mut affected = crate::access::affected_users_for_share(&state.db, &before.name)
+        .await
+        .unwrap_or_default();
     let dto = shares::update(&state.db, &state.storage, &id, body).await?;
+    let renamed = dto.name != before.name;
+    if renamed {
+        if let Ok(extra) = crate::access::affected_users_for_share(&state.db, &dto.name).await {
+            affected.extend(extra);
+        }
+    }
+    affected.sort_unstable();
+    affected.dedup();
+    if renamed {
+        publish_access_changed(&state, &affected, "share_renamed", admin.0.id);
+    } else if members_changed {
+        publish_access_changed(&state, &affected, "share_updated", admin.0.id);
+    }
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -1132,7 +1162,14 @@ pub async fn delete_share(
     ip: ClientIp,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
+    let before = shares::find_by_id(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("shared folder not found"))?;
+    let affected = crate::access::affected_users_for_share(&state.db, &before.name)
+        .await
+        .unwrap_or_default();
     let record = shares::delete(&state.db, &id).await?;
+    publish_access_changed(&state, &affected, "share_deleted", admin.0.id);
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -1605,15 +1642,15 @@ mod tests {
             Method::POST,
             "/api/shares",
             Body::from(
-                r#"{"name":"team","description":"x","members":[{"userId":2,"perms":"write"}]}"#,
+                r#"{"name":"team-api-crud","description":"x","members":[{"userId":2,"perms":"write"}]}"#,
             ),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
         let share = json_body(&body).await;
-        assert_eq!(share["path"], "/shared/team");
+        assert_eq!(share["path"], "/shared/team-api-crud");
         assert_eq!(share["members"][0]["username"], "bob");
-        assert!(state.storage.shared_container_dir("team").is_dir());
+        assert!(state.storage.shared_container_dir("team-api-crud").is_dir());
 
         // Bob sees the shared root; a third user would not.
         let bob = auth_user(2, "bob", Role::User);
@@ -1623,7 +1660,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let roots = json_body(&body).await;
         assert_eq!(roots.as_array().unwrap().len(), 2);
-        assert_eq!(roots[1]["path"], "/shared/team");
+        assert_eq!(roots[1]["path"], "/shared/team-api-crud");
         assert_eq!(roots[1]["perms"], "write");
 
         // Admin-only guard: non-admin cannot list shares.
@@ -1635,11 +1672,11 @@ mod tests {
             &admin_app,
             Method::PATCH,
             &format!("/api/shares/{}", share["id"].as_str().unwrap()),
-            Body::from(r#"{"name":"team2"}"#),
+            Body::from(r#"{"name":"team-api-crud2"}"#),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(json_body(&body).await["path"], "/shared/team2");
+        assert_eq!(json_body(&body).await["path"], "/shared/team-api-crud2");
         let (status, _, _) = request(
             &admin_app,
             Method::DELETE,
@@ -1761,17 +1798,17 @@ mod tests {
         .execute(&ctx.state.db)
         .await
         .unwrap();
-        std::fs::create_dir_all(ctx.state.storage.shared_container_dir("team")).unwrap();
+        std::fs::create_dir_all(ctx.state.storage.shared_container_dir("team-api-rt")).unwrap();
         sqlx::query(
             "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
-             VALUES ('share-team', 'team', '', 'team', 1, 1, 1)",
+             VALUES ('share-team-api-rt', 'team-api-rt', '', 'team-api-rt', 1, 1, 1)",
         )
         .execute(&ctx.state.db)
         .await
         .unwrap();
         for user_id in [1_i64, 2] {
             sqlx::query(
-                "INSERT INTO share_members (share_id, user_id, perms) VALUES ('share-team', ?, 'write')",
+                "INSERT INTO share_members (share_id, user_id, perms) VALUES ('share-team-api-rt', ?, 'write')",
             )
             .bind(user_id)
             .execute(&ctx.state.db)
@@ -1780,9 +1817,15 @@ mod tests {
         }
 
         let mut rx = ctx.state.events.subscribe();
-        upload_raw(&ctx.app, "/shared/team", "team.txt", b"shared").await;
+        upload_raw(
+            &ctx.app,
+            "/shared/team-api-rt",
+            "team-api-rt.txt",
+            b"shared",
+        )
+        .await;
         let changed = next_matching_event(&mut rx, "file.changed", |event| {
-            event.data["path"] == "/shared/team/team.txt"
+            event.data["path"] == "/shared/team-api-rt/team-api-rt.txt"
         })
         .await;
         match &changed.scope {
@@ -1845,5 +1888,381 @@ mod tests {
         let quota =
             next_matching_event(&mut rx, "file.quota", |event| event.data["usedBytes"] == 14).await;
         assert_eq!(quota.scope, crate::events::EventScope::User(1));
+    }
+
+    // ------------------------------------------- group policy (task-13)
+
+    async fn add_user_row(pool: &sqlx::SqlitePool, id: i64, username: &str, role: &str) {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (?, ?, 'x', ?, 1, 1)",
+        )
+        .bind(id)
+        .bind(username)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn add_share_row(
+        state: &AppState,
+        name: &str,
+        created_by: Option<i64>,
+        members: &[(i64, &str)],
+    ) -> String {
+        let id = format!("share-{name}");
+        sqlx::query(
+            "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
+             VALUES (?, ?, '', ?, ?, 1, 1)",
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(name)
+        .bind(created_by)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        std::fs::create_dir_all(state.storage.shared_container_dir(name)).unwrap();
+        for (user_id, perms) in members {
+            sqlx::query("INSERT INTO share_members (share_id, user_id, perms) VALUES (?, ?, ?)")
+                .bind(&id)
+                .bind(user_id)
+                .bind(perms)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        crate::access::bump_generation();
+        id
+    }
+
+    async fn add_group(pool: &sqlx::SqlitePool, id: i64, name: &str, member_id: i64) {
+        sqlx::query(
+            "INSERT INTO groups (id, name, description, created_at, updated_at)
+             VALUES (?, ?, '', 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, 1)")
+            .bind(id)
+            .bind(member_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn set_group_rule(pool: &sqlx::SqlitePool, group_id: i64, share_name: &str, rule: &str) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_name, rule)
+             VALUES (?, ?, ?)",
+        )
+        .bind(group_id)
+        .bind(share_name)
+        .bind(rule)
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::access::bump_generation();
+    }
+
+    async fn set_user_rule(pool: &sqlx::SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
+             VALUES (?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(share_name)
+        .bind(rule)
+        .execute(pool)
+        .await
+        .unwrap();
+        crate::access::bump_generation();
+    }
+
+    async fn upload_status(app: &Router, dir: &str, name: &str, data: &[u8]) -> StatusCode {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!(
+                "/api/files/upload?dir={}&name={}",
+                percent_encoding::utf8_percent_encode(dir, percent_encoding::NON_ALPHANUMERIC),
+                percent_encoding::utf8_percent_encode(name, percent_encoding::NON_ALPHANUMERIC)
+            ))
+            .header(header::CONTENT_LENGTH, data.len())
+            .body(Body::from(data.to_vec()))
+            .unwrap();
+        app.clone().oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn read_only_share_member_cannot_mutate_but_can_read() {
+        let ctx = setup(Role::User, 1_000_000).await;
+        add_user_row(&ctx.state.db, 9, "owner-admin", "admin").await;
+        let _share_id = add_share_row(&ctx.state, "team-api-read", Some(9), &[(1, "read")]).await;
+        let team_dir = ctx.state.storage.shared_container_dir("team-api-read");
+        std::fs::write(team_dir.join("report.txt"), b"quarterly").unwrap();
+
+        // Reads work through the evaluator: listing/stat/search/download/preview.
+        let (status, _, body) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files?path=/shared/team-api-read",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body(&body).await["total"], 1);
+        let (status, _, body) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files/stat?path=/shared/team-api-read/report.txt",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body(&body).await["name"], "report.txt");
+        let (status, _, body) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files/search?q=report&path=/shared/team-api-read",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body(&body).await["total"], 1);
+        let (status, _, body) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files/download?path=/shared/team-api-read/report.txt",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"quarterly".to_vec());
+        let (status, headers, _) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files/preview?path=/shared/team-api-read/report.txt",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("sandbox"));
+        // Root listing advertises the evaluated read level.
+        let (status, _, body) =
+            request(&ctx.app, Method::GET, "/api/files/roots", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
+        let roots = json_body(&body).await;
+        assert_eq!(roots[1]["path"], "/shared/team-api-read");
+        assert_eq!(roots[1]["perms"], "read");
+
+        // Mutations are denied for a read-only member.
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/mkdir",
+            Body::from(r#"{"path":"/shared/team-api-read/new"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/rename",
+            Body::from(r#"{"path":"/shared/team-api-read/report.txt","newName":"renamed.txt"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/delete",
+            Body::from(r#"{"paths":["/shared/team-api-read/report.txt"]}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            upload_status(&ctx.app, "/shared/team-api-read", "up.txt", b"x").await,
+            StatusCode::FORBIDDEN
+        );
+        // Copy out only needs read on the source; copy in needs write on dest.
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/copy",
+            Body::from(r#"{"paths":["/shared/team-api-read/report.txt"],"destDir":"/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        upload_raw(&ctx.app, "/", "home.txt", b"home").await;
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/copy",
+            Body::from(r#"{"paths":["/home.txt"],"destDir":"/shared/team-api-read"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Move writes both sides: denied for a read-only member.
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::POST,
+            "/api/files/move",
+            Body::from(r#"{"paths":["/shared/team-api-read/report.txt"],"destDir":"/"}"#),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // A group write grant upgrades access; the share is still mounted.
+        add_group(&ctx.state.db, 10, "editors", 1).await;
+        set_group_rule(&ctx.state.db, 10, "team-api-read", "write").await;
+        let (status, _, body) =
+            request(&ctx.app, Method::GET, "/api/files/roots", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_body(&body).await[1]["perms"], "write");
+        assert_eq!(
+            upload_status(&ctx.app, "/shared/team-api-read", "written.txt", b"data").await,
+            StatusCode::OK
+        );
+
+        // An explicit direct deny wins over the group write: share is hidden.
+        set_user_rule(&ctx.state.db, 1, "team-api-read", "none").await;
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files?path=/shared/team-api-read",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _, _) = request(
+            &ctx.app,
+            Method::GET,
+            "/api/files/search?q=report&path=/shared/team-api-read",
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (_, _, body) = request(&ctx.app, Method::GET, "/api/files/roots", Body::empty()).await;
+        assert!(json_body(&body)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|root| root["path"] != "/shared/team-api-read"));
+        assert_eq!(
+            upload_status(&ctx.app, "/shared/team-api-read", "denied.txt", b"x").await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn share_rename_delete_rewrite_rules_and_notify_access_changed() {
+        let ctx = setup(Role::User, 1_000_000).await;
+        add_user_row(&ctx.state.db, 9, "owner-admin", "admin").await;
+        let share_id = add_share_row(&ctx.state, "team-api-rules", Some(9), &[(1, "read")]).await;
+        add_group(&ctx.state.db, 10, "staff", 1).await;
+        set_group_rule(&ctx.state.db, 10, "team-api-rules", "write").await;
+        let mut rx = ctx.state.events.subscribe();
+
+        // Admin renames the share; rules are rewritten and affected users get a
+        // user-scoped access.changed event.
+        let admin = auth_user(9, "owner-admin", Role::Admin);
+        let admin_app = routes()
+            .layer(Extension(admin.clone()))
+            .with_state(ctx.state.clone());
+        let (status, _, body) = request(
+            &admin_app,
+            Method::PATCH,
+            &format!("/api/shares/{share_id}"),
+            Body::from(r#"{"name":"team-api-rules-renamed"}"#),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{:?}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(
+            json_body(&body).await["path"],
+            "/shared/team-api-rules-renamed"
+        );
+        let rules: Vec<(String, String)> =
+            sqlx::query_as("SELECT share_name, rule FROM group_folder_rules")
+                .fetch_all(&ctx.state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            rules,
+            vec![("team-api-rules-renamed".to_string(), "write".to_string())]
+        );
+        let mut saw_access_changed = false;
+        for _ in 0..20 {
+            let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+            let Ok(Ok(event)) = received else { break };
+            if event.kind == "access.changed" {
+                assert!(matches!(event.scope, crate::events::EventScope::User(_)));
+                assert_eq!(event.data["reason"], "share_renamed");
+                assert_eq!(event.data["changedBy"], 9);
+                saw_access_changed = true;
+                break;
+            }
+        }
+        assert!(
+            saw_access_changed,
+            "share rename must publish access.changed"
+        );
+
+        // The member sees the renamed share through the evaluator.
+        let (status, _, body) =
+            request(&ctx.app, Method::GET, "/api/files/roots", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json_body(&body)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|root| root["path"] == "/shared/team-api-rules-renamed"));
+
+        // Deleting the share removes its rules and publishes access.changed.
+        let (status, _, _) = request(
+            &admin_app,
+            Method::DELETE,
+            &format!("/api/shares/{share_id}"),
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_folder_rules")
+            .fetch_one(&ctx.state.db)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+        let mut saw_deleted = false;
+        for _ in 0..20 {
+            let received = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await;
+            let Ok(Ok(event)) = received else { break };
+            if event.kind == "access.changed" && event.data["reason"] == "share_deleted" {
+                saw_deleted = true;
+                break;
+            }
+        }
+        assert!(saw_deleted, "share delete must publish access.changed");
+        let (status, _, body) =
+            request(&ctx.app, Method::GET, "/api/files/roots", Body::empty()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(json_body(&body)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|root| root["path"] != "/shared/team-api-rules-renamed"));
     }
 }

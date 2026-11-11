@@ -198,14 +198,27 @@ impl AppRecord {
 // ---------------------------------------------------------------------------
 
 /// GET /api/docker/status — never fails: reports why Docker is unavailable.
-pub async fn docker_status(State(state): State<AppState>, _admin: AdminUser) -> Json<Value> {
-    Json(state.docker.status().await)
+///
+/// Read handler: admins and non-admins with a read-only `applications` grant.
+pub async fn docker_status(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Value>> {
+    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    Ok(Json(state.docker.status().await))
 }
 
 /// GET /api/docker/containers — discovered containers flagged `managed`.
 ///
 /// Returns 503 when the Docker subsystem is unavailable (the status endpoint
 /// explains why, so the UI can show a helpful message).
+///
+/// Intentionally **admin-only**: this lists every container on the host (not
+/// just managed applications) and exists to drive the explicit import flow,
+/// which is an administrator action. Read-only `applications` grants get
+/// `/api/docker/status` instead, which is enough to render the availability
+/// banner. The group-policy middleware also blocks this only at the app level,
+/// so the `AdminUser` extractor is the defence in depth for this handler.
 pub async fn docker_containers(
     State(state): State<AppState>,
     _admin: AdminUser,
@@ -289,9 +302,12 @@ pub async fn docker_containers(
 /// GET /api/apps — managed apps with a freshly probed status.
 pub async fn list_apps(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Query(query): Query<PageQuery>,
 ) -> AppResult<Json<Value>> {
+    // Defence in depth: the policy middleware also gates /api/apps, but the
+    // handler must never rely on the route layer alone.
+    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * per_page;
@@ -343,13 +359,18 @@ pub async fn list_apps(
 /// GET /api/apps/{id}
 pub async fn get_app(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
+    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let app = load_app(&state, &id).await?;
     let (containers, docker_reason) = probe_app_containers(&state, &app.slug).await;
     let status = derive_status(&containers, &app.status);
-    let mut detail = app_json(&app, &state.secrets, true, &containers, &status);
+    // The Compose document may contain inline values an administrator typed
+    // (e.g. a literal API key); it is only returned to administrators. Read-only
+    // viewers get the same metadata/logs but not the editable definition.
+    let include_compose = !access.read_only;
+    let mut detail = app_json(&app, &state.secrets, include_compose, &containers, &status);
     if let Some(object) = detail.as_object_mut() {
         object.insert("containers".to_string(), Value::Array(containers.clone()));
         object.insert(
@@ -591,10 +612,11 @@ pub async fn redeploy_app(
 /// GET /api/apps/{id}/logs?tail=200
 pub async fn app_logs(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Json<Value>> {
+    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     state.docker.ensure_available().await?;
     let app = load_app(&state, &id).await?;
     let tail = crate::api::parse_bounded(query.tail.as_deref(), 200, 2000) as u32;
@@ -929,10 +951,11 @@ fn log_stream(
 ///   15 s keep-alive, closes when the app is deleted or the worker stays down.
 pub async fn app_logs_stream(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
+    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let app = load_app(&state, &id).await?;
     state.docker.ensure_available().await?;
     let tail = crate::api::parse_bounded(
@@ -956,9 +979,10 @@ pub async fn app_logs_stream(
 /// GET /api/apps/{id}/history
 pub async fn app_history(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
+    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
     let _app = load_app(&state, &id).await?;
     let rows = sqlx::query(
         "SELECT id, action, status, detail, created_at, finished_at
@@ -2408,7 +2432,7 @@ mod tests {
         let state = AppState::new(test_config(dir.path())).await.unwrap();
 
         // docker/status always answers 200 and explains why.
-        let response = docker_status(State(state.clone()), admin_user()).await;
+        let response = docker_status(State(state.clone()), admin()).await.unwrap();
         assert_eq!(response.0["enabled"], false);
         assert_eq!(response.0["available"], false);
 
@@ -2451,7 +2475,7 @@ mod tests {
         // Listing managed apps works without Docker and reports the reason.
         let list = list_apps(
             State(state.clone()),
-            admin_user(),
+            admin(),
             Query(PageQuery {
                 page: None,
                 per_page: None,
@@ -2565,10 +2589,6 @@ mod realtime_tests {
         }
     }
 
-    fn admin_user() -> AdminUser {
-        AdminUser(admin())
-    }
-
     fn test_config(dir: &Path, docker_socket: Option<&Path>) -> crate::config::Config {
         let mut cfg =
             crate::config::Config::from_parts(None, crate::config::FileConfig::default(), |_| None)
@@ -2657,7 +2677,7 @@ mod realtime_tests {
         let state = AppState::new(test_config(dir.path(), None)).await.unwrap();
         let result = app_logs_stream(
             State(state),
-            admin_user(),
+            admin(),
             AxumPath("missing".into()),
             Query(LogsQuery { tail: None }),
         )
@@ -2675,7 +2695,7 @@ mod realtime_tests {
         insert_app_row(&state, "app1", "shop").await;
         let result = app_logs_stream(
             State(state),
-            admin_user(),
+            admin(),
             AxumPath("app1".into()),
             Query(LogsQuery {
                 tail: Some("200".into()),
@@ -2746,7 +2766,7 @@ mod realtime_tests {
 
         let result = app_logs_stream(
             State(state),
-            admin_user(),
+            admin(),
             AxumPath("app1".into()),
             Query(LogsQuery {
                 tail: Some("200".into()),
@@ -2816,12 +2836,15 @@ mod realtime_tests {
     // Fake Docker worker used by the transport tests (no Docker required)
     // ------------------------------------------------------------------
 
-    enum FakeWorkerMode {
+    pub(super) enum FakeWorkerMode {
         Initial { message: String },
         Rotating,
     }
 
-    fn start_fake_worker(socket: PathBuf, mode: FakeWorkerMode) -> tokio::task::JoinHandle<()> {
+    pub(super) fn start_fake_worker(
+        socket: PathBuf,
+        mode: FakeWorkerMode,
+    ) -> tokio::task::JoinHandle<()> {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let _ = std::fs::remove_file(&socket);
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
@@ -2863,8 +2886,32 @@ mod realtime_tests {
                         .unwrap_or_default();
                     let data = match op {
                         "version" => json!({"version": "26.1.4"}),
+                        "info" => json!({"version": "26.1.4"}),
                         "stats" => json!({"items": []}),
-                        "ps-all" => json!({"items": []}),
+                        "ps-all" => json!({"items": [
+                            {"id": "0123456789ab", "name": "shop-web-1", "image": "nginx:alpine",
+                             "state": "running", "status": "Up 1 min", "project": "rast-shop",
+                             "ports": [], "mounts": [], "labels": {}}
+                        ]}),
+                        "logs" => json!({
+                            "lines": [{"ts": 1_700_000_000_123i64, "stream": "stdout", "service": "web", "message": "access-test log line"}],
+                            "tail": 200,
+                        }),
+                        "compose-validate" => {
+                            json!({"valid": true, "services": ["web"], "bindMounts": 0})
+                        }
+                        "compose-up" => json!({"action": "up", "running": true}),
+                        "compose-stop" => json!({"action": "stop", "running": false}),
+                        "compose-restart" => json!({"action": "restart", "running": true}),
+                        "compose-down" => json!({"action": "down", "running": false}),
+                        "app-containers" | "ps" => json!({
+                            "project": "rast-shop",
+                            "items": [{"id": "0123456789ab", "name": "shop-web-1",
+                                       "image": "nginx:alpine", "state": "running",
+                                       "status": "Up 1 min", "project": "rast-shop"}],
+                        }),
+                        "inspect" => json!({"items": []}),
+                        "remove-volumes" => json!({"removed": []}),
                         "compose-logs-since" => {
                             let call = calls.fetch_add(1, Ordering::SeqCst);
                             match mode.as_ref() {
@@ -2917,5 +2964,499 @@ mod realtime_tests {
                 });
             }
         })
+    }
+}
+
+/// Shared router-level test support for the group-access enforcement tests in
+/// `api::apps` and `api::backup`. Compiled only for tests.
+#[cfg(test)]
+pub(crate) mod access_test_support {
+    use axum::{
+        body::Body,
+        http::{header, HeaderMap, HeaderValue, Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+    use tower::ServiceExt;
+
+    use crate::{
+        auth::Role,
+        config::{Config, FileConfig},
+        state::AppState,
+        users,
+    };
+
+    /// A real `AppState` + router backed by a temporary database/storage tree.
+    pub struct TestServer {
+        pub _dir: tempfile::TempDir,
+        pub state: AppState,
+        router: axum::Router,
+    }
+
+    /// Authenticated browser session (cookie + CSRF token).
+    pub struct Session {
+        pub cookie: String,
+        pub csrf: String,
+    }
+
+    impl Session {
+        pub fn headers(&self) -> HeaderMap {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::COOKIE,
+                HeaderValue::from_str(&self.cookie).expect("valid cookie header"),
+            );
+            headers
+        }
+
+        pub fn headers_with_csrf(&self) -> HeaderMap {
+            let mut headers = self.headers();
+            headers.insert(
+                "x-csrf-token",
+                HeaderValue::from_str(&self.csrf).expect("valid csrf header"),
+            );
+            headers
+        }
+    }
+
+    impl TestServer {
+        pub async fn start() -> Self {
+            Self::build(None).await
+        }
+
+        /// Docker-backed server; the caller must have started a fake worker on
+        /// `socket` first (see `api::apps::realtime_tests::start_fake_worker`).
+        pub async fn start_with_docker(socket: &std::path::Path) -> Self {
+            Self::build(Some(socket)).await
+        }
+
+        async fn build(docker_socket: Option<&std::path::Path>) -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let mut cfg = Config::from_parts(
+                None,
+                FileConfig {
+                    data_dir: Some(dir.path().join("data")),
+                    storage_dir: Some(dir.path().join("storage")),
+                    public_url: Some("https://rast.test".into()),
+                    secure_cookies: Some(false),
+                    setup_token_required: Some(true),
+                    ..Default::default()
+                },
+                |_| None,
+            )
+            .expect("config");
+            if let Some(socket) = docker_socket {
+                cfg.worker_socket = socket.to_path_buf();
+                cfg.docker_enabled = true;
+            }
+            let state = AppState::new(cfg).await.expect("state");
+            // Disjoint user-id range: the access evaluator cache is keyed by
+            // (user_id, resource) in-process, so parallel tests must not reuse ids.
+            {
+                static NEXT_USER_BASE: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(1_000_000);
+                let base = NEXT_USER_BASE.fetch_add(1000, std::sync::atomic::Ordering::SeqCst);
+                let updated =
+                    sqlx::query("UPDATE sqlite_sequence SET seq = ? WHERE name = 'users'")
+                        .bind(base)
+                        .execute(&state.db)
+                        .await
+                        .map(|result| result.rows_affected())
+                        .unwrap_or(0);
+                if updated == 0 {
+                    let _ =
+                        sqlx::query("INSERT INTO sqlite_sequence (name, seq) VALUES ('users', ?)")
+                            .bind(base)
+                            .execute(&state.db)
+                            .await;
+                }
+                crate::access::bump_generation();
+            }
+            let router = crate::api::router(state.clone());
+            Self {
+                _dir: dir,
+                state,
+                router,
+            }
+        }
+
+        pub async fn create_user(&self, username: &str, password: &str, role: Role) -> i64 {
+            users::create(
+                &self.state.db,
+                &self.state.config,
+                username,
+                password,
+                role,
+                None,
+                None,
+            )
+            .await
+            .expect("create user")
+            .id
+        }
+
+        pub async fn login(&self, username: &str, password: &str) -> Session {
+            let (status, headers, body) = self
+                .request(
+                    "POST",
+                    "/api/auth/login",
+                    Some(json!({"username": username, "password": password})),
+                    HeaderMap::new(),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "login failed: {body}");
+            let csrf = body["csrfToken"]
+                .as_str()
+                .expect("csrf token in login response")
+                .to_string();
+            let cookie = headers
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|value| value.starts_with("rast_session="))
+                .and_then(|value| value.split(';').next())
+                .expect("session cookie")
+                .to_string();
+            Session { cookie, csrf }
+        }
+
+        pub async fn request(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+            headers: HeaderMap,
+        ) -> (StatusCode, HeaderMap, Value) {
+            let mut builder = Request::builder().method(method).uri(path);
+            for (key, value) in headers.iter() {
+                builder = builder.header(key, value);
+            }
+            let body = match body {
+                Some(value) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(value.to_string())
+                }
+                None => Body::empty(),
+            };
+            let response = self
+                .router
+                .clone()
+                .oneshot(builder.body(body).expect("request"))
+                .await
+                .expect("router response");
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("response body")
+                .to_bytes();
+            let value = if bytes.is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+            };
+            (status, headers, value)
+        }
+
+        pub async fn get(&self, path: &str, session: &Session) -> (StatusCode, HeaderMap, Value) {
+            self.request("GET", path, None, session.headers()).await
+        }
+
+        pub async fn get_anon(&self, path: &str) -> (StatusCode, HeaderMap, Value) {
+            self.request("GET", path, None, HeaderMap::new()).await
+        }
+
+        /// Perform a request but only return status/headers (used for SSE
+        /// endpoints whose body never ends on its own).
+        pub async fn request_headers(
+            &self,
+            method: &str,
+            path: &str,
+            session: &Session,
+        ) -> (StatusCode, HeaderMap) {
+            let mut builder = Request::builder().method(method).uri(path);
+            for (key, value) in session.headers().iter() {
+                builder = builder.header(key, value);
+            }
+            let response = self
+                .router
+                .clone()
+                .oneshot(builder.body(Body::empty()).expect("request"))
+                .await
+                .expect("router response");
+            (response.status(), response.headers().clone())
+        }
+
+        /// Grant an app rule through a group the user belongs to.
+        pub async fn grant_group_app(&self, user_id: i64, app_id: &str, rule: &str) {
+            let now = crate::db::now_ms();
+            let group_name = format!(
+                "grant-{user_id}-{app_id}-{rule}-{}",
+                uuid::Uuid::new_v4().simple()
+            );
+            let inserted = sqlx::query(
+                "INSERT INTO groups (name, description, created_at, updated_at) VALUES (?, '', ?, ?)",
+            )
+            .bind(&group_name)
+            .bind(now)
+            .bind(now)
+            .execute(&self.state.db)
+            .await
+            .expect("insert group");
+            let group_id = inserted.last_insert_rowid();
+            sqlx::query("INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)")
+                .bind(group_id)
+                .bind(user_id)
+                .bind(now)
+                .execute(&self.state.db)
+                .await
+                .expect("insert membership");
+            sqlx::query("INSERT INTO group_app_rules (group_id, app_id, rule) VALUES (?, ?, ?)")
+                .bind(group_id)
+                .bind(app_id)
+                .bind(rule)
+                .execute(&self.state.db)
+                .await
+                .expect("insert app rule");
+            crate::access::bump_generation();
+        }
+
+        /// Set a direct per-user app rule (explicit override).
+        pub async fn set_user_app_rule(&self, user_id: i64, app_id: &str, rule: &str) {
+            sqlx::query("INSERT INTO user_app_rules (user_id, app_id, rule) VALUES (?, ?, ?)")
+                .bind(user_id)
+                .bind(app_id)
+                .bind(rule)
+                .execute(&self.state.db)
+                .await
+                .expect("insert direct app rule");
+            crate::access::bump_generation();
+        }
+
+        pub async fn insert_app(&self, id: &str, slug: &str) {
+            sqlx::query(
+                "INSERT INTO apps (id, name, slug, compose, env_json, status, last_error, created_by, created_at, updated_at)
+                 VALUES (?, ?, ?, 'services: {}', '[]', 'running', '', NULL, 1, 1)",
+            )
+            .bind(id)
+            .bind(slug)
+            .bind(slug)
+            .execute(&self.state.db)
+            .await
+            .expect("insert app");
+        }
+    }
+}
+
+/// Group-policy enforcement tests for the Applications/Docker read surfaces.
+#[cfg(test)]
+mod access_policy_tests {
+    use super::access_test_support::TestServer;
+    use super::realtime_tests::{start_fake_worker, FakeWorkerMode};
+    use axum::http::{header, StatusCode};
+    use serde_json::json;
+
+    const ADMIN_PASSWORD: &str = "Admin-Password-123!";
+    const USER_PASSWORD: &str = "Alice-Password-123!";
+
+    #[tokio::test]
+    async fn denied_non_admin_reads_return_403() {
+        let server = TestServer::start().await;
+        server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        let alice = server.login("alice", USER_PASSWORD).await;
+        for path in [
+            "/api/apps",
+            "/api/apps/app1",
+            "/api/apps/app1/logs",
+            "/api/apps/app1/logs/stream?tail=10",
+            "/api/apps/app1/history",
+            "/api/docker/status",
+        ] {
+            let (status, _, body) = server.get(path, &alice).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} -> {body}");
+            assert_eq!(body["error"]["code"], "forbidden", "{path} -> {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_reads_are_401() {
+        let server = TestServer::start().await;
+        let (status, _, _) = server.get_anon("/api/apps").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _, _) = server.get_anon("/api/docker/status").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_allows_application_reads() {
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "access log".into(),
+            },
+        );
+        let server = TestServer::start_with_docker(&socket).await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "applications", "allow").await;
+        server.insert_app("app1", "shop").await;
+        let session = server.login("alice", USER_PASSWORD).await;
+
+        let (status, _, body) = server.get("/api/apps", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+
+        let (status, _, body) = server.get("/api/apps/app1", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Read-only viewers do not receive the editable Compose document.
+        assert!(
+            body.get("compose").is_none(),
+            "compose must stay admin-only: {body}"
+        );
+        assert!(body.get("env").is_some(), "masked env list is safe: {body}");
+
+        let (status, _, body) = server.get("/api/apps/app1/history", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["items"].is_array());
+
+        let (status, _, body) = server.get("/api/apps/app1/logs?tail=10", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["lines"][0]["message"], "access-test log line");
+
+        let (status, _, body) = server.get("/api/docker/status", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["available"], true, "{body}");
+
+        // The live log stream opens for a read-only grant (SSE body is not
+        // consumed here so the test can finish; content-type proves transport).
+        let (status, headers) = server
+            .request_headers("GET", "/api/apps/app1/logs/stream?tail=10", &session)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            "text/event-stream"
+        );
+
+        // Host-wide container discovery stays administrator-only (import flow).
+        let (status, _, _) = server.get("/api/docker/containers", &session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_none_blocks_the_group_grant() {
+        let server = TestServer::start().await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "applications", "allow").await;
+        server
+            .set_user_app_rule(alice, "applications", "none")
+            .await;
+        let session = server.login("alice", USER_PASSWORD).await;
+        let (status, _, body) = server.get("/api/apps", &session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_still_forbids_mutations() {
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "access log".into(),
+            },
+        );
+        let server = TestServer::start_with_docker(&socket).await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "applications", "allow").await;
+        server.insert_app("app1", "shop").await;
+        let session = server.login("alice", USER_PASSWORD).await;
+
+        let cases: [(&str, &str, Option<serde_json::Value>); 5] = [
+            (
+                "POST",
+                "/api/apps",
+                Some(
+                    json!({"name": "x", "compose": "services:\n  web:\n    image: nginx\n", "env": []}),
+                ),
+            ),
+            ("POST", "/api/apps/app1/start", None),
+            ("POST", "/api/apps/app1/stop", None),
+            ("DELETE", "/api/apps/app1", None),
+            (
+                "POST",
+                "/api/docker/import",
+                Some(json!({"containerIds": ["0123456789ab"]})),
+            ),
+        ];
+        for (method, path, body) in cases {
+            let (status, _, value) = server
+                .request(method, path, body, session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} -> {value}");
+        }
+
+        worker.abort();
+    }
+
+    #[tokio::test]
+    async fn admin_behaviour_is_unchanged() {
+        let dir = tempfile::tempdir().expect("socket dir");
+        let socket = dir.path().join("worker.sock");
+        let worker = start_fake_worker(
+            socket.clone(),
+            FakeWorkerMode::Initial {
+                message: "access log".into(),
+            },
+        );
+        let server = TestServer::start_with_docker(&socket).await;
+        server
+            .create_user("admin", ADMIN_PASSWORD, crate::auth::Role::Admin)
+            .await;
+        server.insert_app("app1", "shop").await;
+        let admin = server.login("admin", ADMIN_PASSWORD).await;
+
+        let (status, _, body) = server.get("/api/apps", &admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, body) = server.get("/api/docker/containers", &admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, body) = server.get("/api/apps/app1", &admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.get("compose").is_some(),
+            "admins keep the editable Compose document: {body}"
+        );
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/apps",
+                Some(json!({
+                    "name": "Admin App",
+                    "compose": "services:\n  web:\n    image: nginx:alpine\n",
+                    "env": [],
+                })),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["jobId"].as_str().is_some(), "{body}");
+
+        worker.abort();
     }
 }

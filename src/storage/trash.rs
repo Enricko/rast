@@ -718,7 +718,7 @@ mod tests {
             &storage,
             &admin,
             shares::CreateShareInput {
-                name: "team".into(),
+                name: "team-trash".into(),
                 description: None,
                 members: Some(vec![shares::MemberInput {
                     user_id: 2,
@@ -735,7 +735,7 @@ mod tests {
         )
         .unwrap();
         let resolved = storage
-            .resolve(&pool, &alice, "/shared/team/f.txt", Access::Write)
+            .resolve(&pool, &alice, "/shared/team-trash/f.txt", Access::Write)
             .await
             .unwrap();
         let row = move_to_trash(&pool, &storage, &alice, &resolved)

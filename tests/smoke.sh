@@ -561,6 +561,57 @@ else
 fi
 
 ########################################################################
+info "Users & groups (access policy)"
+########################################################################
+GROUP_NAME="smoke-viewers-$SUFFIX"
+SHARE_NAME="smoke-share-$SUFFIX"
+STATUS="$(api "$ADMIN_JAR" GET "/api/users?page=1&perPage=100")"
+ALICE_ID="$(python3 - "$WORK/body" "$ALICE" <<'PY' 2>/dev/null || true
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(next((str(u["id"]) for u in d.get("items", []) if u["username"] == sys.argv[2]), ""))
+PY
+)"
+STATUS="$(api "$ADMIN_JAR" POST /api/shares "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"description":"group policy smoke folder"}))' "$SHARE_NAME")" "$ADMIN_CSRF")"
+SHARE_ID="$(json_get "$WORK/body" "d['id']")"
+if [ "$STATUS" = "200" ] && [ -n "$SHARE_ID" ]; then pass "created shared folder for policy test"; else fail "create shared folder ($STATUS: $(cat "$WORK/body"))"; fi
+GROUP_STATUS="$(api "$ADMIN_JAR" POST /api/groups "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"description":"smoke read-only group","members":[int(sys.argv[2])],"folderRules":[{"shareName":sys.argv[3],"rule":"read"}],"appRules":[{"appId":"applications","rule":"allow"}]}))' "$GROUP_NAME" "$ALICE_ID" "$SHARE_NAME")" "$ADMIN_CSRF")"
+GROUP_ID="$(json_get "$WORK/body" "d['id']")"
+if [ "$GROUP_STATUS" = "200" ] && [ -n "$GROUP_ID" ]; then pass "created group with member, folder rule and app rule"; else fail "create group ($GROUP_STATUS: $(cat "$WORK/body"))"; fi
+STATUS="$(api "$ALICE_JAR" GET /api/files/roots)"
+if [ "$STATUS" = "200" ] && grep -q "$SHARE_NAME" "$WORK/body"; then pass "group-granted folder appears in File Station roots"; else fail "group-granted folder missing from roots ($STATUS)"; fi
+STATUS="$(api "$ALICE_JAR" GET "/api/files?path=%2Fshared%2F$SHARE_NAME&page=1&perPage=50")"
+if [ "$STATUS" = "200" ]; then pass "group read grant allows listing the folder"; else fail "group read listing -> $STATUS"; fi
+STATUS="$(curl -sS -o "$WORK/body" -w '%{http_code}' -X POST -b "$ALICE_JAR" -c "$ALICE_JAR" -H "X-CSRF-Token: $ALICE_CSRF" -H 'Content-Type: text/plain' --data-binary 'should be denied' "$BASE/api/files/upload?dir=%2Fshared%2F$SHARE_NAME&name=denied.txt" 2>/dev/null || echo 000)"
+if [ "$STATUS" = "403" ]; then pass "read-only group grant denies uploads"; else fail "read-only upload -> $STATUS"; fi
+STATUS="$(api "$ADMIN_JAR" GET "/api/users/$ALICE_ID/effective-access")"
+if [ "$STATUS" = "200" ] && python3 - "$WORK/body" "$SHARE_NAME" "$GROUP_NAME" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+row = next((f for f in d.get("folders", []) if f.get("shareName") == sys.argv[2]), None)
+assert row is not None and row.get("level") == "read", row
+assert any(s.get("kind") == "group" and s.get("groupName") == sys.argv[3] and s.get("rule") == "read" for s in row.get("sources", [])), row
+app = next((a for a in d.get("apps", []) if a.get("appId") == "applications"), None)
+assert app and app.get("allowed") is True and app.get("readOnly") is True, app
+PY
+then pass "effective access explains the group grant (read + read-only app)"; else fail "effective access explanation wrong"; fi
+STATUS="$(api "$ALICE_JAR" GET '/api/apps?page=1&perPage=5')"
+if [ "$STATUS" = "200" ]; then pass "group grant allows read-only Applications access"; else fail "read-only Applications access -> $STATUS"; fi
+STATUS="$(api "$ALICE_JAR" POST /api/apps '{"name":"smoke-policy-app","compose":"services: {web: {image: nginx}}"}' "$ALICE_CSRF")"
+if [ "$STATUS" = "403" ]; then pass "read-only Applications grant cannot deploy"; else fail "read-only deploy -> $STATUS"; fi
+# Revoke membership: access disappears immediately from the signed-in session.
+api "$ADMIN_JAR" PUT "/api/groups/$GROUP_ID" "$(python3 -c 'import json,sys;print(json.dumps({"name":sys.argv[1],"members":[],"folderRules":[{"shareName":sys.argv[2],"rule":"read"}]}))' "$GROUP_NAME" "$SHARE_NAME")" "$ADMIN_CSRF" >/dev/null
+STATUS="$(api "$ALICE_JAR" GET /api/files/roots)"
+if [ "$STATUS" = "200" ] && ! grep -q "$SHARE_NAME" "$WORK/body"; then pass "removing the membership revokes folder access live"; else fail "revoked folder still listed ($STATUS)"; fi
+# Delete the group and share: users/files are retained, definitions removed.
+STATUS="$(api "$ADMIN_JAR" DELETE "/api/groups/$GROUP_ID" "" "$ADMIN_CSRF")"
+if [ "$STATUS" = "200" ] && [ "$(json_get "$WORK/body" "d['deleted']")" = "true" ]; then pass "group deletion reports and succeeds"; else fail "group deletion -> $STATUS"; fi
+STATUS="$(api "$ADMIN_JAR" DELETE "/api/shares/$SHARE_ID" "" "$ADMIN_CSRF")"
+if [ "$STATUS" = "200" ]; then pass "shared folder definition removed (data retained)"; else fail "share delete -> $STATUS"; fi
+STATUS="$(api "$ALICE_JAR" GET /api/auth/me)"
+if [ "$STATUS" = "200" ]; then pass "user account survives group deletion"; else fail "user lost after group deletion ($STATUS)"; fi
+
+########################################################################
 info "Cleanup"
 ########################################################################
 if [ "$KEEP_USERS" = "1" ]; then

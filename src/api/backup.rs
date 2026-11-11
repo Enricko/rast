@@ -17,8 +17,9 @@ use sqlx::Row;
 use tokio_util::io::ReaderStream;
 
 use crate::{
+    access,
     audit::{self, AuditLog},
-    auth::AdminUser,
+    auth::{AdminUser, AuthUser},
     backup::{self, schedule},
     db,
     error::{AppError, AppResult},
@@ -64,9 +65,11 @@ pub struct BackupDto {
 /// GET /api/backups
 pub async fn list_backups(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Query(q): Query<BackupQuery>,
 ) -> AppResult<Json<Value>> {
+    // Read handler: admins or non-admins with the read-only `backup` grant.
+    access::app_surface(&state.db, &state, &user, "backup").await?;
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(25).clamp(1, 100);
     let offset = (page - 1) * per_page;
@@ -191,10 +194,8 @@ pub async fn create_backup(
 }
 
 /// GET /api/backups/schedule
-pub async fn get_schedule(
-    State(state): State<AppState>,
-    _admin: AdminUser,
-) -> AppResult<Json<Value>> {
+pub async fn get_schedule(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    access::app_surface(&state.db, &state, &user, "backup").await?;
     let schedules = schedule::list(&state.db).await?;
     Ok(Json(json!({"schedule": schedules.first()})))
 }
@@ -280,7 +281,7 @@ pub async fn update_schedule(
             .detail(format!("enabled={}, retention={retention}", body.enabled)),
     )
     .await;
-    get_schedule(State(state), admin).await
+    get_schedule(State(state), admin.0).await
 }
 
 /// DELETE /api/backups/{id}
@@ -328,9 +329,10 @@ pub async fn delete_backup(
 /// GET /api/backups/{id}/download — streamed archive download.
 pub async fn download_backup(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
+    access::app_surface(&state.db, &state, &user, "backup").await?;
     let row = sqlx::query("SELECT path, file_name FROM backups WHERE id = ?")
         .bind(&id)
         .fetch_optional(&state.db)
@@ -408,9 +410,10 @@ pub async fn verify_backup(
 /// GET /api/backups/restore-guide?backupId=...
 pub async fn restore_guide(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Query(q): Query<RestoreGuideQuery>,
 ) -> AppResult<Json<Value>> {
+    access::app_surface(&state.db, &state, &user, "backup").await?;
     let file_name = if let Some(id) = &q.backup_id {
         sqlx::query_scalar::<_, String>("SELECT file_name FROM backups WHERE id = ?")
             .bind(id)
@@ -447,4 +450,185 @@ pub async fn restore_guide(
 #[serde(rename_all = "camelCase")]
 pub struct RestoreGuideQuery {
     pub backup_id: Option<String>,
+}
+
+/// Group-policy enforcement tests for the Backup Center read surface.
+#[cfg(test)]
+mod access_policy_tests {
+    use crate::api::apps::access_test_support::TestServer;
+    use axum::http::{header, StatusCode};
+    use serde_json::json;
+
+    const ADMIN_PASSWORD: &str = "Admin-Password-123!";
+    const USER_PASSWORD: &str = "Alice-Password-123!";
+
+    /// Seed one completed backup row + archive file inside the backup dir.
+    async fn seed_backup(server: &TestServer) -> String {
+        let backup_dir = server.state.config.backup_dir();
+        std::fs::create_dir_all(&backup_dir).expect("backup dir");
+        let path = backup_dir.join("b1.tar.gz");
+        std::fs::write(&path, b"fake-archive-bytes").expect("write archive");
+        sqlx::query(
+            "INSERT INTO backups (id, file_name, path, size_bytes, sha256, scope, status, note, created_at, finished_at, error)
+             VALUES ('b1', 'b1.tar.gz', ?, 18, '', '[\"db\"]', 'done', '', 1, NULL, '')",
+        )
+        .bind(path.display().to_string())
+        .execute(&server.state.db)
+        .await
+        .expect("insert backup row");
+        path.display().to_string()
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_backup_reads_are_401() {
+        let server = TestServer::start().await;
+        for path in [
+            "/api/backups",
+            "/api/backups/schedule",
+            "/api/backups/restore-guide",
+        ] {
+            let (status, _, _) = server.get_anon(path).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_non_admin_backup_reads_are_403() {
+        let server = TestServer::start().await;
+        server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        let alice = server.login("alice", USER_PASSWORD).await;
+        for path in [
+            "/api/backups",
+            "/api/backups/schedule",
+            "/api/backups/restore-guide",
+            "/api/backups/missing/download",
+        ] {
+            let (status, _, body) = server.get(path, &alice).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{path} -> {body}");
+            assert_eq!(body["error"]["code"], "forbidden", "{path} -> {body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_allows_backup_reads() {
+        let server = TestServer::start().await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "backup", "allow").await;
+        seed_backup(&server).await;
+        let session = server.login("alice", USER_PASSWORD).await;
+
+        let (status, _, body) = server.get("/api/backups", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["items"][0]["fileName"], "b1.tar.gz");
+
+        let (status, _, body) = server.get("/api/backups/schedule", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.get("schedule").is_some(), "{body}");
+
+        let (status, _, body) = server.get("/api/backups/restore-guide", &session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body["steps"]
+            .as_array()
+            .is_some_and(|steps| !steps.is_empty()));
+
+        let (status, headers, _) = server.get("/api/backups/b1/download", &session).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default(),
+            "application/gzip"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_grant_still_forbids_backup_mutations() {
+        let server = TestServer::start().await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "backup", "allow").await;
+        seed_backup(&server).await;
+        let session = server.login("alice", USER_PASSWORD).await;
+
+        let cases: [(&str, &str, Option<serde_json::Value>); 4] = [
+            (
+                "POST",
+                "/api/backups",
+                Some(json!({"scope": ["db"], "note": "x"})),
+            ),
+            ("DELETE", "/api/backups/b1", None),
+            ("POST", "/api/backups/b1/verify", None),
+            (
+                "PUT",
+                "/api/backups/schedule",
+                Some(json!({
+                    "enabled": true,
+                    "frequency": "daily",
+                    "timeOfDay": "03:00",
+                    "retentionCount": 7,
+                    "scopes": ["db"],
+                })),
+            ),
+        ];
+        for (method, path, body) in cases {
+            let (status, _, value) = server
+                .request(method, path, body, session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} -> {value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_none_blocks_backup_grant() {
+        let server = TestServer::start().await;
+        let alice = server
+            .create_user("alice", USER_PASSWORD, crate::auth::Role::User)
+            .await;
+        server.grant_group_app(alice, "backup", "allow").await;
+        server.set_user_app_rule(alice, "backup", "none").await;
+        let session = server.login("alice", USER_PASSWORD).await;
+        let (status, _, body) = server.get("/api/backups", &session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    #[tokio::test]
+    async fn admin_behaviour_is_unchanged() {
+        let server = TestServer::start().await;
+        server
+            .create_user("admin", ADMIN_PASSWORD, crate::auth::Role::Admin)
+            .await;
+        seed_backup(&server).await;
+        let admin = server.login("admin", ADMIN_PASSWORD).await;
+
+        let (status, _, body) = server.get("/api/backups", &admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+        let (status, _, body) = server.get("/api/backups/b1/download", &admin).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Administrators keep the schedule write path.
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                "/api/backups/schedule",
+                Some(json!({
+                    "enabled": true,
+                    "frequency": "daily",
+                    "timeOfDay": "03:30",
+                    "retentionCount": 5,
+                    "scopes": ["db", "config"],
+                })),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["schedule"]["frequency"], "daily", "{body}");
+    }
 }

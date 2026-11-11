@@ -402,30 +402,24 @@ impl PathMapper {
             users.insert(username.to_ascii_lowercase(), row.get("id"));
         }
 
-        let share_rows = sqlx::query("SELECT id, name, container_path, created_by FROM shares")
+        let share_rows = sqlx::query("SELECT id, name, container_path FROM shares")
             .fetch_all(pool)
             .await?;
-        let member_rows = sqlx::query("SELECT share_id, user_id FROM share_members")
-            .fetch_all(pool)
-            .await?;
-        let mut members: HashMap<String, Vec<i64>> = HashMap::new();
-        for row in member_rows {
-            members
-                .entry(row.get::<String, _>("share_id"))
-                .or_default()
-                .push(row.get("user_id"));
-        }
         let mut shares = HashMap::with_capacity(share_rows.len());
         for row in share_rows {
             let id: String = row.get("id");
             let container_path: String = row.get("container_path");
-            let created_by: Option<i64> = row.get("created_by");
-            let mut audience = members.remove(&id).unwrap_or_default();
-            if let Some(creator) = created_by {
-                audience.push(creator);
-            }
-            audience.sort_unstable();
-            audience.dedup();
+            // The evaluator-filtered audience includes legacy members, the
+            // owner, direct-rule holders and members of groups with folder
+            // rules (explicit denials excluded), so external filesystem
+            // changes reach every account that can currently read the share.
+            let audience = match crate::storage::shares::member_ids(pool, &id).await {
+                Ok(audience) => audience,
+                Err(error) => {
+                    tracing::warn!(share = %id, error = %error, "could not resolve share audience; skipping");
+                    Vec::new()
+                }
+            };
             shares.insert(
                 container_path,
                 CachedShare {

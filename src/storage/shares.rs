@@ -11,7 +11,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::{
-    auth::AuthUser,
+    auth::{AuthUser, Role},
     db,
     error::{AppError, AppResult},
     storage::{safe_path, Perm, Storage},
@@ -129,24 +129,17 @@ pub async fn find_by_id(pool: &SqlitePool, id: &str) -> AppResult<Option<ShareRe
     Ok(row.map(map_share))
 }
 
-/// Effective permission for a user on a share. `None` means "not visible"
-/// (which callers translate to HTTP 404, not 403).
+/// Effective permission for a user on a share, evaluated by the group policy
+/// evaluator (explicit rules > strongest grant > legacy `share_members`/owner
+/// fallback; admins bypass). `None` means "not visible" (callers translate that
+/// to HTTP 404 so hidden shares stay indistinguishable from missing ones).
 pub async fn effective_perm(
     pool: &SqlitePool,
     user: &AuthUser,
     share_id: &str,
 ) -> AppResult<Option<Perm>> {
-    if user.is_admin() {
-        return Ok(Some(Perm::Admin));
-    }
-    let row = sqlx::query("SELECT perms FROM share_members WHERE share_id = ? AND user_id = ?")
-        .bind(share_id)
-        .bind(user.id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(row
-        .and_then(|r| Perm::parse(r.get::<String, _>("perms").as_str()))
-        .or(None))
+    let access = crate::access::folder_access_by_id(pool, user, share_id).await?;
+    Ok(access.level)
 }
 
 /// Load the member list of one share.
@@ -169,24 +162,78 @@ pub async fn members(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<MemberD
         .collect())
 }
 
-/// Account ids that may observe a shared folder: the share owner plus every
-/// explicit member. Used for realtime event audiences.
+/// Account ids that may observe a shared folder. Candidates come from the
+/// legacy ACL (members + owner), direct folder rules and group folder rules;
+/// each candidate is then confirmed through the access evaluator so explicit
+/// denials are excluded and group-granted users are included. Used for realtime
+/// event audiences.
 pub async fn member_ids(pool: &SqlitePool, share_id: &str) -> AppResult<Vec<i64>> {
-    let mut ids: Vec<i64> =
+    let row = sqlx::query("SELECT name, created_by FROM shares WHERE id = ?")
+        .bind(share_id)
+        .fetch_optional(pool)
+        .await?;
+    let Some(row) = row else {
+        return Ok(Vec::new());
+    };
+    let name: String = row.get("name");
+    let created_by: Option<i64> = row.get("created_by");
+    let mut candidates: Vec<i64> =
         sqlx::query_scalar("SELECT user_id FROM share_members WHERE share_id = ?")
             .bind(share_id)
             .fetch_all(pool)
             .await?;
-    let created_by: Option<i64> = sqlx::query_scalar("SELECT created_by FROM shares WHERE id = ?")
-        .bind(share_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
     if let Some(creator) = created_by {
-        ids.push(creator);
+        candidates.push(creator);
     }
-    ids.sort_unstable();
-    ids.dedup();
+    candidates.extend(
+        sqlx::query_scalar::<_, i64>("SELECT user_id FROM user_folder_rules WHERE share_name = ?")
+            .bind(&name)
+            .fetch_all(pool)
+            .await?,
+    );
+    candidates.extend(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT gm.user_id FROM group_members gm
+             JOIN group_folder_rules r ON r.group_id = gm.group_id
+             WHERE r.share_name = ?",
+        )
+        .bind(&name)
+        .fetch_all(pool)
+        .await?,
+    );
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut ids = Vec::with_capacity(candidates.len());
+    for user_id in candidates {
+        let user_row = sqlx::query("SELECT username, role FROM users WHERE id = ? AND active = 1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+        let Some(user_row) = user_row else {
+            continue;
+        };
+        let username: String = user_row.get("username");
+        let Some(role) = Role::parse(&user_row.get::<String, _>("role")) else {
+            continue;
+        };
+        let candidate = AuthUser {
+            id: user_id,
+            username: username.clone(),
+            display_name: username,
+            role,
+            session_id: String::new(),
+            quota_bytes: 0,
+            must_change_password: false,
+        };
+        let allowed = crate::access::folder_access_by_id(pool, &candidate, share_id)
+            .await
+            .map(|access| access.level.is_some())
+            .unwrap_or(false);
+        if allowed {
+            ids.push(user_id);
+        }
+    }
     Ok(ids)
 }
 
@@ -206,32 +253,44 @@ async fn load_dto(pool: &SqlitePool, record: ShareRecord) -> AppResult<ShareDto>
     Ok(dto(record, members))
 }
 
-/// List shares visible to `user`: admins see everything, regular users only
-/// the shares they are a member of.
-pub async fn list_for_user(pool: &SqlitePool, user: &AuthUser) -> AppResult<Vec<ShareDto>> {
-    let rows = if user.is_admin() {
-        sqlx::query(
-            "SELECT id, name, description, container_path, created_at
-             FROM shares ORDER BY name COLLATE NOCASE",
-        )
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query(
-            "SELECT s.id, s.name, s.description, s.container_path, s.created_at
-             FROM shares s JOIN share_members m ON m.share_id = s.id
-             WHERE m.user_id = ?
-             ORDER BY s.name COLLATE NOCASE",
-        )
-        .bind(user.id)
-        .fetch_all(pool)
-        .await?
-    };
+/// List shares visible to `user`, with the evaluated access level: admins see
+/// everything, regular users see exactly the shares the group evaluator grants
+/// them (group rules, direct rules, legacy membership or ownership).
+pub async fn list_for_user_with_levels(
+    pool: &SqlitePool,
+    user: &AuthUser,
+) -> AppResult<Vec<(ShareDto, Perm)>> {
+    let rows = sqlx::query(
+        "SELECT id, name, description, container_path, created_at
+         FROM shares ORDER BY name COLLATE NOCASE",
+    )
+    .fetch_all(pool)
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        out.push(load_dto(pool, map_share(row)).await?);
+        let record = map_share(row);
+        let access = match crate::access::folder_access_by_id(pool, user, &record.id).await {
+            Ok(access) => access,
+            // The share vanished concurrently; skip it instead of failing the
+            // whole listing.
+            Err(AppError::NotFound(_)) => continue,
+            Err(error) => return Err(error),
+        };
+        let Some(level) = access.level else {
+            continue;
+        };
+        out.push((load_dto(pool, record).await?, level));
     }
     Ok(out)
+}
+
+/// List shares visible to `user` (see [`list_for_user_with_levels`]).
+pub async fn list_for_user(pool: &SqlitePool, user: &AuthUser) -> AppResult<Vec<ShareDto>> {
+    Ok(list_for_user_with_levels(pool, user)
+        .await?
+        .into_iter()
+        .map(|(share, _level)| share)
+        .collect())
 }
 
 /// Normalise and validate a member list: dedupe by user id, validate perms and
@@ -327,6 +386,8 @@ pub async fn create(
             .await?;
     }
     tx.commit().await?;
+    // A new share changes the visibility matrix for cache entries.
+    crate::access::bump_generation();
 
     let record = find_by_id(pool, &id)
         .await?
@@ -402,7 +463,22 @@ pub async fn update(
                 .await?;
         }
     }
+    // Group policy rules reference shared folders by display name: rewrite
+    // them in the same transaction so a rename never orphans access rules.
+    if name != current.name {
+        sqlx::query("UPDATE OR REPLACE group_folder_rules SET share_name = ? WHERE share_name = ?")
+            .bind(&name)
+            .bind(&current.name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE OR REPLACE user_folder_rules SET share_name = ? WHERE share_name = ?")
+            .bind(&name)
+            .bind(&current.name)
+            .execute(&mut *tx)
+            .await?;
+    }
     tx.commit().await?;
+    crate::access::bump_generation();
 
     // Repair a container directory that was removed out-of-band.
     let _ = std::fs::create_dir_all(storage.shared_container_dir(&current.container_path));
@@ -413,15 +489,27 @@ pub async fn update(
     load_dto(pool, record).await
 }
 
-/// Delete a shared folder definition; the data on disk is preserved.
+/// Delete a shared folder definition; the data on disk is preserved. Access
+/// rules that reference it by name are removed in the same transaction.
 pub async fn delete(pool: &SqlitePool, id: &str) -> AppResult<ShareRecord> {
     let record = find_by_id(pool, id)
         .await?
         .ok_or(AppError::NotFound("shared folder not found"))?;
+    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM shares WHERE id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+    sqlx::query("DELETE FROM group_folder_rules WHERE share_name = ?")
+        .bind(&record.name)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM user_folder_rules WHERE share_name = ?")
+        .bind(&record.name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    crate::access::bump_generation();
     Ok(record)
 }
 
@@ -485,7 +573,7 @@ mod tests {
             &storage,
             &admin,
             CreateShareInput {
-                name: "team".into(),
+                name: "team-acl".into(),
                 description: Some("Team files".into()),
                 members: Some(vec![
                     MemberInput {
@@ -501,10 +589,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(share.name, "team");
-        assert_eq!(share.path, "/shared/team");
+        assert_eq!(share.name, "team-acl");
+        assert_eq!(share.path, "/shared/team-acl");
         assert_eq!(share.members.len(), 2);
-        assert!(storage.shared_container_dir("team").is_dir());
+        assert!(storage.shared_container_dir("team-acl").is_dir());
 
         // Admin sees the share and has full permissions.
         assert_eq!(list_for_user(&pool, &admin).await.unwrap().len(), 1);
@@ -564,6 +652,40 @@ mod tests {
             member_ids(&pool, "missing").await.unwrap(),
             Vec::<i64>::new()
         );
+    }
+
+    #[tokio::test]
+    async fn member_ids_include_group_grants_and_exclude_denied_users() {
+        let (_d, storage, pool, admin) = setup().await;
+        let share = create(
+            &pool,
+            &storage,
+            &admin,
+            CreateShareInput {
+                name: "audience-team".into(),
+                description: None,
+                members: None,
+            },
+        )
+        .await
+        .unwrap();
+        // carol has no grant; a direct deny must not make her an event audience.
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (4, 'carol', 'x', 'user', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        add_group(&pool, 30, "readers").await;
+        add_group_member(&pool, 30, 3).await;
+        set_group_rule(&pool, 30, &share.name, "read").await;
+        set_user_rule(&pool, 4, &share.name, "none").await;
+        crate::access::bump_generation();
+
+        // Owner (admin bypass) + group-granted bob; denied carol excluded.
+        assert_eq!(member_ids(&pool, &share.id).await.unwrap(), vec![1, 3]);
+        assert!(member_ids(&pool, "missing-share").await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -672,5 +794,271 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // ----------------------------------------------- group policy (task-13)
+
+    async fn add_group(pool: &SqlitePool, id: i64, name: &str) {
+        sqlx::query(
+            "INSERT INTO groups (id, name, description, created_at, updated_at)
+             VALUES (?, ?, '', 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn add_group_member(pool: &SqlitePool, group_id: i64, user_id: i64) {
+        sqlx::query("INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, 1)")
+            .bind(group_id)
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn set_group_rule(pool: &SqlitePool, group_id: i64, share_name: &str, rule: &str) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO group_folder_rules (group_id, share_name, rule)
+             VALUES (?, ?, ?)",
+        )
+        .bind(group_id)
+        .bind(share_name)
+        .bind(rule)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn set_user_rule(pool: &SqlitePool, user_id: i64, share_name: &str, rule: &str) {
+        sqlx::query(
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_name, rule)
+             VALUES (?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(share_name)
+        .bind(rule)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn level(pool: &SqlitePool, who: &AuthUser, share_name: &str) -> Option<Perm> {
+        crate::access::folder_access_by_name(pool, who, share_name)
+            .await
+            .unwrap()
+            .level
+    }
+
+    #[tokio::test]
+    async fn owner_and_admin_get_full_access() {
+        let (_d, storage, pool, admin) = setup().await;
+        let alice = user(2, "alice", Role::User);
+        let bob = user(3, "bob", Role::User);
+        // A non-admin creates a share with no legacy membership rows.
+        let share = create(
+            &pool,
+            &storage,
+            &alice,
+            CreateShareInput {
+                name: "alice-share".into(),
+                description: None,
+                members: None,
+            },
+        )
+        .await
+        .unwrap();
+        // Owner fallback: full access without a share_members row.
+        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Admin));
+        assert_eq!(level(&pool, &bob, &share.name).await, None);
+        // Admin bypass, even when an explicit deny rule targets them.
+        set_user_rule(&pool, 1, &share.name, "none").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &admin, &share.name).await, Some(Perm::Admin));
+        // Root listings follow the evaluator: owner sees it with its level,
+        // others do not see it at all.
+        let alice_shares = list_for_user_with_levels(&pool, &alice).await.unwrap();
+        assert_eq!(alice_shares.len(), 1);
+        assert_eq!(alice_shares[0].1, Perm::Admin);
+        assert_eq!(alice_shares[0].0.name, "alice-share");
+        assert!(list_for_user(&pool, &bob).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn legacy_membership_is_preserved_when_no_rules_exist() {
+        let (_d, storage, pool, admin) = setup().await;
+        let alice = user(2, "alice", Role::User);
+        let bob = user(3, "bob", Role::User);
+        let share = create(
+            &pool,
+            &storage,
+            &admin,
+            CreateShareInput {
+                name: "team-legacy".into(),
+                description: None,
+                members: Some(vec![
+                    MemberInput {
+                        user_id: 2,
+                        perms: Some("read".into()),
+                    },
+                    MemberInput {
+                        user_id: 3,
+                        perms: Some("write".into()),
+                    },
+                ]),
+            },
+        )
+        .await
+        .unwrap();
+        // Exactly the pre-groups behaviour: read stays read, write stays write.
+        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Read));
+        assert_eq!(level(&pool, &bob, &share.name).await, Some(Perm::Write));
+        assert_eq!(list_for_user(&pool, &alice).await.unwrap().len(), 1);
+        assert_eq!(list_for_user(&pool, &bob).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn group_grants_and_explicit_denials_win() {
+        let (_d, storage, pool, admin) = setup().await;
+        let alice = user(2, "alice", Role::User);
+        let bob = user(3, "bob", Role::User);
+        let share = create(
+            &pool,
+            &storage,
+            &admin,
+            CreateShareInput {
+                name: "team-grp".into(),
+                description: None,
+                members: None,
+            },
+        )
+        .await
+        .unwrap();
+        // New restricted resource with no grants is admin-only.
+        assert_eq!(level(&pool, &alice, &share.name).await, None);
+
+        // Group grant: read.
+        add_group(&pool, 10, "staff").await;
+        add_group_member(&pool, 10, 2).await;
+        set_group_rule(&pool, 10, "team-grp", "read").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Read));
+        assert_eq!(level(&pool, &bob, &share.name).await, None);
+        assert_eq!(list_for_user(&pool, &alice).await.unwrap().len(), 1);
+
+        // Direct write is stronger than the group read.
+        set_user_rule(&pool, 2, "team-grp", "write").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, Some(Perm::Write));
+
+        // Group deny wins over the direct write (any order).
+        set_group_rule(&pool, 10, "team-grp", "none").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, None);
+        assert!(list_for_user(&pool, &alice).await.unwrap().is_empty());
+
+        // Direct deny wins over the group write.
+        set_group_rule(&pool, 10, "team-grp", "write").await;
+        set_user_rule(&pool, 2, "team-grp", "none").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, None);
+
+        // Inherit entries are ignored: with no grant left, the legacy ACL
+        // (here: nothing) decides.
+        set_group_rule(&pool, 10, "team-grp", "inherit").await;
+        set_user_rule(&pool, 2, "team-grp", "inherit").await;
+        crate::access::bump_generation();
+        assert_eq!(level(&pool, &alice, &share.name).await, None);
+        assert!(list_for_user(&pool, &alice).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rename_rewrites_rules_and_delete_removes_them() {
+        let (_d, storage, pool, admin) = setup().await;
+        let alice = user(2, "alice", Role::User);
+        let share = create(
+            &pool,
+            &storage,
+            &admin,
+            CreateShareInput {
+                name: "docs".into(),
+                description: None,
+                members: Some(vec![MemberInput {
+                    user_id: 2,
+                    perms: Some("read".into()),
+                }]),
+            },
+        )
+        .await
+        .unwrap();
+        add_group(&pool, 20, "editors").await;
+        add_group_member(&pool, 20, 2).await;
+        set_group_rule(&pool, 20, "docs", "write").await;
+        set_user_rule(&pool, 2, "docs", "read").await;
+        crate::access::bump_generation();
+        // Cache the decision under the old name first.
+        assert_eq!(level(&pool, &alice, "docs").await, Some(Perm::Write));
+
+        let updated = update(
+            &pool,
+            &storage,
+            &share.id,
+            UpdateShareInput {
+                name: Some("documents".into()),
+                description: None,
+                members: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "documents");
+        // Rules were rewritten in the same transaction.
+        let group_rules: Vec<(String, String)> =
+            sqlx::query_as("SELECT share_name, rule FROM group_folder_rules ORDER BY share_name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            group_rules,
+            vec![("documents".to_string(), "write".to_string())]
+        );
+        let user_rules: Vec<(String, String)> =
+            sqlx::query_as("SELECT share_name, rule FROM user_folder_rules ORDER BY share_name")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            user_rules,
+            vec![("documents".to_string(), "read".to_string())]
+        );
+        // The evaluator cache was invalidated: the new mount name works and the
+        // old one no longer exists.
+        assert_eq!(level(&pool, &alice, "documents").await, Some(Perm::Write));
+        assert!(crate::access::folder_access_by_name(&pool, &alice, "docs")
+            .await
+            .is_err());
+
+        // Deleting the share removes every rule that referenced it.
+        delete(&pool, &share.id).await.unwrap();
+        let group_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM group_folder_rules WHERE share_name = 'documents'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let user_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_folder_rules WHERE share_name = 'documents'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((group_count, user_count), (0, 0));
+        assert!(
+            crate::access::folder_access_by_name(&pool, &alice, "documents")
+                .await
+                .is_err()
+        );
     }
 }
