@@ -18,6 +18,21 @@ use crate::{
 
 const SAFE_METHODS: [Method; 3] = [Method::GET, Method::HEAD, Method::OPTIONS];
 
+/// Endpoints an account flagged with `must_change_password` may still use:
+/// identify itself, change the password, sign out and keep its live
+/// connection (so the UI can show the forced-change dialog).
+const PASSWORD_CHANGE_ALLOWED: [&str; 4] = [
+    "/api/auth/me",
+    "/api/auth/password",
+    "/api/auth/logout",
+    "/api/events",
+];
+
+/// Is this request permitted while a password change is pending?
+pub fn allowed_during_forced_password_change(path: &str) -> bool {
+    PASSWORD_CHANGE_ALLOWED.contains(&path)
+}
+
 /// Authentication + CSRF layer applied to all protected routes.
 pub async fn require_auth(
     State(state): State<AppState>,
@@ -63,6 +78,15 @@ pub async fn require_auth(
         if !origin_allowed(req.headers(), &state.config) {
             return Err(AppError::Forbidden("cross-origin request rejected"));
         }
+    }
+
+    // A password reset by an administrator (or the first sign-in with a
+    // temporary password) must be completed before the account can use any
+    // other API — enforced server-side, not only by the UI dialog.
+    if row.must_change_password && !allowed_during_forced_password_change(req.uri().path()) {
+        return Err(AppError::Forbidden(
+            "password change required before using RAST",
+        ));
     }
 
     let user = AuthUser {
@@ -215,5 +239,32 @@ mod tests {
         assert!(!origin_allowed(&headers, &cfg));
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
         assert!(!origin_allowed(&headers, &cfg));
+    }
+}
+
+#[cfg(test)]
+mod forced_password_change_tests {
+    use super::allowed_during_forced_password_change;
+
+    #[test]
+    fn only_identity_password_logout_and_events_are_allowed() {
+        for allowed in [
+            "/api/auth/me",
+            "/api/auth/password",
+            "/api/auth/logout",
+            "/api/events",
+        ] {
+            assert!(allowed_during_forced_password_change(allowed), "{allowed}");
+        }
+        for denied in [
+            "/api/files",
+            "/api/files/download",
+            "/api/users",
+            "/api/appearance",
+            "/api/auth/sessions",
+            "/api/auth/me/extra",
+        ] {
+            assert!(!allowed_during_forced_password_change(denied), "{denied}");
+        }
     }
 }

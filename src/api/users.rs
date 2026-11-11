@@ -38,6 +38,8 @@ pub struct ListQuery {
     #[serde(rename = "perPage")]
     pub per_page_camel: Option<i64>,
     pub q: Option<String>,
+    /// `all` (default), `active` or `inactive`.
+    pub active: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +59,14 @@ pub async fn list_users(
 ) -> AppResult<Json<UserPage>> {
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.or(q.per_page_camel).unwrap_or(25).clamp(1, 100);
-    let (rows, total) = users::list(&state.db, q.q.as_deref(), page, per_page).await?;
+    let (rows, total) = users::list_filtered(
+        &state.db,
+        q.q.as_deref(),
+        users::ActiveFilter::parse(q.active.as_deref()),
+        page,
+        per_page,
+    )
+    .await?;
     let mut items: Vec<UserDto> = rows.into_iter().map(UserDto::from).collect();
     attach_groups(&state.db, &mut items).await?;
     Ok(Json(UserPage {

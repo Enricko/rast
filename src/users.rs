@@ -163,61 +163,100 @@ pub async fn find_by_id(pool: &SqlitePool, id: i64) -> AppResult<Option<UserReco
     Ok(row.map(map_user))
 }
 
+/// Account status filter for [`list_filtered`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveFilter {
+    #[default]
+    All,
+    Active,
+    Inactive,
+}
+
+impl ActiveFilter {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("active") => Self::Active,
+            Some("inactive") | Some("disabled") => Self::Inactive,
+            _ => Self::All,
+        }
+    }
+}
+
+/// Escape `%`, `_` and `\` for a `LIKE ... ESCAPE '\'` pattern.
+fn like_pattern(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('%');
+    for c in value.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('%');
+    out
+}
+
+/// Paginated account list (search by username/display name, any length).
 pub async fn list(
     pool: &SqlitePool,
     query: Option<&str>,
     page: i64,
     per_page: i64,
 ) -> AppResult<(Vec<UserRecord>, i64)> {
+    list_filtered(pool, query, ActiveFilter::All, page, per_page).await
+}
+
+/// Paginated account list with search and status filters. Searching is
+/// case-insensitive (usernames and display names use NOCASE/LOWER) and works
+/// for any non-empty query, including one or two characters.
+pub async fn list_filtered(
+    pool: &SqlitePool,
+    query: Option<&str>,
+    active: ActiveFilter,
+    page: i64,
+    per_page: i64,
+) -> AppResult<(Vec<UserRecord>, i64)> {
     let page = page.max(1);
     let per_page = per_page.clamp(1, 100);
     let offset = (page - 1) * per_page;
-    let like = query
-        .map(|q| format!("%{}%", q.replace(['%', '_'], "").to_lowercase()))
-        .filter(|q| q.len() > 2);
-    let (rows, total) = match like {
-        Some(like) => {
-            let total: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM users WHERE username LIKE ? OR display_name LIKE ?",
-            )
-            .bind(&like)
-            .bind(&like)
-            .fetch_one(pool)
-            .await?;
-            let rows = sqlx::query(
-                "SELECT u.id, u.username, u.display_name, u.role, u.active, u.quota_bytes,
-                        u.must_change_password, u.created_at, u.updated_at, u.last_login_at,
-                        COALESCE(s.used_bytes, 0) AS used_bytes
-                 FROM users u LEFT JOIN storage_usage s ON s.user_id = u.id
-                 WHERE u.username LIKE ? OR u.display_name LIKE ?
-                 ORDER BY u.id ASC LIMIT ? OFFSET ?",
-            )
-            .bind(&like)
-            .bind(&like)
-            .bind(per_page)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
-            (rows, total)
-        }
-        None => {
-            let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
-                .fetch_one(pool)
-                .await?;
-            let rows = sqlx::query(
-                "SELECT u.id, u.username, u.display_name, u.role, u.active, u.quota_bytes,
-                        u.must_change_password, u.created_at, u.updated_at, u.last_login_at,
-                        COALESCE(s.used_bytes, 0) AS used_bytes
-                 FROM users u LEFT JOIN storage_usage s ON s.user_id = u.id
-                 ORDER BY u.id ASC LIMIT ? OFFSET ?",
-            )
-            .bind(per_page)
-            .bind(offset)
-            .fetch_all(pool)
-            .await?;
-            (rows, total)
-        }
+    let search = query.map(str::trim).filter(|q| !q.is_empty());
+    let mut clauses: Vec<&str> = Vec::new();
+    if search.is_some() {
+        clauses.push(
+            "(u.username LIKE ? ESCAPE '\\' OR LOWER(u.display_name) LIKE LOWER(?) ESCAPE '\\')",
+        );
+    }
+    match active {
+        ActiveFilter::All => {}
+        ActiveFilter::Active => clauses.push("u.active = 1"),
+        ActiveFilter::Inactive => clauses.push("u.active = 0"),
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", clauses.join(" AND "))
     };
+    let pattern = search.map(like_pattern);
+
+    let count_sql = format!("SELECT COUNT(*) FROM users u{where_sql}");
+    let mut count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql));
+    if let Some(pattern) = &pattern {
+        count = count.bind(pattern.clone()).bind(pattern.clone());
+    }
+    let total = count.fetch_one(pool).await?;
+
+    let rows_sql = format!(
+        "SELECT u.id, u.username, u.display_name, u.role, u.active, u.quota_bytes,
+                u.must_change_password, u.created_at, u.updated_at, u.last_login_at,
+                COALESCE(s.used_bytes, 0) AS used_bytes
+         FROM users u LEFT JOIN storage_usage s ON s.user_id = u.id{where_sql}
+         ORDER BY u.id ASC LIMIT ? OFFSET ?"
+    );
+    let mut rows = sqlx::query(sqlx::AssertSqlSafe(rows_sql));
+    if let Some(pattern) = &pattern {
+        rows = rows.bind(pattern.clone()).bind(pattern.clone());
+    }
+    let rows = rows.bind(per_page).bind(offset).fetch_all(pool).await?;
     Ok((rows.into_iter().map(map_user).collect(), total))
 }
 
