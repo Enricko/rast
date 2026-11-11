@@ -1099,12 +1099,17 @@ pub async fn app_logs_stream(
         token,
         ttl_hours: state.config.session_ttl_hours,
     };
-    Ok(Sse::new(log_stream(
-        state.clone(),
-        identity,
-        app.id.clone(),
-        app.slug.clone(),
-        tail,
+    // End the tail when the server shuts down so restarts are not held open.
+    let shutdown = state.events.shutdown_signal();
+    Ok(Sse::new(futures::StreamExt::take_until(
+        log_stream(
+            state.clone(),
+            identity,
+            app.id.clone(),
+            app.slug.clone(),
+            tail,
+        ),
+        shutdown,
     ))
     .keep_alive(
         KeepAlive::new()

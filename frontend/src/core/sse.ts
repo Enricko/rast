@@ -3,7 +3,11 @@
 //
 // There is exactly one authenticated EventSource per browser tab. Applications
 // subscribe through `core/realtime.ts`; this module owns the transport:
-//   * monotonic server sequence numbers (duplicates dropped, gaps -> resync),
+//   * server sequence numbers as a per-connection cursor: every `hello` starts
+//     a new cursor (a restarted server counts from 1 again), older frames on
+//     the same connection are dropped, and missed events are signalled by the
+//     server's `resync` frame. Ids are global and skip events this account
+//     may not see, so an id jump is *not* a gap;
 //   * ping heartbeats and stale detection (force reconnect),
 //   * exponential backoff with jitter,
 //   * online/offline + visibility/wake handling,
@@ -226,6 +230,8 @@ export class EventStream {
       return;
     }
     this.source = source;
+    // The new connection's `hello` sets the cursor; until then accept any id.
+    this.seq = 0;
     let opened = false;
 
     source.addEventListener("open", () => {
@@ -248,22 +254,17 @@ export class EventStream {
     });
 
     const dispatch = (kind: string) => (event: MessageEvent<string>) => {
+      if (this.source !== source) return; // a superseded connection
       this.lastEventAt = Date.now();
-      const rawId = event.lastEventId;
-      const seq = rawId ? Number.parseInt(rawId, 10) : 0;
-      if (Number.isFinite(seq) && seq > 0) {
-        if (seq <= this.seq) return; // duplicate or out of order
-        if (this.seq > 0 && seq > this.seq + 1) {
-          this.emitResync("gap");
-        }
-        this.seq = seq;
-      }
       let data: unknown = null;
       try {
         data = JSON.parse(event.data);
       } catch {
         data = event.data;
       }
+      const seq = acceptSequence(this.seq, kind, event.lastEventId, data);
+      if (seq === null) return; // older than the cursor of this connection
+      this.seq = seq;
       if (kind === "resync") {
         this.emitResync("server");
       }
@@ -396,4 +397,26 @@ export class EventStream {
     }
     if (this.state === "connected") this.setStatus("offline");
   }
+}
+
+/**
+ * Sequence bookkeeping for one connection, kept pure for tests. Returns the
+ * new cursor, or `null` when the frame is older than the cursor and must be
+ * dropped. `hello` always starts a fresh cursor (its `seq`): after a server
+ * restart ids begin at 1 again, and a cursor carried over from the previous
+ * process would silently discard every new event. Frames without an id
+ * (EventSource repeats the last id) keep the cursor.
+ */
+export function acceptSequence(cursor: number, kind: string, rawId: string, data: unknown): number | null {
+  if (kind === "hello") {
+    const fromData = (data as { seq?: unknown } | null)?.seq;
+    const helloSeq = typeof fromData === "number" ? fromData : Number.parseInt(rawId, 10);
+    return Number.isFinite(helloSeq) && helloSeq >= 0 ? helloSeq : 0;
+  }
+  const seq = rawId ? Number.parseInt(rawId, 10) : Number.NaN;
+  if (!Number.isFinite(seq) || seq <= 0) return cursor;
+  // Same id as the cursor: the initial monitor snapshot shares the hello id
+  // and pings repeat the stream position; neither is a duplicate event.
+  if (seq < cursor) return null;
+  return seq;
 }

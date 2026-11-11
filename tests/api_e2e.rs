@@ -2612,3 +2612,193 @@ async fn sse_monitor_container_inventory_follows_current_access() {
     let admin_frames = sse_frames_for(&server, &admin, 300).await;
     assert!(!admin_frames.contains("containersRestricted"));
 }
+
+// ---------------------------------------------------------------------------
+// Desktop reliability: shared-folder updates across accounts
+// ---------------------------------------------------------------------------
+
+/// Open `/api/events` for a session and return the streaming body; events
+/// published after this call are buffered and can be read later.
+async fn open_sse(server: &TestServer, session: &Session) -> Body {
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/events")
+        .header(
+            header::COOKIE,
+            session.cookie.parse::<axum::http::HeaderValue>().unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = server.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    response.into_body()
+}
+
+/// `file.changed` frames (parsed JSON payloads) found in raw SSE text.
+fn file_changed_frames(raw: &str) -> Vec<Value> {
+    raw.split("\n\n")
+        .filter(|frame| frame.lines().any(|line| line == "event: file.changed"))
+        .filter_map(|frame| {
+            let data: String = frame
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .collect();
+            serde_json::from_str(&data).ok()
+        })
+        .collect()
+}
+
+async fn chunked_upload(server: &TestServer, session: &Session, dir: &str, name: &str) -> Value {
+    let data = b"fictional chunked minutes".to_vec();
+    let (status, _, init) = server
+        .request(
+            "POST",
+            "/api/files/upload/init",
+            Some(json!({"dir": dir, "name": name, "size": data.len()})),
+            session.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "init: {init}");
+    let upload_id = init["uploadId"].as_str().expect("upload id").to_string();
+    let (status, body) = server
+        .request_raw(
+            "POST",
+            &format!("/api/files/upload/chunk?uploadId={upload_id}&offset=0"),
+            data,
+            "application/octet-stream",
+            session.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let (status, _, entry) = server
+        .request(
+            "POST",
+            &format!("/api/files/upload/complete?uploadId={upload_id}"),
+            None,
+            session.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "complete: {entry}");
+    entry
+}
+
+/// The reported workflow: a regular account with write access uploads into
+/// `Projects`; an administrator who can open the folder under the existing
+/// policy (admin bypass, no membership) must receive the update on the open
+/// stream — for plain and chunked uploads — while an account without access
+/// receives nothing, and the payload carries no audience list or the actor's
+/// permission flags.
+#[tokio::test]
+async fn shared_folder_uploads_reach_authorized_admins_over_sse() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("ada", USER_PASSWORD, Role::User).await;
+    server.create_user("ben", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let ada = server.login("ada", USER_PASSWORD).await;
+    let ben = server.login("ben", USER_PASSWORD).await;
+    let share = create_share(&server, &admin, "Projects").await;
+    let share_id = share["id"].as_str().expect("share id").to_string();
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{}/access-rules", ada.user_id),
+            Some(json!({"folderRules": [{"shareId": share_id, "shareName": "Projects", "rule": "write"}], "appRules": []})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let admin_stream = open_sse(&server, &admin).await;
+    let ben_stream = open_sse(&server, &ben).await;
+    let ada_stream = open_sse(&server, &ada).await;
+
+    assert_eq!(
+        upload_status(&server, &ada, "/shared/Projects", "plain-notes.txt").await,
+        StatusCode::OK
+    );
+    let entry = chunked_upload(&server, &ada, "/shared/Projects", "chunked-notes.txt").await;
+    assert_eq!(entry["path"], "/shared/Projects/chunked-notes.txt");
+
+    let window = std::time::Duration::from_millis(700);
+    let (admin_raw, ben_raw, ada_raw) = tokio::join!(
+        collect_sse(admin_stream, window),
+        collect_sse(ben_stream, window),
+        collect_sse(ada_stream, window),
+    );
+    for (who, raw) in [("admin", &admin_raw), ("ada", &ada_raw)] {
+        let frames = file_changed_frames(raw);
+        for name in ["plain-notes.txt", "chunked-notes.txt"] {
+            let path = format!("/shared/Projects/{name}");
+            let frame = frames
+                .iter()
+                .find(|frame| frame["path"] == path.as_str() && frame["source"] == "api")
+                .unwrap_or_else(|| panic!("{who} did not receive {path}: {raw}"));
+            assert_eq!(frame["paths"], json!(["/shared/Projects"]));
+            assert_eq!(frame["shareId"], share_id.as_str());
+            assert_eq!(frame["userId"], ada.user_id);
+            assert!(
+                frame.get("userIds").is_none(),
+                "audience list leaked: {frame}"
+            );
+            assert!(
+                frame["entry"].get("writable").is_none(),
+                "actor flags leaked: {frame}"
+            );
+        }
+    }
+    assert!(
+        file_changed_frames(&ben_raw).is_empty() && !ben_raw.contains("Projects"),
+        "an account without access must not receive folder updates: {ben_raw}"
+    );
+
+    // A revocation applies to the very next event on an already-open stream.
+    let ada_stream = open_sse(&server, &ada).await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{}/access-rules", ada.user_id),
+            Some(json!({"folderRules": [{"shareId": share_id, "rule": "none"}], "appRules": []})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let admin_stream = open_sse(&server, &admin).await;
+    assert_eq!(
+        upload_status(&server, &admin, "/shared/Projects", "after-revoke.txt").await,
+        StatusCode::OK
+    );
+    let (admin_raw, ada_raw) = tokio::join!(
+        collect_sse(admin_stream, window),
+        collect_sse(ada_stream, window)
+    );
+    assert!(file_changed_frames(&admin_raw)
+        .iter()
+        .any(|frame| frame["path"] == "/shared/Projects/after-revoke.txt"));
+    assert!(
+        !ada_raw.contains("after-revoke.txt"),
+        "a revoked account must not receive later folder updates: {ada_raw}"
+    );
+}
+
+/// A stream opened after the server began shutting down ends immediately,
+/// and open streams end on shutdown (restarts are not held by browsers).
+#[tokio::test]
+async fn event_streams_end_when_the_server_shuts_down() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let body = open_sse(&server, &admin).await;
+    server.state.events.begin_shutdown();
+    let started = std::time::Instant::now();
+    let raw = collect_sse(body, std::time::Duration::from_secs(5)).await;
+    assert!(raw.contains("event: hello"), "{raw}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "stream must end promptly on shutdown"
+    );
+}

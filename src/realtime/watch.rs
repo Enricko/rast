@@ -3,7 +3,8 @@
 //! Only `<storage>/homes` and `<storage>/shared` are watched, recursively.
 //! Raw `notify` events are debounced (~400 ms), deduplicated and rate-limited;
 //! physical paths are mapped to logical File Station paths and scoped audiences
-//! (home owner, or share owner + members) before anything is published. Host
+//! (home owner, or the shared folder's id — whose current readers are decided
+//! per delivery by the folder evaluator) before anything is published. Host
 //! paths never leave this module.
 //!
 //! Failures and bursts degrade to a broadcast `files.resync` (at most once per
@@ -358,7 +359,6 @@ pub(crate) fn should_ignore_name(name: &str) -> bool {
 struct CachedShare {
     id: String,
     name: String,
-    members: Vec<i64>,
 }
 
 #[derive(Debug)]
@@ -409,23 +409,14 @@ impl PathMapper {
         for row in share_rows {
             let id: String = row.get("id");
             let container_path: String = row.get("container_path");
-            // The evaluator-filtered audience includes legacy members,
-            // direct-rule holders and members of groups with folder rules
-            // (explicit denials excluded). Share creators get no implicit
-            // access (F6); administrators still receive Users-scoped events.
-            let audience = match crate::storage::shares::member_ids(pool, &id).await {
-                Ok(audience) => audience,
-                Err(error) => {
-                    tracing::warn!(share = %id, error = %error, "could not resolve share audience; skipping");
-                    Vec::new()
-                }
-            };
+            // No member list is cached: the audience is the share id, and the
+            // SSE handler asks the folder evaluator who may read it when each
+            // event is delivered (so new grants/revocations apply at once).
             shares.insert(
                 container_path,
                 CachedShare {
                     id,
                     name: row.get("name"),
-                    members: audience,
                 },
             );
         }
@@ -481,7 +472,7 @@ impl PathMapper {
         let logical = LogicalPath::parse(&raw).ok()?.as_string();
         Some(MappedPath {
             logical,
-            audience: Audience::Users(share.members.clone()),
+            audience: Audience::Share(share.id.clone()),
             group_key: format!("s:{}", share.id),
         })
     }
@@ -513,7 +504,6 @@ mod tests {
             CachedShare {
                 id: "share-team".to_string(),
                 name: "Team Files".to_string(),
-                members: vec![1, 2],
             },
         );
         PathMapper {
@@ -564,7 +554,7 @@ mod tests {
             .map(&shared.join("team/docs/budget.xlsx"), homes, shared)
             .unwrap();
         assert_eq!(mapped.logical, "/shared/Team Files/docs/budget.xlsx");
-        assert_eq!(mapped.audience, Audience::Users(vec![1, 2]));
+        assert_eq!(mapped.audience, Audience::Share("share-team".into()));
         assert_eq!(mapped.group_key, "s:share-team");
         assert!(mapper.map(&shared.join("team"), homes, shared).is_none());
         assert!(mapper
@@ -738,23 +728,15 @@ mod tests {
         assert!(!event.scope.allows(2, false));
         assert!(!event.scope.allows(9, true));
 
-        // Shared change -> member event (creator has no implicit access, F6).
+        // Shared change -> share-scoped event (readers decided per delivery).
         let shared_file = cfg.shared_dir().join("team/doc.txt");
         let event = wait_for_event(&mut rx, &shared_file, b"shared", "/shared/team/doc.txt")
             .await
             .expect("watcher did not publish a shared event");
-        match &event.scope {
-            EventScope::Users(ids) => {
-                assert!(ids.contains(&2), "share member must receive the event");
-                assert!(
-                    !ids.contains(&1),
-                    "creator without a grant is not an implicit audience (F6)"
-                );
-                // Admins are still delivered Users-scoped events by scope rules.
-                assert!(event.scope.allows(9, true));
-            }
-            other => panic!("expected Users scope, got {other:?}"),
-        }
+        assert_eq!(event.scope, EventScope::Share("share-team".into()));
+        assert_eq!(event.data["shareId"], "share-team");
+        assert!(event.data.get("userIds").is_none());
+        assert_eq!(event.data["userId"], serde_json::Value::Null);
         assert_eq!(event.data["source"], "external");
         assert_eq!(event.data["paths"], serde_json::json!(["/shared/team"]));
         assert!(event.data.get("entry").is_none());

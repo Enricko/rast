@@ -7,10 +7,15 @@
 //!
 //! * a change inside a user's home is published to that user only
 //!   (`EventBus::publish_user`) — administrators never observe private homes;
-//! * a change inside a shared folder is published to the share owner plus its
-//!   members (`EventBus::publish_users`), never to every administrator;
-//! * paths in event payloads are always **logical** File Station paths, never
-//!   host paths.
+//! * a change inside a shared folder is published to the folder's **share id**
+//!   (`EventBus::publish_share`); the SSE handler delivers it to every account
+//!   the folder evaluator lets read that folder *at delivery time* —
+//!   administrators (who may open every shared folder), legacy members and
+//!   direct/group grants, minus explicit denials. Nobody else receives it;
+//! * payloads carry only what every recipient may already list: logical
+//!   paths, the parent directories to refetch, the share id and the entry
+//!   without the actor's permission flags. Audience lists are never
+//!   serialised and paths are never host paths.
 
 use std::collections::BTreeMap;
 
@@ -34,8 +39,9 @@ pub const FILES_RESYNC: &str = "files.resync";
 pub enum Audience {
     /// A single account (home-directory changes).
     User(i64),
-    /// An explicit account list (shared-folder changes: owner + members).
-    Users(Vec<i64>),
+    /// Every account that may currently read the shared folder with this
+    /// stable id (decided per delivery by the folder evaluator).
+    Share(String),
 }
 
 /// Logical parent directories affected by a set of file paths. These are what
@@ -93,9 +99,9 @@ fn entry_for_scope(entry_path: Option<&String>, share: Option<&str>) -> bool {
 
 /// Publish one scoped `file.changed` event.
 ///
-/// For home audiences `userId` is the owner; for shared audiences `userId` is
-/// the acting account (or `null` for external changes) and `userIds` lists every
-/// allowed account.
+/// `userId` is the acting account (`null` for external changes); shared
+/// events additionally carry `shareId` so clients can match the affected
+/// folder without trusting its display name.
 pub fn publish_file_changed(
     events: &EventBus,
     audience: &Audience,
@@ -113,23 +119,34 @@ pub fn publish_file_changed(
         "path": primary,
         "paths": parent_paths(paths),
         "source": source,
+        "userId": actor_user_id,
     });
     if let Some(entry) = entry {
         data["entry"] = entry;
     }
     match audience {
         Audience::User(user_id) => {
-            data["userId"] = json!(user_id);
+            data["userId"] = json!(actor_user_id.unwrap_or(*user_id));
             events.publish_user(FILE_CHANGED, *user_id, data);
         }
-        Audience::Users(user_ids) => {
-            data["userId"] = match actor_user_id {
-                Some(user_id) => json!(user_id),
-                None => Value::Null,
-            };
-            data["userIds"] = json!(user_ids);
-            events.publish_users(FILE_CHANGED, user_ids.clone(), data);
+        Audience::Share(share_id) => {
+            data["shareId"] = json!(share_id);
+            events.publish_share(FILE_CHANGED, share_id, data);
         }
+    }
+}
+
+/// The entry as every reader of a shared folder may see it: `readable` /
+/// `writable` describe the *actor's* access and are dropped (each recipient
+/// gets its own flags from its next listing request).
+fn shared_entry_value(entry: Value) -> Value {
+    match entry {
+        Value::Object(mut map) => {
+            map.remove("readable");
+            map.remove("writable");
+            Value::Object(map)
+        }
+        other => other,
     }
 }
 
@@ -187,37 +204,20 @@ pub async fn publish_mutation(
     }
 
     for (share_name, paths) in shared_paths {
-        let member_ids = match shares::find_by_name(pool, &share_name).await {
-            Ok(Some(share)) => match shares::member_ids(pool, &share.id).await {
-                Ok(ids) => ids,
-                Err(error) => {
-                    tracing::warn!(error = %error, share = %share_name, "cannot resolve share members for event");
-                    continue;
-                }
-            },
+        let share = match shares::find_by_name(pool, &share_name).await {
+            Ok(Some(share)) => share,
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(error = %error, share = %share_name, "cannot look up share for event");
                 continue;
             }
         };
-        // The actor always receives their own action, even when they are an
-        // administrator who is not a member of the share.
-        let mut audience = member_ids;
-        if !audience.contains(&user.id) {
-            audience.push(user.id);
-            audience.sort_unstable();
-            audience.dedup();
-        }
-        if audience.is_empty() {
-            continue;
-        }
         let share_entry = entry_for_scope(entry_path.as_ref(), Some(&share_name))
-            .then(|| entry_value.clone())
+            .then(|| entry_value.clone().map(shared_entry_value))
             .flatten();
         publish_file_changed(
             events,
-            &Audience::Users(audience),
+            &Audience::Share(share.id),
             Some(user.id),
             op,
             &paths,
@@ -225,6 +225,23 @@ pub async fn publish_mutation(
             "api",
         );
     }
+}
+
+/// Publish a change that only the acting account can observe (recycle-bin
+/// purges: the items already left every shared listing when they were
+/// deleted, so other readers of the folder have nothing to refetch).
+pub fn publish_private(events: &EventBus, user: &AuthUser, op: &str, paths: &[String]) {
+    let mut data = json!({
+        "op": op,
+        "path": paths.first().cloned().unwrap_or_default(),
+        "paths": parent_paths(paths),
+        "source": "api",
+        "userId": user.id,
+    });
+    if paths.is_empty() {
+        data["path"] = json!("");
+    }
+    events.publish_user(FILE_CHANGED, user.id, data);
 }
 
 /// Publish a scoped `file.quota` snapshot for the acting account.
@@ -382,15 +399,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_mutation_reaches_members_and_actor_only() {
+    async fn shared_mutation_is_scoped_to_the_share_id() {
         let (_dir, pool) = pool().await;
         let bus = EventBus::new();
         let mut rx = bus.subscribe();
         let admin = auth_user(9, "root", Role::Admin);
 
-        // Admin (not a member) writes into the share: members + actor. The
-        // creator (user 1, a regular user here) gets no implicit access (F6);
-        // administrators still receive Users-scoped events via scope rules.
+        // An administrator without any membership writes into the share. The
+        // event is addressed to the folder (decided per delivery by the
+        // evaluator), never to a precomputed member list.
         publish_mutation(
             &bus,
             &pool,
@@ -402,26 +419,14 @@ mod tests {
         .await;
         let event = rx.recv().await.unwrap();
         assert_eq!(event.kind, FILE_CHANGED);
-        match &event.scope {
-            EventScope::Users(ids) => {
-                assert!(ids.contains(&2), "member must receive the event");
-                assert!(ids.contains(&9), "actor must receive the event");
-                assert!(
-                    !ids.contains(&1),
-                    "creator without a grant is not an implicit audience (F6)"
-                );
-            }
-            other => panic!("expected Users scope, got {other:?}"),
-        }
+        assert_eq!(event.scope, EventScope::Share("s1".into()));
         assert_eq!(event.data["path"], "/shared/team/new");
         assert_eq!(event.data["paths"], json!(["/shared/team"]));
+        assert_eq!(event.data["shareId"], "s1");
         assert_eq!(event.data["userId"], 9);
         assert_eq!(event.data["source"], "api");
-        let user_ids = event.data["userIds"].as_array().unwrap();
-        assert!(user_ids.iter().any(|id| id == 2));
-        // The scope helper lets admins observe shared content only through the
-        // explicit Users scope, never through a private home scope.
-        assert!(event.scope.allows(2, false));
+        // No audience list is ever serialised to recipients.
+        assert!(event.data.get("userIds").is_none());
     }
 
     #[tokio::test]
@@ -446,10 +451,8 @@ mod tests {
         let second = rx.recv().await.unwrap();
         assert_eq!(first.scope, EventScope::User(1));
         assert_eq!(first.data["path"], "/homecopy.txt");
-        match &second.scope {
-            EventScope::Users(ids) => assert!(ids.contains(&1) && ids.contains(&2)),
-            other => panic!("expected Users scope, got {other:?}"),
-        }
+        assert!(first.data.get("shareId").is_none());
+        assert_eq!(second.scope, EventScope::Share("s1".into()));
         assert_eq!(second.data["path"], "/shared/team/copy.txt");
     }
 
@@ -477,6 +480,42 @@ mod tests {
         assert!(home_event.data.get("entry").is_none());
         assert_eq!(shared_event.data["entry"]["path"], "/shared/team/doc.txt");
         assert_eq!(shared_event.data["entry"]["kind"], "file");
+        // The actor's permission flags are not every reader's flags.
+        assert!(shared_event.data["entry"].get("writable").is_none());
+        assert!(shared_event.data["entry"].get("readable").is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_share_publishes_nothing() {
+        let (_dir, pool) = pool().await;
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        let alice = auth_user(1, "alice", Role::User);
+        publish_mutation(
+            &bus,
+            &pool,
+            &alice,
+            "upload",
+            &["/shared/gone/x.txt".to_string()],
+            None,
+        )
+        .await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn private_purges_reach_only_the_actor() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        let alice = auth_user(1, "alice", Role::User);
+        publish_private(&bus, &alice, "trash_empty", &["/shared/team/a.txt".into()]);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.scope, EventScope::User(1));
+        assert_eq!(event.data["op"], "trash_empty");
+        publish_private(&bus, &alice, "trash_empty", &[]);
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.data["path"], "");
+        assert_eq!(event.data["paths"], json!([]));
     }
 
     #[tokio::test]
@@ -502,7 +541,7 @@ mod tests {
         let mut rx = bus.subscribe();
         publish_file_changed(
             &bus,
-            &Audience::Users(vec![1, 2]),
+            &Audience::Share("s1".into()),
             None,
             "changed",
             &["/shared/team/dir/file.txt".into()],

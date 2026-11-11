@@ -12,10 +12,10 @@ shared frontend realtime layer and the individual applications.
 
 | Field | Meaning |
 | --- | --- |
-| `seq` | Process-wide monotonic sequence (SSE `id`). Clients ignore duplicates and detect gaps; a gap triggers an authorized snapshot refresh. |
+| `seq` | Process-wide monotonic sequence (SSE `id`), assigned and sent under one lock so subscribers always see ascending ids. Ids skip events the account may not see and restart at 1 with a new process, so they are a per-connection cursor, not a gap detector (see *Sequencing* below). |
 | `kind` | Event name (table below). |
 | `ts` | Epoch milliseconds. |
-| `scope` | `Broadcast`, `Admin`, `User(id)`, `Users(ids)`, `UserAndAdmin(id)`. Never serialised. |
+| `scope` | `Broadcast`, `Admin`, `User(id)`, `Users(ids)`, `UserAndAdmin(id)`, `Share(shareId)`. Never serialised. |
 | `data` | JSON payload. |
 
 Helpers on `AppState.events`:
@@ -26,7 +26,14 @@ publish_user(kind, user_id, data)         // one account
 publish_user_and_admin(kind, user_id, data)
 publish_users(kind, user_ids, data)       // explicit audience (e.g. share members)
 publish_admin(kind, data)                 // administrators
+publish_share(kind, share_id, data)       // whoever may read that shared folder now
 ```
+
+`Share(shareId)` is decided **per delivery** by the folder evaluator
+(`access::folder_access_by_id`, cached and generation-aware): administrators
+(who may open every shared folder), legacy members, direct and group grants,
+minus explicit denials. A grant or revocation applies to the very next event
+on an already-open stream, and no audience list is ever put in a payload.
 
 Events are additionally filtered by the account's current **application access**
 (group policy): a user who cannot use File Station, Applications, Backup Center or
@@ -35,10 +42,25 @@ delivered so clients can reauthorize.
 
 `GET /api/events` (protected) sends `hello` (seq, identity, `sessionId`),
 then filtered events, `ping` heartbeats every 15 s and `resync` when the
-broadcast receiver lagged. Sessions are revalidated every 20 s; revoked,
-expired, disabled or role-changed sessions receive `session.revoked` and the
-stream closes. Events are published **after** the underlying database/filesystem
-change committed.
+broadcast receiver lagged or a gap was detected (the event that revealed the
+gap is still delivered after the `resync`). Sessions are revalidated every
+20 s; revoked, expired, disabled or role-changed sessions receive
+`session.revoked` and the stream closes. Events are published **after** the
+underlying database/filesystem change committed. When the server shuts down
+(SIGTERM/restart) every event and log stream ends immediately, so a restart
+is not held open by connected browsers; clients reconnect and resynchronise.
+
+### Sequencing
+
+* `hello` reports the stream's starting cursor (read *before* subscribing, so
+  an event published in between surfaces as a gap instead of being skipped).
+* Clients treat every `hello` as a **new cursor**: after a restart ids begin
+  at 1 again, and a cursor kept from the previous process would discard every
+  new event (this was the cause of missed shared-folder updates).
+* Within one connection, frames older than the cursor are dropped. An id jump
+  is normal (events for other accounts are skipped) and is **not** a gap;
+  missed events are signalled only by the server's `resync` frame and by the
+  reconnect itself, both of which trigger an authorized snapshot refresh.
 
 ### Event catalogue
 
@@ -46,7 +68,7 @@ change committed.
 | --- | --- | --- |
 | `monitor` | Broadcast | host/container snapshot (already implemented) |
 | `job.queued/start/progress/done/failed/cancelled` | UserAndAdmin(owner) | `{id, kind, progress, total, message, userId, result?, error?}` |
-| `file.changed` | owner / share members | `{op, path, paths:[parent dirs], userId(s), entry?, source:"api"|"external"}` |
+| `file.changed` | `User(owner)` for homes; `Share(shareId)` for shared folders; recycle-bin purges `User(actor)` | `{op, path, paths:[parent dirs to refetch], userId (actor, `null` for external), shareId? , entry? (without the actor's `readable`/`writable`), source:"api"|"external"}` — copy/move/delete jobs publish the source and destination entries that changed, also when the job fails or is cancelled part-way |
 | `file.quota` | owner | `{usedBytes, quotaBytes, trashBytes, userId}` |
 | `files.resync` | Broadcast | `{reason}` when a watcher overflowed |
 | `app.changed` | Admin | `{appId, status, containers}` |
@@ -75,7 +97,8 @@ Rules:
 * **Files:** a bounded recursive watcher (`notify`) covers `storage_dir/homes`
   and `storage_dir/shared` only, debounced ~400 ms, bounded to a few thousand
   events/second with coalescing. Overflow emits `files.resync`. Paths are mapped
-  to the owning account (homes) or share members (shared) before publishing.
+  to the owning account (homes) or the shared folder's id (shared) before
+  publishing; readers of the folder are decided per delivery.
 * **Containers:** a low-frequency reconciler compares managed application state
   every 5 s (and after reconnect) and emits `app.changed` when it differs.
   Docker events are used for per-container changes where available.
@@ -86,7 +109,8 @@ Rules:
 
 `core/sse.ts` owns the single `EventSource` per tab:
 
-* sequencing (dedupe + gap detection), `hello`/`ping`/`resync`,
+* sequencing (per-connection cursor reset by `hello`, older frames dropped,
+  `resync` from the server), `hello`/`ping`/`resync`,
 * exponential backoff with jitter (1 s → 30 s), stale detection after 45 s,
   `online`/`offline` and visibility/wake handling,
 * `onResync` for views that must refetch snapshots,

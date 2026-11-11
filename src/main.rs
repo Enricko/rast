@@ -314,11 +314,18 @@ async fn serve(
     tracing::info!("listening on http://{}", cfg.bind);
     println!("RAST {VERSION} listening on http://{}", cfg.bind);
 
+    let events = state.events.clone();
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        // Graceful shutdown waits for open connections; SSE streams never end
+        // on their own, so tell them to finish (clients reconnect + resync).
+        tracing::info!("shutdown requested; closing live event streams");
+        events.begin_shutdown();
+    })
     .await?;
 
     tracing::info!("shutting down; checkpointing database");

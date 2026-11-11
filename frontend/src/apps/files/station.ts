@@ -57,8 +57,9 @@ interface FileChangedEvent {
   op?: string;
   path?: string;
   paths?: string[];
-  userId?: number;
-  userIds?: number[];
+  userId?: number | null;
+  /** Stable id of the shared folder (shared-folder events only). */
+  shareId?: string;
   entry?: { kind?: string } | null;
   source?: "api" | "external";
 }
@@ -149,6 +150,10 @@ export class FileStation {
   private disposed = false;
   /** Ignore realtime echoes for a short window after our own refetch. */
   private quietUntil = 0;
+  /** Pending reconcile scheduled for the end of the quiet window. */
+  private quietTimer: number | undefined;
+  /** Identity of the view the panel currently shows (scroll is kept within it). */
+  private renderedViewKey = "";
   /** Open edit dialog context: background changes touching it are deferred. */
   private editContext: { paths: Set<string>; label: string } | null = null;
   private syncDeferred = false;
@@ -176,6 +181,8 @@ export class FileStation {
       this.syncListing.cancel();
       this.syncUsage.cancel();
       this.accessCheck.cancel();
+      if (this.quietTimer !== undefined) window.clearTimeout(this.quietTimer);
+      this.quietTimer = undefined;
     });
     this.lastAccessSignature = `${this.ctx.store.get().user?.id ?? 0}|${this.ctx.store.get().user?.role ?? ""}`;
     this.lastPermissionsRef = this.ctx.store.get().permissions ?? null;
@@ -428,7 +435,13 @@ export class FileStation {
 
   private onFileChanged(data: FileChangedEvent | null): void {
     if (this.disposed || !data || typeof data !== "object") return;
-    if (this.isQuiet()) return;
+    if (this.isQuiet()) {
+      // Usually the echo of our own change, but another account may have
+      // changed the same folder meanwhile: reconcile once the window ends
+      // instead of dropping the event.
+      this.deferUntilQuietEnds();
+      return;
+    }
     const changedPath = typeof data.path === "string" ? data.path : "";
     const parents = Array.isArray(data.paths)
       ? data.paths.filter((candidate): candidate is string => typeof candidate === "string")
@@ -458,7 +471,11 @@ export class FileStation {
   }
 
   private onFileQuota(data: FileQuotaEvent | null): void {
-    if (this.disposed || !data || typeof data !== "object" || this.isQuiet()) return;
+    if (this.disposed || !data || typeof data !== "object") return;
+    if (this.isQuiet()) {
+      this.deferUntilQuietEnds();
+      return;
+    }
     const fallback = this.usage ?? null;
     const quota = numberOr(data.quotaBytes, fallback?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0);
     const used = numberOr(data.usedBytes, fallback?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0);
@@ -493,9 +510,25 @@ export class FileStation {
     this.syncUsage.run();
   }
 
-  /** Debounced 250 ms; skips while quiet or while an edit dialog is open. */
+  /** Run one silent listing + usage sync right after the quiet window. */
+  private deferUntilQuietEnds(): void {
+    if (this.quietTimer !== undefined) return;
+    const wait = Math.max(0, this.quietUntil - Date.now()) + 50;
+    this.quietTimer = window.setTimeout(() => {
+      this.quietTimer = undefined;
+      if (this.disposed) return;
+      this.requestListingSync();
+      this.scheduleUsageSync();
+    }, wait);
+  }
+
+  /** Debounced 250 ms; defers while quiet, skips while an edit dialog is open. */
   private runBackgroundSync(): void {
-    if (this.disposed || this.isQuiet()) return;
+    if (this.disposed) return;
+    if (this.isQuiet()) {
+      this.deferUntilQuietEnds();
+      return;
+    }
     if (this.editContext) {
       this.syncDeferred = true;
       return;
@@ -1042,6 +1075,16 @@ export class FileStation {
   }
 
   private renderPanel(): void {
+    // Re-rendering the same view (roots refresh, access re-check, background
+    // sync) must not jump back to the top: keep the scroll offset.
+    const viewKey = `${this.section}|${this.path}|${this.view}|${this.sort}|${this.order}|${this.page}|${this.query}`;
+    const keepScroll = viewKey === this.renderedViewKey ? this.captureScroll() : null;
+    this.renderedViewKey = viewKey;
+    this.renderPanelContent();
+    if (keepScroll) this.restoreScroll(keepScroll);
+  }
+
+  private renderPanelContent(): void {
     if (this.accessBlocked && this.section === "files" && !this.loading) {
       this.renderAccessLost(this.accessMessage, "files");
       return;
@@ -1825,6 +1868,7 @@ function sortHeader(
   }
   btn.addEventListener("click", onClick);
   const th = h("th", { class: className });
+  th.setAttribute("aria-sort", active === key ? (order === "asc" ? "ascending" : "descending") : "none");
   th.appendChild(btn);
   return th;
 }

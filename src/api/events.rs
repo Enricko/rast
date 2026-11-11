@@ -7,6 +7,13 @@
 //! revocation, expiry or deactivation closes open connections promptly. When
 //! the broadcast receiver lags it emits `resync` instead of silently dropping
 //! events; the client then refetches authorized snapshots.
+//!
+//! Frame ids are the process-wide sequence numbers. Events the account may
+//! not see are skipped, so ids are *not* contiguous per connection and a new
+//! process starts again from 1: clients must treat `hello` as a fresh cursor
+//! and rely on `resync` frames (never id jumps) to detect missed events.
+//! When the server shuts down every stream ends, so restarts are not held
+//! open by connected browsers; clients reconnect and resynchronise.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -33,6 +40,10 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
 struct StreamState {
     rx: tokio::sync::broadcast::Receiver<crate::events::Event>,
+    /// An event that arrived after a sequence gap: the `resync` frame goes out
+    /// first, then this event is still delivered (it is newer than the gap).
+    pending: Option<crate::events::Event>,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     user: AuthUser,
     role: String,
     db: sqlx::SqlitePool,
@@ -52,8 +63,11 @@ pub async fn stream(
 ) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
     let token = auth::cookie_value(&headers, session::SESSION_COOKIE).unwrap_or_default();
     let role = user.role.as_str().to_string();
-    let rx = state.events.subscribe();
+    // Read the cursor *before* subscribing: an event published in between is
+    // then seen as a gap (-> `resync`) instead of being silently skipped as
+    // "already seen".
     let hello_seq = state.events.sequence();
+    let rx = state.events.subscribe();
 
     let monitor_allowed = access::event_allowed(&state.db, &user, "monitor", &json!({})).await;
     let initial = {
@@ -100,6 +114,8 @@ pub async fn stream(
     let session_id = user.session_id.clone();
     let state_data = StreamState {
         rx,
+        pending: None,
+        shutdown: state.events.shutdown_receiver(),
         user,
         role,
         db: state.db.clone(),
@@ -113,9 +129,25 @@ pub async fn stream(
 
     let live = futures::stream::unfold(state_data, move |mut st| {
         async move {
+            if st.shutdown.has_changed().unwrap_or(true) || *st.shutdown.borrow_and_update() {
+                return None;
+            }
             loop {
+                if let Some(event) = st.pending.take() {
+                    if let Some(frame) = deliverable(&st.db, &st.user, event).await {
+                        return Some((Ok(frame), st));
+                    }
+                    continue;
+                }
                 tokio::select! {
                     biased;
+                    _ = st.shutdown.changed() => {
+                        // The flag only ever flips to `true` (or its sender is
+                        // gone with the process), so any change means stop.
+                        // Server is stopping: end the stream so the process can
+                        // exit promptly; the browser reconnects and resyncs.
+                        return None;
+                    }
                     received = st.rx.recv() => {
                         match received {
                             Ok(event) => {
@@ -125,43 +157,17 @@ pub async fn stream(
                                 let gap = event.seq > st.last_seq + 1;
                                 st.last_seq = event.seq;
                                 if gap {
-                                    // Events were lost (slow consumer or restart).
+                                    // Events were lost (slow consumer): ask the client
+                                    // to refetch snapshots, then still deliver this one.
                                     let resync = Event::default()
                                         .event("resync")
-                                        .id(event.seq.to_string())
                                         .data(json!({"reason": "gap", "seq": event.seq}).to_string());
+                                    st.pending = Some(event);
                                     return Some((Ok(resync), st));
                                 }
-                                if !event.scope.allows(st.user.id, st.user.is_admin()) {
-                                    continue;
+                                if let Some(frame) = deliverable(&st.db, &st.user, event).await {
+                                    return Some((Ok(frame), st));
                                 }
-                                // Application policy: only deliver events for apps the
-                                // account may currently use (cached, generation-aware).
-                                if !access::event_allowed(&st.db, &st.user, &event.kind, &event.data)
-                                    .await
-                                {
-                                    continue;
-                                }
-                                // Monitor samples are published once for everyone;
-                                // redact the container inventory per connection with the
-                                // account's *current* Applications access (cached,
-                                // generation-aware), so a revocation applies to the very
-                                // next sample without reconnecting.
-                                let payload = if event.kind == "monitor" {
-                                    let can_see = st.user.is_admin()
-                                        || access::app_access(&st.db, &st.user, "applications")
-                                            .await
-                                            .map(|access| access.allowed)
-                                            .unwrap_or(false);
-                                    crate::monitor::redact_for(can_see, &event.data)
-                                } else {
-                                    event.data
-                                };
-                                let sse = Event::default()
-                                    .event(event.kind)
-                                    .id(event.seq.to_string())
-                                    .data(serde_json::to_string(&payload).unwrap_or_else(|_| "null".into()));
-                                return Some((Ok(sse), st));
                             }
                             Err(RecvError::Lagged(skipped)) => {
                                 let resync = Event::default()
@@ -199,6 +205,53 @@ pub async fn stream(
         KeepAlive::new()
             .interval(KEEPALIVE_INTERVAL)
             .text("keep-alive"),
+    )
+}
+
+/// Authorize one event for this stream and render it, or `None` when the
+/// account may not receive it.
+async fn deliverable(
+    db: &sqlx::SqlitePool,
+    user: &AuthUser,
+    event: crate::events::Event,
+) -> Option<Event> {
+    let in_scope = match event.scope.share_id() {
+        // Shared-folder events reach whoever may read the folder *now*
+        // (administrators included), decided by the same cached,
+        // generation-aware evaluator that guards the File Station API.
+        Some(share_id) => access::folder_access_by_id(db, user, share_id)
+            .await
+            .map(|access| access.allowed())
+            .unwrap_or(false),
+        None => event.scope.allows(user.id, user.is_admin()),
+    };
+    if !in_scope {
+        return None;
+    }
+    // Application policy: only deliver events for apps the account may
+    // currently use (cached, generation-aware).
+    if !access::event_allowed(db, user, &event.kind, &event.data).await {
+        return None;
+    }
+    // Monitor samples are published once for everyone; redact the container
+    // inventory per connection with the account's *current* Applications
+    // access (cached, generation-aware), so a revocation applies to the very
+    // next sample without reconnecting.
+    let payload = if event.kind == "monitor" {
+        let can_see = user.is_admin()
+            || access::app_access(db, user, "applications")
+                .await
+                .map(|access| access.allowed)
+                .unwrap_or(false);
+        crate::monitor::redact_for(can_see, &event.data)
+    } else {
+        event.data
+    };
+    Some(
+        Event::default()
+            .event(event.kind)
+            .id(event.seq.to_string())
+            .data(serde_json::to_string(&payload).unwrap_or_else(|_| "null".into())),
     )
 }
 

@@ -10,11 +10,11 @@
 //! once for the whole process regardless of tabs.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 pub const BUS_CAPACITY: usize = 512;
 
@@ -31,10 +31,21 @@ pub enum EventScope {
     Users(Vec<i64>),
     /// The owning account and every administrator (job progress, own audit).
     UserAndAdmin(i64),
+    /// Everyone who may currently read a shared folder, identified by its
+    /// stable `shares.id`. The audience is decided **at delivery time** by the
+    /// folder evaluator (`access::folder_access_by_id`): administrators,
+    /// legacy members, direct and group grants, minus explicit denials. A
+    /// grant or revocation therefore applies to the very next event without
+    /// re-publishing, and no audience list is ever serialised.
+    Share(String),
 }
 
 impl EventScope {
     /// Does this scope include the given authenticated principal?
+    ///
+    /// [`EventScope::Share`] cannot be decided synchronously (it needs the
+    /// folder evaluator) and returns `false` here; the SSE handler evaluates it
+    /// with [`EventScope::share_id`].
     pub fn allows(&self, user_id: i64, is_admin: bool) -> bool {
         match self {
             Self::Broadcast => true,
@@ -42,6 +53,15 @@ impl EventScope {
             Self::User(id) => *id == user_id,
             Self::Users(ids) => is_admin || ids.contains(&user_id),
             Self::UserAndAdmin(id) => is_admin || *id == user_id,
+            Self::Share(_) => false,
+        }
+    }
+
+    /// The shared folder whose readers form this scope's audience.
+    pub fn share_id(&self) -> Option<&str> {
+        match self {
+            Self::Share(id) => Some(id),
+            _ => None,
         }
     }
 
@@ -52,6 +72,7 @@ impl EventScope {
             Self::User(_) => "user",
             Self::Users(_) => "users",
             Self::UserAndAdmin(_) => "user+admin",
+            Self::Share(_) => "share",
         }
     }
 }
@@ -74,15 +95,48 @@ pub struct Event {
 pub struct EventBus {
     tx: broadcast::Sender<Event>,
     seq: Arc<AtomicU64>,
+    /// Serialises "take the next sequence number" with "send", so concurrent
+    /// publishers can never deliver `n + 1` before `n` (which subscribers would
+    /// otherwise report as a gap and drop).
+    order: Arc<Mutex<()>>,
+    /// Flipped once when the process starts shutting down; long-lived streams
+    /// end so a restart is not held open by connected browsers.
+    shutdown: Arc<watch::Sender<bool>>,
 }
 
 impl EventBus {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(BUS_CAPACITY);
+        let (shutdown, _) = watch::channel(false);
         Self {
             tx,
             seq: Arc::new(AtomicU64::new(1)),
+            order: Arc::new(Mutex::new(())),
+            shutdown: Arc::new(shutdown),
         }
+    }
+
+    /// Signal every open stream that the server is shutting down.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    /// Resolves once [`EventBus::begin_shutdown`] was called (immediately if
+    /// it already was).
+    pub fn shutdown_signal(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut rx = self.shutdown.subscribe();
+        async move {
+            let _ = rx.wait_for(|stopping| *stopping).await;
+        }
+    }
+
+    /// A receiver for the shutdown flag (for `select!` loops).
+    pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    pub fn is_shutting_down(&self) -> bool {
+        *self.shutdown.borrow()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Event> {
@@ -105,11 +159,18 @@ impl EventBus {
     }
 
     pub fn publish_scoped(&self, kind: &str, scope: EventScope, data: Value) -> usize {
+        let kind = kind.to_string();
+        let ts = crate::db::now_ms();
+        // Poisoning cannot leave the counter inconsistent; keep publishing.
+        let _order = self
+            .order
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let event = Event {
             seq,
-            kind: kind.to_string(),
-            ts: crate::db::now_ms(),
+            kind,
+            ts,
             scope,
             data,
         };
@@ -130,6 +191,11 @@ impl EventBus {
 
     pub fn publish_admin(&self, kind: &str, data: Value) -> usize {
         self.publish_scoped(kind, EventScope::Admin, data)
+    }
+
+    /// Publish to everyone who may currently read the shared folder `share_id`.
+    pub fn publish_share(&self, kind: &str, share_id: &str, data: Value) -> usize {
+        self.publish_scoped(kind, EventScope::Share(share_id.to_string()), data)
     }
 
     pub fn receiver_count(&self) -> usize {
@@ -194,5 +260,50 @@ mod tests {
         assert!(EventScope::UserAndAdmin(7).allows(7, false));
         assert!(EventScope::UserAndAdmin(7).allows(1, true));
         assert!(!EventScope::UserAndAdmin(7).allows(8, false));
+        // Share scopes are decided by the folder evaluator, never synchronously.
+        let share = EventScope::Share("s1".into());
+        assert!(!share.allows(1, true));
+        assert!(!share.allows(1, false));
+        assert_eq!(share.share_id(), Some("s1"));
+        assert_eq!(EventScope::Admin.share_id(), None);
+    }
+
+    #[tokio::test]
+    async fn concurrent_publishers_deliver_in_sequence_order() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        let mut tasks = Vec::new();
+        for worker in 0..8 {
+            let bus = bus.clone();
+            tasks.push(tokio::task::spawn_blocking(move || {
+                for i in 0..50 {
+                    bus.publish("load", json!({"worker": worker, "i": i}));
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let mut last = 0;
+        for _ in 0..400 {
+            let event = rx.recv().await.unwrap();
+            assert_eq!(event.seq, last + 1, "events must arrive in sequence order");
+            last = event.seq;
+        }
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_resolves_for_existing_and_late_waiters() {
+        let bus = EventBus::new();
+        assert!(!bus.is_shutting_down());
+        let early = bus.shutdown_signal();
+        bus.begin_shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(1), early)
+            .await
+            .expect("waiter registered before shutdown resolves");
+        tokio::time::timeout(std::time::Duration::from_secs(1), bus.shutdown_signal())
+            .await
+            .expect("waiter registered after shutdown resolves immediately");
+        assert!(bus.is_shutting_down());
     }
 }

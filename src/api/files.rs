@@ -1045,7 +1045,10 @@ pub async fn trash_delete(
         format!("permanently deleted {deleted} recycle bin entries ({bytes} bytes)"),
     )
     .await;
-    publish_file_mutation(&state, &user, "trash_delete", &original_paths, None, true).await;
+    // Purged items already left every listing when they were trashed: only
+    // the actor's recycle bin and quota change.
+    realtime::publish_private(&state.events, &user, "trash_delete", &original_paths);
+    realtime::publish_quota(&state.events, &state.db, user.id).await;
     Ok(Json(
         json!({"ok": true, "deleted": deleted, "bytes": bytes}),
     ))
@@ -1067,7 +1070,8 @@ pub async fn trash_empty(
         format!("emptied recycle bin: {deleted} entries ({bytes} bytes)"),
     )
     .await;
-    publish_file_mutation(&state, &user, "trash_empty", &original_paths, None, true).await;
+    realtime::publish_private(&state.events, &user, "trash_empty", &original_paths);
+    realtime::publish_quota(&state.events, &state.db, user.id).await;
     Ok(Json(
         json!({"ok": true, "deleted": deleted, "bytes": bytes}),
     ))
@@ -1828,18 +1832,14 @@ mod tests {
             event.data["path"] == "/shared/team-api-rt/team-api-rt.txt"
         })
         .await;
-        match &changed.scope {
-            crate::events::EventScope::Users(ids) => {
-                assert!(ids.contains(&1));
-                assert!(ids.contains(&2));
-            }
-            other => panic!("expected Users scope, got {other:?}"),
-        }
+        assert_eq!(
+            changed.scope,
+            crate::events::EventScope::Share("share-team-api-rt".into())
+        );
         assert_eq!(changed.data["source"], "api");
         assert_eq!(changed.data["userId"], 1);
-        let user_ids = changed.data["userIds"].as_array().unwrap();
-        assert!(user_ids.iter().any(|id| id == 1));
-        assert!(user_ids.iter().any(|id| id == 2));
+        assert_eq!(changed.data["shareId"], "share-team-api-rt");
+        assert!(changed.data.get("userIds").is_none());
     }
 
     #[tokio::test]

@@ -519,7 +519,20 @@ pub async fn run_copy_job(
     dest_dir: String,
     events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = copy_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir, &events).await;
+    let mut affected: Vec<String> = Vec::new();
+    let outcome = copy_job_inner(
+        &ctx,
+        &pool,
+        &storage,
+        &user,
+        &paths,
+        &dest_dir,
+        &mut affected,
+    )
+    .await;
+    // Publish whatever changed, also when the job failed or was cancelled
+    // part-way: earlier items are already in the destination.
+    realtime::publish_commit(&events, &pool, &user, "copy", &affected, None, true).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -556,12 +569,11 @@ async fn copy_job_inner(
     user: &AuthUser,
     paths: &[String],
     dest_dir: &str,
-    events: &EventBus,
+    affected: &mut Vec<String>,
 ) -> AppResult<Value> {
     let actor = revalidate_actor(pool, user).await?;
     let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, false).await?;
-    let mut affected: Vec<String> = Vec::with_capacity(plan.sources.len());
     // Enumerate sources first: gives an accurate progress total and keeps the
     // copy loop simple.
     let mut trees: Vec<(usize, Vec<TreeEntry>)> = Vec::with_capacity(plan.sources.len());
@@ -588,6 +600,11 @@ async fn copy_job_inner(
         let source = &plan.sources[*index];
         ctx.check_cancelled()?;
         let target = plan.dest.join(&source.name);
+        // The destination entry exists from here on (possibly partial if the
+        // job stops), so its listing must be refreshed either way.
+        if let Ok(logical) = plan.dest_logical.child(&source.name) {
+            affected.push(logical.as_string());
+        }
         if source.is_dir {
             tokio::fs::create_dir_all(&target).await?;
             for entry in entries {
@@ -627,11 +644,7 @@ async fn copy_job_inner(
             )
             .await;
         }
-        if let Ok(logical) = plan.dest_logical.child(&source.name) {
-            affected.push(logical.as_string());
-        }
     }
-    realtime::publish_commit(events, pool, user, "copy", &affected, None, true).await;
     Ok(json!({
         "copied": copied,
         "bytes": progress.bytes,
@@ -649,7 +662,20 @@ pub async fn run_move_job(
     dest_dir: String,
     events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = move_job_inner(&ctx, &pool, &storage, &user, &paths, &dest_dir, &events).await;
+    let mut affected: Vec<String> = Vec::new();
+    let outcome = move_job_inner(
+        &ctx,
+        &pool,
+        &storage,
+        &user,
+        &paths,
+        &dest_dir,
+        &mut affected,
+    )
+    .await;
+    // Source and destination listings of every item that moved, including
+    // the ones before a failure or cancellation.
+    realtime::publish_commit(&events, &pool, &user, "move", &affected, None, true).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -686,12 +712,11 @@ async fn move_job_inner(
     user: &AuthUser,
     paths: &[String],
     dest_dir: &str,
-    events: &EventBus,
+    affected: &mut Vec<String>,
 ) -> AppResult<Value> {
     let actor = revalidate_actor(pool, user).await?;
     let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, true).await?;
-    let mut affected: Vec<String> = Vec::new();
     let total = (plan.sources.len() as u64).max(1);
     let mut done: u64 = 0;
     let mut bytes: u64 = 0;
@@ -748,7 +773,6 @@ async fn move_job_inner(
             }
         }
     }
-    realtime::publish_commit(events, pool, user, "move", &affected, None, true).await;
     Ok(json!({
         "moved": done,
         "bytes": bytes,
@@ -765,7 +789,9 @@ pub async fn run_delete_job(
     paths: Vec<String>,
     events: EventBus,
 ) -> AppResult<Value> {
-    let outcome = delete_job_inner(&ctx, &pool, &storage, &user, &paths, &events).await;
+    let mut affected: Vec<String> = Vec::new();
+    let outcome = delete_job_inner(&ctx, &pool, &storage, &user, &paths, &mut affected).await;
+    realtime::publish_commit(&events, &pool, &user, "delete", &affected, None, true).await;
     match &outcome {
         Ok(value) => {
             audit_job(
@@ -801,7 +827,7 @@ async fn delete_job_inner(
     storage: &Storage,
     user: &AuthUser,
     paths: &[String],
-    events: &EventBus,
+    affected: &mut Vec<String>,
 ) -> AppResult<Value> {
     // Re-validate the actor and every path at execution time: a revoked share
     // ACL or disabled account aborts the job before any mutation.
@@ -817,6 +843,7 @@ async fn delete_job_inner(
             .resolve_logical(pool, user, logical, Access::Write)
             .await?;
         let row = trash::move_to_trash(pool, storage, user, &resolved).await?;
+        affected.push(logical.as_string());
         deleted += 1;
         bytes = bytes.saturating_add(row.size_bytes);
         ctx.progress(
@@ -826,8 +853,6 @@ async fn delete_job_inner(
         )
         .await;
     }
-    let affected: Vec<String> = logicals.iter().map(LogicalPath::as_string).collect();
-    realtime::publish_commit(events, pool, user, "delete", &affected, None, true).await;
     Ok(json!({"deleted": deleted, "bytes": bytes, "trashed": true}))
 }
 
@@ -843,11 +868,20 @@ pub async fn run_blocking_transfer(
     copy: bool,
     events: &EventBus,
 ) -> AppResult<Value> {
-    if copy {
-        copy_job_inner(ctx, pool, storage, user, paths, dest_dir, events).await
+    let mut affected: Vec<String> = Vec::new();
+    let (op, outcome) = if copy {
+        (
+            "copy",
+            copy_job_inner(ctx, pool, storage, user, paths, dest_dir, &mut affected).await,
+        )
     } else {
-        move_job_inner(ctx, pool, storage, user, paths, dest_dir, events).await
-    }
+        (
+            "move",
+            move_job_inner(ctx, pool, storage, user, paths, dest_dir, &mut affected).await,
+        )
+    };
+    realtime::publish_commit(events, pool, user, op, &affected, None, true).await;
+    outcome
 }
 
 /// Small helper used by unit tests: map a job status poll loop.
