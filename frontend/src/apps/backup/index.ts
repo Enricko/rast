@@ -14,7 +14,7 @@ import {
   relativeTime,
 } from "../../core/format";
 import { iconSvg } from "../../core/icons";
-import type { Backup, BackupSchedule } from "../../core/types";
+import type { Backup, BackupSchedule, Permissions } from "../../core/types";
 import { confirmDialog, errorMessage, modal } from "../../core/ui";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel } from "../../components/jobs";
@@ -71,6 +71,14 @@ interface BackupJobEvent {
 interface BackupChangedEvent {
   reason?: string;
   id?: string;
+}
+
+/** Local aliases for the shell-carried access policy (docs/GROUPS.md). */
+type PermissionsState = Permissions;
+
+interface PermissionsCarrier {
+  permissions?: Permissions | null;
+  user?: { id?: number; role?: string } | null;
 }
 
 const SCOPES: Array<{ id: string; label: string; description: string }> = [
@@ -133,6 +141,13 @@ class BackupCenterApp {
   private jobStatus: { jobId: string; progress: number; total: number; message: string } | null = null;
   private scheduleEditorConflict: HTMLElement | null = null;
   private scheduleEditorDirty = false;
+  private readonly accessCheck: { run: () => void; cancel: () => void };
+  private localPermissions: PermissionsState | null = null;
+  private readOnly = false;
+  private denied = false;
+  private lastAccessSignature = "";
+  private lastPermissionsRef: unknown = undefined;
+  private activeModalClose: (() => void) | null = null;
   private disposed = false;
 
   constructor(ctx: AppContext) {
@@ -190,6 +205,98 @@ class BackupCenterApp {
       this.scheduleEditorConflict = null;
     });
     this.subscribeRealtime();
+    this.accessCheck = debounceTask(() => void this.onAccessChanged(), 150);
+    this.lastAccessSignature = `${this.ctx.store.get().user?.id ?? 0}|${this.ctx.store.get().user?.role ?? ""}`;
+    this.lastPermissionsRef = this.ctx.store.get().permissions ?? null;
+    this.lc.add(() => this.accessCheck.cancel());
+    this.lc.add(
+      this.ctx.store.subscribe(() => {
+        const state = this.ctx.store.get() as unknown as {
+          permissions?: unknown;
+          user?: { id?: number; role?: string } | null;
+        };
+        const permissionsRef = state.permissions ?? null;
+        const signature = `${state.user?.id ?? 0}|${state.user?.role ?? ""}`;
+        if (permissionsRef === this.lastPermissionsRef && signature === this.lastAccessSignature) return;
+        this.lastPermissionsRef = permissionsRef;
+        this.lastAccessSignature = signature;
+        this.accessCheck.run();
+      }),
+    );
+    this.lc.add(this.realtime.on("access.changed", () => this.accessCheck.run()));
+    this.applyAccessPolicy();
+  }
+
+  // ----------------------------------------------------------- access policy
+
+
+  private readGrant(): { allowed: boolean; readOnly: boolean } {
+    const state = this.ctx.store.get() as unknown as PermissionsCarrier;
+    const grant = state.permissions?.apps?.backup ?? this.localPermissions?.apps?.backup;
+    if (grant && typeof grant.allowed === "boolean") {
+      return { allowed: grant.allowed, readOnly: grant.allowed && Boolean(grant.readOnly) };
+    }
+    const admin = this.ctx.store.isAdmin();
+    return { allowed: admin, readOnly: false };
+  }
+
+  private async onAccessChanged(): Promise<void> {
+    if (this.disposed) return;
+    const state = this.ctx.store.get() as unknown as PermissionsCarrier;
+    if (!state.permissions) {
+      try {
+        const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+        this.localPermissions = me.permissions ?? null;
+      } catch {
+        this.localPermissions = null;
+      }
+    }
+    if (this.disposed) return;
+    this.applyAccessPolicy();
+  }
+
+  private applyAccessPolicy(): void {
+    if (this.disposed) return;
+    const grant = this.readGrant();
+    const wasDenied = this.denied;
+    this.denied = !grant.allowed;
+    this.readOnly = grant.allowed && grant.readOnly;
+    if (this.denied) {
+      this.activeModalClose?.();
+      this.activeModalClose = null;
+      this.renderDenied();
+      return;
+    }
+    if (wasDenied) void this.loadBackups();
+    this.render();
+  }
+
+  private renderDenied(): void {
+    clear(this.bannerHost);
+    clear(this.jobStatusHost);
+    clear(this.scheduleHost);
+    clear(this.listHost);
+    this.bannerHost.appendChild(
+      h(
+        "div",
+        { class: "app-access-state", role: "alert" },
+        h("div", { class: "app-access-title" }, "Backup Center access changed"),
+        h(
+          "div",
+          { class: "app-access-detail" },
+          "Your access to Backup Center was revoked by a group policy change. Ask an administrator if you need access again.",
+        ),
+        (() => {
+          const btn = h("button", { class: "btn btn-ghost", type: "button" }, "Close window");
+          btn.addEventListener("click", () => this.ctx.window.close());
+          return btn;
+        })(),
+      ),
+    );
+    this.createButton.classList.add("hidden");
+    this.scheduleButton.classList.add("hidden");
+    this.notice.show("Your access to Backup Center was changed.", { kind: "warning" });
+    this.ctx.toast.warning("Your access to Backup Center was changed.");
   }
 
   // -------------------------------------------------------------- realtime
@@ -293,12 +400,26 @@ class BackupCenterApp {
 
   async start(): Promise<void> {
     this.ctx.setTitle("Backup Center");
+    await this.hydratePermissions();
+    this.applyAccessPolicy();
+    if (this.denied) return;
     this.render();
     await Promise.all([this.loadBackups(), this.loadSchedule()]);
   }
 
+  /** Older shells may not copy `permissions` into the store yet. */
+  private async hydratePermissions(): Promise<void> {
+    if (this.ctx.store.get().permissions) return;
+    try {
+      const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+      if (me.permissions) this.localPermissions = me.permissions;
+    } catch {
+      /* fall back to role defaults */
+    }
+  }
+
   private async loadBackups(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposed || this.denied) return;
     try {
       const payload = await this.ctx.api.get<BackupListResponse>("/api/backups", {
         page: this.page,
@@ -325,6 +446,7 @@ class BackupCenterApp {
   }
 
   private async loadSchedule(): Promise<void> {
+    if (this.denied) return;
     try {
       const payload = await this.ctx.api.get<{ schedule?: BackupSchedule | null } | BackupSchedule>(
         "/api/backups/schedule",
@@ -344,10 +466,16 @@ class BackupCenterApp {
 
   private render(): void {
     if (this.disposed) return;
+    if (this.denied) {
+      this.renderDenied();
+      return;
+    }
     const scrollTop = this.contentEl?.scrollTop ?? 0;
     this.renderBanners();
     this.renderSchedule();
     this.renderList();
+    this.createButton.classList.toggle("hidden", this.readOnly);
+    this.scheduleButton.classList.toggle("hidden", this.readOnly);
     this.createButton.disabled = this.unavailable !== null;
     this.createButton.title = this.unavailable !== null ? "Backup creation is not available on this server yet" : "";
     this.scheduleButton.disabled = this.unavailable !== null;
@@ -356,6 +484,15 @@ class BackupCenterApp {
 
   private renderBanners(): void {
     clear(this.bannerHost);
+    if (this.readOnly) {
+      this.bannerHost.appendChild(
+        banner(
+          "info",
+          "Read-only access",
+          "A group policy grants you read-only access to Backup Center. You can browse, verify checksums via the archive list and download backups, but creating, deleting or scheduling backups requires an administrator.",
+        ),
+      );
+    }
     if (this.unavailable) {
       this.bannerHost.appendChild(
         banner(
@@ -451,7 +588,8 @@ class BackupCenterApp {
     edit.addEventListener("click", () => void this.openScheduleEditor());
     const explain = h("button", { class: "btn btn-subtle btn-sm", type: "button" }, "How retention works");
     explain.addEventListener("click", () => this.openRetentionHelp());
-    actions.append(edit, explain);
+    if (!this.readOnly) actions.append(edit);
+    actions.append(explain);
     card.appendChild(actions);
     this.scheduleHost.appendChild(card);
   }
@@ -482,7 +620,12 @@ class BackupCenterApp {
       return;
     }
     if (this.backups.length === 0) {
-      const create = h("button", { class: "btn btn-primary", type: "button", disabled: this.unavailable !== null }, "Create your first backup");
+      const create = h(
+        "button",
+        { class: "btn btn-primary", type: "button", disabled: this.unavailable !== null },
+        "Create your first backup",
+      );
+      if (this.readOnly) create.classList.add("hidden");
       create.addEventListener("click", () => void this.openCreateDialog());
       this.listHost.appendChild(
         emptyBlock(
@@ -546,12 +689,14 @@ class BackupCenterApp {
       return btn;
     };
     const done = backup.status === "done";
-    actions.append(
-      iconAction("download", "Download archive", () => this.download(backup), !done),
-      iconAction("shield", "Verify integrity", () => void this.verify(backup), !done),
-      iconAction("info", "Restore guide", () => void this.openRestoreGuide(backup)),
-      iconAction("trash", "Delete archive", () => void this.deleteBackup(backup), false, true),
-    );
+    actions.append(iconAction("download", "Download archive", () => this.download(backup), !done));
+    if (!this.readOnly) {
+      actions.append(iconAction("shield", "Verify integrity", () => void this.verify(backup), !done));
+    }
+    actions.append(iconAction("info", "Restore guide", () => void this.openRestoreGuide(backup)));
+    if (!this.readOnly) {
+      actions.append(iconAction("trash", "Delete archive", () => void this.deleteBackup(backup), false, true));
+    }
 
     return h(
       "tr",
@@ -587,6 +732,12 @@ class BackupCenterApp {
   }
 
   private async verify(backup: Backup): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Backup Center was changed." : "You have read-only access to Backup Center.",
+      );
+      return;
+    }
     const body = h("div", { class: "col" }, h("p", {}, `Verifying “${backup.fileName}” checks integrity without modifying the archive.`));
     const status = h("div", { class: "small muted" }, "Running integrity check…");
     body.appendChild(status);
@@ -615,6 +766,12 @@ class BackupCenterApp {
   }
 
   private async deleteBackup(backup: Backup): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Backup Center was changed." : "You have read-only access to Backup Center.",
+      );
+      return;
+    }
     const confirmed = await confirmDialog({
       title: "Delete backup archive",
       message: `Delete “${backup.fileName || backup.id}” and its archive file? This cannot be undone. Other backups are not affected.`,
@@ -635,6 +792,12 @@ class BackupCenterApp {
   // --------------------------------------------------------- create dialog
 
   private async openCreateDialog(): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Backup Center was changed." : "You have read-only access to Backup Center.",
+      );
+      return;
+    }
     if (this.unavailable) {
       this.ctx.toast.warning("Backup creation is not available on this server yet.");
       return;
@@ -681,11 +844,13 @@ class BackupCenterApp {
       validation,
     );
     let submitting = false;
-    modal({
+    const closeCreate = modal({
       title: "Create backup",
       body,
       wide: true,
-      onClose: () => undefined,
+      onClose: () => {
+        this.activeModalClose = null;
+      },
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
         {
@@ -740,11 +905,18 @@ class BackupCenterApp {
         },
       ],
     });
+    this.activeModalClose = closeCreate;
   }
 
   // ------------------------------------------------------- schedule editor
 
   private async openScheduleEditor(): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Backup Center was changed." : "You have read-only access to Backup Center.",
+      );
+      return;
+    }
     if (this.unavailable) {
       this.ctx.toast.warning("The backup schedule API is not available on this server yet.");
       return;
@@ -847,13 +1019,14 @@ class BackupCenterApp {
       validation,
     );
 
-    modal({
+    const closeSchedule = modal({
       title: "Backup schedule",
       body,
       wide: true,
       onClose: () => {
         this.scheduleEditorConflict = null;
         this.scheduleEditorDirty = false;
+        this.activeModalClose = null;
       },
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
@@ -898,6 +1071,7 @@ class BackupCenterApp {
         },
       ],
     });
+    this.activeModalClose = closeSchedule;
   }
 
   private openRetentionHelp(): void {

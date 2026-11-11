@@ -1,6 +1,6 @@
 // Application state shared by the shell and every app window.
 
-import type { Features, User } from "./types";
+import type { Features, Permissions, User } from "./types";
 
 /** Concrete theme that is currently rendered. */
 export type Theme = "dark" | "light";
@@ -10,6 +10,8 @@ export type ThemePreference = Theme | "system";
 export interface AppState {
   user: User | null;
   features: Features;
+  /** Effective app permissions from /api/auth/me (null on older servers). */
+  permissions: Permissions | null;
   csrfToken: string;
   siteName: string;
   version: string;
@@ -44,6 +46,7 @@ export class Store {
     this.state = {
       user: null,
       features: { ...DEFAULT_FEATURES },
+      permissions: null,
       csrfToken: "",
       siteName: "RAST",
       version: "",

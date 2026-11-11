@@ -1,12 +1,12 @@
 // Desktop shell: wallpaper, application icon grid, window layer, taskbar, tray,
 // panels (start menu / account / status / clock), context menus and shortcuts.
 
-import { appsForRole, findApp } from "../apps/registry";
+import { appsForPermissions, findApp, isAppAllowed, permissionsSignature } from "../apps/registry";
 import type { AppContext, AppDefinition } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
-import type { MeResponse, Settings } from "../core/types";
+import type { MeResponse, Permissions, Settings } from "../core/types";
 import {
   DEFAULT_APPEARANCE,
   applyAppearance,
@@ -39,8 +39,8 @@ const MAX_WINDOWS = 8;
 const MAX_TASKBAR_WINDOWS = 10;
 const SESSION_WARNING_MS = 10 * 60_000;
 
-function readPinnedApps(isAdmin: boolean): string[] {
-  const available = new Set(appsForRole(isAdmin).map((app) => app.id));
+function readPinnedApps(permissions: Permissions | null, isAdmin: boolean): string[] {
+  const available = new Set(appsForPermissions(permissions, isAdmin).map((app) => app.id));
   let stored: string[] | null = null;
   try {
     const raw = window.localStorage.getItem(PINNED_KEY);
@@ -68,6 +68,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   deps.store.patch({
     user: me.user,
     features: me.features,
+    permissions: me.permissions ?? null,
     csrfToken: me.csrfToken,
     sessionExpiresAt: me.sessionExpiresAt,
   });
@@ -93,7 +94,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   desktop.append(wallpaperLayer, iconLayer, hintLayer, windowsLayer, taskbar);
   deps.root.appendChild(desktop);
 
-  let pinned = readPinnedApps(isAdmin);
+  let pinned = readPinnedApps(me.permissions ?? null, isAdmin);
   let panel: HTMLElement | null = null;
   let panelKind: string | null = null;
   let disposed = false;
@@ -164,8 +165,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toast.error(`Unknown application: ${appId}`);
       return;
     }
-    if (app.adminOnly && !store.isAdmin()) {
-      toast.warning(`${app.name} requires an administrator account`);
+    if (!isAppAllowed(app.id, store.get().permissions, store.isAdmin())) {
+      toast.warning(`${app.name} is not available for your account`);
       return;
     }
     closePanel();
@@ -201,6 +202,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
             store.patch({
               user: fresh.user,
               features: fresh.features,
+              permissions: fresh.permissions ?? null,
               csrfToken: fresh.csrfToken,
               sessionExpiresAt: fresh.sessionExpiresAt,
             });
@@ -250,9 +252,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
 
   // ------------------------------------------------------------ desk icons
-  const apps = appsForRole(isAdmin);
   const iconButtons: HTMLButtonElement[] = [];
   let selectedIcon = 0;
+
+  function visibleApps(): AppDefinition[] {
+    return appsForPermissions(store.get().permissions, store.isAdmin());
+  }
 
   function setIconTabStops(): void {
     for (const [index, button] of iconButtons.entries()) {
@@ -300,9 +305,13 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     ];
   }
 
-  for (const [index, app] of apps.entries()) {
-    const button = h(
-      "button",
+  function renderDesktopIcons(): void {
+    iconLayer.replaceChildren();
+    iconButtons.length = 0;
+    selectedIcon = 0;
+    for (const [index, app] of visibleApps().entries()) {
+      const button = h(
+        "button",
       {
         class: "desktop-icon",
         type: "button",
@@ -350,7 +359,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     iconButtons.push(button);
     iconLayer.appendChild(button);
   }
-  setIconTabStops();
+    setIconTabStops();
+  }
+  renderDesktopIcons();
 
   // --------------------------------------------------------------- panels
   function closePanel(): void {
@@ -624,7 +635,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     let rendered = 0;
     for (const appId of pinned) {
       const app = findApp(appId);
-      if (!app || openApps.has(appId)) continue;
+      if (!app || openApps.has(appId) || !isAppAllowed(appId, store.get().permissions, store.isAdmin())) continue;
       if (rendered >= MAX_TASKBAR_WINDOWS + MAX_PINNED) break;
       taskbarApps.appendChild(pinnedButton(app));
       rendered += 1;
@@ -705,6 +716,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     lastWindowCount = 0;
     hintLayer.hidden = false;
     const quick = pinned
+      .filter((id) => isAppAllowed(id, store.get().permissions, store.isAdmin()))
       .map((id) => findApp(id))
       .filter((app): app is AppDefinition => Boolean(app))
       .slice(0, 3);
@@ -862,6 +874,41 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (jobTimer !== undefined) window.clearTimeout(jobTimer);
   });
 
+  // ------------------------------------------------------ access updates
+  // Group/rule changes are pushed per affected user. We refetch the effective
+  // permissions and apply them in place (launcher, taskbar, open windows).
+  let accessRefreshTimer: number | undefined;
+  const refreshAccess = async (): Promise<void> => {
+    try {
+      const fresh = await deps.api.get<MeResponse>("/api/auth/me");
+      if (disposed) return;
+      deps.api.setCsrfToken(fresh.csrfToken);
+      store.patch({
+        user: fresh.user,
+        features: fresh.features,
+        permissions: fresh.permissions ?? null,
+        csrfToken: fresh.csrfToken,
+        sessionExpiresAt: fresh.sessionExpiresAt,
+      });
+      toast.info("Your access was updated");
+    } catch (error) {
+      console.warn("could not refresh effective access", error);
+    }
+  };
+  disposers.push(
+    realtime.on<{ reason?: string; userId?: number; changedBy?: string }>("access.changed", () => {
+      if (disposed) return;
+      if (accessRefreshTimer !== undefined) window.clearTimeout(accessRefreshTimer);
+      accessRefreshTimer = window.setTimeout(() => {
+        accessRefreshTimer = undefined;
+        void refreshAccess();
+      }, 250);
+    }),
+  );
+  disposers.push(() => {
+    if (accessRefreshTimer !== undefined) window.clearTimeout(accessRefreshTimer);
+  });
+
   // ------------------------------------------------------ global bindings
   const onPointerDown = (event: PointerEvent): void => {
     if (!panel) return;
@@ -927,7 +974,33 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   taskbar.addEventListener("contextmenu", onTaskbarContext);
 
   // ------------------------------------------------------ store reactivity
-  disposers.push(store.subscribe(() => updateTray()));
+  // Permission changes are applied in place: rebuild launcher/taskbar, close
+  // windows that lost access and keep every other window exactly where it is.
+  let accessSignature = permissionsSignature(store.get().permissions, store.isAdmin());
+
+  function enforceEffectiveAccess(): void {
+    if (disposed) return;
+    const signature = permissionsSignature(store.get().permissions, store.isAdmin());
+    if (signature === accessSignature) return;
+    accessSignature = signature;
+    closePanel();
+    renderDesktopIcons();
+    for (const win of wm.list()) {
+      if (isAppAllowed(win.appId, store.get().permissions, store.isAdmin())) continue;
+      const app = findApp(win.appId);
+      wm.close(win.id);
+      toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);
+    }
+    renderTaskbar();
+    renderDesktopHint();
+  }
+
+  disposers.push(
+    store.subscribe(() => {
+      enforceEffectiveAccess();
+      updateTray();
+    }),
+  );
   updateTray();
 
   // --------------------------------------------------- session-expiry flow
@@ -959,7 +1032,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     const toRestore = options.restore.apps.slice(0, MAX_WINDOWS);
     for (const entry of toRestore) {
       const app = findApp(entry.appId);
-      if (!app) continue;
+      if (!app || !isAppAllowed(app.id, store.get().permissions, store.isAdmin())) continue;
       openApp(entry.appId, entry.params);
     }
     const focusedAppId = options.restore.focusedAppId;

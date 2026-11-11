@@ -17,6 +17,7 @@ import type {
   ContainerMetric,
   MonitorDisk,
   MonitorSnapshot,
+  Permissions,
 } from "../../core/types";
 import { sparkline } from "../../core/ui";
 import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
@@ -67,6 +68,11 @@ class MonitorApp {
   private readonly realtime: RealtimeStore;
   private readonly liveIndicator: LiveIndicator;
   private readonly syncSnapshot: { run: () => void; cancel: () => void };
+  private readonly accessCheck: { run: () => void; cancel: () => void };
+  private localPermissions: Permissions | null = null;
+  private denied = false;
+  private lastAccessSignature = "";
+  private lastPermissionsRef: unknown = undefined;
 
   private lastGood: MonitorSnapshot | null = null;
   private latestReceivedAt = 0;
@@ -138,10 +144,107 @@ class MonitorApp {
       this.unsubMonitor = null;
       this.monitorController?.abort();
     });
+    this.accessCheck = debounceTask(() => void this.onAccessChanged(), 150);
+    this.lastAccessSignature = `${this.ctx.store.get().user?.id ?? 0}|${this.ctx.store.get().user?.role ?? ""}`;
+    this.lastPermissionsRef = this.ctx.store.get().permissions ?? null;
+    this.lc.add(() => this.accessCheck.cancel());
+    this.lc.add(
+      this.ctx.store.subscribe(() => {
+        const state = this.ctx.store.get() as unknown as {
+          permissions?: unknown;
+          user?: { id?: number; role?: string } | null;
+        };
+        const permissionsRef = state.permissions ?? null;
+        const signature = `${state.user?.id ?? 0}|${state.user?.role ?? ""}`;
+        if (permissionsRef === this.lastPermissionsRef && signature === this.lastAccessSignature) return;
+        this.lastPermissionsRef = permissionsRef;
+        this.lastAccessSignature = signature;
+        this.accessCheck.run();
+      }),
+    );
+    this.lc.add(this.realtime.on("access.changed", () => this.accessCheck.run()));
+  }
+
+  // ----------------------------------------------------------- access policy
+
+
+  private readGrant(): { allowed: boolean; readOnly: boolean } {
+    const state = this.ctx.store.get() as unknown as { permissions?: Permissions | null };
+    const grant = state.permissions?.apps?.monitor ?? this.localPermissions?.apps?.monitor;
+    if (grant) return { allowed: Boolean(grant.allowed), readOnly: Boolean(grant.readOnly) };
+    // Resource Monitor is available to every authenticated user by default.
+    return { allowed: true, readOnly: false };
+  }
+
+  private async onAccessChanged(): Promise<void> {
+    if (this.disposed) return;
+    const state = this.ctx.store.get() as unknown as { permissions?: Permissions | null };
+    if (!state.permissions) {
+      try {
+        const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+        this.localPermissions = me.permissions ?? null;
+      } catch {
+        this.localPermissions = null;
+      }
+    }
+    if (this.disposed) return;
+    const grant = this.readGrant();
+    if (!grant.allowed) {
+      this.denied = true;
+      this.renderDenied();
+      return;
+    }
+    if (this.denied) {
+      this.denied = false;
+      this.layoutBuilt = false;
+      this.buildLayout();
+    }
+    // Still allowed: refetch the snapshot/history for the new access scope.
+    void this.refreshSnapshot();
+    void this.loadAllHistory();
+    this.scheduleRender();
+  }
+
+  private renderDenied(): void {
+    this.paused = true;
+    clear(this.contentHost);
+    this.contentHost.appendChild(
+      h(
+        "div",
+        { class: "app-access-state", role: "alert" },
+        h("div", { class: "app-access-title" }, "Resource Monitor access changed"),
+        h(
+          "div",
+          { class: "app-access-detail" },
+          "Your access to Resource Monitor was revoked by a group policy change. Ask an administrator if you need access again.",
+        ),
+        (() => {
+          const btn = h("button", { class: "btn btn-ghost", type: "button" }, "Close window");
+          btn.addEventListener("click", () => this.ctx.window.close());
+          return btn;
+        })(),
+      ),
+    );
+    this.ticker.textContent = "Access changed";
+    this.staleBadge.classList.add("hidden");
+    this.layoutBuilt = false;
   }
 
   async start(): Promise<void> {
     this.ctx.setTitle("Resource Monitor");
+    if (!this.ctx.store.get().permissions) {
+      try {
+        const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+        if (me.permissions) this.localPermissions = me.permissions;
+      } catch {
+        /* fall back to the default (monitor allowed) */
+      }
+    }
+    if (!this.readGrant().allowed) {
+      this.denied = true;
+      this.renderDenied();
+      return;
+    }
     this.buildLayout();
     this.subscribe();
     this.lc.setInterval(() => this.tick(), 1000);
@@ -334,7 +437,7 @@ class MonitorApp {
   }
 
   private renderNow(): void {
-    if (this.disposed || this.paused) return;
+    if (this.disposed || this.paused || this.denied) return;
     if (!this.layoutBuilt) {
       if (this.lastGood) this.buildLayout();
       else return;

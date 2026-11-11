@@ -26,7 +26,7 @@ interface TabDefinition {
 const TABS: TabDefinition[] = [
   { id: "profile", label: "Profile", icon: "user", adminOnly: false, render: renderProfileTab },
   { id: "appearance", label: "Appearance", icon: "wallpaper", adminOnly: false, render: renderAppearanceTab },
-  { id: "users", label: "Users", icon: "users", adminOnly: true, render: renderUsersTab },
+  { id: "users", label: "Users & Groups", icon: "users", adminOnly: true, render: renderUsersTab },
   { id: "shares", label: "Shared folders", icon: "share", adminOnly: true, render: renderSharesTab },
   { id: "storage", label: "Storage", icon: "disk", adminOnly: true, render: renderStorageTab },
   { id: "components", label: "Components", icon: "activity", adminOnly: true, render: renderComponentsTab },
@@ -164,7 +164,7 @@ function tabDescription(tabId: string): string {
     case "profile":
       return "Your account, password, appearance and active sessions";
     case "users":
-      return "Accounts, roles, quotas and sign-in activity";
+      return "Accounts, groups, quotas, sign-in activity and access rules";
     case "shares":
       return "Shared folders and access permissions";
     case "storage":

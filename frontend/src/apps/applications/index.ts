@@ -14,6 +14,7 @@ import type {
   ContainerInfo,
   DockerStatus,
   ManagedApp,
+  Permissions,
 } from "../../core/types";
 import { confirmDialog, errorMessage, modal } from "../../core/ui";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
@@ -121,6 +122,14 @@ interface LogStreamUi {
   reconnect: HTMLButtonElement;
 }
 
+/** Local aliases for the shell-carried access policy (docs/GROUPS.md). */
+type PermissionsState = Permissions;
+
+interface PermissionsCarrier {
+  permissions?: Permissions | null;
+  user?: { id?: number; role?: string } | null;
+}
+
 type DetailTab = "overview" | "logs" | "history";
 type AppAction = "start" | "stop" | "restart" | "redeploy";
 
@@ -149,6 +158,13 @@ class ApplicationsApp {
   private readonly syncApps: { run: () => void; cancel: () => void };
   private readonly syncContainers: { run: () => void; cancel: () => void };
   private detailChangedHook: ((data: AppChangedEvent) => void) | null = null;
+  private readonly accessCheck: { run: () => void; cancel: () => void };
+  private localPermissions: PermissionsState | null = null;
+  private readOnly = false;
+  private denied = false;
+  private lastAccessSignature = "";
+  private lastPermissionsRef: unknown = undefined;
+  private activeModalClose: (() => void) | null = null;
 
   private docker: DockerStatus | null = null;
   private dockerError: unknown = null;
@@ -214,6 +230,106 @@ class ApplicationsApp {
       this.detailChangedHook = null;
     });
     this.subscribeRealtime();
+    this.accessCheck = debounceTask(() => void this.onAccessChanged(), 150);
+    this.lastAccessSignature = `${this.ctx.store.get().user?.id ?? 0}|${this.ctx.store.get().user?.role ?? ""}`;
+    this.lastPermissionsRef = this.ctx.store.get().permissions ?? null;
+    this.lc.add(() => this.accessCheck.cancel());
+    this.lc.add(
+      this.ctx.store.subscribe(() => {
+        const state = this.ctx.store.get() as unknown as {
+          permissions?: unknown;
+          user?: { id?: number; role?: string } | null;
+        };
+        const permissionsRef = state.permissions ?? null;
+        const signature = `${state.user?.id ?? 0}|${state.user?.role ?? ""}`;
+        if (permissionsRef === this.lastPermissionsRef && signature === this.lastAccessSignature) return;
+        this.lastPermissionsRef = permissionsRef;
+        this.lastAccessSignature = signature;
+        this.accessCheck.run();
+      }),
+    );
+    this.lc.add(this.realtime.on("access.changed", () => this.accessCheck.run()));
+    this.applyAccessPolicy();
+  }
+
+  // ----------------------------------------------------------- access policy
+
+
+  private readGrant(): { allowed: boolean; readOnly: boolean } {
+    const state = this.ctx.store.get() as unknown as PermissionsCarrier;
+    const grant = state.permissions?.apps?.applications ?? this.localPermissions?.apps?.applications;
+    if (grant && typeof grant.allowed === "boolean") {
+      return { allowed: grant.allowed, readOnly: grant.allowed && Boolean(grant.readOnly) };
+    }
+    // Fallback to the pre-groups behaviour: Applications is admin-only.
+    const admin = this.ctx.store.isAdmin();
+    return { allowed: admin, readOnly: false };
+  }
+
+  private onAccessChangedAfterStoreUpdate(): void {
+    this.applyAccessPolicy();
+  }
+
+  private async onAccessChanged(): Promise<void> {
+    if (this.disposed) return;
+    const state = this.ctx.store.get() as unknown as PermissionsCarrier;
+    if (!state.permissions) {
+      // Shell not storing permissions yet: re-authorize ourselves defensively.
+      try {
+        const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+        this.localPermissions = me.permissions ?? null;
+      } catch {
+        this.localPermissions = null;
+      }
+    }
+    if (this.disposed) return;
+    this.onAccessChangedAfterStoreUpdate();
+  }
+
+  private applyAccessPolicy(): void {
+    if (this.disposed) return;
+    const grant = this.readGrant();
+    const wasDenied = this.denied;
+    this.denied = !grant.allowed;
+    this.readOnly = grant.allowed && grant.readOnly;
+    if (this.denied) {
+      this.activeModalClose?.();
+      this.deployButton.disabled = true;
+      this.importButton.disabled = true;
+      this.renderDenied();
+      return;
+    }
+    if (wasDenied) void this.refreshAll();
+    this.render();
+  }
+
+  private renderDenied(): void {
+    clear(this.bannerHost);
+    clear(this.appsHost);
+    clear(this.containersHost);
+    this.bannerHost.appendChild(
+      h(
+        "div",
+        { class: "app-access-state", role: "alert" },
+        h("div", { class: "app-access-title" }, "Applications access changed"),
+        h(
+          "div",
+          { class: "app-access-detail" },
+          "Your access to Applications was revoked by a group policy change. Ask an administrator if you need access again.",
+        ),
+        (() => {
+          const btn = h("button", { class: "btn btn-ghost", type: "button" }, "Close window");
+          btn.addEventListener("click", () => this.ctx.window.close());
+          return btn;
+        })(),
+      ),
+    );
+    this.statusBadge.className = "badge app-docker-badge error";
+    this.statusBadge.textContent = "Access denied";
+    this.deployButton.classList.add("hidden");
+    this.importButton.classList.add("hidden");
+    this.notice.show("Your access to Applications was changed.", { kind: "warning" });
+    this.ctx.toast.warning("Your access to Applications was changed.");
   }
 
   // -------------------------------------------------------------- realtime
@@ -302,7 +418,21 @@ class ApplicationsApp {
 
   async start(): Promise<void> {
     this.ctx.setTitle("Applications");
+    await this.hydratePermissions();
+    this.applyAccessPolicy();
+    if (this.denied) return;
     await this.refreshAll();
+  }
+
+  /** Older shells may not copy `permissions` into the store yet. */
+  private async hydratePermissions(): Promise<void> {
+    if (this.ctx.store.get().permissions) return;
+    try {
+      const me = await this.ctx.api.get<{ permissions?: Permissions }>("/api/auth/me");
+      if (me.permissions) this.localPermissions = me.permissions;
+    } catch {
+      /* fall back to role defaults */
+    }
   }
 
   private async refreshAll(silent = false): Promise<void> {
@@ -316,6 +446,7 @@ class ApplicationsApp {
   }
 
   private async loadDockerStatus(): Promise<void> {
+    if (this.denied) return;
     try {
       const status = await this.ctx.api.get<DockerStatus>("/api/docker/status");
       if (this.disposed) return;
@@ -330,6 +461,10 @@ class ApplicationsApp {
   }
 
   private async loadApps(): Promise<void> {
+    if (this.denied) {
+      this.appsLoading = false;
+      return;
+    }
     try {
       const payload = await this.ctx.api.get<ManagedApp[] | { items?: ManagedApp[] }>("/api/apps");
       if (this.disposed) return;
@@ -346,6 +481,7 @@ class ApplicationsApp {
   }
 
   private async loadContainers(): Promise<void> {
+    if (this.denied) return;
     this.containersLoading = true;
     try {
       const payload = await this.ctx.api.get<ContainerInfo[] | { items?: ContainerInfo[]; containers?: ContainerInfo[] }>(
@@ -372,6 +508,10 @@ class ApplicationsApp {
 
   private render(): void {
     if (this.disposed) return;
+    if (this.denied) {
+      this.renderDenied();
+      return;
+    }
     const scrollTop = this.contentEl?.scrollTop ?? 0;
     const usable = this.dockerUsable();
     this.statusBadge.className = `badge app-docker-badge ${usable ? "ok" : this.docker?.enabled === false ? "" : "warn"}`;
@@ -384,8 +524,10 @@ class ApplicationsApp {
         : this.docker.available
           ? `Docker ${this.docker.version ? `v${this.docker.version}` : "available"}`
           : "Docker unavailable";
-    this.deployButton.disabled = !usable;
-    this.importButton.disabled = this.importSelection.size === 0;
+    this.deployButton.classList.toggle("hidden", this.readOnly);
+    this.importButton.classList.toggle("hidden", this.readOnly);
+    this.deployButton.disabled = !usable || this.readOnly;
+    this.importButton.disabled = this.importSelection.size === 0 || this.readOnly;
     this.renderBanners(usable);
     this.renderApps(usable);
     this.renderContainers(usable);
@@ -394,6 +536,15 @@ class ApplicationsApp {
 
   private renderBanners(usable: boolean): void {
     clear(this.bannerHost);
+    if (this.readOnly) {
+      this.bannerHost.appendChild(
+        banner(
+          "info",
+          "Read-only access",
+          "A group policy grants you read-only access to Applications. You can inspect applications, containers, logs and history, but deployment and lifecycle actions require an administrator.",
+        ),
+      );
+    }
     if (this.dockerError) {
       if (isUnavailableError(this.dockerError)) {
         this.bannerHost.appendChild(
@@ -545,13 +696,15 @@ class ApplicationsApp {
       });
       return btn;
     };
-    actions.append(
-      actionButton("play", "Start application", () => void this.performAction(app, "start")),
-      actionButton("stop", "Stop application", () => void this.performAction(app, "stop")),
-      actionButton("restart", "Restart application", () => void this.performAction(app, "restart")),
-      actionButton("terminal", "Logs and details", () => void this.openDetail(app.id)),
-      actionButton("trash", "Delete application", () => void this.openDeleteDialog(app), true),
-    );
+    actions.appendChild(actionButton("terminal", "Logs and details", () => void this.openDetail(app.id)));
+    if (!this.readOnly) {
+      actions.prepend(
+        actionButton("play", "Start application", () => void this.performAction(app, "start")),
+        actionButton("stop", "Stop application", () => void this.performAction(app, "stop")),
+        actionButton("restart", "Restart application", () => void this.performAction(app, "restart")),
+      );
+      actions.appendChild(actionButton("trash", "Delete application", () => void this.openDeleteDialog(app), true));
+    }
 
     const nameCell = h(
       "div",
@@ -690,6 +843,14 @@ class ApplicationsApp {
   }
 
   private async performAction(app: ManagedApp, action: AppAction): Promise<void> {
+    if (this.denied) {
+      this.ctx.toast.warning("Your access to Applications was changed.");
+      return;
+    }
+    if (this.readOnly) {
+      this.ctx.toast.warning("You have read-only access to Applications.");
+      return;
+    }
     const labels: Record<AppAction, string> = {
       start: "Start",
       stop: "Stop",
@@ -729,6 +890,12 @@ class ApplicationsApp {
   // ---------------------------------------------------------------- deploy
 
   private async openDeployDialog(): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+      );
+      return;
+    }
     if (!this.dockerUsable()) {
       this.ctx.toast.warning("Application deployment is unavailable: Docker worker is not ready.");
       return;
@@ -912,16 +1079,18 @@ class ApplicationsApp {
       btn.addEventListener("click", onClick);
       return btn;
     };
-    actionRow.append(
-      actionButton("play", "Start", "ghost", () => void this.performAction(detail, "start")),
-      actionButton("stop", "Stop", "ghost", () => void this.performAction(detail, "stop")),
-      actionButton("restart", "Restart", "ghost", () => void this.performAction(detail, "restart")),
-      actionButton("refresh", "Redeploy", "ghost", () => void this.performAction(detail, "redeploy")),
-      actionButton("trash", "Delete", "danger", () => {
-        close();
-        void this.openDeleteDialog(detail);
-      }),
-    );
+    if (!this.readOnly) {
+      actionRow.append(
+        actionButton("play", "Start", "ghost", () => void this.performAction(detail, "start")),
+        actionButton("stop", "Stop", "ghost", () => void this.performAction(detail, "stop")),
+        actionButton("restart", "Restart", "ghost", () => void this.performAction(detail, "restart")),
+        actionButton("refresh", "Redeploy", "ghost", () => void this.performAction(detail, "redeploy")),
+        actionButton("trash", "Delete", "danger", () => {
+          close();
+          void this.openDeleteDialog(detail);
+        }),
+      );
+    }
     const body = h(
       "div",
       { class: "appmgmt-detail" },
@@ -1415,10 +1584,12 @@ class ApplicationsApp {
         localCleanups.length = 0;
         stopLogStream();
         detailController?.abort();
+        this.activeModalClose = null;
         if (this.detailChangedHook) this.detailChangedHook = null;
       },
     });
     this.lc.add(close);
+    this.activeModalClose = close;
 
     // Expose partial updates to the list subscriber (single active modal).
     this.detailChangedHook = (data) => {
@@ -1441,6 +1612,12 @@ class ApplicationsApp {
   // ----------------------------------------------------------------- delete
 
   private async openDeleteDialog(app: ManagedApp): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+      );
+      return;
+    }
     let removeVolumes = false;
     const typed = h("input", { class: "input", type: "text", placeholder: app.name, autocomplete: "off" });
     const validation = formError("");
@@ -1519,6 +1696,12 @@ class ApplicationsApp {
   // ----------------------------------------------------------------- import
 
   private async importSelected(): Promise<void> {
+    if (this.denied || this.readOnly) {
+      this.ctx.toast.warning(
+        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+      );
+      return;
+    }
     const ids = [...this.importSelection];
     if (ids.length === 0) return;
     const confirmed = await confirmDialog({

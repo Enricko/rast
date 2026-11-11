@@ -1,6 +1,6 @@
 // Start menu, user menu, connection-status panel and clock popover.
 
-import { appsForRole } from "../apps/registry";
+import { appsForPermissions, isAppAllowed } from "../apps/registry";
 import { segmented } from "../core/components";
 import { h } from "../core/dom";
 import {
@@ -124,8 +124,9 @@ function installGridKeys(container: HTMLElement, tiles: HTMLButtonElement[]): vo
 }
 
 export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElement {
-  const isAdmin = ctx.deps.store.isAdmin();
-  const apps = appsForRole(isAdmin);
+  const store = ctx.deps.store;
+  const isAdmin = store.isAdmin();
+  const apps = appsForPermissions(store.get().permissions, isAdmin);
   const search = h("input", {
     class: "input menu-search",
     type: "search",
@@ -135,7 +136,6 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
   const grid = h("div", { class: "start-grid", role: "listbox", ariaLabel: "Applications" });
   const recentWrap = h("div", { class: "start-recent" });
   const hiddenLabel = h("div", { class: "menu-section-title", hidden: true }, "No matching applications");
-  const store = ctx.deps.store;
 
   const launch = (appId: string) => {
     pushRecentApp(appId);
@@ -272,6 +272,8 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
 export function buildUserMenu(ctx: PanelContext, onClose: () => void): HTMLElement {
   const store = ctx.deps.store;
   const user = store.get().user;
+  const groups = store.get().permissions?.groups ?? [];
+  const canUseControlPanel = isAppAllowed("controlpanel", store.get().permissions, store.isAdmin());
   const artwork = segmented<ThemePreference>({
     items: [
       { value: "dark", label: "Dark", icon: "moon" },
@@ -305,6 +307,14 @@ export function buildUserMenu(ctx: PanelContext, onClose: () => void): HTMLEleme
         h("div", { class: "small faint" }, `Signed in ${relativeTime(store.get().user?.lastLoginAt ?? Date.now())}`),
       ),
     ),
+    groups.length > 0
+      ? h(
+          "div",
+          { class: "user-menu-groups" },
+          h("div", { class: "menu-section-title" }, "Groups"),
+          h("div", { class: "chip-row" }, ...groups.slice(0, 4).map((group) => h("span", { class: "chip" }, group.name))),
+        )
+      : null,
     h("div", { class: "menu-sep" }),
     h("div", { class: "menu-section-title" }, "Appearance"),
     artwork.el,
@@ -314,14 +324,18 @@ export function buildUserMenu(ctx: PanelContext, onClose: () => void): HTMLEleme
       ctx.showPersonalize();
     }),
     h("div", { class: "menu-sep" }),
-    menuItem("user", "Account settings", () => {
-      onClose();
-      ctx.openAccount("profile");
-    }),
-    menuItem("sessions", "Active sessions", () => {
-      onClose();
-      ctx.openAccount("profile", "sessions");
-    }),
+    canUseControlPanel
+      ? menuItem("user", "Account settings", () => {
+          onClose();
+          ctx.openAccount("profile");
+        })
+      : null,
+    canUseControlPanel
+      ? menuItem("sessions", "Active sessions", () => {
+          onClose();
+          ctx.openAccount("profile", "sessions");
+        })
+      : null,
     menuItem("grid", "Keyboard shortcuts", () => {
       onClose();
       ctx.showShortcuts();

@@ -1,8 +1,8 @@
 // Control Panel → Users: paginated account administration with role, status,
 // quota, password reset and session management.
 
-import { apiErrorMessage } from "../../core/api";
-import { pager, switchControl } from "../../core/components";
+import { ApiError, apiErrorMessage } from "../../core/api";
+import { pager, segmented, switchControl } from "../../core/components";
 import { debounce, h } from "../../core/dom";
 import {
   bytesToGib,
@@ -18,14 +18,116 @@ import {
 import { formatDateTime, relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
-import type { Page, SessionInfo, SystemInfo, User, UserSessionList } from "../../core/types";
-import { confirmDialog, contextMenu, modal } from "../../core/ui";
-import { activeBadge, describeUserAgent, lastLoginCell, quotaCell, roleBadge, type TabRenderContext } from "./common";
+import type {
+  AccessRules,
+  Page,
+  SessionInfo,
+  SystemInfo,
+  User,
+  UserSessionList,
+} from "../../core/types";
+import { confirmDialog, contextMenu, errorMessage, modal } from "../../core/ui";
+import {
+  activeBadge,
+  createSaveWorkflow,
+  describeUserAgent,
+  lastLoginCell,
+  quotaCell,
+  roleBadge,
+  type SaveWorkflow,
+  type TabRenderContext,
+} from "./common";
+import {
+  accessAvailability,
+  groupChips,
+  loadUserAccessData,
+  renderDirectRulesEditor,
+  renderEffectiveAccess,
+  renderGroupMembership,
+} from "./access-ui";
+import { renderGroupsView } from "./groups";
 
 const PER_PAGE_OPTIONS = [10, 25, 50, 100];
 const DEFAULT_PER_PAGE = 25;
 
+/**
+ * Control Panel → Users & Groups: inner Users / Groups tabs sharing the same
+ * content area and header action slot.
+ */
 export async function renderUsersTab(tab: TabRenderContext): Promise<() => void> {
+  const { ctx, host, actions } = tab;
+  host.replaceChildren();
+  actions.replaceChildren();
+  const requested = (ctx.params ?? {}) as { tab?: string; inner?: string; section?: string };
+  let active: "users" | "groups" = requested.inner === "groups" || tab.section === "groups" ? "groups" : "users";
+  let cleanup: (() => void) | void;
+  let switched = false;
+
+  const content = h("div", { class: "users-groups-content" });
+  const control = segmented<"users" | "groups">({
+    items: [
+      { value: "users", label: "Users", icon: "users" },
+      { value: "groups", label: "Groups", icon: "share" },
+    ],
+    value: active,
+    ariaLabel: "Users and groups sections",
+    onChange: (value) => {
+      active = value;
+      void switchView();
+    },
+  });
+  const switchHint = h(
+    "div",
+    { class: "cp-subtabs-hint small muted" },
+    "Users: accounts, groups, direct overrides and effective access. Groups: shared-folder and application rules for their members.",
+  );
+  host.append(
+    h(
+      "div",
+      { class: "cp-subtabs" },
+      h("div", { class: "cp-subtabs-row" }, control.el),
+      switchHint,
+    ),
+    content,
+  );
+
+  async function switchView(): Promise<void> {
+    if (cleanup) {
+      cleanup();
+      cleanup = undefined;
+    }
+    content.replaceChildren();
+    actions.replaceChildren();
+    const innerTab: TabRenderContext = {
+      ...tab,
+      host: content,
+      actions,
+      section: switched ? undefined : tab.section,
+    };
+    switched = true;
+    try {
+      cleanup = active === "users" ? await renderUsersView(innerTab) : await renderGroupsView(innerTab);
+    } catch (error) {
+      content.replaceChildren(
+        h(
+          "div",
+          { class: "error-state" },
+          h("div", { class: "error-title" }, active === "users" ? "Could not load users" : "Could not load groups"),
+          h("div", { class: "error-detail" }, errorMessage(error)),
+          h("button", { class: "btn btn-sm", type: "button", onClick: () => void switchView() }, "Retry"),
+        ),
+      );
+    }
+  }
+
+  await switchView();
+  return () => {
+    cleanup?.();
+    cleanup = undefined;
+  };
+}
+
+async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
   const viewer = ctx.store.get().user;
   if (!viewer) throw new Error("not authenticated");
@@ -35,8 +137,15 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
   let query = "";
   let adminCount: number | null = null;
   let loadToken = 0;
-  let openEditUserId: number | null = null;
-  let editConflictHost: HTMLElement | null = null;
+  interface UserAccessEditorHandle {
+    userId: number;
+    isDirty(): boolean;
+    busy(): boolean;
+    notifyExternalChange(message?: string): void;
+    refreshAccess(): Promise<void>;
+    reload(): Promise<void>;
+  }
+  let openAccessEditor: UserAccessEditorHandle | null = null;
 
   host.replaceChildren();
   actions.replaceChildren();
@@ -102,6 +211,7 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
         {},
         h("th", {}, "User"),
         h("th", {}, "Role"),
+        h("th", { class: "hide-sm" }, "Groups"),
         h("th", {}, "Status"),
         h("th", { class: "quota-col" }, "Quota"),
         h("th", { class: "hide-sm" }, "Last sign-in"),
@@ -174,7 +284,7 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
           {},
           h(
             "td",
-            { colspan: 6 },
+            { colspan: 7 },
             h(
               "div",
               { class: "error-state inline-state" },
@@ -210,7 +320,7 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
           {},
           h(
             "td",
-            { colspan: 6 },
+            { colspan: 7 },
             h(
               "div",
               { class: "table-empty" },
@@ -276,6 +386,7 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
           ),
         ),
         h("td", {}, roleBadge(user.role)),
+        h("td", { class: "hide-sm" }, groupChips(user.groups, 2)),
         h("td", {}, activeBadge(user.active)),
         h("td", { class: "quota-col" }, quotaCell(user)),
         h("td", { class: "hide-sm" }, lastLoginCell(user)),
@@ -393,8 +504,38 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
   }
 
   function openEditModal(user: User): void {
+    void openEditModalAsync(user);
+  }
+
+  function optionalAccessError(error: unknown): boolean {
+    return (
+      error instanceof ApiError &&
+      (error.isNotFound || error.isNotImplemented || error.isUnavailable || error.status === 501)
+    );
+  }
+
+  function normalizeRuleSignature(rules: AccessRules): string {
+    return JSON.stringify({
+      folders: [...(rules.folderRules ?? [])].sort((a, b) => a.shareName.localeCompare(b.shareName)),
+      apps: [...(rules.appRules ?? [])].sort((a, b) => a.appId.localeCompare(b.appId)),
+    });
+  }
+
+  async function openEditModalAsync(user: User): Promise<void> {
+    if (openAccessEditor) return;
     const isSelf = user.id === viewerId;
-    const isLastAdmin = adminCount === 1 && user.role === "admin" && user.active;
+    const isLastAdminRole = adminCount === 1 && user.role === "admin" && user.active;
+
+    let data: Awaited<ReturnType<typeof loadUserAccessData>>;
+    try {
+      data = await loadUserAccessData(ctx, user.id);
+    } catch (error) {
+      ctx.toast.error(apiErrorMessage(error));
+      return;
+    }
+    const accessData = data;
+
+    // ---------------------------------------------------------------- profile fields
     const displayInput = h("input", {
       class: "input",
       type: "text",
@@ -410,24 +551,22 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
       h("option", { value: "admin", selected: user.role === "admin" }, "Administrator"),
     );
     const roleField = formField({ label: "Role", control: role });
-    if (isSelf || isLastAdmin) {
+    if (isSelf || isLastAdminRole) {
       role.disabled = true;
       roleField.hintEl?.remove();
       roleField.el.appendChild(
         h(
           "span",
           { class: "field-hint" },
-          isSelf
-            ? "You cannot change your own role."
-            : "This is the only active administrator; the role is locked.",
+          isSelf ? "You cannot change your own role." : "This is the only active administrator; the role is locked.",
         ),
       );
     }
     const activeSwitch = switchControl({ label: "Account is active", checked: user.active });
-    if (isSelf || isLastAdmin) {
+    if (isSelf || isLastAdminRole) {
       activeSwitch.input.disabled = true;
       if (isSelf) activeSwitch.el.title = "You cannot deactivate your own account.";
-      if (isLastAdmin) activeSwitch.el.title = "The last active administrator cannot be deactivated.";
+      if (isLastAdminRole) activeSwitch.el.title = "The last active administrator cannot be deactivated.";
     }
     const quota = h("input", {
       class: "input",
@@ -442,144 +581,336 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
       label: "Require password change at next sign-in",
       checked: user.mustChangePassword,
     });
-    const alert = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
-    const conflictHost = h(
-      "div",
-      { class: "banner banner-warn", hidden: true, role: "status" },
-      h("span", { class: "banner-icon" }, iconSvg("warning", 16)),
-      h(
-        "div",
-        { class: "banner-body" },
-        h("div", { class: "banner-title" }, "This account changed in another session"),
-        h(
-          "div",
-          { class: "banner-message" },
-          "Reload the fields to review the latest role, status and quota before saving.",
-        ),
-        h(
-          "button",
-          {
-            class: "btn btn-sm",
-            type: "button",
-            onClick: () => void reloadEditedUser(user),
-          },
-          "Reload account",
-        ),
-      ),
+
+    // ------------------------------------------------------------- group membership
+    const membership = renderGroupMembership({
+      groups: accessData.allGroups,
+      selected: accessData.membership.length > 0 ? accessData.membership : (user.groupIds ?? []),
+      onChange: () => markDirty(),
+    });
+    const membershipGroupCount = h(
+      "span",
+      { class: "small muted" },
+      accessData.allGroups.length === 0
+        ? "No groups available"
+        : `${accessData.allGroups.length} group${accessData.allGroups.length === 1 ? "" : "s"} available`,
     );
-    const warning = (isSelf || isLastAdmin)
-      ? h(
+    const membershipHint = h(
+      "div",
+      { class: "field-hint" },
+      "Group rules combine with direct rules. Explicit No Access always wins over a grant.",
+    );
+
+    // -------------------------------------------------------------- direct overrides
+    let baselineRules = normalizeRuleSignature(accessData.rules);
+    let rulesEditor = renderDirectRulesEditor({
+      shareNames: accessData.shares,
+      rules: accessData.rules,
+      onChange: () => markDirty(),
+    });
+    const rulesHost = h("div", { class: "rules-host" }, rulesEditor.el);
+    const rulesHint = h(
+      "div",
+      { class: "field-hint" },
+      "Direct rules apply to this account only. Inherit removes the direct rule for that resource.",
+    );
+
+    // --------------------------------------------------------------- effective access
+    const effectiveError = accessData.errors.find((problem) => problem.startsWith("Effective access"));
+    const effectiveHost = h("div", { class: "effective-host" });
+    const mountEffective = (): void => {
+      effectiveHost.replaceChildren(renderEffectiveAccess(accessData.effective, effectiveError));
+    };
+    mountEffective();
+    const refreshAccessButton = h(
+      "button",
+      { class: "btn btn-subtle btn-sm", type: "button", title: "Refresh effective access" },
+      iconSvg("refresh", 14),
+      "Refresh",
+    );
+
+    // ----------------------------------------------------------------- dirty state
+    let baselineMembership = JSON.stringify(
+      membership.collect().slice().sort((a, b) => a - b),
+    );
+    const readProfile = () => ({
+      displayName: displayInput.value.trim(),
+      role: role.disabled ? user.role : (role.value as User["role"]),
+      active: activeSwitch.isChecked(),
+      quotaBytes: gibToBytes(parseGib(quota.value)),
+      mustChangePassword: forceChange.isChecked(),
+    });
+    const signature = (): string =>
+      JSON.stringify({
+        profile: readProfile(),
+        membership: membership.collect().slice().sort((a, b) => a - b),
+        rules: normalizeRuleSignature(rulesEditor.collect()),
+      });
+    let savedSignature = signature();
+
+    function validationMessage(): string | null {
+      const displayError = validateRequiredText(displayInput.value, "Display name", 64);
+      if (displayError) return displayError;
+      const quotaError = validateGib(quota.value);
+      if (quotaError) return quotaError;
+      const profile = readProfile();
+      if (isLastAdminRole && (profile.role !== "admin" || !profile.active)) {
+        return "The last active administrator cannot be demoted or disabled.";
+      }
+      return null;
+    }
+
+    let workflow: SaveWorkflow | null = null;
+    let closing = false;
+    function markDirty(): void {
+      if (!workflow || closing) return;
+      const dirty = signature() !== savedSignature;
+      const invalid = validationMessage();
+      if (dirty && invalid) workflow.setValidationError(invalid);
+      else workflow.setDirty(dirty);
+    }
+    displayInput.addEventListener("input", markDirty);
+    quota.addEventListener("input", markDirty);
+    role.addEventListener("change", markDirty);
+    activeSwitch.input.addEventListener("change", markDirty);
+    forceChange.input.addEventListener("change", markDirty);
+
+    // ---------------------------------------------------------------- conflict host
+    const conflictHost = h("div", { class: "cp-conflict", hidden: true });
+    const availability = accessAvailability(accessData.errors);
+
+    function showConflict(message: string): void {
+      conflictHost.hidden = false;
+      conflictHost.replaceChildren(
+        h(
           "div",
-          { class: "banner banner-warn" },
-          h("span", { class: "banner-icon" }, iconSvg("shieldAlert", 17)),
+          { class: "banner banner-warn", role: "status" },
+          h("span", { class: "banner-icon" }, iconSvg("warning", 16)),
           h(
             "div",
             { class: "banner-body" },
+            h("div", { class: "banner-title" }, message),
+            h("div", { class: "banner-message" }, "Your unsaved edits were kept. Reload to review the latest values (the draft is discarded)."),
             h(
               "div",
-              { class: "banner-message" },
-              isSelf
-                ? "You cannot deactivate or demote your own account. Use another administrator account for that."
-                : "This is the only active administrator account. RAST will not allow it to be demoted or disabled.",
+              { class: "row wrap" },
+              h(
+                "button",
+                {
+                  class: "btn btn-sm",
+                  type: "button",
+                  onClick: () => {
+                    close();
+                    void reloadUserAndReopen();
+                  },
+                },
+                "Reload user",
+              ),
+              h(
+                "button",
+                { class: "btn btn-sm btn-subtle", type: "button", onClick: () => (conflictHost.hidden = true) },
+                "Keep editing",
+              ),
             ),
           ),
-        )
-      : null;
+        ),
+      );
+    }
 
-    modal({
-      title: `Edit ${user.username}`,
-      body: h(
-        "div",
-        { class: "col" },
-        conflictHost,
-        warning ?? null,
-        displayField.el,
-        roleField.el,
-        activeSwitch.el,
-        quotaField.el,
-        forceChange.el,
-        alert,
-      ),
-      actions: [
-        { label: "Cancel", variant: "ghost", onClick: () => {} },
-        {
-          label: "Save changes",
-          variant: "primary",
-          keepOpen: true,
-          onClick: async (close) => {
-            alert.hidden = true;
-            displayField.setError(null);
-            quotaField.setError(null);
-            const displayError = validateRequiredText(displayInput.value, "Display name", 64);
-            if (displayError) {
-              displayField.setError(displayError);
-              return;
-            }
-            const quotaError = validateGib(quota.value);
-            if (quotaError) {
-              quotaField.setError(quotaError);
-              return;
-            }
-            const nextRole = role.disabled ? user.role : (role.value as User["role"]);
-            const nextActive = activeSwitch.isChecked();
-            if (isLastAdmin && (nextRole !== "admin" || !nextActive)) {
-              alert.hidden = false;
-              alert.textContent = "The last active administrator cannot be demoted or disabled.";
-              throw new Error("invalid last admin change");
-            }
-            try {
-              await ctx.api.patch(`/api/users/${user.id}`, {
-                displayName: displayInput.value.trim(),
-                role: nextRole,
-                active: nextActive,
-                quotaBytes: gibToBytes(parseGib(quota.value)),
-                mustChangePassword: forceChange.isChecked(),
-              });
-              ctx.toast.success("User updated");
-              close();
-              await refreshAdminCount();
-              void load();
-            } catch (error) {
-              alert.hidden = false;
-              alert.textContent = apiErrorMessage(error);
-              throw error;
-            }
-          },
+    async function reloadUserAndReopen(): Promise<void> {
+      try {
+        const page = await ctx.api.get<Page<User>>("/api/users", { page: 1, perPage: 100, q: user.username });
+        const fresh = page.items.find((candidate) => candidate.id === user.id);
+        if (!fresh) {
+          ctx.toast.warning("This account is no longer available.");
+          return;
+        }
+        await load();
+        openEditModal(fresh);
+      } catch (error) {
+        ctx.toast.error(apiErrorMessage(error));
+      }
+    }
+
+    async function refreshAccess(): Promise<void> {
+      const fresh = await loadUserAccessData(ctx, user.id);
+      accessData.effective = fresh.effective;
+      effectiveHost.replaceChildren(
+        renderEffectiveAccess(fresh.effective, fresh.errors.find((problem) => problem.startsWith("Effective access"))),
+      );
+      membership.setGroups(fresh.allGroups);
+      membershipGroupCount.textContent =
+        fresh.allGroups.length === 0 ? "No groups available" : `${fresh.allGroups.length} group${fresh.allGroups.length === 1 ? "" : "s"} available`;
+      if (!workflow?.isDirty()) {
+        baselineMembership = JSON.stringify([...fresh.membership].sort((a, b) => a - b));
+        baselineRules = normalizeRuleSignature(fresh.rules);
+        membership.setSelection(fresh.membership);
+        rulesEditor = renderDirectRulesEditor({ shareNames: fresh.shares, rules: fresh.rules, onChange: () => markDirty() });
+        rulesHost.replaceChildren(rulesEditor.el);
+        savedSignature = signature();
+      }
+    }
+
+    refreshAccessButton.addEventListener("click", () => {
+      refreshAccessButton.disabled = true;
+      void refreshAccess().finally(() => {
+        refreshAccessButton.disabled = false;
+      });
+    });
+
+    // ------------------------------------------------------------------- save FSM
+    workflow = createSaveWorkflow<Awaited<ReturnType<typeof saveUser>>>(
+      {
+        save: async () => saveUser(),
+        onSaved: () => {
+          savedSignature = signature();
+          baselineMembership = JSON.stringify(membership.collect().slice().sort((a, b) => a - b));
+          baselineRules = normalizeRuleSignature(rulesEditor.collect());
+          void refreshAdminCount();
+          void load();
+          window.setTimeout(() => close(), 700);
         },
-      ],
+        onStateChange: () => {
+          queueMicrotask(() => markDirty());
+        },
+      },
+    );
+    const activeWorkflow = workflow;
+
+    async function saveUser(): Promise<User> {
+      const invalid = validationMessage();
+      if (invalid) throw new Error(invalid);
+      const profile = readProfile();
+      const warnings: string[] = [];
+      await ctx.api.patch<User>(`/api/users/${user.id}`, {
+        displayName: profile.displayName,
+        role: profile.role,
+        active: profile.active,
+        quotaBytes: profile.quotaBytes,
+        mustChangePassword: profile.mustChangePassword,
+      });
+      const membershipNow = JSON.stringify(membership.collect().slice().sort((a, b) => a - b));
+      if (membershipNow !== baselineMembership) {
+        try {
+          await ctx.api.put(`/api/users/${user.id}/groups`, { groupIds: membership.collect() });
+          baselineMembership = membershipNow;
+        } catch (error) {
+          if (!optionalAccessError(error)) throw error;
+          warnings.push(`Group membership was not saved: ${apiErrorMessage(error)}`);
+        }
+      }
+      const rulesNow = normalizeRuleSignature(rulesEditor.collect());
+      if (rulesNow !== baselineRules) {
+        try {
+          await ctx.api.put<AccessRules>(`/api/users/${user.id}/access-rules`, rulesEditor.collect());
+          baselineRules = rulesNow;
+        } catch (error) {
+          if (!optionalAccessError(error)) throw error;
+          warnings.push(`Direct rules were not saved: ${apiErrorMessage(error)}`);
+        }
+      }
+      if (warnings.length > 0) ctx.toast.warning(warnings.join(" · "));
+      if (isSelf) {
+        try {
+          await ctx.refreshUser();
+        } catch {
+          /* the live access.changed event also refreshes the shell */
+        }
+      }
+      return { ...user, ...profile } as User;
+    }
+
+    // ------------------------------------------------------------------ layout
+    const identity = h(
+      "div",
+      { class: "identity identity-compact" },
+      h("span", { class: "avatar avatar-sm" }, (user.displayName || user.username).slice(0, 1).toUpperCase()),
+      h(
+        "div",
+        { class: "identity-text" },
+        h("div", { class: "identity-name" }, user.displayName || user.username),
+        h(
+          "div",
+          { class: "identity-meta small muted" },
+          `@${user.username} · created ${formatDateTime(user.createdAt)} · last sign-in ${relativeTime(user.lastLoginAt)}`,
+        ),
+      ),
+    );
+
+    const bodyHost = h(
+      "div",
+      { class: "col user-editor" },
+      availability,
+      conflictHost,
+      identity,
+      h(
+        "div",
+        { class: "appearance-section group-section" },
+        h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Account")),
+        h("div", { class: "form-grid-2" }, displayField.el, roleField.el),
+        h("div", { class: "form-grid-2" }, quotaField.el, h("div", { class: "field" }, h("span", { class: "field-label" }, "Options"), activeSwitch.el, forceChange.el)),
+      ),
+      h(
+        "div",
+        { class: "appearance-section group-section" },
+        h(
+          "div",
+          { class: "appearance-section-head" },
+          h("span", { class: "appearance-section-title" }, "Group Membership"),
+          membershipGroupCount,
+        ),
+        membership.el,
+        membershipHint,
+      ),
+      h(
+        "div",
+        { class: "appearance-section group-section" },
+        h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Direct Overrides")),
+        rulesHost,
+        rulesHint,
+      ),
+      h(
+        "div",
+        { class: "appearance-section group-section" },
+        h(
+          "div",
+          { class: "appearance-section-head" },
+          h("span", { class: "appearance-section-title" }, "Effective Access"),
+          refreshAccessButton,
+        ),
+        effectiveHost,
+      ),
+      activeWorkflow.el,
+    );
+
+    const cancelButton = h("button", { class: "btn btn-ghost", type: "button" }, "Cancel");
+    cancelButton.addEventListener("click", () => close());
+    activeWorkflow.el.querySelector(".appearance-actions-leading")?.append(cancelButton);
+
+    const close = modal({
+      title: `Edit ${user.username}`,
+      body: bodyHost,
+      wide: true,
       onClose: () => {
-        openEditUserId = null;
-        editConflictHost = null;
+        closing = true;
+        openAccessEditor = null;
+        activeWorkflow.dispose();
       },
     });
-    openEditUserId = user.id;
-    editConflictHost = conflictHost;
-    window.setTimeout(() => displayInput.focus(), 40);
-  }
 
-  async function reloadEditedUser(user: User): Promise<void> {
-    try {
-      const response = await ctx.api.get<Page<User>>("/api/users", { page: 1, perPage: 100, q: user.username });
-      const fresh = response.items.find((candidate) => candidate.id === user.id);
-      if (!fresh) {
-        ctx.toast.warning("This account no longer exists.");
-        return;
-      }
-      const dialog = editConflictHost?.closest(".modal");
-      const display = dialog?.querySelector<HTMLInputElement>('[data-edit-field="display"]');
-      const quotaInput = dialog?.querySelector<HTMLInputElement>('[data-edit-field="quota"]');
-      if (display) display.value = fresh.displayName;
-      if (quotaInput) quotaInput.value = String(bytesToGib(fresh.quotaBytes));
-      const roleSelect = dialog?.querySelector<HTMLSelectElement>(".modal-body select");
-      if (roleSelect && !roleSelect.disabled) roleSelect.value = fresh.role;
-      const switches = dialog?.querySelectorAll<HTMLInputElement>(".switch-input");
-      if (switches && switches[0] && !switches[0].disabled) switches[0].checked = fresh.active;
-      if (switches && switches[1]) switches[1].checked = fresh.mustChangePassword;
-      if (editConflictHost) editConflictHost.hidden = true;
-      ctx.toast.success("Account reloaded from the server");
-    } catch (error) {
-      ctx.toast.error(apiErrorMessage(error));
-    }
+    openAccessEditor = {
+      userId: user.id,
+      isDirty: () => activeWorkflow.isDirty(),
+      busy: () => activeWorkflow.state === "saving" || activeWorkflow.state === "saved",
+      notifyExternalChange: (message?: string) => {
+        if (activeWorkflow.state === "saving" || activeWorkflow.state === "saved") return;
+        showConflict(message ?? "This account changed in another session.");
+      },
+      refreshAccess,
+      reload: reloadUserAndReopen,
+    };
+    activeWorkflow.setDirty(false);
+    window.setTimeout(() => displayInput.focus(), 40);
   }
 
   function openResetPasswordModal(user: User): void {
@@ -743,11 +1074,23 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
   }, 350);
   const unsubscribeUsers = realtime.on<{ userId: number; event: string }>("user.changed", (data) => {
     reloadUsers.run();
-    if (data && openEditUserId !== null && data.userId === openEditUserId && editConflictHost) {
-      editConflictHost.hidden = false;
+    if (data && openAccessEditor && !openAccessEditor.busy() && data.userId === openAccessEditor.userId) {
+      openAccessEditor.notifyExternalChange("This account was changed in another session.");
     }
   });
-  const unsubscribeResync = realtime.onResync(() => reloadUsers.run());
+  const unsubscribeGroups = realtime.on<{ groupId?: number }>("group.changed", () => {
+    reloadUsers.run();
+    if (!openAccessEditor || openAccessEditor.busy()) return;
+    if (openAccessEditor.isDirty()) {
+      openAccessEditor.notifyExternalChange("A group or access rule changed in another session.");
+    } else {
+      void openAccessEditor.refreshAccess();
+    }
+  });
+  const unsubscribeResync = realtime.onResync(() => {
+    reloadUsers.run();
+    if (openAccessEditor && !openAccessEditor.busy() && !openAccessEditor.isDirty()) void openAccessEditor.refreshAccess();
+  });
 
   await refreshAdminCount();
   await load();
@@ -755,7 +1098,9 @@ export async function renderUsersTab(tab: TabRenderContext): Promise<() => void>
   return () => {
     reloadUsers.cancel();
     unsubscribeUsers();
+    unsubscribeGroups();
     unsubscribeResync();
+    openAccessEditor = null;
     loadToken += 1;
   };
 }

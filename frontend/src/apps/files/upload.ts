@@ -17,7 +17,7 @@ import type { FileEntry } from "../../core/types";
 import { errorMessage, modal, promptDialog } from "../../core/ui";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import { progressBar } from "../../components/states";
-import { validateFileName } from "./types";
+import { friendlyFileError, validateFileName } from "./types";
 
 type UploadStatus = "queued" | "uploading" | "done" | "error" | "cancelled";
 
@@ -719,7 +719,7 @@ function friendlyUploadError(error: unknown): string {
     if (error.status === 429) return "Too many uploads right now — wait a moment and retry.";
     if (error.status === 401) return "Your session expired. Sign in again.";
     if (error.status === 409) return `Upload conflict: ${error.message}`;
-    return error.message || `Upload failed (${error.status})`;
+    return friendlyFileError(error);
   }
   return errorMessage(error);
 }

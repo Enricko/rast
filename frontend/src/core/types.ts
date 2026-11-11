@@ -14,6 +14,9 @@ export interface User {
   createdAt: number;
   updatedAt: number;
   lastLoginAt: number | null;
+  /** Groups the account belongs to (present once the groups backend lands). */
+  groups?: GroupRef[];
+  groupIds?: number[];
 }
 
 export interface Features {
@@ -31,6 +34,119 @@ export interface MeResponse {
   sessionExpiresAt: number;
   features: Features;
   serverTime: number;
+  /** Present when the groups backend is enabled; absent on older servers. */
+  permissions?: Permissions;
+}
+
+// ---------------------------------------------------------------------------
+// Users & Groups / access policy (docs/GROUPS.md)
+// ---------------------------------------------------------------------------
+
+export type FolderRule = "inherit" | "none" | "read" | "write";
+export type AppRule = "inherit" | "none" | "allow";
+
+export interface GroupRef {
+  id: number;
+  name: string;
+}
+
+export interface GroupMember {
+  userId: number;
+  username: string;
+  displayName: string;
+}
+
+export interface GroupFolderRule {
+  shareName: string;
+  rule: FolderRule;
+}
+
+export interface GroupAppRule {
+  appId: string;
+  rule: AppRule;
+}
+
+export interface GroupSummary {
+  id: number;
+  name: string;
+  description: string;
+  memberCount: number;
+  folderRuleCount: number;
+  appRuleCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GroupDetail extends GroupSummary {
+  members: GroupMember[];
+  folderRules: GroupFolderRule[];
+  appRules: GroupAppRule[];
+}
+
+export interface GroupInput {
+  name: string;
+  description?: string;
+  members?: number[];
+  folderRules?: GroupFolderRule[];
+  appRules?: GroupAppRule[];
+}
+
+export interface UserGroupsResponse {
+  groupIds: number[];
+  groups: GroupRef[];
+}
+
+export interface AccessRules {
+  folderRules: GroupFolderRule[];
+  appRules: GroupAppRule[];
+}
+
+export interface AccessRuleSource {
+  type: "direct" | "group";
+  groupId?: number | null;
+  groupName?: string | null;
+  rule: string;
+  /** Some backends use `kind` instead of `type`. */
+  kind?: "direct" | "group";
+}
+
+export type FolderLevel = "none" | "read" | "write" | "admin" | null;
+
+export interface EffectiveFolderAccess {
+  shareId?: string;
+  shareName: string;
+  path?: string;
+  /** null/absent means No Access. */
+  level: FolderLevel;
+  sources: AccessRuleSource[];
+  fallback?: string | null;
+}
+
+export interface EffectiveAppAccess {
+  appId: string;
+  label?: string;
+  allowed: boolean;
+  readOnly: boolean;
+  sources: AccessRuleSource[];
+  fallback?: string | null;
+}
+
+export interface EffectiveAccess {
+  user?: User;
+  groups?: GroupRef[];
+  folders: EffectiveFolderAccess[];
+  apps: EffectiveAppAccess[];
+}
+
+export interface AppPermission {
+  allowed: boolean;
+  readOnly: boolean;
+}
+
+export interface Permissions {
+  /** Keys are the fixed app ids; missing keys fall back to role defaults. */
+  apps: Record<string, AppPermission>;
+  groups?: GroupRef[];
 }
 
 export interface Bootstrap {

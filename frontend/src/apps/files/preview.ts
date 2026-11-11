@@ -1,6 +1,7 @@
 // Safe inline previews: images via <img>, PDFs via a sandboxed iframe and text
 // via /api/files/text rendered with textContent (never innerHTML).
 
+import { ApiError } from "../../core/api";
 import { h } from "../../core/dom";
 import type { AppContext } from "../../core/app";
 import type { FileEntry } from "../../core/types";
@@ -8,7 +9,7 @@ import { errorMessage, modal } from "../../core/ui";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import { isUnavailableError, unavailableReason, unavailableState } from "../../components/states";
 import { formatBytes, formatDateTime } from "../../core/format";
-import { previewKind, type TextPayload } from "./types";
+import { ACCESS_CHANGED_ITEM_MESSAGE, previewKind, type TextPayload } from "./types";
 
 const TEXT_PREVIEW_BYTES = 262_144;
 
@@ -56,7 +57,11 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
     image.src = ctx.api.previewUrl(entry.path);
     image.addEventListener("error", () => {
       frame.replaceChildren(
-        h("div", { class: "preview-note" }, "The image could not be displayed. It may be corrupted or too large for the browser."),
+        h(
+          "div",
+          { class: "preview-note" },
+          "The image could not be displayed. It may have been moved, your access may have changed, or the file may be too large for the browser preview.",
+        ),
       );
     });
     frame.appendChild(image);
@@ -111,6 +116,10 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
               reason: unavailableReason(error),
             }),
           );
+          return;
+        }
+        if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+          frame.replaceChildren(h("div", { class: "preview-note" }, ACCESS_CHANGED_ITEM_MESSAGE));
           return;
         }
         frame.replaceChildren(

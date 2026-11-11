@@ -14,7 +14,7 @@ import {
   relativeTime,
 } from "../../core/format";
 import { fileIcon, iconSvg } from "../../core/icons";
-import { confirmDialog, contextMenu, errorMessage, promptDialog } from "../../core/ui";
+import { confirmDialog, contextMenu, promptDialog } from "../../core/ui";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel, type JobUpdate } from "../../components/jobs";
@@ -30,6 +30,10 @@ import { openPreview } from "./preview";
 import { pickDestination } from "./picker";
 import { UploadManager } from "./upload";
 import {
+  ACCESS_CHANGED_ITEM_MESSAGE,
+  ACCESS_CHANGED_MESSAGE,
+  friendlyFileError,
+  isAccessError,
   joinPath,
   listingItems,
   parentPath,
@@ -150,6 +154,12 @@ export class FileStation {
   private syncDeferred = false;
   /** Set when an event says the current directory disappeared. */
   private checkMissingCurrent = false;
+  /** True when the backend revoked access to the current directory (files app). */
+  private accessBlocked = false;
+  private accessMessage = ACCESS_CHANGED_MESSAGE;
+  private lastAccessSignature = "";
+  private lastPermissionsRef: unknown = undefined;
+  private readonly accessCheck: { run: () => void; cancel: () => void };
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
@@ -161,10 +171,28 @@ export class FileStation {
     this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
     this.syncListing = debounceTask(() => this.runBackgroundSync(), 250);
     this.syncUsage = debounceTask(() => void this.loadUsage(), 900);
+    this.accessCheck = debounceTask(() => void this.onAccessChanged(), 200);
     this.lc.add(() => {
       this.syncListing.cancel();
       this.syncUsage.cancel();
+      this.accessCheck.cancel();
     });
+    this.lastAccessSignature = `${this.ctx.store.get().user?.id ?? 0}|${this.ctx.store.get().user?.role ?? ""}`;
+    this.lastPermissionsRef = this.ctx.store.get().permissions ?? null;
+    this.lc.add(
+      this.ctx.store.subscribe(() => {
+        const state = this.ctx.store.get() as unknown as {
+          permissions?: unknown;
+          user?: { id?: number; role?: string } | null;
+        };
+        const permissionsRef = state.permissions ?? null;
+        const signature = `${state.user?.id ?? 0}|${state.user?.role ?? ""}`;
+        if (permissionsRef === this.lastPermissionsRef && signature === this.lastAccessSignature) return;
+        this.lastPermissionsRef = permissionsRef;
+        this.lastAccessSignature = signature;
+        this.accessCheck.run();
+      }),
+    );
 
     // ------------------------------------------------------------- toolbar
     this.uploadButton = toolButton("Upload", "upload", () => this.fileInput.click(), "primary");
@@ -392,6 +420,8 @@ export class FileStation {
         this.onFilesResync(typeof reason === "string" ? reason : "server");
       }),
     );
+    // Group/user policy changes: revalidate roots + the open directory.
+    this.lc.add(this.realtime.on("access.changed", () => this.accessCheck.run()));
     // Reconnect, sequence gap, tab wake or sign-in refresh.
     this.lc.add(this.realtime.onResync((reason) => this.onFilesResync(reason)));
   }
@@ -441,10 +471,18 @@ export class FileStation {
 
   private onFilesResync(_reason: string): void {
     if (this.disposed) return;
-    this.renderRoots();
-    if (this.section === "trash") void this.loadTrash();
-    else void this.loadListing({ preserveScroll: true, silent: true });
-    void this.loadUsage();
+    void this.onAccessChanged();
+  }
+
+
+  /** Access/groups changed (or the tab resynced): revalidate roots + current view. */
+  private async onAccessChanged(): Promise<void> {
+    if (this.disposed) return;
+    await this.loadRoots();
+    if (this.disposed) return;
+    if (this.section === "trash") await this.loadTrash();
+    else await this.loadListing({ preserveScroll: true, silent: true, accessCheck: true });
+    if (!this.disposed) void this.loadUsage();
   }
 
   private requestListingSync(): void {
@@ -577,12 +615,17 @@ export class FileStation {
       if (isAbortError(error) || this.disposed) return;
       this.roots = [{ name: "Home", path: "/", kind: "home" }];
       this.rootsError = error;
+      if (isAccessError(error)) {
+        this.accessBlocked = true;
+        this.accessMessage = ACCESS_CHANGED_MESSAGE;
+        this.notice.show(ACCESS_CHANGED_MESSAGE, { kind: "warning" });
+      }
     }
     this.renderRoots();
     this.renderChrome();
   }
 
-  private async loadListing(options: { preserveScroll?: boolean; silent?: boolean } = {}): Promise<void> {
+  private async loadListing(options: { preserveScroll?: boolean; silent?: boolean; accessCheck?: boolean } = {}): Promise<void> {
     if (this.disposed || this.section !== "files") return;
     const previousScroll = options.preserveScroll ? this.captureScroll() : null;
     this.listingRequest?.abort();
@@ -593,6 +636,7 @@ export class FileStation {
       this.renderStatusLine();
     }
     let missingFolder: string | null = null;
+    let accessLostPath: string | null = null;
     try {
       const listing = await this.ctx.api.get<FileListing>(
         "/api/files",
@@ -610,21 +654,30 @@ export class FileStation {
       this.listing = listing;
       this.loadError = null;
       this.checkMissingCurrent = false;
+      this.accessBlocked = false;
       this.page = typeof listing?.page === "number" ? listing.page : this.page;
       this.perPage = typeof listing?.perPage === "number" ? listing.perPage : this.perPage;
       this.total = typeof listing?.total === "number" ? listing.total : listingItems(listing).length;
       const valid = new Set(listingItems(listing).map((entry) => entry.path));
+      const previousSelection = new Set(this.selection);
       this.selection = new Set([...this.selection].filter((path) => valid.has(path)));
       this.anchorPath = this.anchorPath && valid.has(this.anchorPath) ? this.anchorPath : null;
+      if (this.selection.size < previousSelection.size) {
+        this.notice.show("One or more selected items are no longer accessible.", { kind: "warning" });
+      }
       this.pager.set(this.page, this.perPage, this.total);
     } catch (error) {
       if (isAbortError(error) || request.signal.aborted || this.disposed) return;
-      if (this.checkMissingCurrent && error instanceof ApiError && error.status === 404 && this.path !== "/") {
+      if (error instanceof ApiError && error.status === 403) {
+        accessLostPath = this.path;
+      } else if (options.accessCheck && error instanceof ApiError && error.status === 404) {
+        accessLostPath = this.path;
+      } else if (this.checkMissingCurrent && error instanceof ApiError && error.status === 404 && this.path !== "/") {
         this.checkMissingCurrent = false;
         missingFolder = this.path;
       } else if (options.silent && this.listing) {
         // Background refresh failed: keep showing the last good listing.
-        this.notice.show(`Could not refresh this folder: ${errorMessage(error)}`, { kind: "warning" });
+        this.notice.show(`Could not refresh this folder: ${friendlyFileError(error)}`, { kind: "warning" });
       } else {
         this.loadError = error;
         this.listing = null;
@@ -644,6 +697,10 @@ export class FileStation {
         this.updateSelectionUi();
         if (previousScroll) this.restoreScroll(previousScroll);
       }
+    }
+    if (accessLostPath && !this.disposed) {
+      this.handleAccessLost(accessLostPath);
+      return;
     }
     if (missingFolder && !this.disposed) {
       this.ctx.toast.warning(`The folder ${quotedPath(missingFolder)} is no longer available.`);
@@ -668,6 +725,74 @@ export class FileStation {
     }
     const current = this.panel.querySelector<HTMLElement>(".fs-table-wrap, .fs-grid");
     (current ?? saved.el).scrollTop = saved.top;
+  }
+
+  /** A background revalidation found the current directory/selected data revoked. */
+  private handleAccessLost(path: string): void {
+    if (this.disposed) return;
+    this.listing = null;
+    this.total = 0;
+    this.loadError = null;
+    this.selection.clear();
+    this.anchorPath = null;
+    this.checkMissingCurrent = false;
+    this.accessBlocked = true;
+    this.accessMessage = ACCESS_CHANGED_MESSAGE;
+    this.pager.set(1, this.perPage, 0);
+    this.uploads.dismiss();
+    this.notice.show(ACCESS_CHANGED_MESSAGE, {
+      kind: "warning",
+      timeoutMs: 0,
+      action: path === "/" ? undefined : { label: "Go to Home", onClick: () => void this.navigate("/") },
+    });
+    this.ctx.toast.warning("Your access to this folder was changed.");
+    if (path !== "/") {
+      void this.navigate("/");
+      return;
+    }
+    this.renderAccessLost(ACCESS_CHANGED_MESSAGE, "files");
+  }
+
+  private renderAccessLost(message: string, section: "files" | "trash"): void {
+    clear(this.panel);
+    this.rowEls.clear();
+    this.checkboxEls.clear();
+    this.trashRows.clear();
+    this.selectAllBox = null;
+    const home = toolButton("Go to Home", "files", () => void this.navigate("/"), "primary", undefined, false);
+    this.panel.appendChild(
+      h(
+        "div",
+        { class: "fs-access-state", role: "status" },
+        iconSvg("lock", 26),
+        h("div", { class: "fs-access-title" }, "Folder access changed"),
+        h("div", { class: "fs-access-detail" }, message),
+        home,
+      ),
+    );
+    this.renderCrumbs();
+    this.renderStatusLine();
+    this.updateSelectionUi();
+    void section;
+  }
+
+  private async downloadFile(path: string): Promise<void> {
+    // Probe first so an access revocation becomes a friendly message instead of
+    // a browser error page from the streaming download endpoint.
+    try {
+      const probe = await fetch(this.ctx.api.downloadUrl(path), { method: "HEAD", credentials: "same-origin" });
+      if (probe.status === 403 || probe.status === 404) {
+        this.ctx.toast.warning(ACCESS_CHANGED_ITEM_MESSAGE);
+        return;
+      }
+      if (probe.status === 401) {
+        this.ctx.toast.error("Your session expired. Sign in again.");
+        return;
+      }
+    } catch {
+      // Network hiccup: still try the normal download path.
+    }
+    this.ctx.api.download(path);
   }
 
   private async loadUsage(): Promise<void> {
@@ -707,6 +832,12 @@ export class FileStation {
       this.pager.set(this.trashPage, this.perPage, this.trashTotal);
     } catch (error) {
       if (isAbortError(error) || request.signal.aborted || this.disposed) return;
+      if (error instanceof ApiError && error.status === 403) {
+        this.trashItems = [];
+        this.trashTotal = 0;
+        this.renderAccessLost(ACCESS_CHANGED_MESSAGE, "trash");
+        return;
+      }
       this.loadError = error;
       this.trashItems = [];
     } finally {
@@ -784,7 +915,7 @@ export class FileStation {
           { class: "fs-sidebar-note small" },
           isUnavailableError(this.rootsError)
             ? `Shared folders unavailable: ${unavailableReason(this.rootsError)}`
-            : `Could not load locations: ${errorMessage(this.rootsError)}`,
+            : `Could not load locations: ${friendlyFileError(this.rootsError)}`,
         ),
       );
     }
@@ -804,7 +935,7 @@ export class FileStation {
           { class: "fs-sidebar-note small" },
           isUnavailableError(this.usageError)
             ? `Usage unavailable: ${unavailableReason(this.usageError)}`
-            : `Usage unavailable: ${errorMessage(this.usageError)}`,
+            : `Usage unavailable: ${friendlyFileError(this.usageError)}`,
         ),
       );
       return;
@@ -911,6 +1042,10 @@ export class FileStation {
   }
 
   private renderPanel(): void {
+    if (this.accessBlocked && this.section === "files" && !this.loading) {
+      this.renderAccessLost(this.accessMessage, "files");
+      return;
+    }
     clear(this.panel);
     this.rowEls.clear();
     this.checkboxEls.clear();
@@ -1190,8 +1325,12 @@ export class FileStation {
     this.copyButton.disabled = count === 0;
     this.moveButton.disabled = count === 0;
     this.deleteButton.disabled = count === 0;
-    this.newFolderButton.disabled = this.section !== "files";
-    this.uploadButton.disabled = this.section !== "files";
+    this.newFolderButton.disabled = this.section !== "files" || this.accessBlocked;
+    this.uploadButton.disabled = this.section !== "files" || this.accessBlocked;
+    this.copyButton.disabled = count === 0 || this.accessBlocked;
+    this.moveButton.disabled = count === 0 || this.accessBlocked;
+    this.deleteButton.disabled = count === 0 || this.accessBlocked;
+    this.renameButton.disabled = count !== 1 || this.accessBlocked;
     this.selectionInfo.textContent =
       count > 0 ? `${count} item(s) selected` : this.total > 0 ? `${this.total.toLocaleString()} item(s)` : "";
     this.renderDetail();
@@ -1235,7 +1374,7 @@ export class FileStation {
           toolButton("Preview", "eye", () => openPreview(this.ctx, this.lc, entry), "primary", undefined, true),
         );
       }
-      actions.appendChild(toolButton("Download", "download", () => this.ctx.api.download(entry.path), "ghost", undefined, true));
+      actions.appendChild(toolButton("Download", "download", () => void this.downloadFile(entry.path), "ghost", undefined, true));
     }
     actions.appendChild(toolButton("Rename", "rename", () => void this.renameSelected(), "ghost", undefined, true));
     actions.appendChild(toolButton("Delete", "trash", () => void this.deleteSelected(), "danger", undefined, true));
@@ -1312,6 +1451,7 @@ export class FileStation {
 
   private async navigate(path: string): Promise<void> {
     this.section = "files";
+    this.accessBlocked = false;
     this.path = path || "/";
     this.page = 1;
     this.query = "";
@@ -1391,7 +1531,7 @@ export class FileStation {
       onClick: () => this.openEntry(entry),
     });
     if (entry.kind === "file") {
-      items.push({ label: "Download", icon: "download", onClick: () => this.ctx.api.download(entry.path) });
+      items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
       items.push("separator");
     }
     items.push(
@@ -1437,7 +1577,7 @@ export class FileStation {
       await this.loadListing();
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Could not create folder: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Could not create folder: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1463,7 +1603,7 @@ export class FileStation {
       await this.loadListing();
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Rename failed: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Rename failed: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1473,7 +1613,7 @@ export class FileStation {
       return;
     }
     const entry = listingItems(this.listing).find((candidate) => this.selection.has(candidate.path));
-    if (entry) this.ctx.api.download(entry.path);
+    if (entry) await this.downloadFile(entry.path);
   }
 
   private async transferSelected(kind: "copy" | "move"): Promise<void> {
@@ -1507,7 +1647,7 @@ export class FileStation {
         await this.loadListing();
       }
     } catch (error) {
-      this.ctx.toast.error(`${kind === "copy" ? "Copy" : "Move"} failed: ${errorMessage(error)}`);
+      this.ctx.toast.error(`${kind === "copy" ? "Copy" : "Move"} failed: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1535,7 +1675,7 @@ export class FileStation {
       }
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Delete failed: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Delete failed: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1563,7 +1703,7 @@ export class FileStation {
       await this.ctx.api.post(`/api/jobs/${encodeURIComponent(jobId)}/cancel`);
       this.ctx.toast.info("Cancellation requested");
     } catch (error) {
-      this.ctx.toast.error(`Could not cancel: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Could not cancel: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1584,7 +1724,7 @@ export class FileStation {
       await this.loadTrash();
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Restore failed: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Restore failed: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1611,7 +1751,7 @@ export class FileStation {
       await this.loadTrash();
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Permanent delete failed: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Permanent delete failed: ${friendlyFileError(error)}`);
     }
   }
 
@@ -1633,7 +1773,7 @@ export class FileStation {
       await this.loadTrash();
       void this.loadUsage();
     } catch (error) {
-      this.ctx.toast.error(`Could not empty recycle bin: ${errorMessage(error)}`);
+      this.ctx.toast.error(`Could not empty recycle bin: ${friendlyFileError(error)}`);
     }
   }
 }

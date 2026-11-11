@@ -1,6 +1,35 @@
 // Local API shapes and helpers for File Station. Shared DTOs live in core/types.
 
+import { ApiError } from "../../core/api";
 import type { FileEntry, FileListing } from "../../core/types";
+
+/** Friendly copy shown when a folder/share/file becomes inaccessible mid-session. */
+export const ACCESS_CHANGED_MESSAGE =
+  "Your access to this folder was changed. You may no longer have permission to view it.";
+
+export const ACCESS_CHANGED_ITEM_MESSAGE =
+  "This item is no longer accessible — it may have been moved or your access changed.";
+
+export function isAccessError(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 403 || error.status === 404);
+}
+
+/**
+ * Map API errors from file endpoints to user-facing text. Access denials and
+ * hidden resources (403/404) get the same friendly "access changed" copy used
+ * by the revocation flow instead of raw server messages.
+ */
+export function friendlyFileError(error: unknown): string {
+  if (error instanceof ApiError) {
+    if (error.status === 403) return ACCESS_CHANGED_MESSAGE;
+    if (error.status === 404) return ACCESS_CHANGED_ITEM_MESSAGE;
+    if (error.status === 409) return error.message || "A name conflict prevented this operation.";
+    if (error.status === 413) return "Not enough storage quota for this operation.";
+    if (error.status === 0) return "Cannot reach the RAST server.";
+    return error.message || `Request failed (${error.status})`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** GET /api/files/usage */
 export interface UsageStats {
