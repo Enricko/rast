@@ -13,7 +13,7 @@ import { formField, validateRequiredText } from "../../core/forms";
 import { iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import type { GroupDetail, GroupInput, GroupSummary, Page, Share, User } from "../../core/types";
-import { confirmDialog, contextMenu, modal } from "../../core/ui";
+import { contextMenu, modal } from "../../core/ui";
 import {
   APP_RULE_OPTIONS,
   FOLDER_RULE_OPTIONS,
@@ -22,9 +22,18 @@ import {
   pageIntro,
   type TabRenderContext,
 } from "./common";
+import {
+  createEntityPicker,
+  isOptionalEndpointError,
+  loadGroupImpact,
+  loadGroupMembers,
+  summarizeImpact,
+  type EntityPicker,
+  type ImpactSummary,
+  type PickerOption,
+} from "./access-ui";
 
 const PER_PAGE = 25;
-const MAX_MEMBERS_SHOWN = 200;
 
 function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
@@ -268,6 +277,120 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     }
   }
 
+  /** Typed-name delete dialog with the server-computed impact preview. */
+  function confirmGroupDeletion(
+    group: GroupSummary,
+    counts: { members: number; folderRules: number; appRules: number },
+    impact: ImpactSummary | null,
+  ): Promise<boolean> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let closeFn: (() => void) | null = null;
+      const typed = h("input", {
+        class: "input",
+        type: "text",
+        autocomplete: "off",
+        placeholder: group.name,
+      });
+      const typedField = formField({
+        label: "Confirm group name",
+        control: typed,
+        required: true,
+        hint: `Type “${group.name}” to confirm.`,
+      });
+      const typedError = h("div", { class: "field-error", hidden: true });
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        closeFn?.();
+        resolve(value);
+      };
+
+      const userLines: Node[] = [];
+      if (impact && impact.lines.length > 0) {
+        userLines.push(
+          h(
+            "div",
+            { class: "impact-title" },
+            `Affected users (${impact.userCount}${impact.truncated ? "+" : ""})`,
+          ),
+        );
+        const list = h("ul", { class: "impact-list" });
+        for (const user of impact.lines) {
+          const lines = user.changes.length > 0 ? user.changes : ["Access rules change for this user"];
+          list.appendChild(
+            h(
+              "li",
+              {},
+              h("span", { class: "impact-user" }, user.displayName ? `${user.displayName} (@${user.username})` : `@${user.username}`),
+              h(
+                "ul",
+                { class: "impact-changes" },
+                ...lines.map((line) => h("li", { class: "mono small" }, line)),
+              ),
+            ),
+          );
+        }
+        userLines.push(list);
+        if (impact.truncated) {
+          userLines.push(
+            h("div", { class: "small faint" }, "More affected users are not shown (the preview is bounded by the server)."),
+          );
+        }
+      }
+
+      const body = h(
+        "div",
+        { class: "col" },
+        h(
+          "p",
+          { class: "confirm-message" },
+          `Delete “${group.name}”? This removes the group definition and its rules.`,
+        ),
+        h(
+          "div",
+          { class: "impact-counts small" },
+          `${counts.members} member${counts.members === 1 ? "" : "s"} · ${counts.folderRules} shared-folder rule${counts.folderRules === 1 ? "" : "s"} · ${counts.appRules} application rule${counts.appRules === 1 ? "" : "s"}`,
+        ),
+        ...userLines,
+        h(
+          "p",
+          { class: "small muted" },
+          "Users, shared folders and files are retained. Users lose only the access this group granted; direct rules stay in place.",
+        ),
+        typedField.el,
+        typedError,
+      );
+
+      closeFn = modal({
+        title: "Delete group",
+        body,
+        wide: Boolean(impact && impact.lines.length > 0),
+        onClose: () => finish(false),
+        actions: [
+          { label: "Cancel", variant: "ghost", onClick: () => finish(false) },
+          {
+            label: "Delete group",
+            variant: "danger",
+            keepOpen: true,
+            onClick: () => {
+              if (typed.value.trim() !== group.name) {
+                typed.classList.add("is-invalid");
+                typed.setAttribute("aria-invalid", "true");
+                typedError.textContent = `Enter “${group.name}” exactly to continue.`;
+                typedError.hidden = false;
+                typed.focus();
+                throw new Error("confirmation text does not match");
+              }
+              finish(true);
+            },
+          },
+        ],
+      });
+      window.setTimeout(() => typed.focus(), 60);
+    });
+  }
+
   async function deleteGroup(group: GroupSummary): Promise<void> {
     let detail: GroupDetail | null = null;
     try {
@@ -275,19 +398,19 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     } catch {
       detail = null;
     }
-    const members = detail?.memberCount ?? group.memberCount ?? 0;
-    const folderRules = detail?.folderRuleCount ?? group.folderRuleCount ?? 0;
-    const appRules = detail?.appRuleCount ?? group.appRuleCount ?? 0;
-    const ok = await confirmDialog({
-      title: "Delete group",
-      message:
-        `Delete “${group.name}”?\n\n` +
-        `Affected: ${members} user${members === 1 ? "" : "s"}, ${folderRules} shared-folder rule${folderRules === 1 ? "" : "s"}, ${appRules} application rule${appRules === 1 ? "" : "s"}.\n\n` +
-        "Users, shared folders and files are retained. Users lose the access this group granted; explicit direct rules stay in place.",
-      confirmLabel: "Delete group",
-      danger: true,
-      requireTyped: group.name,
-    });
+    let impact: ImpactSummary | null = null;
+    try {
+      const rawImpact = await loadGroupImpact(ctx, group.id);
+      if (rawImpact) impact = summarizeImpact(rawImpact);
+    } catch (error) {
+      problemsFor(deleteGroup, error);
+    }
+    const counts = {
+      members: impact?.members ?? detail?.memberCount ?? group.memberCount ?? 0,
+      folderRules: impact?.folderRules ?? detail?.folderRuleCount ?? group.folderRuleCount ?? 0,
+      appRules: impact?.appRules ?? detail?.appRuleCount ?? group.appRuleCount ?? 0,
+    };
+    const ok = await confirmGroupDeletion(group, counts, impact);
     if (!ok) return;
     try {
       const response = await ctx.api.del<{
@@ -296,7 +419,7 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
         affectedFolderRules?: number;
         affectedAppRules?: number;
       }>(`/api/groups/${group.id}`);
-      const affected = response?.affectedUsers ?? members;
+      const affected = response?.affectedUsers ?? counts.members;
       ctx.toast.success(
         `Group “${group.name}” deleted${affected ? ` — ${affected} user${affected === 1 ? "" : "s"} affected` : ""}`,
       );
@@ -307,26 +430,24 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     }
   }
 
+  /** Non-fatal diagnostic for optional endpoints (kept out of the way visually). */
+  function problemsFor(_fn: unknown, error: unknown): void {
+    if (isOptionalEndpointError(error)) return;
+    ctx.toast.warning(`Delete preview unavailable: ${apiErrorMessage(error)}`);
+  }
+
   async function openGroupEditor(groupId: number | null): Promise<void> {
     let detail: GroupDetail | null = null;
-    let users: User[] = [];
     let shares: Share[] = [];
     const problems: string[] = [];
     const loads = await Promise.allSettled([
       groupId === null ? Promise.resolve(null) : ctx.api.get<GroupDetail>(`/api/groups/${groupId}`),
-      ctx.api.get<Page<User>>("/api/users", { page: 1, perPage: 100 }),
       ctx.api.get<Share[]>("/api/shares"),
     ]);
     if (loads[0].status === "fulfilled" && loads[0].value) detail = normalizeDetail(loads[0].value);
     else if (groupId !== null && loads[0].status === "rejected") problems.push(`Group: ${apiErrorMessage(loads[0].reason)}`);
-    if (loads[1].status === "fulfilled") {
-      // Deactivated accounts cannot be added to groups; existing memberships
-      // are preserved (their ids stay selected) but are not offered again.
-      users = asArray<User>(loads[1].value.items).filter((user) => user.active !== false);
-    }
-    else problems.push(`Users: ${apiErrorMessage(loads[1].reason)}`);
-    if (loads[2].status === "fulfilled") shares = asArray<Share>(loads[2].value);
-    else problems.push(`Shared folders: ${apiErrorMessage(loads[2].reason)}`);
+    if (loads[1].status === "fulfilled") shares = asArray<Share>(loads[1].value);
+    else problems.push(`Shared folders: ${apiErrorMessage(loads[1].reason)}`);
     if (groupId !== null && !detail) {
       ctx.toast.error("Could not load this group");
       return;
@@ -337,11 +458,20 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
       name: "",
       description: "",
     };
-    const folderState = new Map<string, string>();
-    for (const rule of initial.folderRules) folderState.set(rule.shareName, rule.rule);
+    // Folder rules keep the stable share id when known (still sent by name).
+    const folderState = new Map<string, { rule: string; shareId?: string }>();
+    for (const rule of initial.folderRules) {
+      folderState.set(rule.shareName, { rule: rule.rule, shareId: rule.shareId });
+    }
     const appState = new Map<string, string>();
     for (const rule of initial.appRules) appState.set(rule.appId, rule.rule);
-    const selectedMembers = new Set<number>(initial.members.map((member) => Number(member.userId)));
+    const membersLoad = await loadGroupMembers(ctx, groupId, initial.members);
+    if (membersLoad.error) problems.push(membersLoad.error);
+    if (!membersLoad.complete) {
+      problems.push(
+        `Only the first ${membersLoad.members.length} of ${membersLoad.total} group members were loaded (bounded preview).`,
+      );
+    }
 
     const nameInput = h("input", { class: "input", type: "text", value: initial.name, autocomplete: "off", spellcheck: false });
     const nameField = formField({ label: "Group name", control: nameInput, required: true, hint: "Stable id: renaming keeps the group and its rules." });
@@ -354,64 +484,76 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     });
     const descriptionField = formField({ label: "Description (optional)", control: descriptionInput });
 
-    // ---- members
-    const memberSearch = h("input", {
-      class: "input input-search",
-      type: "search",
-      placeholder: "Search users…",
-      ariaLabel: "Search users",
-    });
-    const memberList = h("div", { class: "checklist", role: "group", ariaLabel: "Group members" });
+    // ---- members (server search + pagination, selections persisted)
+    const shareRefs = shares.map((share) => ({ shareName: share.name, shareId: share.id }));
+    const memberOptions: PickerOption[] = membersLoad.members.map((member) => ({
+      id: Number(member.userId),
+      label: member.displayName || member.username,
+      description: `@${member.username}`,
+      inactive: member.active === false,
+    }));
     const memberCount = h("span", { class: "small muted" });
-    const renderMembers = (): void => {
-      const query = memberSearch.value.trim().toLowerCase();
-      memberList.replaceChildren();
-      const shown = users
-        .filter((user) => !query || user.username.toLowerCase().includes(query) || user.displayName.toLowerCase().includes(query))
-        .slice(0, MAX_MEMBERS_SHOWN);
-      for (const user of shown) {
-        const input = h("input", { class: "checkbox-input", type: "checkbox", checked: selectedMembers.has(user.id), ariaLabel: user.username });
-        input.addEventListener("change", () => {
-          if (input.checked) selectedMembers.add(user.id);
-          else selectedMembers.delete(user.id);
-          memberCount.textContent = `${selectedMembers.size} selected`;
-          markDirty();
+    let memberPicker: EntityPicker | null = null;
+
+    async function fetchUsersPage(query: string, pageNumber: number, perPage: number): Promise<{ items: PickerOption[]; total: number }> {
+      const load = async (filterActive: boolean): Promise<{ items: PickerOption[]; total: number }> => {
+        const response = await ctx.api.get<Page<User>>("/api/users", {
+          q: query || undefined,
+          page: pageNumber,
+          perPage,
+          ...(filterActive ? { active: "active" } : {}),
         });
-        memberList.appendChild(
-          h(
-            "label",
-            { class: "checklist-row" },
-            input,
-            h(
-              "span",
-              { class: "checklist-label" },
-              h("span", { class: "user-cell-name" }, user.displayName || user.username),
-              h("span", { class: "small faint" }, `@${user.username}`),
-            ),
-          ),
-        );
+        return {
+          items: asArray<User>(response.items).map((user) => ({
+            id: user.id,
+            label: user.displayName || user.username,
+            description: `@${user.username}`,
+            inactive: user.active === false,
+          })),
+          total: Number(response.total ?? 0),
+        };
+      };
+      try {
+        return await load(true);
+      } catch (error) {
+        if (!isOptionalEndpointError(error)) throw error;
+        // Older servers ignore `active`; retry without it and mark disabled rows.
+        return await load(false);
       }
-      if (shown.length === 0) {
-        memberList.appendChild(h("div", { class: "field-hint" }, users.length === 0 ? "No user accounts available." : "No users match this search."));
-      }
-      memberCount.textContent = `${selectedMembers.size} selected`;
-    };
-    memberSearch.addEventListener("input", renderMembers);
-    renderMembers();
+    }
+
+    memberPicker = createEntityPicker({
+      fetchPage: fetchUsersPage,
+      selected: memberOptions,
+      onChange: () => {
+        if (memberPicker) memberCount.textContent = `${memberPicker.selectedIds().length} selected`;
+        markDirty();
+      },
+      searchPlaceholder: "Search users by name or username…",
+      emptyText: "No matching user accounts.",
+      ariaLabel: "Group members",
+      hint: "Deactivated accounts are shown with a Disabled badge when already members; they cannot be added.",
+    });
+    memberCount.textContent = `${memberPicker.selectedIds().length} selected`;
 
     // ---- folder rules
-    const folderNames = Array.from(new Set([...shares.map((share) => share.name), ...folderState.keys()])).sort((a, b) => a.localeCompare(b));
+    const folderNames = Array.from(new Set([...shareRefs.map((share) => share.shareName), ...folderState.keys()])).sort((a, b) =>
+      a.localeCompare(b),
+    );
+    const shareIds = new Map<string, string | undefined>();
+    for (const share of shareRefs) shareIds.set(share.shareName, share.shareId);
+    for (const [name, state] of folderState) if (state.shareId && !shareIds.has(name)) shareIds.set(name, state.shareId);
     const folderBody = h("tbody");
     for (const shareName of folderNames) {
       const select = h(
         "select",
         { class: "select select-sm rule-select", ariaLabel: `Rule for shared folder ${shareName}` },
         ...FOLDER_RULE_OPTIONS.map((option) =>
-          h("option", { value: option.value, selected: (folderState.get(shareName) ?? "inherit") === option.value }, option.label),
+          h("option", { value: option.value, selected: (folderState.get(shareName)?.rule ?? "inherit") === option.value }, option.label),
         ),
       );
       select.addEventListener("change", () => {
-        folderState.set(shareName, select.value);
+        folderState.set(shareName, { rule: select.value, shareId: shareIds.get(shareName) });
         markDirty();
       });
       folderBody.appendChild(h("tr", {}, h("td", { class: "mono small" }, shareName), h("td", { class: "rule-cell" }, select)));
@@ -476,10 +618,14 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
         const body: GroupInput = {
           name: nameInput.value.trim(),
           description: descriptionInput.value.trim(),
-          members: Array.from(selectedMembers),
+          members: memberPicker ? memberPicker.selectedIds() : [],
           folderRules: Array.from(folderState.entries())
-            .filter(([, rule]) => rule !== "inherit")
-            .map(([shareName, rule]) => ({ shareName, rule: rule as GroupDetail["folderRules"][number]["rule"] })),
+            .filter(([, value]) => value.rule !== "inherit")
+            .map(([shareName, value]) => ({
+              shareName,
+              rule: value.rule as GroupDetail["folderRules"][number]["rule"],
+              ...(value.shareId ? { shareId: value.shareId } : {}),
+            })),
           appRules: Array.from(appState.entries())
             .filter(([, rule]) => rule !== "inherit")
             .map(([appId, rule]) => ({ appId, rule: rule as GroupDetail["appRules"][number]["rule"] })),
@@ -506,12 +652,14 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     });
 
     function currentSignature(): string {
-      const folder = Array.from(folderState.entries()).sort(([a], [b]) => a.localeCompare(b));
+      const folder = Array.from(folderState.entries())
+        .map(([shareName, value]) => [shareName, value.rule, value.shareId ?? ""] as const)
+        .sort((a, b) => a[0].localeCompare(b[0]));
       const apps = Array.from(appState.entries()).sort(([a], [b]) => a.localeCompare(b));
       return JSON.stringify({
         name: nameInput.value.trim(),
         description: descriptionInput.value.trim(),
-        members: Array.from(selectedMembers).sort((a, b) => a - b),
+        members: memberPicker ? memberPicker.selectedIds().sort((a, b) => a - b) : [],
         folder,
         apps,
       });
@@ -530,6 +678,7 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
     }
 
     function markDirty(): void {
+      workflow.markEdited();
       refreshDirty();
     }
 
@@ -551,20 +700,39 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
       h(
         "div",
         { class: "appearance-section group-section" },
-        h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Members"), memberCount),
-        memberSearch,
-        memberList,
+        h(
+          "div",
+          { class: "appearance-section-head" },
+          h("span", { class: "appearance-section-title" }, "Members"),
+          memberCount,
+        ),
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Members receive the shared-folder and application rules below. Adding a user to the group is enough to grant access — no per-user rules are needed.",
+        ),
+        memberPicker.el,
       ),
       h(
         "div",
         { class: "appearance-section group-section" },
         h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Shared Folders")),
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Rules apply to every member. Inherit keeps the legacy share membership; No Access always wins over grants; Read & Write includes read.",
+        ),
         folderTable,
       ),
       h(
         "div",
         { class: "appearance-section group-section" },
         h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Applications")),
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Allow grants interaction with an application; for Applications and Backup Center a group allowance is read-only. No Access blocks the app and its live events.",
+        ),
         appTable,
       ),
       workflow.el,

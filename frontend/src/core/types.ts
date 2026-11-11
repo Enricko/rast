@@ -54,10 +54,14 @@ export interface GroupMember {
   userId: number;
   username: string;
   displayName: string;
+  /** Present on /api/groups/{id}/members and new /api/users payloads. */
+  active?: boolean;
 }
 
 export interface GroupFolderRule {
   shareName: string;
+  /** Stable share id when the server exposes one (rule writes keep the name). */
+  shareId?: string;
   rule: FolderRule;
 }
 
@@ -120,6 +124,11 @@ export interface EffectiveFolderAccess {
   level: FolderLevel;
   sources: AccessRuleSource[];
   fallback?: string | null;
+  /** Server-computed explicit-deny conflict (F13). */
+  conflict?: {
+    deniedBy: AccessRuleSource[];
+    overriddenGrants: AccessRuleSource[];
+  } | null;
 }
 
 export interface EffectiveAppAccess {
@@ -136,6 +145,36 @@ export interface EffectiveAccess {
   groups?: GroupRef[];
   folders: EffectiveFolderAccess[];
   apps: EffectiveAppAccess[];
+  /** Pagination/filter metadata when the server supports F13 query params. */
+  foldersTotal?: number;
+  page?: number;
+  perPage?: number;
+}
+
+/** GET /api/groups/{id}/impact — effect of deleting the group (F12). */
+export interface GroupImpactChange {
+  resource: string;
+  kind: "folder" | "app";
+  before?: string | boolean | null;
+  after?: string | boolean | null;
+}
+
+export interface GroupImpactUser {
+  userId: number;
+  username: string;
+  displayName?: string;
+  changes?: GroupImpactChange[];
+  /** Alternate shape: before/after maps of folder and app decisions. */
+  before?: { folders?: Record<string, string>; apps?: Record<string, boolean | null> };
+  after?: { folders?: Record<string, string>; apps?: Record<string, boolean | null> };
+}
+
+export interface GroupImpact {
+  members: number;
+  folderRules: number;
+  appRules: number;
+  users: GroupImpactUser[];
+  truncated?: boolean;
 }
 
 export interface AppPermission {

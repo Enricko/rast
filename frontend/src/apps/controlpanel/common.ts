@@ -190,6 +190,8 @@ export interface SaveWorkflow {
   readonly state: SaveState;
   isDirty(): boolean;
   setDirty(dirty: boolean): void;
+  /** Call when the user edits the draft after a failed save. */
+  markEdited(): void;
   setValidationError(message: string | null): void;
   save(): Promise<void>;
   reset(): void;
@@ -217,6 +219,8 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
   let savedTimer: number | undefined;
   let disposed = false;
   let inFlight = false;
+  /** Last save failure; kept visible until the draft changes or a retry. */
+  let failure: string | null = null;
 
   const error = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
   const status = h("div", { class: "form-status" });
@@ -283,6 +287,10 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
         setContent(labels.retry, "refresh");
         status.textContent = "Could not save";
         status.classList.add("is-error");
+        if (failure) {
+          error.hidden = false;
+          error.textContent = failure;
+        }
         break;
     }
     options.onStateChange?.(state);
@@ -293,6 +301,7 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
     state = "clean";
     dirty = false;
     validation = null;
+    failure = null;
     render();
   }
 
@@ -304,10 +313,25 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
       return;
     }
     if (state === "dirty" && dirty) return; // no-op changes must not re-render
+    // A failed save stays visible (with Retry) while the draft is unchanged;
+    // editors call setDirty(true) on every state change, which must not hide
+    // the server's error message.
+    if (state === "error" && dirty) return;
     dirty = true;
     validation = null;
+    failure = null;
     state = "dirty";
     render();
+  }
+
+  /** The draft was edited after a failed save: clear the failure message. */
+  function markEdited(): void {
+    if (disposed || inFlight) return;
+    if (state === "error") {
+      failure = null;
+      state = "dirty";
+      render();
+    }
   }
 
   function setValidationError(message: string | null): void {
@@ -332,6 +356,7 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
       return;
     }
     inFlight = true;
+    failure = null;
     state = "saving";
     render();
     try {
@@ -352,10 +377,9 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
       if (disposed) return;
       inFlight = false;
       dirty = true;
+      failure = errorMessage(saveError);
       state = "error";
       render();
-      error.hidden = false;
-      error.textContent = errorMessage(saveError);
     }
   }
 
@@ -372,6 +396,7 @@ export function createSaveWorkflow<T>(options: SaveWorkflowOptions<T>): SaveWork
     },
     isDirty: () => dirty,
     setDirty,
+    markEdited,
     setValidationError,
     save: runSave,
     reset,

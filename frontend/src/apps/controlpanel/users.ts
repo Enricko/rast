@@ -20,6 +20,7 @@ import { iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import type {
   AccessRules,
+  GroupRef,
   Page,
   SessionInfo,
   SystemInfo,
@@ -39,16 +40,23 @@ import {
 } from "./common";
 import {
   accessAvailability,
+  createEffectiveAccessPanel,
+  createEntityPicker,
   groupChips,
   loadUserAccessData,
   renderDirectRulesEditor,
-  renderEffectiveAccess,
-  renderGroupMembership,
+  type EffectiveAccessPanel,
+  type EntityPicker,
+  type PickerOption,
 } from "./access-ui";
 import { renderGroupsView } from "./groups";
 
 const PER_PAGE_OPTIONS = [10, 25, 50, 100];
 const DEFAULT_PER_PAGE = 25;
+
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
 
 /**
  * Control Panel → Users & Groups: inner Users / Groups tabs sharing the same
@@ -582,56 +590,69 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       checked: user.mustChangePassword,
     });
 
-    // ------------------------------------------------------------- group membership
-    const membership = renderGroupMembership({
-      groups: accessData.allGroups,
-      selected: accessData.membership.length > 0 ? accessData.membership : (user.groupIds ?? []),
-      onChange: () => markDirty(),
-    });
-    const membershipGroupCount = h(
+    // ------------------------------------------------------- group membership (F12)
+    const membershipIds =
+      accessData.membershipIds.length > 0 ? accessData.membershipIds : (user.groupIds ?? []);
+    const membershipNames = new Map<number, string>();
+    for (const group of accessData.membershipGroups) membershipNames.set(Number(group.id), group.name);
+    for (const group of user.groups ?? []) membershipNames.set(Number(group.id), group.name);
+    const initialMembershipOptions: PickerOption[] = membershipIds.map((id) => ({
+      id,
+      label: membershipNames.get(Number(id)) ?? `Group #${id}`,
+    }));
+    let membershipGroupCount = h(
       "span",
       { class: "small muted" },
-      accessData.allGroups.length === 0
-        ? "No groups available"
-        : `${accessData.allGroups.length} group${accessData.allGroups.length === 1 ? "" : "s"} available`,
+      `${initialMembershipOptions.length} group${initialMembershipOptions.length === 1 ? "" : "s"} selected`,
     );
-    const membershipHint = h(
-      "div",
-      { class: "field-hint" },
-      "Group rules combine with direct rules. Explicit No Access always wins over a grant.",
-    );
+    let groupPicker: EntityPicker | null = null;
+    async function fetchGroupsPage(query: string, pageNumber: number, perPage: number): Promise<{ items: PickerOption[]; total: number }> {
+      const response = await ctx.api.get<Page<GroupRef>>("/api/groups", {
+        q: query || undefined,
+        page: pageNumber,
+        perPage,
+      });
+      return {
+        items: asArray<GroupRef>(response.items).map((group) => ({ id: Number(group.id), label: group.name })),
+        total: Number(response.total ?? 0),
+      };
+    }
+    groupPicker = createEntityPicker({
+      fetchPage: fetchGroupsPage,
+      selected: initialMembershipOptions,
+      onChange: () => {
+        if (groupPicker) membershipGroupCount.textContent = `${groupPicker.selectedIds().length} group${groupPicker.selectedIds().length === 1 ? "" : "s"} selected`;
+        markDirty();
+      },
+      searchPlaceholder: "Search groups by name…",
+      emptyText: "No groups match this search.",
+      ariaLabel: "Group membership",
+    });
 
     // -------------------------------------------------------------- direct overrides
     let baselineRules = normalizeRuleSignature(accessData.rules);
     let rulesEditor = renderDirectRulesEditor({
-      shareNames: accessData.shares,
+      shares: accessData.shares,
       rules: accessData.rules,
       onChange: () => markDirty(),
     });
     const rulesHost = h("div", { class: "rules-host" }, rulesEditor.el);
     const rulesHint = h(
       "div",
-      { class: "field-hint" },
-      "Direct rules apply to this account only. Inherit removes the direct rule for that resource.",
+      { class: "section-note muted" },
+      "Direct rules apply to this account only and override what the groups alone would grant. Inherit removes the direct rule for that resource; explicit No Access always wins.",
     );
 
-    // --------------------------------------------------------------- effective access
-    const effectiveError = accessData.errors.find((problem) => problem.startsWith("Effective access"));
-    const effectiveHost = h("div", { class: "effective-host" });
-    const mountEffective = (): void => {
-      effectiveHost.replaceChildren(renderEffectiveAccess(accessData.effective, effectiveError));
-    };
-    mountEffective();
-    const refreshAccessButton = h(
-      "button",
-      { class: "btn btn-subtle btn-sm", type: "button", title: "Refresh effective access" },
-      iconSvg("refresh", 14),
-      "Refresh",
-    );
+    // ---------------------------------------------------- effective access (F13)
+    const effectivePanel: EffectiveAccessPanel = createEffectiveAccessPanel({
+      ctx,
+      userId: user.id,
+    });
+    const effectiveHost = h("div", { class: "effective-host" }, effectivePanel.el);
 
     // ----------------------------------------------------------------- dirty state
     let baselineMembership = JSON.stringify(
-      membership.collect().slice().sort((a, b) => a - b),
+      (groupPicker ? groupPicker.selectedIds() : []).slice().sort((a, b) => a - b),
     );
     const readProfile = () => ({
       displayName: displayInput.value.trim(),
@@ -643,7 +664,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     const signature = (): string =>
       JSON.stringify({
         profile: readProfile(),
-        membership: membership.collect().slice().sort((a, b) => a - b),
+        membership: (groupPicker ? groupPicker.selectedIds() : []).slice().sort((a, b) => a - b),
         rules: normalizeRuleSignature(rulesEditor.collect()),
       });
     let savedSignature = signature();
@@ -664,6 +685,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     let closing = false;
     function markDirty(): void {
       if (!workflow || closing) return;
+      workflow.markEdited();
       const dirty = signature() !== savedSignature;
       const invalid = validationMessage();
       if (dirty && invalid) workflow.setValidationError(invalid);
@@ -734,29 +756,23 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
 
     async function refreshAccess(): Promise<void> {
       const fresh = await loadUserAccessData(ctx, user.id);
-      accessData.effective = fresh.effective;
-      effectiveHost.replaceChildren(
-        renderEffectiveAccess(fresh.effective, fresh.errors.find((problem) => problem.startsWith("Effective access"))),
-      );
-      membership.setGroups(fresh.allGroups);
-      membershipGroupCount.textContent =
-        fresh.allGroups.length === 0 ? "No groups available" : `${fresh.allGroups.length} group${fresh.allGroups.length === 1 ? "" : "s"} available`;
       if (!workflow?.isDirty()) {
-        baselineMembership = JSON.stringify([...fresh.membership].sort((a, b) => a - b));
+        const freshNames = new Map<number, string>();
+        for (const group of fresh.membershipGroups) freshNames.set(Number(group.id), group.name);
+        for (const group of user.groups ?? []) freshNames.set(Number(group.id), group.name);
+        const selected = fresh.membershipIds.map((id) => ({ id, label: freshNames.get(Number(id)) ?? `Group #${id}` }));
+        groupPicker?.setSelected(selected);
+        if (groupPicker) {
+          membershipGroupCount.textContent = `${groupPicker.selectedIds().length} group${groupPicker.selectedIds().length === 1 ? "" : "s"} selected`;
+        }
+        baselineMembership = JSON.stringify([...fresh.membershipIds].sort((a, b) => a - b));
         baselineRules = normalizeRuleSignature(fresh.rules);
-        membership.setSelection(fresh.membership);
-        rulesEditor = renderDirectRulesEditor({ shareNames: fresh.shares, rules: fresh.rules, onChange: () => markDirty() });
+        rulesEditor = renderDirectRulesEditor({ shares: fresh.shares, rules: fresh.rules, onChange: () => markDirty() });
         rulesHost.replaceChildren(rulesEditor.el);
         savedSignature = signature();
       }
+      await effectivePanel.reload();
     }
-
-    refreshAccessButton.addEventListener("click", () => {
-      refreshAccessButton.disabled = true;
-      void refreshAccess().finally(() => {
-        refreshAccessButton.disabled = false;
-      });
-    });
 
     // ------------------------------------------------------------------- save FSM
     workflow = createSaveWorkflow<Awaited<ReturnType<typeof saveUser>>>(
@@ -764,7 +780,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
         save: async () => saveUser(),
         onSaved: () => {
           savedSignature = signature();
-          baselineMembership = JSON.stringify(membership.collect().slice().sort((a, b) => a - b));
+          baselineMembership = JSON.stringify((groupPicker ? groupPicker.selectedIds() : []).sort((a, b) => a - b));
           baselineRules = normalizeRuleSignature(rulesEditor.collect());
           void refreshAdminCount();
           void load();
@@ -789,10 +805,11 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
         quotaBytes: profile.quotaBytes,
         mustChangePassword: profile.mustChangePassword,
       });
-      const membershipNow = JSON.stringify(membership.collect().slice().sort((a, b) => a - b));
+      const membershipIdsNow = groupPicker ? groupPicker.selectedIds() : [];
+      const membershipNow = JSON.stringify(membershipIdsNow.slice().sort((a, b) => a - b));
       if (membershipNow !== baselineMembership) {
         try {
-          await ctx.api.put(`/api/users/${user.id}/groups`, { groupIds: membership.collect() });
+          await ctx.api.put(`/api/users/${user.id}/groups`, { groupIds: membershipIdsNow });
           baselineMembership = membershipNow;
         } catch (error) {
           if (!optionalAccessError(error)) throw error;
@@ -859,24 +876,28 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
           h("span", { class: "appearance-section-title" }, "Group Membership"),
           membershipGroupCount,
         ),
-        membership.el,
-        membershipHint,
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Groups grant shared-folder and application access to their members. Changing membership affects everything the groups below allow.",
+        ),
+        groupPicker?.el ?? null,
       ),
       h(
         "div",
         { class: "appearance-section group-section" },
         h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Direct Overrides")),
-        rulesHost,
         rulesHint,
+        h("div", { class: "rules-host" }, rulesHost),
       ),
       h(
         "div",
         { class: "appearance-section group-section" },
+        h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, "Effective Access")),
         h(
-          "div",
-          { class: "appearance-section-head" },
-          h("span", { class: "appearance-section-title" }, "Effective Access"),
-          refreshAccessButton,
+          "p",
+          { class: "section-note muted" },
+          "Final result computed by the server, combining group rules, direct overrides, legacy membership and role defaults. Read-only here.",
         ),
         effectiveHost,
       ),
@@ -895,6 +916,8 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
         closing = true;
         openAccessEditor = null;
         activeWorkflow.dispose();
+        groupPicker?.dispose();
+        effectivePanel.dispose();
       },
     });
 

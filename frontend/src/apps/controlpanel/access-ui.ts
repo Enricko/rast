@@ -1,21 +1,29 @@
 // Shared UI + data helpers for the Users & Groups access policy screens.
 //
-// Built entirely on the existing components/tokens. Every loader tolerates the
-// groups backend being absent (404/501/503) so older servers keep working.
+// Built on the canonical components/tokens. Every new endpoint (F12/F13) is
+// treated as optional: when the server does not implement it yet the UI falls
+// back to the previous behaviour (detail payloads / unfiltered effective
+// access) and shows an inline availability note instead of failing.
 
-import { apiErrorMessage } from "../../core/api";
+import { ApiError, apiErrorMessage } from "../../core/api";
 import type { AppContext } from "../../core/app";
-import { badge } from "../../core/components";
-import { h } from "../../core/dom";
+import { badge, pager, type Pager } from "../../core/components";
+import { debounce, h } from "../../core/dom";
+import { iconSvg } from "../../core/icons";
 import type {
   AccessRuleSource,
   AccessRules,
   AppRule,
   EffectiveAccess,
+  EffectiveAppAccess,
+  EffectiveFolderAccess,
+  FolderLevel,
   FolderRule,
+  GroupImpact,
+  GroupImpactUser,
+  GroupMember,
   GroupRef,
   Page,
-  Permissions,
   Share,
 } from "../../core/types";
 import {
@@ -23,43 +31,283 @@ import {
   FOLDER_RULE_OPTIONS,
   RULE_APPS,
   appLabel,
-  denyConflict,
   folderLevelLabel,
   folderLevelTone,
   sourceLabel,
 } from "./common";
 
-export interface AccessData {
-  allGroups: GroupRef[];
-  membership: number[];
-  rules: AccessRules;
-  shares: string[];
-  effective: EffectiveAccess | null;
-  /** Sections that could not be loaded (endpoint missing/unavailable). */
-  errors: string[];
-}
+const PICKER_PAGE_SIZE = 25;
+const MAX_MEMBER_PAGES = 10;
+const MEMBERS_PAGE_SIZE = 100;
+const EFFECTIVE_PAGE_SIZE = 25;
 
 function asArray<T>(value: unknown): T[] {
   return Array.isArray(value) ? (value as T[]) : [];
 }
 
-/** Load everything the users access editor needs, tolerating partial failures. */
-export async function loadUserAccessData(ctx: AppContext, userId: number): Promise<AccessData> {
-  const [groupsResult, membershipResult, rulesResult, sharesResult, effectiveResult] = await Promise.allSettled([
-    ctx.api.get<Page<GroupRef>>("/api/groups", { page: 1, perPage: 100 }),
+export function isOptionalEndpointError(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false;
+  return (
+    error.status === 400 ||
+    error.status === 404 ||
+    error.status === 405 ||
+    error.status === 501 ||
+    error.status === 503 ||
+    error.code === "not_implemented"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Entity picker: server search + pagination, selections kept across pages
+// ---------------------------------------------------------------------------
+
+export interface PickerOption {
+  id: number;
+  label: string;
+  description?: string;
+  /** Deactivated account: listed for review, never offered for adding. */
+  inactive?: boolean;
+  /** When true the option is shown but cannot be checked. */
+  disabled?: boolean;
+}
+
+export interface PickerPageResult {
+  items: PickerOption[];
+  total: number;
+}
+
+export interface EntityPickerOptions {
+  fetchPage: (query: string, page: number, perPage: number) => Promise<PickerPageResult>;
+  /** Initially selected options (labels may come from a detail/members payload). */
+  selected: PickerOption[];
+  onChange: () => void;
+  searchPlaceholder?: string;
+  emptyText?: string;
+  ariaLabel?: string;
+  /** Text shown above the current page list. */
+  hint?: string;
+}
+
+export interface EntityPicker {
+  el: HTMLElement;
+  selectedIds(): number[];
+  selectedItems(): PickerOption[];
+  setSelected(items: PickerOption[]): void;
+  reload(): Promise<void>;
+  dispose(): void;
+}
+
+/** Reusable server-paginated checkbox picker with a persistent selection set. */
+export function createEntityPicker(options: EntityPickerOptions): EntityPicker {
+  const selected = new Map<number, PickerOption>();
+  for (const item of options.selected) selected.set(Number(item.id), item);
+  let page = 1;
+  let total = 0;
+  let pageItems: PickerOption[] = [];
+  let loading = false;
+  let disposed = false;
+  let loadToken = 0;
+
+  const search = h("input", {
+    class: "input input-search",
+    type: "search",
+    placeholder: options.searchPlaceholder ?? "Search…",
+    ariaLabel: options.ariaLabel ?? "Search",
+  });
+  const selectedLabel = h("div", { class: "picker-selected-label small muted" });
+  const chips = h("div", { class: "picker-chips", role: "list", ariaLabel: "Selected items" });
+  const list = h("div", { class: "checklist", role: "group", ariaLabel: options.ariaLabel ?? "Options" });
+  const pagerHost = h("div", { class: "picker-pager" });
+  const pagerControl: Pager = pager((nextPage) => {
+    page = nextPage;
+    void load();
+  });
+  pagerHost.appendChild(pagerControl.el);
+  const hintLabel = h("div", { class: "field-hint" }, options.hint ?? "");
+  const empty = h("div", { class: "field-hint", hidden: true }, options.emptyText ?? "Nothing found.");
+  const errorHost = h("div", { class: "inline-availability", hidden: true });
+  const selectedHost = h("div", { class: "picker-selected" }, selectedLabel, chips);
+
+  const clearSearch = debounce(() => {
+    page = 1;
+    void load();
+  }, 260);
+  search.addEventListener("input", clearSearch);
+
+  function renderSelected(): void {
+    const items = Array.from(selected.values()).sort((a, b) => a.label.localeCompare(b.label));
+    selectedHost.hidden = items.length === 0;
+    selectedLabel.textContent = `Selected (${items.length})`;
+    chips.replaceChildren();
+    for (const item of items) {
+      const remove = h(
+        "button",
+        {
+          class: "picker-chip-remove",
+          type: "button",
+          ariaLabel: `Remove ${item.label}`,
+          title: "Remove",
+        },
+        "×",
+      );
+      remove.addEventListener("click", () => {
+        selected.delete(Number(item.id));
+        options.onChange();
+        renderSelected();
+        renderList();
+      });
+      chips.appendChild(
+        h(
+          "span",
+          { class: "picker-chip", role: "listitem" },
+          h("span", { class: "picker-chip-label" }, item.label),
+          item.inactive ? badge("Disabled", "warn") : null,
+          remove,
+        ),
+      );
+    }
+  }
+
+  function renderList(): void {
+    list.replaceChildren();
+    empty.hidden = pageItems.length > 0 || loading;
+    for (const item of pageItems) {
+      const isSelected = selected.has(Number(item.id));
+      const cannotAdd = Boolean(item.disabled || item.inactive) && !isSelected;
+      const input = h("input", {
+        class: "checkbox-input",
+        type: "checkbox",
+        checked: isSelected,
+        disabled: cannotAdd,
+        ariaLabel: item.label,
+      });
+      input.addEventListener("change", () => {
+        if (input.checked) selected.set(Number(item.id), item);
+        else selected.delete(Number(item.id));
+        options.onChange();
+        renderSelected();
+        renderList();
+      });
+      list.appendChild(
+        h(
+          "label",
+          { class: `checklist-row${cannotAdd ? " is-disabled" : ""}` },
+          input,
+          h(
+            "span",
+            { class: "checklist-label" },
+            h("span", { class: "checklist-name" }, item.label),
+            item.description ? h("span", { class: "small faint" }, item.description) : null,
+          ),
+          item.inactive ? badge("Disabled", "warn") : null,
+          item.disabled && !item.inactive ? h("span", { class: "small faint" }, "Unavailable") : null,
+        ),
+      );
+    }
+  }
+
+  async function load(): Promise<void> {
+    if (disposed) return;
+    const token = ++loadToken;
+    loading = true;
+    errorHost.hidden = true;
+    list.replaceChildren(h("div", { class: "loading-block compact" }, h("span", { class: "spinner" }), h("span", { class: "muted" }, "Loading…")));
+    try {
+      const result = await options.fetchPage(search.value.trim(), page, PICKER_PAGE_SIZE);
+      if (token !== loadToken || disposed) return;
+      pageItems = asArray<PickerOption>(result.items);
+      total = Number(result.total ?? pageItems.length);
+      const pages = Math.max(1, Math.ceil(total / PICKER_PAGE_SIZE));
+      if (page > pages) {
+        page = pages;
+        loading = false;
+        void load();
+        return;
+      }
+      pagerControl.update({
+        page,
+        totalPages: pages,
+        totalItems: total,
+        label: `${total.toLocaleString()} ${total === 1 ? "match" : "matches"} · page ${page} of ${pages}`,
+      });
+      renderList();
+    } catch (error) {
+      if (token !== loadToken || disposed) return;
+      pageItems = [];
+      list.replaceChildren();
+      empty.hidden = true;
+      errorHost.hidden = false;
+      errorHost.replaceChildren(
+        h(
+          "div",
+          {},
+          h("div", { class: "inline-availability-title" }, "Could not load options"),
+          h("div", { class: "small muted" }, apiErrorMessage(error)),
+          h(
+            "button",
+            { class: "btn btn-sm", type: "button", onClick: () => void load() },
+            "Retry",
+          ),
+        ),
+      );
+      pagerControl.update({ page: 1, totalPages: 1, totalItems: 0, label: "—" });
+    } finally {
+      loading = false;
+    }
+  }
+
+  renderSelected();
+  void load();
+  const el = h("div", { class: "entity-picker" }, selectedHost, search, hintLabel, errorHost, list, pagerHost);
+
+  return {
+    el,
+    selectedIds: () => Array.from(selected.keys()),
+    selectedItems: () => Array.from(selected.values()),
+    setSelected: (items) => {
+      selected.clear();
+      for (const item of items) selected.set(Number(item.id), item);
+      renderSelected();
+      renderList();
+    },
+    reload: () => load(),
+    dispose: () => {
+      disposed = true;
+      loadToken += 1;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Data loaders
+// ---------------------------------------------------------------------------
+
+export interface ShareRef {
+  shareName: string;
+  shareId?: string;
+}
+
+export interface UserAccessBasics {
+  membershipIds: number[];
+  membershipGroups: GroupRef[];
+  rules: AccessRules;
+  shares: ShareRef[];
+  errors: string[];
+}
+
+/** Load direct rules + memberships for the user editor (tolerant of 404/501). */
+export async function loadUserAccessData(ctx: AppContext, userId: number): Promise<UserAccessBasics> {
+  const [membershipResult, rulesResult, sharesResult] = await Promise.allSettled([
     ctx.api.get<{ groupIds?: number[]; groups?: GroupRef[] }>(`/api/users/${userId}/groups`),
     ctx.api.get<AccessRules>(`/api/users/${userId}/access-rules`),
     ctx.api.get<Share[]>("/api/shares"),
-    ctx.api.get<EffectiveAccess>(`/api/users/${userId}/effective-access`),
   ]);
   const errors: string[] = [];
-  const allGroups =
-    groupsResult.status === "fulfilled" ? asArray<GroupRef>(groupsResult.value.items) : [];
-  if (groupsResult.status === "rejected") errors.push(`Groups: ${apiErrorMessage(groupsResult.reason)}`);
-
-  let membership: number[] = [];
+  let membershipIds: number[] = [];
+  let membershipGroups: GroupRef[] = [];
   if (membershipResult.status === "fulfilled") {
-    membership = asArray<number>(membershipResult.value.groupIds).map(Number);
+    membershipIds = asArray<number>(membershipResult.value.groupIds).map(Number);
+    membershipGroups = asArray<GroupRef>(membershipResult.value.groups);
   } else {
     errors.push(`Group membership: ${apiErrorMessage(membershipResult.reason)}`);
   }
@@ -67,122 +315,113 @@ export async function loadUserAccessData(ctx: AppContext, userId: number): Promi
   let rules: AccessRules = { folderRules: [], appRules: [] };
   if (rulesResult.status === "fulfilled") {
     rules = {
-      folderRules: asArray(rulesResult.value.folderRules),
-      appRules: asArray(rulesResult.value.appRules),
+      folderRules: asArray<AccessRules["folderRules"][number]>(rulesResult.value.folderRules),
+      appRules: asArray<AccessRules["appRules"][number]>(rulesResult.value.appRules),
     };
   } else {
     errors.push(`Direct rules: ${apiErrorMessage(rulesResult.reason)}`);
   }
 
-  const shares =
-    sharesResult.status === "fulfilled" ? asArray<Share>(sharesResult.value).map((share) => share.name) : [];
-  if (sharesResult.status === "rejected") errors.push(`Shared folders: ${apiErrorMessage(sharesResult.reason)}`);
-
-  let effective: EffectiveAccess | null = null;
-  if (effectiveResult.status === "fulfilled") {
-    effective = effectiveResult.value;
+  let shares: ShareRef[] = [];
+  if (sharesResult.status === "fulfilled") {
+    shares = asArray<Share>(sharesResult.value).map((share) => ({ shareName: share.name, shareId: share.id }));
   } else {
-    errors.push(`Effective access: ${apiErrorMessage(effectiveResult.reason)}`);
+    errors.push(`Shared folders: ${apiErrorMessage(sharesResult.reason)}`);
   }
 
-  return { allGroups, membership, rules, shares, effective, errors };
+  return { membershipIds, membershipGroups, rules, shares, errors };
 }
 
-export interface GroupMembershipEditor {
-  el: HTMLElement;
-  collect(): number[];
-  setSelection(ids: number[]): void;
-  setGroups(groups: GroupRef[]): void;
+export interface GroupMembersLoad {
+  members: GroupMember[];
+  total: number;
+  complete: boolean;
+  error: string | null;
 }
 
-/** Search + checkbox list of groups. */
-export function renderGroupMembership(options: {
-  groups: GroupRef[];
-  selected: number[];
-  onChange: () => void;
-}): GroupMembershipEditor {
-  let groups = [...options.groups];
-  const selected = new Set<number>(options.selected.map(Number));
-  const search = h("input", {
-    class: "input input-search",
-    type: "search",
-    placeholder: "Search groups…",
-    ariaLabel: "Search groups",
-  });
-  const list = h("div", { class: "checklist", role: "group", ariaLabel: "Group membership" });
-  const empty = h("div", { class: "field-hint", hidden: true }, "No groups yet — create a group first.");
-  const searchWrap = h("div", { class: "search-wrap" }, h("span", { class: "search-icon" }, "⌕"), search);
-
-  const render = (): void => {
-    const query = search.value.trim().toLowerCase();
-    list.replaceChildren();
-    const matches = groups.filter((group) => !query || group.name.toLowerCase().includes(query));
-    empty.hidden = groups.length > 0;
-    for (const group of matches) {
-      const checked = selected.has(Number(group.id));
-      const input = h("input", {
-        class: "checkbox-input",
-        type: "checkbox",
-        checked,
-        ariaLabel: group.name,
+/**
+ * Load every member of a group through the paginated members endpoint (bounded),
+ * falling back to the detail payload when the endpoint is not available yet.
+ */
+export async function loadGroupMembers(
+  ctx: AppContext,
+  groupId: number | null,
+  fallbackMembers: GroupMember[],
+): Promise<GroupMembersLoad> {
+  if (groupId === null) {
+    return { members: [], total: 0, complete: true, error: null };
+  }
+  const collected: GroupMember[] = [];
+  const seen = new Set<number>();
+  let total = fallbackMembers.length;
+  try {
+    for (let page = 1; page <= MAX_MEMBER_PAGES; page += 1) {
+      const response = await ctx.api.get<Page<GroupMember>>(`/api/groups/${groupId}/members`, {
+        page,
+        perPage: MEMBERS_PAGE_SIZE,
       });
-      input.addEventListener("change", () => {
-        if (input.checked) selected.add(Number(group.id));
-        else selected.delete(Number(group.id));
-        options.onChange();
-      });
-      list.appendChild(
-        h(
-          "label",
-          { class: "checklist-row" },
-          input,
-          h("span", { class: "checklist-label" }, group.name),
-        ),
-      );
+      const items = asArray<GroupMember>(response.items);
+      total = Number(response.total ?? items.length);
+      for (const member of items) {
+        const id = Number(member.userId);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        collected.push(member);
+      }
+      if (items.length === 0 || collected.length >= total) break;
     }
-    if (matches.length === 0 && groups.length > 0) {
-      list.appendChild(h("div", { class: "field-hint" }, `No groups match “${search.value.trim()}”.`));
+    return {
+      members: collected,
+      total,
+      complete: collected.length >= total,
+      error: null,
+    };
+  } catch (error) {
+    if (!isOptionalEndpointError(error)) {
+      // Non-optional failure: show the fallback and a note, keep editing usable.
+      return {
+        members: fallbackMembers,
+        total: fallbackMembers.length,
+        complete: true,
+        error: `Group members: ${apiErrorMessage(error)}`,
+      };
     }
-  };
-  search.addEventListener("input", render);
-  render();
-  const el = h("div", { class: "membership-editor" }, searchWrap, list, empty);
-  return {
-    el,
-    collect: () => Array.from(selected),
-    setSelection: (ids) => {
-      selected.clear();
-      for (const id of ids) selected.add(Number(id));
-      render();
-    },
-    setGroups: (next) => {
-      groups = [...next];
-      render();
-    },
-  };
+    return { members: fallbackMembers, total: fallbackMembers.length, complete: true, error: null };
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Direct overrides editor
+// ---------------------------------------------------------------------------
 
 export interface DirectRulesEditor {
   el: HTMLElement;
   collect(): AccessRules;
-  rules(): AccessRules;
 }
 
 /** Folder + application rule selects. `inherit` means "remove the direct rule". */
 export function renderDirectRulesEditor(options: {
-  shareNames: string[];
+  shares: ShareRef[];
   rules: AccessRules;
   onChange: () => void;
 }): DirectRulesEditor {
-  const folderRules = new Map<string, FolderRule>();
-  for (const rule of options.rules.folderRules) folderRules.set(rule.shareName, rule.rule);
+  const folderRules = new Map<string, GroupFolderRuleLike>();
+  for (const rule of options.rules.folderRules) {
+    folderRules.set(rule.shareName, { rule: rule.rule, shareId: rule.shareId });
+  }
   const appRules = new Map<string, AppRule>();
   for (const rule of options.rules.appRules) appRules.set(rule.appId, rule.rule);
 
+  const shareIds = new Map<string, string | undefined>();
+  for (const share of options.shares) shareIds.set(share.shareName, share.shareId);
+  for (const rule of options.rules.folderRules) {
+    if (rule.shareId && !shareIds.has(rule.shareName)) shareIds.set(rule.shareName, rule.shareId);
+  }
+
   // Direct rules may reference shares that are no longer listed; keep them
   // visible so an admin can clear them.
-  const folderNames = Array.from(new Set([...options.shareNames, ...folderRules.keys()])).sort((a, b) =>
-    a.localeCompare(b),
+  const folderNames = Array.from(new Set([...options.shares.map((share) => share.shareName), ...folderRules.keys()])).sort(
+    (a, b) => a.localeCompare(b),
   );
   const MAX_ROWS = 200;
   const shownFolders = folderNames.slice(0, MAX_ROWS);
@@ -193,11 +432,11 @@ export function renderDirectRulesEditor(options: {
       "select",
       { class: "select select-sm rule-select", ariaLabel: `Direct rule for ${shareName}` },
       ...FOLDER_RULE_OPTIONS.map((option) =>
-        h("option", { value: option.value, selected: (folderRules.get(shareName) ?? "inherit") === option.value }, option.label),
+        h("option", { value: option.value, selected: (folderRules.get(shareName)?.rule ?? "inherit") === option.value }, option.label),
       ),
     );
     select.addEventListener("change", () => {
-      folderRules.set(shareName, select.value as FolderRule);
+      folderRules.set(shareName, { rule: select.value as FolderRule, shareId: shareIds.get(shareName) });
       options.onChange();
     });
     folderBody.appendChild(
@@ -205,9 +444,7 @@ export function renderDirectRulesEditor(options: {
     );
   }
   if (shownFolders.length === 0) {
-    folderBody.appendChild(
-      h("tr", {}, h("td", { colspan: 2, class: "table-empty" }, "No shared folders available.")),
-    );
+    folderBody.appendChild(h("tr", {}, h("td", { colspan: 2, class: "table-empty" }, "No shared folders available.")));
   }
   const folderTable = h(
     "table",
@@ -240,8 +477,12 @@ export function renderDirectRulesEditor(options: {
 
   const collect = (): AccessRules => ({
     folderRules: Array.from(folderRules.entries())
-      .filter(([, rule]) => rule !== "inherit")
-      .map(([shareName, rule]) => ({ shareName, rule })),
+      .filter(([, value]) => value.rule !== "inherit")
+      .map(([shareName, value]) => ({
+        shareName,
+        rule: value.rule,
+        ...(value.shareId ? { shareId: value.shareId } : {}),
+      })),
     appRules: Array.from(appRules.entries())
       .filter(([, rule]) => rule !== "inherit")
       .map(([appId, rule]) => ({ appId, rule })),
@@ -250,7 +491,12 @@ export function renderDirectRulesEditor(options: {
   const el = h(
     "div",
     { class: "access-rules-editor" },
-    h("div", { class: "access-subsection" }, h("div", { class: "access-subsection-title" }, "Shared folders"), folderTable),
+    h(
+      "div",
+      { class: "access-subsection" },
+      h("div", { class: "access-subsection-title" }, "Shared folders"),
+      h("div", { class: "table-wrap table-wrap-compact" }, folderTable),
+    ),
     shownFolders.length < folderNames.length
       ? h("div", { class: "field-hint" }, `Showing the first ${MAX_ROWS} of ${folderNames.length} shared folders.`)
       : null,
@@ -262,7 +508,217 @@ export function renderDirectRulesEditor(options: {
     ),
   );
 
-  return { el, collect, rules: () => collect() };
+  return { el, collect };
+}
+
+interface GroupFolderRuleLike {
+  rule: FolderRule;
+  shareId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Effective access (F13): server search/filter/pagination with client fallback
+// ---------------------------------------------------------------------------
+
+export type EffectiveLevelFilter = "all" | "none" | "read" | "write";
+
+export interface EffectiveAccessPanelOptions {
+  ctx: AppContext;
+  userId: number;
+  /** Called with non-fatal availability problems (optional endpoints). */
+  onAvailability?: (problems: string[]) => void;
+}
+
+export interface EffectiveAccessPanel {
+  el: HTMLElement;
+  reload: () => Promise<void>;
+  dispose: () => void;
+}
+
+const LEVEL_OPTIONS: Array<{ value: EffectiveLevelFilter; label: string }> = [
+  { value: "all", label: "All levels" },
+  { value: "none", label: "No Access" },
+  { value: "read", label: "Read Only" },
+  { value: "write", label: "Read & Write" },
+];
+
+interface EffectivePage {
+  access: EffectiveAccess | null;
+  folders: EffectiveFolderAccess[];
+  apps: EffectiveAppAccess[];
+  total: number;
+  page: number;
+  perPage: number;
+  serverPaged: boolean;
+  error: string | null;
+}
+
+function normalizeEffectiveResponse(input: EffectiveAccess): EffectiveAccess {
+  return {
+    user: input.user,
+    groups: asArray<GroupRef>(input.groups),
+    folders: asArray<EffectiveFolderAccess>(input.folders).map((folder) => ({
+      ...folder,
+      level: folder.level ?? "none",
+      sources: asArray<AccessRuleSource>(folder.sources),
+      conflict: folder.conflict ?? null,
+    })),
+    apps: asArray<EffectiveAppAccess>(input.apps).map((app) => ({
+      ...app,
+      sources: asArray<AccessRuleSource>(app.sources),
+    })),
+    foldersTotal: typeof input.foldersTotal === "number" ? input.foldersTotal : undefined,
+    page: typeof input.page === "number" ? input.page : undefined,
+    perPage: typeof input.perPage === "number" ? input.perPage : undefined,
+  };
+}
+
+function folderMatches(folder: EffectiveFolderAccess, query: string, level: EffectiveLevelFilter): boolean {
+  if (level !== "all" && (folder.level ?? "none") !== level) return false;
+  if (!query) return true;
+  const needle = query.toLowerCase();
+  return folder.shareName.toLowerCase().includes(needle) || (folder.path ?? "").toLowerCase().includes(needle);
+}
+
+/** Fetch one page; falls back to client-side filter/paging when unsupported. */
+async function fetchEffectivePage(
+  ctx: AppContext,
+  userId: number,
+  query: string,
+  level: EffectiveLevelFilter,
+  page: number,
+  perPage: number,
+): Promise<EffectivePage> {
+  const params: Record<string, unknown> = { q: query || undefined, level, page, perPage };
+  try {
+    const response = normalizeEffectiveResponse(
+      await ctx.api.get<EffectiveAccess>(`/api/users/${userId}/effective-access`, params),
+    );
+    const serverPaged =
+      typeof response.foldersTotal === "number" && typeof response.page === "number" && typeof response.perPage === "number";
+    if (serverPaged) {
+      return {
+        access: response,
+        folders: response.folders,
+        apps: response.apps,
+        total: response.foldersTotal ?? response.folders.length,
+        page: response.page ?? page,
+        perPage: response.perPage ?? perPage,
+        serverPaged: true,
+        error: null,
+      };
+    }
+    return clientPaginate(response, query, level, page, perPage, "The server returns unpaginated Effective Access; filtering locally.");
+  } catch (error) {
+    if (!isOptionalEndpointError(error)) throw error;
+    // Endpoint/params unavailable: fall back to the plain endpoint.
+    try {
+      const response = normalizeEffectiveResponse(await ctx.api.get<EffectiveAccess>(`/api/users/${userId}/effective-access`));
+      return clientPaginate(response, query, level, page, perPage, null);
+    } catch (fallbackError) {
+      return {
+        access: null,
+        folders: [],
+        apps: [],
+        total: 0,
+        page: 1,
+        perPage,
+        serverPaged: false,
+        error: apiErrorMessage(fallbackError),
+      };
+    }
+  }
+}
+
+function clientPaginate(
+  access: EffectiveAccess,
+  query: string,
+  level: EffectiveLevelFilter,
+  page: number,
+  perPage: number,
+  note: string | null,
+): EffectivePage {
+  const filtered = access.folders.filter((folder) => folderMatches(folder, query, level));
+  const total = filtered.length;
+  const pages = Math.max(1, Math.ceil(total / perPage));
+  const safePage = Math.min(Math.max(1, page), pages);
+  const start = (safePage - 1) * perPage;
+  return {
+    access: { ...access, folders: filtered, apps: access.apps },
+    folders: filtered.slice(start, start + perPage),
+    apps: access.apps,
+    total,
+    page: safePage,
+    perPage,
+    serverPaged: false,
+    error: note,
+  };
+}
+
+function ruleWord(rule: string | boolean | null | undefined): string {
+  if (typeof rule === "boolean") return rule ? "Allowed" : "Denied";
+  switch (rule) {
+    case "none":
+      return "No Access";
+    case "read":
+      return "Read Only";
+    case "write":
+      return "Read & Write";
+    case "admin":
+      return "Admin";
+    case "inherit":
+      return "Inherit";
+    case "allow":
+      return "Allow";
+    default:
+      return rule ? String(rule) : "Unknown";
+  }
+}
+
+function describeSourceList(sources: AccessRuleSource[]): string {
+  const parts = sources.map((source) => {
+    const type = source.type ?? source.kind ?? "direct";
+    if (type === "direct") return "Direct";
+    return source.groupName ? `Group “${source.groupName}”` : "Group";
+  });
+  return Array.from(new Set(parts)).join(" and ");
+}
+
+/** Human-readable explicit-deny conflict from the server or raw sources. */
+export function folderConflictText(folder: EffectiveFolderAccess): string | null {
+  if (folder.conflict && (folder.conflict.deniedBy?.length || folder.conflict.overriddenGrants?.length)) {
+    const denied = folder.conflict.deniedBy ?? [];
+    const grants = folder.conflict.overriddenGrants ?? [];
+    if (denied.length > 0 && grants.length > 0) {
+      return `No Access from ${describeSourceList(denied)} overrides ${ruleWord(grants[0]?.rule)} from ${describeSourceList(grants)}.`;
+    }
+    if (denied.length > 0) return `No Access from ${describeSourceList(denied)} wins for this folder.`;
+  }
+  const deny = (folder.sources ?? []).filter((source) => source.rule === "none");
+  const grant = (folder.sources ?? []).filter(
+    (source) => source.rule === "read" || source.rule === "write" || source.rule === "allow",
+  );
+  if (deny.length > 0 && grant.length > 0) {
+    return `No Access from ${describeSourceList(deny)} overrides ${ruleWord(grant[0]?.rule)} from ${describeSourceList(grant)}.`;
+  }
+  return null;
+}
+
+function fallbackLabel(fallback: string | null | undefined): string {
+  switch (fallback) {
+    case "admin":
+      return "Administrator bypass";
+    case "legacy-acl":
+      return "Legacy share membership";
+    case "explicit":
+      return "Explicit rule";
+    case "default":
+      return "Role default";
+    case "none":
+      return "No grant";
+    default:
+      return "";
+  }
 }
 
 function sourceChips(sources: AccessRuleSource[]): Node {
@@ -278,54 +734,27 @@ function sourceChips(sources: AccessRuleSource[]): Node {
         "span",
         { class: `prov-chip prov-${type}` },
         h("span", { class: "prov-who" }, sourceLabel(source)),
-        h("span", { class: "prov-rule" }, source.rule),
+        h("span", { class: "prov-rule" }, ruleWord(source.rule)),
       ),
     );
   }
   return wrap;
 }
 
-function fallbackLabel(fallback: string | null | undefined): string {
-  switch (fallback) {
-    case "admin":
-      return "Administrator bypass";
-    case "legacy-acl":
-      return "Legacy share membership";
-    case "owner":
-      return "Share owner";
-    case "explicit":
-      return "Explicit rule";
-    case "default":
-      return "Role default";
-    case "none":
-      return "No grant";
-    default:
-      return "";
-  }
-}
-
-/** Effective Access tables with provenance + explicit-deny explanation. */
-export function renderEffectiveAccess(access: EffectiveAccess | null, fallbackError?: string): HTMLElement {
-  if (!access) {
-    return h(
-      "div",
-      { class: "inline-availability" },
-      h("div", { class: "inline-availability-title" }, "Effective access is not available yet"),
-      h(
-        "div",
-        { class: "small muted" },
-        fallbackError || "The server does not expose /api/users/{id}/effective-access yet.",
-      ),
-    );
-  }
-  const folderBody = h("tbody");
-  for (const folder of access.folders ?? []) {
-    const conflict = denyConflict(folder.sources ?? []);
-    folderBody.appendChild(
+function folderTable(folders: EffectiveFolderAccess[]): HTMLElement {
+  const body = h("tbody");
+  for (const folder of folders) {
+    const conflict = folderConflictText(folder);
+    body.appendChild(
       h(
         "tr",
         {},
-        h("td", {}, h("div", { class: "mono small" }, folder.shareName), folder.path ? h("div", { class: "small faint" }, folder.path) : null),
+        h(
+          "td",
+          {},
+          h("div", { class: "mono small" }, folder.shareName),
+          folder.path ? h("div", { class: "small faint" }, folder.path) : null,
+        ),
         h("td", {}, badge(folderLevelLabel(folder.level ?? "none"), folderLevelTone(folder.level ?? "none"))),
         h("td", {}, sourceChips(folder.sources ?? [])),
         h(
@@ -339,26 +768,34 @@ export function renderEffectiveAccess(access: EffectiveAccess | null, fallbackEr
       ),
     );
   }
-  if (!(access.folders ?? []).length) {
-    folderBody.appendChild(h("tr", {}, h("td", { colspan: 4, class: "table-empty" }, "No shared folders to evaluate.")));
+  if (folders.length === 0) {
+    body.appendChild(h("tr", {}, h("td", { colspan: 4, class: "table-empty" }, "No shared folders match this search or filter.")));
   }
-  const folderTable = h(
+  return h(
     "table",
     { class: "table effective-table" },
     h(
       "thead",
       {},
-      h("tr", {}, h("th", {}, "Shared folder"), h("th", {}, "Effective level"), h("th", {}, "Provenance"), h("th", {}, "Notes")),
+      h(
+        "tr",
+        {},
+        h("th", {}, "Shared folder"),
+        h("th", {}, "Effective level"),
+        h("th", {}, "Provenance"),
+        h("th", {}, "Notes"),
+      ),
     ),
-    folderBody,
+    body,
   );
+}
 
-  const appBody = h("tbody");
-  for (const app of access.apps ?? []) {
+function appTable(apps: EffectiveAppAccess[]): HTMLElement {
+  const body = h("tbody");
+  for (const app of apps) {
     const constant = RULE_APPS.find((item) => item.id === app.appId);
     const decision = app.allowed ? (app.readOnly ? "Read-only" : "Allowed") : "Denied";
-    const conflict = denyConflict(app.sources ?? []);
-    appBody.appendChild(
+    body.appendChild(
       h(
         "tr",
         {},
@@ -368,18 +805,15 @@ export function renderEffectiveAccess(access: EffectiveAccess | null, fallbackEr
         h(
           "td",
           { class: "small muted" },
-          ...[
-            fallbackLabel(app.fallback) ? h("span", {}, fallbackLabel(app.fallback)) : null,
-            conflict ? h("div", { class: "conflict-note" }, conflict) : null,
-          ].filter((node): node is HTMLElement => node !== null),
+          fallbackLabel(app.fallback) ? h("span", {}, fallbackLabel(app.fallback)) : null,
         ),
       ),
     );
   }
-  if (!(access.apps ?? []).length) {
-    appBody.appendChild(h("tr", {}, h("td", { colspan: 4, class: "table-empty" }, "No applications to evaluate.")));
+  if (apps.length === 0) {
+    body.appendChild(h("tr", {}, h("td", { colspan: 4, class: "table-empty" }, "No applications to evaluate.")));
   }
-  const appTable = h(
+  return h(
     "table",
     { class: "table effective-table" },
     h(
@@ -387,31 +821,231 @@ export function renderEffectiveAccess(access: EffectiveAccess | null, fallbackEr
       {},
       h("tr", {}, h("th", {}, "Application"), h("th", {}, "Effective access"), h("th", {}, "Provenance"), h("th", {}, "Notes")),
     ),
-    appBody,
+    body,
   );
+}
 
-  return h(
+/** Effective Access panel: search + level filter + folder pagination; apps always shown. */
+export function createEffectiveAccessPanel(options: EffectiveAccessPanelOptions): EffectiveAccessPanel {
+  let query = "";
+  let level: EffectiveLevelFilter = "all";
+  let page = 1;
+  let disposed = false;
+  let token = 0;
+
+  const search = h("input", {
+    class: "input input-search",
+    type: "search",
+    placeholder: "Search shared folders…",
+    ariaLabel: "Search effective access",
+  });
+  const levelSelect = h(
+    "select",
+    { class: "select select-sm", ariaLabel: "Filter by effective level" },
+    ...LEVEL_OPTIONS.map((option) => h("option", { value: option.value }, option.label)),
+  );
+  const toolbar = h(
+    "div",
+    { class: "effective-toolbar" },
+    h("div", { class: "search-wrap" }, h("span", { class: "search-icon" }, iconSvg("search", 15)), search),
+    levelSelect,
+    h("div", { class: "cp-toolbar-spacer" }),
+    h("div", { class: "small muted effective-total" }),
+  );
+  const folderHost = h("div", { class: "effective-folders" });
+  const appsHost = h("div", { class: "effective-apps" });
+  const pagerHost = h("div", { class: "effective-pager" });
+  const availabilityHost = h("div", { class: "inline-availability", hidden: true });
+  const errorHost = h("div", { class: "inline-availability", hidden: true });
+  const panel = h(
     "div",
     { class: "effective-access" },
     h(
       "div",
       { class: "small muted" },
-      "Explicit No Access always wins over grants. Effective Access shows the decision and where it came from.",
+      "Final decision computed by the server: explicit No Access always wins over grants. Search and filter the shared-folder list; applications are always shown.",
     ),
+    toolbar,
+    availabilityHost,
+    errorHost,
     h(
       "div",
       { class: "access-subsection" },
       h("div", { class: "access-subsection-title" }, "Shared folders"),
-      h("div", { class: "table-wrap table-wrap-compact" }, folderTable),
+      folderHost,
+      pagerHost,
     ),
-    h(
-      "div",
-      { class: "access-subsection" },
-      h("div", { class: "access-subsection-title" }, "Applications"),
-      h("div", { class: "table-wrap table-wrap-compact" }, appTable),
-    ),
+    h("div", { class: "access-subsection" }, h("div", { class: "access-subsection-title" }, "Applications"), appsHost),
   );
+
+  const pagerControl: Pager = pager((nextPage) => {
+    page = nextPage;
+    void load();
+  });
+  pagerHost.appendChild(pagerControl.el);
+
+  const scheduleReload = debounce(() => {
+    page = 1;
+    void load();
+  }, 260);
+  search.addEventListener("input", () => {
+    query = search.value.trim();
+    scheduleReload();
+  });
+  levelSelect.addEventListener("change", () => {
+    level = levelSelect.value as EffectiveLevelFilter;
+    page = 1;
+    void load();
+  });
+
+  function render(pageData: EffectivePage): void {
+    const totalEl = toolbar.querySelector<HTMLElement>(".effective-total");
+    if (totalEl) {
+      totalEl.textContent = `${pageData.total.toLocaleString()} shared folder${pageData.total === 1 ? "" : "s"}`;
+    }
+    errorHost.hidden = true;
+    if (pageData.error) {
+      availabilityHost.hidden = false;
+      availabilityHost.replaceChildren(
+        h("div", { class: "inline-availability-title" }, "Filtering locally"),
+        h("div", { class: "small muted" }, pageData.error),
+      );
+    } else {
+      availabilityHost.hidden = true;
+    }
+    folderHost.replaceChildren(
+      h("div", { class: "table-wrap table-wrap-compact" }, folderTable(pageData.folders)),
+    );
+    appsHost.replaceChildren(
+      h("div", { class: "table-wrap table-wrap-compact" }, appTable(pageData.apps)),
+    );
+    const pages = Math.max(1, Math.ceil(pageData.total / pageData.perPage));
+    pagerControl.update({
+      page: pageData.page,
+      totalPages: pages,
+      totalItems: pageData.total,
+      label: `${pageData.total.toLocaleString()} folder${pageData.total === 1 ? "" : "s"} · page ${pageData.page} of ${pages}`,
+    });
+  }
+
+  function renderFailure(message: string): void {
+    folderHost.replaceChildren();
+    appsHost.replaceChildren();
+    pagerControl.update({ page: 1, totalPages: 1, totalItems: 0, label: "—" });
+    availabilityHost.hidden = true;
+    errorHost.hidden = false;
+    errorHost.replaceChildren(
+      h(
+        "div",
+        {},
+        h("div", { class: "inline-availability-title" }, "Effective access is unavailable"),
+        h("div", { class: "small muted" }, message),
+        h("button", { class: "btn btn-sm", type: "button", onClick: () => void load() }, "Retry"),
+      ),
+    );
+  }
+
+  async function load(): Promise<void> {
+    if (disposed) return;
+    const requestToken = ++token;
+    folderHost.replaceChildren(h("div", { class: "loading-block compact" }, h("span", { class: "spinner" }), h("span", { class: "muted" }, "Loading effective access…")));
+    try {
+      const pageData = await fetchEffectivePage(options.ctx, options.userId, query, level, page, EFFECTIVE_PAGE_SIZE);
+      if (disposed || requestToken !== token) return;
+      if (pageData.error && !pageData.access) {
+        renderFailure(pageData.error);
+        options.onAvailability?.([pageData.error]);
+        return;
+      }
+      render(pageData);
+      if (pageData.error) options.onAvailability?.([pageData.error]);
+    } catch (error) {
+      if (disposed || requestToken !== token) return;
+      renderFailure(apiErrorMessage(error));
+      options.onAvailability?.([`Effective access: ${apiErrorMessage(error)}`]);
+    }
+  }
+
+  void load();
+  return {
+    el: panel,
+    reload: () => load(),
+    dispose: () => {
+      disposed = true;
+      token += 1;
+    },
+  };
 }
+
+// ---------------------------------------------------------------------------
+// Group deletion impact (F12)
+// ---------------------------------------------------------------------------
+
+export interface ImpactSummary {
+  members: number;
+  folderRules: number;
+  appRules: number;
+  userCount: number;
+  lines: Array<{ username: string; displayName?: string; changes: string[] }>;
+  truncated: boolean;
+}
+
+/** Fetch the delete-impact preview; null when the endpoint is unavailable. */
+export async function loadGroupImpact(ctx: AppContext, groupId: number): Promise<GroupImpact | null> {
+  try {
+    return await ctx.api.get<GroupImpact>(`/api/groups/${groupId}/impact`);
+  } catch (error) {
+    if (isOptionalEndpointError(error)) return null;
+    throw error;
+  }
+}
+
+function impactChangeLine(change: { resource: string; kind: "folder" | "app"; before?: string | boolean | null; after?: string | boolean | null }): string {
+  const resource = change.kind === "app" ? appLabel(change.resource) : change.resource;
+  return `${resource}: ${ruleWord(change.before)} → ${ruleWord(change.after)}`;
+}
+
+function impactUserChanges(user: GroupImpactUser): string[] {
+  if (Array.isArray(user.changes) && user.changes.length > 0) {
+    return user.changes.map((change) => impactChangeLine(change));
+  }
+  const lines: string[] = [];
+  const beforeFolders = user.before?.folders ?? {};
+  const afterFolders = user.after?.folders ?? {};
+  for (const [share, before] of Object.entries(beforeFolders)) {
+    const after = afterFolders[share] ?? "none";
+    if (after !== before) lines.push(`${share}: ${ruleWord(before)} → ${ruleWord(after)}`);
+  }
+  const beforeApps = user.before?.apps ?? {};
+  const afterApps = user.after?.apps ?? {};
+  for (const [appId, before] of Object.entries(beforeApps)) {
+    const after = afterApps[appId] ?? false;
+    if (after !== before) lines.push(`${appLabel(appId)}: ${ruleWord(before)} → ${ruleWord(after)}`);
+  }
+  return lines;
+}
+
+/** Normalise either documented impact shape into display-ready lines. */
+export function summarizeImpact(impact: GroupImpact): ImpactSummary {
+  const users = asArray<GroupImpactUser>(impact.users);
+  const lines = users.slice(0, 10).map((user) => ({
+    username: user.username,
+    displayName: user.displayName,
+    changes: impactUserChanges(user).slice(0, 6),
+  }));
+  return {
+    members: Number(impact.members ?? users.length),
+    folderRules: Number(impact.folderRules ?? 0),
+    appRules: Number(impact.appRules ?? 0),
+    userCount: users.length,
+    lines,
+    truncated: Boolean(impact.truncated) || users.length > 10,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Small shared bits
+// ---------------------------------------------------------------------------
 
 /** Compact group chips for the users table. */
 export function groupChips(groups: GroupRef[] | undefined, limit = 2): HTMLElement {
@@ -439,7 +1073,5 @@ export function accessAvailability(problems: string[]): HTMLElement | null {
   );
 }
 
-/** Empty-state text for permissions fallback (older server). */
-export function permissionsFallback(permissions: Permissions | null): boolean {
-  return !permissions || !permissions.apps;
-}
+// Keep the type referenced for downstream modules that import it from here.
+export type { FolderLevel };
