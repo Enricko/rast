@@ -26,6 +26,11 @@ import { createLiveIndicator, type LiveIndicator } from "../../components/live";
 import { banner, renderLoadFailure } from "../../components/states";
 
 const SERIES_POINTS = 60;
+
+/** Monitor payload extension: container inventory is operator-only (F8). */
+interface MonitorSnapshotView extends MonitorSnapshot {
+  containersRestricted?: boolean;
+}
 const MIN_RENDER_GAP_MS = 1000;
 
 /** `docker.changed` payload (docs/REALTIME.md). */
@@ -87,6 +92,7 @@ class MonitorApp {
   private fallbackContainers: ContainerMetric[] | null = null;
   private fallbackComponents: ComponentHealth[] | null = null;
   private fallbackFetched = false;
+  private containersRestricted = false;
   private disposed = false;
 
   private readonly series: MonitorSeries = { cpu: [], memory: [], swap: [], rx: [], tx: [] };
@@ -283,6 +289,8 @@ class MonitorApp {
     if (snapshot.ts && snapshot.ts > 0) this.latestReceivedAt = Date.now();
     if (snapshot.host) {
       this.lastGood = snapshot;
+      const restricted = (snapshot as MonitorSnapshotView).containersRestricted;
+      this.containersRestricted = restricted === true;
       this.unavailableReasonText = snapshot.unavailable ? snapshot.reason ?? "" : "";
       this.fatalError = null;
     } else if (snapshot.unavailable) {
@@ -369,9 +377,18 @@ class MonitorApp {
           "/api/monitor/containers",
         );
         if (this.disposed) return;
-        if (Array.isArray(payload)) this.fallbackContainers = payload;
-        else if (Array.isArray(payload?.containers)) this.fallbackContainers = payload.containers;
-        else if (Array.isArray(payload?.items)) this.fallbackContainers = payload.items;
+        if (Array.isArray(payload)) {
+          this.fallbackContainers = payload;
+        } else if (payload && typeof payload === "object") {
+          const view = payload as {
+            containers?: ContainerMetric[];
+            items?: ContainerMetric[];
+            containersRestricted?: boolean;
+          };
+          if (view.containersRestricted === true) this.containersRestricted = true;
+          if (Array.isArray(view.containers)) this.fallbackContainers = view.containers;
+          else if (Array.isArray(view.items)) this.fallbackContainers = view.items;
+        }
       } catch {
         this.fallbackContainers = [];
       }
@@ -708,10 +725,20 @@ class MonitorApp {
     const header = h(
       "div",
       { class: "mon-section-head" },
-      h("h3", { class: "mon-section-title" }, `Containers (${containers.length})`),
+      h("h3", { class: "mon-section-title" }, this.containersRestricted ? "Containers" : `Containers (${containers.length})`),
       h("span", { class: "small muted" }, "Docker resource usage, separate from host totals"),
     );
     this.containersHost.appendChild(header);
+    if (this.containersRestricted) {
+      this.containersHost.appendChild(
+        h(
+          "div",
+          { class: "mon-restricted-note small muted" },
+          "Container details are available to administrators and Applications users.",
+        ),
+      );
+      return;
+    }
     if (containers.length === 0) {
       const dockerEnabled = this.ctx.store.get().features.docker;
       this.containersHost.appendChild(

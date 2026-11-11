@@ -30,10 +30,15 @@ import {
 } from "../../components/states";
 
 interface BackupListResponse {
-  items?: Backup[];
+  items?: BackupRow[];
   total?: number;
   page?: number;
   perPage?: number;
+}
+
+/** Read-only viewers receive metadata only (docs/AUDIT-NOTES.md F1). */
+interface BackupRow extends Backup {
+  downloadable?: boolean;
 }
 
 interface CreateBackupResponse {
@@ -55,6 +60,8 @@ interface RestoreGuideResponse {
   steps?: RestoreStep[];
   warning?: string;
   archive?: string;
+  /** Schema/rollback caveat for administrators (F3). */
+  rollback?: string;
 }
 
 /** `job.*` payload subset for backup jobs. */
@@ -129,7 +136,7 @@ class BackupCenterApp {
   private readonly syncList: { run: () => void; cancel: () => void };
   private readonly syncSchedule: { run: () => void; cancel: () => void };
 
-  private backups: Backup[] = [];
+  private backups: BackupRow[] = [];
   private total = 0;
   private page = 1;
   private perPage = 25;
@@ -427,7 +434,7 @@ class BackupCenterApp {
       });
       if (this.disposed) return;
       const items = Array.isArray(payload?.items) ? payload.items : [];
-      this.backups = items;
+      this.backups = items as BackupRow[];
       this.total = typeof payload?.total === "number" ? payload.total : items.length;
       this.page = typeof payload?.page === "number" ? payload.page : this.page;
       this.listError = null;
@@ -489,7 +496,7 @@ class BackupCenterApp {
         banner(
           "info",
           "Read-only access",
-          "A group policy grants you read-only access to Backup Center. You can browse, verify checksums via the archive list and download backups, but creating, deleting or scheduling backups requires an administrator.",
+          "A group policy grants you read-only access to Backup Center. You can see when backups ran, their size, scope and status. Archives contain account data and are available to administrators only, so file names, checksums, downloads and the restore guide are hidden. Creating, deleting, verifying or scheduling backups requires an administrator.",
         ),
       );
     }
@@ -655,21 +662,30 @@ class BackupCenterApp {
     this.listHost.appendChild(h("div", { class: "backup-footer" }, h("div", { class: "small muted" }), this.pager.el));
   }
 
-  private renderRow(backup: Backup): HTMLTableRowElement {
-    const name = h("div", { class: "backup-file-cell" }, h("div", { class: "backup-file-name" }, backup.fileName || backup.id));
+  private renderRow(backup: BackupRow): HTMLTableRowElement {
+    const restricted = this.readOnly || backup.downloadable === false;
+    const displayName = restricted ? `Backup ${backup.id.slice(0, 8)}` : backup.fileName || backup.id;
+    const name = h("div", { class: "backup-file-cell" }, h("div", { class: "backup-file-name" }, displayName));
+    if (restricted) {
+      name.appendChild(
+        h("div", { class: "small muted" }, "Archive details are available to administrators only."),
+      );
+    }
     const checksum = h(
       "div",
       { class: "backup-checksum mono small muted", title: backup.sha256 || "no checksum" },
       backup.sha256 ? `sha256 ${backup.sha256.slice(0, 16)}…` : "no checksum",
     );
-    if (backup.sha256) {
-      const copy = h("button", { class: "backup-copy", type: "button", ariaLabel: "Copy checksum", title: "Copy checksum" });
-      copy.appendChild(iconSvg("copy", 12));
-      copy.addEventListener("click", () => void this.copyChecksum(backup.sha256));
-      checksum.appendChild(copy);
+    if (!restricted) {
+      if (backup.sha256) {
+        const copy = h("button", { class: "backup-copy", type: "button", ariaLabel: "Copy checksum", title: "Copy checksum" });
+        copy.appendChild(iconSvg("copy", 12));
+        copy.addEventListener("click", () => void this.copyChecksum(backup.sha256));
+        checksum.appendChild(copy);
+      }
+      name.appendChild(checksum);
+      if (backup.note) name.appendChild(h("div", { class: "small muted backup-note" }, backup.note));
     }
-    name.appendChild(checksum);
-    if (backup.note) name.appendChild(h("div", { class: "small muted backup-note" }, backup.note));
     if (backup.error) name.appendChild(h("div", { class: "small backup-row-error" }, backup.error));
 
     const actions = h("div", { class: "backup-row-actions" });
@@ -689,13 +705,15 @@ class BackupCenterApp {
       return btn;
     };
     const done = backup.status === "done";
-    actions.append(iconAction("download", "Download archive", () => this.download(backup), !done));
-    if (!this.readOnly) {
-      actions.append(iconAction("shield", "Verify integrity", () => void this.verify(backup), !done));
+    if (!restricted) {
+      actions.append(iconAction("download", "Download archive", () => this.download(backup), !done));
+      if (!this.readOnly) {
+        actions.append(iconAction("shield", "Verify integrity", () => void this.verify(backup), !done));
+      }
+      actions.append(iconAction("info", "Restore guide", () => this.openRestoreGuide(backup)));
     }
-    actions.append(iconAction("info", "Restore guide", () => void this.openRestoreGuide(backup)));
-    if (!this.readOnly) {
-      actions.append(iconAction("trash", "Delete archive", () => void this.deleteBackup(backup), false, true));
+    if (!this.readOnly && !restricted) {
+      actions.append(iconAction("trash", "Delete archive", () => this.deleteBackup(backup), false, true));
     }
 
     return h(
@@ -721,7 +739,11 @@ class BackupCenterApp {
     }
   }
 
-  private download(backup: Backup): void {
+  private download(backup: BackupRow): void {
+    if (this.readOnly || backup.downloadable === false) {
+      this.ctx.toast.warning("Backup archives contain account data and are available to administrators only.");
+      return;
+    }
     const anchor = document.createElement("a");
     anchor.href = `/api/backups/${encodeURIComponent(backup.id)}/download`;
     anchor.download = backup.fileName || `backup-${backup.id}.tar.gz`;
@@ -1095,7 +1117,11 @@ class BackupCenterApp {
 
   // --------------------------------------------------------- restore guide
 
-  private async openRestoreGuide(backup: Backup): Promise<void> {
+  private async openRestoreGuide(backup: BackupRow): Promise<void> {
+    if (this.readOnly || backup.downloadable === false) {
+      this.ctx.toast.warning("The restore guide is available to administrators only.");
+      return;
+    }
     const stepsHost = h("div", { class: "backup-restore-steps" }, h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading restore guide…"));
     const body = h(
       "div",
@@ -1128,6 +1154,9 @@ class BackupCenterApp {
           stepsHost.appendChild(banner("warning", "Application data is not covered", guide.warning));
         }
         stepsHost.appendChild(renderSteps(steps));
+        if (guide?.rollback) {
+          stepsHost.appendChild(banner("warning", "Rollback and schema compatibility", guide.rollback));
+        }
         stepsHost.appendChild(
           h(
             "div",

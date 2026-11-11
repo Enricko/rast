@@ -47,7 +47,13 @@ interface PortMappingLike {
   hostIp?: string | null;
 }
 
-interface AppDetail extends ManagedApp {
+/** Read-only viewers receive metadata only: env values/compose/logs are admin-only. */
+interface ManagedAppView extends ManagedApp {
+  envCount?: number;
+  secretCount?: number;
+}
+
+interface AppDetail extends ManagedAppView {
   description?: string;
   /** The backend returns one resource sample per container. */
   resources?: ContainerResourceStat[];
@@ -165,10 +171,11 @@ class ApplicationsApp {
   private lastAccessSignature = "";
   private lastPermissionsRef: unknown = undefined;
   private activeModalClose: (() => void) | null = null;
+  private detailAccessHandler: ((readOnly: boolean) => void) | null = null;
 
   private docker: DockerStatus | null = null;
   private dockerError: unknown = null;
-  private apps: ManagedApp[] = [];
+  private apps: ManagedAppView[] = [];
   private appsLoading = true;
   private appsError: unknown = null;
   private containers: ContainerInfo[] = [];
@@ -299,6 +306,7 @@ class ApplicationsApp {
       this.renderDenied();
       return;
     }
+    this.detailAccessHandler?.(this.readOnly);
     if (wasDenied) void this.refreshAll();
     this.render();
   }
@@ -468,7 +476,7 @@ class ApplicationsApp {
     try {
       const payload = await this.ctx.api.get<ManagedApp[] | { items?: ManagedApp[] }>("/api/apps");
       if (this.disposed) return;
-      this.apps = listOf<ManagedApp>(payload);
+      this.apps = listOf<ManagedAppView>(payload);
       this.appsError = null;
     } catch (error) {
       if (isAbortError(error) || this.disposed) return;
@@ -669,7 +677,7 @@ class ApplicationsApp {
     this.appsHost.appendChild(host);
   }
 
-  private renderAppRow(app: ManagedApp, usable: boolean): HTMLTableRowElement {
+  private renderAppRow(app: ManagedAppView, usable: boolean): HTMLTableRowElement {
     const statusBadge = h("span", { class: `badge ${statusClass(app.status)}` }, statusLabel(app.status));
     if (app.lastError) statusBadge.title = app.lastError;
     const containers = app.containers ?? [];
@@ -838,11 +846,11 @@ class ApplicationsApp {
 
   // --------------------------------------------------------------- actions
 
-  private findApp(id: string): ManagedApp | undefined {
+  private findApp(id: string): ManagedAppView | undefined {
     return this.apps.find((app) => app.id === id);
   }
 
-  private async performAction(app: ManagedApp, action: AppAction): Promise<void> {
+  private async performAction(app: ManagedAppView, action: AppAction): Promise<void> {
     if (this.denied) {
       this.ctx.toast.warning("Your access to Applications was changed.");
       return;
@@ -1326,6 +1334,10 @@ class ApplicationsApp {
       historyHost.classList.toggle("hidden", next !== "history");
       logsVisible = next === "logs";
       if (next === "logs") {
+        if (this.readOnly) {
+          this.ctx.toast.warning("Container logs require an administrator.");
+          return;
+        }
         if (!logUi) buildLogsUi();
         connectLogStream();
       } else {
@@ -1333,11 +1345,16 @@ class ApplicationsApp {
       }
       if (next === "history") void loadHistory();
     };
-    const tabs: Array<{ id: DetailTab; label: string }> = [
-      { id: "overview", label: "Overview" },
-      { id: "logs", label: "Logs" },
-      { id: "history", label: "History" },
-    ];
+    const tabs: Array<{ id: DetailTab; label: string }> = this.readOnly
+      ? [
+          { id: "overview", label: "Overview" },
+          { id: "history", label: "History" },
+        ]
+      : [
+          { id: "overview", label: "Overview" },
+          { id: "logs", label: "Logs" },
+          { id: "history", label: "History" },
+        ];
     for (const entry of tabs) {
       const btn = h("button", { class: `tab${entry.id === tab ? " is-active" : ""}`, type: "button", dataset: { tab: entry.id } }, entry.label);
       btn.addEventListener("click", () => setTab(entry.id));
@@ -1448,7 +1465,20 @@ class ApplicationsApp {
       );
 
       const env = detail.env ?? [];
-      if (env.length > 0) {
+      if (this.readOnly) {
+        overviewHost.appendChild(h("h4", { class: "appmgmt-subhead" }, "Environment"));
+        const total = typeof detail.envCount === "number" ? detail.envCount : env.length;
+        const secrets = typeof detail.secretCount === "number" ? detail.secretCount : 0;
+        overviewHost.appendChild(
+          h(
+            "div",
+            { class: "appmgmt-restricted-note small muted" },
+            total > 0
+              ? `${total} environment variable(s) defined (${secrets} secret). Values are visible to administrators only.`
+              : "No environment variables are defined for this application.",
+          ),
+        );
+      } else if (env.length > 0) {
         overviewHost.appendChild(h("h4", { class: "appmgmt-subhead" }, "Environment"));
         const envRowsEl = h("div", { class: "appmgmt-env-view" });
         for (const row of env.slice(0, 100)) {
@@ -1500,6 +1530,11 @@ class ApplicationsApp {
                 record.detail ? h("div", { class: "small muted" }, record.detail) : null,
               ),
             ),
+          );
+        }
+        if (this.readOnly) {
+          historyHost.appendChild(
+            h("div", { class: "appmgmt-restricted-note small muted" }, "Deployment error details are visible to administrators only."),
           );
         }
         historyHost.appendChild(timeline);
@@ -1585,11 +1620,24 @@ class ApplicationsApp {
         stopLogStream();
         detailController?.abort();
         this.activeModalClose = null;
+        this.detailAccessHandler = null;
         if (this.detailChangedHook) this.detailChangedHook = null;
       },
     });
     this.lc.add(close);
     this.activeModalClose = close;
+    this.detailAccessHandler = (readOnly) => {
+      if (readOnly) {
+        if (tab === "logs") setTab("overview");
+        const logsTab = tabBar.querySelector<HTMLElement>('[data-tab="logs"]');
+        logsTab?.classList.add("hidden");
+        stopLogStream();
+        if (tab === "overview") {
+          renderStatus();
+          renderOverview();
+        }
+      }
+    };
 
     // Expose partial updates to the list subscriber (single active modal).
     this.detailChangedHook = (data) => {
@@ -1611,7 +1659,7 @@ class ApplicationsApp {
 
   // ----------------------------------------------------------------- delete
 
-  private async openDeleteDialog(app: ManagedApp): Promise<void> {
+  private async openDeleteDialog(app: ManagedAppView): Promise<void> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
         this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",

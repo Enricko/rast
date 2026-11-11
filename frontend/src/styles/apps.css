@@ -15,7 +15,7 @@
 }
 
 .na-icon {
-  color: var(--warning);
+  color: var(--warning-strong, var(--warning));
   display: grid;
   place-items: center;
 }
@@ -55,15 +55,15 @@
 }
 
 .banner-success {
-  border-left-color: var(--ok);
+  border-left-color: var(--ok-strong, var(--ok));
 }
 
 .banner-warning {
-  border-left-color: var(--warning);
+  border-left-color: var(--warning-strong, var(--warning));
 }
 
 .banner-error {
-  border-left-color: var(--danger);
+  border-left-color: var(--danger-strong, var(--danger));
 }
 
 .banner-glyph {
@@ -77,15 +77,15 @@
 }
 
 .banner-success .banner-glyph {
-  color: var(--ok);
+  color: var(--ok-strong, var(--ok));
 }
 
 .banner-warning .banner-glyph {
-  color: var(--warning);
+  color: var(--warning-strong, var(--warning));
 }
 
 .banner-error .banner-glyph {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
 }
 
 .banner-body {
@@ -113,7 +113,7 @@
 }
 
 .form-error {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
   font-size: 12px;
   min-height: 16px;
 }
@@ -162,7 +162,7 @@
 
 .pager-page.is-active {
   background: var(--accent-soft);
-  border-color: rgba(120, 170, 255, 0.28);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--accent);
   font-weight: 650;
 }
@@ -222,7 +222,7 @@
   object-fit: contain;
   margin: 0 auto;
   border-radius: 8px;
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--surface-inset, var(--surface-2));
 }
 
 .preview-pdf {
@@ -230,7 +230,7 @@
   height: 60vh;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--surface);
 }
 
 .preview-text {
@@ -381,7 +381,7 @@
 
 .fs-view-btn.is-active {
   background: var(--accent-soft);
-  border-color: rgba(120, 170, 255, 0.28);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
   color: var(--accent);
 }
 
@@ -552,7 +552,7 @@
 }
 
 .fs-search-clear:hover {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--surface-hover, var(--surface-3));
 }
 
 .fs-crumbs-spacer {
@@ -704,7 +704,7 @@
 
 .fs-card.is-selected {
   background: var(--accent-soft);
-  border-color: rgba(120, 170, 255, 0.45);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
 }
 
 .fs-card-icon {
@@ -752,7 +752,7 @@
   border-left: 1px solid var(--border);
   padding: 12px;
   overflow: auto;
-  background: rgba(255, 255, 255, 0.015);
+  background: color-mix(in srgb, var(--text) 2%, transparent);
   min-width: 0;
 }
 
@@ -837,7 +837,7 @@
   align-items: center;
   justify-content: center;
   gap: 8px;
-  background: rgba(6, 10, 20, 0.72);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
   border: 2px dashed var(--accent);
   color: var(--text);
   pointer-events: none;
@@ -943,7 +943,7 @@
 }
 
 .upload-item[data-status="error"] .upload-state {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
 }
 
 .upload-item[data-status="cancelled"] .upload-state {
@@ -1005,7 +1005,7 @@
   }
 
   .fs-sidebar .nav-item.is-active {
-    border-color: rgba(120, 170, 255, 0.32);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
   }
 
   .fs-trash-nav {
@@ -1157,7 +1157,7 @@
 }
 
 .appmgmt-error {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
   font-size: 11.5px;
   word-break: break-word;
 }
@@ -1188,7 +1188,7 @@
 }
 
 .appmgmt-icon-btn.is-danger {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
 }
 
 .appmgmt-icon-btn.is-danger:hover:not(:disabled) {
@@ -1224,7 +1224,7 @@
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.02);
+  background: color-mix(in srgb, var(--text) 2%, transparent);
 }
 
 .appmgmt-prereqs {
@@ -1459,7 +1459,7 @@
 }
 
 .appmgmt-delete-option.is-danger {
-  border-color: rgba(248, 113, 113, 0.35);
+  border-color: var(--danger-border, var(--danger));
 }
 
 .appmgmt-delete-option input {
@@ -1830,7 +1830,7 @@
 }
 
 .backup-row-error {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
   font-size: 11px;
   word-break: break-word;
 }
@@ -1901,11 +1901,11 @@
 }
 
 .backup-verify-ok {
-  color: var(--ok);
+  color: var(--ok-strong, var(--ok));
 }
 
 .backup-verify-fail {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
 }
 
 .backup-restore-list {
@@ -2004,7 +2004,7 @@
 }
 
 .live-badge[data-state="connected"] {
-  color: var(--ok);
+  color: var(--ok-strong, var(--ok));
   border-color: var(--ok-border, var(--ok));
 }
 
@@ -2021,12 +2021,12 @@
 
 .live-badge[data-state="connecting"],
 .live-badge[data-state="reconnecting"] {
-  color: var(--warning);
+  color: var(--warning-strong, var(--warning));
   border-color: var(--warning-border, var(--warning));
 }
 
 .live-badge[data-state="offline"] {
-  color: var(--danger);
+  color: var(--danger-strong, var(--danger));
   border-color: var(--danger-border, var(--danger));
 }
 
@@ -2064,15 +2064,15 @@
 }
 
 .realtime-notice[data-kind="warning"] {
-  border-left-color: var(--warning);
+  border-left-color: var(--warning-strong, var(--warning));
 }
 
 .realtime-notice[data-kind="error"] {
-  border-left-color: var(--danger);
+  border-left-color: var(--danger-strong, var(--danger));
 }
 
 .realtime-notice[data-kind="success"] {
-  border-left-color: var(--ok);
+  border-left-color: var(--ok-strong, var(--ok));
 }
 
 .realtime-notice-dot {
@@ -2248,7 +2248,7 @@
 }
 
 .fs-access-state .icon-wrap {
-  color: var(--warning);
+  color: var(--warning-strong, var(--warning));
 }
 
 @media (max-width: 820px) {
@@ -2257,4 +2257,63 @@
     margin: 8px;
     padding: 28px 14px;
   }
+}
+
+
+/* ==========================================================================
+   Read-only boundary notes (audit F1/F2/F8)
+   ========================================================================== */
+
+.appmgmt-restricted-note,
+.mon-restricted-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-inset);
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.appmgmt-restricted-note {
+  margin: 2px 0 4px;
+}
+
+.mon-restricted-note {
+  margin: 0 14px 10px;
+}
+
+/* File Station: use semantic tokens for the selection/hover affordances. */
+.fs-table tbody tr:hover {
+  background: var(--surface-hover);
+}
+
+.fs-card:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.fs-detail-actions .btn:focus-visible,
+.fs-toolbar .btn:focus-visible,
+.fs-view-btn:focus-visible,
+.appmgmt-icon-btn:focus-visible,
+.backup-row-actions .appmgmt-icon-btn:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--accent));
+  outline-offset: 1px;
+}
+
+/* Read-only rows stay legible without implying they are broken. */
+.backup-row-actions .appmgmt-icon-btn:disabled {
+  opacity: 0.65;
+}
+
+.appmgmt-restricted-note,
+.mon-restricted-note,
+.backup-file-cell .small.muted,
+.fs-access-detail,
+.app-access-detail {
+  overflow-wrap: anywhere;
 }
