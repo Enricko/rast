@@ -74,10 +74,13 @@ pub async fn stream(
                 })
                 .to_string(),
             );
+        // Container inventory is limited to administrators and accounts that
+        // may use Applications (audit finding F8).
+        let can_see_containers = crate::api::monitor::can_see_containers(&state, &user).await;
         let monitor = Event::default()
             .event("monitor")
             .id(hello_seq.to_string())
-            .data(snapshot.to_string());
+            .data(crate::monitor::redact_for(can_see_containers, &snapshot).to_string());
         if monitor_allowed {
             futures::stream::iter(vec![Ok::<Event, Infallible>(hello), Ok(monitor)])
         } else {
@@ -139,10 +142,25 @@ pub async fn stream(
                                 {
                                     continue;
                                 }
+                                // Monitor samples are published once for everyone;
+                                // redact the container inventory per connection with the
+                                // account's *current* Applications access (cached,
+                                // generation-aware), so a revocation applies to the very
+                                // next sample without reconnecting.
+                                let payload = if event.kind == "monitor" {
+                                    let can_see = st.user.is_admin()
+                                        || access::app_access(&st.db, &st.user, "applications")
+                                            .await
+                                            .map(|access| access.allowed)
+                                            .unwrap_or(false);
+                                    crate::monitor::redact_for(can_see, &event.data)
+                                } else {
+                                    event.data
+                                };
                                 let sse = Event::default()
                                     .event(event.kind)
                                     .id(event.seq.to_string())
-                                    .data(serde_json::to_string(&event.data).unwrap_or_else(|_| "null".into()));
+                                    .data(serde_json::to_string(&payload).unwrap_or_else(|_| "null".into()));
                                 return Some((Ok(sse), st));
                             }
                             Err(RecvError::Lagged(skipped)) => {
@@ -194,7 +212,7 @@ async fn check_session(st: &StreamState) -> SessionState {
         Ok(Some(record)) => record,
         Ok(None) => return SessionState::Revoked("session expired"),
         Err(error) => {
-            tracing::warn!(error = %error, "ssession revalidation failed; keeping stream");
+            tracing::warn!(error = %error, "session revalidation failed; keeping stream");
             return SessionState::Valid;
         }
     };

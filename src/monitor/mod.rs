@@ -439,11 +439,18 @@ fn collect_host(inner: &mut Inner) -> HostSample {
                 if sample.disks.len() >= MAX_DISKS {
                     break;
                 }
+                let mount = disk.mount_point().display().to_string();
+                let filesystem = disk.file_system().to_string_lossy().into_owned();
+                // Hide overlay/tmpfs/container-runtime internals for every
+                // account (host runtime layout, not user storage).
+                if is_hidden_disk(&mount, &filesystem) {
+                    continue;
+                }
                 let total = disk.total_space();
                 let available = disk.available_space();
                 sample.disks.push(json!({
-                    "mount": disk.mount_point().display().to_string(),
-                    "filesystem": disk.file_system().to_string_lossy(),
+                    "mount": mount,
+                    "filesystem": filesystem,
                     "name": disk.name().to_string_lossy(),
                     "totalBytes": total,
                     "availableBytes": available,
@@ -493,6 +500,109 @@ fn collect_host(inner: &mut Inner) -> HostSample {
     }
 
     sample
+}
+
+/// Is this mount an overlay/tmpfs/container-runtime internal that must never be
+/// shown in the resource monitor, regardless of the requesting account?
+///
+/// These entries expose host runtime layout (Docker/containerd/k8s storage,
+/// snap mounts, virtual filesystems) and are not user storage; they are also
+/// I/O-noisy and mostly read-only.
+pub fn is_hidden_disk(mount: &str, filesystem: &str) -> bool {
+    let filesystem = filesystem.trim().to_ascii_lowercase();
+    if matches!(
+        filesystem.as_str(),
+        "overlay"
+            | "overlayfs"
+            | "squashfs"
+            | "tmpfs"
+            | "devtmpfs"
+            | "ramfs"
+            | "fuse.snapfuse"
+            | "fuse.lxcfs"
+            | "nsfs"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "fusectl"
+            | "mqueue"
+            | "debugfs"
+            | "tracefs"
+            | "securityfs"
+            | "pstore"
+            | "configfs"
+            | "bpf"
+            | "autofs"
+            | "binfmt_misc"
+    ) {
+        return true;
+    }
+    let mount = mount.trim();
+    const HIDDEN_PREFIXES: &[&str] = &[
+        "/var/lib/docker",
+        "/var/lib/containers",
+        "/var/lib/containerd",
+        "/var/lib/buildkit",
+        "/var/lib/kubelet",
+        "/var/lib/lxcfs",
+        "/run",
+        "/snap",
+        "/var/snap",
+        "/proc",
+        "/sys",
+        "/dev",
+    ];
+    HIDDEN_PREFIXES.iter().any(|prefix| {
+        mount == *prefix
+            || (mount.len() > prefix.len()
+                && mount.starts_with(prefix)
+                && mount.as_bytes()[prefix.len()] == b'/')
+    })
+}
+
+/// Remove container inventory from a monitor snapshot for accounts that are
+/// neither administrators nor allowed to use Applications.
+///
+/// The process-wide sampler publishes one shared snapshot; the SSE handler and
+/// the REST handlers call this per authenticated user so only authorized
+/// accounts see host-wide container names/ids. Disks are filtered at sampling
+/// time for everyone (see [`is_hidden_disk`]).
+pub fn redact_for(user_can_see_containers: bool, snapshot: &Value) -> Value {
+    if user_can_see_containers {
+        return snapshot.clone();
+    }
+    let Some(object) = snapshot.as_object() else {
+        return snapshot.clone();
+    };
+    let mut out = object.clone();
+    out.insert("containers".to_string(), Value::Array(Vec::new()));
+    out.insert("containersRestricted".to_string(), Value::Bool(true));
+    // The docker component detail can contain worker socket paths / daemon
+    // errors; keep only the availability category for restricted accounts.
+    if let Some(components) = out.get_mut("components").and_then(Value::as_array_mut) {
+        for component in components.iter_mut() {
+            let Some(component) = component.as_object_mut() else {
+                continue;
+            };
+            if component.get("id").and_then(Value::as_str) != Some("docker") {
+                continue;
+            }
+            let status = component
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string();
+            component.insert(
+                "detail".to_string(),
+                Value::String(match status.as_str() {
+                    "ok" => "available".to_string(),
+                    _ => "unavailable".to_string(),
+                }),
+            );
+        }
+    }
+    Value::Object(out)
 }
 
 fn build_snapshot(
@@ -865,5 +975,75 @@ mod tests {
         assert!(components
             .iter()
             .any(|c| c["id"] == "host" && c["status"] == "error"));
+    }
+
+    #[test]
+    fn hidden_disks_cover_runtime_and_virtual_filesystems() {
+        for (mount, filesystem) in [
+            ("", "overlay"),
+            ("", "overlayfs"),
+            ("", "squashfs"),
+            ("/run", "tmpfs"),
+            ("/var/lib/docker/overlay2/abc/merged", "ext4"),
+            ("/var/lib/docker", "ext4"),
+            ("/run/containerd", "ext4"),
+            ("/snap/core/1234", "squashfs"),
+            ("/var/snap/lxd/common", "squashfs"),
+            ("/proc", "proc"),
+            ("/sys/fs/cgroup", "cgroup2"),
+            ("/dev", "devtmpfs"),
+        ] {
+            assert!(
+                is_hidden_disk(mount, filesystem),
+                "should be hidden: {mount:?} {filesystem:?}"
+            );
+        }
+        for (mount, filesystem) in [
+            ("/", "ext4"),
+            ("/srv/rast", "xfs"),
+            ("/home", "btrfs"),
+            ("/var/lib/rast", "ext4"),
+            ("/mnt/backup", "zfs"),
+        ] {
+            assert!(
+                !is_hidden_disk(mount, filesystem),
+                "should be visible: {mount:?} {filesystem:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_for_hides_container_inventory_for_restricted_accounts() {
+        let snapshot = json!({
+            "ts": 1,
+            "containers": [
+                {"id": "0123456789ab", "name": "other-project-db-1"},
+            ],
+            "components": [
+                {"id": "docker", "name": "Docker", "status": "disabled",
+                 "detail": "socket /run/rast/worker.sock is missing"},
+            ],
+            "host": {"cpuCores": 4},
+        });
+        let restricted = redact_for(false, &snapshot);
+        assert_eq!(restricted["containers"], json!([]));
+        assert_eq!(restricted["containersRestricted"], json!(true));
+        assert_eq!(
+            restricted["components"][0]["detail"], "unavailable",
+            "worker socket paths must not leak to restricted accounts"
+        );
+        assert_eq!(restricted["host"]["cpuCores"], 4, "host metrics stay");
+
+        let admin = redact_for(true, &snapshot);
+        assert_eq!(admin["containers"][0]["name"], "other-project-db-1");
+        assert!(admin.get("containersRestricted").is_none());
+        assert!(admin["components"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("/run/rast"));
+
+        // Degenerate inputs never panic.
+        assert_eq!(redact_for(false, &json!(null)), json!(null));
+        assert_eq!(redact_for(true, &json!("text")), json!("text"));
     }
 }

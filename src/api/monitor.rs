@@ -32,6 +32,21 @@ pub struct HistoryQuery {
     pub points: Option<String>,
 }
 
+/// May this account see host-wide container inventory?
+///
+/// Only administrators and accounts allowed to use Applications may see
+/// container names/ids; everyone else still gets host metrics (the monitor
+/// itself stays available by default).
+pub async fn can_see_containers(state: &AppState, user: &AuthUser) -> bool {
+    if user.is_admin() {
+        return true;
+    }
+    crate::access::app_access(&state.db, user, "applications")
+        .await
+        .map(|access| access.allowed)
+        .unwrap_or(false)
+}
+
 /// Validate the requested history metric. Kept separate so it can be unit
 /// tested without building an `AppState`.
 pub fn parse_metric(metric: Option<&str>) -> AppResult<&'static str> {
@@ -47,12 +62,13 @@ pub fn parse_metric(metric: Option<&str>) -> AppResult<&'static str> {
 
 /// GET /api/monitor/snapshot — latest sample, sampling on demand if the
 /// maintenance timer has not produced one yet.
-pub async fn snapshot(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
+pub async fn snapshot(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
+    let can_see_containers = can_see_containers(&state, &user).await;
     let snapshot = match state.monitor.latest() {
         Some(snapshot) => snapshot,
         None => state.monitor.sample().await,
     };
-    Json(snapshot)
+    Json(crate::monitor::redact_for(can_see_containers, &snapshot))
 }
 
 /// GET /api/monitor/history?metric=cpu|mem|net&points=120
@@ -77,7 +93,8 @@ pub async fn history(
 
 /// GET /api/monitor/containers — container resource samples. Returns an empty
 /// list (with a reason) when Docker is disabled or the worker is unavailable.
-pub async fn containers(State(state): State<AppState>, _user: AuthUser) -> Json<Value> {
+pub async fn containers(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
+    let can_see_containers = can_see_containers(&state, &user).await;
     let mut body = state.monitor.containers();
     if let Some(snapshot) = state.monitor.latest() {
         if let Some(object) = body.as_object_mut() {
@@ -96,7 +113,7 @@ pub async fn containers(State(state): State<AppState>, _user: AuthUser) -> Json<
             );
         }
     }
-    Json(body)
+    Json(crate::monitor::redact_for(can_see_containers, &body))
 }
 
 /// Small endpoint summary used by tests and documentation tooling.
@@ -126,6 +143,18 @@ mod tests {
         cfg.db_max_connections = 2;
         cfg.job_concurrency = 1;
         cfg
+    }
+
+    fn normal_user() -> AuthUser {
+        AuthUser {
+            id: 2,
+            username: "alice".into(),
+            display_name: "Alice".into(),
+            role: crate::auth::Role::User,
+            session_id: "test".into(),
+            quota_bytes: 0,
+            must_change_password: false,
+        }
     }
 
     fn admin() -> AuthUser {
@@ -169,6 +198,17 @@ mod tests {
         assert!(body["host"].is_object());
         assert!(body["host"]["cpuCores"].as_u64().unwrap() >= 1);
         assert_eq!(body["unavailable"], false);
+        // Administrators keep the full container inventory payload.
+        assert!(body.get("containersRestricted").is_none(), "{body}");
+
+        // A regular account (no Applications grant) gets host metrics only.
+        let response = snapshot(State(state.clone()), normal_user())
+            .await
+            .into_response();
+        let body = body_json(response).await;
+        assert!(body["host"].is_object());
+        assert_eq!(body["containers"], json!([]));
+        assert_eq!(body["containersRestricted"], json!(true));
 
         let response = history(
             State(state.clone()),
@@ -206,5 +246,14 @@ mod tests {
         assert_eq!(body["available"], false);
         assert!(body["containers"].as_array().unwrap().is_empty());
         assert!(body["reason"].as_str().is_some());
+        assert!(body.get("containersRestricted").is_none(), "{body}");
+
+        // Restricted accounts get an empty inventory plus the marker.
+        let response = containers(State(state.clone()), normal_user())
+            .await
+            .into_response();
+        let body = body_json(response).await;
+        assert_eq!(body["containers"], json!([]));
+        assert_eq!(body["containersRestricted"], json!(true));
     }
 }
