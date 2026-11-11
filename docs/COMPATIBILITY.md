@@ -5,10 +5,12 @@ what is tested, what is only built in CI and what is unsupported. “Tested”
 means the complete install → run → upgrade path was exercised; “installer
 tested in a clean container” means the full install/upgrade/uninstall flow was
 run by `scripts/test-installer-clean.sh` in a disposable systemd container (see
-[INSTALL.md](INSTALL.md#clean-environment-installer-test-maintainers)); “CI”
-means the code builds and the test suite passes there but the installer/units
-were not manually deployed; “build-only” means a release binary is produced
-there but runtime behaviour is unverified.
+[INSTALL.md](INSTALL.md#clean-environment-installer-test-maintainers)); “runtime
+smoke-tested in CI” means the release workflow starts the built server on a
+native runner, hits `/healthz`, creates an administrator through the CLI and
+logs in through the JSON API; “CI” means the code builds and the test suite
+passes there but the installer/units were not manually deployed; “build-only”
+means a release binary is produced there but runtime behaviour is unverified.
 
 ## Platform support
 
@@ -16,8 +18,8 @@ there but runtime behaviour is unverified.
 | --- | --- | --- | --- |
 | Ubuntu 26.04 LTS | x86_64 | **Tested (reference platform)** | Primary development and deployment target (Cloudflare Tunnel + nginx in front); installer, units and upgrade path are exercised here |
 | Ubuntu 24.04 LTS | x86_64 | **Installer tested in a clean container** | `scripts/test-installer-clean.sh` installs/upgrades/uninstalls RAST inside a disposable systemd container built from the official `ubuntu:24.04` image (64 checks). Also a CI build/test runner |
-| Ubuntu 22.04 LTS | x86_64 | CI + release build host | Produces the official `rast-linux-x86_64` binary (glibc 2.35 baseline) |
-| Ubuntu 24.04 LTS | aarch64 | **Build-only** | Official `rast-linux-aarch64` binary is built on a native `ubuntu-24.04-arm` runner; runtime not yet tested |
+| Ubuntu 22.04 LTS | x86_64 | CI + release build host + **runtime smoke-tested in CI** | Produces the official `rast-linux-x86_64` binary (glibc 2.35 baseline); the release workflow runs the server smoke test on this native runner |
+| Ubuntu 24.04 LTS | aarch64 | **Runtime smoke-tested in CI (native arm64)** | The official `rast-linux-aarch64` binary is built and smoke-tested (serve + `/healthz` + CLI admin + API login) on a native `ubuntu-24.04-arm` runner. The full installer flow is still only exercised on x86_64; Debian/Ubuntu arm64 installs remain best-effort |
 | Debian 12 / 13 | x86_64, aarch64 | Expected, untested | Installer uses standard systemd, `useradd` and `install`; verify `rast doctor` on your host |
 | Other systemd distributions (Fedora, RHEL 9+, Rocky, …) | x86_64, aarch64 | Untested, best effort | Installer warns on non-Debian/Ubuntu families; manual install is the safe route ([INSTALL.md](INSTALL.md#manual-installation-no-installer)) |
 | Alpine, other musl systems | — | **Unsupported** | No musl/static build is published; glibc binaries do not run |
@@ -49,6 +51,18 @@ scripts/test-installer-clean.sh --skip-build --artifacts dist
 It is also the fastest way to reproduce a platform-specific installer bug
 without touching a real machine (see
 [INSTALL.md](INSTALL.md#clean-environment-installer-test-maintainers)).
+
+### CI runtime vs installer coverage
+
+| Architecture | Build + unit/e2e tests | Runtime smoke (serve, health, login) | Full installer flow |
+| --- | --- | --- | --- |
+| x86_64 | ✅ CI on Ubuntu 24.04 | ✅ native x86_64 release runner | ✅ clean systemd container (`scripts/test-installer-clean.sh`) |
+| aarch64 | ✅ CI on native arm64 runner | ✅ native arm64 release runner | ❌ not automated (manual/expected only) |
+
+Both release binaries are additionally covered by Sigstore build-provenance
+attestations created and verified by the release workflow — see
+[INSTALL.md](INSTALL.md#release-integrity-and-provenance) and
+[SECURITY.md](../SECURITY.md#releases).
 
 ## Build requirements
 

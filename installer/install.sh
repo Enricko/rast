@@ -49,6 +49,7 @@ RAST_ENABLE_WORKER=${RAST_ENABLE_WORKER:-auto}
 RAST_NO_START=${RAST_NO_START:-0}
 RAST_DRY_RUN=${RAST_DRY_RUN:-0}
 RAST_REQUIRE_SIGNATURE=${RAST_REQUIRE_SIGNATURE:-}
+RAST_VERIFY_ATTESTATION=${RAST_VERIFY_ATTESTATION:-}
 RAST_MINISIGN_PUBKEY=${RAST_MINISIGN_PUBKEY:-}
 RAST_COSIGN_PUBKEY=${RAST_COSIGN_PUBKEY:-}
 RAST_RELEASE_BASE_URL=${RAST_RELEASE_BASE_URL:-$DEFAULT_RELEASE_BASE}
@@ -99,6 +100,8 @@ Options:
   --no-worker            Do not install/start rast-worker.service.
   --no-start             Install files only; do not enable or start services.
   --dry-run              Detect, download and verify, but change nothing.
+  --verify-attestation   Also verify the binary's GitHub build-provenance
+                         attestation with `gh attestation verify` (fail closed).
   -h, --help             Show this help and exit.
 
 Environment variables (flags take precedence):
@@ -116,6 +119,8 @@ Environment variables (flags take precedence):
                           mirrors/air-gap installs. Default:
                           https://github.com/Enricko/rast/releases/download
                           (with a custom base, pass an explicit RAST_VERSION).
+  RAST_VERIFY_ATTESTATION 1 to verify GitHub build-provenance attestations
+                          (Sigstore keyless) with `gh attestation verify`.
   RAST_REQUIRE_SIGNATURE  minisign|cosign — fail unless a signature verifies.
   RAST_MINISIGN_PUBKEY    Path to a local minisign public key file.
   RAST_COSIGN_PUBKEY      Path to a local cosign public key file.
@@ -126,8 +131,10 @@ uid of the rast web account (RAST_WORKER_ALLOWED_UID drop-in); the worker
 accepts only whitelisted Docker operations from that account.
 
 The installer requires: systemd, an x86_64 or aarch64 CPU, glibc, and curl or
-wget. It runs only the documented steps, verifies the SHA-256 checksum of the
-downloaded binary and refuses to continue on a mismatch. It never configures
+wget. It runs only the documented steps, always verifies the SHA-256 checksum of
+the downloaded binary and refuses to continue on a mismatch. With
+--verify-attestation it additionally verifies the GitHub/Sigstore
+build-provenance attestation (requires the `gh` CLI 2.49+). It never configures
 the firewall, DNS, TLS certificates or a reverse proxy — see docs/INSTALL.md.
 
 Documentation: https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
@@ -205,6 +212,7 @@ while [ "$#" -gt 0 ]; do
         --no-worker) RAST_ENABLE_WORKER=0 ;;
         --no-start) RAST_NO_START=1 ;;
         --dry-run) RAST_DRY_RUN=1 ;;
+        --verify-attestation) RAST_VERIFY_ATTESTATION=1 ;;
         *) die "unknown option: $1 (run with --help for usage)" ;;
     esac
     shift
@@ -440,6 +448,25 @@ verify_signature() {
             die "unsupported RAST_REQUIRE_SIGNATURE=$RAST_REQUIRE_SIGNATURE (expected 'minisign' or 'cosign')"
             ;;
     esac
+}
+
+verify_attestation() {
+    # $1 downloaded file, $2 asset name. Optional fail-closed provenance check.
+    [ "$ATTESTATION_VERIFY" -eq 1 ] || return 0
+    _file=$1
+    _name=$2
+    command -v gh >/dev/null 2>&1 ||
+        die "RAST_VERIFY_ATTESTATION is enabled but the GitHub CLI 'gh' is not installed.
+Install it from https://cli.github.com/ or re-run without --verify-attestation."
+    if ! gh attestation verify --help >/dev/null 2>&1; then
+        die "the installed 'gh' CLI does not support 'gh attestation verify' (requires GitHub CLI 2.49 or newer).
+Upgrade gh or re-run without --verify-attestation."
+    fi
+    if ! gh attestation verify "$_file" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+        die "build-provenance attestation verification failed for $_name — refusing to install.
+The binary was not attested by the $REPO_SLUG release workflow (or GitHub could not be reached)."
+    fi
+    log "build-provenance attestation verified for $_name"
 }
 
 # ---------------------------------------------------------------------------
@@ -910,6 +937,8 @@ parse_bool "RAST_NO_START" "$RAST_NO_START" 0
 NO_START=$PARSED_BOOL
 parse_bool "RAST_DRY_RUN" "$RAST_DRY_RUN" 0
 DRY_RUN=$PARSED_BOOL
+parse_bool "RAST_VERIFY_ATTESTATION" "$RAST_VERIFY_ATTESTATION" 0
+ATTESTATION_VERIFY=$PARSED_BOOL
 
 case "$RAST_DOCKER_ENABLED" in
     "" | auto | AUTO | Auto) DOCKER_CHOICE=auto ;;
@@ -1054,6 +1083,7 @@ download "$RELEASE_URL/$BINARY_ASSET" "$RAST_TMP/$BINARY_ASSET" "RAST binary"
 download "$RELEASE_URL/SHA256SUMS" "$RAST_TMP/SHA256SUMS" "SHA256SUMS"
 verify_checksum "$RAST_TMP/SHA256SUMS" "$RAST_TMP/$BINARY_ASSET" "$BINARY_ASSET"
 verify_signature "$RELEASE_URL" "$RAST_TMP/$BINARY_ASSET" "$BINARY_ASSET"
+verify_attestation "$RAST_TMP/$BINARY_ASSET" "$BINARY_ASSET"
 
 chmod 0755 "$RAST_TMP/$BINARY_ASSET"
 if ! _version_output=$("$RAST_TMP/$BINARY_ASSET" version 2>&1); then
@@ -1095,6 +1125,11 @@ else
 fi
 if [ "$DOCKER_ENABLED" -eq 1 ]; then DOCKER_STATE="enabled"; else DOCKER_STATE="disabled"; fi
 if [ "$NO_START" -eq 1 ]; then START_STATE="no"; else START_STATE="yes"; fi
+if [ "$ATTESTATION_VERIFY" -eq 1 ]; then
+    ATTESTATION_STATE="verified via gh attestation"
+else
+    ATTESTATION_STATE="not verified (enable with --verify-attestation)"
+fi
 if [ -f "$CONFIG_FILE" ]; then CONFIG_STATE="preserved"; else CONFIG_STATE="created from template"; fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -1112,6 +1147,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  configuration:    %s (%s)\n' "$CONFIG_FILE" "$CONFIG_STATE"
     printf '  bind/public url:  %s / %s\n' "$BIND" "${PUBLIC_URL:-<not set>}"
     printf '  trusted proxies:  %s\n' "${TRUSTED_PROXIES:-<none>}"
+    printf '  provenance:       %s\n' "$ATTESTATION_STATE"
     printf '  docker apps:      %s (worker %s)\n' "$DOCKER_STATE" "$WORKER_STATE"
     printf '  services:         rast.service%s\n' "$WORKER_SERVICE"
     printf '  start services:   %s\n' "$START_STATE"

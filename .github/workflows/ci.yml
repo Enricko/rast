@@ -54,6 +54,7 @@ jobs:
           sh installer/install.sh --help > /dev/null
           sh installer/uninstall.sh --help > /dev/null
           # The installer must work when piped to sh and still parse arguments.
+          # shellcheck disable=SC2002 # piping through cat is exactly what we test here
           cat installer/install.sh | sh -s -- --help > /dev/null
           # Invalid input must fail cleanly before doing anything (no root, no network).
           if RAST_VERSION=not-a-version sh installer/install.sh --dry-run > /dev/null 2>&1; then

@@ -10,10 +10,14 @@
 #     the ShellCheck tool is available,
 #   * the binary for this machine's architecture runs and reports the expected
 #     version (skip with --no-run; binaries for other architectures are only
-#     checksum-verified).
+#     checksum-verified),
+#   * GitHub/Sigstore build-provenance attestations for both binaries and
+#     SHA256SUMS when --attestations is given (`gh attestation verify`; fails
+#     closed when gh is missing or a verification fails).
 #
 # Usage:
 #   scripts/verify-release.sh [--dir DIR] [--version X.Y.Z] [--no-run]
+#                             [--attestations] [--repo OWNER/REPO]
 
 set -euo pipefail
 
@@ -21,10 +25,12 @@ ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 DIR="$ROOT/dist"
 EXPECTED_VERSION=""
 RUN_CHECK=1
+VERIFY_ATTESTATIONS=0
+REPO_SLUG="Enricko/rast"
 FAILURES=0
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +54,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --version=*) EXPECTED_VERSION=${1#*=} ; EXPECTED_VERSION=${EXPECTED_VERSION#v} ;;
         --no-run) RUN_CHECK=0 ;;
+        --attestations) VERIFY_ATTESTATIONS=1 ;;
+        --repo)
+            shift
+            [[ $# -gt 0 ]] || {
+                echo "verify-release: --repo requires OWNER/REPO" >&2
+                exit 2
+            }
+            REPO_SLUG=$1
+            ;;
+        --repo=*) REPO_SLUG=${1#*=} ;;
         -h | --help)
             usage
             exit 0
@@ -147,6 +163,30 @@ for script in install.sh uninstall.sh; do
 done
 if [[ -f "$DIR/install.sh" ]] && ! grep -q '^RAST_DEFAULT_VERSION="v' "$DIR/install.sh"; then
     echo "verify-release: WARNING: install.sh is not pinned to a release tag; GitHub release assets should be pinned by the release workflow" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# Build-provenance attestations (optional, fail closed)
+# ---------------------------------------------------------------------------
+if [[ "$VERIFY_ATTESTATIONS" -eq 1 ]]; then
+    GH_BIN=${GH_BIN:-gh}
+    if ! command -v "$GH_BIN" >/dev/null 2>&1; then
+        fail "--attestations requires the GitHub CLI ('gh'); install it or omit the flag"
+    elif ! "$GH_BIN" attestation verify --help >/dev/null 2>&1; then
+        fail "--attestations requires 'gh attestation verify' (GitHub CLI 2.49+); upgrade gh"
+    else
+        for subject in rast-linux-x86_64 rast-linux-aarch64 SHA256SUMS; do
+            if [[ ! -f "$DIR/$subject" ]]; then
+                fail "attestation subject missing: $subject"
+                continue
+            fi
+            if "$GH_BIN" attestation verify "$DIR/$subject" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+                ok "build provenance attested: $subject ($REPO_SLUG)"
+            else
+                fail "build provenance verification failed: $subject"
+            fi
+        done
+    fi
 fi
 
 # ---------------------------------------------------------------------------

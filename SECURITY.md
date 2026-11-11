@@ -100,16 +100,21 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
 * Availability attacks that exhaust host resources (bounded by systemd limits,
   but there is no per-user request quota beyond file quotas).
 * Supply-chain compromise of crates/npm packages beyond what `Cargo.lock`,
-  `package-lock.json`, checksummed releases and dependency auditing detect.
+  `package-lock.json`, checksummed releases, build-provenance attestations and
+  dependency auditing detect.
 * Users who can read the data directory or `secret.key` from the host: that is
   game over for encrypted secrets and sessions.
 * Missing browser security features in very old browsers.
 
 ### Not implemented (yet) — do not assume these protections exist
 
-* **Release signing** is not enabled; integrity relies on TLS + SHA-256
-  checksums from the GitHub Release. Verify checksums and prefer pinned
-  versions.
+* **Project-managed release signing** (long-lived minisign/cosign keys) is not
+  enabled. Integrity relies on TLS + the release `SHA256SUMS`, and releases now
+  publish GitHub/Sigstore build-provenance attestations for both binaries and
+  `SHA256SUMS` (verify with `gh attestation verify ... --repo Enricko/rast`).
+  Provenance proves build origin, not source review or reproducibility. The
+  fail-closed `RAST_REQUIRE_SIGNATURE` hooks remain for operators who verify
+  with their own keys.
 * **Two-factor authentication** (TOTP/WebAuthn) is not available in 0.1.x.
 * Audit logs are append-only in the application but are not cryptographically
   chained or forwarded to a remote SIEM; an admin with database access can
@@ -172,13 +177,36 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
   toolchain and a committed `Cargo.lock`/`package-lock.json`.
 * `SHA256SUMS` is published and verified by the installer and `rast update`
   before anything is replaced; a mismatch aborts.
+* **Build-provenance attestations**: the release workflow creates Sigstore
+  keyless attestations (`actions/attest-build-provenance`) for both binaries
+  and for `SHA256SUMS`, and verifies them with `gh attestation verify` before
+  publishing. The installer can enforce the same check with
+  `--verify-attestation` / `RAST_VERIFY_ATTESTATION=1` (fail-closed; requires
+  GitHub CLI 2.49+ and GitHub API access).
+* Both architectures are exercised end to end on their native runners before
+  release: the built binary starts, answers `/healthz`, creates an
+  administrator through the CLI and logs in through the JSON API.
 * The release workflow validates the version against `Cargo.toml`, extracts
   release notes from `CHANGELOG.md` and re-verifies all assets before
   publishing.
 * Fail-closed signature verification hooks (`RAST_REQUIRE_SIGNATURE`,
-  minisign/cosign) are implemented in the installer for operators who manage
-  their own keys; official signatures are planned (see
-  [CHANGELOG.md](CHANGELOG.md)).
+  minisign/cosign) remain available for operators who manage their own keys;
+  project-managed signatures are planned.
+
+Manual verification of a downloaded release:
+
+```bash
+sha256sum --check --strict SHA256SUMS
+gh attestation verify rast-linux-x86_64 --repo Enricko/rast
+gh attestation verify SHA256SUMS --repo Enricko/rast
+```
+
+An attestation proves the file was produced by this repository's public
+release workflow for a specific commit and is recorded in Sigstore's
+transparency log. It does **not** prove the source was reviewed, that the
+build is reproducible, or that the binary is free of vulnerabilities. Checksums
+alone protect against corruption and transfer errors, not against a compromised
+release; provenance plus a pinned version narrows that window.
 
 ## Known dependency advisory (0.1.0)
 
@@ -214,5 +242,6 @@ and upgrade RAST once a build with the patched SQLite is published.
 - [ ] Set `RAST_MAX_UPLOAD_BYTES` and proxy body limits to values you need;
       missing limits allow disk-filling uploads by authenticated users.
 - [ ] Run `sudo -u rast rast doctor` after upgrades or configuration changes.
-- [ ] Verify release checksums (and signatures once published) before
-      installing, especially on internet-facing servers.
+- [ ] Verify release checksums **and** build-provenance attestations
+      (`sha256sum --check --strict SHA256SUMS`, `gh attestation verify …`)
+      before installing, especially on internet-facing servers.

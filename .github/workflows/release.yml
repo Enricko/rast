@@ -22,6 +22,9 @@ on:
 
 permissions:
   contents: write
+  # Sigstore keyless build-provenance attestations (F10).
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -114,6 +117,29 @@ jobs:
             echo "sha256sum -c SHA256SUMS"
             echo "sh install.sh --help"
             echo '```'
+            echo
+            echo "## Runtime verification"
+            echo
+            echo "Both binaries were smoke-tested on their native build runners"
+            echo "(GitHub-hosted x86_64 and arm64): the server started with a temporary"
+            echo "config, answered \`/healthz\`, accepted CLI administrator creation and a"
+            echo "JSON API login. The installer itself is exercised on Ubuntu 24.04 in a"
+            echo "disposable systemd container."
+            echo
+            echo "## Provenance"
+            echo
+            echo "Both binaries and \`SHA256SUMS\` carry GitHub artifact attestations"
+            echo "(Sigstore keyless build provenance). Verify them after downloading:"
+            echo
+            echo '```bash'
+            echo "gh attestation verify rast-linux-x86_64 --repo Enricko/rast"
+            echo "gh attestation verify rast-linux-aarch64 --repo Enricko/rast"
+            echo "gh attestation verify SHA256SUMS --repo Enricko/rast"
+            echo '```'
+            echo
+            echo "Provenance proves the files were built by this repository's release"
+            echo "workflow for the tagged commit; it is not a reproduction or code-review"
+            echo "guarantee. The installer can enforce it with \`--verify-attestation\`."
           } > release-notes.md
           cat release-notes.md
 
@@ -164,6 +190,11 @@ jobs:
     name: Build ${{ matrix.arch }}
     needs: [prepare, frontend]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      # Required to create keyless Sigstore build-provenance attestations.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -209,6 +240,50 @@ jobs:
           test -f frontend/dist/index.html
           echo "Verified rast $reported with embedded frontend assets"
 
+      - name: Runtime smoke test (native ${{ matrix.arch }})
+        # Both architectures are exercised on their native runners, not just
+        # built: start the server with a temporary config, hit /healthz, create
+        # an administrator through the CLI and log in through the JSON API.
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          pid=""
+          cleanup() {
+            if [ -n "$pid" ]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+            rm -rf "$work"
+          }
+          trap cleanup EXIT
+          cat > "$work/rast.toml" <<EOF
+          bind = "127.0.0.1:18720"
+          data_dir = "$work/data"
+          storage_dir = "$work/storage"
+          log_level = "warn"
+          EOF
+          RAST_CONFIG="$work/rast.toml" ./target/release/rast serve >"$work/serve.log" 2>&1 &
+          pid=$!
+          healthy=no
+          for _ in $(seq 1 80); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18720/healthz >/dev/null 2>&1; then
+              healthy=yes
+              break
+            fi
+            sleep 0.25
+          done
+          if [ "$healthy" != yes ]; then
+            echo "server did not become healthy on native ${{ matrix.arch }} runner" >&2
+            cat "$work/serve.log" >&2
+            exit 1
+          fi
+          test "$(curl -fsS --max-time 5 http://127.0.0.1:18720/healthz)" = ok
+          printf '%s\n' 'Runtime-Smoke-Passw0rd-1!' | \
+            RAST_CONFIG="$work/rast.toml" ./target/release/rast user create-admin smoke --password-stdin
+          login_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Content-Type: application/json' \
+            -d '{"username":"smoke","password":"Runtime-Smoke-Passw0rd-1!"}' \
+            http://127.0.0.1:18720/api/auth/login)
+          test "$login_code" = 200
+          echo "Runtime smoke test passed on native ${{ matrix.arch }} runner"
+
       - name: Stage release asset
         run: |
           set -euo pipefail
@@ -217,6 +292,11 @@ jobs:
           chmod 0755 "$asset"
           sha256sum "$asset" > "$asset.sha256"
           cat "$asset.sha256"
+
+      - name: Attest build provenance (native ${{ matrix.arch }})
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: rast-linux-${{ matrix.arch }}
 
       - name: Upload release asset
         uses: actions/upload-artifact@v4
@@ -235,6 +315,11 @@ jobs:
     name: Publish GitHub Release
     needs: [prepare, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # Attest SHA256SUMS and verify the build-provenance attestations.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -256,6 +341,10 @@ jobs:
           set -euo pipefail
           version="${{ needs.prepare.outputs.version }}"
           tag="${{ needs.prepare.outputs.tag }}"
+          if [[ "$tag" != "v${version}" ]]; then
+            echo "tag '$tag' and version '$version' disagree" >&2
+            exit 1
+          fi
           rm -f dist/*.sha256
 
           # Pin install.sh to this release so a release asset never installs
@@ -273,11 +362,55 @@ jobs:
           test -f dist/install.sh
           grep -q "^RAST_DEFAULT_VERSION=\"${tag}\"" dist/install.sh
 
+      - name: Attest SHA256SUMS
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/SHA256SUMS
+
       - name: Verify release assets
         run: |
           set -euo pipefail
           ls -l dist
+          (cd dist && sha256sum --check --strict SHA256SUMS)
           scripts/verify-release.sh --dir dist --version "${{ needs.prepare.outputs.version }}"
+
+      - name: Verify release provenance attestations
+        # gh attestation verify needs a reasonably recent gh CLI; install a
+        # current release if the runner's copy is too old (F10).
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          verifier=$(command -v gh)
+          if ! gh attestation verify --help >/dev/null 2>&1; then
+            echo "::notice::runner gh lacks attestation support; installing the latest gh release"
+            gh_version=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              https://api.github.com/repos/cli/cli/releases/latest \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+            gh_dir="${RUNNER_TEMP}/gh-${gh_version}"
+            mkdir -p "$gh_dir"
+            curl -fsSL "https://github.com/cli/cli/releases/download/${gh_version}/gh_${gh_version#v}_linux_amd64.tar.gz" \
+              | tar -xz -C "$gh_dir" --strip-components=1
+            verifier="${gh_dir}/bin/gh"
+          fi
+          "$verifier" --version
+          for file in dist/rast-linux-x86_64 dist/rast-linux-aarch64 dist/SHA256SUMS; do
+            echo "verifying build provenance: $file"
+            verified=no
+            for attempt in 1 2 3 4 5; do
+              if "$verifier" attestation verify "$file" --repo "${GITHUB_REPOSITORY}"; then
+                verified=yes
+                break
+              fi
+              echo "attestation verification attempt ${attempt} failed; retrying in 3s" >&2
+              sleep 3
+            done
+            if [ "$verified" != yes ]; then
+              echo "build provenance verification failed for ${file}" >&2
+              exit 1
+            fi
+          done
+          echo "All release assets carry valid build-provenance attestations"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

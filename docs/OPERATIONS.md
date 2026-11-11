@@ -172,6 +172,48 @@ sudo -u rast rast doctor
 # sign in through the browser and check audit logs / files
 ```
 
+### Restoring user files from an archive
+
+`rast restore` replaces the **database** only. A `users`-scope archive also
+contains the raw user files, stored as `users/homes/<username>/...` and
+`users/shared/<name>/...`. They must be extracted into the configured
+`storage_dir` subdirectories — never into `/`.
+
+With the default `storage_dir = /srv/rast`:
+
+```bash
+archive=/var/lib/rast/backups/rast-...-db-config-users.tar.gz
+sudo systemctl stop rast.service        # do not extract while the server runs
+
+# 1. Inspect the archive (no writes).
+tar -tzf "$archive" | head -n 30
+
+# 2. Test on an isolated copy first: extract to a scratch directory and compare.
+scratch=$(mktemp -d)
+mkdir -p "$scratch/homes" "$scratch/shared"
+tar -xzf "$archive" -C "$scratch/homes" --strip-components=2 users/homes
+tar -xzf "$archive" -C "$scratch/shared" --strip-components=2 users/shared
+diff -r "$scratch/homes/<username>" /srv/rast/homes/<username> | head
+
+# 3. Extract into storage_dir (NOT into /).
+sudo tar -xzf "$archive" -C /srv/rast/homes --strip-components=2 users/homes
+sudo tar -xzf "$archive" -C /srv/rast/shared --strip-components=2 users/shared
+sudo chown -R rast:rast /srv/rast/homes /srv/rast/shared
+# Per-user homes stay private; shared folders follow their share policy.
+sudo chmod 0700 /srv/rast/homes/*
+
+# 4. Start and verify.
+sudo systemctl start rast.service
+sudo -u rast rast doctor
+```
+
+`--strip-components=2 users/homes` removes the `users/homes/` prefix, so each
+home is restored under its username; the same applies to `users/shared`.
+Never use `-C / --strip-components=2 users/` — that extracts every home and
+shared folder directly into the filesystem root. If `storage_dir` is custom
+(see [CONFIGURATION.md](CONFIGURATION.md)), substitute it above. Always try the
+scratch extraction on an isolated copy before touching live data.
+
 ### Full disaster recovery (lost host)
 
 On a fresh host, in this order:
@@ -180,8 +222,11 @@ On a fresh host, in this order:
 2. Stop the service.
 3. Restore `/etc/rast/` (config + env), `/var/lib/rast/secret.key` and the
    database (`rast restore --from … --yes`).
-4. Restore `/srv/rast/` (user files) with your file-level backups. Match
-   ownership: `rast:rast`; per-user homes are `0700`.
+4. Restore user files into `storage_dir/homes` and `storage_dir/shared` with
+   the commands in
+   [Restoring user files from an archive](#restoring-user-files-from-an-archive)
+   (never extract `users/` into `/`). Match ownership: `rast:rast`; per-user
+   homes are `0700`.
 5. `sudo systemctl start rast.service && sudo -u rast rast doctor`.
 
 Without `secret.key`, sessions and encrypted app secrets cannot be recovered;
@@ -201,6 +246,12 @@ curl -fsSL https://github.com/Enricko/rast/releases/latest/download/install.sh \
 Re-running the installer replaces the binary and units, keeps `/etc/rast`,
 `/var/lib/rast` and `/srv/rast`, restarts the service and verifies `/healthz`.
 Choose an exact version with `--version X.Y.Z`. Preview with `--dry-run`.
+To also verify the release's build provenance (GitHub CLI 2.49+):
+
+```bash
+curl -fsSL https://github.com/Enricko/rast/releases/latest/download/install.sh \
+  | sudo sh -s -- --verify-attestation
+```
 
 ### 2. `rast update` (CLI)
 
@@ -228,6 +279,22 @@ What `rast update` does:
 `rast update` must run as root (it writes `/usr/local/bin` and drives systemd).
 `--check` is safe for unprivileged monitoring.
 
+**Provenance:** `rast update` verifies the release `SHA256SUMS` (integrity) but
+does not query Sigstore attestations yet. Verify provenance manually — the
+installed binary is byte-identical to the published asset:
+
+```bash
+gh attestation verify /usr/local/bin/rast --repo Enricko/rast
+# or, before updating, against the downloaded asset:
+gh attestation verify rast-linux-x86_64 --repo Enricko/rast
+```
+
+The installer can enforce the same check with `--verify-attestation`; see
+[INSTALL.md](INSTALL.md#release-integrity-and-provenance). An attestation proves
+the binary was built by this repository's release workflow for a specific
+commit — it does not prove the source was reviewed or that the build is
+reproducible.
+
 ### Upgrade checklist
 
 1. Read the release notes and `CHANGELOG.md` section for the target version.
@@ -239,41 +306,88 @@ What `rast update` does:
 
 ## Rollback
 
-### Binary-only rollback (same or older compatible schema)
+> **Prefer fixing forward.** Rollback restores a database snapshot taken before
+> the upgrade, so everything written after that backup (users, files, audit
+> events, settings) is lost. If the new release is usable at all, install the
+> next patch release instead.
 
-If the **new version was already running** and you only need to go back one
-step, restore the previous binary and restart:
+An update has two independent parts: the **binary** and the **database schema**.
+The binary can be replaced at any time, but migrations are **forward-only**: a
+binary that does not know every migration recorded in the database refuses to
+start. Keep the pre-upgrade database backup created by `rast update` (or your
+own `rast backup`) until the new release has proven healthy.
 
-```bash
-sudo systemctl stop rast.service
-# option A: rast update's rollback copy
-ls -l /usr/local/bin/rast.rollback-*
-sudo cp -a /usr/local/bin/rast /usr/local/bin/rast.failed-$(date +%Y%m%d)
-sudo cp -a /usr/local/bin/rast.rollback-<previous-version> /usr/local/bin/rast
-# option B: installer's copy
-ls -l /usr/local/lib/rast/
-sudo install -m 0755 /usr/local/lib/rast/rast-<previous-version> /usr/local/bin/rast
-sudo systemctl start rast.service
-sudo rast status && sudo -u rast rast doctor
+### Why a binary-only rollback usually fails after a schema change
+
+RAST applies and validates migrations at startup. A binary older than the
+database schema exits with an error like:
+
+```text
+rast: database migration failed: migration 4 was previously applied but is missing in the resolved migrations
 ```
 
-**Schema caveat:** migrations are forward-only. If the new binary applied a
-migration, the older binary may refuse to open the database ("migration …
-missing/version mismatch"). In that case restore the pre-upgrade database
-(`rast restore --from <pre-upgrade backup> --yes`) as well as the older binary.
-Check the current schema version with `rast doctor` (shows `schema vN`) before
-and after the upgrade.
+(reproduced with the published v0.1.8 binary against a schema-v4 database).
+The service stays down until a new-enough binary is installed **or** the old
+database is restored. The saved binaries (`/usr/local/lib/rast/rast-<version>`
+from the installer, `/usr/local/bin/rast.rollback-<version>` from `rast update`)
+are only directly reusable when the older binary understands the *current*
+schema. Check `rast doctor` (`schema vN`) and the target release's migration
+list before swapping the binary.
 
-### Full rollback
+### Rollback procedure
 
-1. Stop the service.
-2. Install the previous release (`install.sh --version X.Y.Z` or restore the
-   binary copy).
-3. Restore the pre-upgrade backup (`rast restore --from … --yes`).
-4. Start the service and verify.
+1. Stop the service: `sudo systemctl stop rast.service`.
+2. Preserve evidence before changing anything:
 
-Keep the failed-version logs (`journalctl -u rast.service --since …`) for the
-issue report.
+   ```bash
+   sudo journalctl -u rast.service --since '1 hour ago' > /tmp/rast-failed.log
+   sudo cp -a /usr/local/bin/rast /usr/local/bin/rast.failed-$(date +%Y%m%d)
+   sudo -u rast sqlite3 /var/lib/rast/rast.db \
+     ".backup '/var/lib/rast/backups/pre-rollback-$(date +%Y%m%d-%H%M%S).db'"
+   ```
+
+3. **Schema-compatible rollback** (the old binary understands the current
+   schema — typically only between patch releases that added no migration):
+   install the saved binary and start the service:
+
+   ```bash
+   sudo install -m 0755 /usr/local/lib/rast/rast-<previous-version> /usr/local/bin/rast
+   sudo systemctl start rast.service
+   sudo rast status && sudo -u rast rast doctor
+   ```
+
+4. **Schema rollback** (the old binary predates a migration): restore the
+   database **first**, then install the old binary, then start:
+
+   ```bash
+   # Restore the pre-upgrade archive (stop the service first; rast restore
+   # refuses to run while it is active).
+   sudo -u rast rast restore --from /var/lib/rast/backups/<pre-upgrade-backup>.tar.gz --yes
+   sudo install -m 0755 /usr/local/lib/rast/rast-<previous-version> /usr/local/bin/rast
+   sudo systemctl start rast.service
+   sudo rast status && sudo -u rast rast doctor
+   ```
+
+5. Verify: sign in, open a file, check Activity Logs and `/healthz`.
+
+### Access-control caveat when rolling back below 0.2.0
+
+0.2.0 introduced NAS-style **user groups** and the enforced access policy
+(migration `0004_groups.sql`, schema v4). A pre-0.2.0 binary does **not**
+evaluate group folder/app rules at all; it falls back to the legacy
+`share_members` ACL and owner rules. Rolling back to 0.1.x therefore **widens
+access** for every account whose access came from a group grant and silently
+ignores explicit group denies. After such a rollback:
+
+* review Control Panel → Users & Groups and the affected shared folders with an
+  administrator;
+* have users sign out and back in (sessions are revalidated against the running
+  server);
+* temporarily disable accounts that relied on group grants;
+* return to 0.2.0+ as soon as possible.
+
+Keep the failed-version logs and the preserved database copy for the issue
+report.
 
 ## User and session operations
 

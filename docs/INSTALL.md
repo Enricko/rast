@@ -68,6 +68,7 @@ curl -fsSL https://github.com/Enricko/rast/releases/latest/download/install.sh \
 | `--enable-worker` / `--no-worker` | `RAST_ENABLE_WORKER` | auto | Install/start the worker unit |
 | `--no-start` | `RAST_NO_START=1` | off | Install files only, do not enable/start services |
 | `--dry-run` | `RAST_DRY_RUN=1` | off | Detect, download, verify, print plan, change nothing |
+| `--verify-attestation` | `RAST_VERIFY_ATTESTATION=1` | off | Also verify the binary's GitHub/Sigstore build-provenance attestation with `gh attestation verify` (fails closed) |
 | `--help` | — | — | Usage |
 | — | `RAST_RELEASE_BASE_URL` | GitHub Releases | Mirror/air-gap download base URL |
 | — | `RAST_REQUIRE_SIGNATURE=minisign\|cosign` | unset | Fail unless a release signature verifies (see below) |
@@ -80,6 +81,9 @@ Notes:
 * It never edits the firewall, DNS, TLS certificates or reverse proxy config.
 * It always verifies `SHA256SUMS`; a mismatch aborts before anything is
   installed.
+* With `--verify-attestation` it additionally checks the GitHub/Sigstore
+  build-provenance attestation of the downloaded binary (needs the `gh` CLI
+  2.49+ and network access; verification failures abort the installation).
 * `--no-start` is useful in images/automation: run
   `systemctl enable --now rast.service` yourself afterwards.
 * If the downloaded binary cannot run (glibc or CPU mismatch) the installer
@@ -105,20 +109,55 @@ Re-running the installer is the supported upgrade path: it replaces the binary
 and units, keeps `/etc/rast/rast.toml` (and prints a warning if you passed
 configuration flags that were not applied) and never touches existing data.
 
-### Release signature verification
+### Release integrity and provenance
 
-Official releases can be verified with `minisign` or `cosign`. Signature
-verification is **fail-closed**: if `RAST_REQUIRE_SIGNATURE` is set and the
-tool, public key or signature is missing, the installer aborts. Release
-signing is not yet enabled; leave the variable unset until a signing
-announcement is made in the release notes.
+Every release publishes `SHA256SUMS` and Sigstore build-provenance attestations
+(GitHub artifact attestations, keyless) for both binaries and the checksum
+file. Three independent checks are available:
 
 ```bash
-# example once signatures are published
+# 1. Integrity: the files match the published checksums.
+sha256sum --check --strict SHA256SUMS
+
+# 2. Origin/provenance: the files were built by this repository's release
+#    workflow (GitHub CLI 2.49+; works without a local login for public repos).
+gh attestation verify rast-linux-x86_64 --repo Enricko/rast
+gh attestation verify rast-linux-aarch64 --repo Enricko/rast
+gh attestation verify SHA256SUMS --repo Enricko/rast
+
+# 3. End to end through the installer (downloads, checksum + provenance,
+#    then installs only if both pass).
+curl -fsSL https://github.com/Enricko/rast/releases/latest/download/install.sh \
+  | sudo sh -s -- --verify-attestation
+```
+
+What this does and does not prove:
+
+* **Proves**: the attested file is exactly the artifact produced by the public
+  release workflow of `Enricko/rast` for a specific commit, recorded in
+  Sigstore's transparency log (no project signing key to manage or leak).
+* **Does not prove**: that the source was reviewed, free of bugs, or that the
+  build is bit-for-bit reproducible. Treat provenance as one layer on top of
+  TLS, checksums and pinned versions.
+* The attestation lookup needs access to the GitHub API. Air-gapped/mirrored
+  installs without that access can skip `--verify-attestation`; the installer
+  still enforces `SHA256SUMS` from the mirrored release.
+* Older `gh` versions do not ship `gh attestation verify` (2.49+ is required);
+  the installer fails closed with a clear message instead of silently skipping
+  the check.
+
+Project-managed `minisign`/`cosign` signatures are **not** published yet. The
+installer keeps the fail-closed hooks for operators who manage their own keys:
+
+```bash
 RAST_REQUIRE_SIGNATURE=minisign \
 RAST_MINISIGN_PUBKEY=/etc/rast/minisign.pub \
-  sh install.sh --version 0.1.0
+  sh install.sh --version 0.2.0
 ```
+
+`RAST_REQUIRE_SIGNATURE` (minisign/cosign) and
+`RAST_VERIFY_ATTESTATION` (`gh attestation verify`) are independent and can be
+combined.
 
 ### Air-gapped or mirrored installation
 
@@ -142,9 +181,12 @@ RAST_RELEASE_BASE_URL=https://mirror.example.com/rast-mirror \
 ```
 
 The installer appends `/v<version>/` to the base URL and still verifies
-`SHA256SUMS`; `file://` bases work for offline media. If your mirror also
-serves a newest-release pointer, keep the default GitHub URLs unchanged and
-mirror the release assets under the standard `v<version>/` layout.
+`SHA256SUMS`; `file://` bases work for offline media. Provenance verification
+(`--verify-attestation`) needs GitHub API access, so it is normally skipped on
+air-gapped installs and mirrors should distribute the release assets plus
+`SHA256SUMS` over a trusted channel. If your mirror also serves a newest-release
+pointer, keep the default GitHub URLs unchanged and mirror the release assets
+under the standard `v<version>/` layout.
 
 ## Post-install steps
 
@@ -383,11 +425,13 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 1. Download the release assets, verify the checksum and inspect the files:
 
    ```bash
-   version=0.1.0
+   version=0.2.0
    base="https://github.com/Enricko/rast/releases/download/v${version}"
    curl -fsSLO "$base/rast-linux-x86_64"
    curl -fsSLO "$base/SHA256SUMS"
    sha256sum --check --ignore-missing SHA256SUMS
+   # optional: verify GitHub/Sigstore build provenance
+   gh attestation verify rast-linux-x86_64 --repo Enricko/rast
    ```
 
 2. Create the account, directories and configuration:
@@ -533,6 +577,8 @@ to test on a physical machine.
 | `unsupported CPU architecture` | Only `x86_64` and `aarch64` are built; build from source for anything else |
 | `the downloaded binary cannot run on this host` | glibc too old or wrong arch. Check [COMPATIBILITY.md](COMPATIBILITY.md); build from source on the target |
 | `SHA-256 checksum mismatch` | Corrupted/partial download or a mirror problem; retry, verify the release page |
+| `build-provenance attestation verification failed` | Not attested by the `Enricko/rast` release workflow, no network/GitHub access, or a tampered/unofficial download; verify `SHA256SUMS` and the release URL, or omit `--verify-attestation` for air-gapped mirrors |
+| `gh CLI does not support 'gh attestation verify'` | Upgrade the GitHub CLI to 2.49+ or drop `--verify-attestation` |
 | `cannot determine the latest RAST release` | No releases published / GitHub API blocked; pin `RAST_VERSION=X.Y.Z` |
 | `address already in use` | Another process (or old RAST instance) uses port 8720: `ss -ltnp \| grep 8720` |
 | Service fails with a TOML parse error | `journalctl -u rast.service -n 50`; unknown keys are rejected |
