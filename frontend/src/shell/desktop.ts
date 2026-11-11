@@ -702,7 +702,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         { class: "taskbar-app-icon", dataset: { app: win.appId } },
         appIconSvg(win.appId, win.icon || app?.icon || "grid", 17),
       ),
-      h("span", { class: "taskbar-app-label" }, win.title || app?.name || "Window"),
+      // The application's name only; the window title (e.g. "Control Panel —
+      // Profile") stays in the tooltip to tell several windows apart.
+      h("span", { class: "taskbar-app-label" }, app?.name || win.title || "Window"),
       h("span", { class: "taskbar-app-indicator", ariaHidden: true }),
     );
     button.addEventListener("auxclick", (event) => {

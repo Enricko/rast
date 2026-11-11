@@ -403,11 +403,12 @@ This is fixed in `09fe04f`, but the fix only helps updates *run by* a binary
 that contains it. The update from 0.4.0 to the next release can therefore
 still print the message once. Check the result with `rast doctor`.
 
-**Follow-up: v0.4.1** (`fca92c9`, CI passed) is prepared but not yet tagged.
+**Follow-up: v0.4.1** is prepared on `main` (CI passed) but not yet tagged.
 It contains:
 - the stable taskbar slots with per-account pins (three default pins);
 - the default widgets (migration 0007, schema v7);
-- the updater fix.
+- the updater fix;
+- taskbar buttons that show only the application name.
 
 ## 11. Verification summary (final build `e03fee4`)
 

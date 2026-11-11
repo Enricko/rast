@@ -43,6 +43,8 @@ is not reversible by an older binary (see "Upgrade and rollback").
   CPU & Memory (when they may use Resource Monitor). Changing or removing them
   saves the account's own layout; removing both is remembered.
 - Widgets keep a small margin from the screen edges and the taskbar.
+- Taskbar buttons show the application's name only ("Control Panel", not
+  "Control Panel — Profile"); the full window title remains in the tooltip.
 
 ### Fixed
 
