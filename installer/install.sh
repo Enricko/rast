@@ -101,7 +101,9 @@ Options:
   --no-start             Install files only; do not enable or start services.
   --dry-run              Detect, download and verify, but change nothing.
   --verify-attestation   Also verify the binary's GitHub build-provenance
-                         attestation with `gh attestation verify` (fail closed).
+                         attestation with `gh attestation verify` (fail closed;
+                         needs gh 2.49+ and GitHub auth: `gh auth login` or
+                         GH_TOKEN, even for public releases).
   -h, --help             Show this help and exit.
 
 Environment variables (flags take precedence):
@@ -462,9 +464,13 @@ Install it from https://cli.github.com/ or re-run without --verify-attestation."
         die "the installed 'gh' CLI does not support 'gh attestation verify' (requires GitHub CLI 2.49 or newer).
 Upgrade gh or re-run without --verify-attestation."
     fi
-    if ! gh attestation verify "$_file" --repo "$REPO_SLUG" >/dev/null 2>&1; then
+    _att_out=$RAST_TMP/attestation-check.out
+    if ! gh attestation verify "$_file" --repo "$REPO_SLUG" >"$_att_out" 2>&1; then
+        _att_detail=$(tail -n 3 "$_att_out" 2>/dev/null | tr '\n' ' ')
         die "build-provenance attestation verification failed for $_name — refusing to install.
-The binary was not attested by the $REPO_SLUG release workflow (or GitHub could not be reached)."
+Possible causes: the binary is not attested by the $REPO_SLUG release workflow,
+GitHub could not be reached, or the GitHub CLI is not authenticated
+(run 'gh auth login' or set GH_TOKEN). gh output: ${_att_detail:-<none>}"
     fi
     log "build-provenance attestation verified for $_name"
 }

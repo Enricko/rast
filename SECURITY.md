@@ -201,6 +201,9 @@ gh attestation verify rast-linux-x86_64 --repo Enricko/rast
 gh attestation verify SHA256SUMS --repo Enricko/rast
 ```
 
+(`gh` must be 2.49+ and authenticated for the attestation API — `gh auth login`
+or `GH_TOKEN` — even though the repository is public.)
+
 An attestation proves the file was produced by this repository's public
 release workflow for a specific commit and is recorded in Sigstore's
 transparency log. It does **not** prove the source was reviewed, that the

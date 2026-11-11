@@ -18,6 +18,13 @@
 # Usage:
 #   scripts/test-installer-clean.sh                 # build + test (systemd container)
 #   scripts/test-installer-clean.sh --skip-build --artifacts dist
+#   GH_TOKEN=$(gh auth token) scripts/test-installer-clean.sh --verify-attestation
+#   scripts/test-installer-clean.sh --verify-attestation --gh-bin /path/to/gh
+#
+# --verify-attestation copies the caller's gh CLI (>= 2.49) into the container
+# and makes the installer verify GitHub/Sigstore build provenance. GitHub
+# requires authentication for the attestation API even on public repositories,
+# so export GH_TOKEN (e.g. `GH_TOKEN=$(gh auth token)`).
 #   scripts/test-installer-clean.sh --mode stub     # fallback when systemd-in-container is unavailable
 #   scripts/test-installer-clean.sh --keep-container
 #
@@ -39,6 +46,8 @@ SKIP_FRONTEND=0
 ARTIFACTS=""
 KEEP_CONTAINER=0
 BOOT_TIMEOUT=120
+VERIFY_ATTESTATION=0
+GH_BIN_CLI=""
 VERBOSE=0
 LOCAL=0
 ALLOW_HOST=0
@@ -168,6 +177,13 @@ while [[ $# -gt 0 ]]; do
         --mode=*) MODE=${1#*=} ;;
         --rebuild-image) REBUILD_IMAGE=1 ;;
         --keep-container) KEEP_CONTAINER=1 ;;
+        --verify-attestation) VERIFY_ATTESTATION=1 ;;
+        --gh-bin)
+            shift
+            [[ $# -gt 0 ]] || die "--gh-bin requires a path to a gh executable"
+            GH_BIN_CLI=$1
+            ;;
+        --gh-bin=*) GH_BIN_CLI=${1#*=} ;;
         --verbose) VERBOSE=1 ;;
         --timeout)
             shift
@@ -579,8 +595,19 @@ check_contains() {
 
 run_installer() {
     local outfile=$1
-    cexec env RAST_RELEASE_BASE_URL=file:///releases RAST_VERSION="$VERSION" \
-        sh "$CONTAINER_RELEASES/install.sh" --version "$VERSION" >"$outfile" 2>&1
+    local args=(--version "$VERSION")
+    local exec_cmd=("${DOCKER[@]}" exec)
+    if [[ "$VERIFY_ATTESTATION" -eq 1 ]]; then
+        args+=(--verify-attestation)
+        # `gh attestation verify` needs authentication even for public
+        # releases; pass the caller's GH_TOKEN into the container if present.
+        if [[ -n "${GH_TOKEN:-}" ]]; then
+            exec_cmd+=(-e "GH_TOKEN=${GH_TOKEN}")
+        fi
+    fi
+    exec_cmd+=("$CONTAINER" env RAST_RELEASE_BASE_URL=file:///releases RAST_VERSION="$VERSION" \
+        sh "$CONTAINER_RELEASES/install.sh" "${args[@]}")
+    "${exec_cmd[@]}" >"$outfile" 2>&1
 }
 
 # ---------------------------------------------------------------------------
@@ -791,11 +818,38 @@ start_container
 record "container:   $CONTAINER (effective mode: $EFFECTIVE_MODE)"
 record ""
 
+if [[ "$VERIFY_ATTESTATION" -eq 1 ]]; then
+    # The installer verifies GitHub/Sigstore provenance with `gh attestation
+    # verify`, so the container needs a gh CLI (>= 2.49) and outbound network.
+    if [[ -z "$GH_BIN_CLI" ]]; then
+        GH_BIN_CLI=$(command -v gh || true)
+    fi
+    if [[ -z "$GH_BIN_CLI" || ! -x "$GH_BIN_CLI" ]]; then
+        die "--verify-attestation requires a GitHub CLI executable; install gh >= 2.49 or pass --gh-bin PATH"
+    fi
+    if ! "$GH_BIN_CLI" attestation verify --help >/dev/null 2>&1; then
+        die "the gh CLI at $GH_BIN_CLI does not support 'gh attestation verify' (requires GitHub CLI 2.49+)"
+    fi
+    log "copying gh CLI ($("$GH_BIN_CLI" --version 2>/dev/null | head -n 1)) into the container"
+    "${DOCKER[@]}" cp "$GH_BIN_CLI" "$CONTAINER:/usr/local/bin/gh" ||
+        die "could not copy the gh CLI into the container"
+    cexec chmod 0755 /usr/local/bin/gh
+    if [[ -n "${GH_TOKEN:-}" ]]; then
+        record "attestation: enabled (gh copied into container; GH_TOKEN passed for GitHub API auth)"
+    else
+        record "attestation: enabled (gh copied into container; no GH_TOKEN - gh may require 'gh auth login')"
+    fi
+fi
+
 record "--- installer run (first install) ---"
 install_log="$WORK/install.log"
 if run_installer "$install_log"; then
     pass "installer exits 0"
     sed -e 's/^/      /' "$install_log" | tail -n 12 >>"$EVIDENCE" || true
+    if [[ "$VERIFY_ATTESTATION" -eq 1 ]]; then
+        check_contains "installer verified build provenance attestation" \
+            "build-provenance attestation verified" "$(cat "$install_log")"
+    fi
 else
     fail "installer exits 0"
     sed -e 's/^/      /' "$install_log" | tail -n 60 >>"$EVIDENCE" || true

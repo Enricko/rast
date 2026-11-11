@@ -289,6 +289,10 @@ gh attestation verify /usr/local/bin/rast --repo Enricko/rast
 gh attestation verify rast-linux-x86_64 --repo Enricko/rast
 ```
 
+(`gh` 2.49+ is required and must be authenticated with `gh auth login` or
+`GH_TOKEN` for the attestation API; the installer's `--verify-attestation`
+fails closed with the gh output if this is missing.)
+
 The installer can enforce the same check with `--verify-attestation`; see
 [INSTALL.md](INSTALL.md#release-integrity-and-provenance). An attestation proves
 the binary was built by this repository's release workflow for a specific

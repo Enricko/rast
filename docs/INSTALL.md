@@ -145,6 +145,12 @@ What this does and does not prove:
 * Older `gh` versions do not ship `gh attestation verify` (2.49+ is required);
   the installer fails closed with a clear message instead of silently skipping
   the check.
+* GitHub requires **authentication** for the attestation API even on public
+  repositories: run `gh auth login` once on the verifying machine, or export a
+  `GH_TOKEN` with read access. Without it `gh attestation verify` fails with an
+  authentication prompt (the installer reports the gh output and refuses to
+  install). The release workflow verifies attestations with its own
+  `GITHUB_TOKEN`, so this only affects manual/offline verification machines.
 
 Project-managed `minisign`/`cosign` signatures are **not** published yet. The
 installer keeps the fail-closed hooks for operators who manage their own keys:
