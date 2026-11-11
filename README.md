@@ -16,6 +16,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **Live updates** | One authenticated event stream per tab keeps files, applications, containers, backups, audit logs, control panel data and appearance synchronized automatically — including changes made outside RAST and in other sessions. |
 | **Users & Groups** | NAS-style groups with shared-folder and application rules, multi-group membership, per-user direct overrides with an Effective Access explanation, live reauthorization and audit trail. Group grants never elevate the administrator role. |
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. |
+| **Package Center** | Verified Python, PHP CLI, Go and Node.js runtimes from a signed catalog, side by side with a selectable default, updates with rollback, and packages imported from GitHub releases ([handoff](docs/package-center-handoff.md)). |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
 [![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)

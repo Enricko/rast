@@ -62,6 +62,10 @@ applied by `src/config.rs`.
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
 | `setup_token_required` | boolean | `false` | Require a one-shot token for the web first-run setup; CLI account creation always works | `RAST_SETUP_TOKEN_REQUIRED` |
 | `trust_forwarded_headers` | boolean | auto | Auto = `true` when `trusted_proxies` is non-empty | `RAST_TRUST_FORWARDED_HEADERS` |
+| `packages_catalog_url` | string | official catalog (`https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json`) | `https://` or `file:///`; the detached signature is read from `<url>.sig` | `RAST_PACKAGES_CATALOG_URL` |
+| `packages_catalog_keys` | array of strings | `[]` | Extra trusted catalog keys, each `"<key-id>:<base64 Ed25519 public key>"` (32 bytes); invalid entries fail startup. The official key is always trusted | `RAST_PACKAGES_CATALOG_KEYS` (comma separated) |
+| `packages_check_interval_minutes` | integer | `360` | 0–10080; `0` disables automatic checks (Check updates still works) | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` |
+| `packages_github_token` | string | unset | Optional token for GitHub API lookups by Install from GitHub (rate limit only; public repositories need no token). Never printed by `rast config` | `RAST_PACKAGES_GITHUB_TOKEN` |
 
 ## Environment variables
 
@@ -88,6 +92,10 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |
 | `RAST_SETUP_TOKEN_REQUIRED` | `setup_token_required` | Harden the web first-run flow |
+| `RAST_PACKAGES_CATALOG_URL` | `packages_catalog_url` | Package Center catalog (or a local mirror) |
+| `RAST_PACKAGES_CATALOG_KEYS` | `packages_catalog_keys` | Comma-separated `<key-id>:<base64>` |
+| `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` | `packages_check_interval_minutes` | 0–10080 |
+| `RAST_PACKAGES_GITHUB_TOKEN` | `packages_github_token` | Secret; prefer the environment file over the TOML file |
 
 Additional variables that are **not** configuration-file keys:
 
@@ -187,6 +195,19 @@ RAST_MAX_UPLOAD_BYTES=10737418240
 Environment variables have higher precedence than the TOML file, which is handy
 for secrets-free deployment automation. Do not put secrets in this file — RAST
 has no configuration-time secrets beyond the generated `secret.key`.
+
+### Package Center mirror signed with your own key
+
+```toml
+# Serve a copy of the catalog yourself (or from disk) and sign it with your key.
+packages_catalog_url = "file:///srv/mirror/rast-catalog/catalog.json"
+packages_catalog_keys = ["my-mirror-2026:BASE64_OF_32_BYTE_ED25519_PUBLIC_KEY"]
+packages_check_interval_minutes = 60
+```
+
+Installed runtimes live under `<data_dir>/packages/` (`runtimes/<id>/<version>/`,
+`runtimes/<id>/current`, `bin/`). RAST never changes the system `PATH` or the
+operating system's own runtimes; see [package-center-handoff.md](package-center-handoff.md).
 
 ## CLI overrides
 

@@ -102,6 +102,7 @@ keeps it inactive in that case.
 | `src/docker/` | Worker-socket client, compose validation, deployment metadata |
 | `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions |
 | `src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
+| `src/packages/` | Package Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
 | `src/update.rs` | GitHub-Release self-update with checksum verification, DB backup, atomic binary replacement and rollback of the binary |
 | `src/audit.rs` | Append-only audit log writer |
 | `src/secrets.rs` | Master key at `<data_dir>/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
@@ -277,6 +278,14 @@ only).
   apps/<slug>/compose.yaml            managed Docker Compose definitions
   apps/<slug>/.env                    encrypted app secrets (rendered on deploy)
   tmp/                               transient backup/restore work dirs
+  packages/                          Package Center (never on the system PATH)
+    runtimes/<id>/<version>/         one directory per installed version
+    runtimes/<id>/current            symlink to the RAST default version
+    bin/<executable>                 shims that follow `current`
+    catalog/catalog.json(.sig)       last verified catalog (used when offline)
+    .staging/  .trash/               install staging and removal, cleaned at start
+                                     (a replaced version tree waits in .trash/displaced.*
+                                     until the new one is recorded; restored after a crash)
 /srv/rast/                           storage dir (0755 rast:rast)
   homes/<username>/                  per-user home, 0700
   shared/<name>/                     shared folders (ACL in DB)
@@ -325,6 +334,7 @@ release notes (see [OPERATIONS.md](OPERATIONS.md#updates)).
 | Worker ↔ Docker | Worker is in the `docker` group — practically root-equivalent; it runs no shell and only whitelisted operations |
 | RAST ↔ filesystem | Per-user roots resolved and canonicalised under `storage_dir`; traversal and symlink escapes rejected on every operation |
 | RAST ↔ data dir | Contains the SQLite DB and master key; 0750 `rast:rast`, master key 0600 |
+| RAST ↔ package sources | Official catalog accepted only with a valid Ed25519 signature from a trusted key and a sequence not lower than the last accepted one; artifacts downloaded over HTTPS from the catalog's allowed hosts (redirects re-checked), size and SHA-256 verified before extraction; extraction refuses absolute paths, `..`, devices and links leaving the version directory; extension records over 64 KiB and archives that would leave less than 512 MiB free are refused. Declared version checks execute the package's own files as the `rast` user, without a shell, in a sandbox: own process group (killed on timeout and after exit; `setsid`/`setpgid` denied), seccomp (no sockets, io_uring or ptrace), Landlock (read/execute only in the package and system library directories, write only to a scratch home, TCP denied), no core dumps, 64 MiB file limit, output to files. GitHub imports are third-party code: Landlock is mandatory for them, they are pinned to the inspected release and digests, bound to one repository and publisher (re-checked at install time and in the same transaction that records the install), and can never take an official package id or command name. Expired catalogs drive no installs |
 | Secrets at rest | Master key file, encrypted app secrets (AES-256-GCM), session tokens hashed at rest |
 | systemd sandbox | `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, empty capability sets, syscall blacklist, `NoNewPrivileges`, memory caps (see units) |
 

@@ -75,6 +75,8 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `app.logs` | Admin | `{appId, lines:[{ts,stream,message}]}` (bounded stream) |
 | `docker.changed` | Admin | `{available, version, reason}` |
 | `backup.changed` | Admin | `{reason, id?}` |
+| `package.changed` | Accounts allowed to open Package Center (admins, group `allow`) | `{packageId, version?, reason:"queued"\|"started"\|"installed"\|"failed"\|"default"\|"removed"\|"consumers", jobId?, error?}` |
+| `package.catalog` | Accounts allowed to open Package Center | `{reason:"checking"}`, then `{reason:"checked", changed, sequence, error}` after every manual or automatic check |
 | `audit.created` | UserAndAdmin(actor) / Admin | audit row (already emitted by `audit::record`) |
 | `user.changed` | Admin | `{userId, event:"created"|"updated"|"deactivated"}` |
 | `settings.changed` | Admin | `{keys:[...]}` |
@@ -108,6 +110,10 @@ Rules:
 ## Frontend
 
 `core/sse.ts` owns the single `EventSource` per tab:
+
+* named SSE events reach the page only for kinds listed in `KNOWN_EVENTS`;
+  `tests/event_kinds.rs` fails when the server publishes a kind that is missing
+  there (Package Center's events were once silently dropped this way),
 
 * sequencing (per-connection cursor reset by `hello`, older frames dropped,
   `resync` from the server), `hello`/`ping`/`resync`,

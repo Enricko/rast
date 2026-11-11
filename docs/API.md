@@ -203,6 +203,35 @@ group grants. A read-only `backup` grant receives status metadata only:
 | POST | `/api/backups/{id}/verify` | integrity check |
 | GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
 
+## Package Center (admin; read-only grant can view)
+
+Verified runtimes installed side by side under `<data_dir>/packages/`. Reads
+need the `packages` application (administrators, or a group `allow` grant,
+which is read-only: `canManage:false`). Every mutation is administrator-only
+and audited (`package.install`, `package.update`, `package.reinstall`,
+`package.activate`, `package.remove`, `package.consumer_*`,
+`package.source_approve`, `package.catalog_check`). Installs and updates run as
+jobs (`job.*` events with kind `package.install|update|reinstall`).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/packages` | `{catalog:{url,name,official,keyId,officialKey,sequence,generatedAt,expiresAt,checkedAt,lastAttemptAt,nextCheckAt,intervalMinutes,checking,stale,expired,lastError}, host:{os,arch,target,libc,glibcVersion,kernel,rastVersion}, counts:{all,installed,updates,updatesReady}, canManage, packages:[PackageView]}` |
+| GET | `/api/packages/{id}` | `{package: PackageView, jobs:[{jobId,packageId,version,action,status,progress,total,message,error,username,createdAt,finishedAt}]}`; `message` of a finished job is a summary (`Installed and verified Go 1.26.11 · RAST default`) |
+| POST | `/api/packages/check` | fetch and verify the signed catalog now (also looks for new releases of imported packages) → `{catalog}`; a refused catalog keeps the last verified one and reports `lastError`/`stale` |
+| POST | `/api/packages/{id}/install` | `{version, makeDefault?}` → `{jobId}`; only versions of the verified catalog that are compatible with this host; 503 while the catalog is expired |
+| POST | `/api/packages/{id}/update` | `{version?, makeDefault?}` → `{jobId}`; without `version`: newest compatible version of the default's channel. Installs next to the current version, which stays for rollback |
+| PUT | `/api/packages/{id}/default` | `{version}` → `{ok, activation:{shims,conflicts}}`; switches `runtimes/<id>/current` and the `bin/` shims atomically |
+| DELETE | `/api/packages/{id}/versions/{version}?confirm={version}` | `confirm` must repeat the version; the default and pinned versions are refused (409) |
+| POST | `/api/packages/consumers` | `{name, packageId, version\|null, description?}`; `null` follows the default, a version pins it (and protects it from removal) |
+| PUT / DELETE | `/api/packages/consumers/{id}` | edit / delete a consumer |
+| POST | `/api/packages/github/inspect` | `{url}` (repository or release link) → `{inspectionId, repo, repoUrl, release, manifest, manifestSha256, checks:[{label,status,detail}], official, sourceApproved, sourceApprovedBy, hostTarget, compatible, reason, artifact, alreadyInstalled, expiresAt}`; nothing is installed |
+| POST | `/api/packages/github/install` | `{inspectionId, approveSource, makeDefault?}` → `{jobId}`; pinned to the inspected release and digests (inspection valid 30 minutes). Ownership is checked again: 409 when the id belongs to another source, repository or publisher, to the official catalog, or the package provides an official command name; 503 when no verified catalog is loaded or the kernel lacks Landlock. The source approval is recorded only once the install is queued |
+
+`PackageView`: `{id, name, description, homepage, license, publisher:{id,name,url}, packageType, official, source, sourceRepo, inCatalog, verification:{label,detail}, installed:[{version,revision,channel,isDefault,status,path,executables:[{name,path}],bundled,target,artifact,sizeBytes,installedAt,installedBy,checkOutput,pinnedBy,releaseTag}], defaultVersion, defaultExecutables, latest, versions:[{version,revision,channel,channelLabel,channelStatus,compatible,reason,prerelease,targets,artifact,bundled,extensions,executables,installedRevision,releaseDate,notes}], unsupported:[{version,reason}], updates:[{from,to,channel,replacesDefault,revision}], detected:[{version,channel,state,detail,detectedAt,source,releaseUrl}], updateState: none|detected|ready, unavailableReason, consumers:[{id,name,packageId,version,followsDefault,effectiveVersion,executables,description,createdBy,updatedAt}], activeJob}`.
+`updates` are verified versions ready to install; `detected` are new upstream
+versions the catalog announces while its workflow verifies them (not
+installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.json).
+
 ## Activity logs
 
 | Method | Path | Notes |
@@ -293,7 +322,7 @@ folder policy, and group permissions never grant administrator capabilities.
 
 Folder rules: `inherit | none | read | write`. Application rules:
 `inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
-`logs`, `controlpanel` (group `allow` for Applications/Backup is read-only
+`logs`, `controlpanel`, `packages` (group `allow` for Applications/Backup/Package Center is read-only
 status metadata: no env values, logs, archive downloads or restore guide;
 deploy/config/mutations remain admin-only). Folder rules reference shared
 folders by stable id (`shareId`); `shareName` is accepted on input and always
@@ -348,7 +377,8 @@ never appear in the event URL.
 
 Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
 `job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
-`audit.created`, `user.changed`, `settings.changed`, `appearance.changed`.
+`audit.created`, `user.changed`, `settings.changed`, `appearance.changed`,
+`package.changed`, `package.catalog`.
 
 ## Conventions for implementers
 

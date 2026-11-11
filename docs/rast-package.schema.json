@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Enricko/rast-packages/main/schema/rast-package.schema.json",
+  "title": "RAST package manifest (rast-package.json), schema version 1",
+  "description": "Declarative description of one package version. RAST enforces these rules (and a few that JSON Schema cannot express, such as version ordering) in src/packages/manifest.rs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "id", "type", "name", "publisher", "version", "revision", "runtime", "artifacts"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "rast-package" },
+    "id": {
+      "description": "Stable package id. Lowercase letters, digits and dashes; must not end with a dash.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
+      "not": { "enum": ["check", "consumers", "github", "host", "catalog", "bin"] }
+    },
+    "type": {
+      "description": "Package type. Schema version 1 installs runtimes; app and service are reserved for later versions.",
+      "enum": ["runtime"]
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "description": { "type": "string", "maxLength": 500 },
+    "homepage": { "$ref": "#/$defs/httpsUrl" },
+    "license": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "publisher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "url": { "$ref": "#/$defs/httpsUrl" }
+      }
+    },
+    "version": {
+      "description": "Upstream version; also the install directory name.",
+      "type": "string",
+      "maxLength": 32,
+      "pattern": "^[0-9][0-9A-Za-z.+-]*$"
+    },
+    "revision": {
+      "description": "Package revision of the same upstream version (rebuilds). Starts at 1.",
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "channel": {
+      "description": "Update stream. Defaults to major.minor of the version (Node.js uses the major).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9.-]{1,16}$"
+    },
+    "minRastVersion": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,3}" },
+    "releaseDate": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "notes": { "type": "string", "maxLength": 1000 },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executables", "checks"],
+      "properties": {
+        "executables": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "path"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$" },
+              "path": { "$ref": "#/$defs/relativePath" }
+            }
+          }
+        },
+        "checks": {
+          "description": "Commands RAST runs (no shell) after extraction and again from the final location. The first is the version check.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["executable", "expect"],
+            "properties": {
+              "executable": { "type": "string" },
+              "args": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+              "expect": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 32 }
+            }
+          }
+        },
+        "bundled": {
+          "description": "Tools shipped inside the artifact, as found in it (e.g. npm).",
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "version"],
+            "properties": {
+              "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "version": { "type": "string", "minLength": 1, "maxLength": 32 }
+            }
+          }
+        },
+        "extensions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 48 } }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "url", "sha256", "size", "format", "provenance"],
+        "properties": {
+          "target": { "enum": ["linux-x86_64", "linux-aarch64"] },
+          "url": { "$ref": "#/$defs/httpsUrl" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "size": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+          "format": { "const": "tar.gz" },
+          "stripComponents": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "requires": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "glibc": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,3}$" },
+              "notes": { "type": "string", "maxLength": 500 }
+            }
+          },
+          "provenance": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "source"],
+            "properties": {
+              "kind": { "enum": ["upstream", "built"] },
+              "source": { "$ref": "#/$defs/httpsUrl" },
+              "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "verification": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "buildUrl": { "$ref": "#/$defs/httpsUrl" },
+              "attestationUrl": { "$ref": "#/$defs/httpsUrl" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "httpsUrl": { "type": "string", "pattern": "^https://[^\\s]+$", "maxLength": 2048 },
+    "relativePath": {
+      "description": "Relative path inside the package: no leading slash, no '.' or '..' components, no backslashes.",
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^(?!/)(?!.*\\\\)(?!(.*/)?\\.{1,2}(/|$))(?!.*//).+$"
+    }
+  }
+}
