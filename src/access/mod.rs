@@ -222,13 +222,22 @@ fn cache_get(user_id: i64, key: &str) -> Option<Cached> {
     }
 }
 
-fn cache_put(user_id: i64, key: &str, value: Cached) {
+/// Cache a decision under the generation observed *before* its inputs were
+/// read. An evaluation that straddles a policy change (`bump_generation`)
+/// read pre-change rules; stamping it with the newer generation would serve
+/// that stale decision - e.g. a just-revoked grant - until the next change.
+/// Stale results are therefore dropped, and one that races past the check
+/// keeps its old generation, which `cache_get` never matches.
+fn cache_put(user_id: i64, key: &str, read_at: u64, value: Cached) {
+    if read_at != current_generation() {
+        return;
+    }
     if let Ok(mut map) = cache().write() {
         // Bound the cache; policy changes invalidate it anyway.
         if map.len() > 4096 {
             map.clear();
         }
-        map.insert((user_id, key.to_string()), (current_generation(), value));
+        map.insert((user_id, key.to_string()), (read_at, value));
     }
 }
 
@@ -264,6 +273,7 @@ pub async fn folder_access_by_name(
             fallback: Some("admin".into()),
         });
     }
+    let read_at = current_generation();
     let row = sqlx::query("SELECT id, name FROM shares WHERE name = ?")
         .bind(share_name)
         .fetch_optional(pool)
@@ -275,7 +285,7 @@ pub async fn folder_access_by_name(
         return Ok(access);
     }
     let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
-    cache_put(user.id, &key, Cached::Folder(access.clone()));
+    cache_put(user.id, &key, read_at, Cached::Folder(access.clone()));
     Ok(access)
 }
 
@@ -299,6 +309,7 @@ pub async fn folder_access_by_id(
             fallback: Some("admin".into()),
         });
     }
+    let read_at = current_generation();
     let row = sqlx::query("SELECT id, name FROM shares WHERE id = ?")
         .bind(share_id)
         .fetch_optional(pool)
@@ -310,7 +321,7 @@ pub async fn folder_access_by_id(
         return Ok(access);
     }
     let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
-    cache_put(user.id, &key, Cached::Folder(access.clone()));
+    cache_put(user.id, &key, read_at, Cached::Folder(access.clone()));
     Ok(access)
 }
 
@@ -459,6 +470,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
         });
     }
     let key = app_cache_key(app_id);
+    let read_at = current_generation();
     if let Some(Cached::App(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
@@ -556,7 +568,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
         }
     };
 
-    cache_put(user.id, &key, Cached::App(access.clone()));
+    cache_put(user.id, &key, read_at, Cached::App(access.clone()));
     Ok(access)
 }
 
@@ -948,6 +960,48 @@ pub fn merge_app<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn folder_decision(level: Option<Perm>) -> Cached {
+        Cached::Folder(FolderAccess {
+            share_id: "straddle".into(),
+            share_name: "straddle".into(),
+            level,
+            sources: Vec::new(),
+            fallback: None,
+        })
+    }
+
+    #[test]
+    fn decision_read_before_a_policy_change_is_never_served_after_it() {
+        // A user id no fixture uses; other tests bump the generation
+        // concurrently, which only makes the stale case more likely.
+        let (user, key) = (-4_311, "folder:straddle");
+        // An evaluation reads the old policy (a read grant)...
+        let read_at = current_generation();
+        // ...an administrator revokes it while the evaluation is in flight...
+        bump_generation();
+        // ...and the evaluation finishes, caching what it read.
+        cache_put(user, key, read_at, folder_decision(Some(Perm::Read)));
+        assert!(
+            cache_get(user, key).is_none(),
+            "a pre-change decision must not be served as current"
+        );
+
+        // A decision read under the current policy is served (retry if a
+        // concurrent test changes the generation in between).
+        let served = (0..100).any(|_| {
+            let read_at = current_generation();
+            cache_put(user, key, read_at, folder_decision(Some(Perm::Write)));
+            matches!(
+                cache_get(user, key),
+                Some(Cached::Folder(FolderAccess {
+                    level: Some(Perm::Write),
+                    ..
+                }))
+            )
+        });
+        assert!(served, "a current decision should be cached");
+    }
 
     #[test]
     fn folder_rule_parsing() {

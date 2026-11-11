@@ -110,6 +110,9 @@ Decisions expose **sources** so the admin UI can explain them:
 Caching: evaluator results are cached in-process keyed by `(user_id, resource)`
 and invalidated by a global generation counter that is bumped by every
 group/membership/rule/share change (all in the same process after commit).
+A result is stamped with the generation observed *before* its rules were read,
+so an evaluation that straddles a change is never cached as current (a
+just-revoked grant cannot outlive the revocation in the cache).
 
 ## 4. Rust evaluator (`src/access/mod.rs`)
 
