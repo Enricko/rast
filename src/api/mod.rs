@@ -18,6 +18,7 @@ pub mod groups;
 pub mod jobs;
 pub mod logs;
 pub mod monitor;
+pub mod packages;
 pub mod settings;
 pub mod system;
 pub mod users;
@@ -37,6 +38,7 @@ pub fn router(state: AppState) -> Router {
         .merge(apps::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
+        .merge(packages::routes())
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

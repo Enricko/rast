@@ -27,6 +27,7 @@ const PROGRESS_WRITE_INTERVAL_MS: i64 = 250;
 #[derive(Clone)]
 pub struct JobContext {
     pub id: String,
+    pub kind: String,
     pub db: SqlitePool,
     events: EventBus,
     cancel: Arc<AtomicBool>,
@@ -37,6 +38,11 @@ pub struct JobContext {
 impl JobContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// The shared cancellation flag (for blocking work on other threads).
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel.clone()
     }
 
     /// Returns `Err(AppError::Cancelled)` when the job has been cancelled.
@@ -66,6 +72,7 @@ impl JobContext {
             .await;
         let payload = json!({
             "id": self.id,
+            "kind": self.kind,
             "progress": done,
             "total": total,
             "message": message,
@@ -299,12 +306,14 @@ async fn run_job(
 
     let ctx = JobContext {
         id: id.clone(),
+        kind: spec.kind.clone(),
         db: db.clone(),
         events: events.clone(),
         cancel,
         last_write: Arc::new(AtomicU64::new(0)),
         user_id: owner,
     };
+    let job_kind = spec.kind.clone();
     let outcome = (spec.run)(ctx).await;
     let finished = db::now_ms();
 
@@ -318,7 +327,7 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            let done_event = json!({"id": id, "result": value, "userId": owner});
+            let done_event = json!({"id": id, "kind": job_kind, "result": value, "userId": owner});
             match owner {
                 Some(uid) => events.publish_user_and_admin("job.done", uid, done_event),
                 None => events.publish_admin("job.done", done_event),
@@ -332,7 +341,7 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            let cancelled_event = json!({"id": id, "userId": owner});
+            let cancelled_event = json!({"id": id, "kind": job_kind, "userId": owner});
             match owner {
                 Some(uid) => events.publish_user_and_admin("job.cancelled", uid, cancelled_event),
                 None => events.publish_admin("job.cancelled", cancelled_event),
@@ -348,7 +357,8 @@ async fn run_job(
             .bind(&id)
             .execute(&db)
             .await;
-            let failed_event = json!({"id": id, "error": message, "userId": owner});
+            let failed_event =
+                json!({"id": id, "kind": job_kind, "error": message, "userId": owner});
             match owner {
                 Some(uid) => events.publish_user_and_admin("job.failed", uid, failed_event),
                 None => events.publish_admin("job.failed", failed_event),

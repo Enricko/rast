@@ -30,6 +30,7 @@ pub struct AppState {
     pub monitor: Arc<crate::monitor::Monitor>,
     pub storage: Arc<crate::storage::Storage>,
     pub docker: Arc<crate::docker::DockerManager>,
+    pub packages: Arc<crate::packages::PackageManager>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -58,6 +59,14 @@ impl AppState {
         let docker = crate::docker::DockerManager::new(&config);
 
         let config = Arc::new(config);
+        let packages = crate::packages::PackageManager::new(
+            config.clone(),
+            db.clone(),
+            events.clone(),
+            jobs.clone(),
+        );
+        // Restores the catalog check state and starts the periodic checker.
+        packages.start().await;
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -83,6 +92,7 @@ impl AppState {
             monitor,
             storage,
             docker,
+            packages,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

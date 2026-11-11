@@ -39,6 +39,7 @@ impl TestServer {
                 secure_cookies: Some(false),
                 setup_token_required: Some(true),
                 trusted_proxies: Some(vec!["127.0.0.1/32".into()]),
+                packages_check_interval_minutes: Some(0),
                 ..Default::default()
             },
             |_| None,
@@ -1644,8 +1645,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7],
-        "0004 to 0007 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8],
+        "0004 to 0008 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -2312,7 +2313,7 @@ async fn effective_access_matches_api_decisions_for_every_account() {
     assert_eq!(page["folders"][0]["level"], "write");
     assert_eq!(
         page["apps"].as_array().unwrap().len(),
-        6,
+        7,
         "apps always complete"
     );
     let (_, _, none_only) = server

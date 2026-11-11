@@ -37,6 +37,7 @@ pub const APP_IDS: &[&str] = &[
     "applications",
     "monitor",
     "backup",
+    "packages",
     "logs",
     "controlpanel",
 ];
@@ -47,6 +48,7 @@ pub fn app_label(app_id: &str) -> &'static str {
         "applications" => "Applications",
         "monitor" => "Resource Monitor",
         "backup" => "Backup Center",
+        "packages" => "Package Center",
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
         _ => "Unknown application",
@@ -548,7 +550,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
             }
         } else if explicit_allow {
             // A group grant for a normally-admin-only surface (Applications,
-            // Backup Center) is read-only; for surfaces every account may use
+            // Backup Center, Package Center) is read-only; for surfaces every account may use
             // by default an explicit allow is just a regular grant.
             AppAccess {
                 app_id: app_id.to_string(),
@@ -849,6 +851,7 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
         "file.changed" | "file.quota" | "files.resync" => Some("files"),
         "app.changed" | "app.deploy" | "app.logs" | "docker.changed" => Some("applications"),
         "backup.changed" | "backup.done" => Some("backup"),
+        "package.changed" | "package.catalog" => Some("packages"),
         "audit.created" => Some("logs"),
         "user.changed" | "settings.changed" | "group.changed" => Some("controlpanel"),
         "job.queued" | "job.start" | "job.progress" | "job.done" | "job.failed"
@@ -856,6 +859,8 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
             let job_kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             if job_kind.starts_with("backup") {
                 Some("backup")
+            } else if job_kind.starts_with("package") {
+                Some("packages")
             } else if job_kind.starts_with("app") {
                 Some("applications")
             } else {
@@ -1037,6 +1042,12 @@ mod tests {
         assert_eq!(event_app("job.progress", &job), Some("backup"));
         let file_job = serde_json::json!({"kind": "file.copy"});
         assert_eq!(event_app("job.progress", &file_job), Some("files"));
+        let package_job = serde_json::json!({"kind": "package.install"});
+        assert_eq!(event_app("job.progress", &package_job), Some("packages"));
+        assert_eq!(
+            event_app("package.catalog", &serde_json::json!({})),
+            Some("packages")
+        );
         assert_eq!(
             event_app("audit.created", &serde_json::json!({})),
             Some("logs")

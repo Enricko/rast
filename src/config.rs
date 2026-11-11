@@ -77,6 +77,15 @@ pub struct FileConfig {
     pub setup_token_required: Option<bool>,
     /// Keep this false unless RAST is behind a reverse proxy you control.
     pub trust_forwarded_headers: Option<bool>,
+    /// Package Center catalog (signed). `https://…` or a local `file:///…` mirror.
+    pub packages_catalog_url: Option<String>,
+    /// Extra trusted catalog keys, `"<key-id>:<base64 Ed25519 public key>"`
+    /// (for mirrors and test catalogs). The official key is always trusted.
+    pub packages_catalog_keys: Option<Vec<String>>,
+    /// Automatic catalog/update check interval in minutes (0 disables).
+    pub packages_check_interval_minutes: Option<u64>,
+    /// Optional GitHub token for "Install from GitHub" API lookups.
+    pub packages_github_token: Option<String>,
 }
 
 /// Fully resolved configuration.
@@ -99,6 +108,10 @@ pub struct Config {
     pub job_concurrency: usize,
     pub setup_token_required: bool,
     pub trust_forwarded_headers: bool,
+    pub packages_catalog_url: String,
+    pub packages_catalog_keys: Vec<String>,
+    pub packages_check_interval_minutes: u64,
+    pub packages_github_token: Option<String>,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
 }
@@ -289,6 +302,44 @@ impl Config {
         )?
         .unwrap_or(!trusted_proxies.is_empty());
 
+        let packages_catalog_url = get_str(file.packages_catalog_url, "RAST_PACKAGES_CATALOG_URL")
+            .unwrap_or_else(|| crate::packages::catalog::OFFICIAL_CATALOG_URL.to_string());
+        if !(packages_catalog_url.starts_with("https://")
+            || packages_catalog_url.starts_with("file:///"))
+        {
+            return Err(ConfigError::Invalid(
+                "packages_catalog_url must be an https:// or file:/// URL".into(),
+            ));
+        }
+        let packages_catalog_keys: Vec<String> = get_str(
+            file.packages_catalog_keys.map(|v| v.join(",")),
+            "RAST_PACKAGES_CATALOG_KEYS",
+        )
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+        for key in &packages_catalog_keys {
+            crate::packages::catalog::parse_trusted_key(key).map_err(ConfigError::Invalid)?;
+        }
+        let packages_check_interval_minutes = parse_env_num(
+            &env,
+            "RAST_PACKAGES_CHECK_INTERVAL_MINUTES",
+            file.packages_check_interval_minutes,
+        )?
+        .unwrap_or(360);
+        if packages_check_interval_minutes > 7 * 24 * 60 {
+            return Err(ConfigError::Invalid(
+                "packages_check_interval_minutes must be between 0 and 10080".into(),
+            ));
+        }
+        let packages_github_token =
+            get_str(file.packages_github_token, "RAST_PACKAGES_GITHUB_TOKEN");
+
         if data_dir.as_os_str().is_empty() || storage_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invalid(
                 "data_dir and storage_dir must not be empty".into(),
@@ -313,6 +364,10 @@ impl Config {
             job_concurrency,
             setup_token_required,
             trust_forwarded_headers,
+            packages_catalog_url,
+            packages_catalog_keys,
+            packages_check_interval_minutes,
+            packages_github_token,
             loaded_from,
         })
     }
@@ -325,6 +380,10 @@ impl Config {
     }
     pub fn apps_dir(&self) -> PathBuf {
         self.data_dir.join("apps")
+    }
+    /// Package Center root: `<data_dir>/packages`.
+    pub fn packages_dir(&self) -> PathBuf {
+        self.data_dir.join("packages")
     }
     pub fn secret_path(&self) -> PathBuf {
         self.data_dir.join("secret.key")
@@ -463,6 +522,10 @@ pub fn to_toml_example(cfg: &Config) -> String {
         job_concurrency: usize,
         setup_token_required: bool,
         trust_forwarded_headers: bool,
+        packages_catalog_url: &'a str,
+        packages_catalog_keys: &'a [String],
+        packages_check_interval_minutes: u64,
+        // packages_github_token is a secret and is never written here.
     }
     let ex = Example {
         bind: cfg.bind.to_string(),
@@ -482,6 +545,9 @@ pub fn to_toml_example(cfg: &Config) -> String {
         job_concurrency: cfg.job_concurrency,
         setup_token_required: cfg.setup_token_required,
         trust_forwarded_headers: cfg.trust_forwarded_headers,
+        packages_catalog_url: &cfg.packages_catalog_url,
+        packages_catalog_keys: &cfg.packages_catalog_keys,
+        packages_check_interval_minutes: cfg.packages_check_interval_minutes,
     };
     let body = toml::to_string_pretty(&ex).unwrap_or_default();
     format!(
@@ -572,5 +638,11 @@ mod tests {
         let text = to_toml_example(&cfg);
         let parsed: FileConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed.bind.as_deref(), Some(DEFAULT_BIND));
+        assert_eq!(
+            parsed.packages_catalog_url.as_deref(),
+            Some(crate::packages::catalog::OFFICIAL_CATALOG_URL)
+        );
+        assert_eq!(parsed.packages_check_interval_minutes, Some(360));
+        assert!(!text.contains("packages_github_token"));
     }
 }

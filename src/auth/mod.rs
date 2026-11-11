@@ -295,6 +295,10 @@ mod tests {
             job_concurrency: 1,
             setup_token_required: true,
             trust_forwarded_headers: true,
+            packages_catalog_url: crate::packages::catalog::OFFICIAL_CATALOG_URL.into(),
+            packages_catalog_keys: Vec::new(),
+            packages_check_interval_minutes: 0,
+            packages_github_token: None,
             loaded_from: None,
         }
     }
