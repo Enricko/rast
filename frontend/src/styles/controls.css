@@ -82,9 +82,11 @@
 }
 
 .btn-primary:disabled {
-  background: color-mix(in srgb, var(--accent) 35%, var(--surface-2));
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--border-subtle));
-  color: color-mix(in srgb, var(--accent-fg) 82%, transparent);
+  /* Same accessible disabled palette as other buttons: the translucent accent
+     mix made the label unreadable (≈2.1:1). */
+  background: var(--surface-2);
+  border-color: var(--border-subtle);
+  color: var(--text-faint);
 }
 
 /* Secondary is the default `.btn`; explicit class for readability. */
@@ -268,14 +270,20 @@
 }
 
 .segment.is-active,
-.segment[aria-checked="true"] {
+.segment[aria-checked="true"],
+/* Higher specificity than the legacy theme layer's `.segmented button` rules:
+   canonical selected segments are accent-filled in every surface. */
+.segmented button.segment.is-active,
+.segmented button.segment[aria-checked="true"] {
   background: var(--accent);
   color: var(--accent-fg);
   box-shadow: var(--shadow-sm);
 }
 
 .segment.is-active:hover,
-.segment[aria-checked="true"]:hover {
+.segment[aria-checked="true"]:hover,
+.segmented button.segment.is-active:hover,
+.segmented button.segment[aria-checked="true"]:hover {
   background: var(--accent-hover);
   color: var(--accent-fg);
 }
@@ -559,6 +567,19 @@ input[type="radio"]:disabled {
   background: transparent;
 }
 
+.tab:disabled,
+.tab[aria-disabled="true"] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+  background: transparent;
+}
+
+.tab:disabled:hover,
+.tab[aria-disabled="true"]:hover {
+  background: transparent;
+  color: var(--text-faint);
+}
+
 /* ---------------------------------------------------------- menus & popovers */
 
 .menu-panel,
@@ -742,6 +763,13 @@ input[type="radio"]:disabled {
 
 .table tbody tr.is-clickable {
   cursor: pointer;
+}
+
+/* Keyboard-accessible table rows (tabindex="0" rows in admin views). */
+.table tbody tr:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  background: var(--selection);
 }
 
 .table td.num,
@@ -1033,6 +1061,17 @@ input[type="radio"]:disabled {
 .toast-close:hover {
   background: var(--surface-hover);
   color: var(--text);
+}
+
+.toast-close:focus-visible,
+.toast-action:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+/* Busy controls keep their label readable and signal the pending state. */
+.btn[aria-busy="true"] {
+  cursor: progress;
 }
 
 /* --------------------------------------------------------- banners / states */

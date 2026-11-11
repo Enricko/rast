@@ -21,8 +21,8 @@
 
   /* Text */
   --text: #26323f;
-  --text-dim: #5f6b7a;
-  --text-faint: #8794a3;
+  --text-dim: #4e5a67;
+  --text-faint: #5f6b78;
   --text-on-accent: var(--accent-fg);
 
   /* Borders */
@@ -43,7 +43,7 @@
   --ok-soft: #e8f5ee;
   --ok-border: #bfe3cd;
   --warning: #c07d10;
-  --warning-strong: #a2660a;
+  --warning-strong: #7f5008;
   --warning-soft: #fdf3e2;
   --warning-border: #f0d9ab;
   --danger: #c93b3b;
@@ -54,7 +54,7 @@
   /* Focus + selection */
   --selection: color-mix(in srgb, var(--accent) 12%, var(--surface));
   --selection-strong: color-mix(in srgb, var(--accent) 20%, var(--surface));
-  --focus-ring: color-mix(in srgb, var(--accent) 55%, transparent);
+  --focus-ring: var(--accent);
 
   /* Elevation */
   --shadow-sm: 0 1px 2px rgba(20, 30, 42, 0.08);
@@ -105,7 +105,7 @@
 
   --text: #e8edf3;
   --text-dim: #b3bdc9;
-  --text-faint: #8a97a6;
+  --text-faint: #9aa8b6;
 
   --border: #3b4551;
   --border-strong: #4a5563;
@@ -132,7 +132,7 @@
 
   --selection: color-mix(in srgb, var(--accent) 18%, var(--surface));
   --selection-strong: color-mix(in srgb, var(--accent) 26%, var(--surface));
-  --focus-ring: color-mix(in srgb, var(--accent) 65%, transparent);
+  --focus-ring: var(--accent);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
   --shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
