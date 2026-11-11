@@ -2529,29 +2529,65 @@ async fn sse_monitor_container_inventory_follows_current_access() {
         "components": []
     });
 
-    // Restricted: no inventory.
-    let stream = {
-        let server_app = server.app.clone();
-        let cookie = hana.cookie.clone();
-        tokio::spawn(async move {
-            let request = Request::builder()
-                .method("GET")
-                .uri("/api/events")
-                .header(
-                    header::COOKIE,
-                    cookie.parse::<axum::http::HeaderValue>().unwrap(),
-                )
-                .body(Body::empty())
-                .unwrap();
-            let response = server_app.oneshot(request).await.unwrap();
-            collect_sse(response.into_body(), std::time::Duration::from_millis(1500)).await
-        })
+    // Open Hana's stream and read it frame by frame, waiting for specific
+    // frames instead of sleeping (deterministic under a loaded test runner).
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/events")
+        .header(
+            header::COOKIE,
+            hana.cookie.parse::<axum::http::HeaderValue>().unwrap(),
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = server.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut buffer = String::new();
+    async fn next_frame_matching(
+        body: &mut Body,
+        buffer: &mut String,
+        predicate: impl Fn(&str) -> bool,
+    ) -> String {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            while let Some(end) = buffer.find("\n\n") {
+                let frame = buffer[..end].to_string();
+                buffer.drain(..end + 2);
+                if predicate(&frame) {
+                    return frame;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!remaining.is_zero(), "timed out waiting for an SSE frame");
+            match tokio::time::timeout(remaining, body.frame()).await {
+                Ok(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data() {
+                        buffer.push_str(&String::from_utf8_lossy(&data));
+                    }
+                }
+                other => panic!("SSE stream ended early: {:?}", other.is_ok()),
+            }
+        }
+    }
+    let is_sample = |frame: &str| {
+        frame.contains("event: monitor")
+            && (frame.contains("\"ts\":1}") || frame.contains("\"ts\":1,"))
     };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The hello frame proves the subscription exists before publishing.
+    next_frame_matching(&mut body, &mut buffer, |f| f.contains("event: hello")).await;
+
+    // Restricted: no inventory.
     server.state.events.publish("monitor", sample.clone());
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let restricted = next_frame_matching(&mut body, &mut buffer, is_sample).await;
+    assert!(
+        !restricted.contains("fictional-db"),
+        "restricted sample leaked inventory: {restricted}"
+    );
+    assert!(restricted.contains("containersRestricted"));
+
     // Grant Applications while the stream is open; the next sample includes it.
-    let (status, _, body) = server
+    let (status, _, response_body) = server
         .request(
             "PUT",
             &format!("/api/users/{}/access-rules", hana.user_id),
@@ -2559,34 +2595,18 @@ async fn sse_monitor_container_inventory_follows_current_access() {
             admin.headers_with_csrf(),
         )
         .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(status, StatusCode::OK, "{response_body}");
+    next_frame_matching(&mut body, &mut buffer, |f| {
+        f.contains("event: access.changed")
+    })
+    .await;
     server.state.events.publish("monitor", sample.clone());
-    let frames = stream.await.unwrap();
-    let monitor_frames: Vec<&str> = frames
-        .split("\n\n")
-        .filter(|frame| frame.contains("event: monitor"))
-        .collect();
-    // initial snapshot + two live samples
-    assert!(monitor_frames.len() >= 3, "{frames}");
-    let live: Vec<&&str> = monitor_frames
-        .iter()
-        .filter(|frame| frame.contains("\"ts\":1}") || frame.contains("\"ts\":1,"))
-        .collect();
-    assert_eq!(live.len(), 2, "{frames}");
+    let granted = next_frame_matching(&mut body, &mut buffer, is_sample).await;
     assert!(
-        !live[0].contains("fictional-db"),
-        "restricted sample leaked inventory"
+        granted.contains("fictional-db"),
+        "grant applies to the next sample: {granted}"
     );
-    assert!(live[0].contains("containersRestricted"));
-    assert!(
-        live[1].contains("fictional-db"),
-        "grant applies to the next sample"
-    );
-    assert!(
-        frames.contains("access.changed"),
-        "live access.changed delivered"
-    );
+    drop(body);
 
     // Admin streams are never redacted.
     let admin_frames = sse_frames_for(&server, &admin, 300).await;
