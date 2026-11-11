@@ -26,8 +26,22 @@ this file by `scripts/changelog-section.sh`.
 
 ## [0.4.1] - 2026-11-11
 
-Taskbar and widget defaults. Upgrade with a database backup: migration `0007`
-is not reversible by an older binary (see "Upgrade and rollback").
+Taskbar and widget defaults, and a complete Add user dialog. Upgrade with a
+database backup: migration `0007` is not reversible by an older binary (see
+"Upgrade and rollback").
+
+### Added
+
+- **Add user** sets up the whole account at once: username, display name,
+  role, quota, initial password, whether the account is active, whether the
+  password must be changed at the first sign-in (on by default), group
+  membership (searchable picker), and direct shared-folder and application
+  rules. Section headers count the selected groups and rules; choosing the
+  Administrator role explains that administrators always have full access.
+- `POST /api/users` accepts `active`, `mustChangePassword`, `groupIds`,
+  `folderRules` and `appRules`. They are validated before anything is written
+  and saved in the account's transaction, so an invalid choice creates no
+  account and a failure never leaves a half-configured one.
 
 ### Changed
 
@@ -48,6 +62,13 @@ is not reversible by an older binary (see "Upgrade and rollback").
 
 ### Fixed
 
+- A storage quota of 0 (unlimited) was rejected with "Must be greater than
+  zero" in Add user, in Edit user (so an unlimited account's changes could not
+  be saved) and in Settings → default quota, although each field says 0 means
+  unlimited.
+- The Add user and Edit user dialogs showed their fields in one column at any
+  size; they now use two columns and stack only when the dialog is narrow.
+  Rule selects are wide enough for "Read & Write".
 - `rast update` reported `database migration failed: migration N was
   previously applied but is missing` after a successful update that added a
   migration: the previous binary opened the database with its own migrations

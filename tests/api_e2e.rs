@@ -2875,3 +2875,199 @@ async fn event_streams_end_when_the_server_shuts_down() {
         "stream must end promptly on shutdown"
     );
 }
+
+#[tokio::test]
+async fn create_user_saves_groups_rules_and_options_with_the_account() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let projects = create_share(&server, &admin, "Projects").await;
+    let _finance = create_share(&server, &admin, "Finance").await;
+    let projects_id = projects["id"].as_str().expect("share id").to_string();
+    let (status, _, group) = server
+        .request(
+            "POST",
+            "/api/groups",
+            Some(json!({
+                "name": "Designers",
+                "folderRules": [{"shareName": "Projects", "rule": "read"}],
+                "appRules": [{"appId": "backup", "rule": "allow"}]
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{group}");
+    let group_id = group["id"].as_i64().unwrap();
+
+    let user_count = |server: &TestServer| {
+        let pool = server.state.db.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+    let before = user_count(&server).await;
+
+    // Any invalid selection rejects the request before an account exists.
+    for (case, extra) in [
+        ("unknown group", json!({"groupIds": [group_id, 987_654]})),
+        (
+            "unknown share",
+            json!({"folderRules": [{"shareName": "Missing", "rule": "read"}]}),
+        ),
+        (
+            "bad folder rule",
+            json!({"folderRules": [{"shareId": projects_id, "rule": "everything"}]}),
+        ),
+        (
+            "unknown application",
+            json!({"appRules": [{"appId": "terminal", "rule": "allow"}]}),
+        ),
+        (
+            "bad application rule",
+            json!({"appRules": [{"appId": "files", "rule": "write"}]}),
+        ),
+    ] {
+        let mut body = json!({"username": "erin", "password": "Erin-Password-123!"});
+        for (key, value) in extra.as_object().unwrap() {
+            body[key] = value.clone();
+        }
+        let (status, _, response) = server
+            .request("POST", "/api/users", Some(body), admin.headers_with_csrf())
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {response}");
+        assert_eq!(user_count(&server).await, before, "{case} created a user");
+        assert!(!server.state.config.home_for("erin").exists(), "{case}");
+    }
+
+    let (status, _, created) = server
+        .request(
+            "POST",
+            "/api/users",
+            Some(json!({
+                "username": "erin",
+                "displayName": "Erin Example",
+                "password": "Erin-Password-123!",
+                "role": "user",
+                "quotaBytes": 5 * 1024 * 1024 * 1024_i64,
+                "mustChangePassword": true,
+                "groupIds": [group_id, group_id],
+                "folderRules": [
+                    {"shareId": projects_id, "rule": "write"},
+                    {"shareName": "Finance", "rule": "none"}
+                ],
+                "appRules": [
+                    {"appId": "monitor", "rule": "none"},
+                    {"appId": "files", "rule": "inherit"}
+                ]
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let erin_id = created["id"].as_i64().unwrap();
+    assert_eq!(created["mustChangePassword"], true);
+    assert_eq!(created["active"], true);
+    assert_eq!(created["displayName"], "Erin Example");
+
+    let (_, _, membership) = server
+        .request(
+            "GET",
+            &format!("/api/users/{erin_id}/groups"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(membership["groupIds"], json!([group_id]), "{membership}");
+
+    let (_, _, rules) = server
+        .request(
+            "GET",
+            &format!("/api/users/{erin_id}/access-rules"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(
+        rules["folderRules"],
+        json!([
+            {"shareId": rules["folderRules"][0]["shareId"], "shareName": "Finance", "rule": "none"},
+            {"shareId": projects_id, "shareName": "Projects", "rule": "write"}
+        ]),
+        "{rules}"
+    );
+    assert_eq!(
+        rules["appRules"],
+        json!([{"appId": "monitor", "rule": "none"}]),
+        "inherit rules are not stored: {rules}"
+    );
+
+    // The new account's effective access combines the group and its own rules.
+    let access = effective_access_for(&server, &admin, erin_id).await;
+    let folder = |name: &str| {
+        access["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["shareName"] == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing {name}: {access}"))
+    };
+    assert_eq!(folder("Projects")["level"], "write");
+    assert_eq!(folder("Finance")["level"], "none");
+    let app = |id: &str| {
+        access["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["appId"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("missing app {id}: {access}"))
+    };
+    assert_eq!(app("monitor")["allowed"], false);
+    assert_eq!(app("backup")["allowed"], true, "granted by the group");
+
+    // The forced password change applies at the first sign-in.
+    let erin = server.login("erin", "Erin-Password-123!").await;
+    let (status, _, _) = server
+        .request("GET", "/api/shares", None, erin.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "password change comes first");
+
+    let detail: String = sqlx::query_scalar(
+        "SELECT detail FROM audit_logs WHERE action = 'user.create' AND object_id = ?",
+    )
+    .bind(erin_id.to_string())
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert!(detail.contains("mustChangePassword=true"), "{detail}");
+    assert!(detail.contains("groups=[Designers]"), "{detail}");
+    assert!(detail.contains("Projects=write"), "{detail}");
+    assert!(detail.contains("app:monitor=none"), "{detail}");
+
+    // An account can be created disabled; it cannot sign in until enabled.
+    let (status, _, dormant) = server
+        .request(
+            "POST",
+            "/api/users",
+            Some(json!({"username": "dormant", "password": "Dormant-Pass-123!", "active": false})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{dormant}");
+    assert_eq!(dormant["active"], false);
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/auth/login",
+            Some(json!({"username": "dormant", "password": "Dormant-Pass-123!"})),
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

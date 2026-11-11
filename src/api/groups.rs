@@ -262,7 +262,39 @@ async fn validate_members(pool: &sqlx::SqlitePool, members: &[i64]) -> AppResult
     Ok(ids)
 }
 
-async fn validate_folder_rules(
+/// Validate a user's group selection: deduplicated, sorted, every id exists.
+pub(crate) async fn validate_group_ids(
+    pool: &sqlx::SqlitePool,
+    group_ids: &[i64],
+) -> AppResult<Vec<i64>> {
+    if group_ids.len() > MAX_RULES {
+        return Err(AppError::bad_request("too many groups for one user"));
+    }
+    let ids: Vec<i64> = group_ids
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if ids.is_empty() {
+        return Ok(ids);
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT id FROM groups WHERE id IN ({placeholders})");
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+    for group_id in &ids {
+        query = query.bind(group_id);
+    }
+    let found = query.fetch_all(pool).await?.len();
+    if found != ids.len() {
+        return Err(AppError::bad_request("one or more groups do not exist"));
+    }
+    Ok(ids)
+}
+
+pub(crate) async fn validate_folder_rules(
     pool: &sqlx::SqlitePool,
     rules: &[FolderRuleInput],
 ) -> AppResult<Vec<FolderRuleDto>> {
@@ -338,7 +370,7 @@ async fn validate_folder_rules(
     Ok(out)
 }
 
-fn validate_app_rules(rules: &[AppRuleInput]) -> AppResult<Vec<AppRuleDto>> {
+pub(crate) fn validate_app_rules(rules: &[AppRuleInput]) -> AppResult<Vec<AppRuleDto>> {
     if rules.len() > MAX_RULES {
         return Err(AppError::bad_request("too many application rules"));
     }
@@ -365,7 +397,7 @@ fn validate_app_rules(rules: &[AppRuleInput]) -> AppResult<Vec<AppRuleDto>> {
         .collect())
 }
 
-fn describe_rules(folder_rules: &[FolderRuleDto], app_rules: &[AppRuleDto]) -> String {
+pub(crate) fn describe_rules(folder_rules: &[FolderRuleDto], app_rules: &[AppRuleDto]) -> String {
     let mut parts = Vec::new();
     for rule in folder_rules {
         if rule.rule != "inherit" {
@@ -384,7 +416,7 @@ fn describe_rules(folder_rules: &[FolderRuleDto], app_rules: &[AppRuleDto]) -> S
     }
 }
 
-fn truncate_detail(value: &str) -> String {
+pub(crate) fn truncate_detail(value: &str) -> String {
     const MAX: usize = 900;
     if value.chars().count() <= MAX {
         return value.to_string();
@@ -398,7 +430,7 @@ fn truncate_detail(value: &str) -> String {
 // Event helpers
 // ---------------------------------------------------------------------------
 
-fn publish_group_changed(state: &AppState, reason: &str, group_id: i64) {
+pub(crate) fn publish_group_changed(state: &AppState, reason: &str, group_id: i64) {
     state.events.publish_admin(
         "group.changed",
         json!({"reason": reason, "groupId": group_id}),
@@ -952,38 +984,15 @@ pub async fn set_user_groups(
     Json(body): Json<SetUserGroupsInput>,
 ) -> AppResult<Json<UserGroupsDto>> {
     ensure_user_exists(&state.db, id).await?;
-    if body.group_ids.len() > MAX_RULES {
-        return Err(AppError::bad_request("too many groups for one user"));
-    }
-    let wanted: BTreeSet<i64> = body.group_ids.iter().copied().collect();
+    let wanted: BTreeSet<i64> = validate_group_ids(&state.db, &body.group_ids)
+        .await?
+        .into_iter()
+        .collect();
     let current: BTreeSet<i64> = access::group_refs_for_user(&state.db, id)
         .await?
         .into_iter()
         .map(|g| g.id)
         .collect();
-    if wanted.is_empty() && !current.is_empty() {
-        // Removing every group is allowed; nothing extra to validate.
-    }
-    if !wanted.is_empty() {
-        let ids: Vec<i64> = wanted.iter().copied().collect();
-        let placeholders = std::iter::repeat_n("?", ids.len())
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT id, name FROM groups WHERE id IN ({placeholders})");
-        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
-        for group_id in &ids {
-            query = query.bind(group_id);
-        }
-        let found: Vec<i64> = query
-            .fetch_all(&state.db)
-            .await?
-            .into_iter()
-            .map(|row| row.get("id"))
-            .collect();
-        if found.len() != ids.len() {
-            return Err(AppError::bad_request("one or more groups do not exist"));
-        }
-    }
 
     let now = db::now_ms();
     let mut tx = state.db.begin().await?;

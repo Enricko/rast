@@ -172,7 +172,7 @@ export async function renderSettingsTab(tab: TabRenderContext): Promise<() => vo
       trashField.setError("Enter a whole number between 1 and 3650");
       invalid = true;
     }
-    const quotaError = validateGib(defaultQuota.value);
+    const quotaError = validateGib(defaultQuota.value, { allowZero: true });
     if (quotaError) {
       defaultQuotaField.setError(quotaError);
       invalid = true;

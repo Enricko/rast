@@ -14,8 +14,10 @@ use crate::{
     db,
     error::{AppError, AppResult},
     state::AppState,
-    users::{self, CreateUserRequest, UserDto},
+    users::{self, InitialAccess, UserDto},
 };
+
+use super::groups::{self, AppRuleInput, FolderRuleInput};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -91,6 +93,35 @@ async fn attach_groups(pool: &sqlx::SqlitePool, items: &mut [UserDto]) -> AppRes
 }
 
 /// POST /api/users
+/// Body of `POST /api/users`. Everything after the password is optional and
+/// is saved in the same transaction as the account.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateUserRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
+    /// Defaults to true.
+    #[serde(default)]
+    pub active: Option<bool>,
+    /// Defaults to false.
+    #[serde(default)]
+    pub must_change_password: Option<bool>,
+    #[serde(default)]
+    pub group_ids: Vec<i64>,
+    #[serde(default)]
+    pub folder_rules: Vec<FolderRuleInput>,
+    #[serde(default)]
+    pub app_rules: Vec<AppRuleInput>,
+}
+
+/// POST /api/users — create an account, optionally with its groups and
+/// direct shared-folder and application rules.
 pub async fn create_user(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -105,7 +136,24 @@ pub async fn create_user(
             )))
         }
     };
-    let user = users::create(
+    // Validate the whole selection before anything is written.
+    let group_ids = groups::validate_group_ids(&state.db, &body.group_ids).await?;
+    let folder_rules = groups::validate_folder_rules(&state.db, &body.folder_rules).await?;
+    let app_rules = groups::validate_app_rules(&body.app_rules)?;
+    let initial = InitialAccess {
+        active: body.active.unwrap_or(true),
+        must_change_password: body.must_change_password.unwrap_or(false),
+        group_ids: group_ids.clone(),
+        folder_rules: folder_rules
+            .iter()
+            .map(|r| (r.share_id.clone(), r.rule.clone()))
+            .collect(),
+        app_rules: app_rules
+            .iter()
+            .map(|r| (r.app_id.clone(), r.rule.clone()))
+            .collect(),
+    };
+    let user = users::create_with_access(
         &state.db,
         &state.config,
         &body.username,
@@ -113,8 +161,12 @@ pub async fn create_user(
         role,
         body.display_name.as_deref(),
         body.quota_bytes,
+        &initial,
     )
     .await?;
+    if !group_ids.is_empty() || !folder_rules.is_empty() || !app_rules.is_empty() {
+        crate::access::bump_generation();
+    }
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": user.id, "event": "created"}),
@@ -124,6 +176,34 @@ pub async fn create_user(
         user.id,
         serde_json::json!({"userId": user.id, "event": "created"}),
     );
+    for group_id in &group_ids {
+        groups::publish_group_changed(&state, "membership_updated", *group_id);
+    }
+    let group_names = crate::access::group_refs_for_user(&state.db, user.id)
+        .await
+        .map(|refs| {
+            refs.into_iter()
+                .map(|g| g.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    let mut detail = format!(
+        "role={}, quota={}, active={}, mustChangePassword={}, groups=[{}]",
+        user.role,
+        user.quota_bytes,
+        user.active,
+        user.must_change_password,
+        if group_names.is_empty() {
+            "none"
+        } else {
+            group_names.as_str()
+        },
+    );
+    if !folder_rules.is_empty() || !app_rules.is_empty() {
+        detail.push_str(", rules: ");
+        detail.push_str(&groups::describe_rules(&folder_rules, &app_rules));
+    }
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -132,7 +212,7 @@ pub async fn create_user(
             .object("user", user.id.to_string())
             .path(&user.username)
             .success()
-            .detail(format!("role={}, quota={}", user.role, user.quota_bytes)),
+            .detail(groups::truncate_detail(&detail)),
     )
     .await;
     Ok(Json(UserDto::from(user)))

@@ -23,6 +23,7 @@ import type {
   GroupRef,
   Page,
   SessionInfo,
+  Share,
   SystemInfo,
   User,
   UserSessionList,
@@ -48,6 +49,7 @@ import {
   type EffectiveAccessPanel,
   type EntityPicker,
   type PickerOption,
+  type ShareRef,
 } from "./access-ui";
 import { renderGroupsView } from "./groups";
 
@@ -406,24 +408,60 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
   }
 
   // ---------------------------------------------------------------- actions
+  async function fetchGroupsPage(query: string, pageNumber: number, perPage: number): Promise<{ items: PickerOption[]; total: number }> {
+    const response = await ctx.api.get<Page<GroupRef>>("/api/groups", {
+      q: query || undefined,
+      page: pageNumber,
+      perPage,
+    });
+    return {
+      items: asArray<GroupRef>(response.items).map((group) => ({ id: Number(group.id), label: group.name })),
+      total: Number(response.total ?? 0),
+    };
+  }
+
+  function plural(count: number, one: string, many = `${one}s`): string {
+    return `${count} ${count === 1 ? one : many}`;
+  }
+
   function openCreateModal(): void {
-    const username = h("input", { class: "input", type: "text", autocomplete: "off", spellcheck: false });
+    void openCreateModalAsync();
+  }
+
+  let creating = false;
+  async function openCreateModalAsync(): Promise<void> {
+    if (creating) return;
+    creating = true;
+    // Shared folders feed the direct-rule editor; groups load inside the picker.
+    const problems: string[] = [];
+    let shares: ShareRef[] = [];
+    try {
+      shares = asArray<Share>(await ctx.api.get<Share[]>("/api/shares")).map((share) => ({
+        shareName: share.name,
+        shareId: share.id,
+      }));
+    } catch (error) {
+      problems.push(`Shared folders: ${apiErrorMessage(error)}`);
+    }
+
+    // ---------------------------------------------------------------- account
+    const username = h("input", { class: "input", type: "text", autocomplete: "off", spellcheck: false, dataset: { createField: "username" } });
     const usernameField = formField({
       label: "Username",
       control: username,
       required: true,
       hint: "Letters, digits, dot, dash and underscore.",
     });
-    const displayInput = h("input", { class: "input", type: "text", autocomplete: "off" });
-    const displayField = formField({ label: "Display name (optional)", control: displayInput });
+    const displayInput = h("input", { class: "input", type: "text", autocomplete: "off", dataset: { createField: "display" } });
+    const displayField = formField({ label: "Display name (optional)", control: displayInput, hint: "Defaults to the username." });
     const role = h(
       "select",
-      { class: "select" },
+      { class: "select", dataset: { createField: "role" } },
       h("option", { value: "user", selected: true }, "User"),
       h("option", { value: "admin" }, "Administrator"),
     );
     const roleField = formField({ label: "Role", control: role, hint: "Administrators can manage users, storage and system settings." });
-    const quota = h("input", { class: "input", type: "number", min: "0", step: "1", value: "0" });
+    const quota = h("input", { class: "input", type: "number", min: "0", step: "1", value: "0", dataset: { createField: "quota" } });
     const quotaField = formField({
       label: "Storage quota (GiB)",
       control: quota,
@@ -435,22 +473,131 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       required: true,
       showStrength: true,
     });
+    password.input.dataset.createField = "password";
+    const activeSwitch = switchControl({
+      label: "Account is active",
+      checked: true,
+      hint: "Inactive accounts cannot sign in until enabled.",
+    });
+    const forceChange = switchControl({
+      label: "Require password change at next sign-in",
+      checked: true,
+      hint: "The person picks their own password after signing in with this one.",
+    });
+
+    // ---------------------------------------------------------------- groups
+    const groupCount = h("span", { class: "small muted", dataset: { createCount: "groups" } });
+    const groupPicker = createEntityPicker({
+      fetchPage: fetchGroupsPage,
+      selected: [],
+      onChange: () => updateCounts(),
+      searchPlaceholder: "Search groups by name…",
+      emptyText: "No groups found. Groups are created on the Groups tab.",
+      ariaLabel: "Group membership",
+    });
+
+    // ---------------------------------------------------------------- direct rules
+    const rulesEditor = renderDirectRulesEditor({
+      shares,
+      rules: { folderRules: [], appRules: [] },
+      onChange: () => updateCounts(),
+    });
+    const ruleCount = h("span", { class: "small muted", dataset: { createCount: "rules" } });
+
+    function updateCounts(): void {
+      const groups = groupPicker.selectedIds().length;
+      groupCount.textContent = groups === 0 ? "None selected" : `${plural(groups, "group")} selected`;
+      const rules = rulesEditor.collect();
+      const total = rules.folderRules.length + rules.appRules.length;
+      ruleCount.textContent = total === 0 ? "Everything inherits" : plural(total, "direct rule");
+    }
+    updateCounts();
+
+    // Administrators bypass groups and rules; say so instead of hiding them.
+    const adminNote = (): HTMLElement =>
+      h(
+        "div",
+        { class: "banner banner-info create-admin-note", hidden: true },
+        h("span", { class: "banner-icon" }, iconSvg("shield", 16)),
+        h(
+          "div",
+          { class: "banner-body" },
+          h(
+            "div",
+            { class: "banner-message" },
+            "Administrators always have full access. These choices are saved and take effect if the account becomes a regular user.",
+          ),
+        ),
+      );
+    const adminNotes = [adminNote(), adminNote()];
+    role.addEventListener("change", () => {
+      for (const note of adminNotes) note.hidden = role.value !== "admin";
+    });
+
     const alert = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
+    const section = (title: string, extra: Node | null, ...children: Array<Node | null>): HTMLElement =>
+      h(
+        "div",
+        { class: "appearance-section group-section" },
+        h("div", { class: "appearance-section-head" }, h("span", { class: "appearance-section-title" }, title), extra),
+        ...children,
+      );
 
     const body = h(
       "div",
-      { class: "col" },
-      usernameField.el,
-      displayField.el,
-      roleField.el,
-      quotaField.el,
-      password.el,
+      { class: "col user-editor user-create" },
+      accessAvailability(problems),
+      section(
+        "Account",
+        null,
+        h("div", { class: "form-grid-2" }, usernameField.el, displayField.el),
+        h("div", { class: "form-grid-2" }, roleField.el, quotaField.el),
+        h(
+          "div",
+          { class: "form-grid-2" },
+          password.el,
+          h("div", { class: "field" }, h("span", { class: "field-label" }, "Options"), activeSwitch.el, forceChange.el),
+        ),
+      ),
+      section(
+        "Group Membership",
+        groupCount,
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Groups grant their shared-folder and application access to members. Pick any number; you can change them later.",
+        ),
+        adminNotes[0] ?? null,
+        groupPicker.el,
+      ),
+      section(
+        "Direct Rules",
+        ruleCount,
+        h(
+          "p",
+          { class: "section-note muted" },
+          "Optional rules for this account only, on top of its groups. Inherit uses what the groups and defaults allow; No Access always wins.",
+        ),
+        adminNotes[1] ?? null,
+        rulesEditor.el,
+      ),
       alert,
     );
+
+    const showAlert = (message: string): void => {
+      alert.hidden = false;
+      alert.textContent = message;
+      alert.scrollIntoView({ block: "nearest" });
+    };
 
     modal({
       title: "Add user",
       body,
+      wide: true,
+      onClose: () => {
+        creating = false;
+        groupPicker.dispose();
+      },
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
         {
@@ -461,47 +608,63 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
             alert.hidden = true;
             usernameField.setError(null);
             displayField.setError(null);
+            quotaField.setError(null);
             password.setError(null);
-            let invalid = false;
-            const usernameError = validateUsername(username.value);
-            if (usernameError) {
-              usernameField.setError(usernameError);
-              invalid = true;
+            let firstInvalid: HTMLElement | null = null;
+            const invalid = (setError: (message: string) => void, message: string | null, control: HTMLElement): void => {
+              if (!message) return;
+              setError(message);
+              firstInvalid ??= control;
+            };
+            invalid((m) => usernameField.setError(m), validateUsername(username.value), username);
+            invalid(
+              (m) => displayField.setError(m),
+              displayInput.value.trim() ? validateRequiredText(displayInput.value, "Display name", 64) : null,
+              displayInput,
+            );
+            invalid((m) => quotaField.setError(m), validateGib(quota.value, { allowZero: true }), quota);
+            invalid((m) => password.setError(m), validatePassword(password.value()), password.input);
+            if (firstInvalid) {
+              const target: HTMLElement = firstInvalid;
+              target.scrollIntoView({ block: "center" });
+              target.focus({ preventScroll: true });
+              return;
             }
-            const displayError = displayInput.value.trim()
-              ? validateRequiredText(displayInput.value, "Display name", 64)
-              : null;
-            if (displayError) {
-              displayField.setError(displayError);
-              invalid = true;
-            }
-            const passwordError = validatePassword(password.value());
-            if (passwordError) {
-              password.setError(passwordError);
-              invalid = true;
-            }
-            const quotaError = validateGib(quota.value);
-            if (quotaError) {
-              quotaField.setError(quotaError);
-              invalid = true;
-            }
-            if (invalid) return;
+            const name = username.value.trim();
+            const rules = rulesEditor.collect();
+            const groupIds = groupPicker.selectedIds();
             try {
-              await ctx.api.post("/api/users", {
-                username: username.value.trim(),
+              await ctx.api.post<User>("/api/users", {
+                username: name,
                 displayName: displayInput.value.trim() || undefined,
                 role: role.value,
                 password: password.value(),
                 quotaBytes: gibToBytes(parseGib(quota.value)),
+                active: activeSwitch.isChecked(),
+                mustChangePassword: forceChange.isChecked(),
+                groupIds,
+                folderRules: rules.folderRules,
+                appRules: rules.appRules,
               });
-              ctx.toast.success(`User ${username.value.trim()} created`);
+              const extras = [
+                groupIds.length > 0 ? plural(groupIds.length, "group") : "",
+                rules.folderRules.length + rules.appRules.length > 0
+                  ? plural(rules.folderRules.length + rules.appRules.length, "direct rule")
+                  : "",
+              ].filter(Boolean);
+              ctx.toast.success(`User ${name} created${extras.length > 0 ? ` · ${extras.join(" · ")}` : ""}`);
               close();
               page = 1;
               await refreshAdminCount();
               void load();
             } catch (error) {
-              alert.hidden = false;
-              alert.textContent = apiErrorMessage(error);
+              if (error instanceof ApiError && error.isConflict) {
+                usernameField.setError(apiErrorMessage(error));
+                username.scrollIntoView({ block: "center" });
+                username.focus({ preventScroll: true });
+              } else {
+                showAlert(apiErrorMessage(error));
+              }
               throw error;
             }
           },
@@ -606,17 +769,6 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       `${initialMembershipOptions.length} group${initialMembershipOptions.length === 1 ? "" : "s"} selected`,
     );
     let groupPicker: EntityPicker | null = null;
-    async function fetchGroupsPage(query: string, pageNumber: number, perPage: number): Promise<{ items: PickerOption[]; total: number }> {
-      const response = await ctx.api.get<Page<GroupRef>>("/api/groups", {
-        q: query || undefined,
-        page: pageNumber,
-        perPage,
-      });
-      return {
-        items: asArray<GroupRef>(response.items).map((group) => ({ id: Number(group.id), label: group.name })),
-        total: Number(response.total ?? 0),
-      };
-    }
     groupPicker = createEntityPicker({
       fetchPage: fetchGroupsPage,
       selected: initialMembershipOptions,
@@ -672,7 +824,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     function validationMessage(): string | null {
       const displayError = validateRequiredText(displayInput.value, "Display name", 64);
       if (displayError) return displayError;
-      const quotaError = validateGib(quota.value);
+      const quotaError = validateGib(quota.value, { allowZero: true });
       if (quotaError) return quotaError;
       const profile = readProfile();
       if (isLastAdminRole && (profile.role !== "admin" || !profile.active)) {

@@ -1,6 +1,6 @@
 //! User domain logic shared by the HTTP API, the CLI and the setup flow.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
 use crate::{
@@ -62,6 +62,32 @@ pub fn validate_username(username: &str) -> AppResult<String> {
     Ok(trimmed.to_string())
 }
 
+/// Account options, group membership and direct rules stored together with a
+/// new account. Group ids and rules must already be validated by the caller
+/// (see `api::groups`); they are written in the same transaction as the user.
+#[derive(Debug, Clone)]
+pub struct InitialAccess {
+    pub active: bool,
+    pub must_change_password: bool,
+    pub group_ids: Vec<i64>,
+    /// `(share_id, rule)` pairs; `inherit` rules are skipped.
+    pub folder_rules: Vec<(String, String)>,
+    /// `(app_id, rule)` pairs; `inherit` rules are skipped.
+    pub app_rules: Vec<(String, String)>,
+}
+
+impl Default for InitialAccess {
+    fn default() -> Self {
+        Self {
+            active: true,
+            must_change_password: false,
+            group_ids: Vec::new(),
+            folder_rules: Vec::new(),
+            app_rules: Vec::new(),
+        }
+    }
+}
+
 /// Create a user, their home directory and quota row atomically-ish.
 pub async fn create(
     pool: &SqlitePool,
@@ -71,6 +97,33 @@ pub async fn create(
     role: Role,
     display_name: Option<&str>,
     quota_bytes: Option<i64>,
+) -> AppResult<UserRecord> {
+    create_with_access(
+        pool,
+        cfg,
+        username,
+        password,
+        role,
+        display_name,
+        quota_bytes,
+        &InitialAccess::default(),
+    )
+    .await
+}
+
+/// Create a user like [`create`], also saving the initial account options,
+/// group membership and direct rules in the account's transaction, so a
+/// failure never leaves a half-configured account behind.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_with_access(
+    pool: &SqlitePool,
+    cfg: &Config,
+    username: &str,
+    password: &str,
+    role: Role,
+    display_name: Option<&str>,
+    quota_bytes: Option<i64>,
+    initial: &InitialAccess,
 ) -> AppResult<UserRecord> {
     let username = validate_username(username)?;
     let lower = username.to_ascii_lowercase();
@@ -93,14 +146,17 @@ pub async fn create(
 
     let mut tx = pool.begin().await?;
     let res = sqlx::query(
-        "INSERT INTO users (username, display_name, password_hash, role, active, quota_bytes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?)",
+        "INSERT INTO users (username, display_name, password_hash, role, active, quota_bytes,
+                            must_change_password, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&lower)
     .bind(&display)
     .bind(&hash)
     .bind(role.as_str())
+    .bind(initial.active)
     .bind(quota)
+    .bind(initial.must_change_password)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -119,6 +175,41 @@ pub async fn create(
     .bind(now)
     .execute(&mut *tx)
     .await?;
+    let mut group_ids = initial.group_ids.clone();
+    group_ids.sort_unstable();
+    group_ids.dedup();
+    for group_id in group_ids {
+        sqlx::query("INSERT INTO group_members (group_id, user_id, added_at) VALUES (?, ?, ?)")
+            .bind(group_id)
+            .bind(id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| missing_reference(e, "a selected group no longer exists"))?;
+    }
+    for (share_id, rule) in initial.folder_rules.iter().filter(|(_, r)| r != "inherit") {
+        sqlx::query(
+            "INSERT OR REPLACE INTO user_folder_rules (user_id, share_id, rule, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(share_id)
+        .bind(rule)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| missing_reference(e, "a selected shared folder no longer exists"))?;
+    }
+    for (app_id, rule) in initial.app_rules.iter().filter(|(_, r)| r != "inherit") {
+        sqlx::query(
+            "INSERT OR REPLACE INTO user_app_rules (user_id, app_id, rule, updated_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(app_id)
+        .bind(rule)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
     tx.commit().await?;
 
     // Home directory: 0700, owned by the service account running the server.
@@ -133,6 +224,17 @@ pub async fn create(
     find_by_id(pool, id)
         .await?
         .ok_or(AppError::internal("user disappeared after creation"))
+}
+
+/// A group or share deleted between validation and the insert surfaces as a
+/// foreign-key failure; report it as a client error instead of a 500.
+fn missing_reference(error: sqlx::Error, message: &'static str) -> AppError {
+    match &error {
+        sqlx::Error::Database(db) if db.is_foreign_key_violation() => {
+            AppError::bad_request(message)
+        }
+        _ => error.into(),
+    }
 }
 
 pub async fn find_by_username(pool: &SqlitePool, username: &str) -> AppResult<Option<UserRecord>> {
@@ -478,20 +580,6 @@ impl From<UserRecord> for UserDto {
     }
 }
 
-/// Request body shared by user creation endpoints.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateUserRequest {
-    pub username: String,
-    pub password: String,
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub quota_bytes: Option<i64>,
-}
-
 /// Verify a password for a user id, used by long-lived CLI operations.
 pub async fn verify_password(pool: &SqlitePool, id: i64, candidate: &str) -> AppResult<bool> {
     let Some(hash) = password_hash(pool, id).await? else {
@@ -523,6 +611,62 @@ mod tests {
         let cfg = test_cfg(dir.path());
         let pool = db::init(&cfg).await.unwrap();
         (dir, cfg, pool)
+    }
+
+    #[tokio::test]
+    async fn initial_access_is_written_with_the_account_or_not_at_all() {
+        let (_dir, cfg, pool) = setup().await;
+        // A group that disappeared after validation fails the whole creation.
+        let missing_group = InitialAccess {
+            group_ids: vec![424_242],
+            ..InitialAccess::default()
+        };
+        let err = create_with_access(
+            &pool,
+            &cfg,
+            "frank",
+            "Frank-Password-123!",
+            Role::User,
+            None,
+            None,
+            &missing_group,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)), "{err:?}");
+        assert!(find_by_username(&pool, "frank").await.unwrap().is_none());
+        assert!(!cfg.home_for("frank").exists());
+
+        let options = InitialAccess {
+            active: false,
+            must_change_password: true,
+            app_rules: vec![
+                ("monitor".into(), "none".into()),
+                ("files".into(), "inherit".into()),
+            ],
+            ..InitialAccess::default()
+        };
+        let user = create_with_access(
+            &pool,
+            &cfg,
+            "frank",
+            "Frank-Password-123!",
+            Role::User,
+            None,
+            None,
+            &options,
+        )
+        .await
+        .unwrap();
+        assert!(!user.active);
+        assert!(user.must_change_password);
+        let rules: Vec<(String, String)> =
+            sqlx::query_as("SELECT app_id, rule FROM user_app_rules WHERE user_id = ?")
+                .bind(user.id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rules, vec![("monitor".to_string(), "none".to_string())]);
     }
 
     #[test]

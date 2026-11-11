@@ -408,7 +408,12 @@ It contains:
 - the stable taskbar slots with per-account pins (three default pins);
 - the default widgets (migration 0007, schema v7);
 - the updater fix;
-- taskbar buttons that show only the application name.
+- taskbar buttons that show only the application name;
+- the complete Add user dialog: groups, direct shared-folder and application
+  rules, "account is active" and "require password change", saved in the
+  account's transaction (`POST /api/users`);
+- the fix for quota 0 (unlimited) being rejected in Add user, Edit user and
+  Settings, and two-column user dialogs.
 
 ## 11. Verification summary (final build `e03fee4`)
 

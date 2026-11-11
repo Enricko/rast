@@ -3815,6 +3815,14 @@ kbd {
   gap: 12px;
 }
 
+.create-admin-note {
+  margin-bottom: 10px;
+}
+
+.user-create .switch {
+  margin-bottom: 8px;
+}
+
 .user-editor .appearance-section-head {
   margin-bottom: 10px;
 }
@@ -3828,6 +3836,8 @@ kbd {
 }
 
 .user-editor .form-grid-2 {
+  /* Beats the generic one-column rule for windows under 820px. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 16px;
 }
 
@@ -3849,11 +3859,16 @@ kbd {
     max-width: 170px;
   }
 
+  /* Narrow, but wide enough for the longest choice ("Read & Write"). */
   .rules-table .rule-col,
   .rules-table .rule-cell {
-    width: 140px;
+    width: 160px;
   }
+}
 
+/* The dialog body is a "win" container about 720px wide: keep two columns
+   there and stack them only when the dialog itself gets narrow. */
+@container win (max-width: 560px) {
   .user-editor .form-grid-2 {
     grid-template-columns: 1fr;
   }

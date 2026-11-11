@@ -71,7 +71,7 @@ before using RAST`.
 | Method | Path | Body |
 | --- | --- | --- |
 | GET | `/api/users?page&perPage&q` | list |
-| POST | `/api/users` | `{username, password, role, displayName?, quotaBytes?}` |
+| POST | `/api/users` | `{username, password, role, displayName?, quotaBytes?, active?, mustChangePassword?, groupIds?, folderRules?, appRules?}` (see below) |
 | PATCH | `/api/users/{id}` | `{displayName?, role?, active?, quotaBytes?, mustChangePassword?}` |
 | DELETE | `/api/users/{id}` | deactivate (data preserved) |
 | POST | `/api/users/{id}/password` | `{password, mustChangePassword?}` |
@@ -80,6 +80,17 @@ before using RAST`.
 
 Rules enforced server-side: cannot demote/deactivate the last active admin,
 cannot deactivate yourself.
+
+`POST /api/users` can set up the whole account in one request. `active`
+defaults to `true` and `mustChangePassword` to `false`. `groupIds`,
+`folderRules` (`[{shareId? | shareName, rule}]`, rule `inherit|none|read|write`)
+and `appRules` (`[{appId, rule}]`, rule `inherit|none|allow`) use the same
+format as `PUT /api/users/{id}/groups` and `PUT /api/users/{id}/access-rules`.
+Everything is validated before anything is written: an unknown group, shared
+folder or application, or an invalid rule, answers `400` and creates no
+account. The account, its groups and its direct rules are stored in one
+transaction; `inherit` rules are not stored. The `user.create` audit entry
+lists the groups and rules.
 
 ## File Station
 
