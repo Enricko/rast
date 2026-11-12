@@ -1,39 +1,75 @@
 #!/bin/sh
-# RAST: keep the app's windows filling its RAST window, and show a slim window
+# RAST: keep the app's main window filling its RAST window and let the app's
+# extra windows float on top of it (not stacked full-size); show a slim window
 # bar while the app has more than one window, or a minimized one, so every
-# window can be reached. With a single window the app fills the whole RAST
-# window.
+# window can be reached. Dialogs and popups keep the size the app gave them.
 bar=""
+primary=""
 while :; do
   count=0
   hidden=0
+  normal=""
   for id in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# *//; s/,/ /g'); do
     info=$(xprop -id "$id" _NET_WM_WINDOW_TYPE _NET_WM_STATE 2>/dev/null) || continue
     case "$info" in *_NET_WM_WINDOW_TYPE_DOCK*) continue ;; esac
     count=$((count + 1))
-    case "$info" in *_NET_WM_STATE_HIDDEN*) hidden=1 ;; esac
-    # The app's windows are the RAST window: a window the app restored
-    # smaller, or one dragged inside the picture, fills it again. Dialogs and
-    # popups keep the size the app gave them.
+    case "$info" in *_NET_WM_STATE_HIDDEN*) hidden=1; continue ;; esac
+    # Dialogs and popups keep the size the app gave them.
+    case "$info" in
+      *_NET_WM_WINDOW_TYPE_DIALOG*|*_NET_WM_WINDOW_TYPE_UTILITY*|\
+      *_NET_WM_WINDOW_TYPE_TOOLBAR*|*_NET_WM_WINDOW_TYPE_MENU*|\
+      *_NET_WM_WINDOW_TYPE_POPUP_MENU*|*_NET_WM_WINDOW_TYPE_SPLASH*|\
+      *_NET_WM_WINDOW_TYPE_NOTIFICATION*|*_NET_WM_WINDOW_TYPE_DND*) continue ;;
+    esac
+    if xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | grep -q 'window id'; then continue; fi
+    normal="$normal $id"
+  done
+
+  # The main window is the oldest one still open; it fills the RAST window.
+  if [ -z "$primary" ]; then
+    set -- $normal
+    primary=${1:-}
+  else
+    case " $normal " in *" $primary "*) ;; *) set -- $normal; primary=${1:-} ;; esac
+  fi
+
+  geometry=$(xdpyinfo 2>/dev/null | sed -n 's/.*dimensions: *\([0-9]*\)x\([0-9]*\).*/\1 \2/p' | head -1)
+  set -- $geometry
+  screen_w=${1:-1024}
+  screen_h=${2:-768}
+  # The window bar takes the bottom 30 pixels while it is shown.
+  bar_height=0
+  if [ "$count" -ge 2 ] || [ "$hidden" = 1 ]; then bar_height=30; fi
+  usable_h=$((screen_h - bar_height))
+
+  extra=0
+  for id in $normal; do
+    info=$(xprop -id "$id" _NET_WM_STATE 2>/dev/null)
     maximized=0
     case "$info" in *_NET_WM_STATE_MAXIMIZED_VERT*)
       case "$info" in *_NET_WM_STATE_MAXIMIZED_HORZ*) maximized=1 ;; esac
     esac
-    if [ "$maximized" = 0 ]; then
-      case "$info" in
-        *_NET_WM_STATE_HIDDEN*) ;;
-        *_NET_WM_WINDOW_TYPE_DIALOG*|*_NET_WM_WINDOW_TYPE_UTILITY*|\
-        *_NET_WM_WINDOW_TYPE_TOOLBAR*|*_NET_WM_WINDOW_TYPE_MENU*|\
-        *_NET_WM_WINDOW_TYPE_POPUP_MENU*|*_NET_WM_WINDOW_TYPE_SPLASH*|\
-        *_NET_WM_WINDOW_TYPE_NOTIFICATION*|*_NET_WM_WINDOW_TYPE_DND*) ;;
-        *)
-          if ! xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | grep -q 'window id'; then
-            wmctrl -i -r "$id" -b add,maximized_vert,maximized_horz 2>/dev/null
-          fi
-          ;;
-      esac
+    if [ "$id" = "$primary" ]; then
+      # The app's main window is the RAST window: fill it again if the app
+      # restored it smaller or it was dragged inside the picture.
+      if [ "$maximized" = 0 ]; then
+        wmctrl -i -r "$id" -b add,maximized_vert,maximized_horz 2>/dev/null
+      fi
+    elif [ "$count" -ge 2 ]; then
+      # Extra windows float on top: 70% wide and 75% tall, cascaded, so they
+      # are not hidden exactly behind the main window.
+      extra=$((extra + 1))
+      x=$(((screen_w - screen_w * 70 / 100) / 2 + extra * 40))
+      y=$(((usable_h - usable_h * 75 / 100) / 2 + extra * 32))
+      if [ "$x" -lt 0 ]; then x=0; fi
+      if [ "$y" -lt 0 ]; then y=0; fi
+      if [ "$maximized" = 1 ]; then
+        wmctrl -i -r "$id" -b remove,maximized_vert,maximized_horz 2>/dev/null
+      fi
+      wmctrl -i -r "$id" -e "0,$x,$y,$((screen_w * 70 / 100)),$((usable_h * 75 / 100))" 2>/dev/null
     fi
   done
+
   if [ "$count" -ge 2 ] || [ "$hidden" = 1 ]; then
     if [ -z "$bar" ] || ! kill -0 "$bar" 2>/dev/null; then
       tint2 -c /rast/tint2rc >/dev/null 2>&1 &

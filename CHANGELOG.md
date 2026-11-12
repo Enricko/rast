@@ -24,6 +24,20 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.4] - 2026-11-13
+
+No database migration (schema stays v11). Apps installed before this release
+get the window arrangement after *Reinstall* (the app's page, More actions);
+the container setting applies from the next start.
+
+### Fixed
+
+- **A second app window is no longer stacked full-size on the main one.** The
+  app's main window keeps filling the RAST window, and windows the app opens
+  later (a tab dragged out of Chrome, a second document) float on top at a
+  readable size, cascaded, so both are visible; the window bar lists them.
+  Dialogs and popups keep the size the app gives them.
+
 ## [0.11.3] - 2026-11-13
 
 No database migration (schema stays v11). Apps installed before this release

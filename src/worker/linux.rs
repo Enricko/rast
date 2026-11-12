@@ -735,6 +735,10 @@ pub(crate) fn run_args(
         "HARDEN_DESKTOP=true".to_string(),
         "DISABLE_MOUSE_BUTTONS=true".to_string(),
         "NO_DECOR=true".to_string(),
+        // Do not auto-maximize every window: the base image maximizes the
+        // app's main window, and extra windows keep the size the app gives
+        // them instead of stacking full-size on top of it.
+        "NO_FULL=true".to_string(),
         "NO_GAMEPAD=true".to_string(),
         "NO_WEBCAM=true".to_string(),
         "SELKIES_UI_SHOW_SIDEBAR=false|locked".to_string(),
