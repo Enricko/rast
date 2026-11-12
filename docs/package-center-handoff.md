@@ -1,4 +1,4 @@
-# Package Center — handoff (RAST 0.6.0)
+# Package Center — handoff (RAST 0.6.1)
 
 Package Center is a desktop application for administrators. It installs verified
 runtimes — **Python, PHP CLI, Go and Node.js** — side by side, plus packages
@@ -8,10 +8,8 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
-| Status | **v0.6.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): system runtimes are detected, updates go in alongside them, and the default is on every login shell's PATH. v0.5.0 (first Package Center) was deployed on 2026-11-11. See [Deploy of 0.6.0](#deploy-of-060-2026-11-12). |
+| Status | **v0.6.1** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): the calmer Package Center (tiles, package pages, Settings), and a catalog check after every start. v0.6.0 (system runtimes, shell PATH) and v0.5.0 (first Package Center) came before. See [Deploy of 0.6.1](#deploy-of-061-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
-| Next step | On prod (0.6.0), click **Check updates** once: prod still holds catalog sequence 1, which lists no versions, so no card has an Install or Update button until it is refreshed. |
-| Unreleased on `main` | Calmer Package Center layout (tiles with one button, package page, Settings) and a catalog check at every start. See [After 0.6.0](#after-060-unreleased). Needs an approved release. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
 
@@ -504,7 +502,7 @@ To also remove the PATH entry, set `packages_shell_path = false` in
 `/etc/rast/rast.toml` and run `sudo rast packages path sync` *before* rolling
 back, because 0.5.0 has no `path` command.
 
-### After 0.6.0 (unreleased)
+### After 0.6.0: released as 0.6.1
 
 The user found no Install or Update buttons on prod and asked for a calmer
 layout, in the style of a NAS package center. The cause of the missing
@@ -546,6 +544,34 @@ errors and no horizontal overflow on a phone. The scripted run then checked:
 * search from a package page.
 
 The frontend tests (34) and the Rust package tests (41 + 5) pass.
+
+### Deploy of 0.6.1 (2026-11-12)
+
+Approved by the user. The release-prep commit is `c2bc65a` (CI 43141089027
+green). The annotated tag `v0.6.1` triggered release workflow 43141417321,
+which published both binaries, `SHA256SUMS` and the installer. Steps:
+
+* backup `rast-20261112-022639-db-config.tar.gz`;
+* `sudo rast update --version 0.6.1`. It took its own backup
+  (`rast-20261112-022904-db-config.tar.gz`) and reported `health: ok` and
+  schema 8. It also ran `rast packages path sync` by itself (the 0.6.0
+  updater knows the step).
+
+Verified afterwards:
+
+* `rast 0.6.1`; `rast doctor` ok (schema v8, 0 warnings); `rast.service`
+  active with no restarts;
+* `/healthz` ok on loopback and on https://desktop.lufria.tech;
+* the served `index-DMyxYj8C.js` is identical to the local build of
+  `v0.6.1`;
+* the terminal PATH is on, and the profile script is 0644 root;
+* the start-up catalog check replaced the cached sequence 1 with
+  **sequence 8** at 02:29:28 UTC, 21 s after start, with no click. It
+  lists Python 3.15.2/3.14.10/3.13.18, PHP 8.5.12/8.4.27, Go
+  1.27.4/1.27.3/1.26.11/1.26.10 and Node.js 26.13.1 to 22.23.4;
+* the journal shows no warnings.
+
+Rollback: `/usr/local/bin/rast.rollback-0.6.0` (schema unchanged).
 
 ## Limitations
 
