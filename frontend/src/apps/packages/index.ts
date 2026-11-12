@@ -191,6 +191,7 @@ class PackageCenterApp {
     this.main = h("div", { class: "app-main pkg-main" });
     ctx.root.classList.add("packages-app");
     ctx.root.append(toolbar, this.notice.el, h("div", { class: "app-split pkg-split" }, this.sidebar, this.main));
+    this.linux.attachDrop(ctx.root);
 
     this.subscribe();
     // Keep relative times and the stale indicator honest without a reload.

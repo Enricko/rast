@@ -15,6 +15,7 @@ import type { AppLifecycle } from "../../components/lifecycle";
 import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock } from "../../components/states";
 import { pickDestination } from "../files/picker";
+import { UploadManager } from "../files/upload";
 import {
   isLinuxPackageName,
   isOpenable,
@@ -55,6 +56,9 @@ const SOURCE_LABEL: Record<string, string> = {
   zsync: "The AppImage's update server",
 };
 
+/** Where a dropped file is saved (the person's home). */
+const DROP_FOLDER = "/Downloads";
+
 const MEMORY_CHOICES_MB = [1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768];
 
 export class LinuxApps {
@@ -62,6 +66,7 @@ export class LinuxApps {
   /** Running install and update jobs, by job id. */
   private readonly progress = new Map<string, Progress>();
   private readonly checking = new Set<string>();
+  private uploads: UploadManager | null = null;
 
   constructor(host: LinuxHost) {
     this.host = host;
@@ -109,6 +114,76 @@ export class LinuxApps {
       .filter((app) => view !== "updates" || (app.status === "ready" && app.update.available))
       .filter((app) => !q || app.name.toLowerCase().includes(q) || app.id.includes(q) || (app.package ?? "").includes(q))
       .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  // ------------------------------------------------------------- drag & drop
+
+  /**
+   * Dropping a .deb, AppImage or archive on App Center uploads it to the
+   * person's Downloads folder and installs it.
+   */
+  attachDrop(root: HTMLElement): void {
+    if (!this.enabled) return;
+    const { ctx, lc } = this.host;
+    const overlay = h(
+      "div",
+      { class: "fs-drop-overlay hidden" },
+      iconSvg("upload", 34),
+      h("div", { class: "fs-drop-title" }, "Drop to install a Linux app"),
+      h("div", { class: "small muted" }, ".deb, AppImage or .tar.gz. The file is saved in your Downloads folder."),
+    );
+    const uploads = new UploadManager(ctx, lc, {
+      currentDir: () => DROP_FOLDER,
+      onUploaded: (entry) => void this.install(entry.path),
+      onDrained: () => undefined,
+      maxUploadBytes: () => ctx.store.get().maxUploadBytes,
+    });
+    this.uploads = uploads;
+    root.append(overlay, uploads.el);
+    let depth = 0;
+    const active = (event: DragEvent): boolean => !this.host.readOnly() && hasFileDrag(event);
+    root.addEventListener("dragenter", (event) => {
+      if (!active(event)) return;
+      event.preventDefault();
+      depth += 1;
+      overlay.classList.remove("hidden");
+    });
+    root.addEventListener("dragover", (event) => {
+      if (!active(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    });
+    root.addEventListener("dragleave", (event) => {
+      if (!active(event)) return;
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) overlay.classList.add("hidden");
+    });
+    root.addEventListener("drop", (event) => {
+      if (!active(event)) return;
+      event.preventDefault();
+      depth = 0;
+      overlay.classList.add("hidden");
+      void this.dropped(Array.from(event.dataTransfer?.files ?? []));
+    });
+  }
+
+  private async dropped(files: File[]): Promise<void> {
+    const { ctx } = this.host;
+    const usable = files.filter((file) => isLinuxPackageName(file.name));
+    if (usable.length === 0) {
+      if (files.length) ctx.toast.warning("Drop a .deb package, an AppImage or a .tar.gz archive.");
+      return;
+    }
+    if (!this.dockerEnabled) {
+      ctx.toast.warning("Linux apps are not available here: they need Docker on a Linux server.");
+      return;
+    }
+    try {
+      await ctx.api.post("/api/files/mkdir", { path: DROP_FOLDER });
+    } catch {
+      /* the folder is already there */
+    }
+    this.uploads?.enqueue(usable, DROP_FOLDER);
   }
 
   // ------------------------------------------------------------------ tiles
@@ -339,18 +414,23 @@ export class LinuxApps {
       startPath: "/",
       files: (entry) => isLinuxPackageName(entry.name),
       emptyHint: "No .deb, AppImage or .tar.gz files here. Upload one with File Station first.",
-    }).then(async (path) => {
-      if (!path) return;
-      try {
-        const res = await ctx.api.post<{ app: LinuxApp; jobId: string }>("/api/linux-apps/install", { path });
-        ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
-        this.follow(res.jobId);
-        await this.reload();
-        this.host.openPage(res.app.id);
-      } catch (error) {
-        ctx.toast.error(errorMessage(error));
-      }
+    }).then((path) => {
+      if (path) void this.install(path);
     });
+  }
+
+  /** Install the File Station file at `path` and show the app's page. */
+  private async install(path: string): Promise<void> {
+    const { ctx } = this.host;
+    try {
+      const res = await ctx.api.post<{ app: LinuxApp; jobId: string }>("/api/linux-apps/install", { path });
+      ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
+      this.follow(res.jobId);
+      await this.reload();
+      this.host.openPage(res.app.id);
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+    }
   }
 
   private async update(app: LinuxApp): Promise<void> {
@@ -549,4 +629,8 @@ function button(label: string, variant: "primary" | "secondary", run: () => Prom
     }
   });
   return btn;
+}
+
+function hasFileDrag(event: DragEvent): boolean {
+  return Array.from(event.dataTransfer?.types ?? []).includes("Files");
 }

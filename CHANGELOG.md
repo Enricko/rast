@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.10.1] - 2026-11-12
+
+No database migration (schema stays v10).
+
+### Added
+
+- **Drop a file on App Center to install a Linux app.** Dragging a `.deb`, an
+  AppImage or a `.tar.gz` archive from your computer onto the App Center
+  window uploads it to your `Downloads` folder and installs it.
+
 ## [0.10.0] - 2026-11-12
 
 Linux apps: administrators can install desktop Linux apps (`.deb`, AppImage,
