@@ -1,7 +1,8 @@
 #!/bin/sh
-# RAST: show a slim window bar while the app has more than one window, or a
-# minimized one, so every window can be reached. With a single window the app
-# fills the whole RAST window.
+# RAST: keep the app's windows filling its RAST window, and show a slim window
+# bar while the app has more than one window, or a minimized one, so every
+# window can be reached. With a single window the app fills the whole RAST
+# window.
 bar=""
 while :; do
   count=0
@@ -11,6 +12,27 @@ while :; do
     case "$info" in *_NET_WM_WINDOW_TYPE_DOCK*) continue ;; esac
     count=$((count + 1))
     case "$info" in *_NET_WM_STATE_HIDDEN*) hidden=1 ;; esac
+    # The app's windows are the RAST window: a window the app restored
+    # smaller, or one dragged inside the picture, fills it again. Dialogs and
+    # popups keep the size the app gave them.
+    maximized=0
+    case "$info" in *_NET_WM_STATE_MAXIMIZED_VERT*)
+      case "$info" in *_NET_WM_STATE_MAXIMIZED_HORZ*) maximized=1 ;; esac
+    esac
+    if [ "$maximized" = 0 ]; then
+      case "$info" in
+        *_NET_WM_STATE_HIDDEN*) ;;
+        *_NET_WM_WINDOW_TYPE_DIALOG*|*_NET_WM_WINDOW_TYPE_UTILITY*|\
+        *_NET_WM_WINDOW_TYPE_TOOLBAR*|*_NET_WM_WINDOW_TYPE_MENU*|\
+        *_NET_WM_WINDOW_TYPE_POPUP_MENU*|*_NET_WM_WINDOW_TYPE_SPLASH*|\
+        *_NET_WM_WINDOW_TYPE_NOTIFICATION*|*_NET_WM_WINDOW_TYPE_DND*) ;;
+        *)
+          if ! xprop -id "$id" WM_TRANSIENT_FOR 2>/dev/null | grep -q 'window id'; then
+            wmctrl -i -r "$id" -b add,maximized_vert,maximized_horz 2>/dev/null
+          fi
+          ;;
+      esac
+    fi
   done
   if [ "$count" -ge 2 ] || [ "$hidden" = 1 ]; then
     if [ -z "$bar" ] || ! kill -0 "$bar" 2>/dev/null; then

@@ -18,8 +18,9 @@ find /config/.config -maxdepth 3 \( -name SingletonLock -o -name SingletonCookie
 # RAST: the streamed window is the app's only window frame. Chromium browsers
 # draw their own title bar with minimize/maximize/close buttons inside the
 # picture, which would give them two frames; turn the browser's own window bar
-# off so RAST's window frame is the only one. This is an ordinary browser
-# preference and stays off.
+# off so RAST's window frame is the only one. The saved window position is
+# forgotten too, so the app starts filling its window instead of restoring an
+# old, possibly off-screen size. Both are ordinary browser preferences.
 if grep -q '"chromium": true' /rast/meta.json 2>/dev/null; then
   PYTHON=$(command -v python3 || echo /lsiopy/bin/python3)
   s6-setuidgid abc "$PYTHON" - <<'PY' || true
@@ -48,9 +49,15 @@ for name in (
         if not isinstance(browser, dict):
             browser = {}
             data["browser"] = browser
-        if browser.get("custom_chrome_frame") is False:
+        changed = False
+        if browser.get("custom_chrome_frame") is not False:
+            browser["custom_chrome_frame"] = False
+            changed = True
+        if "window_placement" in browser:
+            browser.pop("window_placement")
+            changed = True
+        if not changed:
             continue
-        browser["custom_chrome_frame"] = False
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data))
 PY

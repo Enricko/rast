@@ -486,6 +486,10 @@ docker volume ls --filter label=rast.managed=linux-app     # per-person app sett
   *Use system title bar and borders* preference), so the RAST window is the
   only window frame. Apps installed before 0.11.2 get this after *Reinstall*;
   apps that draw their own title bar keep it.
+* The app's windows are kept filling the RAST window: a window the app restored
+  smaller, or one dragged inside the picture, is maximized again within a
+  second (dialogs and popups keep the size the app gave them). Apps installed
+  before 0.11.3 get this after *Reinstall*.
 * A copy only starts while the host has 4 GiB of memory free.
 * Updates come from the app's official source: its apt repository for a
   `.deb` that installs one, GitHub releases or zsync for AppImages that embed

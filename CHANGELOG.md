@@ -24,6 +24,21 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.3] - 2026-11-13
+
+No database migration (schema stays v11). Apps installed before this release
+get the window guard after *Reinstall* (the app's page, More actions); the
+browser preferences are applied at every start.
+
+### Fixed
+
+- **Linux app windows fill their RAST window again.** A window that the app
+  restored smaller, or that was dragged inside the picture, could leave the
+  desktop visible around it, and Chrome could also restore an old window
+  position. A small guard in the app image now maximizes every app window that
+  is not maximized within a second (dialogs and popups keep the size the app
+  gave them), and Chromium browsers forget their saved window position.
+
 ## [0.11.2] - 2026-11-13
 
 No database migration (schema stays v11). Chrome installs made before this
