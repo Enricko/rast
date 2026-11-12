@@ -11,6 +11,28 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.6.0] - 2026-11-12
+
+Package Center works with the runtimes the server already has and puts its
+versions on the terminal PATH. No database migration (schema stays v8).
+After updating from 0.5.0, run `sudo rast packages path sync` once: the 0.5.0
+updater does not know this step (later updates run it themselves).
+
+### Added
+
 - Package Center lists the runtimes the server already has (for example PHP
   and Python from apt, or Node.js installed by hand) as installed *System*
   versions. It reads each version by running the command, confined, and names
@@ -31,17 +53,6 @@ this file by `scripts/changelog-section.sh`.
 - A failed package catalog check is now logged and retried after 5, 10, 20,
   40… minutes (capped at the check interval) instead of waiting a full interval,
   so a catalog published after RAST started is picked up within minutes.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.5.0] - 2026-11-11
 
