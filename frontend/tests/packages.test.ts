@@ -211,14 +211,14 @@ test("sudo and services follow the system-wide links", () => {
   assert.equal(systemWideText(p, { ...links, enabled: false })?.text, "run the system 8.5.4");
   assert.equal(systemWideText(p, { ...links, linked: [], watcher: false })?.text, "Not linked yet");
   assert.equal(systemWideText(p, { ...links, linked: [] })?.text, "Linking…");
-  assert.equal(systemWideText(pkg("php", { defaultVersion: null, terminal, system }), links), null, "no Package Center default");
+  assert.equal(systemWideText(pkg("php", { defaultVersion: null, terminal, system }), links), null, "no App Center default");
   assert.equal(systemSourceLabel({ source: "manual", sourcePackage: null, displaced: true }), "manual install · moved aside");
 });
 
 test("RAST apps: Installed hides uninstalled ones, Updates has none, search matches name and description", () => {
   const apps: AppPackage[] = [
     { id: "files", name: "File Station", description: "Browse files.", installed: true, removable: false },
-    { id: "applications", name: "Container Manager", description: "Docker containers.", installed: false, removable: true },
+    { id: "applications", name: "Docker", description: "Docker containers.", installed: false, removable: true },
     { id: "backup", name: "Backup Center", description: "Back up data.", installed: true, removable: true },
   ];
   assert.deepEqual(filterApps(apps, "installed", "").map((a) => a.id), ["files", "backup"]);

@@ -1,4 +1,4 @@
-//! Package Center orchestration: catalog checks, views, install/update jobs,
+//! App Center orchestration: catalog checks, views, install/update jobs,
 //! default selection, removal, consumers and GitHub imports.
 //!
 //! Every mutation is serialised per package (one operation at a time), runs
@@ -1099,7 +1099,7 @@ impl PackageManager {
             }
         }
         // The system's own runtime: a newer verified version of its release
-        // line (unless Package Center already has that line) is an update,
+        // line (unless App Center already has that line) is an update,
         // installed next to it. It becomes the default when nothing else is.
         let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
         let system_version = system.and_then(|s| s.version.clone());
@@ -1465,7 +1465,7 @@ impl PackageManager {
             .as_ref()
             .and_then(|r| r.default_version.clone())
             .is_some();
-        // The first Package Center version becomes the default, unless the
+        // The first App Center version becomes the default, unless the
         // system already provides the command (then the caller decides).
         let system = self
             .system_install(&manifest.id)

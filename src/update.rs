@@ -165,7 +165,7 @@ pub async fn run(
         return Err("health check failed after update; rolled back".into());
     }
 
-    // Package Center on the login-shell PATH (needs root, which only this
+    // App Center on the login-shell PATH (needs root, which only this
     // command has). Run by the new binary: it knows the current script.
     // Best effort: an older target release may not have the command.
     match std::process::Command::new(BIN_PATH)

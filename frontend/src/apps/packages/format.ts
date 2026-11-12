@@ -1,4 +1,4 @@
-// Pure helpers for the Package Center (unit-tested in tests/packages.test.ts).
+// Pure helpers for the App Center (unit-tested in tests/packages.test.ts).
 
 import type { AppPackage, JobHistory, PackageView, SystemInstall, SystemLinks, VersionChoice } from "./types";
 
@@ -209,7 +209,7 @@ export function systemWideText(
   if (!p.official || !p.defaultVersion || !command) return null;
   if (!links?.enabled) {
     const system = p.system && !p.system.displaced ? `the system ${p.system.version ?? "version"}` : "nothing (not on their PATH)";
-    return { text: `run ${system}`, sub: "Package Center versions are for login shells only (packages_system_wide = false)" };
+    return { text: `run ${system}`, sub: "App Center versions are for login shells only (packages_system_wide = false)" };
   }
   if (links.linked.includes(command)) return { text: `run ${p.defaultVersion}`, sub: `Linked in ${links.directory}` };
   if (!links.watcher) return { text: "Not linked yet", sub: "Run sudo rast packages path sync once" };

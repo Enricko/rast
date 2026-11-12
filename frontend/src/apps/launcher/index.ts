@@ -1,7 +1,7 @@
 // Applications: the folder with every app this account may open. Click a tile
 // to open it; drag it to the desktop or the taskbar, or use its menu to add or
 // remove the desktop shortcut and the taskbar pin. Apps that are not
-// installed live in Package Center ("Get more apps").
+// installed live in App Center ("Get more apps").
 
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition } from "../../core/app";
 import { h } from "../../core/dom";
@@ -36,7 +36,7 @@ function mountLauncher(ctx: AppContext): void {
   });
   const moreButton = h(
     "button",
-    { class: "btn btn-ghost btn-sm", type: "button", title: "Install more apps in Package Center" },
+    { class: "btn btn-ghost btn-sm", type: "button", title: "Install more apps in App Center" },
     iconSvg("package", 14),
     h("span", {}, "Get more apps"),
   );
@@ -73,7 +73,7 @@ function mountLauncher(ctx: AppContext): void {
     ];
     if (app.id !== "packages" && canOpenPackageCenter()) {
       items.push("separator", {
-        label: "Show in Package Center",
+        label: "Show in App Center",
         icon: "package",
         onClick: () => ctx.openApp("packages", { app: app.id }),
       });

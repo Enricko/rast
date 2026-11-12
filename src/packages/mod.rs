@@ -1,4 +1,4 @@
-//! Package Center: verified, side-by-side runtime packages.
+//! App Center: verified, side-by-side runtime packages.
 //!
 //! * [`manifest`] — the versioned `rast-package.json` format.
 //! * [`catalog`] — the signed official catalog (Ed25519, anti-rollback).

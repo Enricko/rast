@@ -665,7 +665,7 @@ log_level = "info"
 docker_enabled = false
 
 # ---------------------------------------------------------------------------
-# Package Center
+# App Center
 # ---------------------------------------------------------------------------
 
 # Put the runtimes chosen with "Make default" on every login shell's PATH,
@@ -1305,11 +1305,11 @@ fi
 
 run systemctl daemon-reload
 
-# Package Center: put the runtimes chosen with "Make default" on every login
+# App Center: put the runtimes chosen with "Make default" on every login
 # shell's PATH (packages_shell_path in rast.toml, on by default). Writes
 # /etc/profile.d/rast-packages.sh and lets other users read the runtimes.
 if ! run env RAST_CONFIG="$CONFIG_FILE" "$BIN_PATH" packages path sync; then
-    warn "could not set up the Package Center shell PATH; run later: sudo rast packages path sync"
+    warn "could not set up the App Center shell PATH; run later: sudo rast packages path sync"
 fi
 
 # ---------------------------------------------------------------------------

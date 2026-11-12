@@ -1,4 +1,4 @@
-//! Package Center API: signed catalog checks (rollback/tamper refusal),
+//! App Center API: signed catalog checks (rollback/tamper refusal),
 //! compatibility, permissions, default selection, consumer protection and
 //! the audit trail. Uses a local `file://` catalog signed with a test key, so
 //! no network access is needed. Real downloads are covered by
@@ -937,7 +937,7 @@ async fn granted_groups_manage_packages_and_uninstall_removes_everything() {
     let shim = server.state.packages.layout.bin_dir().join("lua");
     assert!(shim.is_symlink());
 
-    // Without a grant Package Center is closed, uninstall included.
+    // Without a grant App Center is closed, uninstall included.
     let (status, _) = server
         .request(
             "DELETE",
@@ -948,7 +948,7 @@ async fn granted_groups_manage_packages_and_uninstall_removes_everything() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // A group granted Package Center manages packages.
+    // A group granted App Center manages packages.
     let keeper_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'keeper'")
         .fetch_one(&server.state.db)
         .await
@@ -1098,7 +1098,7 @@ async fn optional_apps_are_uninstalled_and_installed_in_package_center() {
     let apps = body["apps"].as_array().unwrap();
     let app = |id: &str| apps.iter().find(|a| a["id"] == id).cloned().unwrap();
     assert_eq!(app("launcher")["name"], "Applications");
-    assert_eq!(app("applications")["name"], "Container Manager");
+    assert_eq!(app("applications")["name"], "Docker");
     assert_eq!(app("applications")["removable"], true);
     assert_eq!(app("backup")["installed"], true);
     assert_eq!(app("files")["removable"], false);
@@ -1128,7 +1128,7 @@ async fn optional_apps_are_uninstalled_and_installed_in_package_center() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "Package Center is closed to viewers"
+        "App Center is closed to viewers"
     );
 
     let (status, _) = server

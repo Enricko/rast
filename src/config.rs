@@ -77,7 +77,7 @@ pub struct FileConfig {
     pub setup_token_required: Option<bool>,
     /// Keep this false unless RAST is behind a reverse proxy you control.
     pub trust_forwarded_headers: Option<bool>,
-    /// Package Center catalog (signed). `https://…` or a local `file:///…` mirror.
+    /// App Center catalog (signed). `https://…` or a local `file:///…` mirror.
     pub packages_catalog_url: Option<String>,
     /// Extra trusted catalog keys, `"<key-id>:<base64 Ed25519 public key>"`
     /// (for mirrors and test catalogs). The official key is always trusted.
@@ -86,7 +86,7 @@ pub struct FileConfig {
     pub packages_check_interval_minutes: Option<u64>,
     /// Optional GitHub token for "Install from GitHub" API lookups.
     pub packages_github_token: Option<String>,
-    /// Put the Package Center defaults on every login shell's PATH
+    /// Put the App Center defaults on every login shell's PATH
     /// (`/etc/profile.d/rast-packages.sh`, written by `rast packages path sync`).
     pub packages_shell_path: Option<bool>,
     /// Also link the defaults into /usr/local/bin so sudo, services and
@@ -397,7 +397,7 @@ impl Config {
     pub fn apps_dir(&self) -> PathBuf {
         self.data_dir.join("apps")
     }
-    /// Package Center root: `<data_dir>/packages`.
+    /// App Center root: `<data_dir>/packages`.
     pub fn packages_dir(&self) -> PathBuf {
         self.data_dir.join("packages")
     }
@@ -523,7 +523,7 @@ pub fn warnings(cfg: &Config) -> Vec<String> {
     }
     if cfg.packages_system_wide && !cfg.packages_shell_path {
         out.push(
-            "packages_system_wide needs packages_shell_path; the Package Center defaults are not linked into /usr/local/bin"
+            "packages_system_wide needs packages_shell_path; the App Center defaults are not linked into /usr/local/bin"
                 .into(),
         );
     }
@@ -531,7 +531,7 @@ pub fn warnings(cfg: &Config) -> Vec<String> {
 }
 
 impl Config {
-    /// Whether the Package Center defaults are linked into /usr/local/bin.
+    /// Whether the App Center defaults are linked into /usr/local/bin.
     pub fn packages_links_enabled(&self) -> bool {
         self.packages_shell_path && self.packages_system_wide
     }

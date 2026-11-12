@@ -61,10 +61,10 @@ pub async fn enforce_app_policy(
     let Some(app_id) = app_for_path(request.uri().path()) else {
         return next.run(request).await;
     };
-    // An app uninstalled in Package Center is closed for everyone.
+    // An app uninstalled in App Center is closed for everyone.
     if !access::app_installed(&state.db, app_id).await {
         return AppError::Forbidden(
-            "this application is not installed; install it from Package Center",
+            "this application is not installed; install it from App Center",
         )
         .into_response();
     }

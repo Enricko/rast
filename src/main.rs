@@ -83,7 +83,7 @@ enum Command {
     },
     /// Print version information
     Version,
-    /// Package Center administration
+    /// App Center administration
     Packages {
         #[command(subcommand)]
         cmd: PackagesCommand,
@@ -107,7 +107,7 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum PackagesCommand {
-    /// Package Center defaults on every login shell's PATH
+    /// App Center defaults on every login shell's PATH
     Path {
         #[command(subcommand)]
         cmd: PathCommand,
@@ -121,7 +121,7 @@ enum PathCommand {
     /// packages_system_wide, install the watcher that links the defaults
     /// into /usr/local/bin (needs root)
     Sync,
-    /// Show whether login shells, sudo and services use the Package Center
+    /// Show whether login shells, sudo and services use the App Center
     /// defaults
     Status,
     /// Link the defaults into /usr/local/bin now (run as root by the
@@ -360,7 +360,7 @@ fn packages_path(cfg: &Config, cmd: PathCommand) -> Result<ExitCode, Box<dyn std
     }
     let st = shell::status(cfg.packages_shell_path, &bin_dir, profile);
     let state = if st.active {
-        "on: login shells run the Package Center defaults first"
+        "on: login shells run the App Center defaults first"
     } else if !st.enabled {
         "off (packages_shell_path = false)"
     } else if st.installed {
@@ -381,7 +381,7 @@ fn packages_path(cfg: &Config, cmd: PathCommand) -> Result<ExitCode, Box<dyn std
     } else if sys.linked.is_empty() {
         "on: nothing to link yet (no official defaults)".to_string()
     } else {
-        "on: sudo, services and scripts run the Package Center defaults".to_string()
+        "on: sudo, services and scripts run the App Center defaults".to_string()
     };
     println!("system-wide: {system}");
     if !sys.linked.is_empty() {

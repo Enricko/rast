@@ -140,7 +140,7 @@ Shared folders (admin CRUD; ACL enforced on every files endpoint):
 | PATCH | `/api/shares/{id}` | `{name?, description?, members?}` |
 | DELETE | `/api/shares/{id}` | removes the share definition, keeps data |
 
-## Container Manager (Docker, admin; app id `applications`)
+## Docker (admin; app id `applications`)
 
 Requires `RAST_DOCKER_ENABLED=true` and a running `rast-worker.service`.
 When unavailable: `503` with `{"error":{"code":"unavailable","message":"docker worker unavailable"}}`
@@ -203,10 +203,10 @@ group grants. A read-only `backup` grant receives status metadata only:
 | POST | `/api/backups/{id}/verify` | integrity check |
 | GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
 
-## Package Center (admins and granted groups)
+## App Center (admins and granted groups)
 
 Verified runtimes installed side by side under `<data_dir>/packages/`.
-Package Center is for administrators and the members of groups granted the
+App Center is for administrators and the members of groups granted the
 `packages` application (`allow`); everyone else gets 403. Both may check,
 install, update, change the default, remove, uninstall, cancel package jobs and
 edit consumers (`canManage:true`); approving a new GitHub source stays
@@ -215,7 +215,7 @@ administrator-only. Every mutation is audited (`package.install`,
 `package.uninstall`, `package.consumer_*`, `package.source_approve`,
 `package.catalog_check`, `job.cancel`). Installs and updates run as jobs
 (`job.*` events with kind `package.install|update|reinstall`, delivered to
-every account that may open Package Center); `POST /api/jobs/{id}/cancel`
+every account that may open App Center); `POST /api/jobs/{id}/cancel`
 stops one until its files are moved into place (progress message `Moving into
 place`), after which it finishes.
 
@@ -225,11 +225,11 @@ place`), after which it finishes.
 | GET | `/api/packages/{id}` | `{package: PackageView, jobs:[{jobId,packageId,version,action,status,progress,total,message,error,username,createdAt,finishedAt}]}`; `message` of a finished job is a summary (`Installed and verified Go 1.26.11 · RAST default`) |
 | POST | `/api/packages/check` | fetch and verify the signed catalog now (also looks for new releases of imported packages) → `{catalog}`; a refused catalog keeps the last verified one and reports `lastError`/`stale` |
 | POST | `/api/packages/{id}/install` | `{version, makeDefault?}` → `{jobId}`; only versions of the verified catalog that are compatible with this host; 503 while the catalog is expired |
-| POST | `/api/packages/{id}/update` | `{version?, makeDefault?}` → `{jobId}`; without `version`: newest compatible version of the default's channel (without a default: of the system runtime's release line). Installs next to the current version, which stays for rollback. Without `makeDefault`, the first Package Center version becomes the default unless the system already provides the command |
+| POST | `/api/packages/{id}/update` | `{version?, makeDefault?}` → `{jobId}`; without `version`: newest compatible version of the default's channel (without a default: of the system runtime's release line). Installs next to the current version, which stays for rollback. Without `makeDefault`, the first App Center version becomes the default unless the system already provides the command |
 | PUT | `/api/packages/{id}/default` | `{version}` → `{ok, activation:{shims,conflicts}}`; switches `runtimes/<id>/current` and the `bin/` shims atomically. `{system: true}` goes back to the system's runtime: removes `current` and the shims, keeps the installed versions (400 without a system runtime on PATH, 409 while consumers follow the default) |
 | DELETE | `/api/packages/{id}/versions/{version}?confirm={version}` | `confirm` must repeat the version; the default and pinned versions are refused (409) |
 | DELETE | `/api/packages/{id}?confirm={id}` | uninstall: removes every installed version, `current` and the `bin/` shims (the system's own runtime, if any, is used again). `confirm` must repeat the id; 409 while any consumer uses the package, 404 when nothing is installed |
-| POST | `/api/packages/apps/{id}/install` | install one of RAST's optional apps again (`applications` = Container Manager, `backup` = Backup Center) → `{ok, changed, apps}`; 400 for built-in apps, 404 for unknown ids |
+| POST | `/api/packages/apps/{id}/install` | install one of RAST's optional apps again (`applications` = Docker, `backup` = Backup Center) → `{ok, changed, apps}`; 400 for built-in apps, 404 for unknown ids |
 | DELETE | `/api/packages/apps/{id}?confirm={id}` | uninstall an optional app → `{ok, changed, apps}`: it disappears from every desktop and its API answers 403 for every account, administrators included. Data, containers and backup schedules stay. `confirm` must repeat the id. Both calls publish `access.changed` (`reason: app_installed\|app_uninstalled`, `appId`) and `package.changed` (`reason: app`) and are audited (`package.app_install`, `package.app_uninstall`) |
 | POST | `/api/packages/consumers` | `{name, packageId, version\|null, description?}`; `null` follows the default, a version pins it (and protects it from removal) |
 | PUT / DELETE | `/api/packages/consumers/{id}` | edit / delete a consumer |
@@ -255,7 +255,7 @@ installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.
 | --- | --- | --- |
 | GET | `/api/jobs?page&perPage&status` | own jobs (admin: all) |
 | GET | `/api/jobs/{id}` | `{id, kind, status, progress, total, message, result, error}` |
-| POST | `/api/jobs/{id}/cancel` | cooperative cancellation → `{ok, cancelRequested}` (`false` when the job already finished); the owner, an administrator, or for package jobs any Package Center manager |
+| POST | `/api/jobs/{id}/cancel` | cooperative cancellation → `{ok, cancelRequested}` (`false` when the job already finished); the owner, an administrator, or for package jobs any App Center manager |
 
 ## System & settings (admin)
 
@@ -331,9 +331,9 @@ folder policy, and group permissions never grant administrator capabilities.
 
 Folder rules: `inherit | none | read | write`. Application rules:
 `inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
-`logs`, `controlpanel`, `packages` (group `allow` for Container Manager/Backup is read-only
+`logs`, `controlpanel`, `packages` (group `allow` for Docker/Backup is read-only
 status metadata: no env values, logs, archive downloads or restore guide;
-deploy/config/mutations remain admin-only; for Package Center it lets the
+deploy/config/mutations remain admin-only; for App Center it lets the
 group manage packages, except approving a new GitHub source). Folder rules reference shared
 folders by stable id (`shareId`); `shareName` is accepted on input and always
 returned with the current name.

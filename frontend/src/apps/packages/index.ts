@@ -1,4 +1,4 @@
-// Package Center: verified runtimes (Python, PHP CLI, Go, Node.js, imports
+// App Center: verified runtimes (Python, PHP CLI, Go, Node.js, imports
 // from GitHub) installed side by side. The list is a calm grid of tiles with
 // one action each (Install, Update or Installed); a package's page has the
 // details, with paths, checks, consumers and history folded away. Catalog,
@@ -156,7 +156,7 @@ class PackageCenterApp {
     this.settingsButton.addEventListener("click", () => this.openSettings());
     const toolbar = h(
       "div",
-      { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "Package Center" },
+      { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "App Center" },
       this.backButton,
       this.checkButton,
       this.search,
@@ -175,7 +175,7 @@ class PackageCenterApp {
   }
 
   async start(): Promise<void> {
-    this.ctx.setTitle("Package Center");
+    this.ctx.setTitle("App Center");
     this.applyParams(this.ctx.params);
     this.openableSignature = this.openableApps();
     this.ctx.onReopen((params) => {
@@ -239,8 +239,8 @@ class PackageCenterApp {
         h(
           "div",
           { class: "app-access-state", role: "alert" },
-          h("div", { class: "app-access-title" }, "Package Center is not available"),
-          h("div", { class: "app-access-detail" }, "Your account has no access to Package Center. Ask an administrator if you need it."),
+          h("div", { class: "app-access-title" }, "App Center is not available"),
+          h("div", { class: "app-access-detail" }, "Your account has no access to App Center. Ask an administrator if you need it."),
         ),
       );
       for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton]) b.classList.add("hidden");
@@ -501,7 +501,7 @@ class PackageCenterApp {
     this.appSection = null;
     this.runtimeSection = null;
     if (this.loadError && !this.overview) {
-      renderLoadFailure(this.main, this.loadError, { title: "Package Center could not load", retry: () => void this.reload() });
+      renderLoadFailure(this.main, this.loadError, { title: "App Center could not load", retry: () => void this.reload() });
       return;
     }
     if (!this.overview) {
@@ -952,7 +952,7 @@ class PackageCenterApp {
       p.installed.length > 0
         ? this.actionButton("Uninstall", "secondary", () => this.uninstall(p))
         : null;
-    if (uninstall) uninstall.title = `Remove every ${p.name} version installed by Package Center`;
+    if (uninstall) uninstall.title = `Remove every ${p.name} version installed by App Center`;
     const actions = h("div", { class: "pkg-hero-actions", dataset: { actionFor: p.id } }, group, uninstall);
     if (this.liveJobFor(p)) actions.classList.add("hidden");
     return actions;
@@ -1010,7 +1010,7 @@ class PackageCenterApp {
       ? h(
           "span",
           { class: "pkg-info-sub", title: shell.enabled ? `Run ${shell.syncCommand}` : "packages_shell_path = false" },
-          "Package Center versions are not on the terminal PATH",
+          "App Center versions are not on the terminal PATH",
         )
       : null;
     if (!t) return h("span", {}, "—", note);
@@ -1041,7 +1041,7 @@ class PackageCenterApp {
 
   private systemRow(p: PackageView): HTMLElement {
     const s = p.system!;
-    // The system copy is the default only while Package Center has none.
+    // The system copy is the default only while App Center has none.
     const isDefault = !p.defaultVersion;
     const actions = h("div", { class: "pkg-row-actions" });
     if (!this.readOnly && p.defaultVersion && s.onPath) {
@@ -1156,7 +1156,7 @@ class PackageCenterApp {
             s.detectedAt ? ` · checked ${relativeTime(s.detectedAt)}` : "",
           ),
           h("pre", { class: "code pkg-check-output" }, s.output),
-          h("p", { class: "small muted" }, "Installed outside Package Center: RAST never changes or removes it. Updates install next to it."),
+          h("p", { class: "small muted" }, "Installed outside App Center: RAST never changes or removes it. Updates install next to it."),
         ),
       );
     }
@@ -1345,7 +1345,7 @@ class PackageCenterApp {
     const terminal = !shell
       ? "—"
       : shell.active
-        ? h("span", {}, "On: login shells run the Package Center defaults first", h("span", { class: "pkg-settings-sub mono" }, shell.profile))
+        ? h("span", {}, "On: login shells run the App Center defaults first", h("span", { class: "pkg-settings-sub mono" }, shell.profile))
         : !shell.enabled
           ? h("span", {}, "Off (packages_shell_path = false)")
           : h("span", {}, "Not set up yet. Run this once as root:", commandLine(shell.syncCommand, this.ctx));
@@ -1353,7 +1353,7 @@ class PackageCenterApp {
     const everywhere = !links
       ? "—"
       : !links.enabled
-        ? h("span", {}, "Off: only login shells use Package Center versions", h("span", { class: "pkg-settings-sub mono" }, "packages_system_wide = false"))
+        ? h("span", {}, "Off: only login shells use App Center versions", h("span", { class: "pkg-settings-sub mono" }, "packages_system_wide = false"))
         : !links.watcher
           ? h("span", {}, "Not set up yet. Run this once as root:", commandLine(shell.syncCommand, this.ctx))
           : h(
@@ -1386,7 +1386,7 @@ class PackageCenterApp {
         ]),
       ),
     );
-    close = modal({ title: "Package Center settings", body, actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }] });
+    close = modal({ title: "App Center settings", body, actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }] });
   }
 
   // ---------------------------------------------------------------- actions
@@ -1482,7 +1482,7 @@ class PackageCenterApp {
       : `${p.name} will no longer be available on this server.`;
     const ok = await confirmDialog({
       title: `Uninstall ${p.name}?`,
-      message: `This removes ${versions} (${formatBytes(size)}) and its commands from Package Center. ${after} You can install it again later.`,
+      message: `This removes ${versions} (${formatBytes(size)}) and its commands from App Center. ${after} You can install it again later.`,
       confirmLabel: "Uninstall",
       danger: true,
       requireTyped: p.id,
@@ -1800,7 +1800,7 @@ function catalogTooltip(c: CatalogStatus): string {
 
 export const packagesApp: AppDefinition = {
   id: "packages",
-  name: "Package Center",
+  name: "App Center",
   icon: "package",
   description: "Install and manage apps and verified runtimes",
   adminOnly: true,

@@ -98,7 +98,7 @@ impl JobContext {
 
 /// Job events go to the job's owner and administrators; package jobs go to
 /// everyone, and the event stream delivers them only to accounts that may use
-/// Package Center (every package manager can follow and cancel them).
+/// App Center (every package manager can follow and cancel them).
 fn publish_job(events: &EventBus, kind: &str, job_kind: &str, owner: Option<i64>, data: Value) {
     if job_kind.starts_with("package") {
         events.publish(kind, data);

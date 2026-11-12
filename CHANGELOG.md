@@ -9,9 +9,11 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Nothing yet.
+- Package Center is now called **App Center**, and Container Manager is now
+  called **Docker**. Only the displayed names change: app ids (`packages`,
+  `applications`), API paths, group rules, desktop layouts and pins stay.
 
 ### Planned
 

@@ -1,8 +1,8 @@
-//! Package Center on the shell PATH: `/etc/profile.d/rast-packages.sh` puts
+//! App Center on the shell PATH: `/etc/profile.d/rast-packages.sh` puts
 //! `<data_dir>/packages/bin` (the shims of each package's default version)
 //! first on every login shell's PATH, so `go`, `node`, `php` or `python3` in
 //! a terminal run the version chosen with *Make default*. A package without a
-//! Package Center default has no shim, and the system's command is used.
+//! App Center default has no shim, and the system's command is used.
 //!
 //! The profile script is root's to write (`rast packages path sync`, run by
 //! the installer and `rast update`). The server only keeps the runtime tree
@@ -29,7 +29,7 @@ pub fn script(bin_dir: &Path) -> String {
     let bin = bin_dir.display().to_string().replace('\'', "");
     format!(
         "{MARKER} (rast packages path sync); it is rewritten, do not edit.\n\
-         # Package Center: the version chosen with \"Make default\" comes first.\n\
+         # App Center: the version chosen with \"Make default\" comes first.\n\
          # Turn off with packages_shell_path = false in /etc/rast/rast.toml,\n\
          # then run: {SYNC_COMMAND}\n\
          case \":${{PATH}}:\" in\n\

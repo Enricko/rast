@@ -126,7 +126,7 @@ log_level = "info"
 docker_enabled = false
 
 # ---------------------------------------------------------------------------
-# Package Center
+# App Center
 # ---------------------------------------------------------------------------
 
 # Put the runtimes chosen with "Make default" on every login shell's PATH,

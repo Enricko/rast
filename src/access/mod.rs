@@ -48,7 +48,7 @@ pub const APP_IDS: &[&str] = &[
 /// on the desktop like the others.
 pub const LAUNCHER_APP: &str = "launcher";
 
-/// Apps Package Center can uninstall and install again. Uninstalling hides
+/// Apps App Center can uninstall and install again. Uninstalling hides
 /// the app and closes its API for everyone (administrators included); its
 /// data, schedules and running containers stay. Every other app is built in.
 pub const REMOVABLE_APPS: &[&str] = &["applications", "backup"];
@@ -60,7 +60,7 @@ pub fn is_desktop_app(app_id: &str) -> bool {
     app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
 }
 
-/// Removable apps that were uninstalled in Package Center.
+/// Removable apps that were uninstalled in App Center.
 pub async fn removed_apps(pool: &SqlitePool) -> Vec<String> {
     crate::db::get_setting(pool, REMOVED_APPS_SETTING)
         .await
@@ -112,18 +112,18 @@ pub async fn set_app_installed(
 pub fn app_label(app_id: &str) -> &'static str {
     match app_id {
         "files" => "File Station",
-        "applications" => "Container Manager",
+        "applications" => "Docker",
         "launcher" => "Applications",
         "monitor" => "Resource Monitor",
         "backup" => "Backup Center",
-        "packages" => "Package Center",
+        "packages" => "App Center",
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
         _ => "Unknown application",
     }
 }
 
-/// One line about an application (Package Center's app pages).
+/// One line about an application (App Center's app pages).
 pub fn app_description(app_id: &str) -> &'static str {
     match app_id {
         "files" => "Browse, upload, download and organise your files.",
@@ -148,7 +148,7 @@ fn app_default_read_only(_app_id: &str) -> bool {
 }
 
 /// Admin-only surfaces whose group grant is a full grant rather than
-/// read-only: members of a group granted Package Center install, update,
+/// read-only: members of a group granted App Center install, update,
 /// uninstall and cancel packages (approving a new GitHub source stays
 /// administrator-only).
 fn app_grant_manages(app_id: &str) -> bool {
@@ -656,7 +656,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
             }
         } else if explicit_allow {
             // A group grant for a normally-admin-only surface (Applications,
-            // Backup Center) is read-only; Package Center's lets the group
+            // Backup Center) is read-only; App Center's lets the group
             // manage packages; for surfaces every account may use by
             // default an explicit allow is just a regular grant.
             AppAccess {

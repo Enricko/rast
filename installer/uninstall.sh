@@ -278,7 +278,7 @@ log "purge data:        $([ "$PURGE" -eq 1 ] && printf yes || printf no)"
 log "service accounts:  $([ "$REMOVE_USER" -eq 1 ] && printf 'remove' || printf 'keep')"
 
 # ---------------------------------------------------------------------------
-# Package Center system-wide commands (packages_system_wide): stop the
+# App Center system-wide commands (packages_system_wide): stop the
 # watcher, remove RAST's links in /usr/local/bin and put back what it moved
 # aside. Only files RAST wrote are touched.
 # ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ if [ -d "$WORKER_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 remove_file "$RUNTIME_DIR/worker.sock"
-# Package Center's login-shell PATH entry (only the script RAST wrote).
+# App Center's login-shell PATH entry (only the script RAST wrote).
 if [ -f "$PROFILE_SCRIPT" ] && head -n 1 "$PROFILE_SCRIPT" | grep -q '^# Managed by RAST'; then
     remove_file "$PROFILE_SCRIPT"
 fi

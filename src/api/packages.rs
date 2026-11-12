@@ -1,6 +1,6 @@
-//! Package Center API.
+//! App Center API.
 //!
-//! Package Center is for administrators and the members of groups an
+//! App Center is for administrators and the members of groups an
 //! administrator granted the `packages` application; everyone else is
 //! refused. Those package managers may check the catalog, install, update,
 //! change the default, remove, uninstall, cancel and edit consumers.
@@ -32,7 +32,7 @@ pub async fn can_manage(state: &AppState, user: &AuthUser) -> AppResult<bool> {
 }
 
 /// An account allowed to change packages: an administrator or a member of a
-/// group granted Package Center.
+/// group granted App Center.
 pub struct PackageManager(pub AuthUser);
 
 impl axum::extract::FromRequestParts<AppState> for PackageManager {
@@ -47,7 +47,7 @@ impl axum::extract::FromRequestParts<AppState> for PackageManager {
             Ok(Self(user))
         } else {
             Err(AppError::Forbidden(
-                "Package Center is for administrators and the groups they grant it to",
+                "App Center is for administrators and the groups they grant it to",
             ))
         }
     }
@@ -86,7 +86,7 @@ pub async fn overview(State(state): State<AppState>, user: AuthUser) -> AppResul
     Ok(Json(body))
 }
 
-/// RAST's own apps as Package Center lists them: built-in ones are always
+/// RAST's own apps as App Center lists them: built-in ones are always
 /// installed; removable ones can be uninstalled and installed again.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

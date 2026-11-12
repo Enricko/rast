@@ -1,6 +1,6 @@
 //! Runtimes the operating system already has: apt packages (`php8.5-cli`),
 //! manual installs (`/usr/local/go`, a Node.js tarball linked into
-//! `/usr/local/bin`) and snaps. Package Center lists them as *System*
+//! `/usr/local/bin`) and snaps. App Center lists them as *System*
 //! installs so a newer verified version can be offered as an update.
 //!
 //! The version is read by running the command, confined like a package check
@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use super::{sandbox, version};
 
-/// Where a login shell finds commands, in PATH order (Package Center's own
+/// Where a login shell finds commands, in PATH order (App Center's own
 /// `bin` directory is not part of it).
 pub const SYSTEM_PATH: &[&str] = &[
     "/usr/local/sbin",
@@ -97,7 +97,7 @@ pub struct SystemInstall {
     /// False for well-known locations a shell does not search, such as
     /// `/usr/local/go/bin` without a PATH entry.
     pub on_path: bool,
-    /// Moved aside (`.rast-displaced.<command>`) while Package Center
+    /// Moved aside (`.rast-displaced.<command>`) while App Center
     /// provides the command system-wide; it is put back by "Use the system
     /// version" or an uninstall.
     #[serde(default)]
@@ -210,7 +210,7 @@ fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
         .map(|d| (d, true))
         .chain(extra.map(|d| (d, false)));
     for (dir, on_path) in dirs {
-        // A command moved aside for Package Center's system-wide link
+        // A command moved aside for App Center's system-wide link
         // belongs where the link is now.
         let candidates = [
             (dir.join(probe.command), false),
@@ -227,7 +227,7 @@ fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
             let Ok(real) = fs::canonicalize(&path) else {
                 continue;
             };
-            // Package Center's own shims, wherever they are linked from.
+            // App Center's own shims, wherever they are linked from.
             if real.starts_with(own) {
                 continue;
             }
@@ -464,7 +464,7 @@ mod tests {
             &root.join("usr/local/go/bin/go"),
             "echo 'go version go1.26.3 linux/amd64'",
         );
-        // Package Center's own shim linked into /usr/local/bin is not "system".
+        // App Center's own shim linked into /usr/local/bin is not "system".
         let own = root.join("packages");
         script(
             &own.join("runtimes/python/3.14.10/bin/python3"),
@@ -511,7 +511,7 @@ mod tests {
         assert_eq!(go.version.as_deref(), Some("1.26.3"));
         assert!(!go.on_path, "/usr/local/go/bin is not on the system PATH");
 
-        // The Package Center shim was skipped; the real system python3 is
+        // The App Center shim was skipped; the real system python3 is
         // reported, without a version.
         let python = &found["python"];
         assert_eq!(python.path, usr_bin.join("python3").display().to_string());

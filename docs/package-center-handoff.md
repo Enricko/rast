@@ -8,6 +8,7 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
+| Name | Shown as **App Center** since the rename after 0.8.0 (app id `packages`; this document keeps the old name "Package Center" in its history). The Docker app (formerly Container Manager, app id `applications`) is shown as **Docker**. |
 | Status | **v0.8.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): RAST's own apps in Package Center (Container Manager and Backup Center can be uninstalled), movable desktop icons and the Applications folder. Before: v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.8.0](#deploy-of-080-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
 

@@ -42,7 +42,7 @@ export function isAppAllowed(appId: string, permissions: Permissions | null, isA
   const app = findApp(appId);
   if (!app) return false;
   const granted = permissions?.apps?.[appId];
-  // Uninstalled in Package Center: closed for everyone, administrators included.
+  // Uninstalled in App Center: closed for everyone, administrators included.
   if (granted?.installed === false) return false;
   if (isAdmin) return true;
   if (granted && typeof granted.allowed === "boolean") return granted.allowed;
@@ -61,7 +61,7 @@ export function isAppReadOnly(appId: string, permissions: Permissions | null, is
   return Boolean(granted?.readOnly && granted.allowed);
 }
 
-/** Whether an app is installed (uninstalled apps live only in Package Center). */
+/** Whether an app is installed (uninstalled apps live only in App Center). */
 export function isAppInstalled(appId: string, permissions: Permissions | null): boolean {
   return permissions?.apps?.[appId]?.installed !== false;
 }

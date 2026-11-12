@@ -717,7 +717,7 @@ function fallbackLabel(fallback: string | null | undefined): string {
     case "none":
       return "No grant";
     case "not-installed":
-      return "Not installed (Package Center)";
+      return "Not installed (App Center)";
     default:
       return "";
   }

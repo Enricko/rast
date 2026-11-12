@@ -1,4 +1,4 @@
-// Package Center API shapes (see src/packages/service.rs).
+// App Center API shapes (see src/packages/service.rs).
 
 export interface ExecutablePath {
   name: string;
@@ -92,7 +92,7 @@ export interface SystemInstall {
   source: "apt" | "snap" | "manual" | string;
   sourcePackage?: string | null;
   onPath: boolean;
-  /** Moved aside (`.rast-displaced.<command>`) while Package Center provides the command system-wide. */
+  /** Moved aside (`.rast-displaced.<command>`) while App Center provides the command system-wide. */
   displaced?: boolean;
   detectedAt: number;
 }
@@ -116,7 +116,7 @@ export interface SystemLinks {
   watcher: boolean;
 }
 
-/** Package Center on the login-shell PATH (/etc/profile.d). */
+/** App Center on the login-shell PATH (/etc/profile.d). */
 export interface ShellPath {
   enabled: boolean;
   installed: boolean;

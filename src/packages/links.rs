@@ -1,4 +1,4 @@
-//! Package Center system-wide (`packages_system_wide`): the commands of each
+//! App Center system-wide (`packages_system_wide`): the commands of each
 //! default version are linked into `/usr/local/bin`, so `sudo`, systemd
 //! services and scripts run them too, not only login shells (see `shell`).
 //!
@@ -6,7 +6,7 @@
 //! PATH systemd gives services, so files installed by apt are never changed:
 //! they are only shadowed. A command someone installed there by hand (for
 //! example a manual Node.js) is renamed in place to `.rast-displaced.<name>`
-//! (relative links keep working) and put back when Package Center no longer
+//! (relative links keep working) and put back when App Center no longer
 //! provides that command.
 //!
 //! Only root can write `/usr/local/bin`. `rast packages path sync` installs a
@@ -232,7 +232,7 @@ pub fn units(
     let header = format!("{MARKER} (rast packages path sync); it is rewritten, do not edit.\n");
     let path = format!(
         "{header}[Unit]\n\
-         Description=RAST Package Center: watch the default commands\n\
+         Description=RAST App Center: watch the default commands\n\
          \n\
          [Path]\n\
          PathChanged={bin}\n\
@@ -244,7 +244,7 @@ pub fn units(
     );
     let service = format!(
         "{header}[Unit]\n\
-         Description=RAST Package Center: link the default commands into {SYSTEM_BIN}\n\
+         Description=RAST App Center: link the default commands into {SYSTEM_BIN}\n\
          \n\
          [Service]\n\
          Type=oneshot\n\

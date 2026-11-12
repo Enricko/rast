@@ -402,7 +402,7 @@ sudo -u rast rast user reset-password <name> --password-stdin   # revokes that u
 sudo -u rast rast setup-token                                   # one-shot web setup token, 60 min
 ```
 
-## Package Center on the shell PATH
+## App Center on the shell PATH
 
 ```bash
 rast packages path status        # login shells, sudo and services: what runs the defaults?

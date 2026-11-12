@@ -437,10 +437,10 @@ export const APP_RULE_OPTIONS: Array<{ value: AppRule; label: string }> = [
 /** Fixed executable app catalogue used by group/user rule editors. */
 export const RULE_APPS: Array<{ id: string; label: string }> = [
   { id: "files", label: "File Station" },
-  { id: "applications", label: "Container Manager" },
+  { id: "applications", label: "Docker" },
   { id: "monitor", label: "Resource Monitor" },
   { id: "backup", label: "Backup Center" },
-  { id: "packages", label: "Package Center" },
+  { id: "packages", label: "App Center" },
   { id: "logs", label: "Activity Logs" },
   { id: "controlpanel", label: "Control Panel" },
 ];

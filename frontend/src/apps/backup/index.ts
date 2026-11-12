@@ -107,7 +107,7 @@ const SCOPES: Array<{ id: string; label: string; description: string }> = [
   {
     id: "apps",
     label: "Container apps",
-    description: "Container Manager apps: Compose definitions, environment and bind data.",
+    description: "Docker apps: Compose definitions, environment and bind data.",
   },
 ];
 

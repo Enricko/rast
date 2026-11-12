@@ -296,7 +296,7 @@ pub struct AppPermissionDto {
     pub allowed: bool,
     pub read_only: bool,
     pub label: String,
-    /// False when the app was uninstalled in Package Center (then `allowed`
+    /// False when the app was uninstalled in App Center (then `allowed`
     /// is false for everyone, administrators included).
     pub installed: bool,
 }
