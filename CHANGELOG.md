@@ -13,6 +13,13 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Fixed
+
+- On aarch64 Linux, File Station now refuses symlinks when it opens a file
+  (downloads, copies, wallpapers). The `O_NOFOLLOW` value was hard-coded for
+  x86_64, and on aarch64 that value means `O_LARGEFILE`. The inode check after
+  opening already stopped symlink swaps there.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

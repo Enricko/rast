@@ -327,19 +327,19 @@ pub fn verify_no_symlinks(root: &Path, physical: &Path) -> AppResult<bool> {
 
 /// Open a file for reading **without following a final symlink**.
 ///
-/// On Linux this passes `O_NOFOLLOW`; on other platforms the caller still
-/// performs the [`verify_same_inode`] check after opening. A symlink planted
-/// between path validation and the `open` call therefore fails with `ELOOP`
-/// instead of leaking a file from outside the storage root.
+/// On Unix this passes `O_NOFOLLOW` (callers also perform the
+/// [`verify_same_inode`] check after opening). A symlink planted between path
+/// validation and the `open` call therefore fails with `ELOOP` instead of
+/// leaking a file from outside the storage root.
 pub fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // O_NOFOLLOW is 0o400000 on the Linux architectures RAST ships for
-        // (x86_64 and aarch64).
-        options.custom_flags(0o400000);
+        // The value differs per platform (x86_64 Linux 0o400000, aarch64
+        // Linux 0o100000, macOS 0x100): take it from libc.
+        options.custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
 }
@@ -352,11 +352,24 @@ pub async fn open_read_no_follow_async(path: &Path) -> AppResult<tokio::fs::File
         .map_err(AppError::from)?;
     match opened {
         Ok(file) => Ok(tokio::fs::File::from_std(file)),
-        Err(error) if error.raw_os_error() == Some(40) => {
+        Err(error) if is_symlink_refusal(&error) => {
             // ELOOP: the final component is a symlink.
             Err(AppError::Forbidden("symbolic links are not supported"))
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+/// `open` with `O_NOFOLLOW` refused a symlink (`ELOOP`, on Linux and macOS).
+fn is_symlink_refusal(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        error.raw_os_error() == Some(libc::ELOOP)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
     }
 }
 
@@ -542,10 +555,8 @@ mod tests {
 
         let link = dir.path().join("link.txt");
         std::os::unix::fs::symlink(&other, &link).unwrap();
-        assert!(
-            open_read_no_follow(&link).is_err(),
-            "O_NOFOLLOW must reject symlinks"
-        );
+        let refused = open_read_no_follow(&link).expect_err("O_NOFOLLOW must reject symlinks");
+        assert!(is_symlink_refusal(&refused), "{refused:?}");
     }
 
     #[test]
