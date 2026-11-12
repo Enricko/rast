@@ -13,15 +13,6 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
-### Changed
-
-- **Linux app windows no longer show a second title bar.** A streamed Linux
-  app draws its own window controls (Chrome's own minimize/maximize/close), so
-  the desktop hides its title bar for those windows: one frame, and the app's
-  own close button closes the window. The taskbar still minimizes, maximizes
-  and closes the window and the edges still resize it; on phones the desktop
-  title bar stays because nothing else would grab the window.
-
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless
@@ -32,6 +23,19 @@ this file by `scripts/changelog-section.sh`.
 - Automated restore drills and a documented JSON schema for backup manifests.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.11.1] - 2026-11-12
+
+No database migration (schema stays v11).
+
+### Changed
+
+- **Linux app windows no longer show a second title bar.** A streamed Linux
+  app draws its own window controls (Chrome's own minimize/maximize/close), so
+  the desktop hides its title bar for those windows: one frame, and the app's
+  own close button closes the window. The taskbar still minimizes, maximizes
+  and closes the window and the edges still resize it; on phones the desktop
+  title bar stays because nothing else would grab the window.
 
 ## [0.11.0] - 2026-11-12
 
