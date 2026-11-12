@@ -191,6 +191,13 @@ class LinuxWindow {
     this.frame = frame;
     this.stage.replaceChildren(frame);
     frame.addEventListener("load", () => frame.focus(), { once: true });
+    // The app window has no desktop title bar, and the frame swallows pointer
+    // events, so raise the window when the app takes the keyboard focus.
+    const raise = (): void => {
+      if (document.activeElement === frame) this.ctx.window.focus();
+    };
+    document.addEventListener("focusout", raise);
+    this.lc.add(() => document.removeEventListener("focusout", raise));
   }
 
   private removeFrame(): void {
