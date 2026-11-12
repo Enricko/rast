@@ -11,6 +11,27 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.7.0] - 2026-11-12
+
+Uninstall and Cancel in Package Center, optional system-wide defaults for
+`sudo` and services, and Package Center management for granted groups. No
+database migration (schema stays v8).
+
+### Added
+
 - Package Center: **Uninstall** on a package page removes every installed
   version and its commands (`DELETE /api/packages/{id}?confirm={id}`, audited
   as `package.uninstall`); the system's own runtime is used again.
@@ -37,17 +58,6 @@ this file by `scripts/changelog-section.sh`.
   users lost access to the Package Center runtimes until the next
   `rast packages path sync`.
 - Queued package jobs showed no progress bar after a reload.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.6.1] - 2026-11-12
 
