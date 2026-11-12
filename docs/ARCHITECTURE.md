@@ -297,6 +297,7 @@ only).
   apps/<slug>/compose.yaml            managed Docker Compose definitions
   apps/<slug>/.env                    encrypted app secrets (rendered on deploy)
   tmp/                               transient backup/restore work dirs
+  linux-apps/<id>/                   Linux app file being installed or updated (removed after the build)
   packages/                          App Center (0751 with packages_shell_path)
     runtimes/<id>/<version>/         one directory per installed version (readable by all
                                      users with packages_shell_path; 0750 otherwise)
@@ -359,6 +360,7 @@ release notes (see [OPERATIONS.md](OPERATIONS.md#updates)).
 | RAST ↔ filesystem | Per-user roots resolved and canonicalised under `storage_dir`; traversal and symlink escapes rejected on every operation |
 | RAST ↔ data dir | Contains the SQLite DB and master key; 0750 `rast:rast`, master key 0600 |
 | RAST ↔ package sources | Official catalog accepted only with a valid Ed25519 signature from a trusted key and a sequence not lower than the last accepted one; artifacts downloaded over HTTPS from the catalog's allowed hosts (redirects re-checked), size and SHA-256 verified before extraction; extraction refuses absolute paths, `..`, devices and links leaving the version directory; extension records over 64 KiB and archives that would leave less than 512 MiB free are refused. Declared version checks execute the package's own files as the `rast` user, without a shell, in a sandbox: own process group (killed on timeout and after exit; `setsid`/`setpgid` denied), seccomp (no sockets, io_uring or ptrace), Landlock (read/execute only in the package and system library directories, write only to a scratch home, TCP denied), no core dumps, 64 MiB file limit, output to files. GitHub imports are third-party code: Landlock is mandatory for them, they are pinned to the inspected release and digests, bound to one repository and publisher (re-checked at install time and in the same transaction that records the install), and can never take an official package id or command name. Expired catalogs drive no installs |
+| Browser ↔ Linux apps | Admin only. Each person's copy is a container with its own settings volume and only their RAST home mounted; no privileged mode, `no-new-privileges`, a few capabilities dropped, memory/CPU/PID limits, port published on loopback only, image never pulled at run time. The frame is served by RAST under `/linux-apps/<128-bit key>/` with `Content-Security-Policy: sandbox` (no same-origin access to RAST) and `frame-ancestors 'self'`; the container's own password is added by RAST and never reaches the browser |
 | Secrets at rest | Master key file, encrypted app secrets (AES-256-GCM), session tokens hashed at rest |
 | systemd sandbox | `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, empty capability sets, syscall blacklist, `NoNewPrivileges`, memory caps (see units) |
 
@@ -382,10 +384,13 @@ plenty). Tune with systemd drop-ins and configuration keys.
 | Job queue | 128 pending | `src/jobs.rs::QUEUE_CAPACITY` |
 | File descriptors | 65536 | `LimitNOFILE` in both units |
 | Uploads | streamed, never buffered whole | `RAST_MAX_UPLOAD_BYTES` |
+| Linux apps | per copy: 4 GiB memory and 6 CPUs by default (per app, adjustable), 4096 PIDs; a copy only starts with 4 GiB of host memory free; one copy per person per app | App Center → the app's page → Memory and CPU |
 | Binary size | release profile: `opt-level=z`, thin LTO, stripped symbols | `Cargo.toml` release profile |
 
 Disk growth comes from user files (`storage_dir`), backup archives
-(`data_dir/backups`) and the trash directory. Backups are compressed tar.gz
+(`data_dir/backups`), the trash directory and Docker images of Linux apps
+(the shared base is about 3.7 GB, downloaded once; each app adds roughly
+1 GB; plus Docker's build cache). Backups are compressed tar.gz
 archives; retention keeps the newest N archives per the schedule. Monitor the
 host with `/api/system/info`, `rast status --json` and `df -h`.
 

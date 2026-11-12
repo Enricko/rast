@@ -16,6 +16,7 @@ pub mod docker;
 pub mod error;
 pub mod events;
 pub mod jobs;
+pub mod linux_apps;
 pub mod monitor;
 pub mod packages;
 pub mod realtime;

@@ -11,6 +11,7 @@
 pub mod compose;
 pub mod containers;
 pub mod exec;
+pub mod linux;
 pub mod protocol;
 pub mod reconcile;
 
@@ -794,6 +795,8 @@ exit 0
         let socket = dir.path().join("worker.sock");
         let options = crate::worker::WorkerOptions {
             socket_path: socket.clone(),
+            linux_apps_dir: dir.path().join("linux-apps"),
+            homes_dir: dir.path().join("homes"),
             apps_dir,
             docker_bin,
             quick_timeout: StdDuration::from_secs(5),

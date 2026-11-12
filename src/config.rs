@@ -401,6 +401,10 @@ impl Config {
     pub fn packages_dir(&self) -> PathBuf {
         self.data_dir.join("packages")
     }
+    /// Linux app uploads waiting to be built: `<data_dir>/linux-apps`.
+    pub fn linux_apps_dir(&self) -> PathBuf {
+        self.data_dir.join("linux-apps")
+    }
     pub fn secret_path(&self) -> PathBuf {
         self.data_dir.join("secret.key")
     }

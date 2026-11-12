@@ -78,6 +78,8 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `backup.changed` | Admin | `{reason, id?}` |
 | `package.changed` | Accounts allowed to open App Center (admins, group `allow`) | `{packageId, version?, reason:"queued"\|"started"\|"installed"\|"failed"\|"default"\|"removed"\|"consumers", jobId?, error?}` |
 | `package.catalog` | Accounts allowed to open App Center | `{reason:"checking"}`, then `{reason:"checked", changed, sequence, error}` after every manual or automatic check |
+| `linuxapps.changed` | Admin | `{id}` after an install, update, check, limit change, uninstall or a copy starting or stopping |
+| `linuxapps.session` | User(owner) | `Session` of one of the owner's Linux app copies when it becomes ready or ends |
 | `audit.created` | UserAndAdmin(actor) / Admin | audit row (already emitted by `audit::record`) |
 | `user.changed` | Admin | `{userId, event:"created"|"updated"|"deactivated"}` |
 | `settings.changed` | Admin | `{keys:[...]}` |

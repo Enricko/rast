@@ -37,6 +37,8 @@ pub fn app_for_path(path: &str) -> Option<&'static str> {
         || path.starts_with("/api/apps/")
         || path == "/api/docker"
         || path.starts_with("/api/docker/")
+        || path == "/api/linux-apps"
+        || path.starts_with("/api/linux-apps/")
     {
         Some("applications")
     } else if path == "/api/backups" || path.starts_with("/api/backups/") {
@@ -107,6 +109,10 @@ mod tests {
             Some("applications")
         );
         assert_eq!(app_for_path("/api/docker/status"), Some("applications"));
+        assert_eq!(
+            app_for_path("/api/linux-apps/chrome/open"),
+            Some("applications")
+        );
         assert_eq!(app_for_path("/api/backups/1/download"), Some("backup"));
         // Own profile, appearance, events and access helpers are not gated here.
         assert_eq!(app_for_path("/api/auth/me"), None);

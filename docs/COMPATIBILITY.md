@@ -124,6 +124,11 @@ starts, but hardening is reduced. `Type=simple`, `Restart=on-failure` and
 | Socket | `/var/run/docker.sock`, group `docker` | The worker user is added to `docker` when the group exists |
 | Docker absent | Applications app reports “unavailable” | The rest of RAST is fully functional |
 
+Linux apps (App Center) also need Docker with BuildKit (the default since
+Docker 23) and run on Linux hosts only (tested on x86_64; a `.deb` must match the
+host's architecture). The macOS preview does not offer them. Images are
+built on a pinned `ghcr.io/linuxserver/baseimage-selkies` digest, pulled once.
+
 ## Browsers
 
 The web desktop targets current evergreen browsers (latest two stable versions

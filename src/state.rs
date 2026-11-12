@@ -31,6 +31,7 @@ pub struct AppState {
     pub storage: Arc<crate::storage::Storage>,
     pub docker: Arc<crate::docker::DockerManager>,
     pub packages: Arc<crate::packages::PackageManager>,
+    pub linux_apps: Arc<crate::linux_apps::LinuxApps>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -67,6 +68,15 @@ impl AppState {
         );
         // Restores the catalog check state and starts the periodic checker.
         packages.start().await;
+        let linux_apps = crate::linux_apps::LinuxApps::new(
+            config.clone(),
+            db.clone(),
+            docker.clone(),
+            events.clone(),
+            jobs.clone(),
+        );
+        // Stops copies left from before a restart, then sweeps and checks.
+        linux_apps.start().await;
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -93,6 +103,7 @@ impl AppState {
             storage,
             docker,
             packages,
+            linux_apps,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

@@ -1,0 +1,36 @@
+#!/usr/bin/with-contenv bash
+# RAST: run the app as the desktop session and point the usual folders at the
+# person's RAST home, which is mounted at /config/RAST.
+
+rm -f /tmp/.rast-app-exited
+
+# Only one copy of this app runs for this person, so profile locks left by a
+# copy that was stopped are stale (Chrome and Electron apps refuse to start
+# when they find one, as "in use on another computer").
+find /config/.config -maxdepth 3 \( -name SingletonLock -o -name SingletonCookie \
+  -o -name SingletonSocket \) -delete 2>/dev/null || true
+
+mkdir -p /config/.config/openbox /config/.config/gtk-3.0
+cp /rast/autostart /config/.config/openbox/autostart
+chmod 644 /config/.config/openbox/autostart
+
+if [ -d /config/RAST ]; then
+  s6-setuidgid abc mkdir -p /config/RAST/Downloads 2>/dev/null || true
+  cat > /config/.config/user-dirs.dirs <<'DIRS'
+XDG_DESKTOP_DIR="$HOME/RAST"
+XDG_DOWNLOAD_DIR="$HOME/RAST/Downloads"
+XDG_DOCUMENTS_DIR="$HOME/RAST"
+XDG_MUSIC_DIR="$HOME/RAST"
+XDG_PICTURES_DIR="$HOME/RAST"
+XDG_VIDEOS_DIR="$HOME/RAST"
+XDG_TEMPLATES_DIR="$HOME/RAST"
+XDG_PUBLICSHARE_DIR="$HOME/RAST"
+DIRS
+  echo "enabled=False" > /config/.config/user-dirs.conf
+  echo "file:///config/RAST RAST" > /config/.config/gtk-3.0/bookmarks
+fi
+
+chown abc:abc /config/.config /config/.config/openbox /config/.config/gtk-3.0 \
+  /config/.config/openbox/autostart
+chown abc:abc /config/.config/user-dirs.dirs /config/.config/user-dirs.conf \
+  /config/.config/gtk-3.0/bookmarks 2>/dev/null || true

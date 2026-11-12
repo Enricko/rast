@@ -11,7 +11,19 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Linux apps (administrators).** App Center can install desktop Linux apps
+  from a file in File Station: a `.deb` package, an AppImage or a portable
+  `.tar.gz` archive (*Add Linux app*, or *Install as Linux app* on the file in
+  File Station). Each app gets a desktop icon and opens in its own RAST window.
+  Every person who opens it gets their own copy on the server, with their RAST
+  home folder as the app's files (downloads go to `Downloads`). A copy stops
+  when its window closes or after 30 minutes without use. By default a copy may
+  use 4 GB of memory and 6 CPU cores (changeable per app), and a new copy only
+  starts while the server has 4 GB free. RAST checks the app's official source
+  daily (its apt repository, GitHub releases or the AppImage's update server)
+  and offers *Update* when there is a newer version. Needs Docker on a Linux
+  server; see [docs/OPERATIONS.md](docs/OPERATIONS.md#linux-apps). Database
+  migration 0010 (schema v10).
 
 ### Planned
 

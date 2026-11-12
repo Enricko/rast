@@ -328,6 +328,13 @@
   max-width: 52%;
 }
 
+.picker-row.is-selected,
+.picker-row.is-selected:hover {
+  background: var(--accent-soft, var(--surface-2));
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
 .picker-empty {
   padding: 18px 10px;
   text-align: center;
@@ -4603,4 +4610,106 @@ button.pkg-pill {
   .dk-log-time {
     display: none;
   }
+}
+
+/* ------------------------------------------------------------ Linux apps */
+
+/* App Center: picture icons, the add tile and a failed install. */
+.pkg-icon.is-picture img {
+  display: block;
+  object-fit: contain;
+}
+
+.pkg-tile.is-linux-add {
+  width: 100%;
+  border-style: dashed;
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.pkg-tile.is-linux-add:hover {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+
+.pkg-tile.is-linux-add:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.pkg-icon.is-add {
+  background: var(--surface-2);
+  border: 1px dashed var(--border);
+  box-shadow: none;
+  color: var(--text-dim);
+  text-shadow: none;
+}
+
+.pkg-pill.is-failed {
+  color: var(--danger, #c0392b);
+}
+
+/* The app window: the app fills it; messages sit in the middle. */
+.app.linux-window {
+  position: relative;
+  overflow: hidden;
+  background: #101418;
+}
+
+.linux-stage {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.linux-frame {
+  flex: 1;
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #101418;
+}
+
+.linux-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: center;
+}
+
+.linux-state-icon {
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 84px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(12, 18, 26, 0.12);
+}
+
+.linux-state-title {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.linux-state-detail {
+  max-width: 420px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+/* Moving or resizing any window must not lose the pointer to an app frame. */
+body:has(.is-dragging, .is-resizing) .linux-frame {
+  pointer-events: none;
 }

@@ -29,6 +29,7 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 argon2 = "0.6.0"
 rand = "0.9"
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 subtle = "2"
 base64 = "0.22"
@@ -59,6 +60,8 @@ socket2 = "0.6"
 libc = "0.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 notify = "8.2.2"
+httparse = "1.10"
+tokio-tungstenite = "0.29"
 
 [dev-dependencies]
 tempfile = "3"

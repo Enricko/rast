@@ -2,6 +2,7 @@
 // panels (start menu / account / status / clock), context menus and shortcuts.
 
 import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature } from "../apps/registry";
+import { LINUX_PREFIX, loadLinuxApps as fetchLinuxApps, onLinuxApps } from "../apps/linuxapp/catalog";
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
@@ -913,6 +914,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       "package.update": "Package update",
       "app.deploy": "App deployment",
       "docker.pull": "Image download",
+      "linuxapps.install": "Linux app install",
+      "linuxapps.update": "Linux app update",
     };
     return labels[kind] ?? (kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : "Background job");
   };
@@ -1089,7 +1092,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       if (isAppAllowed(win.appId, store.get().permissions, store.isAdmin())) continue;
       const app = findApp(win.appId);
       wm.close(win.id);
-      if (!isAppInstalled(win.appId, store.get().permissions)) {
+      if (win.appId.startsWith(LINUX_PREFIX) || !isAppInstalled(win.appId, store.get().permissions)) {
         toast.warning(`${app?.name ?? "The application"} was uninstalled — its window has been closed.`);
       } else {
         toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);
@@ -1106,6 +1109,42 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     }),
   );
   updateTray();
+
+  // ----------------------------------------------------------- Linux apps
+  // Administrators' Linux apps join the app list once loaded. Windows are not
+  // restored after sign-in: each one would start the app on the server.
+  if (isAdmin) {
+    let linuxTimer: number | undefined;
+    const loadLinuxApps = async (): Promise<void> => {
+      try {
+        await fetchLinuxApps(deps.api);
+      } catch {
+        /* an older server, or Docker is off: no Linux apps */
+      }
+    };
+    const scheduleLinuxApps = (): void => {
+      if (linuxTimer !== undefined) window.clearTimeout(linuxTimer);
+      linuxTimer = window.setTimeout(() => {
+        linuxTimer = undefined;
+        if (!disposed) void loadLinuxApps();
+      }, 300);
+    };
+    disposers.push(
+      onLinuxApps(() => {
+        if (disposed) return;
+        enforceEffectiveAccess();
+        // Same apps, new names or icons: repaint anyway.
+        desktopIcons.refresh();
+        renderTaskbar();
+      }),
+    );
+    disposers.push(realtime.on("linuxapps.changed", scheduleLinuxApps));
+    disposers.push(realtime.onResync(scheduleLinuxApps));
+    disposers.push(() => {
+      if (linuxTimer !== undefined) window.clearTimeout(linuxTimer);
+    });
+    void loadLinuxApps();
+  }
 
   // --------------------------------------------------- session-expiry flow
   if (me.user.mustChangePassword) {
@@ -1135,6 +1174,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   if (options.restore) {
     const toRestore = options.restore.apps.slice(0, MAX_WINDOWS);
     for (const entry of toRestore) {
+      if (entry.appId.startsWith(LINUX_PREFIX)) continue;
       const app = findApp(entry.appId);
       if (!app || !isAppAllowed(app.id, store.get().permissions, store.isAdmin())) continue;
       openApp(entry.appId, entry.params);

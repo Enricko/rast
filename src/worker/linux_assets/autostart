@@ -1,0 +1,3 @@
+# RAST: start the app. When it closes, the container stops (svc-rast-exit).
+/rast/launch
+touch /tmp/.rast-app-exited

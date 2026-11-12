@@ -16,6 +16,8 @@ import { AppLifecycle } from "../../components/lifecycle";
 import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
 import { openGithubImport } from "./github";
+import { LinuxApps } from "./linux";
+import { onLinuxApps } from "../linuxapp/catalog";
 import {
   filterApps,
   filterPackages,
@@ -80,6 +82,8 @@ class PackageCenterApp {
   private readonly search: HTMLInputElement;
   private readonly githubButton: HTMLButtonElement;
   private readonly settingsButton: HTMLButtonElement;
+  private readonly linuxButton: HTMLButtonElement;
+  private readonly linux: LinuxApps;
   private readonly sidebar: HTMLElement;
   private readonly main: HTMLElement;
   private readonly sync: { run: () => void; cancel: () => void };
@@ -96,6 +100,10 @@ class PackageCenterApp {
   private selectedId: string | null = null;
   /** The RAST app whose page is open (instead of a package's). */
   private selectedApp: string | null = null;
+  /** The Linux app whose page is open. */
+  private selectedLinux: string | null = null;
+  private linuxGrid: HTMLElement | null = null;
+  private linuxSection: HTMLElement | null = null;
   /** Apps this account can open now (their tiles offer Open). */
   private openableSignature = "";
   private detail: PackageDetail | null = null;
@@ -137,7 +145,7 @@ class PackageCenterApp {
     this.search = h("input", { class: "input input-search pkg-search", type: "search", placeholder: "Search", ariaLabel: "Search packages" });
     this.search.addEventListener("input", () => {
       this.query = this.search.value;
-      if (this.selectedId || this.selectedApp) this.closeDetail();
+      if (this.selectedId || this.selectedApp || this.selectedLinux) this.closeDetail();
       else this.paintGrid();
     });
     this.githubButton = h(
@@ -154,12 +162,27 @@ class PackageCenterApp {
       h("span", { class: "pkg-btn-label" }, "Settings"),
     );
     this.settingsButton.addEventListener("click", () => this.openSettings());
+    this.linux = new LinuxApps({
+      ctx,
+      lc: this.lc,
+      realtime: this.realtime,
+      readOnly: () => this.readOnly,
+      openPage: (id) => this.openLinuxPage(id),
+    });
+    this.linuxButton = h(
+      "button",
+      { class: "btn btn-ghost btn-sm", type: "button", title: "Install a .deb package, an AppImage or a .tar.gz archive" },
+      iconSvg("plus", 14),
+      h("span", { class: "pkg-btn-label" }, "Add Linux app"),
+    );
+    this.linuxButton.addEventListener("click", () => this.linux.openAdd());
     const toolbar = h(
       "div",
       { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "App Center" },
       this.backButton,
       this.checkButton,
       this.search,
+      this.linuxButton,
       this.githubButton,
       this.settingsButton,
       this.live.el,
@@ -184,21 +207,35 @@ class PackageCenterApp {
     });
     this.applyAccess();
     if (this.denied) return;
+    this.lc.add(onLinuxApps(() => this.render()));
     this.render();
+    void this.linux.reload();
     await this.reload();
   }
 
-  /** `{ view }` opens a list, `{ app }` an app's page (Applications, the launcher). */
+  /**
+   * `{ view }` opens a list, `{ app }` an app's page (Applications, the
+   * launcher) and `{ linux }` a Linux app's page (File Station opens it after
+   * starting an install).
+   */
   private applyParams(params: unknown): void {
-    const wanted = (params ?? {}) as { view?: unknown; app?: unknown };
+    const wanted = (params ?? {}) as { view?: unknown; app?: unknown; linux?: unknown };
     if (wanted.view === "installed" || wanted.view === "all" || wanted.view === "updates") {
       this.view = wanted.view;
       this.selectedId = null;
       this.selectedApp = null;
+      this.selectedLinux = null;
       this.detail = null;
     }
     if (typeof wanted.app === "string" && wanted.app) {
       this.selectedApp = wanted.app;
+      this.selectedId = null;
+      this.selectedLinux = null;
+      this.detail = null;
+    }
+    if (typeof wanted.linux === "string" && wanted.linux) {
+      this.selectedLinux = wanted.linux;
+      this.selectedApp = null;
       this.selectedId = null;
       this.detail = null;
     }
@@ -243,12 +280,13 @@ class PackageCenterApp {
           h("div", { class: "app-access-detail" }, "Your account has no access to App Center. Ask an administrator if you need it."),
         ),
       );
-      for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton]) b.classList.add("hidden");
+      for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton, this.linuxButton]) b.classList.add("hidden");
       this.search.classList.add("hidden");
       return;
     }
     this.checkButton.classList.toggle("hidden", this.readOnly);
     this.githubButton.classList.toggle("hidden", this.readOnly);
+    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.enabled);
     for (const el of [this.settingsButton, this.backButton, this.search]) el.classList.remove("hidden");
     if (wasDenied) void this.reload();
   }
@@ -415,14 +453,15 @@ class PackageCenterApp {
     if (this.disposed || this.denied) return;
     this.renderChrome();
     this.renderSidebar();
-    if (this.selectedApp) this.renderAppDetail();
+    if (this.selectedLinux) this.renderLinuxDetail();
+    else if (this.selectedApp) this.renderAppDetail();
     else if (this.selectedId) this.renderDetail();
     else this.renderList();
   }
 
   /** Toolbar state: back only on a package page, refresh spins while checking. */
   private renderChrome(): void {
-    this.backButton.disabled = !this.selectedId && !this.selectedApp;
+    this.backButton.disabled = !this.selectedId && !this.selectedApp && !this.selectedLinux;
     const checking = this.checking || Boolean(this.overview?.catalog.checking);
     this.checkButton.disabled = checking;
     this.checkButton.classList.toggle("is-checking", checking);
@@ -433,10 +472,10 @@ class PackageCenterApp {
 
   private renderSidebar(): void {
     clear(this.sidebar);
-    const updates = this.overview?.counts.updates ?? 0;
+    const updates = (this.overview?.counts.updates ?? 0) + this.linux.updateCount();
     const list = h("div", { class: "pkg-nav" });
     for (const v of VIEWS) {
-      const active = !this.selectedId && !this.selectedApp && this.currentView() === v.id;
+      const active = !this.selectedId && !this.selectedApp && !this.selectedLinux && this.currentView() === v.id;
       const count = v.id === "updates" && updates > 0 ? updates : 0;
       const button = h(
         "button",
@@ -449,6 +488,7 @@ class PackageCenterApp {
         this.view = v.id;
         this.selectedId = null;
         this.selectedApp = null;
+        this.selectedLinux = null;
         this.detail = null;
         this.render();
       });
@@ -499,6 +539,8 @@ class PackageCenterApp {
     this.grid = null;
     this.appGrid = null;
     this.appSection = null;
+    this.linuxGrid = null;
+    this.linuxSection = null;
     this.runtimeSection = null;
     if (this.loadError && !this.overview) {
       renderLoadFailure(this.main, this.loadError, { title: "App Center could not load", retry: () => void this.reload() });
@@ -519,11 +561,17 @@ class PackageCenterApp {
       this.appSection = h("section", { class: "pkg-group", ariaLabel: "Apps" }, h("h3", { class: "pkg-group-title" }, "Apps"), this.appGrid);
       content.appendChild(this.appSection);
     }
+    // Linux apps (administrators): Updates lists only those with a newer version.
+    if (this.linux.enabled) {
+      this.linuxGrid = h("div", { class: "pkg-grid" });
+      this.linuxSection = h("section", { class: "pkg-group", ariaLabel: "Linux apps" }, h("h3", { class: "pkg-group-title" }, "Linux apps"), this.linuxGrid);
+      content.appendChild(this.linuxSection);
+    }
     this.grid = h("div", { class: "pkg-grid" });
     this.runtimeSection = h(
       "section",
       { class: "pkg-group", ariaLabel: "Runtimes" },
-      this.appSection ? h("h3", { class: "pkg-group-title" }, "Runtimes") : null,
+      this.appSection || this.linuxSection ? h("h3", { class: "pkg-group-title" }, "Runtimes") : null,
       this.grid,
     );
     content.appendChild(this.runtimeSection);
@@ -581,8 +629,19 @@ class PackageCenterApp {
       for (const app of apps) this.appGrid.appendChild(this.appTile(app));
       this.appSection.hidden = apps.length === 0;
     }
+    const linuxApps = this.linux.filtered(view, this.query);
+    if (this.linuxGrid && this.linuxSection) {
+      clear(this.linuxGrid);
+      for (const app of linuxApps) this.linuxGrid.appendChild(this.linux.tile(app));
+      // An empty All Packages list offers the install as a tile.
+      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.dockerEnabled;
+      if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
+      this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
+    }
     const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
-    if (this.runtimeSection) this.runtimeSection.hidden = packages.length === 0 && apps.length > 0 && Boolean(this.query);
+    if (this.runtimeSection) {
+      this.runtimeSection.hidden = packages.length === 0 && (apps.length > 0 || linuxApps.length > 0) && (Boolean(this.query) || view === "updates");
+    }
     if (packages.length === 0) {
       grid.appendChild(
         this.query
@@ -855,10 +914,31 @@ class PackageCenterApp {
     });
   }
 
-  private closeDetail(): void {
-    if (!this.selectedId && !this.selectedApp) return;
+  private openLinuxPage(id: string): void {
+    this.selectedLinux = id;
     this.selectedId = null;
     this.selectedApp = null;
+    this.detail = null;
+    this.render();
+    this.main.scrollTop = 0;
+  }
+
+  private renderLinuxDetail(): void {
+    const scroll = this.main.scrollTop;
+    clear(this.main);
+    this.grid = null;
+    this.appGrid = null;
+    this.linuxGrid = null;
+    const content = h("div", { class: "app-content pkg-content pkg-detail" }, ...this.linux.page(this.selectedLinux ?? ""));
+    this.main.appendChild(content);
+    this.main.scrollTop = scroll;
+  }
+
+  private closeDetail(): void {
+    if (!this.selectedId && !this.selectedApp && !this.selectedLinux) return;
+    this.selectedId = null;
+    this.selectedApp = null;
+    this.selectedLinux = null;
     this.detail = null;
     this.render();
   }

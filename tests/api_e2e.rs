@@ -1645,8 +1645,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
-        "0004 to 0009 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "0004 to 0010 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [

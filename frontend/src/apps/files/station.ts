@@ -14,7 +14,8 @@ import {
   relativeTime,
 } from "../../core/format";
 import { fileIcon, iconSvg } from "../../core/icons";
-import { confirmDialog, contextMenu, promptDialog } from "../../core/ui";
+import { confirmDialog, contextMenu, errorMessage, promptDialog } from "../../core/ui";
+import { isLinuxPackageName } from "../linuxapp/catalog";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel, type JobUpdate } from "../../components/jobs";
@@ -1575,6 +1576,9 @@ export class FileStation {
     });
     if (entry.kind === "file") {
       items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
+      if (this.ctx.store.isAdmin() && isLinuxPackageName(entry.name)) {
+        items.push({ label: "Install as Linux app", icon: "box", onClick: () => void this.installLinuxApp(entry) });
+      }
       items.push("separator");
     }
     items.push(
@@ -1587,6 +1591,17 @@ export class FileStation {
     this.onItemContextSelect(entry);
     this.updateSelectionUi();
     contextMenu(x, y, items);
+  }
+
+  /** Administrators: install a .deb, AppImage or archive, then show it in App Center. */
+  private async installLinuxApp(entry: FileEntry): Promise<void> {
+    try {
+      const res = await this.ctx.api.post<{ app: { id: string; name: string } }>("/api/linux-apps/install", { path: entry.path });
+      this.ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
+      this.ctx.openApp("packages", { linux: res.app.id });
+    } catch (error) {
+      this.ctx.toast.error(errorMessage(error));
+    }
   }
 
   private openEntry(entry: FileEntry): void {

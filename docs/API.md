@@ -299,6 +299,44 @@ place`), after which it finishes.
 versions the catalog announces while its workflow verifies them (not
 installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.json).
 
+## Linux apps (admin; app id `applications`)
+
+Desktop Linux apps installed from a File Station file (`.deb`, AppImage or a
+portable `.tar.gz`/`.tar.xz`/`.tar.bz2`/`.tar` archive). Each app is a Docker
+image built on a pinned Selkies base (`rast-linux/<id>:<build>`). Opening an
+app starts the caller's own container (`rast-linux-<id>-u<uid>`, settings in
+the volume of the same name, the caller's RAST home at `$HOME/RAST`) and
+shows it in a sandboxed frame. A copy stops when its window closes, 60 seconds
+after its last viewer left, or after 30 minutes without input. Requires
+`docker_enabled`. Every change is audited (`linuxapp.install`,
+`linuxapp.update`, `linuxapp.limits`, `linuxapp.uninstall`).
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/linux-apps` | `{apps:[LinuxApp], sessions:[Session] (the caller's), limits:{minFreeMemoryBytes, idleMinutes, maxCpus}, dockerEnabled}` |
+| POST | `/api/linux-apps/install` | `{path}` (File Station path the caller can read, up to 8 GB) → `{app, jobId}`; job kind `linuxapps.install` |
+| GET | `/api/linux-apps/{id}` | `LinuxApp` |
+| PATCH | `/api/linux-apps/{id}` | `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; applies from the next start |
+| DELETE | `/api/linux-apps/{id}?removeData=true` | stops every copy, removes the images (and with `removeData`, every person's settings volume); files in RAST homes are never touched. 409 while installing or updating |
+| GET | `/api/linux-apps/{id}/icon` | PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
+| POST | `/api/linux-apps/{id}/check` | ask the app's official source for a newer version now → `LinuxApp` (checks also run daily) |
+| POST | `/api/linux-apps/{id}/update` | `{}` → `{app, jobId}`; job kind `linuxapps.update`. Running copies keep the old version until they are closed. 400 when the app has no update source |
+| POST | `/api/linux-apps/{id}/open` | start (or return) the caller's copy → `Session`. 503 when the server has less than 4 GiB of free memory |
+| GET | `/api/linux-apps/sessions/{sid}` | one of the caller's copies → `Session`; 404 once it is gone |
+| POST | `/api/linux-apps/sessions/{sid}/close` | stop it now → `Session` |
+
+`LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball", fileName, version, package, description, command:[argv], launchGuess, iconUrl, status:"installing"|"ready"|"updating"|"failed", error, jobId, update:{source:"apt"|"github"|"zsync"|null, latestVersion, available, checkedAt, error}, memoryMb, cpus, sizeBytes, running, createdAt, updatedAt}`.
+`launchGuess` is true when RAST picked the program of an archive itself.
+`latestVersion` is `"newer build"` for an AppImage whose update file changed
+without a version number.
+
+`Session`: `{id, appId, appName, status:"starting"|"ready"|"ended", url, reason:"closed"|"idle"|"exited"|"error"|"removed"|null, error, startedAt, viewers}`.
+`url` (`/linux-apps/<key>/`, only while `ready`) is the frame's address. The
+key is 128 random bits and is the only credential of that route, so treat the
+URL like a password. RAST does not write it to its logs (Docker sees it in the
+container's settings), and it stops working when the copy ends. Responses on
+`/linux-apps/` carry `Content-Security-Policy: sandbox …; frame-ancestors 'self'`.
+
 ## Activity logs
 
 | Method | Path | Notes |

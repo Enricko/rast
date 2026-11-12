@@ -46,6 +46,7 @@ use tokio::{
     sync::{oneshot, Semaphore},
 };
 
+mod linux;
 mod terminal;
 
 use crate::{
@@ -95,6 +96,10 @@ const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct WorkerOptions {
     pub socket_path: PathBuf,
     pub apps_dir: PathBuf,
+    /// Where the server stages Linux app uploads (`<data_dir>/linux-apps`).
+    pub linux_apps_dir: PathBuf,
+    /// Home folders (`<storage_dir>/homes`), shared with Linux apps.
+    pub homes_dir: PathBuf,
     pub docker_bin: PathBuf,
     pub quick_timeout: Duration,
     pub compose_timeout: Duration,
@@ -118,6 +123,8 @@ impl WorkerOptions {
         Self {
             socket_path: cfg.worker_socket.clone(),
             apps_dir: cfg.apps_dir(),
+            linux_apps_dir: cfg.linux_apps_dir(),
+            homes_dir: cfg.homes_dir(),
             docker_bin,
             quick_timeout: QUICK_OP_TIMEOUT,
             compose_timeout: COMPOSE_OP_TIMEOUT,
@@ -507,6 +514,7 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
         ValidatedAction::Exec { .. } => Err(WorkerError::invalid(
             "container-exec opens a terminal session and cannot be dispatched",
         )),
+        ValidatedAction::Linux(action) => linux::dispatch(options, action).await,
         ValidatedAction::App {
             op,
             slug,
@@ -1509,6 +1517,8 @@ mod tests {
             let socket = root.join("worker.sock");
             let options = WorkerOptions {
                 socket_path: socket.clone(),
+                linux_apps_dir: root.join("linux-apps"),
+                homes_dir: root.join("homes"),
                 apps_dir,
                 docker_bin: script_path,
                 quick_timeout: Duration::from_secs(5),

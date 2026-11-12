@@ -303,6 +303,96 @@ fn download_inner(
     Ok(())
 }
 
+/// Fetch at most `max_bytes` from the start of a document (for headers of
+/// large files, such as a `.zsync` file's text header).
+pub fn fetch_prefix(url: &str, policy: &OriginPolicy, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let resolved = open(url, policy, &[], Duration::from_secs(60))?;
+    let mut out = Vec::new();
+    resolved
+        .response
+        .into_body()
+        .into_with_config()
+        .limit(u64::MAX)
+        .reader()
+        .take(max_bytes)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("cannot read {}: {e}", short(&resolved.url)))?;
+    Ok(out)
+}
+
+/// Digests of a finished download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Downloaded {
+    pub size: u64,
+    pub sha256: String,
+    pub sha1: String,
+}
+
+/// Stream a download to `target` (at most `max_bytes`, exactly
+/// `expected_size` when known) and return its size and digests; the caller
+/// compares them with what the source published. The file is removed again
+/// on failure.
+pub fn download_hashed(
+    url: &str,
+    policy: &OriginPolicy,
+    target: &Path,
+    expected_size: Option<u64>,
+    max_bytes: u64,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Downloaded, String> {
+    let result = (|| {
+        use sha1::Digest as _;
+        let resolved = open(url, policy, &[], Duration::from_secs(60 * 60))?;
+        let limit = expected_size.unwrap_or(max_bytes).min(max_bytes);
+        let mut reader = resolved
+            .response
+            .into_body()
+            .into_with_config()
+            .limit(limit + 1)
+            .reader();
+        let mut file = std::fs::File::create(target)
+            .map_err(|e| format!("cannot create {}: {e}", target.display()))?;
+        let mut sha256 = Sha256::new();
+        let mut sha1 = sha1::Sha1::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut done: u64 = 0;
+        loop {
+            if cancelled() {
+                return Err("cancelled".to_string());
+            }
+            let n = reader
+                .read(&mut buf)
+                .map_err(|e| format!("download interrupted: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            done += n as u64;
+            if done > limit {
+                return Err(format!("the download is larger than {limit} bytes"));
+            }
+            sha256.update(&buf[..n]);
+            sha1.update(&buf[..n]);
+            file.write_all(&buf[..n])
+                .map_err(|e| format!("cannot write download: {e}"))?;
+        }
+        file.sync_all().ok();
+        if let Some(expected) = expected_size {
+            if done != expected {
+                return Err(format!("downloaded {done} bytes, expected {expected}"));
+            }
+        }
+        Ok(Downloaded {
+            size: done,
+            sha256: hex::encode(sha256.finalize()),
+            sha1: hex::encode(sha1.finalize()),
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(target);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

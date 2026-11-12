@@ -1,0 +1,7 @@
+#!/usr/bin/with-contenv bash
+# RAST: when the app closes, stop the whole container.
+while [ ! -e /tmp/.rast-app-exited ]; do
+  sleep 2
+done
+echo "[rast] the app was closed; stopping"
+exec /run/s6/basedir/bin/halt

@@ -134,6 +134,20 @@ pub enum WorkerOp {
     /// Interactive shell in one running container. After the success line
     /// the connection carries terminal frames ([`super::exec`]).
     ContainerExec,
+    /// Build a Linux app image ([`super::linux`]).
+    LinuxBuild,
+    /// Start one person's copy of a Linux app.
+    LinuxRun,
+    /// Stop and remove one person's copy of a Linux app (its data stays).
+    LinuxStop,
+    /// Remove a Linux app's containers and images (and data on request).
+    LinuxRemove,
+    /// Remove a Linux app's older images.
+    LinuxPrune,
+    /// Containers of every Linux app.
+    LinuxList,
+    /// Ask a `.deb` app's apt sources for a newer version.
+    LinuxCheck,
 }
 
 impl WorkerOp {
@@ -167,6 +181,13 @@ impl WorkerOp {
             Self::VolumeList => "volume-list",
             Self::VolumeRemove => "volume-remove",
             Self::ContainerExec => "container-exec",
+            Self::LinuxBuild => "linux-build",
+            Self::LinuxRun => "linux-run",
+            Self::LinuxStop => "linux-stop",
+            Self::LinuxRemove => "linux-remove",
+            Self::LinuxPrune => "linux-prune",
+            Self::LinuxList => "linux-list",
+            Self::LinuxCheck => "linux-check",
         }
     }
 
@@ -187,6 +208,7 @@ impl WorkerOp {
             | Self::ImageList
             | Self::ImageInspect
             | Self::VolumeList
+            | Self::LinuxList
             | Self::ContainerExec => TimeoutClass::Quick,
             Self::ComposeUp
             | Self::ComposeDown
@@ -199,8 +221,13 @@ impl WorkerOp {
             | Self::ContainerRemove
             | Self::ImageRemove
             | Self::ImagePrune
-            | Self::VolumeRemove => TimeoutClass::Long,
-            Self::ImagePull => TimeoutClass::Pull,
+            | Self::VolumeRemove
+            | Self::LinuxRun
+            | Self::LinuxStop
+            | Self::LinuxRemove
+            | Self::LinuxPrune
+            | Self::LinuxCheck => TimeoutClass::Long,
+            Self::ImagePull | Self::LinuxBuild => TimeoutClass::Pull,
         }
     }
 
@@ -227,6 +254,20 @@ impl WorkerOp {
                 | Self::RemoveVolumes
                 | Self::Logs
                 | Self::ComposeLogsSince
+        )
+    }
+
+    /// Operations on Linux desktop apps ([`super::linux`]).
+    pub fn is_linux_op(self) -> bool {
+        matches!(
+            self,
+            Self::LinuxBuild
+                | Self::LinuxRun
+                | Self::LinuxStop
+                | Self::LinuxRemove
+                | Self::LinuxPrune
+                | Self::LinuxList
+                | Self::LinuxCheck
         )
     }
 }
@@ -260,6 +301,9 @@ pub struct WorkerRequest {
     /// Terminal height in rows (`container-exec` only; clamped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+    /// Arguments of the `linux-*` operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux: Option<super::linux::LinuxArgs>,
 }
 
 impl WorkerRequest {
@@ -275,7 +319,13 @@ impl WorkerRequest {
             volume: None,
             cols: None,
             rows: None,
+            linux: None,
         }
+    }
+
+    pub fn linux(mut self, args: super::linux::LinuxArgs) -> Self {
+        self.linux = Some(args);
+        self
     }
 
     pub fn slug(mut self, slug: impl Into<String>) -> Self {
@@ -394,6 +444,8 @@ pub enum ValidatedAction {
     Volume { op: WorkerOp, name: String },
     /// Terminal into one container, with a clamped initial size.
     Exec { id: String, cols: u16, rows: u16 },
+    /// One of the `linux-*` operations.
+    Linux(super::linux::LinuxAction),
 }
 
 impl ValidatedAction {
@@ -405,6 +457,15 @@ impl ValidatedAction {
             Self::Containers { op, .. } | Self::Image { op, .. } | Self::Volume { op, .. } => *op,
             Self::ContainerLogs { .. } => WorkerOp::ContainerLogs,
             Self::Exec { .. } => WorkerOp::ContainerExec,
+            Self::Linux(action) => match action {
+                super::linux::LinuxAction::Build { .. } => WorkerOp::LinuxBuild,
+                super::linux::LinuxAction::Run(_) => WorkerOp::LinuxRun,
+                super::linux::LinuxAction::Stop { .. } => WorkerOp::LinuxStop,
+                super::linux::LinuxAction::Remove { .. } => WorkerOp::LinuxRemove,
+                super::linux::LinuxAction::Prune { .. } => WorkerOp::LinuxPrune,
+                super::linux::LinuxAction::List => WorkerOp::LinuxList,
+                super::linux::LinuxAction::Check { .. } => WorkerOp::LinuxCheck,
+            },
         }
     }
 }
@@ -415,6 +476,13 @@ impl ValidatedAction {
 pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<ValidatedAction, String> {
     if req.id.is_empty() || req.id.len() > 128 {
         return Err("request id must be 1-128 characters".into());
+    }
+    if req.op.is_linux_op() {
+        accept_only(req, &[])?;
+        return super::linux::validate(req.op, req.linux.as_ref()).map(ValidatedAction::Linux);
+    }
+    if req.linux.is_some() {
+        return Err(format!("{} does not accept `linux`", req.op.as_str()));
     }
     match req.op {
         WorkerOp::Version

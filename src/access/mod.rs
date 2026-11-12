@@ -60,6 +60,16 @@ pub fn is_desktop_app(app_id: &str) -> bool {
     app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
 }
 
+/// Desktop/taskbar shortcut ids: the built-in apps and installed Linux apps
+/// (`linux:<id>`; unknown ones are hidden by the desktop, not refused, so a
+/// shortcut survives an app being reinstalled).
+pub fn is_shortcut_id(id: &str) -> bool {
+    is_desktop_app(id)
+        || id
+            .strip_prefix("linux:")
+            .is_some_and(|app| crate::docker::linux::validate_app_id(app).is_ok())
+}
+
 /// Removable apps that were uninstalled in App Center.
 pub async fn removed_apps(pool: &SqlitePool) -> Vec<String> {
     crate::db::get_setting(pool, REMOVED_APPS_SETTING)

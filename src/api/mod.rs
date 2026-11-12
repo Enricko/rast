@@ -17,6 +17,7 @@ pub mod events;
 pub mod files;
 pub mod groups;
 pub mod jobs;
+pub mod linux_apps;
 pub mod logs;
 pub mod monitor;
 pub mod packages;
@@ -43,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
+        .merge(linux_apps::routes())
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -64,6 +66,12 @@ fn public_routes() -> Router<AppState> {
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", axum::routing::post(auth::setup))
         .route("/api/auth/login", axum::routing::post(auth::login))
+        // A running Linux app's page; the key in the path is its credential
+        // (see `linux_apps::proxy`).
+        .route(
+            "/linux-apps/{*rest}",
+            axum::routing::any(crate::linux_apps::proxy::handle),
+        )
 }
 
 /// Shared helper: JSON 501 for features not yet available on this host.

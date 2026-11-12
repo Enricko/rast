@@ -444,7 +444,7 @@ pub fn validate_taskbar_pins(pins: Vec<String>) -> AppResult<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(pins.len());
     for pin in pins {
         let id = pin.trim().to_ascii_lowercase();
-        if !crate::access::is_desktop_app(&id) {
+        if !crate::access::is_shortcut_id(&id) {
             return Err(bad_request(format!("unknown application {:?}", pin.trim())));
         }
         if out.contains(&id) {
@@ -464,7 +464,7 @@ pub fn validate_desktop_icons(icons: Vec<DesktopIconDto>) -> AppResult<Vec<Deskt
     let mut out: Vec<DesktopIconDto> = Vec::with_capacity(icons.len());
     for icon in icons {
         let id = icon.id.trim().to_ascii_lowercase();
-        if !crate::access::is_desktop_app(&id) {
+        if !crate::access::is_shortcut_id(&id) {
             return Err(bad_request(format!(
                 "unknown application {:?}",
                 icon.id.trim()
@@ -499,7 +499,7 @@ fn parse_stored_desktop_icons(raw: Option<&str>) -> Option<Vec<DesktopIconDto>> 
         let Ok(icon) = serde_json::from_value::<DesktopIconDto>(item) else {
             continue;
         };
-        let valid = crate::access::is_desktop_app(&icon.id)
+        let valid = crate::access::is_shortcut_id(&icon.id)
             && icon.col <= MAX_DESKTOP_CELL
             && icon.row <= MAX_DESKTOP_CELL
             && !out
@@ -520,7 +520,7 @@ fn parse_stored_pins(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in items {
         if let Some(id) = item.as_str() {
-            if crate::access::is_desktop_app(id) && !out.iter().any(|known| known == id) {
+            if crate::access::is_shortcut_id(id) && !out.iter().any(|known| known == id) {
                 out.push(id.to_string());
             }
         }
@@ -1558,6 +1558,19 @@ pub(crate) mod tests {
             quota_bytes: 0,
             must_change_password: false,
         }
+    }
+
+    #[test]
+    fn linux_apps_can_be_pinned_and_placed() {
+        assert_eq!(
+            validate_taskbar_pins(vec!["files".into(), "linux:google-chrome".into()]).unwrap(),
+            vec!["files".to_string(), "linux:google-chrome".to_string()]
+        );
+        for bad in ["linux:", "linux:../x", "linux:Bad Id", "other:files"] {
+            assert!(validate_taskbar_pins(vec![bad.into()]).is_err(), "{bad}");
+        }
+        let stored = parse_stored_pins(r#"["linux:obsidian", "linux:../x", "files"]"#);
+        assert_eq!(stored, vec!["linux:obsidian".to_string(), "files".to_string()]);
     }
 
     // ------------------------------------------------------------- image tests

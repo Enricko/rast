@@ -148,6 +148,14 @@ export function appAccentClass(appId: string): string {
   return `app-icon--${APP_ACCENT[appId] ?? "controlpanel"}`;
 }
 
+/** Picture icons of installed Linux apps (same-origin URLs from the server). */
+const APP_IMAGES = new Map<string, string>();
+
+export function setAppImageIcon(appId: string, url: string | null): void {
+  if (url && url.startsWith("/api/")) APP_IMAGES.set(appId, url);
+  else APP_IMAGES.delete(appId);
+}
+
 /** Coloured application icon (falls back to the monochrome icon set). */
 export function appIconSvg(appId: string, fallbackIcon: string, size = 28): SVGSVGElement {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -157,6 +165,18 @@ export function appIconSvg(appId: string, fallbackIcon: string, size = 28): SVGS
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
   svg.classList.add("icon", "app-icon", appAccentClass(appId));
+  const image = APP_IMAGES.get(appId);
+  if (image) {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", "image");
+    el.setAttribute("href", image);
+    el.setAttribute("x", "1");
+    el.setAttribute("y", "1");
+    el.setAttribute("width", "22");
+    el.setAttribute("height", "22");
+    el.setAttribute("preserveAspectRatio", "xMidYMid meet");
+    svg.appendChild(el);
+    return svg;
+  }
   const markup = APP_ICONS[appId];
   if (!markup) {
     return iconSvg(fallbackIcon, size);

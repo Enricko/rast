@@ -444,6 +444,31 @@ uninstaller. Check with `systemctl status rast-packages-links.path` and
 * Audit history is available in the Activity Logs app and
   `GET /api/logs`; exports are provided by `GET /api/logs/export`.
 
+## Linux apps
+
+Administrators install desktop Linux apps from App Center (a `.deb`, an
+AppImage or a portable archive from File Station). Each app becomes a Docker
+image; each person who opens it gets their own container, which stops when the
+window closes or after 30 minutes without input.
+
+```bash
+docker ps --filter label=rast.managed=linux-app           # running copies
+docker images 'rast-linux/*'; docker images rast-linux-base  # app images and the base
+docker volume ls --filter label=rast.managed=linux-app     # per-person app settings
+```
+
+* Disk: the first app downloads the shared base (about 3.7 GB); each app
+  adds roughly 1 GB.
+* RAST removes old builds after an update and everything of an app on
+  uninstall (settings volumes only when *Also delete its settings* is ticked).
+  Docker's build cache is not removed; reclaim it with `docker builder prune`.
+* Copies left running by a restart are stopped when RAST starts again.
+* A copy only starts while the host has 4 GiB of memory free.
+* Updates come from the app's official source: its apt repository for a
+  `.deb` that installs one, GitHub releases or zsync for AppImages that embed
+  update information. Archives without an update source are updated by
+  installing a newer file.
+
 ## Secrets and key rotation
 
 `/var/lib/rast/secret.key` (0600) is the master key for CSRF derivation and
