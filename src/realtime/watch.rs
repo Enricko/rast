@@ -65,6 +65,10 @@ async fn run(
     db: SqlitePool,
     events: EventBus,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // FSEvents (macOS) reports resolved paths (`/tmp` arrives as
+    // `/private/tmp`); compare events against the resolved roots.
+    let homes = std::fs::canonicalize(&homes).unwrap_or(homes);
+    let shared = std::fs::canonicalize(&shared).unwrap_or(shared);
     let (tx, mut rx) = tokio::sync::mpsc::channel::<notify::Event>(CHANNEL_CAPACITY);
     let overflow = Arc::new(AtomicBool::new(false));
 

@@ -510,7 +510,10 @@ mod tests {
     #[test]
     fn symlink_escape_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("root");
+        // Storage roots are canonical (macOS temp folders sit behind a
+        // `/var` -> `/private/var` symlink).
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("root");
         std::fs::create_dir_all(&root).unwrap();
         let inside = root.join("inside");
         std::fs::create_dir(&inside).unwrap();
@@ -520,7 +523,7 @@ mod tests {
         assert!(verify_no_symlinks(&root, &inside.join("ok.txt")).unwrap());
 
         // A symlink to an existing directory outside the root is rejected.
-        let outside = dir.path().join("outside");
+        let outside = base.join("outside");
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
         std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
