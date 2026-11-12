@@ -482,6 +482,10 @@ docker volume ls --filter label=rast.managed=linux-app     # per-person app sett
 * Closing the app from inside it (its own close button, for example Chrome's
   ×) closes its RAST window within a few seconds; a page reload reconnects to
   the same copy.
+* Chromium browsers' own window bar is turned off in the app image (Chrome's
+  *Use system title bar and borders* preference), so the RAST window is the
+  only window frame. Apps installed before 0.11.2 get this after *Reinstall*;
+  apps that draw their own title bar keep it.
 * A copy only starts while the host has 4 GiB of memory free.
 * Updates come from the app's official source: its apt repository for a
   `.deb` that installs one, GitHub releases or zsync for AppImages that embed

@@ -24,6 +24,23 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.2] - 2026-11-13
+
+No database migration (schema stays v11). Chrome installs made before this
+release get the single window frame after *Reinstall* (the app's page, More
+actions); the setting itself is applied every time the app starts.
+
+### Fixed
+
+- **One window frame for Linux apps, and the window can be moved again.**
+  0.11.1 hid the desktop title bar of streamed app windows, which left no way
+  to move, minimize or maximize them from the desktop. The desktop title bar
+  is back and the app image now turns off the browser's own window bar
+  (Chrome's *Use system title bar and borders* preference), so a Chrome window
+  shows one set of controls: RAST's. Closing the app from inside still closes
+  the window (0.11.0). Chromium browsers other than Chrome are covered too;
+  apps that draw their own title bar keep it.
+
 ## [0.11.1] - 2026-11-12
 
 No database migration (schema stays v11).

@@ -15,6 +15,47 @@ find /config -xdev ! -user abc -exec chown -h abc:abc {} + 2>/dev/null || true
 find /config/.config -maxdepth 3 \( -name SingletonLock -o -name SingletonCookie \
   -o -name SingletonSocket \) -delete 2>/dev/null || true
 
+# RAST: the streamed window is the app's only window frame. Chromium browsers
+# draw their own title bar with minimize/maximize/close buttons inside the
+# picture, which would give them two frames; turn the browser's own window bar
+# off so RAST's window frame is the only one. This is an ordinary browser
+# preference and stays off.
+if grep -q '"chromium": true' /rast/meta.json 2>/dev/null; then
+  PYTHON=$(command -v python3 || echo /lsiopy/bin/python3)
+  s6-setuidgid abc "$PYTHON" - <<'PY' || true
+import json
+from pathlib import Path
+
+for name in (
+    "google-chrome",
+    "google-chrome-beta",
+    "google-chrome-unstable",
+    "chromium",
+    "microsoft-edge",
+):
+    folder = Path("/config/.config") / name
+    if not folder.is_dir():
+        continue
+    profiles = sorted(folder.glob("*/Preferences")) or [folder / "Default" / "Preferences"]
+    for path in profiles:
+        try:
+            data = json.loads(path.read_text()) if path.exists() else {}
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        browser = data.get("browser")
+        if not isinstance(browser, dict):
+            browser = {}
+            data["browser"] = browser
+        if browser.get("custom_chrome_frame") is False:
+            continue
+        browser["custom_chrome_frame"] = False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+PY
+fi
+
 mkdir -p /config/.config/openbox /config/.config/gtk-3.0
 cp /rast/autostart /config/.config/openbox/autostart
 chmod 644 /config/.config/openbox/autostart

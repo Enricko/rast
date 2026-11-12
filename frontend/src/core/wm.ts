@@ -147,10 +147,10 @@ export class WindowManager {
     const iconEl = h("span", { class: "win-icon", dataset: { app: app.id } });
     iconEl.appendChild(appIconSvg(app.id, app.icon, 16));
     const titleEl = h("span", { class: "win-title" }, app.name);
-    // Frameless windows let the app draw its own title bar and controls (a
-    // streamed Linux app window does); the taskbar still minimizes, maximizes
-    // and closes them, and the edges resize. Phones keep the title bar: there
-    // is nothing else to grab the window with there.
+    // Frameless windows let the app draw its own title bar and controls; the
+    // taskbar still minimizes, maximizes and closes them, and the edges
+    // resize. Phones keep the title bar: there is nothing else to grab the
+    // window with there.
     const frameless = app.frameless === true && !this.isMobile;
     const titlebar = frameless
       ? null
