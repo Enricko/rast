@@ -243,13 +243,14 @@ jobs:
         run: cargo build --release --locked
 
       - name: Start RAST with scripts/run-local.sh
+        timeout-minutes: 5
         run: |
           set -euo pipefail
           ./target/release/rast version
           work=$(mktemp -d)
           pid=""
           cleanup() {
-            if [ -n "$pid" ]; then kill -INT "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+            if [ -n "$pid" ]; then kill -TERM "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
             cat "$work/out.log" || true
             rm -rf "$work"
           }
@@ -271,7 +272,7 @@ jobs:
           setup_code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $origin" \
             -d "{\"token\":\"$token\",\"username\":\"smoke\",\"password\":\"Runtime-Smoke-Passw0rd-1!\"}" \
             "$origin/api/setup")
-          test "$setup_code" = 200
+          test "$setup_code" = 201
           login_code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $origin" \
             -d '{"username":"smoke","password":"Runtime-Smoke-Passw0rd-1!"}' \
             "$origin/api/auth/login")

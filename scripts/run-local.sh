@@ -93,4 +93,14 @@ if [ ! -e "$local_dir/data/rast.db" ]; then
 fi
 
 echo "RAST is starting on http://127.0.0.1:$port (data in $local_dir). Press Ctrl+C to stop."
-"$rast_bin" serve
+# Run the server in the background and forward INT/TERM to it, so stopping
+# works whether the signal reaches the whole terminal group (Ctrl+C) or only
+# this script (kill, a process manager).
+"$rast_bin" serve &
+serve_pid=$!
+trap 'kill -TERM "$serve_pid" 2>/dev/null || true' INT TERM
+status=0
+while kill -0 "$serve_pid" 2>/dev/null; do
+  wait "$serve_pid" || status=$?
+done
+exit "$status"
