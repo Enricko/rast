@@ -1,18 +1,23 @@
-//! Linux apps API (administrators only).
+//! Linux apps API.
 //!
-//! | Method | Path | |
+//! Every signed-in user can list and open the apps shared with them; managing
+//! apps (installing, updating, removing, limits and visibility) is
+//! administrator-only.
+//!
+//! | Method | Path | Who |
 //! |---|---|---|
-//! | GET | `/api/linux-apps` | installed apps and the caller's running copies |
-//! | POST | `/api/linux-apps/install` | `{path}` (File Station file) or `{url}` (https link): install (job) |
-//! | GET | `/api/linux-apps/{id}` | one app |
-//! | PATCH | `/api/linux-apps/{id}` | `{memoryMb?, cpus?}` |
-//! | DELETE | `/api/linux-apps/{id}?removeData=true` | uninstall |
-//! | GET | `/api/linux-apps/{id}/icon` | the app's icon |
-//! | POST | `/api/linux-apps/{id}/check` | ask the official source for a newer version |
-//! | POST | `/api/linux-apps/{id}/update` | install the newer version (job) |
-//! | POST | `/api/linux-apps/{id}/open` | start (or find) the caller's copy |
-//! | GET | `/api/linux-apps/sessions/{sid}` | state of one of the caller's copies |
-//! | POST | `/api/linux-apps/sessions/{sid}/close` | stop it now |
+//! | GET | `/api/linux-apps` | any signed-in user: installed apps they may see and their running copies |
+//! | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station file) or `{url}` (https link): install (job) |
+//! | GET | `/api/linux-apps/{id}` | any signed-in user: one app they may see |
+//! | PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` |
+//! | DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: uninstall |
+//! | GET | `/api/linux-apps/{id}/icon` | any signed-in user: the app's icon |
+//! | POST | `/api/linux-apps/{id}/check` | administrator: ask the official source for a newer version |
+//! | POST | `/api/linux-apps/{id}/update` | administrator: install the newer version (job) |
+//! | POST | `/api/linux-apps/{id}/visibility` | administrator: `{visibility:"users"|"admins"}` |
+//! | POST | `/api/linux-apps/{id}/open` | any signed-in user: start (or find) their own copy |
+//! | GET | `/api/linux-apps/sessions/{sid}` | any signed-in user: state of one of their own copies |
+//! | POST | `/api/linux-apps/sessions/{sid}/close` | any signed-in user: stop their own copy now |
 
 use axum::{
     extract::{Path, Query, State},
@@ -24,7 +29,12 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::{auth::AdminUser, error::AppResult, state::AppState};
+use crate::{
+    auth::{AdminUser, AuthUser},
+    error::AppResult,
+    linux_apps::Visibility,
+    state::AppState,
+};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -37,15 +47,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/linux-apps/{id}/icon", get(icon))
         .route("/api/linux-apps/{id}/check", post(check))
         .route("/api/linux-apps/{id}/update", post(update))
+        .route("/api/linux-apps/{id}/visibility", post(set_visibility))
         .route("/api/linux-apps/{id}/open", post(open))
         .route("/api/linux-apps/sessions/{sid}", get(session))
         .route("/api/linux-apps/sessions/{sid}/close", post(close))
 }
 
-async fn list(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     Ok(Json(json!({
-        "apps": state.linux_apps.list().await?,
-        "sessions": state.linux_apps.my_sessions(&admin.0),
+        "apps": state.linux_apps.list(&user).await?,
+        "sessions": state.linux_apps.my_sessions(&user),
         "limits": {
             "minFreeMemoryBytes": crate::linux_apps::MIN_FREE_MEMORY_BYTES,
             "idleMinutes": crate::linux_apps::IDLE_LIMIT.as_secs() / 60,
@@ -83,10 +94,33 @@ async fn install(
 
 async fn one(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.get(&id).await?))
+    Ok(Json(state.linux_apps.get(&user, &id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VisibilityRequest {
+    visibility: String,
+}
+
+async fn set_visibility(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<VisibilityRequest>,
+) -> AppResult<Json<Value>> {
+    let visibility = Visibility::parse(body.visibility.trim()).ok_or_else(|| {
+        crate::error::AppError::bad_request("visibility must be \"users\" or \"admins\"")
+    })?;
+    Ok(Json(
+        state
+            .linux_apps
+            .set_visibility(&admin.0, &id, visibility)
+            .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -133,10 +167,10 @@ async fn uninstall(
 
 async fn icon(
     State(state): State<AppState>,
-    _admin: AdminUser,
+    user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Response> {
-    let (kind, bytes) = state.linux_apps.icon(&id).await?;
+    let (kind, bytes) = state.linux_apps.icon(&user, &id).await?;
     let content_type = if kind == "svg" {
         "image/svg+xml"
     } else {
@@ -175,24 +209,24 @@ async fn update(
 
 async fn open(
     State(state): State<AppState>,
-    admin: AdminUser,
+    user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.open(&admin.0, &id).await?))
+    Ok(Json(state.linux_apps.open(&user, &id).await?))
 }
 
 async fn session(
     State(state): State<AppState>,
-    admin: AdminUser,
+    user: AuthUser,
     Path(sid): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.session(&admin.0, &sid)?))
+    Ok(Json(state.linux_apps.session(&user, &sid)?))
 }
 
 async fn close(
     State(state): State<AppState>,
-    admin: AdminUser,
+    user: AuthUser,
     Path(sid): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.close(&admin.0, &sid)?))
+    Ok(Json(state.linux_apps.close(&user, &sid)?))
 }

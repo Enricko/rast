@@ -299,7 +299,7 @@ place`), after which it finishes.
 versions the catalog announces while its workflow verifies them (not
 installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.json).
 
-## Linux apps (admin; app id `applications`)
+## Linux apps (app id `applications`; managing them is administrator-only)
 
 Desktop Linux apps installed from a File Station file (`.deb`, AppImage or a
 portable `.tar.gz`/`.tar.xz`/`.tar.bz2`/`.tar` archive). Each app is a Docker
@@ -309,23 +309,31 @@ the volume of the same name, the caller's RAST home at `$HOME/RAST`) and
 shows it in a sandboxed frame. A copy stops when its window closes, 60 seconds
 after its last viewer left, or after 30 minutes without input. Requires
 `docker_enabled`. Every change is audited (`linuxapp.install`,
-`linuxapp.update`, `linuxapp.limits`, `linuxapp.uninstall`).
+`linuxapp.update`, `linuxapp.limits`, `linuxapp.visibility`,
+`linuxapp.uninstall`).
+
+Installed apps are shared with every signed-in user by default; an
+administrator can restrict one to administrators. Everyone who may see an app
+can open their own copy, list it and read its icon. Managing apps (installing,
+updating, removing, limits, visibility) is administrator-only. The shared app
+surface is not governed by the group policy's `applications` (Docker) rule.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/linux-apps` | `{apps:[LinuxApp], sessions:[Session] (the caller's), limits:{minFreeMemoryBytes, idleMinutes, maxCpus}, dockerEnabled}` |
-| POST | `/api/linux-apps/install` | `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) → `{app, jobId}`; job kind `linuxapps.install` |
-| GET | `/api/linux-apps/{id}` | `LinuxApp` |
-| PATCH | `/api/linux-apps/{id}` | `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; applies from the next start |
-| DELETE | `/api/linux-apps/{id}?removeData=true` | stops every copy, removes the images (and with `removeData`, every person's settings volume); files in RAST homes are never touched. 409 while installing or updating |
-| GET | `/api/linux-apps/{id}/icon` | PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
-| POST | `/api/linux-apps/{id}/check` | ask the app's official source for a newer version now → `LinuxApp` (checks also run daily) |
-| POST | `/api/linux-apps/{id}/update` | `{}` → `{app, jobId}`; job kind `linuxapps.update`. Running copies keep the old version until they are closed. 400 when the app has no update source |
-| POST | `/api/linux-apps/{id}/open` | start (or return) the caller's copy → `Session`. 503 when the server has less than 4 GiB of free memory |
-| GET | `/api/linux-apps/sessions/{sid}` | one of the caller's copies → `Session`; 404 once it is gone |
-| POST | `/api/linux-apps/sessions/{sid}/close` | stop it now → `Session` |
+| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[Session] (the caller's), limits:{minFreeMemoryBytes, idleMinutes, maxCpus}, dockerEnabled}` |
+| POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) → `{app, jobId}`; job kind `linuxapps.install` |
+| GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |
+| PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; applies from the next start |
+| DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: stops every copy, removes the images (and with `removeData`, every person's settings volume); files in RAST homes are never touched. 409 while installing or updating |
+| GET | `/api/linux-apps/{id}/icon` | any signed-in user: PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
+| POST | `/api/linux-apps/{id}/check` | administrator: ask the app's official source for a newer version now → `LinuxApp` (checks also run daily) |
+| POST | `/api/linux-apps/{id}/update` | administrator: `{}` → `{app, jobId}`; job kind `linuxapps.update`. Running copies keep the old version until they are closed. 400 when the app has no update source |
+| POST | `/api/linux-apps/{id}/visibility` | administrator: `{visibility:"users"|"admins"}` → `LinuxApp`. `users` (default) shows the app to every signed-in user; `admins` restricts it to administrators |
+| POST | `/api/linux-apps/{id}/open` | any signed-in user: start (or return) the caller's own copy → `Session`. 404 when the app is not visible to them. 503 when the server has less than 4 GiB of free memory |
+| GET | `/api/linux-apps/sessions/{sid}` | any signed-in user: one of the caller's own copies → `Session`; 404 once it is gone or for someone else's copy |
+| POST | `/api/linux-apps/sessions/{sid}/close` | any signed-in user: stop their own copy now → `Session` |
 
-`LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball", fileName, version, package, description, command:[argv], launchGuess, iconUrl, status:"installing"|"ready"|"updating"|"failed", error, jobId, update:{source:"apt"|"github"|"zsync"|null, latestVersion, available, checkedAt, error}, memoryMb, cpus, sizeBytes, running, createdAt, updatedAt}`.
+`LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball", fileName, version, package, description, command:[argv], launchGuess, iconUrl, status:"installing"|"ready"|"updating"|"failed", error, jobId, update:{source:"apt"|"github"|"zsync"|null, latestVersion, available, checkedAt, error}, memoryMb, cpus, sizeBytes, visibility:"users"|"admins", running, createdAt, updatedAt}`.
 `launchGuess` is true when RAST picked the program of an archive itself.
 `latestVersion` is `"newer build"` for an AppImage whose update file changed
 without a version number.

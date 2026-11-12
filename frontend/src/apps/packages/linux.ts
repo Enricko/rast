@@ -340,6 +340,7 @@ export class LinuxApps {
     }
     if (app.status === "ready") {
       items.push({ label: "Memory and CPU…", icon: "cpu", onClick: () => this.openLimits(app) });
+      items.push({ label: "Who can use it…", icon: "users", onClick: () => this.openVisibility(app) });
     }
     if (items.length) items.push("separator");
     items.push({ label: "Uninstall…", icon: "trash", danger: true, onClick: () => this.openUninstall(app) });
@@ -374,6 +375,7 @@ export class LinuxApps {
     }
     items.push(["Memory limit", `${gb(app.memoryMb)} per person`]);
     items.push(["CPU limit", `${app.cpus} ${app.cpus === 1 ? "core" : "cores"}`]);
+    items.push(["Who can use it", app.visibility === "admins" ? "Administrators only" : "Everyone who signs in"]);
     items.push(["Open now", app.running > 0 ? `${app.running} ${app.running === 1 ? "copy" : "copies"}` : "Not running"]);
     if (app.sizeBytes) items.push(["Size", formatBytes(app.sizeBytes)]);
     items.push(["Added", formatDate(app.createdAt)]);
@@ -597,6 +599,45 @@ export class LinuxApps {
               await ctx.api.patch(`/api/linux-apps/${encodeURIComponent(app.id)}`, { memoryMb: Number(memory.value), cpus: Number(cpus.value) });
               close();
               ctx.toast.success("Saved");
+              await this.reload();
+            } catch (err) {
+              error.textContent = errorMessage(err);
+            }
+          },
+        },
+      ],
+    });
+  }
+
+  private openVisibility(app: LinuxApp): void {
+    const { ctx } = this.host;
+    const users = h("input", { type: "radio", name: "linux-app-visibility", value: "users", checked: app.visibility !== "admins" });
+    const admins = h("input", { type: "radio", name: "linux-app-visibility", value: "admins", checked: app.visibility === "admins" });
+    const error = h("div", { class: "form-error", role: "alert" });
+    const body = h(
+      "div",
+      { class: "col" },
+      h("p", { class: "muted small" }, `Who can see and open ${app.name}. Everyone who opens it still gets their own copy with separate settings, sign-ins and open windows. Installing, updating and removing the app stays with administrators.`),
+      h("label", { class: "checkbox" }, users, h("span", {}, "Everyone who signs in")),
+      h("label", { class: "checkbox" }, admins, h("span", {}, "Administrators only")),
+      error,
+    );
+    modal({
+      title: `${app.name}: who can use it`,
+      body,
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => {} },
+        {
+          label: "Save",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            try {
+              await ctx.api.post(`/api/linux-apps/${encodeURIComponent(app.id)}/visibility`, {
+                visibility: admins.checked ? "admins" : "users",
+              });
+              close();
+              ctx.toast.success(admins.checked ? `${app.name} is now visible to administrators only` : `${app.name} is now visible to everyone who signs in`);
               await this.reload();
             } catch (err) {
               error.textContent = errorMessage(err);

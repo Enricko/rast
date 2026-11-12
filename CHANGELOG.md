@@ -11,7 +11,22 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Linux apps for every signed-in user.** Installed Linux apps now appear on
+  each account's desktop (and in the Applications folder and taskbar); every
+  user opens their own copy with their own settings, sign-ins and windows.
+  Installing, updating, removing, limiting and changing who can use an app stay
+  administrator actions. A new **Who can use it** setting (App Center → the
+  app's page → More actions) can restrict an app to administrators; shared is
+  the default. Schema v11 (a `visibility` column on `linux_apps`) is applied
+  automatically on the next start.
+
+### Changed
+
+- **Closing a Linux app from inside it closes its RAST window.** When the app
+  quits from its own close button (for example Chrome's ×) the RAST window now
+  closes instead of staying blank while the server notices; RAST checks whether
+  the app is still running as soon as its picture stops rather than waiting for
+  the periodic sweep. Reloading the page reconnects to the same copy.
 
 ### Planned
 

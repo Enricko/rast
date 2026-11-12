@@ -1,5 +1,7 @@
 // A Linux app window: starts the person's own copy of the app on the server
 // and shows it in a sandboxed frame. Closing the window stops the copy.
+// Every app the server lists for this account becomes a desktop app; an
+// administrator can restrict an app to administrators only.
 
 import type { AppContext, AppDefinition } from "../../core/app";
 import { h } from "../../core/dom";
@@ -40,7 +42,8 @@ export function linuxAppDefinitions(): AppDefinition[] {
           name: app.name,
           icon: "box",
           description: app.description || "Linux app",
-          adminOnly: true,
+          // The server lists only the apps this account may see.
+          adminOnly: false,
           singleton: true,
           defaultSize: { w: 1100, h: 720 },
           minSize: { w: 480, h: 360 },
@@ -122,6 +125,13 @@ class LinuxWindow {
     } else {
       this.stopPolling();
       this.removeFrame();
+      if (session.status === "ended" && session.reason === "exited") {
+        // The app quit from inside (its own close button, or it crashed):
+        // close the RAST window, like a desktop app closing its last window.
+        this.ctx.toast.info(`${this.name} was closed`);
+        this.ctx.window.close();
+        return;
+      }
       this.showEnded(session);
     }
   }

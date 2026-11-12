@@ -1111,9 +1111,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   updateTray();
 
   // ----------------------------------------------------------- Linux apps
-  // Administrators' Linux apps join the app list once loaded. Windows are not
-  // restored after sign-in: each one would start the app on the server.
-  if (isAdmin) {
+  // Linux apps shared with this account join the app list once loaded (the
+  // server sends only the ones it may see). Windows are not restored after
+  // sign-in: each one would start the app on the server.
+  {
     let linuxTimer: number | undefined;
     const loadLinuxApps = async (): Promise<void> => {
       try {

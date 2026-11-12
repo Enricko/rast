@@ -1,9 +1,10 @@
-// Linux apps installed through App Center (administrators only).
+// Linux apps installed through App Center (managing them is for
+// administrators; every signed-in user can open the ones shared with users).
 //
 // The desktop loads the list once and keeps it current from the
 // `linuxapps.changed` event; the registry turns each ready app into a desktop
 // app with the id `linux:<id>`. App Center and the app windows read the same
-// list.
+// list. The server sends each account only the apps it may see.
 
 import type { ApiClient } from "../../core/api";
 import { setAppImageIcon } from "../../core/icons";
@@ -39,6 +40,8 @@ export interface LinuxApp {
   memoryMb: number;
   cpus: number;
   sizeBytes: number | null;
+  /** Who can see and open the app: every signed-in user, or administrators. */
+  visibility: "users" | "admins";
   running: number;
   createdAt: number;
   updatedAt: number;
@@ -116,8 +119,8 @@ let loading: Promise<void> | null = null;
 let again = false;
 
 /**
- * Fetch the list (administrators only). Calls made while a fetch runs are
- * folded into one more fetch afterwards, so the newest state always wins.
+ * Fetch the list of apps this account may see. Calls made while a fetch runs
+ * are folded into one more fetch afterwards, so the newest state always wins.
  */
 export function loadLinuxApps(api: ApiClient): Promise<void> {
   if (loading) {

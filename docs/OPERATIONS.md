@@ -451,6 +451,14 @@ AppImage or a portable archive from File Station). Each app becomes a Docker
 image; each person who opens it gets their own container, which stops when the
 window closes or after 30 minutes without input.
 
+Installed apps are shared with every signed-in user by default, so they appear
+on every account's desktop and in the Applications folder. Everyone opens their
+own copy: own container, own settings volume (settings, sign-ins, bookmarks),
+own open windows. An administrator can restrict an app to administrators:
+App Center → the app → More actions → **Who can use it…**. This per-app
+visibility decides access; Linux app windows are outside the group policy's
+"applications" (Docker) rule.
+
 ```bash
 docker ps --filter label=rast.managed=linux-app           # running copies
 docker images 'rast-linux/*'; docker images rast-linux-base  # app images and the base
@@ -471,6 +479,9 @@ docker volume ls --filter label=rast.managed=linux-app     # per-person app sett
   uninstall (settings volumes only when *Also delete its settings* is ticked).
   Docker's build cache is not removed; reclaim it with `docker builder prune`.
 * Copies left running by a restart are stopped when RAST starts again.
+* Closing the app from inside it (its own close button, for example Chrome's
+  ×) closes its RAST window within a few seconds; a page reload reconnects to
+  the same copy.
 * A copy only starts while the host has 4 GiB of memory free.
 * Updates come from the app's official source: its apt repository for a
   `.deb` that installs one, GitHub releases or zsync for AppImages that embed

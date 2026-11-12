@@ -37,13 +37,15 @@ pub fn app_for_path(path: &str) -> Option<&'static str> {
         || path.starts_with("/api/apps/")
         || path == "/api/docker"
         || path.starts_with("/api/docker/")
-        || path == "/api/linux-apps"
-        || path.starts_with("/api/linux-apps/")
     {
         Some("applications")
     } else if path == "/api/backups" || path.starts_with("/api/backups/") {
         Some("backup")
     } else {
+        // Linux app windows are not the Docker app: every signed-in user may
+        // list and open the apps shared with them (the Linux apps API enforces
+        // each app's visibility), while managing apps stays administrator-only
+        // in the handlers themselves.
         None
     }
 }
@@ -109,10 +111,11 @@ mod tests {
             Some("applications")
         );
         assert_eq!(app_for_path("/api/docker/status"), Some("applications"));
-        assert_eq!(
-            app_for_path("/api/linux-apps/chrome/open"),
-            Some("applications")
-        );
+        // Linux app windows are open to every signed-in user; each app's
+        // visibility is enforced by the Linux apps API, not by group policy.
+        assert_eq!(app_for_path("/api/linux-apps"), None);
+        assert_eq!(app_for_path("/api/linux-apps/chrome/open"), None);
+        assert_eq!(app_for_path("/api/linux-apps/sessions/abc/close"), None);
         assert_eq!(app_for_path("/api/backups/1/download"), Some("backup"));
         // Own profile, appearance, events and access helpers are not gated here.
         assert_eq!(app_for_path("/api/auth/me"), None);

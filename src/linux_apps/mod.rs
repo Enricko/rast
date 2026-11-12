@@ -6,6 +6,11 @@
 //! that person and RAST shows the app's streamed desktop in a window through
 //! [`proxy`].
 //!
+//! An installed app is visible to every signed-in user unless its
+//! [`Visibility`] is restricted to administrators; everyone who can see an app
+//! opens their own copy. Installing, updating, removing, limiting and changing
+//! an app's visibility are administrator actions.
+//!
 //! Rules for running copies ("sessions"):
 //! * one copy per person per app (opening it again shows the same copy);
 //! * a copy only starts when the server has [`MIN_FREE_MEMORY_BYTES`] free;
@@ -58,6 +63,16 @@ pub const EMPTY_GRACE: Duration = Duration::from_secs(60);
 pub const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// A copy that is not ready this long after it was asked to start is given up.
 const START_LIMIT: Duration = Duration::from_secs(150);
+/// After an app's stream goes away, how long to keep checking whether the app
+/// itself exited (its own close button) before ending the session early. The
+/// container needs a few seconds to stop, and a reload reconnects within the
+/// first checks.
+const EXIT_CHECK_DELAYS: [Duration; 4] = [
+    Duration::from_secs(2),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(3),
+];
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
 /// Every this many sweeps the running containers are compared with Docker.
 const RECONCILE_EVERY: u32 = 3;
@@ -70,13 +85,40 @@ pub const DEFAULT_MEMORY_MB: u32 = 4096;
 /// Default CPU limit: half the server's CPUs, at most this many.
 pub const DEFAULT_MAX_CPUS: u32 = 6;
 
-/// Admin event: the list of Linux apps changed.
+/// Event: the list of Linux apps changed (sent to every client; each client
+/// reloads the list it may see).
 pub const APPS_EVENT: &str = "linuxapps.changed";
 /// Owner event: one of the person's running copies changed.
 pub const SESSION_EVENT: &str = "linuxapps.session";
 
 /// Linux apps are offered on Linux hosts only.
 pub const SUPPORTED: bool = cfg!(target_os = "linux");
+
+/// Who can see and open an app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Every signed-in user (the default).
+    Users,
+    /// Administrators only.
+    Admins,
+}
+
+impl Visibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Users => "users",
+            Self::Admins => "admins",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "users" => Some(Self::Users),
+            "admins" => Some(Self::Admins),
+            _ => None,
+        }
+    }
+}
 
 /// One person's running copy of an app.
 pub struct Session {
@@ -194,17 +236,34 @@ struct AppRow {
     memory_mb: i64,
     cpus: i64,
     size_bytes: Option<i64>,
+    /// `users` or `admins`; see [`Visibility`].
+    visibility: String,
     created_at: i64,
     updated_at: i64,
 }
 
 const APP_COLUMNS: &str = "id, name, format, file_name, version, package, description, command, \
     launch_guess, icon_type, build, status, error, job_id, update_kind, update_ref, file_sha1, \
-    latest_version, checked_at, check_error, memory_mb, cpus, size_bytes, created_at, updated_at";
+    latest_version, checked_at, check_error, memory_mb, cpus, size_bytes, visibility, created_at, \
+    updated_at";
 
 impl AppRow {
     fn format(&self) -> LinuxFormat {
         LinuxFormat::parse(&self.format).unwrap_or(LinuxFormat::Deb)
+    }
+
+    /// The app's visibility; anything unexpected is treated as everyone.
+    fn visibility(&self) -> Visibility {
+        Visibility::parse(&self.visibility).unwrap_or(Visibility::Users)
+    }
+
+    /// Can `user` see this app? Administrators see everything; everyone else
+    /// sees apps shared with all users once they have a finished build.
+    fn visible_to(&self, user: &AuthUser) -> bool {
+        user.is_admin()
+            || (self.visibility() == Visibility::Users
+                && self.build > 0
+                && matches!(self.status.as_str(), "ready" | "updating"))
     }
 
     fn update_available(&self) -> bool {
@@ -248,6 +307,7 @@ impl AppRow {
             "memoryMb": self.memory_mb,
             "cpus": self.cpus,
             "sizeBytes": self.size_bytes,
+            "visibility": self.visibility().as_str(),
             "running": running,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -372,12 +432,22 @@ impl LinuxApps {
         counts
     }
 
-    pub async fn list(&self) -> AppResult<Vec<Value>> {
-        let rows = sqlx::query_as::<_, AppRow>(sqlx::AssertSqlSafe(format!(
-            "SELECT {APP_COLUMNS} FROM linux_apps ORDER BY name COLLATE NOCASE, id"
-        )))
-        .fetch_all(&self.db)
-        .await?;
+    /// The app list as `user` may see it: everything for an administrator,
+    /// only shared apps with a finished build for everyone else.
+    pub async fn list(&self, user: &AuthUser) -> AppResult<Vec<Value>> {
+        let sql = if user.is_admin() {
+            format!("SELECT {APP_COLUMNS} FROM linux_apps ORDER BY name COLLATE NOCASE, id")
+        } else {
+            format!(
+                "SELECT {APP_COLUMNS} FROM linux_apps \
+                 WHERE visibility = 'users' AND build > 0 \
+                   AND status IN ('ready', 'updating') \
+                 ORDER BY name COLLATE NOCASE, id"
+            )
+        };
+        let rows = sqlx::query_as::<_, AppRow>(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&self.db)
+            .await?;
         let counts = self.running_counts();
         Ok(rows
             .iter()
@@ -385,19 +455,34 @@ impl LinuxApps {
             .collect())
     }
 
-    pub async fn get(&self, id: &str) -> AppResult<Value> {
+    pub async fn get(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
+        let row = self.row(id).await?;
+        if !row.visible_to(user) {
+            return Err(AppError::NotFound("Linux app not found"));
+        }
+        let running = self.running_counts().get(id).copied().unwrap_or(0);
+        Ok(row.json(running))
+    }
+
+    /// The app regardless of who may see it: for administrator and background
+    /// paths that already worked out the row.
+    async fn any_json(&self, id: &str) -> AppResult<Value> {
         let row = self.row(id).await?;
         let running = self.running_counts().get(id).copied().unwrap_or(0);
         Ok(row.json(running))
     }
 
-    pub async fn icon(&self, id: &str) -> AppResult<(String, Vec<u8>)> {
-        let row: Option<(Option<String>, Option<Vec<u8>>)> =
+    pub async fn icon(&self, user: &AuthUser, id: &str) -> AppResult<(String, Vec<u8>)> {
+        let row = self.row(id).await?;
+        if !row.visible_to(user) {
+            return Err(AppError::NotFound("Linux app not found"));
+        }
+        let icon: Option<(Option<String>, Option<Vec<u8>>)> =
             sqlx::query_as("SELECT icon_type, icon FROM linux_apps WHERE id = ?")
                 .bind(id)
                 .fetch_optional(&self.db)
                 .await?;
-        match row {
+        match icon {
             Some((Some(kind), Some(icon))) => Ok((kind, icon)),
             _ => Err(AppError::NotFound("this app has no icon")),
         }
@@ -413,8 +498,10 @@ impl LinuxApps {
         self.docker.ensure_available().await
     }
 
+    /// Tell every connected client that an app changed. Everyone reloads the
+    /// list they may see, so a hidden app never appears from the event itself.
     fn announce(&self, id: &str) {
-        self.events.publish_admin(APPS_EVENT, json!({"id": id}));
+        self.events.publish(APPS_EVENT, json!({"id": id}));
     }
 
     async fn set_status(&self, id: &str, status: &str, error: Option<&str>, job: Option<&str>) {
@@ -473,7 +560,42 @@ impl LinuxApps {
         )
         .await;
         self.announce(id);
-        self.get(id).await
+        self.get(user, id).await
+    }
+
+    /// Change who can see and open an app (administrators only).
+    pub async fn set_visibility(
+        &self,
+        user: &AuthUser,
+        id: &str,
+        visibility: Visibility,
+    ) -> AppResult<Value> {
+        user.require_admin()?;
+        let row = self.row(id).await?;
+        if row.visibility() != visibility {
+            sqlx::query("UPDATE linux_apps SET visibility = ?, updated_at = ? WHERE id = ?")
+                .bind(visibility.as_str())
+                .bind(db::now_ms())
+                .bind(id)
+                .execute(&self.db)
+                .await?;
+            let detail = match visibility {
+                Visibility::Users => "visible to every user",
+                Visibility::Admins => "administrators only",
+            };
+            audit::record_with_events(
+                &self.db,
+                &self.events,
+                AuditLog::new("linuxapp.visibility")
+                    .actor(user)
+                    .object("linux-app", id)
+                    .detail(detail)
+                    .success(),
+            )
+            .await;
+            self.announce(id);
+        }
+        self.get(user, id).await
     }
 
     // -----------------------------------------------------------------------
@@ -593,7 +715,7 @@ impl LinuxApps {
             .execute(&self.db)
             .await;
         self.announce(&id);
-        Ok(json!({"app": self.get(&id).await?, "jobId": job_id}))
+        Ok(json!({"app": self.get(user, &id).await?, "jobId": job_id}))
     }
 
     async fn new_id(&self, file_name: &str) -> AppResult<String> {
@@ -782,7 +904,7 @@ impl LinuxApps {
             return Err(AppError::conflict("wait until the app is installed"));
         }
         self.check(&row).await;
-        self.get(id).await
+        self.any_json(id).await
     }
 
     async fn check(&self, row: &AppRow) {
@@ -1092,6 +1214,9 @@ impl LinuxApps {
     /// Open an app for `user`: their running copy, or a new one.
     pub async fn open(self: &Arc<Self>, user: &AuthUser, id: &str) -> AppResult<Value> {
         let row = self.row(id).await?;
+        if !row.visible_to(user) {
+            return Err(AppError::NotFound("Linux app not found"));
+        }
         if row.build < 1 || !matches!(row.status.as_str(), "ready" | "updating") {
             return Err(AppError::conflict("this app is not installed yet"));
         }
@@ -1302,6 +1427,44 @@ impl LinuxApps {
             .await
     }
 
+    /// The app's stream went away: when the app itself has exited (its own
+    /// close button, or a crash) end the copy and tell the window, so the
+    /// window closes instead of staying blank until the periodic sweep.
+    /// A reload or a network blip reconnects and keeps the copy running.
+    pub fn watch_exit(self: &Arc<Self>, session: Arc<Session>) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            for delay in EXIT_CHECK_DELAYS {
+                tokio::time::sleep(delay).await;
+                {
+                    let state = session.lock();
+                    if state.status == Status::Ended || state.viewers > 0 {
+                        return;
+                    }
+                }
+                let Ok(list) = this
+                    .docker
+                    .call(WorkerRequest::new(WorkerOp::LinuxList))
+                    .await
+                else {
+                    return;
+                };
+                if container_running(&list, &session.app_id, session.user_id) {
+                    continue;
+                }
+                // A viewer may have reconnected while Docker answered.
+                let stale = {
+                    let state = session.lock();
+                    state.status != Status::Ended && state.viewers == 0
+                };
+                if stale {
+                    this.end(&session, "exited", None);
+                }
+                return;
+            }
+        });
+    }
+
     /// Apply the stop rules; with `reconcile`, also notice copies whose
     /// container stopped on its own (the app was closed, or ran out of memory).
     async fn sweep(self: &Arc<Self>, reconcile: bool) {
@@ -1405,6 +1568,15 @@ fn containers_of(list: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// Is one person's copy of `app` in the worker's running list?
+fn container_running(list: &Value, app: &str, user_id: i64) -> bool {
+    containers_of(list).iter().any(|container| {
+        container.get("running").and_then(Value::as_bool) == Some(true)
+            && container.get("app").and_then(Value::as_str) == Some(app)
+            && container.get("userId").and_then(Value::as_i64) == Some(user_id)
+    })
 }
 
 /// Is the app's page answering yet?
@@ -1703,6 +1875,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn visibility_round_trips() {
+        assert_eq!(Visibility::parse("users"), Some(Visibility::Users));
+        assert_eq!(Visibility::parse("admins"), Some(Visibility::Admins));
+        for bad in ["", "everyone", "admin", "Users", " users "] {
+            assert_eq!(Visibility::parse(bad), None, "{bad:?}");
+        }
+        assert_eq!(Visibility::Users.as_str(), "users");
+        assert_eq!(Visibility::Admins.as_str(), "admins");
+    }
+
+    #[test]
     fn links_must_end_in_a_file_name() {
         assert_eq!(
             file_name_from_url("https://dl.example.com/linux/app_1.0_amd64.deb?x=1#y").as_deref(),
@@ -1775,5 +1958,19 @@ mod tests {
     fn default_limits_fit_the_server() {
         let cpus = default_cpus();
         assert!((1..=DEFAULT_MAX_CPUS).contains(&cpus));
+    }
+
+    #[test]
+    fn running_copies_are_found_by_app_and_user() {
+        let list = json!({"containers": [
+            {"app": "chrome", "userId": 1, "running": true},
+            {"app": "chrome", "userId": 2, "running": false},
+            {"app": "firefox", "userId": 1, "running": true},
+        ]});
+        assert!(container_running(&list, "chrome", 1));
+        assert!(!container_running(&list, "chrome", 2));
+        assert!(!container_running(&list, "chrome", 3));
+        assert!(container_running(&list, "firefox", 1));
+        assert!(!container_running(&json!({}), "chrome", 1));
     }
 }

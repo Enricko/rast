@@ -34,7 +34,7 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as AppMessage};
 
-use super::Session;
+use super::{LinuxApps, Session};
 use crate::{docker::linux::URL_PREFIX, state::AppState};
 
 /// Injected at the start of every HTML page of an app.
@@ -129,7 +129,14 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
     };
     let authorization = authorization.to_string();
     if is_websocket(request.headers()) {
-        websocket(request, session, port, authorization).await
+        websocket(
+            request,
+            session,
+            port,
+            authorization,
+            state.linux_apps.clone(),
+        )
+        .await
     } else {
         forward(request, port, &authorization).await
     }
@@ -345,6 +352,7 @@ async fn websocket(
     session: Arc<Session>,
     port: u16,
     authorization: String,
+    apps: Arc<LinuxApps>,
 ) -> Response {
     let (mut parts, _body) = request.into_parts();
     let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
@@ -392,13 +400,14 @@ async fn websocket(
     };
     upgrade
         .max_message_size(64 * 1024 * 1024)
-        .on_upgrade(move |socket| relay(socket, upstream, session))
+        .on_upgrade(move |socket| relay(socket, upstream, session, apps))
 }
 
 async fn relay(
     client: WebSocket,
     upstream: tokio_tungstenite::WebSocketStream<TcpStream>,
     session: Arc<Session>,
+    apps: Arc<LinuxApps>,
 ) {
     session.viewer_joined();
     let (mut client_tx, mut client_rx) = client.split();
@@ -448,6 +457,10 @@ async fn relay(
         _ = to_client => {}
     }
     session.viewer_left();
+    // When the app quits from inside (its own close button) the picture just
+    // disappears; ask the worker shortly after whether the app is still there
+    // so the RAST window can close instead of staying blank.
+    apps.watch_exit(session);
 }
 
 #[cfg(test)]

@@ -1645,8 +1645,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "0004 to 0010 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "0004 to 0011 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3071,4 +3071,151 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// Linux apps: every signed-in user sees the apps shared with all users (once
+// they have a finished build) and opens their own copy; managing an app stays
+// administrator-only, including who may see it.
+#[tokio::test]
+async fn linux_apps_are_shared_per_user_and_managed_by_admins() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    for (id, visibility, status, build) in [
+        ("everyone", "users", "ready", 1_i64),
+        ("staffonly", "admins", "ready", 1_i64),
+        ("pending", "users", "installing", 0_i64),
+    ] {
+        sqlx::query(
+            "INSERT INTO linux_apps \
+             (id, name, format, file_name, status, build, visibility, created_at, updated_at) \
+             VALUES (?, ?, 'deb', 'app.deb', ?, ?, ?, 1, 1)",
+        )
+        .bind(id)
+        .bind(format!("App {id}"))
+        .bind(status)
+        .bind(build)
+        .bind(visibility)
+        .execute(&server.state.db)
+        .await
+        .expect("seed a Linux app");
+    }
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+
+    let app_ids = |body: &Value| -> Vec<String> {
+        body["apps"]
+            .as_array()
+            .expect("apps array")
+            .iter()
+            .map(|app| app["id"].as_str().expect("app id").to_string())
+            .collect()
+    };
+
+    // Administrators see every app, unfinished and restricted ones included.
+    let (status, _, body) = server
+        .request("GET", "/api/linux-apps", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(app_ids(&body), ["everyone", "pending", "staffonly"]);
+
+    // Everyone else sees only shared apps that finished installing.
+    let (status, _, body) = server
+        .request("GET", "/api/linux-apps", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(app_ids(&body), ["everyone"]);
+
+    // A restricted or unfinished app does not exist for them.
+    for id in ["staffonly", "pending"] {
+        let (status, _, body) = server
+            .request(
+                "GET",
+                &format!("/api/linux-apps/{id}"),
+                None,
+                alice.headers(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
+        let (status, _, body) = server
+            .request(
+                "POST",
+                &format!("/api/linux-apps/{id}/open"),
+                Some(json!({})),
+                alice.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "open {id}: {body}");
+    }
+
+    // Managing apps is administrator-only.
+    for (method, path, body) in [
+        (
+            "POST",
+            "/api/linux-apps/install",
+            Some(json!({"url": "https://example.com/app.deb"})),
+        ),
+        (
+            "PATCH",
+            "/api/linux-apps/everyone",
+            Some(json!({"memoryMb": 1024})),
+        ),
+        ("DELETE", "/api/linux-apps/everyone", None),
+        ("POST", "/api/linux-apps/everyone/check", None),
+        ("POST", "/api/linux-apps/everyone/update", None),
+        (
+            "POST",
+            "/api/linux-apps/everyone/visibility",
+            Some(json!({"visibility": "admins"})),
+        ),
+    ] {
+        let (status, _, body) = server
+            .request(method, path, body, alice.headers_with_csrf())
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+    }
+
+    // An administrator can take a shared app away from other users…
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/everyone/visibility",
+            Some(json!({"visibility": "admins"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["visibility"], "admins");
+    let (_, _, body) = server
+        .request("GET", "/api/linux-apps", None, alice.headers())
+        .await;
+    assert!(app_ids(&body).is_empty(), "{body}");
+
+    // …and give it back.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/everyone/visibility",
+            Some(json!({"visibility": "users"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, _, body) = server
+        .request("GET", "/api/linux-apps", None, alice.headers())
+        .await;
+    assert_eq!(app_ids(&body), ["everyone"]);
+
+    // Unknown values are refused and leave the app alone.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/everyone/visibility",
+            Some(json!({"visibility": "everyone"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
