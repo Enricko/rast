@@ -48,6 +48,24 @@ Docker-backed apps keep working and can be migrated from App Center.
   `linux_session_memory_mb/cpus/tasks`, `linux_app_memory_mb/cpus/tasks` and
   `linux_admission_reserve_mb` (see docs/CONFIGURATION.md).
 
+### Fixed
+
+- Native Chromium launches no longer hang or delegate to a dead instance when a
+  previous browser process left `Singleton*` files in its profile: the
+  privileged helper removes those stale files (narrowly scoped to the person's
+  profile, only Chromium/Electron singleton names) before starting a browser,
+  and the launcher adds only the ordinary first-run flags. The Chromium sandbox
+  stays enabled; `--no-sandbox` is never used.
+- Native apps receive the X11 auth file the running Xvfb actually uses (it may
+  be `$HOME/.Xauthority` or Xpra's runtime fallback), discovered by the helper
+  from the session process tree, and the session manager recreates a session
+  whose identity home had to be repaired instead of leaving stale windows.
+- `rast-native.service` and the installer now enforce the canonical native
+  directory modes (`linux-apps` 0751, `apps` 0755, `staging` 0750,
+  `profiles`/`linux-users` 0711, per-user homes 0700) and repair a data
+  directory that lacks the traverse bit, so app processes can chdir into their
+  profiles on a fresh host.
+
 ### Changed
 
 - The legacy Docker backend remains for apps installed before this release

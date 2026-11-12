@@ -1,15 +1,15 @@
 {
   "mode": "native",
-  "startedAt": "2026-11-12T23:04:23.391Z",
+  "startedAt": "2026-11-12T23:15:56.882Z",
   "app": {
     "id": "chrome",
     "name": "Google Chrome"
   },
   "baseUrl": "http://127.0.0.1:8732",
   "coldLaunch": {
-    "apiMs": 8891,
-    "readyMs": 8893,
-    "url": "/linux-apps/session/82c0b5bf6de4f61b63fc49663056e61f/",
+    "apiMs": 8895,
+    "readyMs": 8897,
+    "url": "/linux-apps/session/9a6aa68767d0d1d18692e4eb9fb17450/",
     "session": {
       "appId": null,
       "appName": "Desktop session",
@@ -18,8 +18,8 @@
           "appId": "chrome",
           "error": null,
           "name": "Google Chrome",
-          "runId": "9178112797af7572",
-          "startedAt": 1794524681069,
+          "runId": "bdc80ca3145c5856",
+          "startedAt": 1794525373070,
           "status": "running"
         }
       ],
@@ -28,25 +28,25 @@
       "id": "native",
       "reason": null,
       "separateWindows": true,
-      "startedAt": 1794524672226,
+      "startedAt": 1794525364221,
       "status": "ready",
-      "url": "/linux-apps/session/82c0b5bf6de4f61b63fc49663056e61f/",
+      "url": "/linux-apps/session/9a6aa68767d0d1d18692e4eb9fb17450/",
       "viewers": 0
     },
     "run": {
       "appId": "chrome",
       "error": null,
       "name": "Google Chrome",
-      "runId": "9178112797af7572",
-      "startedAt": 1794524681069,
+      "runId": "bdc80ca3145c5856",
+      "startedAt": 1794525373070,
       "status": "running"
     }
   },
-  "coldFirstDrawMs": null,
+  "coldFirstDrawMs": 704,
   "warmLaunch": {
-    "apiMs": 2,
-    "readyMs": 4,
-    "url": "/linux-apps/session/82f938594abe239d2091af78bf604c2f/",
+    "apiMs": 1,
+    "readyMs": 3,
+    "url": "/linux-apps/session/f326910326118148935897c2cc6fcbd0/",
     "session": {
       "appId": null,
       "appName": "Desktop session",
@@ -55,8 +55,8 @@
           "appId": "chrome",
           "error": null,
           "name": "Google Chrome",
-          "runId": "586f437fafbc41e1",
-          "startedAt": 1794524731229,
+          "runId": "cb7138b84d818459",
+          "startedAt": 1794525393232,
           "status": "running"
         }
       ],
@@ -65,17 +65,17 @@
       "id": "native",
       "reason": null,
       "separateWindows": true,
-      "startedAt": 1794524722385,
+      "startedAt": 1794525384362,
       "status": "ready",
-      "url": "/linux-apps/session/82f938594abe239d2091af78bf604c2f/",
+      "url": "/linux-apps/session/f326910326118148935897c2cc6fcbd0/",
       "viewers": 0
     },
     "run": {
       "appId": "chrome",
       "error": null,
       "name": "Google Chrome",
-      "runId": "586f437fafbc41e1",
-      "startedAt": 1794524731229,
+      "runId": "cb7138b84d818459",
+      "startedAt": 1794525393232,
       "status": "running"
     },
     "sessionRetained": true
@@ -90,36 +90,35 @@
       "cgroup": "/sys/fs/cgroup/rast.slice/rast-linux.slice/rast-xpra-u2.service",
       "active": "active",
       "sub": "running",
-      "mainPid": 1662566,
+      "mainPid": 1702209,
       "tasks": 9,
-      "memoryBytes": 198803456,
-      "memoryPeakBytes": 284839936,
-      "cpuUsageUsec": 1833112
+      "memoryBytes": 217772032,
+      "memoryPeakBytes": 283090944,
+      "cpuUsageUsec": 2517748
     },
-    "memoryBytes": 198803456
+    "memoryBytes": 217772032
   },
   "inputLatencyMs": [
-    108,
-    266
+    112
   ],
   "active": {
-    "durationMs": 10711,
-    "cpuPercent": 10.303370366912521,
-    "memoryBytes": 209141760,
+    "durationMs": 10410,
+    "cpuPercent": 5.661690682036503,
+    "memoryBytes": 219627520,
     "units": [
       "rast-xpra-u2"
     ],
     "interaction": {
-      "durationMs": 10407,
-      "iterations": 22
+      "durationMs": 10107,
+      "iterations": 21
     }
   },
   "twoUser": {
-    "openMs": 9893,
+    "openMs": 8887,
     "alice": {
-      "apiMs": 2,
-      "readyMs": 5,
-      "url": "/linux-apps/session/82f938594abe239d2091af78bf604c2f/",
+      "apiMs": 3,
+      "readyMs": 4,
+      "url": "/linux-apps/session/f326910326118148935897c2cc6fcbd0/",
       "session": {
         "appId": null,
         "appName": "Desktop session",
@@ -128,8 +127,8 @@
             "appId": "chrome",
             "error": null,
             "name": "Google Chrome",
-            "runId": "586f437fafbc41e1",
-            "startedAt": 1794524731229,
+            "runId": "cb7138b84d818459",
+            "startedAt": 1794525393232,
             "status": "running"
           }
         ],
@@ -138,24 +137,24 @@
         "id": "native",
         "reason": null,
         "separateWindows": true,
-        "startedAt": 1794524722385,
+        "startedAt": 1794525384362,
         "status": "ready",
-        "url": "/linux-apps/session/82f938594abe239d2091af78bf604c2f/",
+        "url": "/linux-apps/session/f326910326118148935897c2cc6fcbd0/",
         "viewers": 0
       },
       "run": {
         "appId": "chrome",
         "error": null,
         "name": "Google Chrome",
-        "runId": "586f437fafbc41e1",
-        "startedAt": 1794524731229,
+        "runId": "cb7138b84d818459",
+        "startedAt": 1794525393232,
         "status": "running"
       }
     },
     "bob": {
-      "apiMs": 9891,
-      "readyMs": 9893,
-      "url": "/linux-apps/session/680b5b88a274fa0a87762e17d60379e9/",
+      "apiMs": 8885,
+      "readyMs": 8887,
+      "url": "/linux-apps/session/f4165dad8a6f70049110c249b7630e2d/",
       "session": {
         "appId": null,
         "appName": "Desktop session",
@@ -164,8 +163,8 @@
             "appId": "chrome",
             "error": null,
             "name": "Google Chrome",
-            "runId": "242813800e817f59",
-            "startedAt": 1794524822315,
+            "runId": "af5cea735055cddc",
+            "startedAt": 1794525490077,
             "status": "running"
           }
         ],
@@ -174,21 +173,21 @@
         "id": "native",
         "reason": null,
         "separateWindows": true,
-        "startedAt": 1794524812468,
+        "startedAt": 1794525481233,
         "status": "ready",
-        "url": "/linux-apps/session/680b5b88a274fa0a87762e17d60379e9/",
+        "url": "/linux-apps/session/f4165dad8a6f70049110c249b7630e2d/",
         "viewers": 0
       },
       "run": {
         "appId": "chrome",
         "error": null,
         "name": "Google Chrome",
-        "runId": "242813800e817f59",
-        "startedAt": 1794524822315,
+        "runId": "af5cea735055cddc",
+        "startedAt": 1794525490077,
         "status": "running"
       }
     },
-    "memoryBytes": 411561984,
+    "memoryBytes": 661979136,
     "units": {
       "alice": [
         "rast-xpra-u2"
@@ -197,7 +196,7 @@
         "rast-xpra-u3"
       ]
     },
-    "cpuPercent": 20.71560272934041
+    "cpuPercent": 10.58700943109218
   },
-  "finishedAt": "2026-11-12T23:07:20.779Z"
+  "finishedAt": "2026-11-12T23:18:28.421Z"
 }

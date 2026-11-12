@@ -1,0 +1,43 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T23:18:46.024Z",
+  "finishedAt": "2026-11-12T23:18:51.467Z",
+  "scenarios": [
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T23:18:46.024Z",
+      "durationMs": 5379,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "initial Chrome windows: [\"New Tab - Google Chrome\"]",
+        "Chrome windows after Ctrl+N x2: [\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
+        "taskbar labels: [\"File Station\",\"Resource Monitor\",\"Control Panel\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
+        "focused after taskbar click for win-1: New Tab - Google Chrome",
+        "focused after taskbar click for win-2: New Tab - Google Chrome",
+        "focused after taskbar click for win-3: New Tab - Google Chrome",
+        "resize: {\"x\":8,\"y\":8,\"width\":1462,\"height\":806} -> {\"x\":8,\"y\":8,\"width\":1462,\"height\":806}"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png"
+      ],
+      "metrics": {
+        "chromeWindowCount": {
+          "value": 3,
+          "unit": ""
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png"
+      ],
+      "error": "Error: assertion failed: window did not resize (1462x806 -> undefinedxundefined)\n    at assert (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:18:25)\n    at Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:111:9)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    }
+  ]
+}

@@ -1,16 +1,16 @@
 {
   "mode": "native",
   "baseUrl": "http://127.0.0.1:8732",
-  "startedAt": "2026-11-12T22:59:36.434Z",
-  "finishedAt": "2026-11-12T23:01:37.587Z",
+  "startedAt": "2026-11-12T23:18:46.024Z",
+  "finishedAt": "2026-11-12T23:18:51.467Z",
   "scenarios": [
     {
       "id": "d",
       "title": "Three Chrome windows: taskbar entries, focus, resize, close",
       "mode": "native",
       "status": "fail",
-      "startedAt": "2026-11-12T22:59:36.434Z",
-      "durationMs": 34511,
+      "startedAt": "2026-11-12T23:18:46.024Z",
+      "durationMs": 5379,
       "details": [
         "[install google-chrome-stable] already installed: chrome",
         "native profile ancestor permissions fixed (0711)",
@@ -19,8 +19,11 @@
         "native profile ancestor permissions fixed (0711)",
         "initial Chrome windows: [\"New Tab - Google Chrome\"]",
         "Chrome windows after Ctrl+N x2: [\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
-        "taskbar labels: [\"File Station\",\"Resource Monitor\",\"Control Panel\",\"sleep\",\"New Tab - Google Chrome\",\"RAST Test App\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
-        "focused after clicking win-2: New Tab - Google Chrome"
+        "taskbar labels: [\"File Station\",\"Resource Monitor\",\"Control Panel\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
+        "focused after taskbar click for win-1: New Tab - Google Chrome",
+        "focused after taskbar click for win-2: New Tab - Google Chrome",
+        "focused after taskbar click for win-3: New Tab - Google Chrome",
+        "resize: {\"x\":8,\"y\":8,\"width\":1462,\"height\":806} -> {\"x\":8,\"y\":8,\"width\":1462,\"height\":806}"
       ],
       "evidence": [
         "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png"
@@ -34,246 +37,7 @@
       "screenshots": [
         "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png"
       ],
-      "error": "locator.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator('.window[data-window-id=\"win-4\"]').locator('.win-titlebar')\n    - locator resolved to <header class=\"win-titlebar\">…</header>\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <canvas width=\"1048\" height=\"738\" class=\"gpu-trigger\"></canvas> from <section role=\"dialog\" tabindex=\"-1\" data-window-id=\"win-2\" class=\"window is-focused\" data-app-id=\"linux:chrome:6291459\" aria-label=\"New Tab - Google Chrome\">…</section> subtree intercepts pointer events\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is visible, enabled and stable\n      - scrolling into view if needed\n      - done scrolling\n      - <canvas width=\"1048\" height=\"738\" class=\"gpu-trigger\"></canvas> from <section role=\"dialog\" tabindex=\"-1\" data-window-id=\"win-2\" class=\"window is-focused\" data-app-id=\"linux:chrome:6291459\" aria-label=\"New Tab - Google Chrome\">…</section> subtree intercepts pointer events\n    - retrying click action\n      - waiting 100ms\n    23 × waiting for element to be visible, enabled and stable\n       - element is visible, enabled and stable\n       - scrolling into view if needed\n       - done scrolling\n       - <canvas width=\"1048\" height=\"738\" class=\"gpu-trigger\"></canvas> from <section role=\"dialog\" tabindex=\"-1\" data-window-id=\"win-2\" class=\"window is-focused\" data-app-id=\"linux:chrome:6291459\" aria-label=\"New Tab - Google Chrome\">…</section> subtree intercepts pointer events\n     - retrying click action\n       - waiting 500ms\n    - waiting for element to be visible, enabled and stable\n    - element is visible, enabled and stable\n    - scrolling into view if needed\n    - done scrolling\n    - <div tabindex=\"-1\" class=\"win-body linux-native-window\"></div> from <section role=\"dialog\" tabindex=\"-1\" data-window-id=\"win-2\" class=\"window is-focused closing\" data-app-id=\"linux:chrome:6291459\" aria-label=\"New Tab - Google Chrome\">…</section> subtree intercepts pointer events\n  - retrying click action\n    - waiting 500ms\n    - waiting for element to be visible, enabled and stable\n  - element was detached from the DOM, retrying\n\n    at Object.run (/home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:73:49)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:233:7)"
-    },
-    {
-      "id": "e",
-      "title": "Two users use Chrome concurrently with separate data",
-      "mode": "native",
-      "status": "pass",
-      "startedAt": "2026-11-12T23:00:10.945Z",
-      "durationMs": 12801,
-      "details": [
-        "[install google-chrome-stable] already installed: chrome",
-        "native profile ancestor permissions fixed (0711)",
-        "Chrome app chrome (ready, backend native, build undefined)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "native launch ready on attempt 1: run ?, display 101",
-        "native profile ancestor permissions fixed (0711)",
-        "alice windows: Google Chrome and ChromeOS Additional Terms of Service",
-        "bob windows: Starting Google Chrome…",
-        "alice session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"6040b1bfbd945eae\",\"startedAt\":1794523927898,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"fc262987fa80b90f\",\"startedAt\":1794523989977,\"status\":\"running\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"de09671369b93532\",\"startedAt\":17945",
-        "bob session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"16f59acc8c720e9b\",\"startedAt\":1794524420731,\"status\":\"running\"}],\"display\":101,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794524411714,\"status\":\"ready\",\"url\":\"/linux-apps/session/61f26104c4a3137047166e8fa29e04c1/\",\"viewers\":0,\"_launched\":{\"run\":{\"appId\"",
-        "alice identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-e2e/data/linux-users/2\"}",
-        "bob identity: {\"username\":\"rast-u3\",\"userId\":3,\"uid\":210003,\"gid\":210003,\"home\":\"/tmp/rast-native-e2e/data/linux-users/3\"}",
-        "alice unit rast-xpra-u2: running",
-        "bob unit rast-xpra-u3: running",
-        "displays: alice :100, bob :101",
-        "alice home /tmp/rast-native-e2e/data/linux-users/2 entries: 6",
-        "bob home /tmp/rast-native-e2e/data/linux-users/3 entries: 6",
-        "alice closing her window did not affect bob"
-      ],
-      "evidence": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/e/alice-chrome.png",
-        "/home/lufria/RAST/tests/e2e/screenshots/native/e/bob-chrome.png"
-      ],
-      "metrics": {
-        "twoUserOpenMs": {
-          "value": 9646,
-          "unit": "ms"
-        }
-      },
-      "screenshots": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/e/alice-chrome.png",
-        "/home/lufria/RAST/tests/e2e/screenshots/native/e/bob-chrome.png"
-      ],
-      "error": null
-    },
-    {
-      "id": "h",
-      "title": "Closing one app preserves the other apps",
-      "mode": "native",
-      "status": "pass",
-      "startedAt": "2026-11-12T23:00:23.746Z",
-      "durationMs": 35484,
-      "details": [
-        "[install RAST Test App (portable)] already installed: rast-test-app",
-        "[install google-chrome-stable] already installed: chrome",
-        "native profile ancestor permissions fixed (0711)",
-        "Portable app rast-test-app (ready, backend native, build undefined)",
-        "native profile ancestor permissions fixed (0711)",
-        "Chrome app chrome (ready, backend native, build undefined)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "chrome session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"6040b1bfbd945eae\",\"startedAt\":1794523927898,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"fc262987fa80b90f\",\"startedAt\":1794523989977,\"status\":\"running\"",
-        "Chrome windows closed",
-        "chrome session stopped: {\"gone\":true,\"session\":{\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"6040b1bfbd945eae\",\"startedAt\":1794523927898,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"fc262987fa80b90f\",\"startedAt\":179452398",
-        "fixture app session still running",
-        "remaining app pixels changed while typing: true (n/a ms)",
-        "before screenshot: /home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png"
-      ],
-      "evidence": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png",
-        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-after-typing.png"
-      ],
-      "metrics": {},
-      "screenshots": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png",
-        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-after-typing.png"
-      ],
-      "error": null
-    },
-    {
-      "id": "i",
-      "title": "Idle cleanup stops the session after use",
-      "mode": "native",
-      "status": "fail",
-      "startedAt": "2026-11-12T23:00:59.231Z",
-      "durationMs": 4814,
-      "details": [
-        "[install RAST Test App (portable)] already installed: rast-test-app",
-        "native profile ancestor permissions fixed (0711)",
-        "Portable app rast-test-app (ready, backend native, build undefined)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "session before cleanup: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"6040b1bfbd945eae\",\"startedAt\":1794523927898,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"fc262987fa80b90f\",\"startedAt\":1794523989977,\"status\":\"running\"",
-        "windows closed; waiting for the backend to clean up",
-        "session cleaned up after 2.8 s (grace 120s)"
-      ],
-      "evidence": [],
-      "metrics": {
-        "cleanupMs": {
-          "value": 2760,
-          "unit": "ms"
-        }
-      },
-      "screenshots": [],
-      "error": "Error: assertion failed: session stopped after 2760 ms, before the 120000 ms grace\n    at assert (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:18:25)\n    at Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/i-idle-cleanup.mjs:45:5)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
-    },
-    {
-      "id": "j",
-      "title": "Service restart recovery",
-      "mode": "native",
-      "status": "pass",
-      "startedAt": "2026-11-12T23:01:04.045Z",
-      "durationMs": 5142,
-      "details": [
-        "[install RAST Test App (portable)] already installed: rast-test-app",
-        "native profile ancestor permissions fixed (0711)",
-        "Portable app rast-test-app (ready, backend native, build undefined)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "session before restart: display:100",
-        "session unit before restart: active/running",
-        "restarting the dev server: /home/lufria/RAST/scripts/e2e/dev-instance.sh restart-server",
-        "restart output: \u001b[1;34m[e2e]\u001b[0m granting rast traverse access to frontend assets (ACL) | \u001b[1;34m[e2e]\u001b[0m starting RAST server on http://127.0.0.1:8731 (data: /tmp/rast-native-e2e/data) | \u001b[1;34m[e2e]\u001b[0m server healthy (pid 1648311)",
-        "server healthy again after 0.0 s",
-        "session survived the restart (user alice)",
-        "native session after restart: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"6040b1bfbd945eae\",\"startedAt\":1794523927898,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"fdf063862f28b47d\",\"startedAt\":1794524465084,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794523918539,\"status\":\"ready\",\"url\":\"/linux-apps/session/41bcad5a6071572e949ee29abb16722f/\",\"viewers\":0}",
-        "session unit after restart: active/running",
-        "launch after restart returned run null",
-        "browser reconnected after the restart"
-      ],
-      "evidence": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/j/after-service-restart.png"
-      ],
-      "metrics": {},
-      "screenshots": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/j/after-service-restart.png"
-      ],
-      "error": null
-    },
-    {
-      "id": "k",
-      "title": "Failed install and update leave recoverable state",
-      "mode": "native",
-      "status": "pass",
-      "startedAt": "2026-11-12T23:01:09.188Z",
-      "durationMs": 15427,
-      "details": [
-        "[install google-chrome-stable] already installed: chrome",
-        "native profile ancestor permissions fixed (0711)",
-        "Chrome app chrome (ready, backend native, build undefined)",
-        "invalid-corrupt.deb: install started ({\"installing\":true,\"jobId\":\"08a5f09f-9b66-4cc3-85e1-c0d4ebb4590a\"})",
-        "failure state for invalid-corrupt.deb: {\"fileName\":\"invalid-corrupt.deb\",\"jobStatus\":\"failed\",\"jobError\":\"cannot read the package metadata: dpkg-deb: error: '/tmp/rast-native-e2e/data/linux-apps/staging/stage-57fff611d330425ea46d53978170af4a/invalid-corrupt.deb' is not a Debian format archive\",\"app\":{\"id\":\"invalid-corrupt\",\"status\":\"failed\",\"error\":\"cannot read the package metadata: dpkg-deb: error: '/tmp/rast-native-e2e/data/linux-apps/staging/stage-57fff611d330425ea46d53978170af4a/invalid-corrupt.deb' is not a Debian format archive\"}}",
-        "invalid-corrupt.deb: open on the failed app -> 409",
-        "invalid-corrupt.deb: failed app deleted cleanly",
-        "wrong-arch.deb: install started ({\"installing\":true,\"jobId\":\"1b57532a-7800-46b7-a496-35a7a7329442\"})",
-        "failure state for wrong-arch.deb: {\"fileName\":\"wrong-arch.deb\",\"jobStatus\":\"failed\",\"jobError\":\"This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).\",\"app\":{\"id\":\"wrong-arch\",\"status\":\"failed\",\"error\":\"This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).\"}}",
-        "wrong-arch.deb: open on the failed app -> 409",
-        "wrong-arch.deb: failed app deleted cleanly",
-        "wrong-arch error: This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).",
-        "invalid-archive.tar.gz: install started ({\"installing\":true,\"jobId\":\"d3f45a76-a5a8-4e71-b5d7-9b26c6ebc2fa\"})",
-        "failure state for invalid-archive.tar.gz: {\"fileName\":\"invalid-archive.tar.gz\",\"jobStatus\":\"failed\",\"jobError\":\"the archive is corrupt: invalid gzip header\",\"app\":{\"id\":\"invalid-archive\",\"status\":\"failed\",\"error\":\"the archive is corrupt: invalid gzip header\"}}",
-        "invalid-archive.tar.gz: open on the failed app -> 409",
-        "invalid-archive.tar.gz: failed app deleted cleanly",
-        "[install RAST Test App (portable)] already installed: rast-test-app",
-        "native profile ancestor permissions fixed (0711)",
-        "Portable app rast-test-app (ready, backend native, build undefined)",
-        "update with an invalid file accepted for job 27badf71-16fd-417c-852f-15a326cb01d5",
-        "app after failed update: status ready, version 1.0",
-        "failed update reported: job 27badf71-16fd-417c-852f-15a326cb01d5 failed: This app was installed as a tarball; choose a tarball file.",
-        "existing apps remain ready",
-        "Chrome still opens after the failures (2 window(s))"
-      ],
-      "evidence": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/k/healthy-app-after-failures.png"
-      ],
-      "metrics": {},
-      "screenshots": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/k/healthy-app-after-failures.png"
-      ],
-      "error": null
-    },
-    {
-      "id": "l",
-      "title": "Uninstall respects shared dependencies and user data choice",
-      "mode": "native",
-      "status": "pass",
-      "startedAt": "2026-11-12T23:01:24.616Z",
-      "durationMs": 12645,
-      "details": [
-        "[install google-chrome-stable] already installed: chrome",
-        "native profile ancestor permissions fixed (0711)",
-        "Chrome app chrome (ready, backend native, build undefined)",
-        "[install RAST Test App (portable)] already installed: rast-test-app",
-        "native profile ancestor permissions fixed (0711)",
-        "Portable app rast-test-app (ready, backend native, build undefined)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "alice app data root: /tmp/rast-native-e2e/data/linux-users/2/RAST",
-        "app uninstalled with removeData=false",
-        "profile dir kept: (not present, created lazily)",
-        "[install fixture reinstall] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
-        "[install fixture reinstall] install job bf2ffb39-cfd1-4d2a-b9f6-9d4cebb33b9f",
-        "[install fixture reinstall] job bf2ffb39-cfd1-4d2a-b9f6-9d4cebb33b9f: done Installed",
-        "fixture reinstalled: rast-test-app (ready)",
-        "native launch ready on attempt 1: run ?, display 100",
-        "native profile ancestor permissions fixed (0711)",
-        "dpkg libgtk-3-0t64: {\"status\":\"install ok installed\",\"version\":\"3.24.52-0ubuntu1\",\"installed\":true}",
-        "dpkg libx11-6: {\"status\":\"install ok installed\",\"version\":\"2:1.8.13-1ubuntu0.1\",\"installed\":true}",
-        "native-helper --check exit 0",
-        "Chrome still opens after uninstalling the fixture app"
-      ],
-      "evidence": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/l/after-uninstall.png"
-      ],
-      "metrics": {},
-      "screenshots": [
-        "/home/lufria/RAST/tests/e2e/screenshots/native/l/after-uninstall.png"
-      ],
-      "error": null
-    },
-    {
-      "id": "m",
-      "title": "Docker app data migrates or reports a precise compatibility failure",
-      "mode": "native",
-      "status": "skip",
-      "startedAt": "2026-11-12T23:01:37.261Z",
-      "durationMs": 286,
-      "details": [
-        "[install google-chrome-stable] already installed: chrome",
-        "native profile ancestor permissions fixed (0711)",
-        "Chrome app chrome (ready, backend native, build undefined)",
-        "skipped: the app backend is 'native', expected a docker-backed app to migrate"
-      ],
-      "evidence": [],
-      "metrics": {},
-      "screenshots": [],
-      "error": null
+      "error": "Error: assertion failed: window did not resize (1462x806 -> undefinedxundefined)\n    at assert (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:18:25)\n    at Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:111:9)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
     }
   ]
 }
