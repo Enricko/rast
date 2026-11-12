@@ -58,5 +58,11 @@ export interface AppDefinition {
   singleton?: boolean;
   defaultSize?: { w: number; h: number };
   minSize?: { w: number; h: number };
+  /**
+   * No desktop title bar: the app draws its own window controls (streamed
+   * Linux app windows do). The taskbar still minimizes, maximizes and closes
+   * the window; it cannot be dragged, and the edges resize it.
+   */
+  frameless?: boolean;
   mount(ctx: AppContext): AppInstance | void | Promise<AppInstance | void>;
 }

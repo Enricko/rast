@@ -13,6 +13,15 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Changed
+
+- **Linux app windows no longer show a second title bar.** A streamed Linux
+  app draws its own window controls (Chrome's own minimize/maximize/close), so
+  the desktop hides its title bar for those windows: one frame, and the app's
+  own close button closes the window. The taskbar still minimizes, maximizes
+  and closes the window and the edges still resize it; on phones the desktop
+  title bar stays because nothing else would grab the window.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

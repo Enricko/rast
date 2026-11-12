@@ -45,6 +45,9 @@ export function linuxAppDefinitions(): AppDefinition[] {
           // The server lists only the apps this account may see.
           adminOnly: false,
           singleton: true,
+          // The streamed app draws its own window bar and controls (e.g.
+          // Chrome's), so the desktop does not add a second one.
+          frameless: true,
           defaultSize: { w: 1100, h: 720 },
           minSize: { w: 480, h: 360 },
           mount: (ctx) => new LinuxWindow(ctx, appId).start(),

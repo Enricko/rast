@@ -47,7 +47,7 @@ interface WindowRecord {
   appId: string;
   appIcon: string;
   el: HTMLElement;
-  titlebar: HTMLElement;
+  titlebar: HTMLElement | null;
   titleEl: HTMLElement;
   iconEl: HTMLElement;
   contentEl: HTMLElement;
@@ -116,6 +116,8 @@ export class WindowManager {
       icon: string;
       defaultSize?: { w: number; h: number };
       minSize?: { w: number; h: number };
+      /** The app draws its own window controls; hide the desktop title bar. */
+      frameless?: boolean;
     },
     params: unknown,
     mount: (ctx: {
@@ -145,22 +147,30 @@ export class WindowManager {
     const iconEl = h("span", { class: "win-icon", dataset: { app: app.id } });
     iconEl.appendChild(appIconSvg(app.id, app.icon, 16));
     const titleEl = h("span", { class: "win-title" }, app.name);
-    const titlebar = h(
-      "header",
-      { class: "win-titlebar" },
-      iconEl,
-      titleEl,
-      h(
-        "div",
-        { class: "win-controls" },
-        this.controlButton("minimize", "Minimize", () => this.minimize(id)),
-        this.controlButton("maximize", "Maximize", () => this.toggleMaximize(id)),
-        this.controlButton("close", "Close", () => this.close(id)),
-      ),
-    );
+    // Frameless windows let the app draw its own title bar and controls (a
+    // streamed Linux app window does); the taskbar still minimizes, maximizes
+    // and closes them, and the edges resize. Phones keep the title bar: there
+    // is nothing else to grab the window with there.
+    const frameless = app.frameless === true && !this.isMobile;
+    const titlebar = frameless
+      ? null
+      : h(
+          "header",
+          { class: "win-titlebar" },
+          iconEl,
+          titleEl,
+          h(
+            "div",
+            { class: "win-controls" },
+            this.controlButton("minimize", "Minimize", () => this.minimize(id)),
+            this.controlButton("maximize", "Maximize", () => this.toggleMaximize(id)),
+            this.controlButton("close", "Close", () => this.close(id)),
+          ),
+        );
 
     const contentEl = h("div", { class: "win-body" });
-    el.appendChild(titlebar);
+    if (titlebar) el.appendChild(titlebar);
+    if (frameless) el.classList.add("is-frameless");
     el.appendChild(contentEl);
     for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
       el.appendChild(h("div", { class: `win-resize win-resize-${dir}`, dataset: { dir } }));
@@ -188,12 +198,14 @@ export class WindowManager {
     this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
 
     // Drag and resize.
-    record.cleanup.push(this.attachDrag(record));
+    if (titlebar) {
+      record.cleanup.push(this.attachDrag(record));
+      titlebar.addEventListener("dblclick", (event) => {
+        if ((event.target as HTMLElement).closest(".win-control")) return;
+        this.toggleMaximize(id);
+      });
+    }
     record.cleanup.push(this.attachResize(record, app));
-    titlebar.addEventListener("dblclick", (event) => {
-      if ((event.target as HTMLElement).closest(".win-control")) return;
-      this.toggleMaximize(id);
-    });
     el.addEventListener("pointerdown", () => this.focus(id), { capture: true });
 
     const notifyResize = () => {
@@ -643,6 +655,8 @@ export class WindowManager {
   // ---------------------------------------------------------------- pointer
 
   private attachDrag(record: WindowRecord): () => void {
+    const titlebar = record.titlebar;
+    if (!titlebar) return () => {};
     let dragging = false;
     let moved = false;
     let startX = 0;
@@ -663,7 +677,7 @@ export class WindowManager {
       originY = rect.y;
       record.tiled = null;
       record.el.classList.remove("is-tiled");
-      record.titlebar.setPointerCapture(event.pointerId);
+      titlebar.setPointerCapture(event.pointerId);
       record.el.classList.add("is-dragging");
       event.preventDefault();
         };
@@ -688,8 +702,8 @@ export class WindowManager {
       if (!dragging) return;
       dragging = false;
       record.el.classList.remove("is-dragging");
-      if (record.titlebar.hasPointerCapture(event.pointerId)) {
-        record.titlebar.releasePointerCapture(event.pointerId);
+      if (titlebar.hasPointerCapture(event.pointerId)) {
+        titlebar.releasePointerCapture(event.pointerId);
       }
       if (moved) this.applySnap(record);
       this.hideSnapPreview();
@@ -705,16 +719,16 @@ export class WindowManager {
       }
     };
 
-    record.titlebar.addEventListener("pointerdown", onPointerDown);
-    record.titlebar.addEventListener("pointermove", onPointerMove);
-    record.titlebar.addEventListener("pointerup", onPointerUp);
-    record.titlebar.addEventListener("pointercancel", onPointerUp);
+    titlebar.addEventListener("pointerdown", onPointerDown);
+    titlebar.addEventListener("pointermove", onPointerMove);
+    titlebar.addEventListener("pointerup", onPointerUp);
+    titlebar.addEventListener("pointercancel", onPointerUp);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      record.titlebar.removeEventListener("pointerdown", onPointerDown);
-      record.titlebar.removeEventListener("pointermove", onPointerMove);
-      record.titlebar.removeEventListener("pointerup", onPointerUp);
-      record.titlebar.removeEventListener("pointercancel", onPointerUp);
+      titlebar.removeEventListener("pointerdown", onPointerDown);
+      titlebar.removeEventListener("pointermove", onPointerMove);
+      titlebar.removeEventListener("pointerup", onPointerUp);
+      titlebar.removeEventListener("pointercancel", onPointerUp);
       document.removeEventListener("keydown", onKeyDown);
     };
   }
