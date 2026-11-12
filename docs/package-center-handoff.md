@@ -8,7 +8,7 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
-| Status | **v0.7.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): Uninstall, Cancel, system-wide defaults (`packages_system_wide`, on in production) and Package Center management for granted groups. Before: v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.7.0](#deploy-of-070-2026-11-12). |
+| Status | **v0.8.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): RAST's own apps in Package Center (Container Manager and Backup Center can be uninstalled), movable desktop icons and the Applications folder. Before: v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.8.0](#deploy-of-080-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
@@ -666,6 +666,46 @@ restart `rast.service`.
 Note: `rast packages path status` run as an ordinary user cannot read
 `/etc/rast/rast.toml` (0640 root:rast) and reports the defaults; run it as
 `sudo -u rast` or with `sudo`.
+
+### After 0.7.0: apps in Package Center, movable desktop icons (0.8.0)
+
+The user asked for movable desktop icons that can be removed, with every app
+in an "Applications" folder and apps installed from Package Center. Docker
+gets its own apps there. They chose:
+
+* **Docker: both.** The Docker app becomes **Container Manager** (app id
+  `applications` unchanged). Package Center will later also offer ready-made
+  Docker apps (step 2, not built yet).
+* **Removable: optional extras only.** Container Manager and Backup Center can
+  be uninstalled. Uninstalling hides the app and closes its API for every
+  account, administrators included. Data, containers and backup schedules
+  stay. The other apps are built in.
+
+Step 1 is commit `3585992`:
+
+* per-account desktop layout (`desktopIcons`, schema v9);
+* the Applications folder (`launcher`);
+* `apps.removed` setting;
+* `POST /api/packages/apps/{id}/install`, `DELETE /api/packages/apps/{id}`.
+
+### Deploy of 0.8.0 (2026-11-12)
+
+Approved by the user. The release-prep commit is `2f8606b` (CI 43164911791
+green). The annotated tag `v0.8.0` triggered release workflow 43165132416.
+Steps:
+
+* backup `rast-20261112-060323-db-config.tar.gz`;
+* `sudo rast update --version 0.8.0`. It took its own backup
+  (`rast-20261112-060333-db-config.tar.gz`), reported `health: ok` and schema
+  9, and printed no migration error.
+
+Verified afterwards: `rast 0.8.0`; `rast doctor` ok (schema v9, 0 warnings);
+`/healthz` ok on loopback and on https://desktop.lufria.tech; the served
+`index-DFh1lX78.js` is identical to the local build of `v0.8.0`; the
+system-wide links are still in place; no errors in the journal.
+
+Rollback: schema v9 is new, so `/usr/local/bin/rast.rollback-0.7.0` only
+starts after restoring `rast-20261112-060323-db-config.tar.gz`.
 
 ## Limitations
 
