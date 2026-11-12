@@ -56,6 +56,9 @@ const SOURCE_LABEL: Record<string, string> = {
   zsync: "The AppImage's update server",
 };
 
+/** The file types an app can be added from, as shown to people. */
+const ADD_FORMATS = ".deb, .AppImage or .tar.gz";
+
 /** Where a dropped file is saved (the person's home). */
 const DROP_FOLDER = "/Downloads";
 
@@ -129,12 +132,12 @@ export class LinuxApps {
       "div",
       { class: "fs-drop-overlay hidden" },
       iconSvg("upload", 34),
-      h("div", { class: "fs-drop-title" }, "Drop to install a Linux app"),
-      h("div", { class: "small muted" }, ".deb, AppImage or .tar.gz. The file is saved in your Downloads folder."),
+      h("div", { class: "fs-drop-title" }, "Drop to add an app"),
+      h("div", { class: "small muted" }, `${ADD_FORMATS}. The file is saved in your Downloads folder.`),
     );
     const uploads = new UploadManager(ctx, lc, {
       currentDir: () => DROP_FOLDER,
-      onUploaded: (entry) => void this.install(entry.path),
+      onUploaded: (entry) => void this.install({ path: entry.path }),
       onDrained: () => undefined,
       maxUploadBytes: () => ctx.store.get().maxUploadBytes,
     });
@@ -171,7 +174,7 @@ export class LinuxApps {
     const { ctx } = this.host;
     const usable = files.filter((file) => isLinuxPackageName(file.name));
     if (usable.length === 0) {
-      if (files.length) ctx.toast.warning("Drop a .deb package, an AppImage or a .tar.gz archive.");
+      if (files.length) ctx.toast.warning(`That file type is not supported. Use ${ADD_FORMATS}.`);
       return;
     }
     if (!this.dockerEnabled) {
@@ -219,7 +222,7 @@ export class LinuxApps {
       "button",
       { class: "pkg-tile is-linux-add", type: "button", title: "Install a .deb package, an AppImage or a .tar.gz archive" },
       h("div", { class: "pkg-icon pkg-icon-tile is-add", ariaHidden: true }, iconSvg("plus", 26)),
-      h("div", { class: "pkg-tile-body" }, h("span", { class: "pkg-tile-name" }, "Add a Linux app"), h("div", { class: "pkg-tile-sub" }, ".deb, AppImage or .tar.gz")),
+      h("div", { class: "pkg-tile-body" }, h("span", { class: "pkg-tile-name" }, "Add an app"), h("div", { class: "pkg-tile-sub" }, ADD_FORMATS)),
     );
     tile.addEventListener("click", () => this.openAdd());
     return tile;
@@ -403,33 +406,119 @@ export class LinuxApps {
   // ---------------------------------------------------------------- actions
 
   openAdd(): void {
-    const { ctx, lc } = this.host;
+    const { ctx } = this.host;
     if (!this.dockerEnabled) {
       ctx.toast.warning("Linux apps are not available here: they need Docker on a Linux server.");
       return;
     }
+    // A file from this device (dropped anywhere while the dialog is open, or
+    // chosen), or one already in File Station.
+    const input = h("input", { type: "file", class: "hidden", accept: ".deb,.AppImage,.appimage,.gz,.tgz,.xz,.txz,.bz2,.tbz2,.tar" });
+    let close: () => void = () => undefined;
+    const take = (files: File[]): void => {
+      close();
+      void this.dropped(files);
+    };
+    input.addEventListener("change", () => take(Array.from(input.files ?? [])));
+    const choose = h("button", { class: "btn btn-primary btn-sm", type: "button" }, "Choose a file");
+    choose.addEventListener("click", () => input.click());
+    const zone = h(
+      "div",
+      { class: "linux-drop" },
+      iconSvg("upload", 30),
+      h("div", { class: "linux-drop-title" }, "Drop a file here"),
+      h("div", { class: "small muted" }, ADD_FORMATS),
+      choose,
+    );
+    const fromStation = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("folder", 14), "Pick from File Station");
+    fromStation.addEventListener("click", () => {
+      close();
+      this.pickFromStation();
+    });
+    const link = h("input", { class: "input", type: "url", placeholder: "https://…/app.deb", ariaLabel: "Link to the file" });
+    const linkError = h("div", { class: "form-error", role: "alert" });
+    const useLink = h("button", { class: "btn btn-secondary btn-sm", type: "submit" }, "Install");
+    const linkForm = h(
+      "form",
+      { class: "linux-link" },
+      h("label", { class: "small muted" }, "Or paste a link to the file"),
+      h("div", { class: "linux-link-row" }, link, useLink),
+      linkError,
+    );
+    linkForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const url = link.value.trim();
+      if (!url.startsWith("https://")) {
+        linkError.textContent = "Enter a link that starts with https://";
+        return;
+      }
+      useLink.disabled = true;
+      void this.install({ url }).then((error) => {
+        useLink.disabled = false;
+        if (error) linkError.textContent = error;
+        else close();
+      });
+    });
+    const onOver = (event: DragEvent): void => {
+      if (!hasFileDrag(event)) return;
+      event.preventDefault();
+      zone.classList.add("is-over");
+    };
+    const onLeave = (event: DragEvent): void => {
+      if (!event.relatedTarget) zone.classList.remove("is-over");
+    };
+    const onDrop = (event: DragEvent): void => {
+      if (!hasFileDrag(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      take(Array.from(event.dataTransfer?.files ?? []));
+    };
+    document.addEventListener("dragover", onOver, true);
+    document.addEventListener("dragleave", onLeave, true);
+    document.addEventListener("drop", onDrop, true);
+    close = modal({
+      title: "Add an app",
+      body: h("div", { class: "col linux-add" }, zone, linkForm, fromStation, input),
+      actions: [{ label: "Cancel", variant: "ghost", onClick: () => {} }],
+      onClose: () => {
+        document.removeEventListener("dragover", onOver, true);
+        document.removeEventListener("dragleave", onLeave, true);
+        document.removeEventListener("drop", onDrop, true);
+      },
+    });
+  }
+
+  private pickFromStation(): void {
+    const { ctx, lc } = this.host;
     void pickDestination(ctx, lc, {
-      title: "Add a Linux app",
+      title: "Add an app",
       confirmLabel: "Install",
       startPath: "/",
       files: (entry) => isLinuxPackageName(entry.name),
       emptyHint: "No .deb, AppImage or .tar.gz files here. Upload one with File Station first.",
     }).then((path) => {
-      if (path) void this.install(path);
+      if (path) void this.install({ path });
     });
   }
 
-  /** Install the File Station file at `path` and show the app's page. */
-  private async install(path: string): Promise<void> {
+  /**
+   * Install a File Station file (`path`) or a file behind a link (`url`, the
+   * server downloads it) and show the app's page. Resolves with the error
+   * message when the install could not start.
+   */
+  private async install(source: { path: string } | { url: string }): Promise<string | null> {
     const { ctx } = this.host;
     try {
-      const res = await ctx.api.post<{ app: LinuxApp; jobId: string }>("/api/linux-apps/install", { path });
+      const res = await ctx.api.post<{ app: LinuxApp; jobId: string }>("/api/linux-apps/install", source);
       ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
       this.follow(res.jobId);
       await this.reload();
       this.host.openPage(res.app.id);
+      return null;
     } catch (error) {
-      ctx.toast.error(errorMessage(error));
+      const message = errorMessage(error);
+      if ("path" in source) ctx.toast.error(message);
+      return message;
     }
   }
 

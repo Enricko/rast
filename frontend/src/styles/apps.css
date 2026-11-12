@@ -4714,3 +4714,56 @@ button.pkg-pill {
 body:has(.is-dragging, .is-resizing) .linux-frame {
   pointer-events: none;
 }
+
+.linux-add {
+  gap: 10px;
+}
+
+.linux-add > .btn {
+  align-self: center;
+  gap: 6px;
+}
+
+.linux-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  color: var(--text-dim);
+  text-align: center;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.linux-drop.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.linux-drop-title {
+  color: var(--text);
+  font-weight: 650;
+}
+
+/* Placeholder (box) icon of a Linux app without a picture. */
+.pkg-icon.is-app > .icon:not(.app-icon) {
+  color: var(--text-faint);
+}
+
+.linux-link {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.linux-link-row {
+  display: flex;
+  gap: 8px;
+}
+
+.linux-link-row .input {
+  flex: 1;
+  min-width: 0;
+}

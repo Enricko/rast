@@ -3,7 +3,7 @@
 //! | Method | Path | |
 //! |---|---|---|
 //! | GET | `/api/linux-apps` | installed apps and the caller's running copies |
-//! | POST | `/api/linux-apps/install` | `{path}`: install a File Station file (job) |
+//! | POST | `/api/linux-apps/install` | `{path}` (File Station file) or `{url}` (https link): install (job) |
 //! | GET | `/api/linux-apps/{id}` | one app |
 //! | PATCH | `/api/linux-apps/{id}` | `{memoryMb?, cpus?}` |
 //! | DELETE | `/api/linux-apps/{id}?removeData=true` | uninstall |
@@ -56,8 +56,12 @@ async fn list(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct InstallRequest {
-    path: String,
+    /// A File Station path…
+    path: Option<String>,
+    /// …or an `https://` link the server downloads.
+    url: Option<String>,
 }
 
 async fn install(
@@ -65,12 +69,16 @@ async fn install(
     admin: AdminUser,
     Json(body): Json<InstallRequest>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        state
-            .linux_apps
-            .install(&admin.0, &state.storage, body.path.trim())
-            .await?,
-    ))
+    let apps = &state.linux_apps;
+    Ok(Json(match (body.path.as_deref(), body.url.as_deref()) {
+        (Some(path), None) => apps.install(&admin.0, &state.storage, path.trim()).await?,
+        (None, Some(url)) => apps.install_url(&admin.0, url.trim()).await?,
+        _ => {
+            return Err(crate::error::AppError::bad_request(
+                "send either `path` or `url`",
+            ))
+        }
+    }))
 }
 
 async fn one(

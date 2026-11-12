@@ -314,7 +314,7 @@ after its last viewer left, or after 30 minutes without input. Requires
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/linux-apps` | `{apps:[LinuxApp], sessions:[Session] (the caller's), limits:{minFreeMemoryBytes, idleMinutes, maxCpus}, dockerEnabled}` |
-| POST | `/api/linux-apps/install` | `{path}` (File Station path the caller can read, up to 8 GB) → `{app, jobId}`; job kind `linuxapps.install` |
+| POST | `/api/linux-apps/install` | `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) → `{app, jobId}`; job kind `linuxapps.install` |
 | GET | `/api/linux-apps/{id}` | `LinuxApp` |
 | PATCH | `/api/linux-apps/{id}` | `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; applies from the next start |
 | DELETE | `/api/linux-apps/{id}?removeData=true` | stops every copy, removes the images (and with `removeData`, every person's settings volume); files in RAST homes are never touched. 409 while installing or updating |

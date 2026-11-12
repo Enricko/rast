@@ -743,6 +743,7 @@ mod tests {
         let policy = OriginPolicy {
             hosts: vec![],
             allow_file: true,
+            ..Default::default()
         };
         let mut quiet = Quiet(Default::default());
         let m = manifest_for("1.0.0", "demo 1.0.0");
@@ -890,6 +891,7 @@ mod tests {
         let policy = OriginPolicy {
             hosts: vec![],
             allow_file: true,
+            ..Default::default()
         };
         let mut quiet = Quiet(Default::default());
         let installed =

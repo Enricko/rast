@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.10.2] - 2026-11-12
+
+No database migration (schema stays v10).
+
+### Added
+
+- **Add app: choose a file, drop it, or paste a link.** App Center's *Add
+  Linux app* button is now *Add app*. Its dialog takes a `.deb`, `.AppImage`
+  or `.tar.gz` file chosen from your device, dropped anywhere while it is
+  open, picked from File Station, or downloaded by the server from an
+  `https://` link (so the file never has to be on your device). Links into
+  the server's own network are refused.
+
 ## [0.10.1] - 2026-11-12
 
 No database migration (schema stays v10).

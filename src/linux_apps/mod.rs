@@ -510,6 +510,52 @@ impl LinuxApps {
             ));
         }
 
+        self.begin_install(
+            user,
+            file_name,
+            format,
+            PackageSource::File(resolved.physical),
+        )
+        .await
+    }
+
+    /// Install the app file behind an `https://` link (downloaded by the server).
+    pub async fn install_url(self: &Arc<Self>, user: &AuthUser, url: &str) -> AppResult<Value> {
+        self.ensure_available().await?;
+        if url.len() > 2048 {
+            return Err(AppError::bad_request("the link is too long"));
+        }
+        crate::packages::net::https_host(url)
+            .map_err(|_| AppError::bad_request("Enter a link that starts with https://"))?;
+        let file_name = file_name_from_url(url).ok_or_else(|| {
+            AppError::bad_request(
+                "The link must end in the file's name: .deb, .AppImage or .tar.gz.",
+            )
+        })?;
+        let format = LinuxFormat::from_file_name(&file_name).ok_or_else(|| {
+            AppError::bad_request(
+                "The link must end in the file's name: .deb, .AppImage or .tar.gz.",
+            )
+        })?;
+        // Refuse links into this server or its network before anything is recorded.
+        let checked = url.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::packages::net::OriginPolicy::any_public().allows(&checked)
+        })
+        .await
+        .map_err(|e| AppError::internal(e.to_string()))?
+        .map_err(AppError::bad_request)?;
+        self.begin_install(user, file_name, format, PackageSource::Url(url.to_string()))
+            .await
+    }
+
+    async fn begin_install(
+        self: &Arc<Self>,
+        user: &AuthUser,
+        file_name: String,
+        format: LinuxFormat,
+        source: PackageSource,
+    ) -> AppResult<Value> {
         let id = self.new_id(&file_name).await?;
         let now = db::now_ms();
         let cpus = default_cpus();
@@ -533,7 +579,6 @@ impl LinuxApps {
 
         let this = self.clone();
         let job_id_app = id.clone();
-        let source = resolved.physical.clone();
         let actor = user.clone();
         let spec = JobSpec::new("linuxapps.install", move |ctx| async move {
             this.run_install(ctx, actor, job_id_app, source, format)
@@ -579,18 +624,31 @@ impl LinuxApps {
         ctx: JobContext,
         actor: AuthUser,
         id: String,
-        source: PathBuf,
+        source: PackageSource,
         format: LinuxFormat,
     ) -> AppResult<Value> {
-        ctx.progress(0, 3, "Copying the file").await;
+        let downloading = matches!(source, PackageSource::Url(_));
+        ctx.progress(
+            0,
+            3,
+            if downloading {
+                "Downloading the file"
+            } else {
+                "Copying the file"
+            },
+        )
+        .await;
         let staging = self.staging_dir(&id);
         let copied = {
             let staging = staging.clone();
             let cancel = ctx.cancel_flag();
-            tokio::task::spawn_blocking(move || stage_file(&source, &staging, &cancel))
-                .await
-                .map_err(|e| AppError::internal(e.to_string()))
-                .and_then(|r| r)
+            tokio::task::spawn_blocking(move || match source {
+                PackageSource::File(path) => stage_file(&path, &staging, &cancel),
+                PackageSource::Url(url) => download_file(&url, &staging, &cancel),
+            })
+            .await
+            .map_err(|e| AppError::internal(e.to_string()))
+            .and_then(|r| r)
         };
         let sha1 = match copied {
             Ok(sha1) => sha1,
@@ -1385,6 +1443,58 @@ fn docker_message(error: &DockerError) -> String {
 
 /// Copy the chosen file into the staging folder the Docker helper builds
 /// from; returns its SHA-1 (AppImage update checks compare it).
+/// Where an app's file comes from.
+enum PackageSource {
+    /// A file in File Station (already resolved for the installing account).
+    File(PathBuf),
+    /// An `https://` link on the public internet.
+    Url(String),
+}
+
+/// The file name a download link ends in (`…/app_1.0_amd64.deb?x=1`).
+fn file_name_from_url(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next()?;
+    let name = path.strip_prefix("https://")?.split_once('/')?.1;
+    let name = name.rsplit('/').next()?;
+    let ok = !name.is_empty()
+        && name.len() <= 200
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'));
+    ok.then(|| name.to_string())
+}
+
+/// Download the app file into `staging/package`; returns its SHA-1. Blocks.
+fn download_file(
+    url: &str,
+    staging: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> AppResult<String> {
+    std::fs::create_dir_all(staging)
+        .map_err(|e| AppError::internal(format!("cannot prepare the app folder: {e}")))?;
+    let cancelled = || cancel.load(std::sync::atomic::Ordering::Relaxed);
+    let done = crate::packages::net::download_hashed(
+        url,
+        &crate::packages::net::OriginPolicy::any_public(),
+        &staging.join("package"),
+        None,
+        wire::MAX_PACKAGE_BYTES,
+        &cancelled,
+    )
+    .map_err(|message| {
+        if cancelled() {
+            AppError::Cancelled
+        } else {
+            AppError::bad_request(format!("The download failed: {message}"))
+        }
+    })?;
+    if done.size == 0 {
+        return Err(AppError::bad_request("The link returned an empty file."));
+    }
+    Ok(done.sha1)
+}
+
 fn stage_file(
     source: &Path,
     staging: &Path,
@@ -1591,6 +1701,23 @@ fn gib(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_must_end_in_a_file_name() {
+        assert_eq!(
+            file_name_from_url("https://dl.example.com/linux/app_1.0_amd64.deb?x=1#y").as_deref(),
+            Some("app_1.0_amd64.deb")
+        );
+        for bad in [
+            "https://example.com",
+            "https://example.com/",
+            "https://example.com/dir/",
+            "https://example.com/a%20b.deb",
+            "http://example.com/app.deb",
+        ] {
+            assert!(file_name_from_url(bad).is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn ids_and_names_come_from_the_file_name() {

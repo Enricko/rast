@@ -173,7 +173,7 @@ class PackageCenterApp {
       "button",
       { class: "btn btn-ghost btn-sm", type: "button", title: "Install a .deb package, an AppImage or a .tar.gz archive" },
       iconSvg("plus", 14),
-      h("span", { class: "pkg-btn-label" }, "Add Linux app"),
+      h("span", { class: "pkg-btn-label" }, "Add app"),
     );
     this.linuxButton.addEventListener("click", () => this.linux.openAdd());
     const toolbar = h(
