@@ -88,10 +88,30 @@ The first catalog run publishes the `catalog` release whose
 
 Point a service at a specific version (`…/runtimes/go/1.26.10/bin/go`) to pin
 it, or at `…/runtimes/go/current/bin/go` / `…/packages/bin/go` to follow the
-default. RAST never edits `/etc/profile.d`, `/usr/local/bin` or the system
-`PATH`, and never touches the operating system's own Python, PHP or Node.js.
-This was checked: the host's Python 3.14.4, Node v22.23.4 and PHP 8.5.4 were
-unchanged after the test installs.
+default.
+
+**Terminals (since 2026-11-12, `packages_shell_path`, default on).**
+`/etc/profile.d/rast-packages.sh` puts `…/packages/bin` first on every login
+shell's PATH, so `go`, `node`, `php` or `python3` in a terminal run the version
+chosen with *Make default*. A package without a Package Center default has no
+shim there, so the system's own command is found. `sudo rast packages path sync`
+writes or removes the script and sets the permissions: `/var/lib/rast` and
+`packages/` get only the traverse bit for others (0751), and the runtime trees
+and `bin/` are readable (0755). Everything else in the data directory is still
+created without access for others (`UMask=0027`). `sudo` keeps its own
+`secure_path`, and systemd services keep their own PATH, so neither picks up
+the Package Center defaults.
+
+**System runtimes.** RAST never changes the operating system's own Python,
+PHP or Node.js. Package Center lists them as *System* installs. It looks in the
+standard PATH directories (plus `/usr/local/go/bin`) and skips its own shims.
+Each version is read by running the command, confined like a check, and the
+apt package comes from dpkg's file lists. A newer catalog version of the same
+release line is offered as **Update** and installed next to the system one.
+**Use the system version** removes the Package Center shims again. This server
+has Python 3.14.4 (`python3.14-minimal`), PHP 8.5.4 (`php8.5-cli`, which
+`php8.5-fpm` and `cetaphil-web` use) and Node.js 22.23.4 (a nodejs.org tarball
+in `/usr/local/lib/nodejs`).
 
 Under `rast.service` (`MemoryDenyWriteExecute=yes`), V8 cannot JIT. RAST runs
 the Node.js checks with `NODE_OPTIONS=--jitless`. Verified in a transient

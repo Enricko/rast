@@ -402,6 +402,19 @@ sudo -u rast rast user reset-password <name> --password-stdin   # revokes that u
 sudo -u rast rast setup-token                                   # one-shot web setup token, 60 min
 ```
 
+## Package Center on the shell PATH
+
+```bash
+rast packages path status        # is /etc/profile.d/rast-packages.sh in place and current?
+sudo rast packages path sync     # write or remove it to match packages_shell_path
+```
+
+`sync` writes the profile script only when it is RAST's own (a file someone
+else wrote is never replaced or removed), and sets the permissions that let
+other users run the installed runtimes. The installer and `rast update` run it.
+New login shells pick it up; an open shell can run
+`. /etc/profile.d/rast-packages.sh`.
+
 * Passwords must be at least 10 characters. Use `--password-stdin` (or the
   interactive prompt) instead of `--password`, which is visible in process
   lists. `RAST_PASSWORD` is honoured for automation but must not be used in

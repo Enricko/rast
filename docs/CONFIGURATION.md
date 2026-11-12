@@ -65,6 +65,7 @@ applied by `src/config.rs`.
 | `packages_catalog_url` | string | official catalog (`https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json`) | `https://` or `file:///`; the detached signature is read from `<url>.sig` | `RAST_PACKAGES_CATALOG_URL` |
 | `packages_catalog_keys` | array of strings | `[]` | Extra trusted catalog keys, each `"<key-id>:<base64 Ed25519 public key>"` (32 bytes); invalid entries fail startup. The official key is always trusted | `RAST_PACKAGES_CATALOG_KEYS` (comma separated) |
 | `packages_check_interval_minutes` | integer | `360` | 0–10080; `0` disables automatic checks (Check updates still works) | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` |
+| `packages_shell_path` | bool | `true` | Put the Package Center defaults (`<data_dir>/packages/bin`) first on every login shell's PATH through `/etc/profile.d/rast-packages.sh`, and let other users read the installed runtimes (the data directory and package root get only the traverse bit for others). Applied by `sudo rast packages path sync`, which the installer and `rast update` run | `RAST_PACKAGES_SHELL_PATH` |
 | `packages_github_token` | string | unset | Optional token for GitHub API lookups by Install from GitHub (rate limit only; public repositories need no token). Never printed by `rast config` | `RAST_PACKAGES_GITHUB_TOKEN` |
 
 ## Environment variables
@@ -95,6 +96,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_PACKAGES_CATALOG_URL` | `packages_catalog_url` | Package Center catalog (or a local mirror) |
 | `RAST_PACKAGES_CATALOG_KEYS` | `packages_catalog_keys` | Comma-separated `<key-id>:<base64>` |
 | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` | `packages_check_interval_minutes` | 0–10080 |
+| `RAST_PACKAGES_SHELL_PATH` | `packages_shell_path` | `true`/`false` |
 | `RAST_PACKAGES_GITHUB_TOKEN` | `packages_github_token` | Secret; prefer the environment file over the TOML file |
 
 Additional variables that are **not** configuration-file keys:
@@ -206,8 +208,14 @@ packages_check_interval_minutes = 60
 ```
 
 Installed runtimes live under `<data_dir>/packages/` (`runtimes/<id>/<version>/`,
-`runtimes/<id>/current`, `bin/`). RAST never changes the system `PATH` or the
-operating system's own runtimes; see [package-center-handoff.md](package-center-handoff.md).
+`runtimes/<id>/current`, `bin/`). With `packages_shell_path` (the default),
+`/etc/profile.d/rast-packages.sh` puts `bin/` first on every login shell's PATH,
+so a terminal runs the version chosen with *Make default*. A package without a
+Package Center default has no shim there, and the system's own command is used.
+RAST never modifies the operating system's own runtimes (apt packages, manual
+installs): it lists them as *System* and installs updates next to them. `sudo`
+keeps its own `secure_path`, so commands run with `sudo` use the system
+versions. See [package-center-handoff.md](package-center-handoff.md).
 
 ## CLI overrides
 

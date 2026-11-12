@@ -102,7 +102,7 @@ keeps it inactive in that case.
 | `src/docker/` | Worker-socket client, compose validation, deployment metadata |
 | `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions |
 | `src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
-| `src/packages/` | Package Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
+| `src/packages/` | Package Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
 | `src/update.rs` | GitHub-Release self-update with checksum verification, DB backup, atomic binary replacement and rollback of the binary |
 | `src/audit.rs` | Append-only audit log writer |
 | `src/secrets.rs` | Master key at `<data_dir>/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
@@ -271,17 +271,19 @@ only).
 /usr/local/lib/rast/rast-<version>   previous binaries kept by the installer (rollback)
 /etc/rast/rast.toml                  configuration (0640 root:rast)
 /etc/rast/rast.env                   optional env overrides (0600 root:rast)
-/var/lib/rast/                       data dir (0750 rast:rast)
+/var/lib/rast/                       data dir (0750 rast:rast; 0751 with packages_shell_path)
   rast.db  rast.db-wal  rast.db-shm  SQLite database (WAL)
   secret.key                         master key, 0600, generate-on-first-start
   backups/                           backup archives + pre-restore copies
   apps/<slug>/compose.yaml            managed Docker Compose definitions
   apps/<slug>/.env                    encrypted app secrets (rendered on deploy)
   tmp/                               transient backup/restore work dirs
-  packages/                          Package Center (never on the system PATH)
-    runtimes/<id>/<version>/         one directory per installed version
+  packages/                          Package Center (0751 with packages_shell_path)
+    runtimes/<id>/<version>/         one directory per installed version (readable by all
+                                     users with packages_shell_path; 0750 otherwise)
     runtimes/<id>/current            symlink to the RAST default version
-    bin/<executable>                 shims that follow `current`
+    bin/<executable>                 shims that follow `current`; first on every login
+                                     shell's PATH via /etc/profile.d/rast-packages.sh
     catalog/catalog.json(.sig)       last verified catalog (used when offline)
     .staging/  .trash/               install staging and removal, cleaned at start
                                      (a replaced version tree waits in .trash/displaced.*
@@ -290,6 +292,8 @@ only).
   homes/<username>/                  per-user home, 0700
   shared/<name>/                     shared folders (ACL in DB)
   .trash/<user_id>/<uuid>/           recycle bin (root 0700, per-user 0700)
+/etc/profile.d/rast-packages.sh      Package Center bin/ first on PATH (0644 root, written by
+                                     `rast packages path sync`; absent when packages_shell_path = false)
 /run/rast/worker.sock                worker socket (0660 rast-worker:rast)
 /run/rast/                           runtime dir (0750 rast-worker:rast)
 ```
