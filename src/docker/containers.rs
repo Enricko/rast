@@ -347,12 +347,66 @@ pub fn parse_inspect_json(output: &str) -> Result<Vec<Value>, String> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let state = obj
-            .get("State")
+        let state_obj = obj.get("State");
+        let state = state_obj
             .and_then(|s| s.get("Status"))
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let host_config = obj.get("HostConfig");
+        let config = obj.get("Config");
+        let privileged = host_config
+            .and_then(|h| h.get("Privileged"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let network_mode = host_config
+            .and_then(|h| h.get("NetworkMode"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let pid_mode = host_config
+            .and_then(|h| h.get("PidMode"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let cap_add: Vec<String> = host_config
+            .and_then(|h| h.get("CapAdd"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let devices = host_config
+            .and_then(|h| h.get("Devices"))
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
+        let networks: Vec<String> = obj
+            .get("NetworkSettings")
+            .and_then(|n| n.get("Networks"))
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let join_words = |value: Option<&Value>| -> String {
+            match value {
+                Some(Value::Array(items)) => items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Some(Value::String(text)) => text.clone(),
+                _ => String::new(),
+            }
+        };
+        let state_str = |key: &str| {
+            state_obj
+                .and_then(|s| s.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         out.push(json!({
             "id": get_str("Id"),
             "name": name,
@@ -363,6 +417,21 @@ pub fn parse_inspect_json(output: &str) -> Result<Vec<Value>, String> {
             "env": env,
             "labels": labels,
             "restartPolicy": restart_policy,
+            "privileged": privileged,
+            "networkMode": network_mode,
+            "pidMode": pid_mode,
+            "capAdd": cap_add,
+            "devices": devices,
+            "networks": networks,
+            "command": join_words(config.and_then(|c| c.get("Cmd"))),
+            "entrypoint": join_words(config.and_then(|c| c.get("Entrypoint"))),
+            "workingDir": config.and_then(|c| c.get("WorkingDir")).and_then(Value::as_str).unwrap_or(""),
+            "user": config.and_then(|c| c.get("User")).and_then(Value::as_str).unwrap_or(""),
+            "createdAt": get_str("Created"),
+            "startedAt": state_str("StartedAt"),
+            "finishedAt": state_str("FinishedAt"),
+            "exitCode": state_obj.and_then(|s| s.get("ExitCode")).and_then(Value::as_i64),
+            "health": state_obj.and_then(|s| s.get("Health")).and_then(|h| h.get("Status")).and_then(Value::as_str).unwrap_or(""),
             "composeProject": labels.get("com.docker.compose.project").cloned().unwrap_or_default(),
             "composeService": labels.get("com.docker.compose.service").cloned().unwrap_or_default(),
         }));
@@ -398,6 +467,130 @@ pub fn parse_compose_logs(output: &str) -> Vec<Value> {
             "stream": "stdout",
             "service": service,
             "message": sanitize_log_line(rest),
+        }));
+    }
+    out
+}
+
+/// Parse `docker logs --timestamps` output. Docker writes the container's
+/// stdout and stderr to separate pipes; each line starts with an RFC3339
+/// timestamp, which is used to merge both streams back into one ordered list.
+pub fn parse_container_logs(stdout: &str, stderr: &str) -> Vec<Value> {
+    let mut entries: Vec<(i64, usize, Value)> = Vec::new();
+    let mut seq = 0usize;
+    for (stream, text) in [("stdout", stdout), ("stderr", stderr)] {
+        let mut last_ts = 0i64;
+        for line in text.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut rest = line;
+            let mut ts = last_ts;
+            if let Some((first, remainder)) = line.split_once(' ') {
+                if let Some(parsed) = parse_rfc3339_ms(first) {
+                    ts = parsed;
+                    rest = remainder;
+                }
+            }
+            last_ts = ts;
+            entries.push((
+                ts,
+                seq,
+                json!({
+                    "ts": ts,
+                    "stream": stream,
+                    "service": "",
+                    "message": sanitize_log_line(rest),
+                }),
+            ));
+            seq += 1;
+        }
+    }
+    entries.sort_by_key(|(ts, seq, _)| (*ts, *seq));
+    entries.into_iter().map(|(_, _, value)| value).collect()
+}
+
+/// Parse `docker image ls --all --no-trunc --format '{{json .}}'` output.
+pub fn parse_images_json(output: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for value in parse_json_lines(output) {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let get = |key: &str| {
+            obj.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let id = get("ID");
+        if id.is_empty() {
+            continue;
+        }
+        let none = |text: &str| text.is_empty() || text == "<none>";
+        let repository = get("Repository");
+        let tag = get("Tag");
+        let reference = if none(&repository) {
+            String::new()
+        } else if none(&tag) {
+            repository.clone()
+        } else {
+            format!("{repository}:{tag}")
+        };
+        let size_text = get("Size");
+        // `Containers` is a count on current Docker and "N/A" on older ones.
+        let containers = get("Containers").parse::<u64>().ok();
+        let digest = get("Digest");
+        out.push(json!({
+            "id": id,
+            "repository": if none(&repository) { String::new() } else { repository },
+            "tag": if none(&tag) { String::new() } else { tag },
+            "reference": reference,
+            "digest": if none(&digest) { String::new() } else { digest },
+            "sizeBytes": parse_size(&size_text),
+            "size": size_text,
+            "createdAt": get("CreatedAt"),
+            "createdSince": get("CreatedSince"),
+            "containers": containers,
+        }));
+    }
+    out
+}
+
+/// Parse `docker volume ls --format '{{json .}}'` output.
+pub fn parse_volumes_json(output: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    for value in parse_json_lines(output) {
+        let Some(obj) = value.as_object() else {
+            continue;
+        };
+        let get = |key: &str| {
+            obj.get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let name = get("Name");
+        if name.is_empty() {
+            continue;
+        }
+        let labels = parse_labels(&get("Labels"));
+        let project = labels
+            .get("com.docker.compose.project")
+            .cloned()
+            .unwrap_or_default();
+        // Anonymous volumes are named by a 64-character hex id.
+        let anonymous = name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit());
+        out.push(json!({
+            "name": name,
+            "driver": get("Driver"),
+            "scope": get("Scope"),
+            "mountpoint": get("Mountpoint"),
+            "labels": labels,
+            "project": project,
+            "anonymous": anonymous,
         }));
     }
     out
@@ -715,5 +908,76 @@ mod tests {
         assert_eq!(c["restartPolicy"], "unless-stopped");
         assert!(parse_inspect_json("{}").is_err());
         assert!(parse_inspect_json("nonsense").is_err());
+    }
+
+    #[test]
+    fn inspect_reports_privilege_and_runtime_fields() {
+        let output = r#"[{"Id":"abc123","Name":"/vm","Created":"2026-11-01T10:00:00Z","Config":{"Image":"dockurr/windows","Cmd":["/run/entry.sh","--boot"],"Entrypoint":null,"WorkingDir":"/run","User":"","Labels":{}},"State":{"Status":"exited","ExitCode":137,"StartedAt":"2026-11-01T10:00:01Z","FinishedAt":"2026-11-02T10:00:00Z","Health":{"Status":"unhealthy"}},"HostConfig":{"Privileged":true,"NetworkMode":"host","PidMode":"host","CapAdd":["NET_ADMIN"],"Devices":[{"PathOnHost":"/dev/kvm"}],"RestartPolicy":{"Name":"no"}},"Mounts":[],"NetworkSettings":{"Ports":{},"Networks":{"bridge":{}}}}]"#;
+        let c = &parse_inspect_json(output).unwrap()[0];
+        assert_eq!(c["privileged"], true);
+        assert_eq!(c["networkMode"], "host");
+        assert_eq!(c["pidMode"], "host");
+        assert_eq!(c["capAdd"][0], "NET_ADMIN");
+        assert_eq!(c["devices"], 1);
+        assert_eq!(c["networks"][0], "bridge");
+        assert_eq!(c["command"], "/run/entry.sh --boot");
+        assert_eq!(c["entrypoint"], "");
+        assert_eq!(c["exitCode"], 137);
+        assert_eq!(c["health"], "unhealthy");
+        assert_eq!(c["createdAt"], "2026-11-01T10:00:00Z");
+    }
+
+    #[test]
+    fn container_logs_merge_both_streams_by_time() {
+        let stdout = "2026-11-10T13:24:02.000000000Z first\n2026-11-10T13:24:04.000000000Z third\n";
+        let stderr = "2026-11-10T13:24:03.000000000Z second\ncontinuation without time\n";
+        let lines = parse_container_logs(stdout, stderr);
+        let messages: Vec<&str> = lines
+            .iter()
+            .map(|l| l["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            messages,
+            vec!["first", "second", "continuation without time", "third"]
+        );
+        assert_eq!(lines[1]["stream"], "stderr");
+        assert_eq!(
+            lines[2]["ts"], lines[1]["ts"],
+            "untimed lines keep the previous time"
+        );
+        assert_eq!(lines[3]["stream"], "stdout");
+    }
+
+    #[test]
+    fn images_are_parsed_with_references_and_sizes() {
+        let output = concat!(
+            r#"{"Containers":"2","CreatedAt":"2026-11-10 13:52:03 +0000 UTC","CreatedSince":"2 days ago","Digest":"sha256:aa","ID":"sha256:cb52","Repository":"nginx","SharedSize":"N/A","Size":"94.5MB","Tag":"alpine","UniqueSize":"N/A"}"#,
+            "\n",
+            r#"{"Containers":"N/A","CreatedAt":"","CreatedSince":"5 days ago","Digest":"<none>","ID":"sha256:e483","Repository":"<none>","Size":"1.1GB","Tag":"<none>"}"#,
+            "\nnot json\n",
+        );
+        let images = parse_images_json(output);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0]["reference"], "nginx:alpine");
+        assert_eq!(images[0]["containers"], 2);
+        assert_eq!(images[0]["sizeBytes"], 94_500_000u64);
+        assert_eq!(images[1]["reference"], "");
+        assert_eq!(images[1]["repository"], "");
+        assert_eq!(images[1]["digest"], "");
+        assert!(images[1]["containers"].is_null());
+    }
+
+    #[test]
+    fn volumes_are_parsed_with_compose_project() {
+        let anon = "a".repeat(64);
+        let first = r#"{"Driver":"local","Labels":"com.docker.compose.project=rast-shop,com.docker.compose.volume=data","Mountpoint":"/var/lib/docker/volumes/rast-shop_data/_data","Name":"rast-shop_data","Scope":"local"}"#;
+        let output = format!(
+            "{first}\n{{\"Driver\":\"local\",\"Labels\":\"\",\"Mountpoint\":\"\",\"Name\":\"{anon}\",\"Scope\":\"local\"}}\n"
+        );
+        let volumes = parse_volumes_json(&output);
+        assert_eq!(volumes.len(), 2);
+        assert_eq!(volumes[0]["project"], "rast-shop");
+        assert_eq!(volumes[0]["anonymous"], false);
+        assert_eq!(volumes[1]["anonymous"], true);
     }
 }

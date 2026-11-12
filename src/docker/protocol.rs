@@ -48,6 +48,25 @@ pub const MAX_SLUG_LEN: usize = 40;
 pub const QUICK_OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// Timeout for Compose operations (up may need to pull images).
 pub const COMPOSE_OP_TIMEOUT: Duration = Duration::from_secs(180);
+/// Timeout for `docker pull` (large images over slow links).
+pub const PULL_OP_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Longest accepted image reference (`registry/path:tag@sha256:…`).
+pub const MAX_IMAGE_REF_LEN: usize = 255;
+/// Longest accepted volume name.
+pub const MAX_VOLUME_NAME_LEN: usize = 255;
+
+/// How long a worker operation may take, by kind. The client and the worker
+/// map each class onto their own configured deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutClass {
+    /// Cheap reads.
+    Quick,
+    /// Lifecycle changes that may wait for containers to stop.
+    Long,
+    /// Image downloads.
+    Pull,
+}
 
 /// Operations the worker is willing to perform. Anything else is refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +105,29 @@ pub enum WorkerOp {
     Stats,
     /// `docker inspect` for the given container ids (subset of fields).
     Inspect,
+    /// `docker start` for the given container ids.
+    ContainerStart,
+    /// `docker stop` for the given container ids.
+    ContainerStop,
+    /// `docker restart` for the given container ids.
+    ContainerRestart,
+    /// `docker rm -f` for the given container ids (never `-v`: volumes stay).
+    ContainerRemove,
+    /// `docker logs --timestamps --tail N [--since …]` for one container.
+    ContainerLogs,
+    /// `docker image ls -a`.
+    ImageList,
+    /// `docker pull <image>`.
+    ImagePull,
+    /// `docker image rm <image>` (never `--force`).
+    ImageRemove,
+    /// `docker image prune -f`: untagged images no container uses.
+    ImagePrune,
+    /// `docker volume ls`.
+    VolumeList,
+    /// `docker volume rm <volume>` (never `--force`; Docker refuses volumes
+    /// that a container still uses).
+    VolumeRemove,
 }
 
 impl WorkerOp {
@@ -106,11 +148,22 @@ impl WorkerOp {
             Self::ComposeLogsSince => "compose-logs-since",
             Self::Stats => "stats",
             Self::Inspect => "inspect",
+            Self::ContainerStart => "container-start",
+            Self::ContainerStop => "container-stop",
+            Self::ContainerRestart => "container-restart",
+            Self::ContainerRemove => "container-remove",
+            Self::ContainerLogs => "container-logs",
+            Self::ImageList => "image-list",
+            Self::ImagePull => "image-pull",
+            Self::ImageRemove => "image-remove",
+            Self::ImagePrune => "image-prune",
+            Self::VolumeList => "volume-list",
+            Self::VolumeRemove => "volume-remove",
         }
     }
 
-    /// Client-side deadline for this operation.
-    pub fn timeout(self) -> Duration {
+    /// Which deadline applies to this operation.
+    pub fn timeout_class(self) -> TimeoutClass {
         match self {
             Self::Version
             | Self::Info
@@ -121,12 +174,32 @@ impl WorkerOp {
             | Self::Stats
             | Self::Inspect
             | Self::RemoveVolumes
-            | Self::ComposeLogsSince => QUICK_OP_TIMEOUT,
+            | Self::ComposeLogsSince
+            | Self::ContainerLogs
+            | Self::ImageList
+            | Self::VolumeList => TimeoutClass::Quick,
             Self::ComposeUp
             | Self::ComposeDown
             | Self::ComposeStop
             | Self::ComposeRestart
-            | Self::Logs => COMPOSE_OP_TIMEOUT,
+            | Self::Logs
+            | Self::ContainerStart
+            | Self::ContainerStop
+            | Self::ContainerRestart
+            | Self::ContainerRemove
+            | Self::ImageRemove
+            | Self::ImagePrune
+            | Self::VolumeRemove => TimeoutClass::Long,
+            Self::ImagePull => TimeoutClass::Pull,
+        }
+    }
+
+    /// Default deadline for this operation.
+    pub fn timeout(self) -> Duration {
+        match self.timeout_class() {
+            TimeoutClass::Quick => QUICK_OP_TIMEOUT,
+            TimeoutClass::Long => COMPOSE_OP_TIMEOUT,
+            TimeoutClass::Pull => PULL_OP_TIMEOUT,
         }
     }
 
@@ -165,6 +238,12 @@ pub struct WorkerRequest {
     /// RFC3339 `--since` argument by the worker. Never a shell string.
     #[serde(default, rename = "sinceSecs", skip_serializing_if = "Option::is_none")]
     pub since_secs: Option<i64>,
+    /// Image reference or image id (image ops only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Volume name (volume ops only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume: Option<String>,
 }
 
 impl WorkerRequest {
@@ -176,6 +255,8 @@ impl WorkerRequest {
             tail: None,
             ids: None,
             since_secs: None,
+            image: None,
+            volume: None,
         }
     }
 
@@ -196,6 +277,16 @@ impl WorkerRequest {
 
     pub fn since_secs(mut self, since_secs: i64) -> Self {
         self.since_secs = Some(since_secs);
+        self
+    }
+
+    pub fn image(mut self, image: impl Into<String>) -> Self {
+        self.image = Some(image.into());
+        self
+    }
+
+    pub fn volume(mut self, volume: impl Into<String>) -> Self {
+        self.volume = Some(volume.into());
         self
     }
 }
@@ -265,6 +356,18 @@ pub enum ValidatedAction {
     },
     /// Container inspection by id.
     Inspect(Vec<String>),
+    /// Start/stop/restart/remove of validated container ids.
+    Containers { op: WorkerOp, ids: Vec<String> },
+    /// Logs of one container.
+    ContainerLogs {
+        id: String,
+        tail: u32,
+        since_secs: Option<i64>,
+    },
+    /// Pull/remove of one validated image reference or id.
+    Image { op: WorkerOp, reference: String },
+    /// Removal of one validated volume name.
+    Volume { op: WorkerOp, name: String },
 }
 
 impl ValidatedAction {
@@ -273,6 +376,8 @@ impl ValidatedAction {
             Self::Plain(op) => *op,
             Self::App { op, .. } => *op,
             Self::Inspect(_) => WorkerOp::Inspect,
+            Self::Containers { op, .. } | Self::Image { op, .. } | Self::Volume { op, .. } => *op,
+            Self::ContainerLogs { .. } => WorkerOp::ContainerLogs,
         }
     }
 }
@@ -285,35 +390,70 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
         return Err("request id must be 1-128 characters".into());
     }
     match req.op {
-        WorkerOp::Version | WorkerOp::Info | WorkerOp::PsAll | WorkerOp::Stats => {
+        WorkerOp::Version
+        | WorkerOp::Info
+        | WorkerOp::PsAll
+        | WorkerOp::Stats
+        | WorkerOp::ImageList
+        | WorkerOp::ImagePrune
+        | WorkerOp::VolumeList => {
             reject_extra_args(req)?;
             Ok(ValidatedAction::Plain(req.op))
         }
+        WorkerOp::ContainerStart
+        | WorkerOp::ContainerStop
+        | WorkerOp::ContainerRestart
+        | WorkerOp::ContainerRemove => {
+            accept_only(req, &["ids"])?;
+            let ids = validated_ids(req)?;
+            Ok(ValidatedAction::Containers { op: req.op, ids })
+        }
+        WorkerOp::ContainerLogs => {
+            accept_only(req, &["ids", "tail", "sinceSecs"])?;
+            let ids = validated_ids(req)?;
+            let [id] = <[String; 1]>::try_from(ids)
+                .map_err(|_| "container-logs accepts exactly one container id".to_string())?;
+            let tail = req.tail.unwrap_or(DEFAULT_LOG_TAIL).clamp(1, MAX_LOG_TAIL);
+            let since_secs = validated_since(req.since_secs)?;
+            Ok(ValidatedAction::ContainerLogs {
+                id,
+                tail,
+                since_secs,
+            })
+        }
+        WorkerOp::ImagePull | WorkerOp::ImageRemove => {
+            accept_only(req, &["image"])?;
+            let reference = req
+                .image
+                .as_deref()
+                .ok_or_else(|| format!("{} requires `image`", req.op.as_str()))?;
+            validate_image_ref(reference)?;
+            Ok(ValidatedAction::Image {
+                op: req.op,
+                reference: reference.to_string(),
+            })
+        }
+        WorkerOp::VolumeRemove => {
+            accept_only(req, &["volume"])?;
+            let name = req
+                .volume
+                .as_deref()
+                .ok_or_else(|| "volume-remove requires `volume`".to_string())?;
+            validate_volume_name(name)?;
+            Ok(ValidatedAction::Volume {
+                op: req.op,
+                name: name.to_string(),
+            })
+        }
         WorkerOp::Inspect => {
-            if req.slug.is_some() || req.tail.is_some() || req.since_secs.is_some() {
-                return Err("inspect accepts only `ids`".into());
-            }
-            let ids = req
-                .ids
-                .as_ref()
-                .ok_or_else(|| "inspect requires `ids`".to_string())?;
-            if ids.is_empty() {
-                return Err("inspect requires at least one container id".into());
-            }
-            if ids.len() > MAX_CONTAINER_IDS {
-                return Err(format!(
-                    "inspect accepts at most {MAX_CONTAINER_IDS} container ids"
-                ));
-            }
-            for id in ids {
-                validate_container_id(id)?;
-            }
-            Ok(ValidatedAction::Inspect(ids.clone()))
+            accept_only(req, &["ids"])?;
+            Ok(ValidatedAction::Inspect(validated_ids(req)?))
         }
         op if op.is_app_op() => {
             if req.ids.is_some() {
                 return Err(format!("{} does not accept container ids", op.as_str()));
             }
+            accept_only(req, &["slug", "tail", "sinceSecs"])?;
             let slug = req
                 .slug
                 .as_deref()
@@ -334,17 +474,7 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
                 }
             };
             let since_secs = if op == WorkerOp::ComposeLogsSince {
-                let now = crate::db::now_secs();
-                let since = req.since_secs;
-                if let Some(secs) = since {
-                    if secs < 0 {
-                        return Err("sinceSecs must not be negative".into());
-                    }
-                    if secs > now.saturating_add(MAX_SINCE_SKEW_SECS) {
-                        return Err("sinceSecs is too far in the future".into());
-                    }
-                }
-                since
+                validated_since(req.since_secs)?
             } else {
                 if req.since_secs.is_some() {
                     return Err(format!("{} does not accept `sinceSecs`", op.as_str()));
@@ -367,10 +497,72 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
 }
 
 fn reject_extra_args(req: &WorkerRequest) -> Result<(), String> {
-    if req.slug.is_some() || req.tail.is_some() || req.ids.is_some() || req.since_secs.is_some() {
+    if req.slug.is_some()
+        || req.tail.is_some()
+        || req.ids.is_some()
+        || req.since_secs.is_some()
+        || req.image.is_some()
+        || req.volume.is_some()
+    {
         return Err(format!("{} accepts no arguments", req.op.as_str()));
     }
     Ok(())
+}
+
+/// Refuse every argument except the named ones.
+fn accept_only(req: &WorkerRequest, allowed: &[&str]) -> Result<(), String> {
+    let present = [
+        ("slug", req.slug.is_some()),
+        ("tail", req.tail.is_some()),
+        ("ids", req.ids.is_some()),
+        ("sinceSecs", req.since_secs.is_some()),
+        ("image", req.image.is_some()),
+        ("volume", req.volume.is_some()),
+    ];
+    for (name, set) in present {
+        if set && !allowed.contains(&name) {
+            return Err(format!("{} does not accept `{name}`", req.op.as_str()));
+        }
+    }
+    Ok(())
+}
+
+/// 1..=MAX_CONTAINER_IDS hexadecimal container ids, without duplicates.
+fn validated_ids(req: &WorkerRequest) -> Result<Vec<String>, String> {
+    let op = req.op.as_str();
+    let ids = req
+        .ids
+        .as_ref()
+        .ok_or_else(|| format!("{op} requires `ids`"))?;
+    if ids.is_empty() {
+        return Err(format!("{op} requires at least one container id"));
+    }
+    if ids.len() > MAX_CONTAINER_IDS {
+        return Err(format!(
+            "{op} accepts at most {MAX_CONTAINER_IDS} container ids"
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(ids.len());
+    for id in ids {
+        validate_container_id(id)?;
+        if !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// A log cursor in Unix seconds: not negative, not far in the future.
+fn validated_since(since: Option<i64>) -> Result<Option<i64>, String> {
+    if let Some(secs) = since {
+        if secs < 0 {
+            return Err("sinceSecs must not be negative".into());
+        }
+        if secs > crate::db::now_secs().saturating_add(MAX_SINCE_SKEW_SECS) {
+            return Err("sinceSecs is too far in the future".into());
+        }
+    }
+    Ok(since)
 }
 
 /// Docker Compose project name for a managed app: always `rast-<slug>`.
@@ -411,6 +603,58 @@ pub fn validate_container_id(id: &str) -> Result<(), String> {
     }
     if !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("invalid container id: expected hexadecimal characters".into());
+    }
+    Ok(())
+}
+
+/// Image references (`nginx:1.27`, `ghcr.io/org/app@sha256:…`) and image ids
+/// (`sha256:…`). The check is deliberately stricter than Docker's grammar in
+/// the places that matter for argument safety: it never starts with `-`,
+/// never contains whitespace, control characters or shell metacharacters, and
+/// has no empty path segments. Docker validates the rest.
+pub fn validate_image_ref(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > MAX_IMAGE_REF_LEN {
+        return Err(format!(
+            "invalid image: expected 1-{MAX_IMAGE_REF_LEN} characters"
+        ));
+    }
+    let first = value.as_bytes()[0];
+    if !first.is_ascii_alphanumeric() {
+        return Err("invalid image: must start with a letter or digit".into());
+    }
+    if !value
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b':' | b'@'))
+    {
+        return Err("invalid image: only letters, digits and . _ - / : @ are allowed".into());
+    }
+    if value.contains("//") || value.contains("..") {
+        return Err("invalid image: empty or relative path segment".into());
+    }
+    if value.matches('@').count() > 1 {
+        return Err("invalid image: more than one digest".into());
+    }
+    if value.ends_with(['/', ':', '@', '.', '-']) {
+        return Err("invalid image: incomplete reference".into());
+    }
+    Ok(())
+}
+
+/// Docker volume names: `[A-Za-z0-9][A-Za-z0-9_.-]*`, no path separators.
+pub fn validate_volume_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > MAX_VOLUME_NAME_LEN {
+        return Err(format!(
+            "invalid volume name: expected 1-{MAX_VOLUME_NAME_LEN} characters"
+        ));
+    }
+    if !name.as_bytes()[0].is_ascii_alphanumeric() {
+        return Err("invalid volume name: must start with a letter or digit".into());
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+    {
+        return Err("invalid volume name: only letters, digits and _ . - are allowed".into());
     }
     Ok(())
 }
@@ -635,6 +879,182 @@ mod tests {
             serde_json::to_string(&WorkerOp::ComposeUp).unwrap(),
             "\"compose-up\""
         );
+    }
+
+    #[test]
+    fn image_references_are_strict() {
+        for ok in [
+            "nginx",
+            "nginx:1.27-alpine",
+            "library/nginx:latest",
+            "ghcr.io/org/app:v1.2.3",
+            "localhost:5000/team/app",
+            "sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
+            "alpine@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
+            "be2656061b53",
+        ] {
+            assert!(validate_image_ref(ok).is_ok(), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            "-v",
+            "--all",
+            ":tag",
+            "/abs",
+            "nginx latest",
+            "nginx;id",
+            "nginx$(id)",
+            "a//b",
+            "a/../b",
+            "nginx:",
+            "nginx/",
+            "a@b@c",
+            "nginx\n",
+            &"a".repeat(MAX_IMAGE_REF_LEN + 1),
+        ] {
+            assert!(
+                validate_image_ref(bad).is_err(),
+                "{bad:?} should be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn volume_names_are_strict() {
+        for ok in ["data", "rast-shop_data", "a.b-c_d", "0abc"] {
+            assert!(validate_volume_name(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "",
+            "-x",
+            ".hidden",
+            "a/b",
+            "../x",
+            "a b",
+            "a:b",
+            &"a".repeat(256),
+        ] {
+            assert!(validate_volume_name(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn container_ops_take_only_validated_ids() {
+        let id = "0123456789ab".to_string();
+        for op in [
+            WorkerOp::ContainerStart,
+            WorkerOp::ContainerStop,
+            WorkerOp::ContainerRestart,
+            WorkerOp::ContainerRemove,
+        ] {
+            let req = WorkerRequest::new(op).ids(vec![id.clone(), id.clone()]);
+            match validate_request(&req, &apps_dir()).unwrap() {
+                ValidatedAction::Containers { op: got, ids } => {
+                    assert_eq!(got, op);
+                    assert_eq!(ids, vec![id.clone()], "duplicates are dropped");
+                }
+                other => panic!("unexpected action: {other:?}"),
+            }
+            for bad in [
+                WorkerRequest::new(op),
+                WorkerRequest::new(op).ids(vec![]),
+                WorkerRequest::new(op).ids(vec!["-f".into()]),
+                WorkerRequest::new(op).ids(vec!["shop-web-1".into()]),
+                WorkerRequest::new(op).ids(vec![id.clone()]).slug("shop"),
+                WorkerRequest::new(op).ids(vec![id.clone()]).tail(5),
+                WorkerRequest::new(op).ids(vec![id.clone()]).image("nginx"),
+                WorkerRequest::new(op).ids(vec![id.clone(); MAX_CONTAINER_IDS + 1]),
+            ] {
+                assert!(validate_request(&bad, &apps_dir()).is_err(), "{bad:?}");
+            }
+        }
+        assert_eq!(
+            serde_json::to_string(&WorkerOp::ContainerRemove).unwrap(),
+            "\"container-remove\""
+        );
+    }
+
+    #[test]
+    fn container_logs_take_one_id_and_a_bounded_tail() {
+        let now = crate::db::now_secs();
+        let req = WorkerRequest::new(WorkerOp::ContainerLogs)
+            .ids(vec!["0123456789ab".into()])
+            .tail(u32::MAX)
+            .since_secs(now - 60);
+        match validate_request(&req, &apps_dir()).unwrap() {
+            ValidatedAction::ContainerLogs {
+                id,
+                tail,
+                since_secs,
+            } => {
+                assert_eq!(id, "0123456789ab");
+                assert_eq!(tail, MAX_LOG_TAIL);
+                assert_eq!(since_secs, Some(now - 60));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        for bad in [
+            WorkerRequest::new(WorkerOp::ContainerLogs),
+            WorkerRequest::new(WorkerOp::ContainerLogs)
+                .ids(vec!["0123456789ab".into(), "0123456789ac".into()]),
+            WorkerRequest::new(WorkerOp::ContainerLogs)
+                .ids(vec!["0123456789ab".into()])
+                .since_secs(-1),
+            WorkerRequest::new(WorkerOp::ContainerLogs)
+                .ids(vec!["0123456789ab".into()])
+                .slug("shop"),
+        ] {
+            assert!(validate_request(&bad, &apps_dir()).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn image_and_volume_ops_validate_their_argument() {
+        let req = WorkerRequest::new(WorkerOp::ImagePull).image("nginx:alpine");
+        assert_eq!(
+            validate_request(&req, &apps_dir()).unwrap(),
+            ValidatedAction::Image {
+                op: WorkerOp::ImagePull,
+                reference: "nginx:alpine".into()
+            }
+        );
+        let req = WorkerRequest::new(WorkerOp::VolumeRemove).volume("rast-shop_data");
+        assert_eq!(
+            validate_request(&req, &apps_dir()).unwrap(),
+            ValidatedAction::Volume {
+                op: WorkerOp::VolumeRemove,
+                name: "rast-shop_data".into()
+            }
+        );
+        for bad in [
+            WorkerRequest::new(WorkerOp::ImagePull),
+            WorkerRequest::new(WorkerOp::ImagePull).image("--help"),
+            WorkerRequest::new(WorkerOp::ImageRemove)
+                .image("nginx")
+                .volume("data"),
+            WorkerRequest::new(WorkerOp::ImageRemove)
+                .image("nginx")
+                .ids(vec!["0123456789ab".into()]),
+            WorkerRequest::new(WorkerOp::VolumeRemove),
+            WorkerRequest::new(WorkerOp::VolumeRemove).volume("../etc"),
+            WorkerRequest::new(WorkerOp::VolumeRemove)
+                .volume("data")
+                .image("nginx"),
+            WorkerRequest::new(WorkerOp::ImageList).image("nginx"),
+            WorkerRequest::new(WorkerOp::ImagePrune).volume("data"),
+            WorkerRequest::new(WorkerOp::VolumeList).slug("shop"),
+            WorkerRequest::new(WorkerOp::ComposeUp)
+                .slug("shop")
+                .image("nginx"),
+            WorkerRequest::new(WorkerOp::Inspect)
+                .ids(vec!["0123456789ab".into()])
+                .volume("x"),
+        ] {
+            assert!(validate_request(&bad, &apps_dir()).is_err(), "{bad:?}");
+        }
+        assert_eq!(WorkerOp::ImagePull.timeout(), PULL_OP_TIMEOUT);
+        assert_eq!(WorkerOp::ImageList.timeout(), QUICK_OP_TIMEOUT);
+        assert_eq!(WorkerOp::ContainerStop.timeout(), COMPOSE_OP_TIMEOUT);
     }
 
     #[test]

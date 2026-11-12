@@ -66,7 +66,14 @@ resource limits apply. For configuration keys see
 
 The web server **never** opens the Docker socket and never runs privileged
 commands. The worker accepts a strict JSON protocol with structured arguments
-and executes only whitelisted `docker` / `docker compose` operations.
+and executes only whitelisted `docker` / `docker compose` operations:
+Compose lifecycle and logs for managed apps (always the `rast-<slug>` project
+in `<data_dir>/apps/<slug>`), and for the Docker app's engine view
+`start`/`stop`/`restart`/`rm --force` (never `-v`) and `logs` by hex container
+id, `pull`/`image rm` (never forced) by a validated image reference,
+`image prune`, and `volume rm` (never forced) by a validated volume name.
+Arguments that could look like options are refused, and `--` ends option
+parsing before every image or volume name.
 
 ## Processes and systemd units
 

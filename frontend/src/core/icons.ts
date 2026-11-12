@@ -80,6 +80,8 @@ const PATHS: Record<string, string> = {
   chevronUp: `<path d="m5.6 14.6 6.4-6.4 6.4 6.4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
   arrowRight: `<path d="M4 12h14.8M13.4 6.6 18.8 12l-5.4 5.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`,
   package: `<path d="M12 3.2 19.8 7.4v9.2L12 20.8 4.2 16.6V7.4z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M4.4 7.6 12 11.8l7.6-4.2M12 11.8v8.8M8.2 5.4l7.6 4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>`,
+  layers: `<path d="M12 3.6 20.4 8 12 12.4 3.6 8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m3.6 12 8.4 4.4 8.4-4.4M3.6 16l8.4 4.4 8.4-4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
+  box: `<path d="M4.4 7.2 12 3.4l7.6 3.8v9.6L12 20.6l-7.6-3.8z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M4.6 7.4 12 11l7.4-3.6M12 11v9.4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>`,
   github: `<path d="M12 3.4a8.6 8.6 0 0 0-2.7 16.8c.4.1.6-.2.6-.4v-1.5c-2.4.5-2.9-1-2.9-1-.4-1-1-1.3-1-1.3-.8-.5.1-.5.1-.5.9.1 1.3.9 1.3.9.8 1.3 2 1 2.5.7.1-.6.3-1 .6-1.2-1.9-.2-3.9-1-3.9-4.3 0-.9.3-1.7.9-2.3-.1-.2-.4-1.1.1-2.3 0 0 .7-.2 2.4.9a8.2 8.2 0 0 1 4.3 0c1.6-1.1 2.4-.9 2.4-.9.5 1.2.2 2.1.1 2.3.5.6.9 1.4.9 2.3 0 3.3-2 4-3.9 4.3.3.3.6.8.6 1.6v2.4c0 .2.2.5.6.4A8.6 8.6 0 0 0 12 3.4z" fill="currentColor"/>`,
 };
 

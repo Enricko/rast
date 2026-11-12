@@ -9,11 +9,32 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- **Docker works like Docker Desktop.** A sidebar with Containers, Images and
+  Volumes. Containers lists every container on the server, grouped by Compose
+  project (RAST apps first), with status, CPU, memory, port links and
+  start/stop/restart. Each container has a page with live logs (search, follow,
+  stderr marked), its configuration (environment values hidden until shown)
+  and live usage charts.
+- Images: list with size and usage, pull from Docker Hub or a registry (runs as
+  a background job), delete unused images, and clean up untagged ones.
+- Volumes: list with the containers using each one; delete unused volumes
+  after typing the name.
+- Containers RAST does not manage can be deleted (type the name to confirm;
+  their volumes always stay) or turned into a RAST app from their menu.
+  Containers and volumes of a RAST app stay managed through the app.
+- New admin-only endpoints under `/api/docker/containers/{id}`,
+  `/api/docker/images*`, `/api/docker/volumes*` and `/api/docker/stats`, backed
+  by new whitelisted worker operations; every change is audited.
+
 ### Changed
 
 - Package Center is now called **App Center**, and Container Manager is now
   called **Docker**. Only the displayed names change: app ids (`packages`,
   `applications`), API paths, group rules, desktop layouts and pins stay.
+- Starting, stopping and restarting a RAST app no longer asks for
+  confirmation (like containers); redeploy and delete still do.
 
 ### Planned
 

@@ -74,6 +74,7 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `app.changed` | Admin | `{appId, status, containers}` |
 | `app.logs` | Admin | `{appId, lines:[{ts,stream,message}]}` (bounded stream) |
 | `docker.changed` | Admin | `{available, version, reason}` |
+| `docker.inventory` | Admin | `{kind: "containers"\|"images"\|"volumes"}` after a container, image or volume change made in RAST |
 | `backup.changed` | Admin | `{reason, id?}` |
 | `package.changed` | Accounts allowed to open App Center (admins, group `allow`) | `{packageId, version?, reason:"queued"\|"started"\|"installed"\|"failed"\|"default"\|"removed"\|"consumers", jobId?, error?}` |
 | `package.catalog` | Accounts allowed to open App Center | `{reason:"checking"}`, then `{reason:"checked", changed, sequence, error}` after every manual or automatic check |

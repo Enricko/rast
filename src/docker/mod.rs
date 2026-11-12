@@ -242,7 +242,11 @@ impl DockerManager {
     async fn send(&self, request: &WorkerRequest) -> Result<Value, DockerError> {
         let timeout = match request.op {
             op if op.is_app_op() => self.compose_timeout,
-            _ => self.quick_timeout,
+            op => match op.timeout_class() {
+                protocol::TimeoutClass::Quick => self.quick_timeout,
+                protocol::TimeoutClass::Long => self.compose_timeout,
+                protocol::TimeoutClass::Pull => protocol::PULL_OP_TIMEOUT,
+            },
         };
         self.send_with_timeout(request, timeout).await
     }
@@ -656,6 +660,7 @@ exit 0
             docker_bin,
             quick_timeout: StdDuration::from_secs(5),
             compose_timeout: StdDuration::from_secs(5),
+            pull_timeout: StdDuration::from_secs(5),
             max_concurrent: 2,
             allowed_peer_uid: None,
         };

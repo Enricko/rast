@@ -159,11 +159,44 @@ and `/api/docker/status` reports why.
 | GET | `/api/apps/{id}/logs?tail=200` | `{lines:[{ts,stream,message}]}` (admin only) |
 | GET | `/api/apps/{id}/history` | deployment history (read-only grant: no `detail`) |
 | DELETE | `/api/apps/{id}?removeVolumes=false` | confirmation required; volumes kept by default |
-| GET | `/api/docker/containers` | discovered containers, flagged `managed:true|false` |
+| GET | `/api/docker/containers` | every container on the host (`docker ps -a`), flagged `managed:true|false` with the app `slug` |
 | POST | `/api/docker/import` | `{containerIds:[]}` explicit import |
 
 Env values marked `secret:true` are encrypted at rest and returned masked
 (`"••••"`); submit a new value to change them.
+
+### Docker engine (admin only)
+
+Raw containers, images and volumes, as in Docker Desktop. Container ids are the
+full id or a unique prefix of at least 12 hex characters. Changes are audited
+(`docker.container.*`, `docker.image.*`, `docker.volume.remove`) and announced
+with the admin event `docker.inventory`. A refusal by Docker (image in use,
+container gone…) is `409 conflict` with Docker's message.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/docker/containers/{id}` | `{container, inspect, managed, slug, appId, terminal:{allowed, reason}}`; `inspect` has image, command, ports, mounts, env, labels, restart policy, privileged, networks, times, exit code, health |
+| POST | `/api/docker/containers/{id}/start` | `docker start` |
+| POST | `/api/docker/containers/{id}/stop` | `docker stop` |
+| POST | `/api/docker/containers/{id}/restart` | `docker restart` |
+| DELETE | `/api/docker/containers/{id}?confirm=<name>` | `docker rm --force`, never `-v`: volumes stay. `confirm` must equal the container name. Containers of a managed app → `409` (delete the app) |
+| GET | `/api/docker/containers/{id}/logs?tail=300&since=<unix secs>` | `{lines:[{ts, stream:"stdout"|"stderr", message}], tail}`, both streams merged by time; `tail` ≤ 2000 |
+| GET | `/api/docker/stats` | `{items:[{id, name, cpuPercent, memoryBytes, memoryLimitBytes, memoryPercent, netRxBytes, netTxBytes, blockReadBytes, blockWriteBytes, pids}], sampledAt}` |
+| GET | `/api/docker/images` | `{items:[{id, repository, tag, reference, digest, sizeBytes, size, createdAt, createdSince, containers, usedBy:[names], inUse}], totalBytes}`; untagged images have an empty `reference` |
+| POST | `/api/docker/images/pull` | `{image}` → `{jobId, image}`; job kind `docker.pull`, audited when it ends |
+| POST | `/api/docker/images/remove` | `{image}` (reference or id); never forced, so images in use stay |
+| POST | `/api/docker/images/prune` | removes untagged images no container uses → `{deleted, reclaimed}` |
+| GET | `/api/docker/volumes` | `{items:[{name, driver, scope, mountpoint, labels, project, anonymous, inUse, usedBy:[names], app}]}`; `app` is the managed app slug that owns it |
+| POST | `/api/docker/volumes/remove` | `{name, confirm}`; `confirm` must equal `name`. Volumes in use or owned by a managed app → `409` |
+
+Image references accept letters, digits and `. _ - / : @`, must start with a
+letter or digit and have no empty path segment. Volume names follow Docker's
+`[A-Za-z0-9][A-Za-z0-9_.-]*`.
+
+`terminal.allowed` is false for privileged containers, containers sharing the
+host's processes or network, with devices or extra capabilities such as
+`SYS_ADMIN`, and containers that bind-mount `/`, a system folder (`/etc`,
+`/root`, `/home`, `/usr`, `/var/lib`, `/proc`, …) or the Docker socket.
 
 ## Resource monitor
 

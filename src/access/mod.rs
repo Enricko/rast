@@ -956,7 +956,9 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
     match kind {
         "monitor" => Some("monitor"),
         "file.changed" | "file.quota" | "files.resync" => Some("files"),
-        "app.changed" | "app.deploy" | "app.logs" | "docker.changed" => Some("applications"),
+        "app.changed" | "app.deploy" | "app.logs" | "docker.changed" | "docker.inventory" => {
+            Some("applications")
+        }
         "backup.changed" | "backup.done" => Some("backup"),
         "package.changed" | "package.catalog" => Some("packages"),
         "audit.created" => Some("logs"),
@@ -968,7 +970,7 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
                 Some("backup")
             } else if job_kind.starts_with("package") {
                 Some("packages")
-            } else if job_kind.starts_with("app") {
+            } else if job_kind.starts_with("app") || job_kind.starts_with("docker") {
                 Some("applications")
             } else {
                 Some("files")

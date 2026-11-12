@@ -50,11 +50,15 @@ use crate::{
     config::Config,
     docker::{
         compose,
-        containers::{parse_compose_logs, parse_inspect_json, parse_ps_json, parse_stats_json},
+        containers::{
+            parse_compose_logs, parse_container_logs, parse_images_json, parse_inspect_json,
+            parse_ps_json, parse_stats_json, parse_volumes_json,
+        },
         protocol::{
-            truncate_message, validate_container_id, validate_request, ValidatedAction, WorkerOp,
-            WorkerRequest, WorkerResponse, COMPOSE_OP_TIMEOUT, MAX_LINE_BYTES, MAX_LOG_TAIL,
-            PROTOCOL_VERSION, QUICK_OP_TIMEOUT,
+            truncate_message, validate_container_id, validate_image_ref, validate_request,
+            validate_volume_name, ValidatedAction, WorkerOp, WorkerRequest, WorkerResponse,
+            COMPOSE_OP_TIMEOUT, MAX_LINE_BYTES, MAX_LOG_TAIL, PROTOCOL_VERSION, PULL_OP_TIMEOUT,
+            QUICK_OP_TIMEOUT,
         },
     },
 };
@@ -69,6 +73,12 @@ const MAX_ERROR_MESSAGE: usize = 800;
 const MAX_CONTAINERS: usize = 500;
 /// Maximum number of volumes removed in one request.
 const MAX_VOLUMES: usize = 200;
+/// Maximum number of images or volumes returned by list operations.
+const MAX_LIST_ITEMS: usize = 1000;
+/// Bytes of `docker pull`/`rm`/`prune` output kept for the result.
+const MAX_ACTION_OUTPUT: usize = 256 * 1024;
+/// Lines of action output returned to the client.
+const MAX_ACTION_LINES: usize = 40;
 /// Maximum bytes read from a Compose file.
 const MAX_COMPOSE_READ: u64 = compose::MAX_COMPOSE_BYTES as u64;
 /// How long the worker waits for a second client before considering the
@@ -85,6 +95,7 @@ pub struct WorkerOptions {
     pub docker_bin: PathBuf,
     pub quick_timeout: Duration,
     pub compose_timeout: Duration,
+    pub pull_timeout: Duration,
     pub max_concurrent: usize,
     /// Optional numeric uid the connecting peer must have.
     pub allowed_peer_uid: Option<u32>,
@@ -107,6 +118,7 @@ impl WorkerOptions {
             docker_bin,
             quick_timeout: QUICK_OP_TIMEOUT,
             compose_timeout: COMPOSE_OP_TIMEOUT,
+            pull_timeout: PULL_OP_TIMEOUT,
             // Container stats/compose operations can be slow; a small limit
             // would let one slow `docker stats` starve deploys and restarts.
             max_concurrent: 8,
@@ -444,12 +456,36 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
             WorkerOp::Info => docker_info(options).await,
             WorkerOp::PsAll => docker_ps_all(options).await,
             WorkerOp::Stats => docker_stats(options).await,
+            WorkerOp::ImageList => docker_image_list(options).await,
+            WorkerOp::ImagePrune => docker_image_prune(options).await,
+            WorkerOp::VolumeList => docker_volume_list(options).await,
             _ => Err(WorkerError::invalid(format!(
                 "operation '{}' requires application arguments",
                 op.as_str()
             ))),
         },
         ValidatedAction::Inspect(ids) => docker_inspect(options, &ids).await,
+        ValidatedAction::Containers { op, ids } => docker_container_action(options, op, &ids).await,
+        ValidatedAction::ContainerLogs {
+            id,
+            tail,
+            since_secs,
+        } => docker_container_logs(options, &id, tail, since_secs).await,
+        ValidatedAction::Image { op, reference } => match op {
+            WorkerOp::ImagePull => docker_image_pull(options, &reference).await,
+            WorkerOp::ImageRemove => docker_image_remove(options, &reference).await,
+            _ => Err(WorkerError::invalid(format!(
+                "operation '{}' does not take an image",
+                op.as_str()
+            ))),
+        },
+        ValidatedAction::Volume { op, name } => match op {
+            WorkerOp::VolumeRemove => docker_volume_remove(options, &name).await,
+            _ => Err(WorkerError::invalid(format!(
+                "operation '{}' does not take a volume",
+                op.as_str()
+            ))),
+        },
         ValidatedAction::App {
             op,
             slug,
@@ -919,6 +955,257 @@ fn format_rfc3339_secs(secs: i64) -> Option<String> {
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
+/// `docker start|stop|restart|rm -f` for validated container ids. Removal
+/// never passes `-v`, so a container's volumes (its data) always stay.
+async fn docker_container_action(
+    options: &WorkerOptions,
+    op: WorkerOp,
+    ids: &[String],
+) -> Result<Value, WorkerError> {
+    for id in ids {
+        validate_container_id(id).map_err(WorkerError::invalid)?;
+    }
+    let (verb, mut args) = match op {
+        WorkerOp::ContainerStart => ("start", os_args(&["start"])),
+        WorkerOp::ContainerStop => ("stop", os_args(&["stop"])),
+        WorkerOp::ContainerRestart => ("restart", os_args(&["restart"])),
+        WorkerOp::ContainerRemove => ("remove", os_args(&["rm", "--force"])),
+        other => {
+            return Err(WorkerError::invalid(format!(
+                "operation '{}' is not a container action",
+                other.as_str()
+            )))
+        }
+    };
+    args.extend(ids.iter().map(OsString::from));
+    let output = run_docker(
+        options,
+        args,
+        None,
+        options.compose_timeout,
+        MAX_ACTION_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        let message = stderr_summary(&output);
+        if message.contains("No such container") {
+            return Err(WorkerError::not_found(message));
+        }
+        return Err(WorkerError::command_failed(format!(
+            "container {verb} failed: {message}"
+        )));
+    }
+    Ok(json!({"action": verb, "ids": ids}))
+}
+
+/// `docker logs` for one container. Docker writes the container's stdout to
+/// our stdout and its stderr to our stderr; both are kept and merged by
+/// timestamp.
+async fn docker_container_logs(
+    options: &WorkerOptions,
+    id: &str,
+    tail: u32,
+    since_secs: Option<i64>,
+) -> Result<Value, WorkerError> {
+    validate_container_id(id).map_err(WorkerError::invalid)?;
+    let tail = tail.clamp(1, MAX_LOG_TAIL);
+    let mut args = os_args(&["logs", "--timestamps", "--tail"]);
+    args.push(OsString::from(tail.to_string()));
+    if let Some(secs) = since_secs {
+        let since = format_rfc3339_secs(secs)
+            .ok_or_else(|| WorkerError::invalid("invalid sinceSecs log cursor"))?;
+        args.push(OsString::from("--since"));
+        args.push(OsString::from(since));
+    }
+    args.push(OsString::from(id));
+    let output = run_docker_capture(
+        options,
+        args,
+        None,
+        options.quick_timeout,
+        MAX_CMD_OUTPUT,
+        MAX_CMD_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        let message = stderr_summary(&output);
+        if message.contains("No such container") {
+            return Err(WorkerError::not_found(message));
+        }
+        return Err(WorkerError::command_failed(format!(
+            "cannot read container logs: {message}"
+        )));
+    }
+    let mut lines = parse_container_logs(&output.stdout, &output.stderr);
+    truncate_from_start(&mut lines, tail as usize);
+    Ok(json!({"lines": lines, "tail": tail}))
+}
+
+async fn docker_image_list(options: &WorkerOptions) -> Result<Value, WorkerError> {
+    let args = os_args(&[
+        "image",
+        "ls",
+        "--all",
+        "--no-trunc",
+        "--format",
+        "{{json .}}",
+    ]);
+    let output = run_docker(options, args, None, options.quick_timeout, MAX_CMD_OUTPUT).await?;
+    if !output.success {
+        return Err(WorkerError::unavailable(format!(
+            "cannot list docker images: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let mut items = parse_images_json(&output.stdout);
+    items.truncate(MAX_LIST_ITEMS);
+    Ok(json!({"items": items}))
+}
+
+/// `docker pull -- <reference>`. The reference was validated (it can never
+/// look like a flag) and `--` ends option parsing as a second guard.
+async fn docker_image_pull(options: &WorkerOptions, reference: &str) -> Result<Value, WorkerError> {
+    validate_image_ref(reference).map_err(WorkerError::invalid)?;
+    let args = vec![
+        OsString::from("pull"),
+        OsString::from("--"),
+        OsString::from(reference),
+    ];
+    let output = run_docker(options, args, None, options.pull_timeout, MAX_ACTION_OUTPUT).await?;
+    if !output.success {
+        return Err(WorkerError::command_failed(format!(
+            "cannot pull {reference}: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let lines = action_lines(&output.stdout);
+    let digest = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("Digest: "))
+        .map(str::to_string);
+    Ok(json!({"image": reference, "digest": digest, "output": lines}))
+}
+
+/// `docker image rm -- <reference>`, never `--force`: Docker refuses images
+/// that a container uses.
+async fn docker_image_remove(
+    options: &WorkerOptions,
+    reference: &str,
+) -> Result<Value, WorkerError> {
+    validate_image_ref(reference).map_err(WorkerError::invalid)?;
+    let args = vec![
+        OsString::from("image"),
+        OsString::from("rm"),
+        OsString::from("--"),
+        OsString::from(reference),
+    ];
+    let output = run_docker(
+        options,
+        args,
+        None,
+        options.compose_timeout,
+        MAX_ACTION_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        let message = stderr_summary(&output);
+        if message.contains("No such image") {
+            return Err(WorkerError::not_found(message));
+        }
+        return Err(WorkerError::command_failed(format!(
+            "cannot remove {reference}: {message}"
+        )));
+    }
+    Ok(json!({"image": reference, "output": action_lines(&output.stdout)}))
+}
+
+/// `docker image prune --force`: only untagged images that no container uses.
+async fn docker_image_prune(options: &WorkerOptions) -> Result<Value, WorkerError> {
+    let args = os_args(&["image", "prune", "--force"]);
+    let output = run_docker(
+        options,
+        args,
+        None,
+        options.compose_timeout,
+        MAX_ACTION_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        return Err(WorkerError::command_failed(format!(
+            "cannot remove unused images: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let deleted = output
+        .stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with("deleted:"))
+        .count();
+    let reclaimed = output
+        .stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Total reclaimed space:"))
+        .map(|text| text.trim().to_string())
+        .unwrap_or_default();
+    Ok(json!({"deleted": deleted, "reclaimed": reclaimed}))
+}
+
+async fn docker_volume_list(options: &WorkerOptions) -> Result<Value, WorkerError> {
+    let args = os_args(&["volume", "ls", "--format", "{{json .}}"]);
+    let output = run_docker(options, args, None, options.quick_timeout, MAX_CMD_OUTPUT).await?;
+    if !output.success {
+        return Err(WorkerError::unavailable(format!(
+            "cannot list docker volumes: {}",
+            stderr_summary(&output)
+        )));
+    }
+    let mut items = parse_volumes_json(&output.stdout);
+    items.truncate(MAX_LIST_ITEMS);
+    Ok(json!({"items": items}))
+}
+
+/// `docker volume rm -- <name>`, never `--force`: Docker refuses volumes that
+/// a container (running or stopped) still uses.
+async fn docker_volume_remove(options: &WorkerOptions, name: &str) -> Result<Value, WorkerError> {
+    validate_volume_name(name).map_err(WorkerError::invalid)?;
+    let args = vec![
+        OsString::from("volume"),
+        OsString::from("rm"),
+        OsString::from("--"),
+        OsString::from(name),
+    ];
+    let output = run_docker(
+        options,
+        args,
+        None,
+        options.compose_timeout,
+        MAX_ACTION_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        let message = stderr_summary(&output);
+        if message.contains("no such volume") || message.contains("No such volume") {
+            return Err(WorkerError::not_found(message));
+        }
+        return Err(WorkerError::command_failed(format!(
+            "cannot remove volume {name}: {message}"
+        )));
+    }
+    Ok(json!({"removed": name}))
+}
+
+/// Last non-empty, control-free lines of a command's output.
+fn action_lines(stdout: &str) -> Vec<String> {
+    let mut lines: Vec<String> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| truncate_message(line, 300))
+        .collect();
+    truncate_from_start(&mut lines, MAX_ACTION_LINES);
+    lines
+}
+
 async fn remove_project_volumes(
     options: &WorkerOptions,
     context: &AppContext,
@@ -1002,6 +1289,19 @@ async fn run_docker(
     limit: Duration,
     max_stdout: usize,
 ) -> Result<CommandOutput, WorkerError> {
+    run_docker_capture(options, args, workdir, limit, max_stdout, MAX_CMD_STDERR).await
+}
+
+/// [`run_docker`] with an explicit stderr cap (container logs arrive on both
+/// streams).
+async fn run_docker_capture(
+    options: &WorkerOptions,
+    args: Vec<OsString>,
+    workdir: Option<&Path>,
+    limit: Duration,
+    max_stdout: usize,
+    max_stderr: usize,
+) -> Result<CommandOutput, WorkerError> {
     let mut command = Command::new(&options.docker_bin);
     command
         .args(&args)
@@ -1028,7 +1328,7 @@ async fn run_docker(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_task = tokio::spawn(read_capped(stdout, max_stdout));
-    let stderr_task = tokio::spawn(read_capped(stderr, MAX_CMD_STDERR));
+    let stderr_task = tokio::spawn(read_capped(stderr, max_stderr));
 
     let status = match tokio::time::timeout(limit, child.wait()).await {
         Ok(Ok(status)) => status,
@@ -1159,6 +1459,7 @@ mod tests {
                 docker_bin: script_path,
                 quick_timeout: Duration::from_secs(5),
                 compose_timeout: Duration::from_secs(10),
+                pull_timeout: Duration::from_secs(10),
                 // Container stats/compose operations can be slow; a small limit
                 // would let one slow `docker stats` starve deploys and restarts.
                 max_concurrent: 8,
@@ -1258,7 +1559,23 @@ case "$1" in
     esac ;;
   stats) echo '{"BlockIO":"0B / 0B","CPUPerc":"1.50%","Container":"0123456789ab","ID":"0123456789ab","MemPerc":"0.50%","MemUsage":"10MiB / 1GiB","Name":"shop-web-1","NetIO":"1kB / 2kB","Pids":"3"}' ;;
   inspect) echo '[{"Id":"0123456789ab","Name":"/legacy","Config":{"Image":"nginx:alpine","Env":["A=1"],"Labels":{}},"State":{"Status":"running"},"HostConfig":{"RestartPolicy":{"Name":"always"}},"Mounts":[],"NetworkSettings":{"Ports":{}}}]' ;;
-  volume) if [ "$2" = "ls" ]; then echo "rast-shop_data"; else echo "rast-shop_data"; fi ;;
+  volume)
+    case "$*" in
+      *"{{json .}}"*) echo '{"Driver":"local","Labels":"com.docker.compose.project=rast-shop","Mountpoint":"/var/lib/docker/volumes/rast-shop_data/_data","Name":"rast-shop_data","Scope":"local"}' ;;
+      *) echo "rast-shop_data" ;;
+    esac ;;
+  start|stop|restart|rm) echo "0123456789ab" ;;
+  logs)
+    echo "2026-11-10T13:24:02.000000000Z out-one"
+    echo "2026-11-10T13:24:03.000000000Z err-two" >&2
+    echo "2026-11-10T13:24:04.000000000Z out-three" ;;
+  pull) printf 'alpine: Pulling from library/alpine\nDigest: sha256:abc\nStatus: Downloaded newer image for alpine:3.20\n' ;;
+  image)
+    case "$2" in
+      ls) echo '{"Containers":"1","CreatedAt":"2026-11-01 10:00:00 +0000 UTC","CreatedSince":"2 weeks ago","Digest":"<none>","ID":"sha256:713f","Repository":"nginx","Size":"94.5MB","Tag":"alpine"}' ;;
+      rm) echo "Untagged: nginx:alpine" ;;
+      prune) printf 'Deleted Images:\ndeleted: sha256:aa\ndeleted: sha256:bb\n\nTotal reclaimed space: 12.5MB\n' ;;
+    esac ;;
   compose)
     sub=""
     for arg in "$@"; do
@@ -1423,6 +1740,138 @@ exit 0
             .await;
         assert!(inspect.ok, "{inspect:?}");
         assert_eq!(inspect.data.unwrap()["items"][0]["name"], "legacy");
+    }
+
+    #[tokio::test]
+    async fn container_actions_use_structured_args_and_keep_volumes() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let id = "0123456789ab".to_string();
+        for (op, expected) in [
+            (WorkerOp::ContainerStart, vec!["start", "0123456789ab"]),
+            (WorkerOp::ContainerStop, vec!["stop", "0123456789ab"]),
+            (WorkerOp::ContainerRestart, vec!["restart", "0123456789ab"]),
+            (
+                WorkerOp::ContainerRemove,
+                vec!["rm", "--force", "0123456789ab"],
+            ),
+        ] {
+            let response = env.call(WorkerRequest::new(op).ids(vec![id.clone()])).await;
+            assert!(response.ok, "{response:?}");
+            let calls = env.logged_args();
+            assert_eq!(calls.last().unwrap(), &expected);
+        }
+        assert!(!env
+            .logged_args()
+            .iter()
+            .flatten()
+            .any(|arg| arg == "-v" || arg == "--volumes"));
+        // Names and flags never reach docker.
+        let before = env.logged_args().len();
+        for bad in ["-f", "shop-web-1", "--all"] {
+            let response = env
+                .call(WorkerRequest::new(WorkerOp::ContainerStop).ids(vec![bad.into()]))
+                .await;
+            assert!(!response.ok);
+            assert_eq!(response.error.unwrap().code, "invalid_request");
+        }
+        assert_eq!(env.logged_args().len(), before);
+    }
+
+    #[tokio::test]
+    async fn container_logs_merge_stdout_and_stderr() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let response = env
+            .call(
+                WorkerRequest::new(WorkerOp::ContainerLogs)
+                    .ids(vec!["0123456789ab".into()])
+                    .tail(50),
+            )
+            .await;
+        assert!(response.ok, "{response:?}");
+        let data = response.data.unwrap();
+        let lines = data["lines"].as_array().unwrap();
+        let messages: Vec<&str> = lines
+            .iter()
+            .map(|l| l["message"].as_str().unwrap())
+            .collect();
+        assert_eq!(messages, vec!["out-one", "err-two", "out-three"]);
+        assert_eq!(lines[1]["stream"], "stderr");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["logs", "--timestamps", "--tail", "50", "0123456789ab"]
+        );
+    }
+
+    #[tokio::test]
+    async fn image_operations_end_option_parsing_and_never_force() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let list = env.call(WorkerRequest::new(WorkerOp::ImageList)).await;
+        assert!(list.ok, "{list:?}");
+        assert_eq!(list.data.unwrap()["items"][0]["reference"], "nginx:alpine");
+
+        let pull = env
+            .call(WorkerRequest::new(WorkerOp::ImagePull).image("alpine:3.20"))
+            .await;
+        assert!(pull.ok, "{pull:?}");
+        assert_eq!(pull.data.unwrap()["digest"], "sha256:abc");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["pull", "--", "alpine:3.20"]
+        );
+
+        let remove = env
+            .call(WorkerRequest::new(WorkerOp::ImageRemove).image("nginx:alpine"))
+            .await;
+        assert!(remove.ok, "{remove:?}");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["image", "rm", "--", "nginx:alpine"]
+        );
+
+        let prune = env.call(WorkerRequest::new(WorkerOp::ImagePrune)).await;
+        assert!(prune.ok, "{prune:?}");
+        let data = prune.data.unwrap();
+        assert_eq!(data["deleted"], 2);
+        assert_eq!(data["reclaimed"], "12.5MB");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["image", "prune", "--force"]
+        );
+        // Image removal never forces (Docker refuses images in use).
+        assert!(!env.logged_args().iter().any(|call| {
+            call.get(1).map(String::as_str) == Some("rm")
+                && call.iter().any(|arg| arg == "-f" || arg == "--force")
+        }));
+
+        let before = env.logged_args().len();
+        let response = env
+            .call(WorkerRequest::new(WorkerOp::ImagePull).image("--help"))
+            .await;
+        assert_eq!(response.error.unwrap().code, "invalid_request");
+        assert_eq!(env.logged_args().len(), before);
+    }
+
+    #[tokio::test]
+    async fn volume_list_and_single_removal() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let list = env.call(WorkerRequest::new(WorkerOp::VolumeList)).await;
+        assert!(list.ok, "{list:?}");
+        let data = list.data.unwrap();
+        assert_eq!(data["items"][0]["name"], "rast-shop_data");
+        assert_eq!(data["items"][0]["project"], "rast-shop");
+
+        let remove = env
+            .call(WorkerRequest::new(WorkerOp::VolumeRemove).volume("rast-shop_data"))
+            .await;
+        assert!(remove.ok, "{remove:?}");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["volume", "rm", "--", "rast-shop_data"]
+        );
+        let response = env
+            .call(WorkerRequest::new(WorkerOp::VolumeRemove).volume("../escape"))
+            .await;
+        assert_eq!(response.error.unwrap().code, "invalid_request");
     }
 
     #[tokio::test]

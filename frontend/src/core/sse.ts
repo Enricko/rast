@@ -46,6 +46,7 @@ const KNOWN_EVENTS = [
   "app.deploy",
   "app.logs",
   "docker.changed",
+  "docker.inventory",
   "file.changed",
   "file.quota",
   "files.resync",

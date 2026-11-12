@@ -1,22 +1,23 @@
-// Docker (app id `applications`): Docker status, managed app lifecycle, deploy dialog, logs,
-// deployment history and explicit import of discovered containers.
+// Docker (app id `applications`), laid out like Docker Desktop: every container
+// on the server grouped by Compose project (RAST apps first), images and
+// volumes, and a page per container with logs, configuration and usage. RAST
+// apps keep their deploy dialog, detail window (logs, history) and delete flow.
 // OWNER: teammate `frontend-apps`.
 
 import type { AppDefinition, AppContext } from "../../core/app";
 import type { ConnectionState } from "../../core/sse";
-import { h, clear } from "../../core/dom";
+import { h, clear, field } from "../../core/dom";
 import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
 import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../components/live";
 import { formatBytes, formatPercent, formatDateTime, relativeTime, formatTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import type {
   AppEnvVar,
-  ContainerInfo,
   DockerStatus,
   ManagedApp,
   Permissions,
 } from "../../core/types";
-import { confirmDialog, errorMessage, modal } from "../../core/ui";
+import { confirmDialog, contextMenu, copyText, errorMessage, modal, type ContextMenuEntry } from "../../core/ui";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel } from "../../components/jobs";
 import {
@@ -28,6 +29,30 @@ import {
   renderLoadFailure,
   unavailableReason,
 } from "../../components/states";
+import { mountContainerPage, type ContainerPage } from "./container-page";
+import {
+  containerStateLabel,
+  containerTone,
+  filterGroups,
+  filterImages,
+  filterVolumes,
+  groupContainers,
+  groupState,
+  imageLabel,
+  imageRefError,
+  indexStats,
+  isRunning,
+  portLinks,
+  shortId,
+  usageFor,
+  type ContainerGroup,
+  type ContainerStat,
+  type EngineContainer,
+  type EngineImage,
+  type EngineVolume,
+  type PortMap,
+  type UsageFilter,
+} from "./model";
 
 // ---------------------------------------------------------------------------
 // API payload shapes (docs/API.md).
@@ -139,9 +164,9 @@ interface PermissionsCarrier {
 type DetailTab = "overview" | "logs" | "history";
 type AppAction = "start" | "stop" | "restart" | "redeploy";
 
+type EngineView = "containers" | "images" | "volumes";
+
 const TAIL_OPTIONS = [200, 500, 1000];
-const MAX_APP_ROWS = 200;
-const MAX_CONTAINER_ROWS = 100;
 
 // ---------------------------------------------------------------------------
 // Application wrapper
@@ -151,18 +176,19 @@ class ApplicationsApp {
   private readonly ctx: AppContext;
   private readonly lc: AppLifecycle;
   private readonly bannerHost: HTMLElement;
-  private readonly appsHost: HTMLElement;
-  private readonly containersHost: HTMLElement;
   private readonly statusBadge: HTMLElement;
   private readonly deployButton: HTMLButtonElement;
-  private readonly importButton: HTMLButtonElement;
-  private readonly importLabel: HTMLElement;
-  private readonly contentEl: HTMLElement;
+  private readonly pullButton: HTMLButtonElement;
+  private readonly search: HTMLInputElement;
+  private readonly sidebar: HTMLElement;
+  private readonly main: HTMLElement;
+  private readonly viewHost: HTMLElement;
   private readonly realtime: RealtimeStore;
   private readonly liveIndicator: LiveIndicator;
   private readonly notice: NoticeBar;
   private readonly syncApps: { run: () => void; cancel: () => void };
   private readonly syncContainers: { run: () => void; cancel: () => void };
+  private readonly syncInventory: { run: () => void; cancel: () => void };
   private detailChangedHook: ((data: AppChangedEvent) => void) | null = null;
   private readonly accessCheck: { run: () => void; cancel: () => void };
   private localPermissions: PermissionsState | null = null;
@@ -173,15 +199,31 @@ class ApplicationsApp {
   private activeModalClose: (() => void) | null = null;
   private detailAccessHandler: ((readOnly: boolean) => void) | null = null;
 
+  private view: EngineView = "containers";
+  private query = "";
+  private runningOnly = false;
+  private imageFilter: UsageFilter = "all";
+  private volumeFilter: UsageFilter = "all";
+  private readonly expanded = new Set<string>();
+  private page: ContainerPage | null = null;
+  private busy = new Set<string>();
+
   private docker: DockerStatus | null = null;
   private dockerError: unknown = null;
   private apps: ManagedAppView[] = [];
   private appsLoading = true;
   private appsError: unknown = null;
-  private containers: ContainerInfo[] = [];
-  private containersLoading = false;
+  private containers: EngineContainer[] = [];
+  private containersLoaded = false;
   private containersError: unknown = null;
-  private importSelection = new Set<string>();
+  private stats = new Map<string, ContainerStat>();
+  private images: EngineImage[] = [];
+  private imagesLoaded = false;
+  private imagesError: unknown = null;
+  private imagesTotal = 0;
+  private volumes: EngineVolume[] = [];
+  private volumesLoaded = false;
+  private volumesError: unknown = null;
   private disposed = false;
 
   constructor(ctx: AppContext) {
@@ -192,49 +234,59 @@ class ApplicationsApp {
     this.liveIndicator = createLiveIndicator(this.realtime, this.lc);
     this.syncApps = debounceTask(() => void this.reloadAfterEvent(), 250);
     this.syncContainers = debounceTask(() => void this.loadContainers(), 400);
+    this.syncInventory = debounceTask(() => void this.loadInventory(), 300);
     this.lc.add(() => {
       this.syncApps.cancel();
       this.syncContainers.cancel();
+      this.syncInventory.cancel();
     });
 
-    this.statusBadge = h("span", { class: "badge app-docker-badge" }, "Checking Docker…");
+    this.statusBadge = h("span", { class: "dk-engine muted small" }, "Checking Docker…");
+    this.search = h("input", { class: "input input-search dk-search", type: "search", placeholder: "Search", ariaLabel: "Search" });
+    this.search.addEventListener("input", () => {
+      this.query = this.search.value;
+      this.renderView();
+    });
     this.deployButton = h(
       "button",
-      { class: "btn btn-primary btn-sm", type: "button", disabled: true },
+      { class: "btn btn-primary btn-sm", type: "button", disabled: true, title: "Deploy a Compose app" },
       iconSvg("plus", 14),
-      document.createTextNode("Deploy application"),
+      h("span", { class: "dk-btn-label" }, "New app"),
     );
     this.deployButton.addEventListener("click", () => void this.openDeployDialog());
-    this.importLabel = h("span", {}, "Import selected");
-    this.importButton = h(
+    this.pullButton = h(
       "button",
-      { class: "btn btn-ghost btn-sm", type: "button", disabled: true },
+      { class: "btn btn-primary btn-sm", type: "button", title: "Download an image from Docker Hub or a registry" },
       iconSvg("download", 14),
-      this.importLabel,
+      h("span", { class: "dk-btn-label" }, "Pull image"),
     );
-    this.importButton.addEventListener("click", () => void this.importSelected());
+    this.pullButton.addEventListener("click", () => this.openPullDialog());
+    const refresh = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "Refresh", ariaLabel: "Refresh" }, iconSvg("refresh", 16));
+    refresh.addEventListener("click", () => void this.refreshAll(true));
 
     const toolbar = h(
       "div",
-      { class: "app-toolbar", role: "toolbar", ariaLabel: "Application actions" },
-      this.statusBadge,
-      this.liveIndicator.el,
+      { class: "app-toolbar dk-toolbar", role: "toolbar", ariaLabel: "Docker" },
+      refresh,
+      this.search,
       h("div", { class: "app-toolbar-spacer" }),
-      this.importButton,
+      this.liveIndicator.el,
+      this.pullButton,
       this.deployButton,
     );
 
     this.bannerHost = h("div", { class: "appmgmt-banners" });
-    this.appsHost = h("div", { class: "appmgmt-apps" });
-    this.containersHost = h("div", { class: "appmgmt-containers" });
-
-    this.contentEl = h("div", { class: "app-content appmgmt-content" }, this.bannerHost, this.appsHost, this.containersHost);
-    ctx.root.classList.add("applications-app");
-    ctx.root.append(toolbar, this.notice.el, this.contentEl);
+    this.viewHost = h("div", { class: "dk-view" });
+    this.sidebar = h("nav", { class: "app-sidebar dk-sidebar", ariaLabel: "Docker views" });
+    this.main = h("div", { class: "app-main dk-main" }, this.bannerHost, this.viewHost);
+    ctx.root.classList.add("applications-app", "docker-app");
+    ctx.root.append(toolbar, this.notice.el, h("div", { class: "app-split dk-split" }, this.sidebar, this.main));
 
     this.lc.add(() => {
       this.disposed = true;
       this.detailChangedHook = null;
+      this.page?.dispose();
+      this.page = null;
     });
     this.subscribeRealtime();
     this.accessCheck = debounceTask(() => void this.onAccessChanged(), 150);
@@ -256,11 +308,32 @@ class ApplicationsApp {
       }),
     );
     this.lc.add(this.realtime.on("access.changed", () => this.accessCheck.run()));
+    // Containers change outside RAST too (crashes, other tools): keep the list
+    // and the usage numbers fresh while the window is in view.
+    this.lc.setInterval(() => {
+      if (!this.visible()) return;
+      if (this.view === "containers" && !this.page) {
+        void this.loadContainers();
+        void this.loadStats();
+      }
+    }, 8_000);
     this.applyAccessPolicy();
   }
 
-  // ----------------------------------------------------------- access policy
+  private visible(): boolean {
+    return !this.disposed && !this.denied && !document.hidden && !this.ctx.window.isMinimized();
+  }
 
+  /** Only administrators can list and change the engine itself. */
+  private engineAccess(): boolean {
+    return this.ctx.store.isAdmin();
+  }
+
+  private canChange(): boolean {
+    return !this.readOnly && !this.denied && this.dockerUsable();
+  }
+
+  // ----------------------------------------------------------- access policy
 
   private readGrant(): { allowed: boolean; readOnly: boolean } {
     const state = this.ctx.store.get() as unknown as PermissionsCarrier;
@@ -271,10 +344,6 @@ class ApplicationsApp {
     // Fallback to the pre-groups behaviour: Docker is admin-only.
     const admin = this.ctx.store.isAdmin();
     return { allowed: admin, readOnly: false };
-  }
-
-  private onAccessChangedAfterStoreUpdate(): void {
-    this.applyAccessPolicy();
   }
 
   private async onAccessChanged(): Promise<void> {
@@ -290,7 +359,7 @@ class ApplicationsApp {
       }
     }
     if (this.disposed) return;
-    this.onAccessChangedAfterStoreUpdate();
+    this.applyAccessPolicy();
   }
 
   private applyAccessPolicy(): void {
@@ -301,11 +370,12 @@ class ApplicationsApp {
     this.readOnly = grant.allowed && grant.readOnly;
     if (this.denied) {
       this.activeModalClose?.();
+      this.closePage();
       this.deployButton.disabled = true;
-      this.importButton.disabled = true;
       this.renderDenied();
       return;
     }
+    if (!this.engineAccess() && this.view !== "containers") this.view = "containers";
     this.detailAccessHandler?.(this.readOnly);
     if (wasDenied) void this.refreshAll();
     this.render();
@@ -313,8 +383,8 @@ class ApplicationsApp {
 
   private renderDenied(): void {
     clear(this.bannerHost);
-    clear(this.appsHost);
-    clear(this.containersHost);
+    clear(this.viewHost);
+    clear(this.sidebar);
     this.bannerHost.appendChild(
       h(
         "div",
@@ -332,10 +402,9 @@ class ApplicationsApp {
         })(),
       ),
     );
-    this.statusBadge.className = "badge app-docker-badge error";
     this.statusBadge.textContent = "Access denied";
     this.deployButton.classList.add("hidden");
-    this.importButton.classList.add("hidden");
+    this.pullButton.classList.add("hidden");
     this.notice.show("Your access to Docker was changed.", { kind: "warning" });
     this.ctx.toast.warning("Your access to Docker was changed.");
   }
@@ -345,6 +414,7 @@ class ApplicationsApp {
   private subscribeRealtime(): void {
     this.lc.add(this.realtime.on<AppChangedEvent>("app.changed", (data) => this.onAppChanged(data)));
     this.lc.add(this.realtime.on<DockerChangedEvent>("docker.changed", (data) => this.onDockerChanged(data)));
+    this.lc.add(this.realtime.on("docker.inventory", () => this.syncInventory.run()));
     for (const kind of ["job.done", "job.failed", "job.cancelled"]) {
       this.lc.add(
         this.realtime.on<AppJobEvent>(kind, (data) => this.onAppJobEvent(kind, data)),
@@ -363,19 +433,12 @@ class ApplicationsApp {
   private onAppChanged(data: AppChangedEvent | null): void {
     if (this.disposed || !data || typeof data !== "object") return;
     const appId = typeof data.appId === "string" ? data.appId : "";
-    if (!appId) {
-      this.syncApps.run();
-      return;
-    }
-    const index = this.apps.findIndex((app) => app.id === appId);
-    if (index < 0) {
-      // A new application (deployed from another session).
-      this.syncApps.run();
-      return;
-    }
-    const current = this.apps[index];
+    const index = appId ? this.apps.findIndex((app) => app.id === appId) : -1;
+    const current = index >= 0 ? this.apps[index] : undefined;
     if (!current) {
+      // A new application (deployed from another session) or no id.
       this.syncApps.run();
+      this.syncContainers.run();
       return;
     }
     const containers = normalizeContainers(data.containers) ?? current.containers;
@@ -385,10 +448,8 @@ class ApplicationsApp {
       containers,
       updatedAt: Date.now(),
     };
-    const scrollTop = this.contentEl?.scrollTop ?? 0;
-    this.renderApps(this.dockerUsable());
-    this.renderContainers(this.dockerUsable());
-    if (this.contentEl) this.contentEl.scrollTop = scrollTop;
+    this.syncContainers.run();
+    this.renderView();
     this.detailChangedHook?.(data);
   }
 
@@ -404,12 +465,16 @@ class ApplicationsApp {
     };
     this.dockerError = null;
     this.render();
-    this.syncContainers.run();
+    this.syncInventory.run();
   }
 
   private onAppJobEvent(kind: string, data: AppJobEvent | null): void {
     if (this.disposed || !data || typeof data !== "object") return;
     const jobKind = typeof data.kind === "string" ? data.kind : "";
+    if (jobKind.startsWith("docker")) {
+      this.syncInventory.run();
+      return;
+    }
     if (!jobKind.startsWith("app")) return;
     if (kind === "job.failed") {
       this.notice.show(`Application job failed: ${data.error ?? "unknown error"}`, { kind: "error" });
@@ -444,13 +509,21 @@ class ApplicationsApp {
   }
 
   private async refreshAll(silent = false): Promise<void> {
-    if (silent) {
-      await Promise.all([this.loadDockerStatus(), this.loadApps(), this.loadContainers()]);
-    } else {
+    if (!silent) {
       this.appsLoading = true;
       this.render();
-      await Promise.all([this.loadDockerStatus(), this.loadApps(), this.loadContainers()]);
     }
+    await Promise.all([this.loadDockerStatus(), this.loadApps(), this.loadContainers(), this.loadStats(), this.loadInventory()]);
+    this.page?.refresh();
+  }
+
+  /** Whatever the current view shows, plus the container list (sidebar count). */
+  private async loadInventory(): Promise<void> {
+    if (this.disposed || this.denied) return;
+    const loads: Array<Promise<void>> = [this.loadContainers()];
+    if (this.view === "images" || this.imagesLoaded) loads.push(this.loadImages());
+    if (this.view === "volumes" || this.volumesLoaded) loads.push(this.loadVolumes());
+    await Promise.all(loads);
   }
 
   private async loadDockerStatus(): Promise<void> {
@@ -484,27 +557,78 @@ class ApplicationsApp {
       this.apps = [];
     } finally {
       this.appsLoading = false;
-      if (!this.disposed) this.render();
+      if (!this.disposed) this.renderView();
     }
   }
 
   private async loadContainers(): Promise<void> {
-    if (this.denied) return;
-    this.containersLoading = true;
+    if (this.denied || !this.engineAccess()) return;
     try {
-      const payload = await this.ctx.api.get<ContainerInfo[] | { items?: ContainerInfo[]; containers?: ContainerInfo[] }>(
-        "/api/docker/containers",
-      );
+      const payload = await this.ctx.api.get<{ items?: EngineContainer[] }>("/api/docker/containers", { perPage: 200 });
       if (this.disposed) return;
-      this.containers = listOf<ContainerInfo>(payload);
+      this.containers = listOf<EngineContainer>(payload).map(normalizeEngineContainer);
       this.containersError = null;
     } catch (error) {
       if (isAbortError(error) || this.disposed) return;
-      this.containers = [];
       this.containersError = error;
     } finally {
-      this.containersLoading = false;
-      if (!this.disposed) this.render();
+      this.containersLoaded = true;
+      if (!this.disposed) {
+        this.renderSidebar();
+        if (this.view === "containers") this.renderView();
+      }
+    }
+  }
+
+  private async loadStats(): Promise<void> {
+    if (this.denied || !this.engineAccess() || this.docker?.enabled === false) return;
+    try {
+      const payload = await this.ctx.api.get<{ items?: ContainerStat[] }>("/api/docker/stats");
+      if (this.disposed) return;
+      this.stats = indexStats(listOf<ContainerStat>(payload));
+    } catch {
+      // Usage numbers are optional; the list still works without them.
+      return;
+    }
+    if (this.view === "containers" && !this.page) this.renderView();
+  }
+
+  private async loadImages(): Promise<void> {
+    if (this.denied || !this.engineAccess()) return;
+    try {
+      const payload = await this.ctx.api.get<{ items?: EngineImage[]; totalBytes?: number }>("/api/docker/images");
+      if (this.disposed) return;
+      this.images = listOf<EngineImage>(payload);
+      this.imagesTotal = typeof payload.totalBytes === "number" ? payload.totalBytes : 0;
+      this.imagesError = null;
+    } catch (error) {
+      if (isAbortError(error) || this.disposed) return;
+      this.imagesError = error;
+    } finally {
+      this.imagesLoaded = true;
+      if (!this.disposed) {
+        this.renderSidebar();
+        if (this.view === "images") this.renderView();
+      }
+    }
+  }
+
+  private async loadVolumes(): Promise<void> {
+    if (this.denied || !this.engineAccess()) return;
+    try {
+      const payload = await this.ctx.api.get<{ items?: EngineVolume[] }>("/api/docker/volumes");
+      if (this.disposed) return;
+      this.volumes = listOf<EngineVolume>(payload);
+      this.volumesError = null;
+    } catch (error) {
+      if (isAbortError(error) || this.disposed) return;
+      this.volumesError = error;
+    } finally {
+      this.volumesLoaded = true;
+      if (!this.disposed) {
+        this.renderSidebar();
+        if (this.view === "volumes") this.renderView();
+      }
     }
   }
 
@@ -520,26 +644,32 @@ class ApplicationsApp {
       this.renderDenied();
       return;
     }
-    const scrollTop = this.contentEl?.scrollTop ?? 0;
     const usable = this.dockerUsable();
-    this.statusBadge.className = `badge app-docker-badge ${usable ? "ok" : this.docker?.enabled === false ? "" : "warn"}`;
-    this.statusBadge.textContent = !this.docker
-      ? this.dockerError
-        ? "Docker status unknown"
-        : "Checking Docker…"
-      : !this.docker.enabled
-        ? "Docker disabled"
-        : this.docker.available
-          ? `Docker ${this.docker.version ? `v${this.docker.version}` : "available"}`
-          : "Docker unavailable";
-    this.deployButton.classList.toggle("hidden", this.readOnly);
-    this.importButton.classList.toggle("hidden", this.readOnly);
+    this.statusBadge.className = `dk-engine small is-${usable ? "ok" : this.docker?.enabled === false ? "idle" : "warn"}`;
+    this.statusBadge.replaceChildren(
+      h("span", { class: "dk-dot", ariaHidden: true }),
+      h(
+        "span",
+        {},
+        !this.docker
+          ? this.dockerError
+            ? "Docker status unknown"
+            : "Checking Docker…"
+          : !this.docker.enabled
+            ? "Docker is turned off"
+            : this.docker.available
+              ? `Engine running${this.docker.version ? ` · ${this.docker.version}` : ""}`
+              : "Engine not reachable",
+      ),
+    );
+    this.deployButton.classList.toggle("hidden", this.readOnly || this.view !== "containers" || Boolean(this.page));
     this.deployButton.disabled = !usable || this.readOnly;
-    this.importButton.disabled = this.importSelection.size === 0 || this.readOnly;
+    this.pullButton.classList.toggle("hidden", this.readOnly || this.view !== "images" || !this.engineAccess());
+    this.pullButton.disabled = !usable;
+    this.search.classList.toggle("hidden", Boolean(this.page));
     this.renderBanners(usable);
-    this.renderApps(usable);
-    this.renderContainers(usable);
-    if (this.contentEl) this.contentEl.scrollTop = scrollTop;
+    this.renderSidebar();
+    this.renderView();
   }
 
   private renderBanners(usable: boolean): void {
@@ -549,7 +679,7 @@ class ApplicationsApp {
         banner(
           "info",
           "Read-only access",
-          "A group policy grants you read-only access to Docker. You can inspect applications, containers, logs and history, but deployment and lifecycle actions require an administrator.",
+          "You can look at apps and their logs. Starting, stopping and deploying need an administrator.",
         ),
       );
     }
@@ -608,240 +738,787 @@ class ApplicationsApp {
     return h("div", { class: "appmgmt-prereq-box" }, h("div", { class: "small" }, "Prerequisites"), list);
   }
 
-  private sectionHeader(title: string, detail?: string, extra?: Node): HTMLElement {
+  private renderSidebar(): void {
+    if (this.denied) return;
+    clear(this.sidebar);
+    const running = this.containers.filter(isRunning).length;
+    const views: Array<{ id: EngineView; label: string; icon: string; count: string; title: string }> = [
+      {
+        id: "containers",
+        label: "Containers",
+        icon: "box",
+        count: this.engineAccess() && this.containersLoaded ? String(running) : "",
+        title: `${running} running of ${this.containers.length}`,
+      },
+    ];
+    if (this.engineAccess()) {
+      views.push(
+        { id: "images", label: "Images", icon: "layers", count: this.imagesLoaded ? String(this.images.length) : "", title: "Images on this server" },
+        { id: "volumes", label: "Volumes", icon: "database", count: this.volumesLoaded ? String(this.volumes.length) : "", title: "Volumes on this server" },
+      );
+    }
+    const list = h("div", { class: "dk-nav" });
+    for (const v of views) {
+      const active = this.view === v.id;
+      const button = h(
+        "button",
+        { class: `nav-item dk-nav-item${active ? " is-active" : ""}`, type: "button", ariaPressed: active },
+        iconSvg(v.icon, 16),
+        h("span", { class: "dk-nav-label" }, v.label),
+        v.count ? h("span", { class: "dk-nav-count", title: v.title }, v.count) : null,
+      );
+      button.addEventListener("click", () => this.switchView(v.id));
+      list.appendChild(button);
+    }
+    this.sidebar.append(list, this.statusBadge);
+  }
+
+  private switchView(view: EngineView): void {
+    this.closePage();
+    if (this.view === view) {
+      this.render();
+      return;
+    }
+    this.view = view;
+    this.query = "";
+    this.search.value = "";
+    this.render();
+    if (view === "images" && !this.imagesLoaded) void this.loadImages();
+    if (view === "volumes" && !this.volumesLoaded) void this.loadVolumes();
+    if (view === "containers") void this.loadStats();
+    this.main.scrollTop = 0;
+  }
+
+  private renderView(): void {
+    if (this.disposed || this.denied || this.page) return;
+    const scrollTop = this.main.scrollTop;
+    clear(this.viewHost);
+    if (this.view === "images") this.renderImages();
+    else if (this.view === "volumes") this.renderVolumes();
+    else this.renderContainersView();
+    this.main.scrollTop = scrollTop;
+  }
+
+  private viewHeader(title: string, chips: Array<Node | null>, extra?: Node | null): HTMLElement {
     return h(
       "div",
-      { class: "appmgmt-section-head" },
-      h("div", { class: "appmgmt-section-titles" }, h("h3", { class: "appmgmt-section-title" }, title), detail ? h("div", { class: "small muted" }, detail) : null),
+      { class: "dk-view-head" },
+      h("h2", { class: "dk-view-title" }, title),
+      h("div", { class: "dk-chips" }, ...chips.filter((chip): chip is Node => Boolean(chip))),
+      h("div", { class: "app-toolbar-spacer" }),
       extra ?? null,
     );
   }
 
-  private renderApps(usable: boolean): void {
-    clear(this.appsHost);
-    const count = this.apps.length;
-    this.appsHost.appendChild(
-      this.sectionHeader(
-        count > 0 ? `Managed applications (${count})` : "Managed applications",
-        "Deployed through RAST; each application maps to one Docker Compose project.",
-      ),
-    );
-
-    const host = h("div", { class: "appmgmt-body" });
-    if (this.appsError) {
-      renderLoadFailure(host, this.appsError, {
-        title: "Could not load applications",
-        retry: () => void this.loadApps(),
-      });
-      this.appsHost.appendChild(host);
-      return;
-    }
-    if (this.appsLoading) {
-      host.appendChild(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading applications…"));
-      this.appsHost.appendChild(host);
-      return;
-    }
-    if (this.apps.length === 0) {
-      const deploy = h("button", { class: "btn btn-primary", type: "button", disabled: !usable }, "Deploy your first application");
-      deploy.addEventListener("click", () => void this.openDeployDialog());
-      host.appendChild(
-        emptyBlock(
-          "No managed applications",
-          usable
-            ? "Deploy a Compose application to get started. RAST validates the Compose file before starting it."
-            : "Application deployment is unavailable until the Docker worker prerequisites are met.",
-          deploy,
-        ),
-      );
-      this.appsHost.appendChild(host);
-      return;
-    }
-
-    const shown = this.apps.slice(0, MAX_APP_ROWS);
-    const head = h(
-      "tr",
-      {},
-      h("th", {}, "Application"),
-      h("th", {}, "Status"),
-      h("th", { class: "appmgmt-col-containers" }, "Containers"),
-      h("th", { class: "appmgmt-col-ports" }, "Ports"),
-      h("th", { class: "appmgmt-col-updated" }, "Updated"),
-      h("th", { class: "appmgmt-col-actions" }, "Actions"),
-    );
-    const body = h("tbody");
-    for (const app of shown) body.appendChild(this.renderAppRow(app, usable));
-    host.appendChild(h("div", { class: "table-wrap" }, h("table", { class: "table appmgmt-table" }, h("thead", {}, head), body)));
-    if (count > shown.length) {
-      host.appendChild(h("div", { class: "small muted appmgmt-more" }, `Showing the first ${shown.length} of ${count} applications.`));
-    }
-    this.appsHost.appendChild(host);
+  private chip(label: string, value: string, title?: string): HTMLElement {
+    return h("span", { class: "dk-chip", title: title ?? "" }, h("span", { class: "muted" }, label), " ", h("strong", {}, value));
   }
 
-  private renderAppRow(app: ManagedAppView, usable: boolean): HTMLTableRowElement {
-    const statusBadge = h("span", { class: `badge ${statusClass(app.status)}` }, statusLabel(app.status));
-    if (app.lastError) statusBadge.title = app.lastError;
-    const containers = app.containers ?? [];
-    const running = containers.filter((container) => container.state === "running").length;
-    const ports = publishedPorts(app);
-    const actions = h("div", { class: "appmgmt-row-actions" });
-    const busy = app.status === "deploying";
-
-    const actionButton = (icon: string, label: string, onClick: () => void, danger = false) => {
-      const btn = h(
-        "button",
-        {
-          class: `appmgmt-icon-btn${danger ? " is-danger" : ""}`,
-          type: "button",
-          ariaLabel: label,
-          title: label,
-          disabled: !usable || busy,
-        },
-      );
-      btn.appendChild(iconSvg(icon, 15));
-      btn.addEventListener("click", (event) => {
-        event.stopPropagation();
-        onClick();
-      });
-      return btn;
-    };
-    actions.appendChild(actionButton("terminal", "Logs and details", () => void this.openDetail(app.id)));
-    if (!this.readOnly) {
-      actions.prepend(
-        actionButton("play", "Start application", () => void this.performAction(app, "start")),
-        actionButton("stop", "Stop application", () => void this.performAction(app, "stop")),
-        actionButton("restart", "Restart application", () => void this.performAction(app, "restart")),
-      );
-      actions.appendChild(actionButton("trash", "Delete application", () => void this.openDeleteDialog(app), true));
+  private segmented(value: UsageFilter, onChange: (next: UsageFilter) => void): HTMLElement {
+    const group = h("div", { class: "dk-segmented", role: "group", ariaLabel: "Show" });
+    const options: Array<[UsageFilter, string]> = [
+      ["all", "All"],
+      ["used", "In use"],
+      ["unused", "Unused"],
+    ];
+    for (const [id, label] of options) {
+      const button = h("button", { class: `dk-segment${value === id ? " is-active" : ""}`, type: "button", ariaPressed: value === id }, label);
+      button.addEventListener("click", () => onChange(id));
+      group.append(button);
     }
+    return group;
+  }
 
-    const nameCell = h(
-      "div",
-      { class: "appmgmt-name-cell" },
-      h("div", { class: "appmgmt-name" }, app.name || app.slug),
-      h("div", { class: "mono small muted" }, app.slug),
-      app.lastError ? h("div", { class: "appmgmt-error small" }, `Last error: ${app.lastError}`) : null,
+  // ------------------------------------------------------------ containers
+
+  private renderContainersView(): void {
+    const engine = this.engineAccess();
+    const groups = groupContainers(engine ? this.containers : null, this.apps);
+    const usage = usageFor(this.containers, this.stats);
+    const runningSwitch = h("label", { class: "dk-switch" }, h("input", { type: "checkbox", checked: this.runningOnly }), h("span", {}, "Only running"));
+    runningSwitch.querySelector("input")!.addEventListener("change", (event) => {
+      this.runningOnly = (event.target as HTMLInputElement).checked;
+      this.renderView();
+    });
+    this.viewHost.append(
+      this.viewHeader(
+        "Containers",
+        engine && usage.sampled > 0
+          ? [this.chip("CPU", formatPercent(usage.cpuPercent, 1), "Total of all running containers; 100% is one full core"), this.chip("Memory", formatBytes(usage.memoryBytes))]
+          : [],
+        runningSwitch,
+      ),
     );
+
+    if (engine && this.containersError && this.containers.length === 0) {
+      const host = h("div", { class: "dk-body" });
+      renderLoadFailure(host, this.containersError, { title: "Could not list containers", retry: () => void this.loadContainers() });
+      this.viewHost.append(host);
+      return;
+    }
+    if (this.appsError && !engine) {
+      const host = h("div", { class: "dk-body" });
+      renderLoadFailure(host, this.appsError, { title: "Could not load apps", retry: () => void this.loadApps() });
+      this.viewHost.append(host);
+      return;
+    }
+    const loading = engine ? !this.containersLoaded : this.appsLoading;
+    if (loading) {
+      this.viewHost.append(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading containers…"));
+      return;
+    }
+    const shown = filterGroups(groups, this.query, this.runningOnly);
+    if (groups.length === 0) {
+      const deploy = h("button", { class: "btn btn-primary", type: "button", disabled: !this.canChange() }, "Deploy an app");
+      deploy.addEventListener("click", () => void this.openDeployDialog());
+      this.viewHost.append(emptyBlock("No containers yet", "Deploy a Compose app, or run one from an image.", this.readOnly ? undefined : deploy));
+      return;
+    }
+    if (shown.length === 0) {
+      this.viewHost.append(h("div", { class: "dk-empty muted" }, this.query ? `Nothing matches “${this.query.trim()}”.` : "No container is running."));
+      return;
+    }
+    const table = h("div", { class: "dk-table dk-containers", role: "table", ariaLabel: "Containers" });
+    table.append(
+      h(
+        "div",
+        { class: "dk-row dk-row-head", role: "row" },
+        h("span", { class: "dk-cell dk-cell-name", role: "columnheader" }, "Name"),
+        h("span", { class: "dk-cell dk-cell-state", role: "columnheader" }, "Status"),
+        engine ? h("span", { class: "dk-cell dk-cell-num", role: "columnheader" }, "CPU") : null,
+        engine ? h("span", { class: "dk-cell dk-cell-num dk-cell-mem", role: "columnheader" }, "Memory") : null,
+        h("span", { class: "dk-cell dk-cell-ports", role: "columnheader" }, "Ports"),
+        h("span", { class: "dk-cell dk-cell-actions", role: "columnheader" }, h("span", { class: "sr-only" }, "Actions")),
+      ),
+    );
+    for (const group of shown) {
+      if (group.kind === "single") {
+        const container = group.containers[0];
+        if (container) table.append(this.containerRow(container, false));
+        continue;
+      }
+      const open = this.expanded.has(group.key) || (this.query.trim() !== "" && group.containers.length > 0);
+      table.append(this.groupRow(group, open));
+      if (open) for (const container of group.containers) table.append(this.containerRow(container, true));
+    }
+    this.viewHost.append(table);
+  }
+
+  private stateCell(label: string, tone: string): HTMLElement {
+    return h("span", { class: "dk-cell dk-cell-state", role: "cell" }, h("span", { class: `dk-dot is-${tone}`, ariaHidden: true }), h("span", { class: "dk-state-label" }, label));
+  }
+
+  private portsCell(ports: PortMap[]): HTMLElement {
+    const links = portLinks(ports, window.location);
+    const cell = h("span", { class: "dk-cell dk-cell-ports", role: "cell" });
+    if (links.length === 0) {
+      cell.append(h("span", { class: "muted" }, "—"));
+      return cell;
+    }
+    for (const link of links.slice(0, 2)) {
+      cell.append(
+        link.href
+          ? h("a", { class: "dk-port", href: link.href, target: "_blank", rel: "noopener noreferrer", title: `Open ${link.href}`, onClick: (event) => event.stopPropagation() }, link.label, iconSvg("external", 11))
+          : h("span", { class: "dk-port is-plain", title: "Published on the server" }, link.label),
+      );
+    }
+    if (links.length > 2) cell.append(h("span", { class: "muted small" }, `+${links.length - 2}`));
+    return cell;
+  }
+
+  private usageCells(containers: EngineContainer[]): Array<HTMLElement | null> {
+    if (!this.engineAccess()) return [null, null];
+    const usage = usageFor(containers.filter(isRunning), this.stats);
+    const has = usage.sampled > 0;
+    return [
+      h("span", { class: "dk-cell dk-cell-num", role: "cell" }, has ? formatPercent(usage.cpuPercent, 1) : h("span", { class: "muted" }, "—")),
+      h("span", { class: "dk-cell dk-cell-num dk-cell-mem", role: "cell" }, has ? formatBytes(usage.memoryBytes) : h("span", { class: "muted" }, "—")),
+    ];
+  }
+
+  private iconButton(icon: string, label: string, onClick: () => void, options: { disabled?: boolean; danger?: boolean } = {}): HTMLButtonElement {
+    const button = h("button", { class: `dk-icon-btn${options.danger ? " is-danger" : ""}`, type: "button", title: label, ariaLabel: label, disabled: options.disabled ?? false }, iconSvg(icon, 15));
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      onClick();
+    });
+    return button;
+  }
+
+  private menuButton(label: string, items: () => ContextMenuEntry[]): HTMLButtonElement {
+    const button = this.iconButton("more", `More actions for ${label}`, () => {
+      const rect = button.getBoundingClientRect();
+      contextMenu(rect.right - 210, rect.bottom + 4, items(), { ariaLabel: label });
+    });
+    return button;
+  }
+
+  private groupRow(group: ContainerGroup, open: boolean): HTMLElement {
+    const state = groupState(group);
+    const app = group.app ? this.findApp(group.app.id) : undefined;
+    const ports = group.containers.flatMap((c) => c.ports);
+    const toggle = h(
+      "button",
+      { class: "dk-toggle", type: "button", ariaExpanded: open, ariaLabel: `${open ? "Hide" : "Show"} containers of ${group.name}`, disabled: group.containers.length === 0 },
+      iconSvg(open ? "chevronDown" : "chevronRight", 14),
+    );
+    toggle.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (this.expanded.has(group.key)) this.expanded.delete(group.key);
+      else this.expanded.add(group.key);
+      this.renderView();
+    });
+    const name = h(
+      "span",
+      { class: "dk-cell dk-cell-name", role: "cell" },
+      toggle,
+      h("span", { class: `dk-glyph${app ? " is-app" : ""}`, ariaHidden: true }, iconSvg(app ? "docker" : "layers", 16)),
+      h(
+        "span",
+        { class: "dk-name-text" },
+        h("span", { class: "dk-name", title: group.name }, group.name),
+        h("span", { class: "dk-sub muted" }, app ? `RAST app · ${plural(group.containers.length, "container")}` : `Compose · ${plural(group.containers.length, "container")}`),
+      ),
+    );
+    const busy = this.busy.has(group.key) || app?.status === "deploying";
+    const actions = h("span", { class: "dk-cell dk-cell-actions", role: "cell" });
+    if (busy) {
+      actions.append(h("span", { class: "spinner spinner-sm", ariaLabel: "Working" }));
+    } else if (this.canChange()) {
+      const anyRunning = state.running > 0;
+      if (app) {
+        actions.append(
+          anyRunning
+            ? this.iconButton("stop", `Stop ${group.name}`, () => void this.performAction(app, "stop"))
+            : this.iconButton("play", `Start ${group.name}`, () => void this.performAction(app, "start")),
+          this.iconButton("restart", `Restart ${group.name}`, () => void this.performAction(app, "restart"), { disabled: !anyRunning }),
+          this.menuButton(group.name, () => [
+            { label: "Details and logs", icon: "logs", onClick: () => void this.openDetail(app.id) },
+            { label: "Redeploy", icon: "refresh", onClick: () => void this.performAction(app, "redeploy") },
+            "separator",
+            { label: "Delete app…", icon: "trash", danger: true, onClick: () => void this.openDeleteDialog(app) },
+          ]),
+        );
+      } else {
+        const ids = group.containers.map((c) => c.id);
+        actions.append(
+          anyRunning
+            ? this.iconButton("stop", `Stop ${group.name}`, () => void this.groupAction(group, "stop"))
+            : this.iconButton("play", `Start ${group.name}`, () => void this.groupAction(group, "start")),
+          this.iconButton("restart", `Restart ${group.name}`, () => void this.groupAction(group, "restart"), { disabled: !anyRunning }),
+          this.menuButton(group.name, () => [
+            { label: "Manage as RAST app…", icon: "download", onClick: () => void this.importContainers(ids, group.name) },
+          ]),
+        );
+      }
+    } else if (app) {
+      actions.append(this.iconButton("logs", `Details of ${group.name}`, () => void this.openDetail(app.id)));
+    }
     const row = h(
-      "tr",
-      {},
-      h("td", {}, nameCell),
-      h("td", {}, statusBadge),
-      h(
-        "td",
-        { class: "appmgmt-col-containers small muted" },
-        containers.length > 0 ? `${running} / ${containers.length} running` : "—",
-      ),
-      h(
-        "td",
-        { class: "appmgmt-col-ports small" },
-        ports.length > 0
-          ? h("div", { class: "appmgmt-ports" }, ...ports.slice(0, 3).map((port) => h("span", { class: "badge" }, port)), ports.length > 3 ? h("span", { class: "small muted" }, `+${ports.length - 3}`) : null)
-          : "—",
-      ),
-      h("td", { class: "appmgmt-col-updated small muted", title: formatDateTime(app.updatedAt) }, relativeTime(app.updatedAt)),
-      h("td", { class: "appmgmt-col-actions" }, actions),
+      "div",
+      { class: `dk-row dk-row-group${open ? " is-open" : ""}`, role: "row", tabIndex: 0 },
+      name,
+      this.stateCell(state.label, state.tone),
+      ...this.usageCells(group.containers),
+      this.portsCell(ports),
+      actions,
     );
-    row.addEventListener("click", () => void this.openDetail(app.id));
+    if (app?.lastError) row.title = `Last error: ${app.lastError}`;
+    const activate = (): void => {
+      if (app) void this.openDetail(app.id);
+      else toggle.click();
+    };
+    row.addEventListener("click", activate);
+    row.addEventListener("keydown", (event) => {
+      if (event.target !== row) return;
+      if (event.key === "Enter") activate();
+      else if (event.key === "ArrowRight" && !open && group.containers.length) toggle.click();
+      else if (event.key === "ArrowLeft" && open) toggle.click();
+    });
     return row;
   }
 
-  private renderContainers(usable: boolean): void {
-    clear(this.containersHost);
-    const unmanaged = this.containers.filter((container) => !container.managed);
-    const selected = [...this.importSelection];
-    this.importButton.disabled = selected.length === 0;
-    this.importLabel.textContent = selected.length > 0 ? `Import selected (${selected.length})` : "Import selected";
-    this.containersHost.appendChild(
-      this.sectionHeader(
-        "Discovered containers",
-        "Containers running on the host. Unmanaged containers are listed but never adopted automatically — import them explicitly.",
+  private containerRow(container: EngineContainer, nested: boolean): HTMLElement {
+    const running = isRunning(container);
+    const engine = this.engineAccess();
+    const name = h(
+      "span",
+      { class: "dk-cell dk-cell-name", role: "cell" },
+      nested ? h("span", { class: "dk-indent", ariaHidden: true }) : null,
+      h("span", { class: "dk-glyph", ariaHidden: true }, iconSvg("box", 16)),
+      h(
+        "span",
+        { class: "dk-name-text" },
+        h("span", { class: "dk-name", title: container.name }, nested && container.service ? container.service : container.name),
+        h("span", { class: "dk-sub muted mono", title: container.image }, container.image),
       ),
     );
-    const host = h("div", { class: "appmgmt-body" });
-    if (this.containersError) {
-      if (isUnavailableError(this.containersError)) {
-        host.appendChild(
-          h(
-            "div",
-            { class: "appmgmt-inline-muted small muted" },
-            `Container discovery is unavailable: ${unavailableReason(this.containersError)}`,
-          ),
-        );
-      } else {
-        host.appendChild(h("div", { class: "appmgmt-inline-muted small" }, `Could not list containers: ${errorMessage(this.containersError)}`));
-      }
-      this.containersHost.appendChild(host);
-      return;
-    }
-    if (this.containersLoading) {
-      host.appendChild(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Discovering containers…"));
-      this.containersHost.appendChild(host);
-      return;
-    }
-    if (this.containers.length === 0) {
-      host.appendChild(
-        h(
-          "div",
-          { class: "appmgmt-inline-muted small muted" },
-          usable ? "No containers discovered on this host." : "Container discovery requires a working Docker worker.",
-        ),
+    const actions = h("span", { class: "dk-cell dk-cell-actions", role: "cell" });
+    if (this.busy.has(container.id)) {
+      actions.append(h("span", { class: "spinner spinner-sm", ariaLabel: "Working" }));
+    } else if (engine && this.canChange()) {
+      actions.append(
+        running
+          ? this.iconButton("stop", `Stop ${container.name}`, () => void this.containerAction(container, "stop"))
+          : this.iconButton("play", `Start ${container.name}`, () => void this.containerAction(container, "start")),
+        this.iconButton("restart", `Restart ${container.name}`, () => void this.containerAction(container, "restart"), { disabled: !running }),
+        this.menuButton(container.name, () => this.containerMenu(container)),
       );
-      this.containersHost.appendChild(host);
-      return;
     }
-    const shown = this.containers.slice(0, MAX_CONTAINER_ROWS);
-    const head = h(
-      "tr",
-      {},
-      h("th", { class: "appmgmt-check" }),
-      h("th", {}, "Container"),
-      h("th", { class: "appmgmt-col-image" }, "Image"),
-      h("th", { class: "appmgmt-col-state" }, "State"),
-      h("th", { class: "appmgmt-col-managed" }, "Managed"),
+    const row = h(
+      "div",
+      { class: `dk-row dk-row-container${nested ? " is-nested" : ""}`, role: "row", tabIndex: engine ? 0 : -1 },
+      name,
+      this.stateCell(containerStateLabel(container), containerTone(container)),
+      ...this.usageCells([container]),
+      this.portsCell(container.ports),
+      actions,
     );
-    const body = h("tbody");
-    for (const container of shown) {
-      const checkbox = h("input", {
-        type: "checkbox",
-        ariaLabel: `Select ${container.name} for import`,
-        disabled: container.managed,
+    if (engine) {
+      row.addEventListener("click", () => this.openPage(container.id));
+      row.addEventListener("keydown", (event) => {
+        if (event.target === row && event.key === "Enter") this.openPage(container.id);
       });
-      checkbox.checked = this.importSelection.has(container.id);
-      checkbox.addEventListener("change", () => {
-        if (checkbox.checked) this.importSelection.add(container.id);
-        else this.importSelection.delete(container.id);
-        this.renderContainers(usable);
-      });
-      body.appendChild(
-        h(
-          "tr",
-          { class: container.managed ? "" : "is-unmanaged" },
-          h("td", { class: "appmgmt-check" }, checkbox),
-          h("td", {}, h("div", { class: "appmgmt-name" }, container.name), h("div", { class: "mono small muted" }, container.id.slice(0, 12))),
-          h("td", { class: "appmgmt-col-image small mono" }, container.image),
-          h("td", { class: "appmgmt-col-state small" }, container.state),
-          h(
-            "td",
-            { class: "appmgmt-col-managed" },
-            h("span", { class: `badge ${container.managed ? "info" : ""}` }, container.managed ? "managed" : "unmanaged"),
-          ),
-        ),
+    }
+    return row;
+  }
+
+  private containerMenu(container: EngineContainer): ContextMenuEntry[] {
+    const items: ContextMenuEntry[] = [{ label: "Logs and details", icon: "logs", onClick: () => this.openPage(container.id) }];
+    const link = portLinks(container.ports, window.location).find((l) => l.href);
+    if (link?.href) {
+      const href = link.href;
+      items.push({ label: `Open ${link.label.split(":")[0]} in browser`, icon: "external", onClick: () => window.open(href, "_blank", "noopener") });
+    }
+    if (container.managed) {
+      const app = this.apps.find((a) => a.slug === container.slug);
+      if (app) items.push("separator", { label: "Open app", icon: "docker", onClick: () => void this.openDetail(app.id) });
+    } else {
+      items.push(
+        "separator",
+        { label: "Manage as RAST app…", icon: "download", onClick: () => void this.importContainers([container.id], container.name) },
+        { label: "Delete…", icon: "trash", danger: true, onClick: () => void this.deleteContainer(container) },
       );
     }
-    host.appendChild(h("div", { class: "table-wrap" }, h("table", { class: "table appmgmt-table" }, h("thead", {}, head), body)));
-    if (unmanaged.length > 0) {
-      host.appendChild(
-        h(
-          "div",
-          { class: "appmgmt-import-hint small muted" },
-          `${unmanaged.length} unmanaged container(s). Tick the ones you want to convert into managed applications, then choose “Import selected”.`,
-        ),
+    return items;
+  }
+
+  private async containerAction(container: EngineContainer, action: "start" | "stop" | "restart"): Promise<void> {
+    if (!this.canChange() || this.busy.has(container.id)) return;
+    this.busy.add(container.id);
+    this.renderView();
+    const done = { start: "started", stop: "stopped", restart: "restarted" } as const;
+    try {
+      await this.ctx.api.post(`/api/docker/containers/${encodeURIComponent(container.id)}/${action}`);
+      this.ctx.toast.success(`${container.name} ${done[action]}`);
+    } catch (error) {
+      this.ctx.toast.error(`${container.name}: ${errorMessage(error)}`);
+    } finally {
+      this.busy.delete(container.id);
+    }
+    await Promise.all([this.loadContainers(), this.loadStats()]);
+  }
+
+  /** Start/stop/restart every container of a Compose project RAST does not manage. */
+  private async groupAction(group: ContainerGroup, action: "start" | "stop" | "restart"): Promise<void> {
+    if (!this.canChange() || this.busy.has(group.key)) return;
+    const targets = group.containers.filter((c) => (action === "start" ? !isRunning(c) : isRunning(c)));
+    if (targets.length === 0) return;
+    this.busy.add(group.key);
+    this.renderView();
+    const results = await Promise.allSettled(
+      targets.map((c) => this.ctx.api.post(`/api/docker/containers/${encodeURIComponent(c.id)}/${action}`)),
+    );
+    this.busy.delete(group.key);
+    const failed = results.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    const done = { start: "started", stop: "stopped", restart: "restarted" } as const;
+    if (failed.length === 0) this.ctx.toast.success(`${group.name} ${done[action]}`);
+    else this.ctx.toast.error(`${group.name}: ${failed.length} of ${targets.length} failed — ${errorMessage(failed[0]!.reason)}`);
+    await Promise.all([this.loadContainers(), this.loadStats()]);
+  }
+
+  private async deleteContainer(container: EngineContainer): Promise<void> {
+    if (!this.canChange()) return;
+    const confirmed = await confirmDialog({
+      title: "Delete container",
+      message: `Delete “${container.name}”? It is stopped and removed. Its volumes and data stay.`,
+      confirmLabel: "Delete",
+      danger: true,
+      requireTyped: container.name,
+    });
+    if (!confirmed || this.disposed) return;
+    this.busy.add(container.id);
+    this.renderView();
+    try {
+      await this.ctx.api.del(`/api/docker/containers/${encodeURIComponent(container.id)}`, { confirm: container.name });
+      this.ctx.toast.success(`${container.name} deleted`);
+    } catch (error) {
+      this.ctx.toast.error(`Could not delete ${container.name}: ${errorMessage(error)}`);
+    } finally {
+      this.busy.delete(container.id);
+    }
+    await this.loadContainers();
+  }
+
+  // --------------------------------------------------------- container page
+
+  private openPage(id: string): void {
+    if (!this.engineAccess()) return;
+    this.page?.dispose();
+    clear(this.viewHost);
+    this.page = mountContainerPage({
+      ctx: this.ctx,
+      lc: this.lc,
+      id,
+      canChange: () => this.canChange(),
+      onBack: () => this.closePage(true),
+      onChanged: () => void this.loadContainers(),
+      openApp: (appId) => void this.openDetail(appId),
+      importContainers: (ids, label) => this.importContainers(ids, label),
+    });
+    this.viewHost.append(this.page.el);
+    this.render();
+    this.main.scrollTop = 0;
+  }
+
+  private closePage(rerender = false): void {
+    if (!this.page) return;
+    this.page.dispose();
+    this.page = null;
+    if (rerender) {
+      this.render();
+      void this.loadStats();
+    }
+  }
+
+  // ---------------------------------------------------------------- images
+
+  private renderImages(): void {
+    const used = this.images.filter((i) => i.inUse).length;
+    const untaggedUnused = this.images.filter((i) => !i.reference && !i.inUse).length;
+    const prune = h(
+      "button",
+      { class: "btn btn-ghost btn-sm", type: "button", disabled: !this.canChange() || untaggedUnused === 0, title: "Delete untagged images that no container uses" },
+      iconSvg("trash", 13),
+      h("span", {}, "Clean up"),
+    );
+    prune.addEventListener("click", () => void this.pruneImages(untaggedUnused));
+    this.viewHost.append(
+      this.viewHeader(
+        "Images",
+        this.imagesLoaded && !this.imagesError
+          ? [this.chip("Total", formatBytes(this.imagesTotal), "Sum of image sizes; shared layers are counted once per image"), this.chip("In use", `${used} of ${this.images.length}`)]
+          : [],
+        h("div", { class: "row" }, this.segmented(this.imageFilter, (next) => {
+          this.imageFilter = next;
+          this.renderView();
+        }), this.readOnly ? null : prune),
+      ),
+    );
+    if (this.imagesError) {
+      const host = h("div", { class: "dk-body" });
+      renderLoadFailure(host, this.imagesError, { title: "Could not list images", retry: () => void this.loadImages() });
+      this.viewHost.append(host);
+      return;
+    }
+    if (!this.imagesLoaded) {
+      this.viewHost.append(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading images…"));
+      return;
+    }
+    const shown = filterImages(this.images, this.query, this.imageFilter);
+    if (shown.length === 0) {
+      this.viewHost.append(
+        this.images.length === 0
+          ? emptyBlock("No images", "Pull an image from Docker Hub to get started.")
+          : h("div", { class: "dk-empty muted" }, this.query ? `Nothing matches “${this.query.trim()}”.` : "No images here."),
+      );
+      return;
+    }
+    const table = h("div", { class: "dk-table dk-images", role: "table", ariaLabel: "Images" });
+    table.append(
+      h(
+        "div",
+        { class: "dk-row dk-row-head", role: "row" },
+        h("span", { class: "dk-cell dk-cell-name", role: "columnheader" }, "Name"),
+        h("span", { class: "dk-cell dk-cell-state", role: "columnheader" }, "Status"),
+        h("span", { class: "dk-cell dk-cell-created", role: "columnheader" }, "Created"),
+        h("span", { class: "dk-cell dk-cell-num", role: "columnheader" }, "Size"),
+        h("span", { class: "dk-cell dk-cell-actions", role: "columnheader" }, h("span", { class: "sr-only" }, "Actions")),
+      ),
+    );
+    for (const image of shown) table.append(this.imageRow(image));
+    this.viewHost.append(table);
+  }
+
+  private imageRow(image: EngineImage): HTMLElement {
+    const label = imageLabel(image);
+    const busyKey = `image:${image.id}:${image.reference}`;
+    const usedBy = image.usedBy.length ? image.usedBy.join(", ") : "";
+    const name = h(
+      "span",
+      { class: "dk-cell dk-cell-name", role: "cell" },
+      h("span", { class: "dk-glyph", ariaHidden: true }, iconSvg("layers", 16)),
+      h(
+        "span",
+        { class: "dk-name-text" },
+        h("span", { class: `dk-name${image.reference ? "" : " muted"}`, title: label }, label),
+        h("span", { class: "dk-sub muted mono", title: image.id }, shortId(image.id)),
+      ),
+    );
+    const status = image.inUse
+      ? h("span", { class: "dk-cell dk-cell-state", role: "cell", title: usedBy ? `Used by ${usedBy}` : "Used by a container" }, h("span", { class: "dk-pill is-ok" }, "In use"))
+      : h("span", { class: "dk-cell dk-cell-state", role: "cell" }, h("span", { class: "dk-pill" }, "Unused"));
+    const actions = h("span", { class: "dk-cell dk-cell-actions", role: "cell" });
+    if (this.busy.has(busyKey)) {
+      actions.append(h("span", { class: "spinner spinner-sm", ariaLabel: "Working" }));
+    } else if (this.canChange()) {
+      actions.append(
+        this.menuButton(label, () => {
+          const items: ContextMenuEntry[] = [];
+          if (image.reference) {
+            items.push({ label: "Pull again", icon: "download", onClick: () => void this.pullImage(image.reference) });
+          }
+          items.push({
+            label: "Copy image ID",
+            icon: "copy",
+            onClick: () => void copyText(image.id).then((ok) => (ok ? this.ctx.toast.success("Image ID copied") : this.ctx.toast.error("Could not copy"))),
+          });
+          items.push("separator", {
+            label: "Delete…",
+            icon: "trash",
+            danger: true,
+            disabled: image.inUse,
+            onClick: () => void this.deleteImage(image),
+          });
+          return items;
+        }),
       );
     }
-    if (this.containers.length > shown.length) {
-      host.appendChild(h("div", { class: "small muted appmgmt-more" }, `Showing the first ${shown.length} of ${this.containers.length} containers.`));
+    return h(
+      "div",
+      { class: "dk-row", role: "row" },
+      name,
+      status,
+      h("span", { class: "dk-cell dk-cell-created muted", role: "cell" }, image.createdSince || "—"),
+      h("span", { class: "dk-cell dk-cell-num", role: "cell" }, image.sizeBytes !== null ? formatBytes(image.sizeBytes) : image.size || "—"),
+      actions,
+    );
+  }
+
+  private openPullDialog(initial = ""): void {
+    if (!this.canChange()) return;
+    const input = h("input", { class: "input mono", type: "text", placeholder: "nginx:latest", autocomplete: "off", spellcheck: false, value: initial, ariaLabel: "Image name" });
+    const error = formError("");
+    const body = h(
+      "div",
+      { class: "col" },
+      field("Image", input, "From Docker Hub (nginx, postgres:17) or a registry (ghcr.io/owner/app:tag)."),
+      error,
+    );
+    const close = modal({
+      title: "Pull image",
+      body,
+      onClose: () => undefined,
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => {} },
+        {
+          label: "Pull",
+          variant: "primary",
+          keepOpen: true,
+          onClick: (closeDialog) => {
+            const problem = imageRefError(input.value);
+            if (problem) {
+              error.textContent = problem;
+              input.focus();
+              return;
+            }
+            closeDialog();
+            void this.pullImage(input.value.trim());
+          },
+        },
+      ],
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        (body.closest(".modal")?.querySelector(".btn-primary") as HTMLButtonElement | null)?.click();
+      }
+    });
+    void close;
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  private async pullImage(image: string): Promise<void> {
+    if (!this.canChange()) return;
+    try {
+      const response = await this.ctx.api.post<{ jobId?: string }>("/api/docker/images/pull", { image });
+      this.ctx.toast.info(`Pulling ${image}…`);
+      // The desktop announces when the download ends (finished or failed).
+      if (response.jobId) await watchJob(this.ctx, this.lc, response.jobId);
+      if (this.disposed) return;
+    } catch (error) {
+      this.ctx.toast.error(`Could not pull ${image}: ${errorMessage(error)}`);
     }
-    this.containersHost.appendChild(host);
+    await this.loadImages();
+  }
+
+  private async deleteImage(image: EngineImage): Promise<void> {
+    if (!this.canChange() || image.inUse) return;
+    const label = imageLabel(image);
+    const target = image.reference || image.id;
+    const confirmed = await confirmDialog({
+      title: "Delete image",
+      message: image.reference
+        ? `Delete “${label}”? Images you built on this server can't be downloaded again.`
+        : `Delete the untagged image ${shortId(image.id)}?`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!confirmed || this.disposed) return;
+    const busyKey = `image:${image.id}:${image.reference}`;
+    this.busy.add(busyKey);
+    this.renderView();
+    try {
+      await this.ctx.api.post("/api/docker/images/remove", { image: target });
+      this.ctx.toast.success(`${label} deleted`);
+    } catch (error) {
+      this.ctx.toast.error(`Could not delete ${label}: ${errorMessage(error)}`);
+    } finally {
+      this.busy.delete(busyKey);
+    }
+    await this.loadImages();
+  }
+
+  private async pruneImages(count: number): Promise<void> {
+    if (!this.canChange()) return;
+    const confirmed = await confirmDialog({
+      title: "Clean up images",
+      message: `Delete ${plural(count, "untagged image")} that no container uses? Tagged images stay.`,
+      confirmLabel: "Clean up",
+      danger: true,
+    });
+    if (!confirmed || this.disposed) return;
+    try {
+      const result = await this.ctx.api.post<{ deleted?: number; reclaimed?: string }>("/api/docker/images/prune");
+      this.ctx.toast.success(`${plural(result.deleted ?? 0, "image")} deleted${result.reclaimed ? ` · ${result.reclaimed} freed` : ""}`);
+    } catch (error) {
+      this.ctx.toast.error(`Clean up failed: ${errorMessage(error)}`);
+    }
+    await this.loadImages();
+  }
+
+  // --------------------------------------------------------------- volumes
+
+  private renderVolumes(): void {
+    const used = this.volumes.filter((v) => v.inUse).length;
+    this.viewHost.append(
+      this.viewHeader(
+        "Volumes",
+        this.volumesLoaded && !this.volumesError ? [this.chip("In use", `${used} of ${this.volumes.length}`)] : [],
+        this.segmented(this.volumeFilter, (next) => {
+          this.volumeFilter = next;
+          this.renderView();
+        }),
+      ),
+    );
+    if (this.volumesError) {
+      const host = h("div", { class: "dk-body" });
+      renderLoadFailure(host, this.volumesError, { title: "Could not list volumes", retry: () => void this.loadVolumes() });
+      this.viewHost.append(host);
+      return;
+    }
+    if (!this.volumesLoaded) {
+      this.viewHost.append(h("div", { class: "spinner-wrap" }, h("span", { class: "spinner" }), "Loading volumes…"));
+      return;
+    }
+    const shown = filterVolumes(this.volumes, this.query, this.volumeFilter);
+    if (shown.length === 0) {
+      this.viewHost.append(
+        this.volumes.length === 0
+          ? emptyBlock("No volumes", "Volumes appear here when a container stores data in one.")
+          : h("div", { class: "dk-empty muted" }, this.query ? `Nothing matches “${this.query.trim()}”.` : "No volumes here."),
+      );
+      return;
+    }
+    const table = h("div", { class: "dk-table dk-volumes", role: "table", ariaLabel: "Volumes" });
+    table.append(
+      h(
+        "div",
+        { class: "dk-row dk-row-head", role: "row" },
+        h("span", { class: "dk-cell dk-cell-name", role: "columnheader" }, "Name"),
+        h("span", { class: "dk-cell dk-cell-state", role: "columnheader" }, "Status"),
+        h("span", { class: "dk-cell dk-cell-users", role: "columnheader" }, "Used by"),
+        h("span", { class: "dk-cell dk-cell-actions", role: "columnheader" }, h("span", { class: "sr-only" }, "Actions")),
+      ),
+    );
+    for (const volume of shown) table.append(this.volumeRow(volume));
+    this.viewHost.append(table);
+  }
+
+  private volumeRow(volume: EngineVolume): HTMLElement {
+    const busyKey = `volume:${volume.name}`;
+    const displayName = volume.anonymous ? `${volume.name.slice(0, 12)}…` : volume.name;
+    const name = h(
+      "span",
+      { class: "dk-cell dk-cell-name", role: "cell" },
+      h("span", { class: "dk-glyph", ariaHidden: true }, iconSvg("database", 16)),
+      h(
+        "span",
+        { class: "dk-name-text" },
+        h("span", { class: "dk-name mono", title: volume.name }, displayName),
+        h("span", { class: "dk-sub muted" }, volume.app ? `RAST app ${volume.app}` : volume.anonymous ? "Anonymous" : volume.project ? `Compose ${volume.project}` : volume.driver),
+      ),
+    );
+    const status = h("span", { class: "dk-cell dk-cell-state", role: "cell" }, h("span", { class: `dk-pill${volume.inUse ? " is-ok" : ""}` }, volume.inUse ? "In use" : "Unused"));
+    const users = h("span", { class: "dk-cell dk-cell-users muted", role: "cell", title: volume.usedBy.join(", ") }, volume.usedBy.length ? volume.usedBy.join(", ") : "—");
+    const actions = h("span", { class: "dk-cell dk-cell-actions", role: "cell" });
+    if (this.busy.has(busyKey)) {
+      actions.append(h("span", { class: "spinner spinner-sm", ariaLabel: "Working" }));
+    } else if (this.canChange()) {
+      const reason = volume.inUse ? "Used by a container" : volume.app ? "Deleted with its app" : "";
+      actions.append(
+        this.menuButton(volume.name, () => [
+          {
+            label: "Copy name",
+            icon: "copy",
+            onClick: () => void copyText(volume.name).then((ok) => (ok ? this.ctx.toast.success("Volume name copied") : this.ctx.toast.error("Could not copy"))),
+          },
+          "separator",
+          {
+            label: reason ? `Delete (${reason.toLowerCase()})` : "Delete…",
+            icon: "trash",
+            danger: true,
+            disabled: Boolean(reason),
+            onClick: () => void this.deleteVolume(volume),
+          },
+        ]),
+      );
+    }
+    return h("div", { class: "dk-row", role: "row" }, name, status, users, actions);
+  }
+
+  private async deleteVolume(volume: EngineVolume): Promise<void> {
+    if (!this.canChange() || volume.inUse || volume.app) return;
+    const confirmed = await confirmDialog({
+      title: "Delete volume",
+      message: `Delete “${volume.name}” and all the data in it? This can't be undone.`,
+      confirmLabel: "Delete volume",
+      danger: true,
+      requireTyped: volume.name,
+    });
+    if (!confirmed || this.disposed) return;
+    const busyKey = `volume:${volume.name}`;
+    this.busy.add(busyKey);
+    this.renderView();
+    try {
+      await this.ctx.api.post("/api/docker/volumes/remove", { name: volume.name, confirm: volume.name });
+      this.ctx.toast.success(`${volume.name} deleted`);
+    } catch (error) {
+      this.ctx.toast.error(`Could not delete ${volume.name}: ${errorMessage(error)}`);
+    } finally {
+      this.busy.delete(busyKey);
+    }
+    await this.loadVolumes();
   }
 
   // --------------------------------------------------------------- actions
@@ -865,25 +1542,24 @@ class ApplicationsApp {
       restart: "Restart",
       redeploy: "Redeploy",
     };
-    const messages: Record<AppAction, string> = {
-      start: `Start “${app.name}”? Docker will start its containers.`,
-      stop: `Stop “${app.name}”? Its containers will be stopped; data volumes are kept.`,
-      restart: `Restart “${app.name}”? Containers will be stopped and started again.`,
-      redeploy: `Redeploy “${app.name}”? Containers are recreated from the stored Compose definition; running services will briefly stop.`,
-    };
-    const confirmed = await confirmDialog({
-      title: `${labels[action]} application`,
-      message: messages[action],
-      confirmLabel: labels[action],
-      danger: action === "stop" || action === "restart" || action === "redeploy",
-    });
-    if (!confirmed || this.disposed) return;
+    if (action === "redeploy") {
+      const confirmed = await confirmDialog({
+        title: "Redeploy app",
+        message: `Redeploy “${app.name}”? Its containers are recreated from the saved Compose file; it is briefly offline.`,
+        confirmLabel: "Redeploy",
+        danger: true,
+      });
+      if (!confirmed || this.disposed) return;
+    }
+    const key = `app:${app.id}`;
+    this.busy.add(key);
+    this.renderView();
     try {
       const response = await this.ctx.api.post<ActionResponse>(`/api/apps/${encodeURIComponent(app.id)}/${action}`);
       if (response?.jobId) {
         const outcome = await watchJob(this.ctx, this.lc, response.jobId, () => undefined);
         if (this.disposed || this.ctx.window.isClosed()) return;
-        if (outcome.status === "done") this.ctx.toast.success(`${labels[action]} requested`);
+        if (outcome.status === "done") this.ctx.toast.success(`${app.name}: ${labels[action].toLowerCase()} done`);
         else if (outcome.status === "failed") this.ctx.toast.error(`${labels[action]} failed: ${outcome.error ?? "unknown error"}`);
         else this.ctx.toast.warning(`${labels[action]} cancelled`);
       } else {
@@ -891,8 +1567,10 @@ class ApplicationsApp {
       }
     } catch (error) {
       this.ctx.toast.error(`${labels[action]} failed: ${errorMessage(error)}`);
+    } finally {
+      this.busy.delete(key);
     }
-    await Promise.all([this.loadApps(), this.loadDockerStatus()]);
+    await Promise.all([this.loadApps(), this.loadDockerStatus(), this.loadContainers()]);
   }
 
   // ---------------------------------------------------------------- deploy
@@ -1743,30 +2421,49 @@ class ApplicationsApp {
 
   // ----------------------------------------------------------------- import
 
-  private async importSelected(): Promise<void> {
+  /** Adopt containers as a managed RAST app. Resolves true once imported. */
+  private async importContainers(ids: string[], label: string): Promise<boolean> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
         this.denied ? "Your access to Docker was changed." : "You have read-only access to Docker.",
       );
-      return;
+      return false;
     }
-    const ids = [...this.importSelection];
-    if (ids.length === 0) return;
+    if (ids.length === 0) return false;
     const confirmed = await confirmDialog({
-      title: "Import discovered containers",
-      message: `Import ${ids.length} container(s) into RAST management? Only the selected containers are adopted; nothing else is touched.`,
-      confirmLabel: "Import selected",
+      title: "Manage as RAST app",
+      message: `Turn “${label}” into a RAST app? RAST recreates ${ids.length === 1 ? "the container" : `its ${ids.length} containers`} from a Compose file it keeps, so you can redeploy and back it up. Volumes and data stay.`,
+      confirmLabel: "Manage as app",
     });
-    if (!confirmed) return;
+    if (!confirmed) return false;
     try {
       await this.ctx.api.post("/api/docker/import", { containerIds: ids });
-      this.ctx.toast.success(`${ids.length} container(s) imported`);
-      this.importSelection.clear();
+      this.ctx.toast.success(`${label} is now a RAST app`);
       await Promise.all([this.loadApps(), this.loadContainers()]);
+      return true;
     } catch (error) {
       this.ctx.toast.error(`Import failed: ${errorMessage(error)}`);
+      return false;
     }
   }
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function normalizeEngineContainer(value: EngineContainer): EngineContainer {
+  return {
+    ...value,
+    ports: Array.isArray(value.ports) ? value.ports : [],
+    mounts: Array.isArray(value.mounts) ? value.mounts : [],
+    labels: value.labels && typeof value.labels === "object" ? value.labels : {},
+    project: value.project ?? "",
+    service: value.service ?? "",
+    status: value.status ?? value.state ?? "",
+    slug: value.slug ?? null,
+    managed: Boolean(value.managed),
+  };
 }
 
 // ---------------------------------------------------------------------------
