@@ -5,6 +5,11 @@ import { defineConfig } from "vite";
 // `cargo run -- serve` instance on port 8720.
 export default defineConfig({
   base: "/",
+  // Keep `/*! … */` license notices of bundled libraries (xterm.js) in the
+  // minified output.
+  esbuild: {
+    legalComments: "inline",
+  },
   build: {
     outDir: "dist",
     emptyOutDir: true,

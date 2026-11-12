@@ -40,11 +40,13 @@ use std::{
 
 use serde_json::{json, Value};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     process::Command,
     sync::{oneshot, Semaphore},
 };
+
+mod terminal;
 
 use crate::{
     config::Config,
@@ -54,6 +56,7 @@ use crate::{
             parse_compose_logs, parse_container_logs, parse_images_json, parse_inspect_json,
             parse_ps_json, parse_stats_json, parse_volumes_json,
         },
+        exec::{self, MAX_EXEC_SESSIONS},
         protocol::{
             truncate_message, validate_container_id, validate_image_ref, validate_request,
             validate_volume_name, ValidatedAction, WorkerOp, WorkerRequest, WorkerResponse,
@@ -216,6 +219,8 @@ pub async fn serve(options: WorkerOptions, shutdown: impl Future<Output = ()>) -
 
     let options = Arc::new(options);
     let semaphore = Arc::new(Semaphore::new(options.max_concurrent.max(1)));
+    // Terminals are long-lived; they have their own, separate limit.
+    let terminals = Arc::new(Semaphore::new(MAX_EXEC_SESSIONS));
     tokio::pin!(shutdown);
 
     loop {
@@ -226,8 +231,9 @@ pub async fn serve(options: WorkerOptions, shutdown: impl Future<Output = ()>) -
                     Ok((stream, _addr)) => {
                         let options = options.clone();
                         let semaphore = semaphore.clone();
+                        let terminals = terminals.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, options, semaphore).await;
+                            handle_connection(stream, options, semaphore, terminals).await;
                         });
                     }
                     Err(error) => {
@@ -316,6 +322,7 @@ async fn handle_connection(
     stream: UnixStream,
     options: Arc<WorkerOptions>,
     semaphore: Arc<Semaphore>,
+    terminals: Arc<Semaphore>,
 ) {
     if let Some(required_uid) = options.allowed_peer_uid {
         match stream.peer_cred() {
@@ -353,6 +360,11 @@ async fn handle_connection(
             Err(_) => break,
         };
         let response = match serde_json::from_slice::<WorkerRequest>(&line) {
+            Ok(request) if request.op == WorkerOp::ContainerExec => {
+                // The connection now belongs to the terminal session.
+                terminal::serve(request, reader, write_half, &options, &terminals).await;
+                return;
+            }
             Ok(request) => process_request(request, &options, &semaphore).await,
             Err(error) => WorkerResponse::failure(
                 "",
@@ -366,7 +378,7 @@ async fn handle_connection(
     }
 }
 
-async fn write_response(
+pub(crate) async fn write_response(
     stream: &mut tokio::net::unix::OwnedWriteHalf,
     response: &WorkerResponse,
 ) -> io::Result<()> {
@@ -381,33 +393,7 @@ async fn write_response(
 async fn next_line(
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
 ) -> io::Result<Option<Vec<u8>>> {
-    let mut out = Vec::new();
-    loop {
-        let buffer = reader.fill_buf().await?;
-        if buffer.is_empty() {
-            return Ok(if out.is_empty() { None } else { Some(out) });
-        }
-        if let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
-            out.extend_from_slice(&buffer[..position]);
-            reader.consume(position + 1);
-            if out.len() > MAX_LINE_BYTES {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "request line too large",
-                ));
-            }
-            return Ok(Some(out));
-        }
-        let consumed = buffer.len();
-        out.extend_from_slice(buffer);
-        reader.consume(consumed);
-        if out.len() > MAX_LINE_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "request line too large",
-            ));
-        }
-    }
+    exec::read_line_capped(reader, MAX_LINE_BYTES).await
 }
 
 async fn process_request(
@@ -486,6 +472,10 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
                 op.as_str()
             ))),
         },
+        // Terminals are served by `terminal::serve` on their own connection.
+        ValidatedAction::Exec { .. } => Err(WorkerError::invalid(
+            "container-exec opens a terminal session and cannot be dispatched",
+        )),
         ValidatedAction::App {
             op,
             slug,
@@ -1281,6 +1271,21 @@ fn os_args(items: &[&str]) -> Vec<OsString> {
     items.iter().map(OsString::from).collect()
 }
 
+/// A Docker CLI command, killed when dropped.
+fn docker_command(options: &WorkerOptions) -> Command {
+    let mut command = Command::new(&options.docker_bin);
+    command
+        .kill_on_drop(true)
+        // Compose/CLI environment variables that could redirect the project,
+        // its files or its environment files are removed; explicit flags win.
+        .env_remove("COMPOSE_FILE")
+        .env_remove("COMPOSE_PROJECT_NAME")
+        .env_remove("COMPOSE_PROFILES")
+        .env_remove("COMPOSE_ENV_FILES")
+        .env_remove("DOCKER_CONTEXT");
+    command
+}
+
 /// Run one Docker CLI invocation without a shell.
 async fn run_docker(
     options: &WorkerOptions,
@@ -1302,20 +1307,12 @@ async fn run_docker_capture(
     max_stdout: usize,
     max_stderr: usize,
 ) -> Result<CommandOutput, WorkerError> {
-    let mut command = Command::new(&options.docker_bin);
+    let mut command = docker_command(options);
     command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        // Compose/CLI environment variables that could redirect the project,
-        // its files or its environment files are removed; explicit flags win.
-        .env_remove("COMPOSE_FILE")
-        .env_remove("COMPOSE_PROJECT_NAME")
-        .env_remove("COMPOSE_PROFILES")
-        .env_remove("COMPOSE_ENV_FILES")
-        .env_remove("DOCKER_CONTEXT");
+        .stderr(std::process::Stdio::piped());
     if let Some(workdir) = workdir {
         command.current_dir(workdir);
     }
@@ -1565,6 +1562,21 @@ case "$1" in
       *) echo "rast-shop_data" ;;
     esac ;;
   start|stop|restart|rm) echo "0123456789ab" ;;
+  container)
+    case "$3" in
+      fedcba987654) echo '[{"Id":"fedcba987654","Name":"/win-lab","Config":{"Image":"windows:11"},"State":{"Status":"running"},"HostConfig":{"Privileged":true},"Mounts":[]}]' ;;
+      0123456789ac) echo '[{"Id":"0123456789ac","Name":"/old","Config":{"Image":"alpine"},"State":{"Status":"exited"},"HostConfig":{},"Mounts":[]}]' ;;
+      0123456789ab) echo '[{"Id":"0123456789ab","Name":"/legacy","Config":{"Image":"nginx:alpine"},"State":{"Status":"running"},"HostConfig":{},"Mounts":[]}]' ;;
+      *) echo "Error: No such container: $3" >&2; exit 1 ;;
+    esac ;;
+  exec)
+    # A tiny shell on the worker's terminal: report the size, echo one
+    # line, report the size again, then exit with a known status.
+    stty size
+    IFS= read -r input
+    echo "got:$input"
+    stty size
+    exit 7 ;;
   logs)
     echo "2026-11-10T13:24:02.000000000Z out-one"
     echo "2026-11-10T13:24:03.000000000Z err-two" >&2
@@ -1872,6 +1884,191 @@ exit 0
             .call(WorkerRequest::new(WorkerOp::VolumeRemove).volume("../escape"))
             .await;
         assert_eq!(response.error.unwrap().code, "invalid_request");
+    }
+
+    /// Open a terminal session on the worker socket. Returns the handshake
+    /// response and the connection.
+    async fn open_terminal(
+        env: &TestEnv,
+        request: WorkerRequest,
+    ) -> (
+        WorkerResponse,
+        BufReader<tokio::net::unix::OwnedReadHalf>,
+        tokio::net::unix::OwnedWriteHalf,
+    ) {
+        let stream = UnixStream::connect(&env.socket).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+        let mut line = serde_json::to_vec(&request).unwrap();
+        line.push(b'\n');
+        write_half.write_all(&line).await.unwrap();
+        let mut reader = BufReader::new(read_half);
+        let raw = exec::read_line_capped(&mut reader, MAX_LINE_BYTES)
+            .await
+            .unwrap()
+            .expect("handshake line");
+        (serde_json::from_slice(&raw).unwrap(), reader, write_half)
+    }
+
+    /// Read frames until the screen contains `needle` (or the session exits).
+    async fn read_until(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        screen: &mut String,
+        needle: &str,
+    ) -> Option<i32> {
+        let wait = async {
+            loop {
+                match exec::read_frame(reader).await.unwrap() {
+                    Some(exec::Frame::Data(bytes)) => {
+                        screen.push_str(&String::from_utf8_lossy(&bytes));
+                        if screen.contains(needle) {
+                            return None;
+                        }
+                    }
+                    Some(exec::Frame::Exit(code)) => return Some(code),
+                    other => panic!("unexpected frame {other:?}"),
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}; screen: {screen:?}"))
+    }
+
+    #[tokio::test]
+    async fn terminal_runs_on_a_pty_with_resize_and_exit_status() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let request = WorkerRequest::new(WorkerOp::ContainerExec)
+            .ids(vec!["0123456789ab".into()])
+            .size(100, 30);
+        let (response, mut reader, mut writer) = open_terminal(&env, request).await;
+        assert!(response.ok, "{response:?}");
+        assert_eq!(response.data.as_ref().unwrap()["container"], "0123456789ab");
+        assert_eq!(response.data.as_ref().unwrap()["cols"], 100);
+
+        let mut screen = String::new();
+        assert_eq!(read_until(&mut reader, &mut screen, "30 100").await, None);
+        exec::write_frame(
+            &mut writer,
+            &exec::Frame::Resize {
+                cols: 132,
+                rows: 40,
+            },
+        )
+        .await
+        .unwrap();
+        exec::write_frame(&mut writer, &exec::Frame::Data(b"hello\n".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_until(&mut reader, &mut screen, "got:hello").await,
+            None
+        );
+        let code = read_until(&mut reader, &mut screen, "\u{0}never").await;
+        assert_eq!(code, Some(7), "screen: {screen:?}");
+        assert!(
+            screen.contains("40 132"),
+            "resize must reach the shell: {screen:?}"
+        );
+
+        let calls = env.logged_args();
+        let inspect = &calls[0];
+        assert_eq!(inspect, &["container", "inspect", "0123456789ab"]);
+        let exec_args = &calls[1];
+        assert_eq!(
+            exec_args,
+            &[
+                "exec",
+                "-i",
+                "-t",
+                "-e",
+                "TERM=xterm-256color",
+                "-e",
+                "COLORTERM=truecolor",
+                "0123456789ab",
+                "sh",
+                "-c",
+                exec::SHELL_SCRIPT,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_ends_when_the_client_closes() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let request = WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["0123456789ab".into()]);
+        let (response, mut reader, mut writer) = open_terminal(&env, request).await;
+        assert!(response.ok, "{response:?}");
+        let mut screen = String::new();
+        read_until(&mut reader, &mut screen, "24 80").await;
+        exec::write_frame(&mut writer, &exec::Frame::Close)
+            .await
+            .unwrap();
+        // The worker hangs up the shell and closes the connection.
+        let rest = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(frame) = exec::read_frame(&mut reader).await.unwrap() {
+                assert!(matches!(frame, exec::Frame::Data(_)), "{frame:?}");
+            }
+        })
+        .await;
+        assert!(rest.is_ok(), "the session must end after a close frame");
+    }
+
+    #[tokio::test]
+    async fn terminal_is_refused_for_stopped_privileged_or_unknown_containers() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        for (id, code) in [
+            ("fedcba987654", "forbidden"),
+            ("0123456789ac", "not_running"),
+            ("0123456789ff", "not_found"),
+        ] {
+            let request = WorkerRequest::new(WorkerOp::ContainerExec).ids(vec![id.into()]);
+            let (response, _reader, _writer) = open_terminal(&env, request).await;
+            assert!(!response.ok, "{id}");
+            assert_eq!(response.error.unwrap().code, code, "{id}");
+        }
+        // No shell was started for any of them.
+        assert!(env
+            .logged_args()
+            .iter()
+            .all(|call| call.first().map(String::as_str) != Some("exec")));
+        // Bad requests never reach docker.
+        let request = WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["--privileged".into()]);
+        let (response, _reader, _writer) = open_terminal(&env, request).await;
+        assert_eq!(response.error.unwrap().code, "invalid_request");
+    }
+
+    #[tokio::test]
+    async fn terminal_sessions_are_limited() {
+        let env = TestEnv::start(OK_SCRIPT).await;
+        let mut open = Vec::new();
+        for _ in 0..MAX_EXEC_SESSIONS {
+            let request =
+                WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["0123456789ab".into()]);
+            let (response, reader, writer) = open_terminal(&env, request).await;
+            assert!(response.ok, "{response:?}");
+            open.push((reader, writer));
+        }
+        let request = WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["0123456789ab".into()]);
+        let (response, _reader, _writer) = open_terminal(&env, request).await;
+        assert_eq!(response.error.unwrap().code, "busy");
+        // Closing one frees a slot.
+        let (mut reader, mut writer) = open.pop().unwrap();
+        exec::write_frame(&mut writer, &exec::Frame::Close)
+            .await
+            .unwrap();
+        while exec::read_frame(&mut reader).await.unwrap().is_some() {}
+        let mut reopened = None;
+        for _ in 0..50 {
+            let request =
+                WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["0123456789ab".into()]);
+            let (response, reader, writer) = open_terminal(&env, request).await;
+            if response.ok {
+                reopened = Some((reader, writer));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(reopened.is_some(), "a slot must free up after a close");
     }
 
     #[tokio::test]

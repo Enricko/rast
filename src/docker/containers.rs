@@ -369,6 +369,11 @@ pub fn parse_inspect_json(output: &str) -> Result<Vec<Value>, String> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let ipc_mode = host_config
+            .and_then(|h| h.get("IpcMode"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let cap_add: Vec<String> = host_config
             .and_then(|h| h.get("CapAdd"))
             .and_then(Value::as_array)
@@ -420,6 +425,7 @@ pub fn parse_inspect_json(output: &str) -> Result<Vec<Value>, String> {
             "privileged": privileged,
             "networkMode": network_mode,
             "pidMode": pid_mode,
+            "ipcMode": ipc_mode,
             "capAdd": cap_add,
             "devices": devices,
             "networks": networks,

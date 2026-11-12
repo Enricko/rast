@@ -22,6 +22,7 @@ pub mod monitor;
 pub mod packages;
 pub mod settings;
 pub mod system;
+pub mod terminal;
 pub mod users;
 
 /// Build the complete application router (API + embedded frontend).
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .merge(appearance::routes())
         .merge(apps::routes())
         .merge(docker::routes())
+        .merge(terminal::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())

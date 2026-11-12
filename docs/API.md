@@ -180,6 +180,7 @@ container gone…) is `409 conflict` with Docker's message.
 | POST | `/api/docker/containers/{id}/stop` | `docker stop` |
 | POST | `/api/docker/containers/{id}/restart` | `docker restart` |
 | DELETE | `/api/docker/containers/{id}?confirm=<name>` | `docker rm --force`, never `-v`: volumes stay. `confirm` must equal the container name. Containers of a managed app → `409` (delete the app) |
+| GET (WebSocket) | `/api/docker/containers/{id}/terminal` | Interactive shell in a running container; see below |
 | GET | `/api/docker/containers/{id}/logs?tail=300&since=<unix secs>` | `{lines:[{ts, stream:"stdout"|"stderr", message}], tail}`, both streams merged by time; `tail` ≤ 2000 |
 | GET | `/api/docker/stats` | `{items:[{id, name, cpuPercent, memoryBytes, memoryLimitBytes, memoryPercent, netRxBytes, netTxBytes, blockReadBytes, blockWriteBytes, pids}], sampledAt}` |
 | GET | `/api/docker/images` | `{items:[{id, repository, tag, reference, digest, sizeBytes, size, createdAt, createdSince, containers, usedBy:[names], inUse}], totalBytes}`; untagged images have an empty `reference` |
@@ -194,9 +195,32 @@ letter or digit and have no empty path segment. Volume names follow Docker's
 `[A-Za-z0-9][A-Za-z0-9_.-]*`.
 
 `terminal.allowed` is false for privileged containers, containers sharing the
-host's processes or network, with devices or extra capabilities such as
-`SYS_ADMIN`, and containers that bind-mount `/`, a system folder (`/etc`,
-`/root`, `/home`, `/usr`, `/var/lib`, `/proc`, …) or the Docker socket.
+host's processes, memory (IPC) or network, with devices or extra capabilities
+such as `SYS_ADMIN`, and containers that bind-mount `/`, a system folder
+(`/etc`, `/root`, `/home`, `/usr`, `/var/lib`, `/proc`, …), a parent of one
+(such as `/var`) or the Docker socket.
+
+#### Container terminal
+
+`GET /api/docker/containers/{id}/terminal` upgrades to a WebSocket. The
+request must come from the RAST page: its `Origin` must match the host it was
+sent to or `public_url` (otherwise `403` before the upgrade). Then:
+
+1. Within 10 seconds the browser sends a text message
+   `{"type":"start","csrf":"<csrfToken from /api/auth/me>","cols":N,"rows":N}`.
+2. The server answers `{"type":"ready","container":"<name>"}` once the shell
+   runs, or `{"type":"error","message":"…"}` and closes (bad token, container
+   stopped or refused by the terminal policy, 4 terminals already open, …).
+3. Keyboard input goes as binary messages, terminal output comes back as
+   binary messages; `{"type":"resize","cols":N,"rows":N}` changes the size
+   (cols 10–500, rows 2–200).
+4. When the shell ends the server sends `{"type":"exit","code":N}` (`null`
+   when unknown) and closes. Closing the WebSocket hangs up the shell.
+
+The session is re-checked every minute; signing out, a revoked session or a
+lost admin role sends an `error` message and closes the terminal. A terminal
+without keyboard input for 60 minutes is closed. Every opening is audited as
+`docker.container.exec` (success or failure, never the typed commands).
 
 ## Resource monitor
 

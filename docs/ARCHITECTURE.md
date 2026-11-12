@@ -75,6 +75,18 @@ id, `pull`/`image rm` (never forced) by a validated image reference,
 Arguments that could look like options are refused, and `--` ends option
 parsing before every image or volume name.
 
+Container terminals (`container-exec`) are the one long-lived operation. The
+worker re-inspects the container, refuses it unless it is running and passes
+the terminal policy (not privileged, no host namespaces, devices, dangerous
+capabilities, or bind mounts of system folders or the Docker socket), then
+runs `docker exec -i -t <full id> sh -c <fixed script>` (bash when the image
+has it, else sh) on a pseudo terminal it owns. After the JSON reply the same
+connection carries binary frames `[kind u8][length u32 BE][payload]`: 1 data,
+2 resize (cols, rows as u16 BE), 3 exit status (i32 BE), 4 close; payloads are
+at most 64 KiB. At most 4 terminals run at once, a terminal without keyboard
+input for 60 minutes is closed, and closing the connection hangs up the shell.
+The web server bridges each session to a WebSocket (see `docs/API.md`).
+
 ## Processes and systemd units
 
 | Unit | Command | User / groups | Purpose |
@@ -341,7 +353,8 @@ release notes (see [OPERATIONS.md](OPERATIONS.md#updates)).
 | --- | --- |
 | Browser ↔ TLS terminator | TLS terminated by the proxy; RAST only listens on loopback by default |
 | Proxy ↔ RAST | Forwarding headers trusted only from `trusted_proxies` CIDRs |
-| RAST ↔ worker | Unix socket, mode 0660, group `rast`, optional peer-uid allowlist (`RAST_WORKER_ALLOWED_UID`, installer sets it), JSON-lines protocol, action whitelist, strict argument validation, timeouts |
+| RAST ↔ worker | Unix socket, mode 0660, group `rast`, optional peer-uid allowlist (`RAST_WORKER_ALLOWED_UID`, installer sets it), JSON-lines protocol, action whitelist, strict argument validation, timeouts; terminal sessions switch the connection to bounded binary frames |
+| Browser ↔ terminal | WebSocket, admin only, same-origin `Origin` required, CSRF token in the first message, session re-checked every minute, terminal policy checked by the API and again by the worker, every session audited |
 | Worker ↔ Docker | Worker is in the `docker` group — practically root-equivalent; it runs no shell and only whitelisted operations |
 | RAST ↔ filesystem | Per-user roots resolved and canonicalised under `storage_dir`; traversal and symlink escapes rejected on every operation |
 | RAST ↔ data dir | Contains the SQLite DB and master key; 0750 `rast:rast`, master key 0600 |

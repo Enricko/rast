@@ -4278,6 +4278,89 @@ button.pkg-pill {
   font-weight: 600;
 }
 
+/* Terminal: xterm.js on the same dark surface as the log viewer. */
+.dk-term-wrap {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dk-term-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.dk-term-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  flex: none;
+}
+
+.dk-term-wrap[data-phase="ready"] .dk-term-dot {
+  background: var(--ok);
+}
+
+.dk-term-wrap[data-phase="connecting"] .dk-term-dot,
+.dk-term-wrap[data-phase="loading"] .dk-term-dot {
+  background: var(--warning);
+}
+
+.dk-term-wrap[data-phase="failed"] .dk-term-dot {
+  background: var(--danger);
+}
+
+.dk-term-notice {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  font-size: 13px;
+}
+
+.dk-term {
+  height: clamp(240px, 52vh, 640px);
+  min-width: 0;
+  padding: 6px 4px 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #0f1419;
+  overflow: hidden;
+}
+
+.dk-term:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.dk-term .xterm {
+  height: 100%;
+}
+
+.dk-term .xterm-viewport {
+  background: #0f1419 !important;
+}
+
+.dk-term-empty-icon {
+  display: inline-flex;
+  color: var(--text-faint);
+}
+
+.dk-term-empty-title {
+  margin: 8px 0 2px;
+  font-weight: 600;
+}
+
+.dk-term-empty .btn {
+  margin-top: 10px;
+}
+
 .dk-stats {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

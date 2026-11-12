@@ -136,6 +136,15 @@ lines.append("Frontend build tooling (Vite, TypeScript and their transitive "
              "distributed inside the binary; their exact versions and licenses are "
              "pinned in `frontend/package-lock.json`.")
 lines.append("")
+lines.append("The web interface embedded in the binary bundles these frontend "
+             "libraries (loaded only when a container terminal is opened); their "
+             "license notice is kept in the bundled file:")
+lines.append("")
+lines.append("| Package | Version | License | Copyright |")
+lines.append("| --- | --- | --- | --- |")
+lines.append("| `@xterm/xterm` | 6.0.0 | MIT | The xterm.js authors; SourceLair Private Company; Christopher Jeffrey |")
+lines.append("| `@xterm/addon-fit` | 0.11.0 | MIT | The xterm.js authors |")
+lines.append("")
 lines.append("## License summary")
 lines.append("")
 lines.append("| License expression | Packages |")

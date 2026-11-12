@@ -28,6 +28,7 @@ use crate::{
     audit::{self, AuditLog},
     auth::AdminUser,
     docker::{
+        exec::terminal_policy,
         protocol::{
             validate_container_id, validate_image_ref, validate_volume_name, WorkerOp,
             WorkerRequest, MAX_LOG_TAIL,
@@ -41,26 +42,6 @@ use crate::{
 
 /// Realtime event published after any change made through this module.
 pub const INVENTORY_EVENT: &str = "docker.inventory";
-
-/// Host paths whose bind mount makes a container equivalent to host root
-/// access. A terminal is refused for such containers (see [`terminal_policy`]).
-const SYSTEM_PATHS: &[&str] = &[
-    "/etc", "/root", "/home", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64",
-    "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lib", "/var/log",
-];
-
-/// Capabilities that let a process escape or administer the host.
-const DANGEROUS_CAPS: &[&str] = &[
-    "ALL",
-    "SYS_ADMIN",
-    "SYS_PTRACE",
-    "SYS_MODULE",
-    "SYS_RAWIO",
-    "DAC_READ_SEARCH",
-    "NET_ADMIN",
-    "BPF",
-    "PERFMON",
-];
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -140,7 +121,7 @@ pub(crate) fn managed_slug_for(project: &str, slugs: &BTreeSet<String>) -> Optio
 }
 
 /// Every container on the host (`docker ps -a`).
-async fn all_containers(state: &AppState) -> AppResult<Vec<Value>> {
+pub(super) async fn all_containers(state: &AppState) -> AppResult<Vec<Value>> {
     let data = state
         .docker
         .all_containers()
@@ -153,13 +134,13 @@ async fn all_containers(state: &AppState) -> AppResult<Vec<Value>> {
         .unwrap_or_default())
 }
 
-fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
+pub(super) fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or_default()
 }
 
 /// Find one container by full id or by a unique id prefix (at least 12
 /// characters, like `docker ps` short ids).
-fn find_container<'a>(containers: &'a [Value], id: &str) -> AppResult<&'a Value> {
+pub(super) fn find_container<'a>(containers: &'a [Value], id: &str) -> AppResult<&'a Value> {
     validate_container_id(id).map_err(AppError::bad_request)?;
     if id.len() < 12 {
         return Err(AppError::bad_request(
@@ -182,11 +163,25 @@ fn find_container<'a>(containers: &'a [Value], id: &str) -> AppResult<&'a Value>
 /// Map a worker failure for a user-requested change onto an HTTP error: a
 /// refusal by Docker (image in use, container gone…) is a conflict the user
 /// can act on, not a server outage.
-fn change_error(error: DockerError) -> AppError {
+pub(super) fn change_error(error: DockerError) -> AppError {
     match error {
         DockerError::Failed(message) => AppError::conflict(message),
         other => AppError::from(other),
     }
+}
+
+/// Parsed `docker inspect` data of one container.
+pub(super) async fn inspect_container(state: &AppState, full_id: &str) -> AppResult<Value> {
+    let data = state
+        .docker
+        .call(WorkerRequest::new(WorkerOp::Inspect).ids(vec![full_id.to_string()]))
+        .await
+        .map_err(AppError::from)?;
+    data.get("items")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .cloned()
+        .ok_or(AppError::NotFound("container not found"))
 }
 
 fn announce(state: &AppState, what: &str) {
@@ -195,67 +190,6 @@ fn announce(state: &AppState, what: &str) {
         .publish_admin(INVENTORY_EVENT, json!({"kind": what}));
     // App statuses follow their containers; refresh them right away.
     state.docker.request_reconcile();
-}
-
-/// Whether a terminal may be opened into this container. A RAST admin must
-/// not become root on the host through a container, so containers that are
-/// privileged, share host namespaces, have dangerous capabilities or devices,
-/// or bind-mount system folders or the Docker socket are refused.
-pub fn terminal_policy(inspect: &Value) -> (bool, String) {
-    let deny = |reason: &str| (false, reason.to_string());
-    if inspect
-        .get("privileged")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return deny(
-            "This container is privileged, so a terminal would have full access to the server.",
-        );
-    }
-    if str_field(inspect, "pidMode") == "host" {
-        return deny("This container shares the server's processes.");
-    }
-    if str_field(inspect, "networkMode") == "host" {
-        return deny("This container shares the server's network.");
-    }
-    if inspect.get("devices").and_then(Value::as_u64).unwrap_or(0) > 0 {
-        return deny("This container has access to server devices.");
-    }
-    let caps = inspect
-        .get("capAdd")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for cap in caps.iter().filter_map(Value::as_str) {
-        let cap = cap.trim_start_matches("CAP_").to_ascii_uppercase();
-        if DANGEROUS_CAPS.contains(&cap.as_str()) {
-            return deny("This container has extra privileges on the server.");
-        }
-    }
-    let mounts = inspect
-        .get("mounts")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    for mount in &mounts {
-        if str_field(mount, "type") != "bind" {
-            continue;
-        }
-        let source = str_field(mount, "source").trim_end_matches('/');
-        if source.is_empty() {
-            return deny("This container mounts the server's root folder.");
-        }
-        if source.ends_with("docker.sock") || source.ends_with("containerd.sock") {
-            return deny("This container can control Docker on the server.");
-        }
-        let system = SYSTEM_PATHS
-            .iter()
-            .any(|path| source == *path || source.starts_with(&format!("{path}/")));
-        if system {
-            return deny("This container mounts a system folder of the server.");
-        }
-    }
-    (true, String::new())
 }
 
 // ---------------------------------------------------------------------------
@@ -271,18 +205,7 @@ pub async fn container_detail(
     state.docker.ensure_available().await?;
     let containers = all_containers(&state).await?;
     let summary = find_container(&containers, &id)?.clone();
-    let full_id = str_field(&summary, "id").to_string();
-    let data = state
-        .docker
-        .call(WorkerRequest::new(WorkerOp::Inspect).ids(vec![full_id]))
-        .await
-        .map_err(AppError::from)?;
-    let inspect = data
-        .get("items")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .cloned()
-        .ok_or(AppError::NotFound("container not found"))?;
+    let inspect = inspect_container(&state, str_field(&summary, "id")).await?;
     let slugs = managed_slugs(&state).await?;
     let slug = managed_slug_for(str_field(&summary, "project"), &slugs);
     let app_id: Option<String> = match &slug {
@@ -789,51 +712,6 @@ mod tests {
         assert!(
             find_container(&containers, "one").is_err(),
             "names are not ids"
-        );
-    }
-
-    #[test]
-    fn terminal_is_refused_for_root_equivalent_containers() {
-        let base = json!({"privileged": false, "pidMode": "", "networkMode": "bridge", "devices": 0, "capAdd": [], "mounts": [
-            {"type": "bind", "source": "/srv/drive/data", "target": "/data"},
-            {"type": "volume", "source": "/var/lib/docker/volumes/x/_data", "target": "/x"},
-        ]});
-        assert!(terminal_policy(&base).0);
-        let with = |key: &str, value: Value| {
-            let mut v = base.clone();
-            v[key] = value;
-            v
-        };
-        assert!(!terminal_policy(&with("privileged", json!(true))).0);
-        assert!(!terminal_policy(&with("pidMode", json!("host"))).0);
-        assert!(!terminal_policy(&with("networkMode", json!("host"))).0);
-        assert!(!terminal_policy(&with("devices", json!(1))).0);
-        assert!(!terminal_policy(&with("capAdd", json!(["CAP_SYS_ADMIN"]))).0);
-        assert!(terminal_policy(&with("capAdd", json!(["CHOWN"]))).0);
-        for source in [
-            "/",
-            "/etc",
-            "/root/windows-share",
-            "/home/someone",
-            "/var/run/docker.sock",
-            "/run/containerd/containerd.sock",
-            "/var/lib/docker",
-            "/proc",
-        ] {
-            let policy = terminal_policy(&with(
-                "mounts",
-                json!([{"type": "bind", "source": source, "target": "/host"}]),
-            ));
-            assert!(!policy.0, "{source} should be refused");
-            assert!(!policy.1.is_empty());
-        }
-        // Prefixes match whole path segments only.
-        assert!(
-            terminal_policy(&with(
-                "mounts",
-                json!([{"type": "bind", "source": "/etcetera/data", "target": "/d"}])
-            ))
-            .0
         );
     }
 

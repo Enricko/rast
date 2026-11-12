@@ -21,12 +21,20 @@ this file by `scripts/changelog-section.sh`.
   a background job), delete unused images, and clean up untagged ones.
 - Volumes: list with the containers using each one; delete unused volumes
   after typing the name.
+- **Terminal into containers.** A Terminal tab on the container page opens a
+  shell (bash, or sh) in the running container, with colours, resizing,
+  Ctrl+C and copy (Ctrl+Shift+C). Terminals are refused for containers that
+  would give access to the server itself (privileged, host processes or
+  network, devices, extra capabilities, system folders or the Docker socket
+  mounted), and the page says why. Openings are audited; signing out closes
+  open terminals, and a terminal idle for 60 minutes closes itself.
 - Containers RAST does not manage can be deleted (type the name to confirm;
   their volumes always stay) or turned into a RAST app from their menu.
   Containers and volumes of a RAST app stay managed through the app.
-- New admin-only endpoints under `/api/docker/containers/{id}`,
-  `/api/docker/images*`, `/api/docker/volumes*` and `/api/docker/stats`, backed
-  by new whitelisted worker operations; every change is audited.
+- New admin-only endpoints under `/api/docker/containers/{id}` (including the
+  `/terminal` WebSocket), `/api/docker/images*`, `/api/docker/volumes*` and
+  `/api/docker/stats`, backed by new whitelisted worker operations; every
+  change is audited.
 
 ### Changed
 

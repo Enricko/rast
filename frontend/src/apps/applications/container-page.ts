@@ -1,6 +1,6 @@
-// One container's page in the Docker app: logs, configuration and live usage,
-// with start/stop/restart/delete in the header (Docker Desktop's container
-// view). Mounted into the app's main area; the caller disposes it.
+// One container's page in the Docker app: logs, configuration, a terminal and
+// live usage, with start/stop/restart/delete in the header (Docker Desktop's
+// container view). Mounted into the app's main area; the caller disposes it.
 
 import type { AppContext } from "../../core/app";
 import { clear, h } from "../../core/dom";
@@ -21,6 +21,7 @@ import {
   type ContainerStat,
   type LogLine,
 } from "./model";
+import { mountTerminal, type TerminalView } from "./terminal";
 
 export interface ContainerPageDeps {
   ctx: AppContext;
@@ -41,7 +42,7 @@ export interface ContainerPage {
   dispose(): void;
 }
 
-type Tab = "logs" | "inspect" | "stats";
+type Tab = "logs" | "inspect" | "terminal" | "stats";
 
 const TAILS = [300, 1000, 2000];
 const LOG_POLL_MS = 2500;
@@ -80,7 +81,9 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     }
     renderHead();
     renderTabs();
-    if (tab !== "logs" || !logsMounted) renderBody();
+    // A running log view or terminal keeps going; everything else repaints.
+    const live = (tab === "logs" && logsMounted) || (tab === "terminal" && terminal !== null);
+    if (!live) renderBody();
   }
 
   // ---------------------------------------------------------------- header
@@ -200,7 +203,8 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     if (disposed) return;
     deps.onChanged();
     await load();
-    if (tab === "logs") restartLogs();
+    // The shell ended with the container; show the new state (or a new shell).
+    if (tab === "logs" || tab === "terminal") renderBody();
   }
 
   async function importThis(): Promise<void> {
@@ -238,6 +242,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     const entries: Array<[Tab, string]> = [
       ["logs", "Logs"],
       ["inspect", "Inspect"],
+      ["terminal", "Terminal"],
       ["stats", "Stats"],
     ];
     for (const [id, label] of entries) {
@@ -255,6 +260,8 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
   function renderBody(): void {
     stopTimers();
     logsMounted = false;
+    terminal?.dispose();
+    terminal = null;
     clear(body);
     if (!detail) {
       if (loadError) body.append(h("div", { class: "dk-empty" }, h("p", {}, errorMessage(loadError)), retryButton()));
@@ -263,6 +270,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     }
     if (tab === "logs") mountLogs();
     else if (tab === "inspect") renderInspect();
+    else if (tab === "terminal") mountTerminalTab();
     else mountStats();
   }
 
@@ -497,6 +505,34 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
 
   // ----------------------------------------------------------------- stats
 
+  // -------------------------------------------------------------- terminal
+
+  let terminal: TerminalView | null = null;
+
+  function mountTerminalTab(): void {
+    if (!detail) return;
+    const c = detail.container;
+    const empty = (icon: string, title: string, text: string, action?: HTMLElement): void => {
+      body.append(h("div", { class: "dk-empty dk-term-empty" }, h("span", { class: "dk-term-empty-icon" }, iconSvg(icon, 28)), h("p", { class: "dk-term-empty-title" }, title), h("p", { class: "muted" }, text), action ?? null));
+    };
+    if (!deps.canChange()) {
+      empty("lock", "Terminal not available", "You have read-only access to Docker.");
+      return;
+    }
+    if (!detail.terminal.allowed) {
+      empty("lock", "Terminal turned off for this container", detail.terminal.reason);
+      return;
+    }
+    if (!isRunning(c)) {
+      const start = h("button", { class: "btn btn-primary btn-sm", type: "button", disabled: busy }, iconSvg("play", 13), h("span", {}, "Start container"));
+      start.addEventListener("click", () => void act("start"));
+      empty("terminal", "The container is stopped", "Start it to open a terminal.", start);
+      return;
+    }
+    terminal = mountTerminal({ ctx, id: c.id, name: c.name });
+    body.append(terminal.el);
+  }
+
   let cpuSeries: number[] = [];
   let memSeries: number[] = [];
   let lastStat: ContainerStat | null = null;
@@ -561,6 +597,8 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     dispose: () => {
       disposed = true;
       stopTimers();
+      terminal?.dispose();
+      terminal = null;
       el.remove();
     },
   };

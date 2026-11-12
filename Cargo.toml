@@ -20,7 +20,7 @@ name = "rast"
 path = "src/lib.rs"
 
 [dependencies]
-axum = { version = "0.8.9", features = ["macros"] }
+axum = { version = "0.8.9", features = ["macros", "ws"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
 tower = "0.5"

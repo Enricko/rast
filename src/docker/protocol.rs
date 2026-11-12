@@ -128,6 +128,9 @@ pub enum WorkerOp {
     /// `docker volume rm <volume>` (never `--force`; Docker refuses volumes
     /// that a container still uses).
     VolumeRemove,
+    /// Interactive shell in one running container. After the success line
+    /// the connection carries terminal frames ([`super::exec`]).
+    ContainerExec,
 }
 
 impl WorkerOp {
@@ -159,6 +162,7 @@ impl WorkerOp {
             Self::ImagePrune => "image-prune",
             Self::VolumeList => "volume-list",
             Self::VolumeRemove => "volume-remove",
+            Self::ContainerExec => "container-exec",
         }
     }
 
@@ -177,7 +181,8 @@ impl WorkerOp {
             | Self::ComposeLogsSince
             | Self::ContainerLogs
             | Self::ImageList
-            | Self::VolumeList => TimeoutClass::Quick,
+            | Self::VolumeList
+            | Self::ContainerExec => TimeoutClass::Quick,
             Self::ComposeUp
             | Self::ComposeDown
             | Self::ComposeStop
@@ -244,6 +249,12 @@ pub struct WorkerRequest {
     /// Volume name (volume ops only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub volume: Option<String>,
+    /// Terminal width in columns (`container-exec` only; clamped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    /// Terminal height in rows (`container-exec` only; clamped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
 }
 
 impl WorkerRequest {
@@ -257,6 +268,8 @@ impl WorkerRequest {
             since_secs: None,
             image: None,
             volume: None,
+            cols: None,
+            rows: None,
         }
     }
 
@@ -287,6 +300,12 @@ impl WorkerRequest {
 
     pub fn volume(mut self, volume: impl Into<String>) -> Self {
         self.volume = Some(volume.into());
+        self
+    }
+
+    pub fn size(mut self, cols: u16, rows: u16) -> Self {
+        self.cols = Some(cols);
+        self.rows = Some(rows);
         self
     }
 }
@@ -368,6 +387,8 @@ pub enum ValidatedAction {
     Image { op: WorkerOp, reference: String },
     /// Removal of one validated volume name.
     Volume { op: WorkerOp, name: String },
+    /// Terminal into one container, with a clamped initial size.
+    Exec { id: String, cols: u16, rows: u16 },
 }
 
 impl ValidatedAction {
@@ -378,6 +399,7 @@ impl ValidatedAction {
             Self::Inspect(_) => WorkerOp::Inspect,
             Self::Containers { op, .. } | Self::Image { op, .. } | Self::Volume { op, .. } => *op,
             Self::ContainerLogs { .. } => WorkerOp::ContainerLogs,
+            Self::Exec { .. } => WorkerOp::ContainerExec,
         }
     }
 }
@@ -420,6 +442,14 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
                 tail,
                 since_secs,
             })
+        }
+        WorkerOp::ContainerExec => {
+            accept_only(req, &["ids", "cols", "rows"])?;
+            let ids = validated_ids(req)?;
+            let [id] = <[String; 1]>::try_from(ids)
+                .map_err(|_| "container-exec accepts exactly one container id".to_string())?;
+            let (cols, rows) = super::exec::clamp_size(req.cols, req.rows);
+            Ok(ValidatedAction::Exec { id, cols, rows })
         }
         WorkerOp::ImagePull | WorkerOp::ImageRemove => {
             accept_only(req, &["image"])?;
@@ -503,6 +533,8 @@ fn reject_extra_args(req: &WorkerRequest) -> Result<(), String> {
         || req.since_secs.is_some()
         || req.image.is_some()
         || req.volume.is_some()
+        || req.cols.is_some()
+        || req.rows.is_some()
     {
         return Err(format!("{} accepts no arguments", req.op.as_str()));
     }
@@ -518,6 +550,8 @@ fn accept_only(req: &WorkerRequest, allowed: &[&str]) -> Result<(), String> {
         ("sinceSecs", req.since_secs.is_some()),
         ("image", req.image.is_some()),
         ("volume", req.volume.is_some()),
+        ("cols", req.cols.is_some()),
+        ("rows", req.rows.is_some()),
     ];
     for (name, set) in present {
         if set && !allowed.contains(&name) {
@@ -1006,6 +1040,51 @@ mod tests {
         ] {
             assert!(validate_request(&bad, &apps_dir()).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn container_exec_takes_one_id_and_a_clamped_size() {
+        let req = WorkerRequest::new(WorkerOp::ContainerExec)
+            .ids(vec!["0123456789ab".into()])
+            .size(9999, 1);
+        assert_eq!(
+            validate_request(&req, &apps_dir()).unwrap(),
+            ValidatedAction::Exec {
+                id: "0123456789ab".into(),
+                cols: super::super::exec::MAX_COLS,
+                rows: super::super::exec::MIN_ROWS,
+            }
+        );
+        let plain = WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["0123456789ab".into()]);
+        assert!(matches!(
+            validate_request(&plain, &apps_dir()).unwrap(),
+            ValidatedAction::Exec {
+                cols: 80,
+                rows: 24,
+                ..
+            }
+        ));
+        for bad in [
+            WorkerRequest::new(WorkerOp::ContainerExec),
+            WorkerRequest::new(WorkerOp::ContainerExec)
+                .ids(vec!["0123456789ab".into(), "0123456789ac".into()]),
+            WorkerRequest::new(WorkerOp::ContainerExec).ids(vec!["../etc".into()]),
+            WorkerRequest::new(WorkerOp::ContainerExec)
+                .ids(vec!["0123456789ab".into()])
+                .tail(10),
+            WorkerRequest::new(WorkerOp::ContainerExec)
+                .ids(vec!["0123456789ab".into()])
+                .image("alpine"),
+        ] {
+            assert!(validate_request(&bad, &apps_dir()).is_err(), "{bad:?}");
+        }
+        // Sizes belong to terminals only.
+        let stray = WorkerRequest::new(WorkerOp::ContainerLogs)
+            .ids(vec!["0123456789ab".into()])
+            .size(80, 24);
+        assert!(validate_request(&stray, &apps_dir()).is_err());
+        let stray = WorkerRequest::new(WorkerOp::Version).size(80, 24);
+        assert!(validate_request(&stray, &apps_dir()).is_err());
     }
 
     #[test]

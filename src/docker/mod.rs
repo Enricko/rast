@@ -10,6 +10,7 @@
 
 pub mod compose;
 pub mod containers;
+pub mod exec;
 pub mod protocol;
 pub mod reconcile;
 
@@ -21,8 +22,11 @@ use std::{
 
 use serde_json::{json, Value};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixStream,
+    io::{AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixStream,
+    },
     sync::{Mutex, Notify},
 };
 
@@ -268,19 +272,66 @@ impl DockerManager {
         }
     }
 
-    async fn roundtrip(&self, request: &WorkerRequest) -> Result<Value, DockerError> {
-        let mut stream =
-            tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket_path))
+    async fn connect(&self) -> Result<UnixStream, DockerError> {
+        tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket_path))
+            .await
+            .map_err(|_| {
+                DockerError::Unavailable("connection to the worker socket timed out".into())
+            })?
+            .map_err(|e| {
+                DockerError::Unavailable(format!(
+                    "cannot connect to {}: {e}",
+                    self.socket_path.display()
+                ))
+            })
+    }
+
+    /// Open an interactive terminal into a running container. The returned
+    /// session carries [`exec`] frames; dropping it hangs up the shell.
+    pub async fn open_terminal(
+        &self,
+        container_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, DockerError> {
+        if !self.enabled {
+            return Err(DockerError::Disabled("RAST_DOCKER_ENABLED is false".into()));
+        }
+        let request = WorkerRequest::new(WorkerOp::ContainerExec)
+            .ids(vec![container_id.to_string()])
+            .size(cols, rows);
+        validate_request(&request, &self.apps_dir).map_err(DockerError::BadRequest)?;
+        let handshake = async {
+            let stream = self.connect().await?;
+            let (read_half, mut write_half) = stream.into_split();
+            let mut line = serde_json::to_vec(&request)
+                .map_err(|e| DockerError::Protocol(format!("cannot encode request: {e}")))?;
+            line.push(b'\n');
+            write_half.write_all(&line).await.map_err(|e| {
+                DockerError::Unavailable(format!("cannot write to the worker socket: {e}"))
+            })?;
+            let mut reader = BufReader::new(read_half);
+            let raw = exec::read_line_capped(&mut reader, MAX_LINE_BYTES)
                 .await
-                .map_err(|_| {
-                    DockerError::Unavailable("connection to the worker socket timed out".into())
-                })?
                 .map_err(|e| {
-                    DockerError::Unavailable(format!(
-                        "cannot connect to {}: {e}",
-                        self.socket_path.display()
-                    ))
-                })?;
+                    DockerError::Unavailable(format!("cannot read from the worker socket: {e}"))
+                })?
+                .unwrap_or_default();
+            let info = parse_response(&request, &raw)?;
+            Ok(TerminalSession {
+                reader,
+                writer: write_half,
+                info,
+            })
+        };
+        match tokio::time::timeout(self.quick_timeout, handshake).await {
+            Ok(result) => result,
+            Err(_) => Err(DockerError::Timeout(self.quick_timeout)),
+        }
+    }
+
+    async fn roundtrip(&self, request: &WorkerRequest) -> Result<Value, DockerError> {
+        let mut stream = self.connect().await?;
 
         let mut line = serde_json::to_vec(request)
             .map_err(|e| DockerError::Protocol(format!("cannot encode request: {e}")))?;
@@ -295,36 +346,50 @@ impl DockerManager {
         let raw = read_line(&mut stream).await.map_err(|e| {
             DockerError::Unavailable(format!("cannot read from the worker socket: {e}"))
         })?;
-        if raw.is_empty() {
-            return Err(DockerError::Protocol(
-                "worker closed the connection without a response".into(),
-            ));
+        parse_response(request, &raw)
+    }
+}
+
+/// An open terminal session with the worker: [`exec`] frames in both
+/// directions. Dropping it closes the connection, which hangs up the shell.
+pub struct TerminalSession {
+    pub reader: BufReader<OwnedReadHalf>,
+    pub writer: OwnedWriteHalf,
+    /// What the worker reported: `{container, cols, rows}`.
+    pub info: Value,
+}
+
+/// Decode one response line for `request` and map worker errors.
+fn parse_response(request: &WorkerRequest, raw: &[u8]) -> Result<Value, DockerError> {
+    if raw.is_empty() {
+        return Err(DockerError::Protocol(
+            "worker closed the connection without a response".into(),
+        ));
+    }
+    let response: WorkerResponse = serde_json::from_slice(raw)
+        .map_err(|e| DockerError::Protocol(format!("invalid worker response: {e}")))?;
+    if response.id != request.id {
+        return Err(DockerError::Protocol(
+            "worker response id does not match the request".into(),
+        ));
+    }
+    if response.ok {
+        return Ok(response.data.unwrap_or(Value::Null));
+    }
+    let error = response.error.unwrap_or(protocol::WorkerErrorBody {
+        code: "unknown".into(),
+        message: "worker reported an error without details".into(),
+    });
+    match error.code.as_str() {
+        "invalid_request" | "not_found" | "forbidden" => {
+            Err(DockerError::BadRequest(error.message))
         }
-        let response: WorkerResponse = serde_json::from_slice(&raw)
-            .map_err(|e| DockerError::Protocol(format!("invalid worker response: {e}")))?;
-        if response.id != request.id {
-            return Err(DockerError::Protocol(
-                "worker response id does not match the request".into(),
-            ));
-        }
-        if response.ok {
-            return Ok(response.data.unwrap_or(Value::Null));
-        }
-        let error = response.error.unwrap_or(protocol::WorkerErrorBody {
-            code: "unknown".into(),
-            message: "worker reported an error without details".into(),
-        });
-        match error.code.as_str() {
-            "invalid_request" | "not_found" | "forbidden" => {
-                Err(DockerError::BadRequest(error.message))
-            }
-            "timeout" => Err(DockerError::Unavailable(format!(
-                "docker operation timed out: {}",
-                error.message
-            ))),
-            "unavailable" => Err(DockerError::Unavailable(error.message)),
-            _ => Err(DockerError::Failed(error.message)),
-        }
+        "timeout" => Err(DockerError::Unavailable(format!(
+            "docker operation timed out: {}",
+            error.message
+        ))),
+        "unavailable" => Err(DockerError::Unavailable(error.message)),
+        _ => Err(DockerError::Failed(error.message)),
     }
 }
 

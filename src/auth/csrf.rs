@@ -20,6 +20,12 @@ pub fn verify(headers: &HeaderMap, secrets: &Secrets, session_id: &str) -> bool 
     let Some(provided) = headers.get(CSRF_HEADER).and_then(|v| v.to_str().ok()) else {
         return false;
     };
+    verify_token(provided, secrets, session_id)
+}
+
+/// Constant-time verification of a token received outside the header (the
+/// first message of a WebSocket, which cannot carry custom headers).
+pub fn verify_token(provided: &str, secrets: &Secrets, session_id: &str) -> bool {
     let expected = token(secrets, session_id);
     let a = expected.as_bytes();
     let b = provided.trim().as_bytes();

@@ -4,16 +4,23 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 323 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 327 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
+
+The web interface embedded in the binary bundles these frontend libraries (loaded only when a container terminal is opened); their license notice is kept in the bundled file:
+
+| Package | Version | License | Copyright |
+| --- | --- | --- | --- |
+| `@xterm/xterm` | 6.0.0 | MIT | The xterm.js authors; SourceLair Private Company; Christopher Jeffrey |
+| `@xterm/addon-fit` | 0.11.0 | MIT | The xterm.js authors |
 
 ## License summary
 
 | License expression | Packages |
 | --- | ---: |
-| MIT OR Apache-2.0 | 182 |
-| MIT | 49 |
+| MIT OR Apache-2.0 | 184 |
+| MIT | 51 |
 | Apache-2.0 OR MIT | 23 |
 | Unicode-3.0 | 18 |
 | MIT/Apache-2.0 | 8 |
@@ -101,6 +108,7 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `crypto-common` | 0.2.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | `ctr` | 0.9.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/block-modes> |
 | `ctutils` | 0.4.8 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `data-encoding` | 2.11.1 | MIT | <https://github.com/ia0/data-encoding> |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | `digest` | 0.11.3 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
 | `dispatch2` | 0.3.1 | Zlib OR Apache-2.0 OR MIT | <https://github.com/madsmtm/objc2> |
@@ -244,6 +252,7 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `serde_path_to_error` | 0.1.20 | MIT OR Apache-2.0 | <https://github.com/dtolnay/path-to-error> |
 | `serde_spanned` | 1.1.3 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 | <https://github.com/nox/serde_urlencoded> |
+| `sha1` | 0.10.7 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
 | `sha1` | 0.11.0 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
 | `sha2` | 0.11.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
@@ -281,6 +290,7 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `tokio` | 1.54.1 | MIT | <https://github.com/tokio-rs/tokio> |
 | `tokio-macros` | 2.7.2 | MIT | <https://github.com/tokio-rs/tokio> |
 | `tokio-stream` | 0.1.19 | MIT | <https://github.com/tokio-rs/tokio> |
+| `tokio-tungstenite` | 0.29.0 | MIT | <https://github.com/snapview/tokio-tungstenite> |
 | `tokio-util` | 0.7.20 | MIT | <https://github.com/tokio-rs/tokio> |
 | `toml` | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
 | `toml_datetime` | 0.7.5+spec-1.1.0 | MIT OR Apache-2.0 | <https://github.com/toml-rs/toml> |
@@ -295,6 +305,7 @@ Frontend build tooling (Vite, TypeScript and their transitive dependencies) is u
 | `tracing-core` | 0.1.36 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-log` | 0.2.0 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-subscriber` | 0.3.23 | MIT | <https://github.com/tokio-rs/tracing> |
+| `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | <https://github.com/snapview/tungstenite-rs> |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | <https://github.com/paholg/typenum> |
 | `unicase` | 2.10.0 | MIT OR Apache-2.0 | <https://github.com/seanmonstar/unicase> |
 | `unicode-bidi` | 0.3.18 | MIT OR Apache-2.0 | <https://github.com/servo/unicode-bidi> |
