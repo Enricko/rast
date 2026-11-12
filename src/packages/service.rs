@@ -412,18 +412,21 @@ impl PackageManager {
         let me = self.clone();
         tokio::spawn(async move {
             let mut shutdown = me.events.shutdown_receiver();
-            // First check shortly after start, then every interval. After a
-            // failed check, retry sooner with backoff instead of staying
-            // stale for a whole interval.
+            // Check shortly after every start (an update or restart should
+            // not keep showing an old catalog until the interval runs out),
+            // then every interval. After a failed check, retry sooner with
+            // backoff instead of staying stale for a whole interval.
             let full = Duration::from_secs((interval * 60).clamp(60, 7 * 24 * 3600));
             let mut failures: u32 = 0;
+            let mut first = true;
             let mut wait = Duration::from_secs(20);
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
                     _ = shutdown.changed() => return,
                 }
-                let due = failures > 0
+                let due = std::mem::take(&mut first)
+                    || failures > 0
                     || me
                         .status_snapshot()
                         .checked_at

@@ -64,7 +64,7 @@ applied by `src/config.rs`.
 | `trust_forwarded_headers` | boolean | auto | Auto = `true` when `trusted_proxies` is non-empty | `RAST_TRUST_FORWARDED_HEADERS` |
 | `packages_catalog_url` | string | official catalog (`https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json`) | `https://` or `file:///`; the detached signature is read from `<url>.sig` | `RAST_PACKAGES_CATALOG_URL` |
 | `packages_catalog_keys` | array of strings | `[]` | Extra trusted catalog keys, each `"<key-id>:<base64 Ed25519 public key>"` (32 bytes); invalid entries fail startup. The official key is always trusted | `RAST_PACKAGES_CATALOG_KEYS` (comma separated) |
-| `packages_check_interval_minutes` | integer | `360` | 0–10080; `0` disables automatic checks (Check updates still works) | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` |
+| `packages_check_interval_minutes` | integer | `360` | 0–10080; `0` disables automatic checks, including the one at start (the refresh button, *Check for updates*, still works) | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` |
 | `packages_shell_path` | bool | `true` | Put the Package Center defaults (`<data_dir>/packages/bin`) first on every login shell's PATH through `/etc/profile.d/rast-packages.sh`, and let other users read the installed runtimes (the data directory and package root get only the traverse bit for others). Applied by `sudo rast packages path sync`, which the installer and `rast update` run | `RAST_PACKAGES_SHELL_PATH` |
 | `packages_github_token` | string | unset | Optional token for GitHub API lookups by Install from GitHub (rate limit only; public repositories need no token). Never printed by `rast config` | `RAST_PACKAGES_GITHUB_TOKEN` |
 
