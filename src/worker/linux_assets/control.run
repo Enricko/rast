@@ -1,0 +1,4 @@
+#!/usr/bin/with-contenv bash
+# RAST: window control service for per-window streaming (see /rast/control).
+export DISPLAY="${DISPLAY:-:1}"
+exec s6-setuidgid abc /lsiopy/bin/python3 /rast/control

@@ -4714,6 +4714,27 @@ button.pkg-pill {
 body:has(.is-dragging, .is-resizing) .linux-frame {
   pointer-events: none;
 }
+/* Separate windows: one streamed app window per RAST window (noVNC canvas). */
+.linux-window-stream {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  outline: none;
+}
+.linux-window-stream canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.linux-window-stream-problem {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: 24px;
+  color: var(--text-dim);
+  font: 13px/1.5 system-ui, sans-serif;
+  text-align: center;
+}
 
 .linux-add {
   gap: 10px;

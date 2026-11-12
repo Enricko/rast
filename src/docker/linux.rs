@@ -28,6 +28,12 @@ pub const APP_LABEL: &str = "rast.linux.app";
 pub const USER_LABEL: &str = "rast.linux.user";
 /// Port the app's page is served on inside the container.
 pub const CONTAINER_PORT: u16 = 3000;
+/// Port the app container's window control service (per-window streaming)
+/// listens on.
+pub const CONTROL_PORT: u16 = 3021;
+/// Container ports the per-window VNC servers listen on, one stream per app
+/// window (a copy has this many separate windows at most).
+pub const VNC_PORTS: [u16; 4] = [5910, 5911, 5912, 5913];
 /// URL prefix the proxy serves apps under: `/linux-apps/<key>/`.
 pub const URL_PREFIX: &str = "/linux-apps/";
 

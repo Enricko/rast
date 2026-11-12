@@ -18,6 +18,10 @@
 //! | POST | `/api/linux-apps/{id}/open` | any signed-in user: start (or find) their own copy |
 //! | GET | `/api/linux-apps/sessions/{sid}` | any signed-in user: state of one of their own copies |
 //! | POST | `/api/linux-apps/sessions/{sid}/close` | any signed-in user: stop their own copy now |
+//! | GET | `/api/linux-apps/sessions/{sid}/windows` | any signed-in user: the app's windows (separate windows) |
+//! | POST | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: start (or find) that window's stream → `{url}` |
+//! | DELETE | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: stop that window's stream |
+//! | POST | `/api/linux-apps/sessions/{sid}/windows/{window}/close` | any signed-in user: close the window inside the app |
 
 use axum::{
     extract::{Path, Query, State},
@@ -51,6 +55,16 @@ pub fn routes() -> Router<AppState> {
         .route("/api/linux-apps/{id}/open", post(open))
         .route("/api/linux-apps/sessions/{sid}", get(session))
         .route("/api/linux-apps/sessions/{sid}/close", post(close))
+        // Separate windows (per-window streaming).
+        .route("/api/linux-apps/sessions/{sid}/windows", get(windows))
+        .route(
+            "/api/linux-apps/sessions/{sid}/windows/{window}/stream",
+            post(stream_window).delete(stop_window_stream),
+        )
+        .route(
+            "/api/linux-apps/sessions/{sid}/windows/{window}/close",
+            post(close_window),
+        )
 }
 
 async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
@@ -229,4 +243,48 @@ async fn close(
     Path(sid): Path<String>,
 ) -> AppResult<Json<Value>> {
     Ok(Json(state.linux_apps.close(&user, &sid)?))
+}
+
+async fn windows(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(sid): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.windows(&user, &sid).await?))
+}
+
+async fn stream_window(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((sid, window)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(
+        state
+            .linux_apps
+            .start_window_stream(&user, &sid, &window)
+            .await?,
+    ))
+}
+
+async fn stop_window_stream(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((sid, window)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(
+        state
+            .linux_apps
+            .stop_window_stream(&user, &sid, &window)
+            .await?,
+    ))
+}
+
+async fn close_window(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((sid, window)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(
+        state.linux_apps.close_window(&user, &sid, &window).await?,
+    ))
 }

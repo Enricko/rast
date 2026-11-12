@@ -145,6 +145,15 @@ enum Status {
 struct SessionState {
     status: Status,
     port: Option<u16>,
+    /// Host port of the container's window control service, when the image
+    /// has one (per-window streaming).
+    control_port: Option<u16>,
+    /// Host ports of the per-window VNC servers, by slot.
+    vnc_ports: Vec<u16>,
+    /// Window id -> stream (host port and its VNC password).
+    window_streams: HashMap<String, WindowStream>,
+    /// The image streams each app window separately (per-window streaming).
+    separate_windows: bool,
     viewers: usize,
     last_input: Instant,
     empty_since: Option<Instant>,
@@ -166,6 +175,41 @@ impl Session {
             (Status::Starting | Status::Ready, Some(port)) => Some((port, &self.authorization)),
             _ => None,
         }
+    }
+
+    /// The app's window control service, when the image provides one.
+    pub fn control_port(&self) -> Option<u16> {
+        self.lock().control_port
+    }
+
+    /// The VNC stream of one of the app's windows.
+    fn window_stream(&self, window: &str) -> Option<WindowStream> {
+        self.lock().window_streams.get(window).cloned()
+    }
+
+    /// The app page's Basic credentials, also used for the window service.
+    fn authorization(&self) -> String {
+        self.authorization.clone()
+    }
+
+    /// Host port of a VNC server slot the window control service reported.
+    pub fn vnc_host_port(&self, slot: usize) -> Option<u16> {
+        self.lock().vnc_ports.get(slot).copied()
+    }
+
+    pub fn remember_window_stream(&self, window: &str, port: u16, password: String) {
+        self.lock()
+            .window_streams
+            .insert(window.to_string(), WindowStream { port, password });
+    }
+
+    pub fn forget_window_stream(&self, window: &str) {
+        self.lock().window_streams.remove(window);
+    }
+
+    /// The secret part of the app's address.
+    pub(crate) fn key(&self) -> &str {
+        &self.key
     }
 
     pub fn viewer_joined(&self) {
@@ -206,6 +250,8 @@ impl Session {
             "error": state.error,
             "startedAt": state.started_at_ms,
             "viewers": state.viewers,
+            // The image can stream each app window on its own.
+            "separateWindows": state.separate_windows,
         })
     }
 }
@@ -1255,6 +1301,10 @@ impl LinuxApps {
             state: Mutex::new(SessionState {
                 status: Status::Starting,
                 port: None,
+                control_port: None,
+                vnc_ports: Vec::new(),
+                window_streams: HashMap::new(),
+                separate_windows: false,
                 viewers: 0,
                 last_input: now,
                 empty_since: None,
@@ -1297,7 +1347,7 @@ impl LinuxApps {
             .call(WorkerRequest::new(WorkerOp::LinuxRun).linux(args))
             .await;
         let port = match started {
-            Ok(data) => data
+            Ok(ref data) => data
                 .get("port")
                 .and_then(Value::as_u64)
                 .and_then(|p| u16::try_from(p).ok()),
@@ -1305,6 +1355,27 @@ impl LinuxApps {
                 self.end(&session, "error", Some(docker_message(&error)));
                 return;
             }
+        };
+        let (control_port, vnc_ports) = match &started {
+            Ok(data) => {
+                let control = data
+                    .get("controlPort")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok());
+                let vnc = data
+                    .get("vncPorts")
+                    .and_then(Value::as_array)
+                    .map(|ports| {
+                        ports
+                            .iter()
+                            .filter_map(|port| port.as_u64())
+                            .filter_map(|port| u16::try_from(port).ok())
+                            .collect::<Vec<u16>>()
+                    })
+                    .unwrap_or_default();
+                (control, vnc)
+            }
+            Err(_) => (None, Vec::new()),
         };
         let Some(port) = port else {
             self.end(
@@ -1317,6 +1388,8 @@ impl LinuxApps {
         let ended = {
             let mut state = session.lock();
             state.port = Some(port);
+            state.control_port = control_port;
+            state.vnc_ports = vnc_ports;
             state.status == Status::Ended
         };
         if ended {
@@ -1342,11 +1415,24 @@ impl LinuxApps {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        // Old images have the ports but no window service: ask it.
+        let separate_windows = match control_port {
+            Some(control) => matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    control_request(control, &session.authorization(), "GET", "/health"),
+                )
+                .await,
+                Ok(Ok(_))
+            ),
+            None => false,
+        };
         {
             let mut state = session.lock();
             if state.status != Status::Starting {
                 return;
             }
+            state.separate_windows = separate_windows;
             state.status = Status::Ready;
             state.last_input = Instant::now();
             if state.viewers == 0 {
@@ -1367,6 +1453,117 @@ impl LinuxApps {
         let session = self.find_by_id(user, session_id)?;
         self.end(&session, "closed", None);
         Ok(json!({"ok": true}))
+    }
+
+    // -----------------------------------------------------------------------
+    // Separate windows (per-window streaming)
+    // -----------------------------------------------------------------------
+
+    /// The app's windows, as the container's window control service sees them.
+    pub async fn windows(&self, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        control_request(port, &session.authorization(), "GET", "/windows").await
+    }
+
+    /// The VNC stream of `window`, starting it if needed.
+    pub(crate) async fn window_stream_port(
+        &self,
+        session: &Arc<Session>,
+        window: &str,
+    ) -> AppResult<WindowStream> {
+        if let Some(stream) = session.window_stream(window) {
+            return Ok(stream);
+        }
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let control = session.control_port().ok_or_else(no_window_service)?;
+        let started = control_request(
+            control,
+            &session.authorization(),
+            "POST",
+            &format!("/vnc/{window}"),
+        )
+        .await?;
+        let slot = started
+            .get("slot")
+            .and_then(Value::as_u64)
+            .and_then(|slot| usize::try_from(slot).ok())
+            .ok_or_else(|| AppError::unavailable("the window stream did not report its slot"))?;
+        let port = session
+            .vnc_host_port(slot)
+            .ok_or_else(|| AppError::unavailable("no VNC port is published for this slot"))?;
+        let password = started
+            .get("password")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let stream = WindowStream { port, password };
+        session.remember_window_stream(window, port, stream.password.clone());
+        Ok(stream)
+    }
+
+    /// Start (or find) the VNC stream of one of the app's windows and return
+    /// the address a viewer connects to.
+    pub async fn start_window_stream(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let stream = self.window_stream_port(&session, window).await?;
+        Ok(stream_address(&session, window, &stream))
+    }
+
+    /// Close one of the app's windows the way its own close button would.
+    pub async fn close_window(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        let result = control_request(
+            port,
+            &session.authorization(),
+            "POST",
+            &format!("/close/{window}"),
+        )
+        .await?;
+        session.forget_window_stream(window);
+        Ok(result)
+    }
+
+    /// Stop the VNC stream of a window (its RAST window was closed).
+    pub async fn stop_window_stream(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        let result = control_request(
+            port,
+            &session.authorization(),
+            "DELETE",
+            &format!("/vnc/{window}"),
+        )
+        .await;
+        session.forget_window_stream(window);
+        result
     }
 
     /// Mark a copy ended, forget its address and stop its container in the
@@ -1568,6 +1765,84 @@ fn containers_of(list: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+/// One running window stream: where the VNC server listens and the password
+/// the viewer needs (the stream is not open to other containers).
+#[derive(Debug, Clone)]
+pub(crate) struct WindowStream {
+    port: u16,
+    password: String,
+}
+
+/// `/close`, `/vnc` and the RAST windows address one X11 window by its id.
+pub fn validate_window_id(window: &str) -> bool {
+    window.strip_prefix("0x").is_some_and(|hex| {
+        !hex.is_empty() && hex.len() <= 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
+    })
+}
+
+/// Images built before per-window streaming have no window service.
+fn no_window_service() -> AppError {
+    AppError::unavailable("this app's image does not support separate windows; use Reinstall on it")
+}
+
+/// The address a noVNC viewer connects to for one of the app's windows.
+fn stream_address(session: &Session, window: &str, stream: &WindowStream) -> Value {
+    json!({
+        "url": format!("{}{}/vnc/{window}/", wire::URL_PREFIX, session.key()),
+        "password": stream.password,
+    })
+}
+
+/// One JSON request to the app container's window control service.
+async fn control_request(
+    port: u16,
+    authorization: &str,
+    method: &str,
+    path: &str,
+) -> Result<Value, AppError> {
+    let no_service = || AppError::unavailable("the app's window service is not answering");
+    let mut stream = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => return Err(no_service()),
+    };
+    let head = format!(
+        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: {authorization}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(head.as_bytes()).await.is_err() {
+        return Err(no_service());
+    }
+    let mut response = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await {
+        Ok(Ok(_)) => {}
+        _ => return Err(no_service()),
+    }
+    let Some(split) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return Err(no_service());
+    };
+    let (head_bytes, body) = response.split_at(split + 4);
+    let head_text = String::from_utf8_lossy(head_bytes);
+    let status: u16 = head_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let message = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the window service refused the request");
+        return Err(AppError::unavailable(message.to_string()));
+    }
+    Ok(value)
 }
 
 /// Is one person's copy of `app` in the worker's running list?
@@ -1873,6 +2148,70 @@ fn gib(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn window_service_requests_are_read() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let read = socket.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("GET /windows "), "{request}");
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line == "Authorization: Basic abc"),
+                "{request}"
+            );
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\n\r\n{\"windows\":[{\"id\":\"0x1\"}]}")
+                .await
+                .expect("write");
+        });
+        let value = control_request(port, "Basic abc", "GET", "/windows")
+            .await
+            .expect("json");
+        assert_eq!(value["windows"][0]["id"], "0x1");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn window_service_errors_are_reported() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            socket
+                .write_all(b"HTTP/1.0 500 Internal Server Error\r\n\r\n{\"error\":\"no free window stream\"}")
+                .await
+                .expect("write");
+        });
+        let error = control_request(port, "Basic abc", "POST", "/vnc/0x1")
+            .await
+            .expect_err("must fail");
+        assert!(
+            error.to_string().contains("no free window stream"),
+            "{error}"
+        );
+        server.await.expect("server");
+    }
+
+    #[test]
+    fn window_ids_are_hex() {
+        assert!(validate_window_id("0x1200002"));
+        assert!(validate_window_id("0x1a"));
+        for bad in ["", "0x", "1200002", "0xzz", "0x1234567890abcdef0", "0x1/2"] {
+            assert!(!validate_window_id(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn visibility_round_trips() {

@@ -332,13 +332,22 @@ surface is not governed by the group policy's `applications` (Docker) rule.
 | POST | `/api/linux-apps/{id}/open` | any signed-in user: start (or return) the caller's own copy → `Session`. 404 when the app is not visible to them. 503 when the server has less than 4 GiB of free memory |
 | GET | `/api/linux-apps/sessions/{sid}` | any signed-in user: one of the caller's own copies → `Session`; 404 once it is gone or for someone else's copy |
 | POST | `/api/linux-apps/sessions/{sid}/close` | any signed-in user: stop their own copy now → `Session` |
+| GET | `/api/linux-apps/sessions/{sid}/windows` | any signed-in user: the app's windows for separate windows → `{windows:[Window]}`; 503 when the app's image has no window service (use Reinstall) |
+| POST | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: start (or find) that window's VNC stream → `{url, password}`; a noVNC client connects its WebSocket to `url` (RFB bytes) and authenticates with `password` |
+| DELETE | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: stop that window's stream |
+| POST | `/api/linux-apps/sessions/{sid}/windows/{window}/close` | any signed-in user: close that window inside the app, as its own close button would |
 
 `LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball", fileName, version, package, description, command:[argv], launchGuess, iconUrl, status:"installing"|"ready"|"updating"|"failed", error, jobId, update:{source:"apt"|"github"|"zsync"|null, latestVersion, available, checkedAt, error}, memoryMb, cpus, sizeBytes, visibility:"users"|"admins", running, createdAt, updatedAt}`.
 `launchGuess` is true when RAST picked the program of an archive itself.
 `latestVersion` is `"newer build"` for an AppImage whose update file changed
 without a version number.
 
-`Session`: `{id, appId, appName, status:"starting"|"ready"|"ended", url, reason:"closed"|"idle"|"exited"|"error"|"removed"|null, error, startedAt, viewers}`.
+`Session`: `{id, appId, appName, status:"starting"|"ready"|"ended", url, reason:"closed"|"idle"|"exited"|"error"|"removed"|null, error, startedAt, viewers, separateWindows}`.
+`separateWindows` is true when the app's image can stream each of its windows on
+its own (the image runs a window control service and one VNC server per app
+window). The raST desktop then shows one window per `Window` instead of the
+whole desktop (`url`). `Window`:
+`{id:"0x…", title, x, y, width, height, state:"normal"|"maximized"|"minimized", type, transient, streaming}`.
 `url` (`/linux-apps/<key>/`, only while `ready`) is the frame's address. The
 key is 128 random bits and is the only credential of that route, so treat the
 URL like a password. RAST does not write it to its logs (Docker sees it in the

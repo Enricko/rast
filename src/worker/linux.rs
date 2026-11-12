@@ -30,8 +30,8 @@ use super::{docker_command, read_capped, run_docker, CommandOutput, WorkerError,
 use crate::docker::{
     linux::{
         container_name, image_ref, package_path, validate_package_name, BuildSource, LinuxAction,
-        LinuxFormat, RunSpec, APP_LABEL, CONTAINER_PORT, IMAGE_REPOSITORY, MANAGED_LABEL,
-        MAX_PACKAGE_BYTES, URL_PREFIX, USER_LABEL,
+        LinuxFormat, RunSpec, APP_LABEL, CONTAINER_PORT, CONTROL_PORT, IMAGE_REPOSITORY,
+        MANAGED_LABEL, MAX_PACKAGE_BYTES, URL_PREFIX, USER_LABEL, VNC_PORTS,
     },
     protocol::{truncate_message, validate_container_id},
 };
@@ -44,6 +44,10 @@ const WINDOWS_SCRIPT: &str = include_str!("linux_assets/windows");
 const WINDOW_BAR_CONFIG: &str = include_str!("linux_assets/tint2rc");
 const INIT_SCRIPT: &str = include_str!("linux_assets/init-rast");
 const EXIT_SERVICE: &str = include_str!("linux_assets/svc-rast-exit.run");
+/// Lists the app's windows and starts a VNC stream per window (per-window
+/// streaming for the RAST desktop).
+const CONTROL_SCRIPT: &str = include_str!("linux_assets/control");
+const CONTROL_SERVICE: &str = include_str!("linux_assets/control.run");
 
 /// Repository of the shared base image; the tag is a hash of its contents.
 const BASE_REPOSITORY: &str = "rast-linux-base";
@@ -106,15 +110,26 @@ fn base_entries() -> Vec<TarEntry> {
         TarEntry::bytes("rast/tint2rc", 0o644, WINDOW_BAR_CONFIG),
         TarEntry::dir("custom-cont-init.d"),
         TarEntry::bytes("custom-cont-init.d/50-rast", 0o755, INIT_SCRIPT),
+        TarEntry::bytes("rast/control", 0o755, CONTROL_SCRIPT),
         TarEntry::dir("s6"),
         TarEntry::dir("s6/svc-rast-exit"),
         TarEntry::bytes("s6/svc-rast-exit/type", 0o644, "longrun\n"),
         TarEntry::bytes("s6/svc-rast-exit/run", 0o755, EXIT_SERVICE),
         TarEntry::dir("s6/svc-rast-exit/dependencies.d"),
         TarEntry::bytes("s6/svc-rast-exit/dependencies.d/init-services", 0o644, ""),
+        TarEntry::dir("s6/svc-rast-control"),
+        TarEntry::bytes("s6/svc-rast-control/type", 0o644, "longrun\n"),
+        TarEntry::bytes("s6/svc-rast-control/run", 0o755, CONTROL_SERVICE),
+        TarEntry::dir("s6/svc-rast-control/dependencies.d"),
+        TarEntry::bytes(
+            "s6/svc-rast-control/dependencies.d/init-services",
+            0o644,
+            "",
+        ),
         TarEntry::dir("s6/user"),
         TarEntry::dir("s6/user/contents.d"),
         TarEntry::bytes("s6/user/contents.d/svc-rast-exit", 0o644, ""),
+        TarEntry::bytes("s6/user/contents.d/svc-rast-control", 0o644, ""),
     ]
 }
 
@@ -725,6 +740,11 @@ pub(crate) fn run_args(
         "--publish",
         format!("127.0.0.1::{CONTAINER_PORT}"),
     );
+    // The window control service and one VNC server per app window.
+    push_pair(&mut args, "--publish", format!("127.0.0.1::{CONTROL_PORT}"));
+    for port in VNC_PORTS {
+        push_pair(&mut args, "--publish", format!("127.0.0.1::{port}"));
+    }
     let mut env = vec![
         format!("PUID={uid}"),
         format!("PGID={gid}"),
@@ -742,6 +762,11 @@ pub(crate) fn run_args(
         "NO_GAMEPAD=true".to_string(),
         "NO_WEBCAM=true".to_string(),
         "SELKIES_UI_SHOW_SIDEBAR=false|locked".to_string(),
+        format!("RAST_CONTROL_PORT={CONTROL_PORT}"),
+        format!(
+            "RAST_VNC_PORTS={}",
+            VNC_PORTS.map(|p| p.to_string()).join(",")
+        ),
     ];
     if let Some(tz) = tz {
         env.push(format!("TZ={tz}"));
@@ -788,8 +813,25 @@ async fn run_app(options: &WorkerOptions, spec: &RunSpec) -> Result<Value, Worke
         .unwrap_or_default()
         .to_string();
     validate_container_id(&id).map_err(WorkerError::command_failed)?;
-    let port = published_port(options, &id).await?;
-    Ok(json!({"container": name, "containerId": id, "port": port, "image": image}))
+    let port = published_port(options, &id, CONTAINER_PORT).await?;
+    // Per-window streaming: the window control service and one VNC server per
+    // app window. Older images do not listen on them; the server notices.
+    let control_port = published_port(options, &id, CONTROL_PORT).await.ok();
+    let mut vnc_ports = Vec::with_capacity(VNC_PORTS.len());
+    for container_port in VNC_PORTS {
+        match published_port(options, &id, container_port).await {
+            Ok(host_port) => vnc_ports.push(host_port),
+            Err(_) => break,
+        }
+    }
+    Ok(json!({
+        "container": name,
+        "containerId": id,
+        "port": port,
+        "controlPort": control_port,
+        "vncPorts": vnc_ports,
+        "image": image,
+    }))
 }
 
 async fn ensure_volume(options: &WorkerOptions, spec: &RunSpec) -> Result<(), WorkerError> {
@@ -810,11 +852,15 @@ async fn ensure_volume(options: &WorkerOptions, spec: &RunSpec) -> Result<(), Wo
     super::ensure_success("volume create", &output)
 }
 
-async fn published_port(options: &WorkerOptions, id: &str) -> Result<u16, WorkerError> {
+async fn published_port(
+    options: &WorkerOptions,
+    id: &str,
+    container_port: u16,
+) -> Result<u16, WorkerError> {
     let args = vec![
         OsString::from("port"),
         id.into(),
-        format!("{CONTAINER_PORT}/tcp").into(),
+        format!("{container_port}/tcp").into(),
     ];
     let output = run_docker(options, args, None, options.quick_timeout, 4096).await?;
     super::ensure_success("docker port", &output)?;

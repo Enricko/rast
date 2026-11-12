@@ -24,6 +24,22 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.12.0] - 2026-11-13
+
+No database migration (schema stays v11). Apps installed before this release
+get separate windows after *Reinstall* (the app's page, More actions);
+without a Reinstall they keep the single whole-desktop window.
+
+### Added
+
+- **Separate windows for Linux apps.** An app whose image provides the window
+  service (one VNC stream per app window, plus a compositor so covered windows
+  still stream their own contents) is shown as one RAST desktop window per app
+  window: drag a tab out of Chrome and the new window becomes its own RAST
+  window with a taskbar entry, movable/minimizable like any other, and closing
+  it closes the window inside the app. Apps installed from older images keep
+  the single whole-desktop window until *Reinstall*. No database migration.
+
 ## [0.11.4] - 2026-11-13
 
 No database migration (schema stays v11). Apps installed before this release

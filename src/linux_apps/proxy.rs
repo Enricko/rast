@@ -104,10 +104,11 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
     let Some(rest) = path.strip_prefix(URL_PREFIX) else {
         return closed_page(StatusCode::NOT_FOUND);
     };
-    let (key, has_slash) = match rest.split_once('/') {
-        Some((key, _)) => (key, true),
-        None => (rest, false),
+    let (key, tail) = match rest.split_once('/') {
+        Some((key, tail)) => (key, tail),
+        None => (rest, ""),
     };
+    let has_slash = rest.contains('/');
     if !valid_key(key) {
         return closed_page(StatusCode::NOT_FOUND);
     }
@@ -124,6 +125,17 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
     let Some(session) = state.linux_apps.find_by_key(key) else {
         return closed_page(StatusCode::NOT_FOUND);
     };
+    // Separate windows: `/linux-apps/<key>/vnc/<window>/` carries the picture
+    // and input of one app window, relayed to that window's VNC server.
+    if let Some(window) = tail
+        .strip_prefix("vnc/")
+        .map(|tail| tail.trim_end_matches('/').to_string())
+    {
+        if window.is_empty() || window.contains('/') || !is_websocket(request.headers()) {
+            return closed_page(StatusCode::NOT_FOUND);
+        }
+        return vnc_websocket(request, state, session, window).await;
+    }
     let Some((port, authorization)) = session.upstream() else {
         return closed_page(StatusCode::NOT_FOUND);
     };
@@ -463,6 +475,79 @@ async fn relay(
     apps.watch_exit(session);
 }
 
+/// One app window as a VNC client sees it: the browser's WebSocket carries the
+/// RFB bytes of the window's own stream.
+async fn vnc_websocket(
+    request: Request,
+    state: AppState,
+    session: Arc<Session>,
+    window: String,
+) -> Response {
+    let (mut parts, _body) = request.into_parts();
+    let upgrade = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+        Ok(upgrade) => upgrade,
+        Err(rejection) => return with_policy(rejection.into_response()),
+    };
+    let stream = match state.linux_apps.window_stream_port(&session, &window).await {
+        Ok(stream) => stream,
+        Err(_) => return bad_gateway("this window is not available"),
+    };
+    let upstream = match tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect(("127.0.0.1", stream.port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => return bad_gateway("this window is not answering"),
+    };
+    upgrade
+        .max_message_size(64 * 1024 * 1024)
+        .on_upgrade(move |socket| vnc_relay(socket, upstream, session))
+}
+
+async fn vnc_relay(client: WebSocket, upstream: TcpStream, session: Arc<Session>) {
+    session.viewer_joined();
+    let (mut ws_tx, mut ws_rx) = client.split();
+    let (mut tcp_rx, mut tcp_tx) = upstream.into_split();
+    let watcher = session.clone();
+    let mut buffer = vec![0u8; 16 * 1024];
+    loop {
+        tokio::select! {
+            incoming = ws_rx.next() => {
+                match incoming {
+                    Some(Ok(ClientMessage::Binary(bytes))) => {
+                        watcher.input();
+                        if tcp_tx.write_all(bytes.as_ref()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(ClientMessage::Ping(bytes))) => {
+                        if ws_tx.send(ClientMessage::Pong(bytes)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(ClientMessage::Text(_))) | Some(Ok(ClientMessage::Pong(_))) => {}
+                    Some(Ok(ClientMessage::Close(_))) | None | Some(Err(_)) => break,
+                }
+            }
+            read = tcp_rx.read(&mut buffer) => {
+                match read {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let frame = ClientMessage::Binary(buffer[..n].to_vec().into());
+                        if ws_tx.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    session.viewer_left();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +584,88 @@ mod tests {
         assert!(page[..at].ends_with("<Head lang=\"en\">"));
         assert!(page.contains("localStorage"));
         assert!(inject_shim("plain").starts_with("<script>"));
+    }
+
+    fn test_session() -> Arc<Session> {
+        Arc::new(Session {
+            id: "session".into(),
+            key: "a".repeat(32),
+            app_id: "test".into(),
+            app_name: "Test".into(),
+            user_id: 1,
+            authorization: "Basic test".into(),
+            state: std::sync::Mutex::new(super::super::SessionState {
+                status: super::super::Status::Ready,
+                port: None,
+                control_port: None,
+                vnc_ports: Vec::new(),
+                window_streams: std::collections::HashMap::new(),
+                separate_windows: false,
+                viewers: 0,
+                last_input: std::time::Instant::now(),
+                empty_since: None,
+                created: std::time::Instant::now(),
+                started_at_ms: 0,
+                reason: None,
+                error: None,
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn vnc_relay_carries_bytes_both_ways() {
+        // A fake VNC server: it echoes whatever reaches it.
+        let vnc = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("vnc bind");
+        let vnc_port = vnc.local_addr().expect("vnc address").port();
+        tokio::spawn(async move {
+            let (socket, _) = vnc.accept().await.expect("vnc accept");
+            let (mut read, mut write) = socket.into_split();
+            let _ = tokio::io::copy(&mut read, &mut write).await;
+        });
+
+        // The relay route RAST exposes to a viewer.
+        let app = axum::Router::new().route(
+            "/bridge",
+            axum::routing::get(move |upgrade: WebSocketUpgrade| async move {
+                let stream = tokio::net::TcpStream::connect(("127.0.0.1", vnc_port))
+                    .await
+                    .expect("vnc connect");
+                upgrade.on_upgrade(move |socket| vnc_relay(socket, stream, test_session()))
+            }),
+        );
+        let server = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("server bind");
+        let address = server.local_addr().expect("server address");
+        let serving = tokio::spawn(async move {
+            let _ = axum::serve(server, app).await;
+        });
+
+        let (mut viewer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/bridge"))
+            .await
+            .expect("viewer connect");
+        // Browser -> app: the RFB bytes reach the fake server...
+        viewer
+            .send(tokio_tungstenite::tungstenite::Message::binary(
+                b"RFB client bytes".to_vec(),
+            ))
+            .await
+            .expect("send");
+        // ...and the app's answer comes back through the same relay.
+        let answer = viewer
+            .next()
+            .await
+            .expect("an answer")
+            .expect("a valid frame");
+        match answer {
+            tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                assert_eq!(bytes.as_ref(), b"RFB client bytes");
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+        serving.abort();
     }
 
     #[test]

@@ -486,6 +486,12 @@ docker volume ls --filter label=rast.managed=linux-app     # per-person app sett
   *Use system title bar and borders* preference), so the RAST window is the
   only window frame. Apps installed before 0.11.2 get this after *Reinstall*;
   apps that draw their own title bar keep it.
+* **Separate windows.** Images built with the window service stream every app
+  window on its own (x11vnc per window, plus a compositor so a covered window
+  still shows its own contents): RAST shows one desktop window per app window,
+  each with its own taskbar entry and close/minimize/maximize, and closing one
+  closes that window inside the app. Apps installed from older images keep the
+  single whole-desktop window until *Reinstall*.
 * The app's main window is kept filling the RAST window: if the app restored
   it smaller, or it was dragged inside the picture, it is maximized again
   within a second. Windows the app opens later float on top of it, cascaded,

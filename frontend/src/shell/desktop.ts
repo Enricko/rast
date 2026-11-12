@@ -23,6 +23,7 @@ import { ToastCenter } from "../core/toast";
 import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from "../core/ui";
 import { getRealtime } from "../core/realtime";
 import { WindowManager, type WindowInfo } from "../core/wm";
+import { LinuxWindows } from "./linux-windows";
 import { setFavicon } from "./brand";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
@@ -92,6 +93,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     onChange: () => renderTaskbar(),
   });
   disposers.push(() => wm.destroy());
+  // Linux apps whose image streams each window on its own are shown as one
+  // RAST window per app window; older images fall back to the whole-desktop
+  // window (see `openLegacy`).
+  const linuxWindows = new LinuxWindows({
+    api: deps.api,
+    toast,
+    wm,
+    openLegacy: (app) => openDefinitionWindow(app),
+  });
+  disposers.push(() => linuxWindows.dispose());
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
@@ -197,6 +208,17 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     }
     closePanel();
     pushRecentApp(app.id);
+    // Installed Linux apps get one RAST window per app window when their
+    // image supports it (`linux:<app>`; per-window ids have a third part).
+    if (app.id.startsWith(LINUX_PREFIX) && app.id.split(":").length === 2) {
+      linuxWindows.open(app);
+      return;
+    }
+    openDefinitionWindow(app, params);
+  }
+
+  /** Open one window that shows the whole app (legacy launcher path). */
+  function openDefinitionWindow(app: AppDefinition, params?: unknown): void {
     const openBefore = new Set(wm.list().map((win) => win.id));
     const handle = wm.open(
       app,
@@ -1089,10 +1111,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     closePanel();
     desktopIcons.refresh();
     for (const win of wm.list()) {
-      if (isAppAllowed(win.appId, store.get().permissions, store.isAdmin())) continue;
-      const app = findApp(win.appId);
+      // A separate-window view uses `<linux app id>:<window>`; its access is
+      // the app's access.
+      const baseId =
+        win.appId.startsWith(LINUX_PREFIX) && win.appId.split(":").length > 2
+          ? win.appId.split(":").slice(0, 2).join(":")
+          : win.appId;
+      if (isAppAllowed(baseId, store.get().permissions, store.isAdmin())) continue;
+      const app = findApp(baseId);
       wm.close(win.id);
-      if (win.appId.startsWith(LINUX_PREFIX) || !isAppInstalled(win.appId, store.get().permissions)) {
+      if (baseId.startsWith(LINUX_PREFIX) || !isAppInstalled(baseId, store.get().permissions)) {
         toast.warning(`${app?.name ?? "The application"} was uninstalled — its window has been closed.`);
       } else {
         toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);

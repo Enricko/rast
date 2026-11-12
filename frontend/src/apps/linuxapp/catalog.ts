@@ -57,6 +57,8 @@ export interface LinuxSession {
   error: string | null;
   startedAt: number;
   viewers: number;
+  /** The app image can stream each app window on its own. */
+  separateWindows?: boolean;
 }
 
 export interface LinuxOverview {
