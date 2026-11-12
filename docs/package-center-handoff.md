@@ -8,9 +8,9 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
-| Status | Implemented and verified on a scratch instance (linux-x86_64). **Not deployed.** |
+| Status | Released as **v0.5.0** and deployed to desktop.lufria.tech on 2026-11-11 (schema v8). Verified on a scratch instance (linux-x86_64) before release. |
 | Blocked | The two new public repositories could not be created from this session (see [Repositories](#repositories)). Until they exist, servers have no published catalog: Package Center shows "The package catalog could not be verified" and installs nothing. |
-| Needs approval | Pushing/creating the repositories, the `CATALOG_SIGNING_KEY` secret, the v0.5.0 tag and the deploy to desktop.lufria.tech. |
+| Needs the account owner | Creating the two repositories, the `CATALOG_SIGNING_KEY` secret and the first catalog run. Until then the deployed Package Center reports the catalog as not verified. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
 
@@ -349,11 +349,32 @@ rast-package-template (local, not pushed): `ce85da7` forkable template with a st
   the fictional e2e test password (false positive, fixed in `652bf21`; `cargo
   audit`, skipped by that failure, passes locally).
 * rast-packages, rast-package-template: not pushed (repositories not created).
-* Deploy: **not done.** It needs approval for the `v0.5.0` tag, and is only
-  useful once the catalog repository exists. Then follow the existing workflow
-  (tag → release → `sudo rast update`), check the schema report (migration
-  `0008_packages`, schema v8), and verify on desktop.lufria.tech: catalog
-  verified, install one runtime, Make default, live progress.
+* Deploy: **done on 2026-11-11.** Annotated tag `v0.5.0` on `13cdc23` (CI
+  green); the release workflow published both binaries, `SHA256SUMS` and the
+  installer. Steps:
+  * backup `rast-20261111-235556-db-config.tar.gz`;
+  * `sudo rast update --version 0.5.0` (with its own backup
+    `rast-20261111-235843-db-config.tar.gz` and rollback binary
+    `/usr/local/bin/rast.rollback-0.4.1`), which reported `health: ok` and
+    schema 8 without the old schema-report error.
+
+  Verified afterwards:
+  * `rast 0.5.0`; `rast doctor`: ok, schema v8, 0 warnings;
+    `rast.service` and `rast-worker.service` active;
+  * `/healthz` 200 on loopback and on https://desktop.lufria.tech;
+  * the served `index-CE-URyzn.js` is identical to the local build of the
+    tagged commit and contains Package Center;
+  * `/api/packages` answers 401 without a session;
+  * the journal is clean;
+  * `/var/lib/rast/packages/` was created (0750 rast:rast), with an empty
+    `catalog/` because no catalog is published yet.
+
+  The sandbox and install tests (11, including the hostile check) passed as
+  the `rast` user in a transient unit with every hardening property of the
+  installed `rast.service`.
+
+  **Still to verify** once the catalog exists: catalog verified, install one
+  runtime, Make default, live progress.
 
 ## Limitations
 
