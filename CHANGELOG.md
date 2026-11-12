@@ -11,6 +11,27 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.10.0] - 2026-11-12
+
+Linux apps: administrators can install desktop Linux apps (`.deb`, AppImage,
+portable archive) from App Center and use them in a RAST window. Database
+migration 0010 (schema v10).
+
+### Added
+
 - **Linux apps (administrators).** App Center can install desktop Linux apps
   from a file in File Station: a `.deb` package, an AppImage or a portable
   `.tar.gz` archive (*Add Linux app*, or *Install as Linux app* on the file in
@@ -24,17 +45,6 @@ this file by `scripts/changelog-section.sh`.
   and offers *Update* when there is a newer version. Needs Docker on a Linux
   server; see [docs/OPERATIONS.md](docs/OPERATIONS.md#linux-apps). Database
   migration 0010 (schema v10).
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.1] - 2026-11-12
 
