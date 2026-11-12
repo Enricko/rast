@@ -28,7 +28,10 @@ UNIT_DIR="/etc/systemd/system"
 RUNTIME_DIR="/run/rast"
 MAIN_DROPIN_DIR="/etc/systemd/system/rast.service.d"
 WORKER_DROPIN_DIR="/etc/systemd/system/rast-worker.service.d"
-UNITS="rast.service rast-worker.service"
+NATIVE_DROPIN_DIR="/etc/systemd/system/rast-native.service.d"
+NATIVE_TMPFILES="/etc/tmpfiles.d/rast-native.conf"
+NATIVE_RUNTIME_DIR="/run/rast-linux"
+UNITS="rast.service rast-worker.service rast-native.service rast-linux.slice"
 LINK_UNITS="rast-packages-links.path rast-packages-links.service"
 PROFILE_SCRIPT="/etc/profile.d/rast-packages.sh"
 
@@ -350,8 +353,15 @@ remove_file "$WORKER_DROPIN_DIR/20-peer-uid.conf"
 if [ -d "$WORKER_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
     run rmdir "$WORKER_DROPIN_DIR" 2>/dev/null || true
 fi
+remove_file "$NATIVE_DROPIN_DIR/20-peer-uid.conf"
+if [ -d "$NATIVE_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
+    run rmdir "$NATIVE_DROPIN_DIR" 2>/dev/null || true
+fi
+remove_file "$NATIVE_TMPFILES"
 
 remove_file "$RUNTIME_DIR/worker.sock"
+remove_file "$RUNTIME_DIR/native.sock"
+remove_tree "$NATIVE_RUNTIME_DIR"
 # App Center's login-shell PATH entry (only the script RAST wrote).
 if [ -f "$PROFILE_SCRIPT" ] && head -n 1 "$PROFILE_SCRIPT" | grep -q '^# Managed by RAST'; then
     remove_file "$PROFILE_SCRIPT"
@@ -415,8 +425,9 @@ else
     log "RAST uninstall complete"
 fi
 printf '  removed:  %s, %s (if present)\n' "$UNIT_DIR/rast.service" "$UNIT_DIR/rast-worker.service"
+printf '            %s, %s\n' "$UNIT_DIR/rast-native.service" "$UNIT_DIR/rast-linux.slice"
 printf '            %s\n' "$BIN_PATH"
-printf '  removed:  %s (runtime socket directory)\n' "$RUNTIME_DIR"
+printf '  removed:  %s, %s (runtime directories)\n' "$RUNTIME_DIR" "$NATIVE_RUNTIME_DIR"
 if [ "$PURGE" -eq 1 ]; then
     printf '  deleted:  %s\n' "$CONFIG_DIR"
     printf '            %s\n' "$DATA_DIR"

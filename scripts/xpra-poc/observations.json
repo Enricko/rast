@@ -1,0 +1,321 @@
+{
+  "startedAt": "2026-11-12T21:27:48.830Z",
+  "steps": [
+    {
+      "step": "connect",
+      "state": {
+        "ready": true,
+        "connected": true,
+        "separate": true,
+        "shimVersion": "1.0.0",
+        "shimKey": null,
+        "adoptFailures": [],
+        "frames": [
+          "4194316",
+          "6291468"
+        ],
+        "focusedWid": "4194316",
+        "taskbar": [
+          "lufria@lufria-server: /tmp",
+          "RAST-POC"
+        ],
+        "log": [
+          "21:27:50.427 harness ready",
+          "21:27:51.010 session page (re)loaded: resetting RAST windows",
+          "21:27:51.010 shim attached: version=1.0.0 key=none",
+          "21:27:51.204 shim event: ready (2 windows)",
+          "21:27:51.274 window created: 4194316 · lufria@lufria-server: /tmp",
+          "21:27:51.276 window created: 6291468 · RAST-POC",
+          "21:27:51.298 shim event: windows (2 windows)",
+          "21:27:51.298 shim event: connected (2 windows)",
+          "21:27:51.393 shim event: windows (2 windows)"
+        ],
+        "lastEvent": {
+          "event": "windows",
+          "at": 1794518871393
+        },
+        "windows": [
+          {
+            "wid": "6291468",
+            "title": "RAST-POC",
+            "x": 0,
+            "y": 0,
+            "width": 618,
+            "height": 386,
+            "minimized": false,
+            "maximized": false,
+            "focused": false,
+            "stacking": 1,
+            "modal": false,
+            "transientFor": null,
+            "windowType": [
+              "NORMAL"
+            ],
+            "classInstance": [
+              "xterm",
+              "XTerm"
+            ],
+            "overrideRedirect": false,
+            "resizable": true,
+            "iconUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAADUklEQVR4nO1WvU7jShT+jj0EW5agQkaCB0BoRY2Q6CLdMhUFoqThFXgCOipKmu2QeIKL6HgBKChACPEjig0iiYLijD1zPFvsztyxNwnZK3G3uUca2ZbH5/s5Z2YM/B//UZD/YIwhAOEnYTERmU/KPX0Q8EMpEZn9/f201Wr9tbCwUGZZFoz6gJkRhtOZwsyIoqgMwzB4fHz8u9lsfrNYAgBOT08DABxF0ZfFxcWvc3NzmJ+fdwDGVB0i+qdC9h0RwRjjrvZea404jtFut5sAvgEIALDwE0opi/f3d3VxcaFPTk5EFEUgIszMzICZHZBN7oP7oyxLhGGIXq+H9fV1vbe3JzqdTvFTJACgApxlGRHRTLfbpdvbW7G5uYmXlxc8PT1BCAEhRIXAuFGWJYQQaLfbWFpaIiGEYOZKI1eAbV2EEJidncXGxgZWVlZwc3ODs7Mz3N/fo9FoAADKsvwQOI5jR1aIKtQvwMYYMDOKosD5+TmWl5exs7ODh4cHXF1dIY5jp5qIKgTqhLTWjoiUcjywUgrM7Ca3Wi10Oh3s7u7i+fkZaZrCGIOiKCClBDM7Epa0Da01pJQOvB6/KLaMAeDo6Aj9fh9SSjSbTWxvbyMIAlxeXuL4+Ng1kS2RdUopBWMM+v2+u58IrLUGM6MsSyilkGUZwjBEkiS4vr7G4eEhjDEYDAYgIgRBAGZGnufI87zimBDCLbsPrRZCVNgREZgZRIRut4u3tzeXyCYriqJSVyKqrHPrxlRWA0AQBJXNIQgC54SUEkopN9cC1ZvNfs/M0FpPZ7UxxoHZZvLV+WTqHW3DNqldXhMVW2AAkFIiyzLXmdZGX9m4JWVdsMvzQ8WW4WAwcIzHKbLh78++2knAlRPIKlNKoSiKikKbxAepE/Pn2vupge2EUSeQ33B+jKurJTdVV9uNwFdkE47aGv13/lwfWCk1usb2qPq5zRmttTHGmDqJUc00avguGGOMlNIMh8PxipMkoTzPaXV1VRwcHFB9LfvA9U1ilP1lWSJJEjEcDqnRaIw/FvM813d3d4M4jjURifqBX6/7JHD7XkqpX19fRa/X0767ldja2grX1taSNE0TAB9epxlpmtr5n/X3+nsxyqvJxfv38ef/qf9ofAfKSFrAfQjwawAAAABJRU5ErkJggg==",
+            "adopted": true
+          },
+          {
+            "wid": "4194316",
+            "title": "lufria@lufria-server: /tmp",
+            "x": 0,
+            "y": 0,
+            "width": 618,
+            "height": 386,
+            "minimized": false,
+            "maximized": false,
+            "focused": true,
+            "stacking": 2,
+            "modal": false,
+            "transientFor": null,
+            "windowType": [
+              "NORMAL"
+            ],
+            "classInstance": [
+              "xterm",
+              "XTerm"
+            ],
+            "overrideRedirect": false,
+            "resizable": true,
+            "iconUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAADUklEQVR4nO1WvU7jShT+jj0EW5agQkaCB0BoRY2Q6CLdMhUFoqThFXgCOipKmu2QeIKL6HgBKChACPEjig0iiYLijD1zPFvsztyxNwnZK3G3uUca2ZbH5/s5Z2YM/B//UZD/YIwhAOEnYTERmU/KPX0Q8EMpEZn9/f201Wr9tbCwUGZZFoz6gJkRhtOZwsyIoqgMwzB4fHz8u9lsfrNYAgBOT08DABxF0ZfFxcWvc3NzmJ+fdwDGVB0i+qdC9h0RwRjjrvZea404jtFut5sAvgEIALDwE0opi/f3d3VxcaFPTk5EFEUgIszMzICZHZBN7oP7oyxLhGGIXq+H9fV1vbe3JzqdTvFTJACgApxlGRHRTLfbpdvbW7G5uYmXlxc8PT1BCAEhRIXAuFGWJYQQaLfbWFpaIiGEYOZKI1eAbV2EEJidncXGxgZWVlZwc3ODs7Mz3N/fo9FoAADKsvwQOI5jR1aIKtQvwMYYMDOKosD5+TmWl5exs7ODh4cHXF1dIY5jp5qIKgTqhLTWjoiUcjywUgrM7Ca3Wi10Oh3s7u7i+fkZaZrCGIOiKCClBDM7Epa0Da01pJQOvB6/KLaMAeDo6Aj9fh9SSjSbTWxvbyMIAlxeXuL4+Ng1kS2RdUopBWMM+v2+u58IrLUGM6MsSyilkGUZwjBEkiS4vr7G4eEhjDEYDAYgIgRBAGZGnufI87zimBDCLbsPrRZCVNgREZgZRIRut4u3tzeXyCYriqJSVyKqrHPrxlRWA0AQBJXNIQgC54SUEkopN9cC1ZvNfs/M0FpPZ7UxxoHZZvLV+WTqHW3DNqldXhMVW2AAkFIiyzLXmdZGX9m4JWVdsMvzQ8WW4WAwcIzHKbLh78++2knAlRPIKlNKoSiKikKbxAepE/Pn2vupge2EUSeQ33B+jKurJTdVV9uNwFdkE47aGv13/lwfWCk1usb2qPq5zRmttTHGmDqJUc00avguGGOMlNIMh8PxipMkoTzPaXV1VRwcHFB9LfvA9U1ilP1lWSJJEjEcDqnRaIw/FvM813d3d4M4jjURifqBX6/7JHD7XkqpX19fRa/X0767ldja2grX1taSNE0TAB9epxlpmtr5n/X3+nsxyqvJxfv38ef/qf9ofAfKSFrAfQjwawAAAABJRU5ErkJggg==",
+            "adopted": true
+          }
+        ],
+        "framesInfo": [
+          {
+            "wid": "4194316",
+            "title": "lufria@lufria-server: /tmp",
+            "dialogOf": null,
+            "minimized": false,
+            "maximized": false,
+            "body": {
+              "width": 618,
+              "height": 386
+            },
+            "canvas": {
+              "width": 618,
+              "height": 386,
+              "cssWidth": "100%"
+            },
+            "adopted": true
+          },
+          {
+            "wid": "6291468",
+            "title": "RAST-POC",
+            "dialogOf": null,
+            "minimized": false,
+            "maximized": false,
+            "body": {
+              "width": 618,
+              "height": 386
+            },
+            "canvas": {
+              "width": 618,
+              "height": 386,
+              "cssWidth": "100%"
+            },
+            "adopted": true
+          }
+        ]
+      }
+    },
+    {
+      "step": "typing",
+      "testBody": {
+        "width": 618,
+        "height": 386
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "name": "single shared client connects and adopts remote windows",
+      "ok": true,
+      "detail": "2 RAST windows"
+    },
+    {
+      "name": "DOM adoption works for every remote window",
+      "ok": true,
+      "detail": "[{\"wid\":\"4194316\",\"body\":{\"width\":618,\"height\":386},\"canvas\":{\"w\":618,\"h\":386}},{\"wid\":\"6291468\",\"body\":{\"width\":618,\"height\":386},\"canvas\":{\"w\":618,\"h\":386}}]"
+    },
+    {
+      "name": "keyboard forwarding types into the remote app",
+      "ok": true,
+      "detail": "remote xterm created /tmp/rast-poc-typing-proof"
+    },
+    {
+      "name": "clipboard browser -> remote desktop",
+      "ok": true,
+      "detail": "RAST-CLIP-FROM-BROWSER-42"
+    },
+    {
+      "name": "clipboard remote desktop -> browser",
+      "ok": true,
+      "detail": "shim clipboard buffer updated"
+    },
+    {
+      "name": "RAST window resize drives the server window size (canvas + X11)",
+      "ok": true,
+      "detail": "{\"canvas\":{\"width\":778,\"height\":436},\"shimWindow\":{\"wid\":\"6291468\",\"title\":\"RAST-POC\",\"x\":0,\"y\":0,\"width\":778,\"height\":436,\"minimized\":false,\"maximized\":false,\"focused\":true,\"stacking\":2,\"modal\":false,\"transientFor\":null,\"windowType\":[\"NORMAL\"],\"classInstance\":[\"xterm\",\"XTerm\"],\"overrideRedirect\":false,\"resizable\":true,\"iconUrl\":\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAADUklEQVR4nO1WvU7jShT+jj0EW5agQkaCB0BoRY2Q6CLdMhUFoqThFXgCOipKmu2QeIKL6HgBKChACPEjig0iiYLijD1zPFvsztyxNwnZK3G3uUca2ZbH5/s5Z2YM/B//UZD/YIwhAOEnYTERmU/KPX0Q8EMpEZn9/f201Wr9tbCwUGZZFoz6gJkRhtOZwsyIoqgMwzB4fHz8u9lsfrNYAgBOT08DABxF0ZfFxcWvc3NzmJ+fdwDGVB0i+qdC9h0RwRjjrvZea404jtFut5sAvgEIALDwE0opi/f3d3VxcaFPTk5EFEUgIszMzICZHZBN7oP7oyxLhGGIXq+H9fV1vbe3JzqdTvFTJACgApxlGRHRTLfbpdvbW7G5uYmXlxc8PT1BCAEhRIXAuFGWJYQQaLfbWFpaIiGEYOZKI1eAbV2EEJidncXGxgZWVlZwc3ODs7Mz3N/fo9FoAADKsvwQOI5jR1aIKtQvwMYYMDOKosD5+TmWl5exs7ODh4cHXF1dIY5jp5qIKgTqhLTWjoiUcjywUgrM7Ca3Wi10Oh3s7u7i+fkZaZrCGIOiKCClBDM7Epa0Da01pJQOvB6/KLaMAeDo6Aj9fh9SSjSbTWxvbyMIAlxeXuL4+Ng1kS2RdUopBWMM+v2+u58IrLUGM6MsSyilkGUZwjBEkiS4vr7G4eEhjDEYDAYgIgRBAGZGnufI87zimBDCLbsPrRZCVNgREZgZRIRut4u3tzeXyCYriqJSVyKqrHPrxlRWA0AQBJXNIQgC54SUEkopN9cC1ZvNfs/M0FpPZ7UxxoHZZvLV+WTqHW3DNqldXhMVW2AAkFIiyzLXmdZGX9m4JWVdsMvzQ8WW4WAwcIzHKbLh78++2knAlRPIKlNKoSiKikKbxAepE/Pn2vupge2EUSeQ33B+jKurJTdVV9uNwFdkE47aGv13/lwfWCk1usb2qPq5zRmttTHGmDqJUc00avguGGOMlNIMh8PxipMkoTzPaXV1VRwcHFB9LfvA9U1ilP1lWSJJEjEcDqnRaIw/FvM813d3d4M4jjURifqBX6/7JHD7XkqpX19fRa/X0767ldja2grX1taSNE0TAB9epxlpmtr5n/X3+nsxyqvJxfv38ef/qf9ofAfKSFrAfQjwawAAAABJRU5ErkJggg==\",\"adopted\":true}}"
+    },
+    {
+      "name": "resize triggers a full repaint (no blank canvas)",
+      "ok": true,
+      "detail": "distinct colours 14"
+    },
+    {
+      "name": "maximize fills the RAST work area",
+      "ok": true,
+      "detail": "{\"width\":1438,\"height\":814}"
+    },
+    {
+      "name": "minimize unmaps the remote window (X11 iconify)",
+      "ok": true,
+      "detail": "minimized=true"
+    },
+    {
+      "name": "restore maps the remote window again",
+      "ok": true,
+      "detail": "minimized=false"
+    },
+    {
+      "name": "transient modal dialog is attached to its parent",
+      "ok": true,
+      "detail": "{\"parent\":\"10485763\",\"dialog\":\"10486587\",\"attached\":true,\"noTaskbarEntry\":true,\"transientFor\":\"10485763\",\"modal\":true}"
+    },
+    {
+      "name": "closing the child keeps the parent window alive",
+      "ok": true,
+      "detail": "parent 10485763 still open"
+    },
+    {
+      "name": "closing a RAST window sends WM_DELETE (app exits, other windows stay)",
+      "ok": true,
+      "detail": "xterms 5 -> 4, windows 2 -> 1"
+    },
+    {
+      "name": "refresh reconnects the single client and restores all windows (no duplicate apps)",
+      "ok": true,
+      "detail": "windows 1 -> 1, xterms 4 -> 4"
+    },
+    {
+      "name": "reconnected windows are painted",
+      "ok": true,
+      "detail": "[{\"wid\":\"4194316\",\"colors\":12}]"
+    },
+    {
+      "name": "narrow (390x844) layout keeps windows usable",
+      "ok": true,
+      "detail": "[{\"width\":388,\"height\":758}]"
+    }
+  ],
+  "env": {
+    "DISPLAY": ":101",
+    "PORT": 14592
+  },
+  "url": "http://127.0.0.1:14592/",
+  "testXtermPid": 1260280,
+  "console": [
+    "info: [RAST native shim] loaded v1.0.0 (session key null)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "log: title= RAST-POC",
+    "info: [RAST native shim] captured XpraClient, version 1.0.0",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "log: title= RAST-POC-MAIN",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "log: title= RAST-POC-DIALOG",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "info: [RAST native shim] loaded v1.0.0 (session key null)",
+    "info: [RAST native shim] captured XpraClient, version 1.0.0",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ],
+  "finalState": {
+    "ready": true,
+    "connected": true,
+    "separate": true,
+    "shimVersion": "1.0.0",
+    "shimKey": null,
+    "adoptFailures": [],
+    "frames": [
+      "4194316"
+    ],
+    "focusedWid": "4194316",
+    "taskbar": [
+      "lufria@lufria-server: /tmp"
+    ],
+    "log": [
+      "21:28:01.703 harness ready",
+      "21:28:01.785 session page (re)loaded: resetting RAST windows",
+      "21:28:01.785 shim attached: version=1.0.0 key=none",
+      "21:28:01.978 shim event: ready (1 windows)",
+      "21:28:01.980 window created: 4194316 · lufria@lufria-server: /tmp",
+      "21:28:02.007 shim event: windows (1 windows)",
+      "21:28:02.007 shim event: connected (1 windows)",
+      "21:28:04.165 shim event: windows (1 windows)"
+    ],
+    "lastEvent": {
+      "event": "windows",
+      "at": 1794518884165
+    },
+    "windows": [
+      {
+        "wid": "4194316",
+        "title": "lufria@lufria-server: /tmp",
+        "x": 0,
+        "y": 0,
+        "width": 388,
+        "height": 758,
+        "minimized": false,
+        "maximized": false,
+        "focused": true,
+        "stacking": 1,
+        "modal": false,
+        "transientFor": null,
+        "windowType": [
+          "NORMAL"
+        ],
+        "classInstance": [
+          "xterm",
+          "XTerm"
+        ],
+        "overrideRedirect": false,
+        "resizable": true,
+        "iconUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAeCAYAAAA7MK6iAAADUklEQVR4nO1WvU7jShT+jj0EW5agQkaCB0BoRY2Q6CLdMhUFoqThFXgCOipKmu2QeIKL6HgBKChACPEjig0iiYLijD1zPFvsztyxNwnZK3G3uUca2ZbH5/s5Z2YM/B//UZD/YIwhAOEnYTERmU/KPX0Q8EMpEZn9/f201Wr9tbCwUGZZFoz6gJkRhtOZwsyIoqgMwzB4fHz8u9lsfrNYAgBOT08DABxF0ZfFxcWvc3NzmJ+fdwDGVB0i+qdC9h0RwRjjrvZea404jtFut5sAvgEIALDwE0opi/f3d3VxcaFPTk5EFEUgIszMzICZHZBN7oP7oyxLhGGIXq+H9fV1vbe3JzqdTvFTJACgApxlGRHRTLfbpdvbW7G5uYmXlxc8PT1BCAEhRIXAuFGWJYQQaLfbWFpaIiGEYOZKI1eAbV2EEJidncXGxgZWVlZwc3ODs7Mz3N/fo9FoAADKsvwQOI5jR1aIKtQvwMYYMDOKosD5+TmWl5exs7ODh4cHXF1dIY5jp5qIKgTqhLTWjoiUcjywUgrM7Ca3Wi10Oh3s7u7i+fkZaZrCGIOiKCClBDM7Epa0Da01pJQOvB6/KLaMAeDo6Aj9fh9SSjSbTWxvbyMIAlxeXuL4+Ng1kS2RdUopBWMM+v2+u58IrLUGM6MsSyilkGUZwjBEkiS4vr7G4eEhjDEYDAYgIgRBAGZGnufI87zimBDCLbsPrRZCVNgREZgZRIRut4u3tzeXyCYriqJSVyKqrHPrxlRWA0AQBJXNIQgC54SUEkopN9cC1ZvNfs/M0FpPZ7UxxoHZZvLV+WTqHW3DNqldXhMVW2AAkFIiyzLXmdZGX9m4JWVdsMvzQ8WW4WAwcIzHKbLh78++2knAlRPIKlNKoSiKikKbxAepE/Pn2vupge2EUSeQ33B+jKurJTdVV9uNwFdkE47aGv13/lwfWCk1usb2qPq5zRmttTHGmDqJUc00avguGGOMlNIMh8PxipMkoTzPaXV1VRwcHFB9LfvA9U1ilP1lWSJJEjEcDqnRaIw/FvM813d3d4M4jjURifqBX6/7JHD7XkqpX19fRa/X0767ldja2grX1taSNE0TAB9epxlpmtr5n/X3+nsxyqvJxfv38ef/qf9ofAfKSFrAfQjwawAAAABJRU5ErkJggg==",
+        "adopted": true
+      }
+    ],
+    "framesInfo": [
+      {
+        "wid": "4194316",
+        "title": "lufria@lufria-server: /tmp",
+        "dialogOf": null,
+        "minimized": false,
+        "maximized": false,
+        "body": {
+          "width": 388,
+          "height": 758
+        },
+        "canvas": {
+          "width": 388,
+          "height": 758,
+          "cssWidth": "100%"
+        },
+        "adopted": true
+      }
+    ]
+  },
+  "finishedAt": "2026-11-12T21:28:05.505Z",
+  "failures": []
+}

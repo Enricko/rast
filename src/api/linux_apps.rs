@@ -22,6 +22,19 @@
 //! | POST | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: start (or find) that window's stream → `{url}` |
 //! | DELETE | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | any signed-in user: stop that window's stream |
 //! | POST | `/api/linux-apps/sessions/{sid}/windows/{window}/close` | any signed-in user: close the window inside the app |
+//!
+//! Native backend (host execution, one shared Xpra session per person):
+//!
+//! | Method | Path | Who |
+//! |---|---|---|
+//! | POST | `/api/linux-apps/preview` | administrator: inspect `{path}`/`{url}` before installing |
+//! | POST | `/api/linux-apps/{id}/launch` | any signed-in user: launch into their shared session (job-free) |
+//! | GET | `/api/linux-apps/session` | any signed-in user: their shared graphical session |
+//! | POST | `/api/linux-apps/session/close` | any signed-in user: stop the whole shared session |
+//! | POST | `/api/linux-apps/session/runs/{run}` | any signed-in user: terminate one app run |
+//! | POST | `/api/linux-apps/{id}/migrate` | administrator: migrate a Docker-backed app to native |
+//! | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return it to the Docker backend |
+//! | POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: remove retained legacy data |
 
 use axum::{
     extract::{Path, Query, State},
@@ -65,18 +78,42 @@ pub fn routes() -> Router<AppState> {
             "/api/linux-apps/sessions/{sid}/windows/{window}/close",
             post(close_window),
         )
+        // Native backend: host execution in one shared session per person.
+        .route("/api/linux-apps/preview", post(preview))
+        .route("/api/linux-apps/session", get(native_session))
+        .route("/api/linux-apps/session/close", post(close_native_session))
+        .route("/api/linux-apps/session/runs/{run}", post(close_native_run))
+        .route("/api/linux-apps/{id}/launch", post(launch))
+        .route("/api/linux-apps/{id}/migrate", post(migrate))
+        .route(
+            "/api/linux-apps/{id}/migration/rollback",
+            post(rollback_migration),
+        )
+        .route(
+            "/api/linux-apps/{id}/migration/cleanup",
+            post(cleanup_migration),
+        )
 }
 
 async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     Ok(Json(json!({
         "apps": state.linux_apps.list(&user).await?,
         "sessions": state.linux_apps.my_sessions(&user),
+        "session": state.linux_apps.native_session_json(&user).await?,
         "limits": {
             "minFreeMemoryBytes": crate::linux_apps::MIN_FREE_MEMORY_BYTES,
-            "idleMinutes": crate::linux_apps::IDLE_LIMIT.as_secs() / 60,
+            "idleMinutes": state.config.linux_idle_minutes,
             "maxCpus": std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+            "admissionReserveMb": state.config.linux_admission_reserve_mb,
+            "sessionMemoryMb": state.config.linux_session_memory_mb,
+            "sessionCpus": state.config.linux_session_cpus,
+            "sessionTasks": state.config.linux_session_tasks,
+            "appMemoryMb": state.config.linux_app_memory_mb,
+            "appCpus": state.config.linux_app_cpus,
+            "appTasks": state.config.linux_app_tasks,
         },
         "dockerEnabled": state.config.docker_enabled && crate::linux_apps::SUPPORTED,
+        "nativeEnabled": state.linux_apps.native_available(),
     })))
 }
 
@@ -87,6 +124,8 @@ struct InstallRequest {
     path: Option<String>,
     /// …or an `https://` link the server downloads.
     url: Option<String>,
+    /// Chosen launcher for an ambiguous portable archive (`preview.candidates`).
+    launcher: Option<Value>,
 }
 
 async fn install(
@@ -95,9 +134,16 @@ async fn install(
     Json(body): Json<InstallRequest>,
 ) -> AppResult<Json<Value>> {
     let apps = &state.linux_apps;
+    let launcher = body.launcher;
     Ok(Json(match (body.path.as_deref(), body.url.as_deref()) {
-        (Some(path), None) => apps.install(&admin.0, &state.storage, path.trim()).await?,
-        (None, Some(url)) => apps.install_url(&admin.0, url.trim()).await?,
+        (Some(path), None) => {
+            apps.install_with(&admin.0, &state.storage, path.trim(), launcher)
+                .await?
+        }
+        (None, Some(url)) => {
+            apps.install_url_with(&admin.0, url.trim(), launcher)
+                .await?
+        }
         _ => {
             return Err(crate::error::AppError::bad_request(
                 "send either `path` or `url`",
@@ -213,12 +259,34 @@ async fn check(
     Ok(Json(state.linux_apps.check_now(&id).await?))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateRequest {
+    path: Option<String>,
+    url: Option<String>,
+}
+
 async fn update(
     State(state): State<AppState>,
     admin: AdminUser,
     Path(id): Path<String>,
+    body: Option<Json<UpdateRequest>>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.update(&admin.0, &id).await?))
+    let (path, url) = body
+        .map(|Json(body)| (body.path, body.url))
+        .unwrap_or((None, None));
+    Ok(Json(
+        state
+            .linux_apps
+            .update_with_source(
+                &admin.0,
+                &id,
+                path.as_deref().map(str::trim),
+                url.as_deref().map(str::trim),
+                Some(&state.storage),
+            )
+            .await?,
+    ))
 }
 
 async fn open(
@@ -234,7 +302,7 @@ async fn session(
     user: AuthUser,
     Path(sid): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.session(&user, &sid)?))
+    Ok(Json(state.linux_apps.session(&user, &sid).await?))
 }
 
 async fn close(
@@ -242,7 +310,7 @@ async fn close(
     user: AuthUser,
     Path(sid): Path<String>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(state.linux_apps.close(&user, &sid)?))
+    Ok(Json(state.linux_apps.close(&user, &sid).await?))
 }
 
 async fn windows(
@@ -286,5 +354,123 @@ async fn close_window(
 ) -> AppResult<Json<Value>> {
     Ok(Json(
         state.linux_apps.close_window(&user, &sid, &window).await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Native backend
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreviewRequest {
+    path: Option<String>,
+    url: Option<String>,
+}
+
+async fn preview(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Json(body): Json<PreviewRequest>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(
+        state
+            .linux_apps
+            .native_preview(
+                &admin.0,
+                &state.storage,
+                body.path.as_deref().map(str::trim),
+                body.url.as_deref().map(str::trim),
+            )
+            .await?,
+    ))
+}
+
+async fn launch(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.native_launch(&user, &id).await?))
+}
+
+async fn native_session(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    Ok(Json(json!({
+        "session": state.linux_apps.native_session_json(&user).await?,
+        "limits": {
+            "idleMinutes": state.config.linux_idle_minutes,
+            "sessionMemoryMb": state.config.linux_session_memory_mb,
+            "sessionCpus": state.config.linux_session_cpus,
+            "appMemoryMb": state.config.linux_app_memory_mb,
+            "appCpus": state.config.linux_app_cpus,
+        },
+    })))
+}
+
+async fn close_native_session(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.native_close_session(&user).await?))
+}
+
+async fn close_native_run(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(run): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.native_close_run(&user, &run).await?))
+}
+
+async fn migrate(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+    body: Option<Json<PreviewRequest>>,
+) -> AppResult<Json<Value>> {
+    let (path, url) = body
+        .map(|Json(body)| (body.path, body.url))
+        .unwrap_or((None, None));
+    Ok(Json(
+        state
+            .linux_apps
+            .native_migrate(
+                &admin.0,
+                &id,
+                path.as_deref().map(str::trim),
+                url.as_deref().map(str::trim),
+                state.storage.clone(),
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CleanupRequest {
+    #[serde(default)]
+    remove_backup: bool,
+}
+
+async fn rollback_migration(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.native_rollback(&admin.0, &id).await?))
+}
+
+async fn cleanup_migration(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(id): Path<String>,
+    body: Option<Json<CleanupRequest>>,
+) -> AppResult<Json<Value>> {
+    let remove_backup = body.map(|Json(body)| body.remove_backup).unwrap_or(false);
+    Ok(Json(
+        state
+            .linux_apps
+            .native_cleanup(&admin.0, &id, remove_backup)
+            .await?,
     ))
 }

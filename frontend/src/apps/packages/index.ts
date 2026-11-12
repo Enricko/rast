@@ -638,6 +638,13 @@ class PackageCenterApp {
       const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.dockerEnabled;
       if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
       this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
+      // Docker -> native migration notice: only when the server supports native apps.
+      this.linuxSection.querySelector(".native-migration-notice")?.remove();
+      const migrationNotice = this.linux.migrationNotice();
+      if (migrationNotice && !this.linuxSection.hidden) {
+        migrationNotice.classList.add("native-migration-notice");
+        this.linuxSection.insertBefore(migrationNotice, this.linuxGrid);
+      }
     }
     const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
     if (this.runtimeSection) {

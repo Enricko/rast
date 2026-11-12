@@ -148,6 +148,14 @@ pub enum WorkerOp {
     LinuxList,
     /// Ask a `.deb` app's apt sources for a newer version.
     LinuxCheck,
+    /// List a legacy Linux app's per-person data volumes and their owners.
+    LinuxVolumeList,
+    /// Copy one person's legacy Docker data volume into a host directory
+    /// (Docker -> native migration; read-only on the volume).
+    LinuxVolumeExport,
+    /// Remove exactly one person's legacy Docker data volume (post-migration
+    /// cleanup only; the server keeps it until the operator asks).
+    LinuxVolumeRemove,
 }
 
 impl WorkerOp {
@@ -188,6 +196,9 @@ impl WorkerOp {
             Self::LinuxPrune => "linux-prune",
             Self::LinuxList => "linux-list",
             Self::LinuxCheck => "linux-check",
+            Self::LinuxVolumeList => "linux-volume-list",
+            Self::LinuxVolumeExport => "linux-volume-export",
+            Self::LinuxVolumeRemove => "linux-volume-remove",
         }
     }
 
@@ -209,6 +220,7 @@ impl WorkerOp {
             | Self::ImageInspect
             | Self::VolumeList
             | Self::LinuxList
+            | Self::LinuxVolumeList
             | Self::ContainerExec => TimeoutClass::Quick,
             Self::ComposeUp
             | Self::ComposeDown
@@ -226,7 +238,9 @@ impl WorkerOp {
             | Self::LinuxStop
             | Self::LinuxRemove
             | Self::LinuxPrune
-            | Self::LinuxCheck => TimeoutClass::Long,
+            | Self::LinuxCheck
+            | Self::LinuxVolumeExport
+            | Self::LinuxVolumeRemove => TimeoutClass::Long,
             Self::ImagePull | Self::LinuxBuild => TimeoutClass::Pull,
         }
     }
@@ -268,6 +282,9 @@ impl WorkerOp {
                 | Self::LinuxPrune
                 | Self::LinuxList
                 | Self::LinuxCheck
+                | Self::LinuxVolumeList
+                | Self::LinuxVolumeExport
+                | Self::LinuxVolumeRemove
         )
     }
 }
@@ -465,6 +482,9 @@ impl ValidatedAction {
                 super::linux::LinuxAction::Prune { .. } => WorkerOp::LinuxPrune,
                 super::linux::LinuxAction::List => WorkerOp::LinuxList,
                 super::linux::LinuxAction::Check { .. } => WorkerOp::LinuxCheck,
+                super::linux::LinuxAction::VolumeList { .. } => WorkerOp::LinuxVolumeList,
+                super::linux::LinuxAction::VolumeExport { .. } => WorkerOp::LinuxVolumeExport,
+                super::linux::LinuxAction::VolumeRemove { .. } => WorkerOp::LinuxVolumeRemove,
             },
         }
     }

@@ -1,0 +1,21 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8731",
+  "startedAt": "2026-11-12T21:06:37.917Z",
+  "finishedAt": "2026-11-12T21:06:58.103Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:06:37.917Z",
+      "durationMs": 20131,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "page.waitForSelector: Timeout 20000ms exceeded.\nCall log:\n  - waiting for locator('input[name=\"username\"], .auth-form') to be visible\n\n    at Module.loginViaForm (/home/lufria/RAST/tests/e2e/lib/browser.mjs:88:14)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/s0-smoke.mjs:19:5)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    }
+  ]
+}

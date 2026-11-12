@@ -1,0 +1,62 @@
+[Unit]
+Description=RAST native Linux apps privileged helper (Xpra sessions, host APT)
+Documentation=https://github.com/Enricko/rast/blob/main/docs/ARCHITECTURE.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+# Root is required: the helper is the only component allowed to create Linux
+# identities, start transient systemd units as those identities, run host APT
+# transactions and change ownership of managed profile paths. The
+# unprivileged rast.service never has these rights; it only talks to this
+# process over /run/rast/native.sock with a strict JSON protocol.
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/rast native-helper
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+WorkingDirectory=/var/lib/rast
+Environment=RAST_CONFIG=/etc/rast/rast.toml
+# Group owning the socket (mode 0660). rast.service runs as rast:rast, so only
+# its members can connect. Set RAST_NATIVE_ALLOWED_UID in a drop-in to also
+# pin the peer uid; the installer writes /etc/systemd/system/
+# rast-native.service.d/20-peer-uid.conf with the rast web server uid.
+Environment=RAST_NATIVE_SOCKET_GROUP=rast
+# Optional operator overrides (RAST_* variables, mode 0600 root:rast).
+EnvironmentFile=-/etc/rast/rast.env
+# Packaging tools create world-readable files; never inherit a restrictive
+# umask into apt/dpkg maintainer scripts.
+UMask=0022
+LimitNOFILE=65536
+
+# ---- Sandboxing -----------------------------------------------------------
+# The actual isolation is applied to the transient units the helper starts:
+# every session and application runs as its own unprivileged identity with
+# MemoryMax=, CPUQuota= and TasksMax= in rast-linux.slice. This unit must be
+# able to:
+#   * talk to systemd over the D-Bus system bus (systemd-run/systemctl),
+#   * run apt-get/dpkg (writes /var/lib/dpkg, /var/cache/apt, /etc/apt, /usr,
+#     /var/log/apt and reads /proc/sys),
+#   * change identities (/etc/passwd, /etc/group, /etc/shadow),
+#   * manage directories under the RAST data/storage trees and /run/rast*.
+# ProtectSystem=strict, PrivateTmp=yes, RestrictSUIDSGID=yes and
+# NoNewPrivileges=yes are deliberately NOT used here: they break APT
+# maintainer scripts, setuid files created by packages and /tmp usage.
+NoNewPrivileges=no
+ProtectSystem=no
+ProtectHome=read-only
+PrivateTmp=no
+ProtectControlGroups=no
+ProtectKernelTunables=no
+ProtectKernelModules=no
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

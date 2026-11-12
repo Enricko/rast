@@ -60,6 +60,24 @@ resource limits apply. For configuration keys see
                            ▼
                     Docker Engine
 
+              ┌───────────────────────────┐
+              │    rast-native.service    │
+              │  User=root                │
+              │  `rast native-helper`     │
+              │  Unix socket /run/rast/native.sock (0660 root:rast)
+              └────────────┬──────────────┘
+                           │  systemd transient units in rast-linux.slice
+                           ▼
+              systemd: rast-xpra-u<id>  +  rast-app-u<id>-<app>-<n>
+                           │
+                           ▼
+              Xpra seamless session (loopback TCP)  ←  native apps (Chrome, …)
+                           ▲
+                           │  HTTP + WebSocket, same-origin and per-user
+                           │  authorized, proxied at /linux-apps/session/<key>/
+                           │
+                    rast.service (the branch above)
+
         SQLite + files:                    user files:
         /var/lib/rast                      /srv/rast
 ```
@@ -92,12 +110,19 @@ The web server bridges each session to a WebSocket (see `docs/API.md`).
 | Unit | Command | User / groups | Purpose |
 | --- | --- | --- | --- |
 | `rast.service` | `/usr/local/bin/rast serve` | `rast:rast` | HTTP API, embedded UI, SQLite, file storage, background jobs, backup scheduling, SSE event stream |
-| `rast-worker.service` | `/usr/local/bin/rast worker` | `rast-worker`, primary group `rast`, supplementary group `docker` | Privileged Docker operations for the Applications app |
+| `rast-worker.service` | `/usr/local/bin/rast worker` | `rast-worker`, primary group `rast`, supplementary group `docker` | Privileged Docker operations for the Applications app and for legacy Docker-backed Linux apps |
+| `rast-native.service` | `/usr/local/bin/rast native-helper` | `root` | Privileged native helper: per-user Linux identities, transient systemd units (session + applications, cgroup limits), admin-approved APT transactions, managed profile paths |
+| `rast-xpra-u<id>` (transient) | `/usr/bin/xpra start :<display> …` | `rast-u<uid>` (unprivileged identity) | One Xpra seamless graphical session per RAST user, lazily started |
+| `rast-app-u<uid>-<app>-<n>` (transient) | the app's launcher argv | `rast-u<uid>` | One native application process group inside that person's session |
 
-Both units are installed from [`deploy/`](../deploy):
-[`rast.service`](../deploy/rast.service) and
-[`rast-worker.service`](../deploy/rast-worker.service). The worker is optional
-and only installed when Docker is present (or requested explicitly).
+The units are installed from [`deploy/`](../deploy):
+[`rast.service`](../deploy/rast.service),
+[`rast-worker.service`](../deploy/rast-worker.service),
+[`rast-native.service`](../deploy/rast-native.service) and
+[`rast-linux.slice`](../deploy/rast-linux.slice). The worker is optional and
+only installed when Docker is present (or requested explicitly); the native
+helper is optional and only installed when Xpra is present (or requested with
+`RAST_NATIVE=1`).
 
 `rast.service` is the only unit with `[Install] WantedBy=multi-user.target` in
 the default profile; the worker has `Wants=docker.service` (not `Requires`) so
@@ -119,7 +144,12 @@ keeps it inactive in that case.
 | `src/events.rs` | In-process broadcast bus for Server-Sent Events (`/api/events`) |
 | `src/monitor/` | One process-wide resource sampler (CPU, memory, disks, network, containers) |
 | `src/docker/` | Worker-socket client, compose validation, deployment metadata |
-| `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions |
+| `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions; `linux.rs` also builds the legacy app images and exports legacy data volumes for migration |
+| `src/native/` | Privileged native helper: JSON-lines protocol with strict validation (`protocol.rs`), client for the web server (`client.rs`), root daemon (`daemon.rs`), per-user Linux identities (`identity.rs`) |
+| `src/linux_apps/native_session.rs` | Per-user shared Xpra session manager: lazy start, application launch, idle/session lifecycle, restart recovery, systemd cgroup limits |
+| `src/linux_apps/native_proxy.rs` | Same-origin HTTP + WebSocket proxy for `/linux-apps/session/<key>/`, per-user authorization, shim injection |
+| `src/linux_apps/native_apps.rs` | Native installation, update, uninstall and Docker→native migration service (APT, portable archives, AppImage, compatibility preview, profiles) |
+| `src/linux_apps/native_archive.rs` | Path-safe archive extraction, desktop-entry parsing, launcher/icon detection for portable applications |
 | `src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
 | `src/packages/` | App Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
 | `src/update.rs` | GitHub-Release self-update with checksum verification, DB backup, atomic binary replacement and rollback of the binary |
@@ -297,7 +327,14 @@ only).
   apps/<slug>/compose.yaml            managed Docker Compose definitions
   apps/<slug>/.env                    encrypted app secrets (rendered on deploy)
   tmp/                               transient backup/restore work dirs
-  linux-apps/<id>/                   Linux app file being installed or updated (removed after the build)
+  linux-apps/<id>/                   legacy: Linux app file being built into an image (removed after the build)
+  linux-apps/apps/<id>/<version>/    native portable/AppImage installs (managed, versioned; read-only for app users)
+  linux-apps/profiles/<app>/<user>/  one native application profile per person (0700, owned by their identity)
+  linux-apps/staging/<uuid>/         uploads/downloads being inspected or installed
+  linux-apps/migrations/<app>/<user> Docker→native profile exports (retained until cleanup)
+  linux-users/<user_id>/             unprivileged Linux identity homes (0700 rast-u<uid>)
+/run/rast-linux/<uid>/               native session runtime dir (0700; Xpra sockets, logs, Xauthority target is the home)
+/run/rast/native.sock                native helper socket (0660 root:rast)
   packages/                          App Center (0751 with packages_shell_path)
     runtimes/<id>/<version>/         one directory per installed version (readable by all
                                      users with packages_shell_path; 0750 otherwise)
@@ -341,6 +378,7 @@ reported by `rast status`/`rast doctor` and stored in `_sqlx_migrations`.
 | `trash` | Recycle-bin entries: original path, size, deletion time |
 | `jobs` | Persistent background job queue and progress |
 | `apps`, `app_deployments` | Managed Docker applications and deployment history |
+| `linux_apps`, `linux_identities`, `linux_sessions`, `linux_runs` | Installed desktop apps (backend, native metadata, package ownership and migration state), one unprivileged identity per user, the running shared session and its application runs |
 | `backups`, `backup_schedules` | Backup archive metadata and recurring schedules |
 
 **Migration policy:** migrations are forward-only. A newer binary may migrate an
@@ -360,7 +398,7 @@ release notes (see [OPERATIONS.md](OPERATIONS.md#updates)).
 | RAST ↔ filesystem | Per-user roots resolved and canonicalised under `storage_dir`; traversal and symlink escapes rejected on every operation |
 | RAST ↔ data dir | Contains the SQLite DB and master key; 0750 `rast:rast`, master key 0600 |
 | RAST ↔ package sources | Official catalog accepted only with a valid Ed25519 signature from a trusted key and a sequence not lower than the last accepted one; artifacts downloaded over HTTPS from the catalog's allowed hosts (redirects re-checked), size and SHA-256 verified before extraction; extraction refuses absolute paths, `..`, devices and links leaving the version directory; extension records over 64 KiB and archives that would leave less than 512 MiB free are refused. Declared version checks execute the package's own files as the `rast` user, without a shell, in a sandbox: own process group (killed on timeout and after exit; `setsid`/`setpgid` denied), seccomp (no sockets, io_uring or ptrace), Landlock (read/execute only in the package and system library directories, write only to a scratch home, TCP denied), no core dumps, 64 MiB file limit, output to files. GitHub imports are third-party code: Landlock is mandatory for them, they are pinned to the inspected release and digests, bound to one repository and publisher (re-checked at install time and in the same transaction that records the install), and can never take an official package id or command name. Expired catalogs drive no installs |
-| Browser ↔ Linux apps | Admin only. Each person's copy is a container with its own settings volume and only their RAST home mounted; no privileged mode, `no-new-privileges`, a few capabilities dropped, memory/CPU/PID limits, port published on loopback only, image never pulled at run time. The frame is served by RAST under `/linux-apps/<128-bit key>/` with `Content-Security-Policy: sandbox` (no same-origin access to RAST) and `frame-ancestors 'self'`; the container's own password is added by RAST and never reaches the browser |
+| Browser ↔ Linux apps | Managing apps is administrator-only; every signed-in user only reaches their own runs. **Native backend:** each RAST user maps to a distinct unprivileged host identity; one Xpra session per user; the Xpra port is bound to `127.0.0.1` with Xpra authentication disabled and is never exposed; RAST proxies HTTP+WebSocket under `/linux-apps/session/<128-bit key>/` and checks the RAST session cookie on every request (another user's key → 403, expired session → 401, same-origin `Origin` required for WebSockets), injecting its window-integration shim into same-origin pages. Applications inside one person's session share a trust boundary; filesystem isolation between users rests on distinct uids, 0700 profiles and no cross-user access (the person's RAST home is shared with *their* identity through an ACL). Chromium runs unprivileged with its sandbox enabled. The privileged helper is the only root component: socket 0660 root:rast, peer-uid allowlist, strict per-op validation, no shell, arguments/commands from validated fields only, bounded timeouts, APT transactions serialized and admin-authorized. Session keys and credentials are never logged. **Legacy Docker backend:** each person's copy is a container with its own settings volume and only their RAST home mounted; no privileged mode, `no-new-privileges`, capabilities dropped, memory/CPU/PID limits, loopback-only port; the frame is served under `/linux-apps/<128-bit key>/` with a sandbox CSP |
 | Secrets at rest | Master key file, encrypted app secrets (AES-256-GCM), session tokens hashed at rest |
 | systemd sandbox | `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, empty capability sets, syscall blacklist, `NoNewPrivileges`, memory caps (see units) |
 
@@ -384,11 +422,13 @@ plenty). Tune with systemd drop-ins and configuration keys.
 | Job queue | 128 pending | `src/jobs.rs::QUEUE_CAPACITY` |
 | File descriptors | 65536 | `LimitNOFILE` in both units |
 | Uploads | streamed, never buffered whole | `RAST_MAX_UPLOAD_BYTES` |
-| Linux apps | per copy: 4 GiB memory and 6 CPUs by default (per app, adjustable), 4096 PIDs; a copy only starts with 4 GiB of host memory free; one copy per person per app | App Center → the app's page → Memory and CPU |
+| Native Linux apps | one shared session per user: 4 GiB memory / quarter of the CPUs (2–8) / 2048 tasks by default; per application: 2 GiB / 2 CPUs / 1024 tasks (App Center → the app's page → Memory and CPU); admission requires free memory ≥ the app's limit + 1 GiB reserve | `linux_session_*`, `linux_app_*`, `linux_admission_reserve_mb` |
+| Legacy Docker Linux apps | per copy: 4 GiB memory and 6 CPUs by default (per app, adjustable), 4096 PIDs; one copy per person per app | App Center → the app's page → Memory and CPU |
 | Binary size | release profile: `opt-level=z`, thin LTO, stripped symbols | `Cargo.toml` release profile |
 
 Disk growth comes from user files (`storage_dir`), backup archives
-(`data_dir/backups`), the trash directory and Docker images of Linux apps
+(`data_dir/backups`), the trash directory, native app installs and profiles
+(`data_dir/linux-apps`) and — while legacy Docker apps remain — their images
 (the shared base is about 3.7 GB, downloaded once; each app adds roughly
 1 GB; plus Docker's build cache). Backups are compressed tar.gz
 archives; retention keeps the newest N archives per the schedule. Monitor the

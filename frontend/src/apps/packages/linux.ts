@@ -18,14 +18,36 @@ import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
 import {
   isLinuxPackageName,
+  isNativeApp,
   isOpenable,
   linuxApps,
   linuxAppById,
+  linuxNativeSession,
   linuxOverview,
   loadLinuxApps,
+  nativeAppsEnabled,
   NEWER_BUILD,
   type LinuxApp,
+  type NativeAppInfo,
 } from "../linuxapp/catalog";
+import {
+  previewArchitecture,
+  previewCandidates,
+  previewCompatibility,
+  previewDependencies,
+  previewFileName,
+  previewFormat,
+  previewIdentity,
+  previewLauncherOwner,
+  previewName,
+  previewNeedsChoice,
+  previewSizeBytes,
+  previewSummary,
+  previewTransaction,
+  previewVersion,
+  type LinuxInstallPreview,
+  type LinuxPreviewLauncher,
+} from "./linux-preview";
 import type { PackageFilter } from "./format";
 import type { JobEvent } from "./types";
 
@@ -43,6 +65,11 @@ interface Progress {
   total: number;
   message: string;
 }
+
+type PreviewResult =
+  | { preview: LinuxInstallPreview }
+  | { unsupported: true }
+  | { error: string };
 
 const FORMAT_LABEL: Record<string, string> = {
   deb: ".deb package",
@@ -205,7 +232,7 @@ export class LinuxApps {
         "div",
         { class: "pkg-tile-body" },
         name,
-        h("div", { class: "pkg-tile-sub" }, tileSubtitle(app)),
+        h("div", { class: "pkg-tile-sub" }, tileSubtitle(app), this.backendBadge(app)),
         h("div", { class: "pkg-tile-foot" }, this.tileAction(app), this.progressEl(app, "tile")),
       ),
     );
@@ -283,6 +310,8 @@ export class LinuxApps {
       app.description ? h("p", { class: "pkg-about" }, app.description) : null,
       this.problem(app),
       this.info(app),
+      this.nativeSection(app),
+      this.migrationSection(app),
       this.advanced(app),
     ];
     return parts.filter((part): part is HTMLElement => part !== null);
@@ -297,7 +326,7 @@ export class LinuxApps {
       h(
         "div",
         { class: "pkg-hero-body" },
-        h("div", { class: "pkg-hero-publisher" }, iconSvg("box", 13), `${FORMAT_LABEL[app.format] ?? app.format} · Linux app`),
+        h("div", { class: "pkg-hero-publisher" }, iconSvg("box", 13), `${FORMAT_LABEL[app.format] ?? app.format} · Linux app`, this.backendBadge(app)),
         h("h2", { class: "pkg-hero-name" }, app.name),
         h("div", { class: `pkg-hero-status is-${status.kind}` }, status.text),
         this.heroActions(app),
@@ -332,6 +361,19 @@ export class LinuxApps {
 
   private menuItems(app: LinuxApp): ContextMenuEntry[] {
     const items: ContextMenuEntry[] = [];
+    if (isNativeApp(app)) {
+      if (app.status === "ready") {
+        items.push({ label: "Update from file…", icon: "upload", onClick: () => this.openUpdateFromFile(app) });
+        items.push({ label: "Update from URL…", icon: "external", onClick: () => this.openUpdateFromUrl(app) });
+      }
+      const session = linuxNativeSession();
+      const run = session?.apps.find((entry) => entry.appId === app.id);
+      if (run) items.push({ label: "End application", icon: "stop", danger: true, onClick: () => void this.endApplication(app) });
+      if (items.length) items.push("separator");
+    } else if (nativeAppsEnabled()) {
+      items.push({ label: "Migrate to native…", icon: "package", onClick: () => this.confirmMigrate(app) });
+      items.push("separator");
+    }
     if (app.status === "ready" && app.update.source) {
       items.push({ label: "Check for updates", icon: "refresh", onClick: () => void this.check(app) });
     }
@@ -510,20 +552,387 @@ export class LinuxApps {
    * Install a File Station file (`path`) or a file behind a link (`url`, the
    * server downloads it) and show the app's page. Resolves with the error
    * message when the install could not start.
+   *
+   * Nothing is installed before the person has seen the server's preview
+   * (identity, compatibility and the exact package transaction of a .deb).
+   * On servers without native apps (preview endpoint unavailable) the old
+   * one-step flow is kept.
    */
   private async install(source: { path: string } | { url: string }): Promise<string | null> {
     const { ctx } = this.host;
+    const result = await this.previewInstall(source, "install");
+    if ("error" in result) {
+      if (result.error) {
+        if ("path" in source) ctx.toast.error(result.error);
+        return result.error;
+      }
+      return null;
+    }
+    if ("unsupported" in result) return this.startInstall(source);
+    const confirmed = await this.confirmPreview(result.preview, "install");
+    if (!confirmed.ok) return null;
+    return this.startInstall(source, confirmed.launcher);
+  }
+
+  private async startInstall(
+    source: { path: string } | { url: string },
+    launcher?: LinuxPreviewLauncher,
+  ): Promise<string | null> {
+    const { ctx } = this.host;
+    const body = launcher ? { ...source, launcher } : source;
     try {
-      const res = await ctx.api.post<{ app: LinuxApp; jobId: string }>("/api/linux-apps/install", source);
-      ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
+      // Native installs start a job and insert the app row during the job (no
+      // app in the response yet); Docker installs answer with the app already.
+      const res = await ctx.api.post<{ app?: LinuxApp; jobId: string; installing?: boolean }>(
+        "/api/linux-apps/install",
+        body,
+      );
+      if (res.app) {
+        ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
+      } else {
+        // Native install: the app row appears during the job (linuxapps.changed).
+        ctx.toast.info("Installing the app. This can take a few minutes.");
+      }
       this.follow(res.jobId);
       await this.reload();
-      this.host.openPage(res.app.id);
+      if (res.app) this.host.openPage(res.app.id);
       return null;
     } catch (error) {
       const message = errorMessage(error);
       if ("path" in source) ctx.toast.error(message);
       return message;
+    }
+  }
+
+  /**
+   * Ask the server to inspect a file before installing/updating. Shows a modal
+   * with progress (a .deb package transaction can take a few seconds) and
+   * resolves with the preview, `unsupported` for older servers, or an error.
+   */
+  private async previewInstall(
+    source: { path: string } | { url: string },
+    mode: "install" | "update",
+  ): Promise<PreviewResult> {
+    const { ctx } = this.host;
+    const body = h(
+      "div",
+      { class: "pkg-preview" },
+      h(
+        "div",
+        { class: "pkg-preview-loading" },
+        h("span", { class: "spinner" }),
+        h("span", {}, mode === "update" ? "Checking the update…" : "Checking the file before installing…"),
+      ),
+    );
+    const close = modal({
+      title: mode === "update" ? "Update from file" : "Add an app",
+      body,
+      dismissible: false,
+    });
+    try {
+      const res = await ctx.api.post<{ preview: LinuxInstallPreview }>("/api/linux-apps/preview", source);
+      if (!res?.preview) return { error: "The server did not describe this file." };
+      return { preview: res.preview };
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if (status === 404 || status === 405 || status === 501) return { unsupported: true };
+      return { error: errorMessage(error) };
+    } finally {
+      close();
+    }
+  }
+
+  /** Explicit confirm of the server's installation preview. */
+  private confirmPreview(
+    preview: LinuxInstallPreview,
+    mode: "install" | "update",
+  ): Promise<{ ok: boolean; launcher?: LinuxPreviewLauncher }> {
+    const candidates = previewCandidates(preview);
+    const needsChoice = previewNeedsChoice(preview) && candidates.length > 0;
+    return new Promise<{ ok: boolean; launcher?: LinuxPreviewLauncher }>((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean, launcher?: LinuxPreviewLauncher): void => {
+        if (settled) return;
+        settled = true;
+        resolve({ ok, ...(launcher ? { launcher } : {}) });
+      };
+      const chooser = needsChoice
+        ? (() => {
+            const select = h("select", { class: "input", ariaLabel: "Program to start" });
+            candidates.forEach((candidate, index) => {
+              select.appendChild(
+                h(
+                  "option",
+                  { value: String(index), selected: index === 0 },
+                  previewLauncherOwner(candidate),
+                ),
+              );
+            });
+            return { select, element: h("label", { class: "field" }, h("span", { class: "field-label" }, "Program to start"), select) };
+          })()
+        : null;
+      const body = h("div", { class: "col" }, this.renderPreview(preview, mode), chooser?.element ?? null);
+      const chosen = (): LinuxPreviewLauncher | undefined => {
+        if (!chooser) return undefined;
+        const index = Number.parseInt(chooser.select.value, 10);
+        return candidates[Number.isFinite(index) ? index : 0];
+      };
+      modal({
+        title: mode === "update" ? `Update ${previewName(preview)}?` : `Install ${previewName(preview)}?`,
+        body,
+        wide: true,
+        actions: [
+          { label: "Cancel", variant: "ghost", onClick: () => finish(false) },
+          {
+            label: mode === "update" ? "Update" : "Install",
+            variant: "primary",
+            onClick: () => finish(true, chosen()),
+          },
+        ],
+        onClose: () => finish(false),
+      });
+    });
+  }
+
+  private renderPreview(preview: LinuxInstallPreview, mode: "install" | "update"): HTMLElement {
+    const compatibility = previewCompatibility(preview);
+    const transaction = previewTransaction(preview);
+    const dependencies = previewDependencies(preview);
+    const identity = previewIdentity(preview);
+    const version = previewVersion(preview);
+    const size = previewSizeBytes(preview);
+    const title = mode === "update" ? "This update will" : "This will be installed";
+    const head = h(
+      "div",
+      { class: "pkg-preview-head" },
+      h("div", { class: "pkg-icon pkg-icon-hero is-app", ariaHidden: true }, iconSvg("package", 40)),
+      h(
+        "div",
+        { class: "pkg-preview-title" },
+        h("div", { class: "pkg-preview-name" }, previewName(preview)),
+        h(
+          "div",
+          { class: "pkg-preview-sub" },
+          [
+            previewFileName(preview) ?? "",
+            version ? `version ${version}` : "",
+            previewArchitecture(preview) ?? "",
+            size ? formatBytes(size) : "",
+          ]
+            .filter((part) => part !== "")
+            .join(" · "),
+        ),
+      ),
+    );
+    const identityList = h(
+      "div",
+      { class: "pkg-preview-list" },
+      ...identity.map((row) =>
+        h(
+          "div",
+          { class: "pkg-preview-row" },
+          h("span", {}, row.label),
+          h("span", { class: "pkg-preview-mono" }, row.value),
+        ),
+      ),
+    );
+    const warnings = compatibility.warnings;
+    const compatNotice = compatibility.ok
+      ? banner("success", "Compatible with this server", warnings.length > 0 ? warnings.join(" · ") : dependencies.length ? `Needs: ${dependencies.join(", ")}` : undefined)
+      : banner("error", "This file is not fully compatible", compatibility.reasons.join(" · ") || "The server reported an incompatibility.");
+    const compatNode = compatNotice;
+    const format = previewFormat(preview);
+    const parts: HTMLElement[] = [
+      head,
+      h(
+        "div",
+        { class: "pkg-preview-section" },
+        h("div", { class: "pkg-preview-section-title" }, format ? `File (${format})` : "File"),
+        identityList,
+      ),
+      compatNode,
+    ];
+    if (transaction.removals > 0) {
+      parts.push(
+        banner(
+          "warning",
+          "Packages will be removed",
+          "These packages exist on the server and would be removed to install this app.",
+        ),
+      );
+    }
+    if (transaction.hasChanges || transaction.preexisting) {
+      const rows = transaction.rows.map((row) =>
+        h(
+          "div",
+          {
+            class: `pkg-preview-row ${row.kind === "remove" ? "is-remove" : row.kind === "upgrade" ? "is-upgrade" : "is-install"}`,
+          },
+          h("span", {}, row.kind === "remove" ? "Remove" : row.kind === "upgrade" ? "Upgrade" : "Install"),
+          h(
+            "span",
+            { class: "pkg-preview-mono" },
+            row.kind === "upgrade" && row.oldVersion
+              ? `${row.name} ${row.oldVersion} → ${row.version}`
+              : `${row.name} ${row.version}`,
+          ),
+        ),
+      );
+      const summaryParts: string[] = [];
+      if (transaction.installs) summaryParts.push(`${transaction.installs} to install`);
+      if (transaction.upgrades) summaryParts.push(`${transaction.upgrades} to upgrade`);
+      if (transaction.removals) summaryParts.push(`${transaction.removals} to remove`);
+      if (transaction.downloadBytes > 0) summaryParts.push(`${formatBytes(transaction.downloadBytes)} to download`);
+      parts.push(
+        h(
+          "div",
+          { class: "pkg-preview-section" },
+          h("div", { class: "pkg-preview-section-title" }, transaction.preexisting ? "Package changes (package already on the server)" : "Package changes"),
+          summaryParts.length ? h("div", { class: "pkg-preview-sub" }, summaryParts.join(" · ")) : null,
+          rows.length ? h("div", { class: "pkg-preview-list" }, ...rows) : null,
+        ),
+      );
+    }
+    if (dependencies.length > 0) {
+      parts.push(
+        h(
+          "div",
+          { class: "pkg-preview-section" },
+          h("div", { class: "pkg-preview-section-title" }, "Dependencies"),
+          h("div", { class: "pkg-preview-mono" }, dependencies.join(", ")),
+        ),
+      );
+    }
+    const updateSource = preview.update?.source ?? preview.updateSource ?? null;
+    if (updateSource && (updateSource.kind || updateSource.url)) {
+      parts.push(
+        banner(
+          "info",
+          "Future updates can be fetched automatically",
+          updateSource.url ?? updateSource.kind ?? "",
+        ),
+      );
+    }
+    parts.push(h("p", { class: "pkg-preview-sub" }, title + ": " + previewSummary(preview).replace(/^Install /, "")));
+    return h("div", { class: "pkg-preview" }, ...parts);
+  }
+
+  /* -------------------------------------------------- native update actions */
+
+  private openUpdateFromFile(app: LinuxApp): void {
+    const input = h("input", {
+      type: "file",
+      class: "hidden",
+      accept: ".deb,.AppImage,.appimage,.gz,.tgz,.xz,.txz,.bz2,.tbz2,.tar",
+    });
+    input.addEventListener("change", () => {
+      const files = Array.from(input.files ?? []);
+      input.remove();
+      if (files.length > 0) void this.uploadUpdate(app, files);
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
+
+  private async uploadUpdate(app: LinuxApp, files: File[]): Promise<void> {
+    const { ctx, lc } = this.host;
+    try {
+      await ctx.api.post("/api/files/mkdir", { path: DROP_FOLDER });
+    } catch {
+      /* the folder is already there */
+    }
+    const uploads = new UploadManager(ctx, lc, {
+      currentDir: () => DROP_FOLDER,
+      onUploaded: (entry) => {
+        void this.updateFrom(app, { path: entry.path });
+      },
+      onDrained: () => undefined,
+      maxUploadBytes: () => ctx.store.get().maxUploadBytes,
+    });
+    document.body.appendChild(uploads.el);
+    uploads.enqueue(files, DROP_FOLDER);
+    ctx.toast.info(`Uploading the update for ${app.name}…`);
+  }
+
+  private openUpdateFromUrl(app: LinuxApp): void {
+    const { ctx } = this.host;
+    const input = h("input", { class: "input", type: "url", placeholder: "https://…/app.deb", ariaLabel: "Link to the update file" });
+    const error = h("div", { class: "form-error", role: "alert" });
+    modal({
+      title: `Update ${app.name} from a URL`,
+      body: h(
+        "div",
+        { class: "col" },
+        h("p", { class: "muted small" }, "The server downloads the file, checks it and shows what would change before updating."),
+        input,
+        error,
+      ),
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Continue",
+          variant: "primary",
+          onClick: (close) => {
+            const url = input.value.trim();
+            if (!url.startsWith("https://")) {
+              error.textContent = "Enter a link that starts with https://";
+              return;
+            }
+            close();
+            void this.updateFrom(app, { url });
+          },
+        },
+      ],
+    });
+    void ctx;
+  }
+
+  private async updateFrom(app: LinuxApp, source: { path: string } | { url: string }): Promise<void> {
+    const { ctx } = this.host;
+    const result = await this.previewInstall(source, "update");
+    if ("error" in result) {
+      if (result.error) ctx.toast.error(result.error);
+      return;
+    }
+    if (!("unsupported" in result)) {
+      const confirmed = await this.confirmPreview(result.preview, "update");
+      if (!confirmed.ok) return;
+      if (confirmed.launcher) {
+        try {
+          const res = await ctx.api.post<{ jobId?: string }>(`/api/linux-apps/${encodeURIComponent(app.id)}/update`, {
+            ...source,
+            launcher: confirmed.launcher,
+          });
+          if (res?.jobId) this.follow(res.jobId);
+          ctx.toast.info(`Updating ${app.name}. Open copies keep running until they are closed.`);
+          await this.reload();
+        } catch (error) {
+          ctx.toast.error(errorMessage(error));
+        }
+        return;
+      }
+    }
+    try {
+      const res = await ctx.api.post<{ jobId?: string }>(`/api/linux-apps/${encodeURIComponent(app.id)}/update`, source);
+      if (res?.jobId) this.follow(res.jobId);
+      ctx.toast.info(`Updating ${app.name}. Open copies keep running until they are closed.`);
+      await this.reload();
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+    }
+  }
+
+  private async endApplication(app: LinuxApp): Promise<void> {
+    const { ctx } = this.host;
+    const session = linuxNativeSession();
+    const run = session?.apps.find((entry) => entry.appId === app.id);
+    if (!run) return;
+    try {
+      await ctx.api.post(`/api/linux-apps/session/runs/${encodeURIComponent(run.runId)}/close`);
+      ctx.toast.info(`${app.name} was closed`);
+      await this.reload();
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
     }
   }
 
@@ -687,6 +1096,247 @@ export class LinuxApps {
       ],
     });
   }
+  /* ---------------------------------------------- native install details UI */
+
+  private backendBadge(app: LinuxApp): HTMLElement | null {
+    if (isNativeApp(app)) {
+      return h(
+        "span",
+        { class: "native-badge is-native", title: "Installed directly on the server, no container" },
+        iconSvg("package", 11),
+        "Native",
+      );
+    }
+    if (app.backend === "docker" && nativeAppsEnabled()) {
+      return h("span", { class: "native-badge is-docker", title: "Runs in a Docker container" }, iconSvg("docker", 11), "Docker");
+    }
+    return null;
+  }
+
+  private nativeSection(app: LinuxApp): HTMLElement | null {
+    const native = app.native;
+    if (!native) return null;
+    const rows: Array<[string, Node | string]> = [
+      ["Install type", isNativeApp(app) ? "Native Linux app" : "Docker container"],
+      ["Package already on the server", native.preexistingPackage ? "Yes (reused, not duplicated)" : "No (installed by RAST)"],
+    ];
+    if (native.installPath) rows.push(["Installed at", h("span", { class: "pkg-preview-mono" }, native.installPath)]);
+    if (native.previousPath) rows.push(["Previous version", h("span", { class: "pkg-preview-mono" }, native.previousPath)]);
+    if (native.architecture) rows.push(["Architecture", native.architecture]);
+    if (native.packageVersion) rows.push(["Package version", native.packageVersion]);
+    const launcher = launcherLabel(native.launcher);
+    if (launcher) rows.push(["Starts", h("span", { class: "pkg-preview-mono" }, launcher)]);
+    if (native.dependencies.length > 0) rows.push(["Dependencies", native.dependencies.join(", ")]);
+    if (native.packagesAdded.length > 0) rows.push(["Packages added", native.packagesAdded.join(", ")]);
+    if (native.installSource) {
+      const source = native.installSource;
+      const label =
+        source.kind === "url" && source.url
+          ? source.url
+          : source.path ?? source.url ?? source.kind;
+      rows.push(["Installed from", h("span", { class: "pkg-preview-mono" }, label)]);
+    }
+    const problems: HTMLElement[] = [];
+    if (!native.compatibility.ok) {
+      problems.push(
+        banner(
+          "error",
+          "This app may not run on this server",
+          native.compatibility.reasons.join(" · ") || "The server reported an incompatibility.",
+        ),
+      );
+    }
+    return h(
+      "section",
+      { class: "pkg-section" },
+      h("h3", { class: "pkg-section-title" }, "Native install"),
+      ...problems,
+      h(
+        "dl",
+        { class: "pkg-info" },
+        ...rows.map(([key, value]) => h("div", { class: "pkg-info-item" }, h("dt", {}, key), h("dd", {}, value))),
+      ),
+    );
+  }
+
+  private migrationSection(app: LinuxApp): HTMLElement | null {
+    if (!nativeAppsEnabled()) return null;
+    const migration = app.native?.migration ?? null;
+    const docker = app.backend !== "native";
+    if (!docker && (!migration || migration.state === "none")) return null;
+    const section = (title: string, ...children: Array<Node | null>): HTMLElement =>
+      h(
+        "section",
+        { class: "pkg-section" },
+        h("h3", { class: "pkg-section-title" }, title),
+        ...children.filter((child): child is Node => child !== null),
+      );
+    if (docker) {
+      return section(
+        "Migrate to a native install",
+        banner(
+          "info",
+          "This app still runs in a Docker container",
+          `${app.name} can be installed directly on the server so it starts faster, uses less memory and gets its own native windows. RAST backs up the container data first.`,
+          h("div", { class: "pkg-hero-actions" }, button("Migrate to native", "secondary", () => this.confirmMigrate(app))),
+        ),
+      );
+    }
+    if (!migration) return null;
+    switch (migration.state) {
+      case "pending":
+      case "running": {
+        const jobId = this.progress.keys().next().value as string | undefined;
+        return section(
+          "Migration",
+          banner(
+            "info",
+            "Migrating to a native install…",
+            migration.error ?? "RAST is backing up the Docker data and installing the app on the server. This can take a few minutes.",
+            jobId ? this.progressEl(app, "hero") : undefined,
+          ),
+        );
+      }
+      case "failed":
+        return section(
+          "Migration",
+          banner(
+            "error",
+            "The migration did not finish",
+            migration.error ?? "The Docker version is still available. Check the error and try again.",
+            h(
+              "div",
+              { class: "pkg-hero-actions" },
+              button("Try again", "primary", async () => this.confirmMigrate(app)),
+              button("Roll back", "secondary", async () => this.rollbackMigration(app)),
+            ),
+          ),
+        );
+      case "rolled-back":
+        return section(
+          "Migration",
+          banner(
+            "warning",
+            "Rolled back to the Docker version",
+            migration.backup ? `The backup is still at ${migration.backup}.` : "The app runs in Docker again.",
+            h(
+              "div",
+              { class: "pkg-hero-actions" },
+              migration.backup ? button("Clean up backup", "secondary", async () => this.cleanupMigration(app, true)) : null,
+              button("Migrate again", "primary", async () => this.confirmMigrate(app)),
+            ),
+          ),
+        );
+      case "done":
+        return section(
+          "Migration",
+          banner(
+            "success",
+            "Migrated to a native install",
+            migration.backup
+              ? `RAST kept the old Docker data as a backup at ${migration.backup}. Roll back if something is missing.`
+              : "This app now runs natively.",
+            h(
+              "div",
+              { class: "pkg-hero-actions" },
+              button("Roll back to Docker", "secondary", async () => this.rollbackMigration(app)),
+              migration.backup ? button("Clean up backup", "secondary", async () => this.cleanupMigration(app, true)) : null,
+            ),
+          ),
+        );
+      default:
+        return null;
+    }
+  }
+
+  /** Banner shown above the Linux app list when Docker apps can be migrated. */
+  migrationNotice(): HTMLElement | null {
+    if (!this.enabled || !nativeAppsEnabled()) return null;
+    const apps = linuxApps();
+    const failed = apps.filter((app) => app.native?.migration?.state === "failed");
+    if (failed.length > 0) {
+      return banner(
+        "error",
+        "A native migration failed",
+        `${failed.map((app) => app.name).join(", ")} ${failed.length === 1 ? "is" : "are"} still running the Docker version. Open the app to see the error and try again.`,
+        h("div", { class: "pkg-hero-actions" }, button("Review", "secondary", async () => this.host.openPage(failed[0]!.id))),
+      );
+    }
+    const docker = apps.filter((app) => app.backend !== "native");
+    if (docker.length === 0) return null;
+    return banner(
+      "info",
+      "Linux apps can run natively",
+      `${docker.length} ${docker.length === 1 ? "app still runs" : "apps still run"} in a Docker container. Migrate to a native install for faster starts, less memory and real desktop windows.`,
+      h(
+        "div",
+        { class: "pkg-hero-actions" },
+        button("Migrate an app…", "secondary", async () => this.host.openPage(docker[0]!.id)),
+        button("Review apps", "secondary", async () => this.host.openPage(docker[0]!.id)),
+      ),
+    );
+  }
+
+  private confirmMigrate(app: LinuxApp): void {
+    const { ctx } = this.host;
+    const error = h("div", { class: "form-error", role: "alert" });
+    modal({
+      title: `Migrate ${app.name} to a native install?`,
+      body: h(
+        "div",
+        { class: "col" },
+        h("p", {}, `${app.name} currently runs in a Docker container. Migrating installs it directly on the server and switches it to the native backend.`),
+        h("p", { class: "muted small" }, "RAST backs up the container's settings first. Open windows are closed during the migration. You can roll back afterwards."),
+        error,
+      ),
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Migrate",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            try {
+              const res = await ctx.api.post<{ jobId?: string }>(`/api/linux-apps/${encodeURIComponent(app.id)}/migrate`);
+              if (res?.jobId) this.follow(res.jobId);
+              close();
+              ctx.toast.info(`Migrating ${app.name} to a native install…`);
+              await this.reload();
+            } catch (err) {
+              error.textContent = errorMessage(err);
+            }
+          },
+        },
+      ],
+    });
+  }
+
+  private rollbackMigration(app: LinuxApp): Promise<void> {
+    const { ctx } = this.host;
+    return (async () => {
+      try {
+        await ctx.api.post(`/api/linux-apps/${encodeURIComponent(app.id)}/migration/rollback`);
+        ctx.toast.success(`${app.name} was rolled back to the Docker version`);
+        await this.reload();
+      } catch (error) {
+        ctx.toast.error(errorMessage(error));
+      }
+    })();
+  }
+
+  private cleanupMigration(app: LinuxApp, removeBackup: boolean): Promise<void> {
+    const { ctx } = this.host;
+    return (async () => {
+      try {
+        await ctx.api.post(`/api/linux-apps/${encodeURIComponent(app.id)}/migration/cleanup`, { removeBackup });
+        ctx.toast.success(`Cleaned up the migration for ${app.name}`);
+        await this.reload();
+      } catch (error) {
+        ctx.toast.error(errorMessage(error));
+      }
+    })();
+  }
+
 }
 
 // ---------------------------------------------------------------- helpers
@@ -762,6 +1412,14 @@ function button(label: string, variant: "primary" | "secondary", run: () => Prom
     }
   });
   return btn;
+}
+
+function launcherLabel(launcher: NativeAppInfo["launcher"]): string {
+  if (!launcher) return "";
+  const argv = launcher.argv ?? [];
+  if (argv.length > 0) return argv.join(" ");
+  if (launcher.desktopEntry) return launcher.desktopEntry;
+  return launcher.name ?? "";
 }
 
 function hasFileDrag(event: DragEvent): boolean {

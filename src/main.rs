@@ -1,7 +1,8 @@
 //! RAST command-line interface and server entry point.
 //!
 //! Commands: `serve`, `status`, `doctor`, `user create-admin`, `setup-token`,
-//! `backup`, `update`, `version`, `worker` (internal), `restore`.
+//! `backup`, `update`, `version`, `worker` (internal), `native-helper`
+//! (internal), `restore`.
 
 use std::{
     io::{IsTerminal, Read, Write},
@@ -91,6 +92,13 @@ enum Command {
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
+    /// Internal: privileged native Linux app helper (Xpra sessions, host APT)
+    #[command(hide = true)]
+    NativeHelper {
+        /// Validate the environment and exit 0/1 without binding the socket
+        #[arg(long)]
+        check: bool,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -276,6 +284,7 @@ async fn run(
                     cmd: PackagesCommand::Path { cmd },
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
+                Command::NativeHelper { check } => rast::native::run(cfg, check).await,
                 Command::Serve { .. } | Command::Version => unreachable!(),
             }
         }
@@ -728,6 +737,16 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     } else {
         println!("disabled (optional)");
     }
+
+    // Native Linux apps (optional; replaces the Docker backend for desktop
+    // apps). Warnings only: a missing Xpra or helper never breaks the rest of
+    // RAST, and with the native backend disabled there is nothing to report.
+    let native_report = rast::native::doctor_report(&cfg).await;
+    for line in &native_report.lines {
+        println!("{line}");
+    }
+    warnings += native_report.warnings;
+    failures += native_report.failures;
 
     print!("[    ] time drift (system clock) ... ");
     println!(

@@ -1743,10 +1743,9 @@ body.app-ready #boot-splash {
     -webkit-line-clamp: 2;
   }
 
-  .window.is-mobile + .window.is-mobile {
-    display: none;
-  }
-
+  /* Mobile shows one window at a time: the focused one. (A focused window
+     must never be hidden because another mobile window precedes it: native
+     apps and multi-window applications open several windows.) */
   .window.is-mobile:not(.is-focused) {
     display: none;
   }

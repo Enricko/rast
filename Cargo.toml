@@ -1,6 +1,6 @@
 [package]
 name = "rast"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.94"
 description = "RAST — Resource Administration & Storage Toolkit"
@@ -53,6 +53,8 @@ ipnet = "2"
 walkdir = "2"
 flate2 = "1"
 tar = "0.4"
+xz2 = "0.1"
+bzip2 = "0.6"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 ring = "0.17"
 async-trait = "0.1"

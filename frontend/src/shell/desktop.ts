@@ -2,7 +2,7 @@
 // panels (start menu / account / status / clock), context menus and shortcuts.
 
 import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature } from "../apps/registry";
-import { LINUX_PREFIX, loadLinuxApps as fetchLinuxApps, onLinuxApps } from "../apps/linuxapp/catalog";
+import { LINUX_PREFIX, isNativeApp, linuxAppById, loadLinuxApps as fetchLinuxApps, onLinuxApps } from "../apps/linuxapp/catalog";
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
@@ -24,6 +24,7 @@ import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from 
 import { getRealtime } from "../core/realtime";
 import { WindowManager, type WindowInfo } from "../core/wm";
 import { LinuxWindows } from "./linux-windows";
+import { NativeLinuxHost } from "./xpra-native";
 import { setFavicon } from "./brand";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
@@ -103,6 +104,20 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     openLegacy: (app) => openDefinitionWindow(app),
   });
   disposers.push(() => linuxWindows.dispose());
+  // Native (host-installed) Linux apps share ONE Xpra seamless session per
+  // RAST user; every remote top-level window becomes a first-class RAST
+  // window. Docker-backed apps keep using `linuxWindows` above.
+  const nativeLinux = new NativeLinuxHost({
+    api: deps.api,
+    events: deps.events,
+    toast,
+    wm,
+    host: desktop,
+    findApp,
+    openLegacy: (app) => openDefinitionWindow(app),
+  });
+  disposers.push(() => nativeLinux.dispose());
+  nativeLinux.start();
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
@@ -210,8 +225,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     pushRecentApp(app.id);
     // Installed Linux apps get one RAST window per app window when their
     // image supports it (`linux:<app>`; per-window ids have a third part).
+    // Native apps run in the user's shared Xpra session instead.
     if (app.id.startsWith(LINUX_PREFIX) && app.id.split(":").length === 2) {
-      linuxWindows.open(app);
+      const linuxApp = linuxAppById(app.id.slice(LINUX_PREFIX.length));
+      if (isNativeApp(linuxApp)) nativeLinux.open(app.id.slice(LINUX_PREFIX.length));
+      else linuxWindows.open(app);
       return;
     }
     openDefinitionWindow(app, params);
@@ -760,7 +778,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   function renderTaskbar(): void {
     if (disposed) return;
     taskbarApps.replaceChildren();
-    const windows = wm.list();
+    const windows = wm.list().filter((win) => win.taskbar !== false);
     const slots = taskbarSlots(pinned, windows, (appId) =>
       Boolean(findApp(appId)) && isAppAllowed(appId, store.get().permissions, store.isAdmin()),
     );
@@ -1111,6 +1129,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     closePanel();
     desktopIcons.refresh();
     for (const win of wm.list()) {
+      // Native-session windows are managed by the native host: it maps each
+      // RAST window to its installed app and closes it when the app is gone.
+      if (nativeLinux.isManagedAppId(win.appId)) {
+        if (!nativeLinux.isWindowAllowed(win.appId)) nativeLinux.closeManagedWindow(win.appId);
+        continue;
+      }
       // A separate-window view uses `<linux app id>:<window>`; its access is
       // the app's access.
       const baseId =
@@ -1161,6 +1185,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     disposers.push(
       onLinuxApps(() => {
         if (disposed) return;
+        nativeLinux.syncFromOverview();
         enforceEffectiveAccess();
         // Same apps, new names or icons: repaint anyway.
         desktopIcons.refresh();

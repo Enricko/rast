@@ -1,0 +1,165 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:27:37.548Z",
+  "finishedAt": "2026-11-12T22:29:17.379Z",
+  "scenarios": [
+    {
+      "id": "c",
+      "title": "Same user opens Chrome and another GUI app (shared session)",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:27:37.548Z",
+      "durationMs": 4222,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job cf9e3dcc-ffb9-4cf1-88cb-e3373695f597",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "[install RAST Test App (portable)] job cf9e3dcc-ffb9-4cf1-88cb-e3373695f597: done Installed",
+        "native profile ancestor permissions fixed (0711)",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "windows: [{\"title\":\"Starting Google Chrome…\",\"appId\":\"linuxnative-starting:chrome\"},{\"title\":\"Starting RAST Test App…\",\"appId\":\"linuxnative-starting:rast-test-app\"}]",
+        "both apps open at once (1 + 1 windows)",
+        "chrome session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"e96c0a0acb8a18f0\",\"startedAt\":1794522460348,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt",
+        "portable session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"e96c0a0acb8a18f0\",\"startedAt\":1794522460348,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt",
+        "identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-e2e/data/linux-users/2\"}",
+        "session unit: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"1472105\",\"Result\":\"success\",\"MemoryCurrent\":\"192573440\",\"CPUUsageNSec\":\"1581735000\",\"TasksCurrent\":\"8\"}",
+        "native session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"e96c0a0acb8a18f0\",\"startedAt\":1794522460348,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794522197784,\"status\":\"ready\",\"url\":\"/linux-apps/session/c5374fbd22ad30a465aef800bcf9167f/\",\"viewers\":1}",
+        "runs reported by the session API: 2 (both apps are in the one session)",
+        "native app units: [\"rast-app-u210002-chrome-7.service\"]",
+        "app processes: [{\"pid\":1491501,\"cmd\":\"/usr/bin/google-chrome-stable\"},{\"pid\":1491780,\"cmd\":\"sudo pgrep -af ^/usr/bin/google-chrome|rast-test-app\"}]",
+        "closing the Chrome window kept the other app's window"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/two-apps-one-user.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/after-closing-chrome.png"
+      ],
+      "metrics": {
+        "sessionMemoryBytes": {
+          "value": 192573440,
+          "unit": "bytes"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/two-apps-one-user.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/after-closing-chrome.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:27:41.770Z",
+      "durationMs": 62013,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "initial Chrome windows: [\"Starting Google Chrome…\"]"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: Cannot read properties of undefined (reading 'id')\n    at openChromeWindowFromInside (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:22:56)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:42:7)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    },
+    {
+      "id": "f",
+      "title": "Concurrent launch requests reuse the intended session",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:28:43.783Z",
+      "durationMs": 2496,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "concurrent requests: 8 ok, 0 rejected",
+        "native session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"e96c0a0acb8a18f0\",\"startedAt\":1794522460348,\"status\":\"exited\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794522197784,\"status\":\"ready\",\"url\":\"/linux-apps/session/c5374fbd22ad30a465aef800bcf9167f/\",\"viewe (listApps sessions: 0)",
+        "all concurrent launches resolve to one session: display:100",
+        "native runs for the app: [{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"running\"}]",
+        "native app units: [\"rast-app-u210002-chrome-7.service\"]",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "RAST windows after opening: 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/f/concurrent-launch-one-window.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/f/concurrent-launch-one-window.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "g",
+      "title": "Browser refresh reconnects without duplicating processes",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:28:46.279Z",
+      "durationMs": 4368,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "session before refresh: display:100",
+        "Chrome processes before refresh: 1",
+        "app units before refresh: [\"rast-app-u210002-chrome-7.service\"]",
+        "page reloaded",
+        "session after refresh: display:100",
+        "Chrome processes after refresh: 1",
+        "app units after refresh: [\"rast-app-u210002-chrome-7.service\"]",
+        "RAST windows after refresh: 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/before-refresh.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/after-refresh.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/before-refresh.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/after-refresh.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "h",
+      "title": "Closing one app preserves the other apps",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:28:50.647Z",
+      "durationMs": 26679,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "chrome session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"0c22bd7145ab17f7\",\"startedAt\":1794522459721,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"e96c0a0acb8a18f0\",\"startedAt\":1794522460348,\"status\":\"",
+        "Chrome windows closed",
+        "chrome session stopped: {\"gone\":true,\"session\":{\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[],\"display\":102,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794522556667,\"status\":\"starting\",\"url\":\"/linux-apps/session/a6054c4d86cb1217361c214acdae4303/\",\"viewers\":0},\"appRuns\":[]}"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: assertion failed: the fixture app window disappeared when Chrome closed\n    at assert (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:18:25)\n    at Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/h-close-preserves.mjs:50:5)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    }
+  ]
+}

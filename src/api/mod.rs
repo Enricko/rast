@@ -69,6 +69,14 @@ fn public_routes() -> Router<AppState> {
         // A running Linux app's page; the key in the path is its credential
         // (see `linux_apps::proxy`).
         .route(
+            "/linux-apps/session/{*rest}",
+            axum::routing::any(crate::linux_apps::native_proxy::handle),
+        )
+        .route(
+            "/linux-apps/session/",
+            axum::routing::any(crate::linux_apps::native_proxy::handle),
+        )
+        .route(
             "/linux-apps/{*rest}",
             axum::routing::any(crate::linux_apps::proxy::handle),
         )

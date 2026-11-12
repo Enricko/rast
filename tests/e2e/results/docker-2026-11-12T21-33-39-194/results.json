@@ -1,0 +1,281 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8731",
+  "startedAt": "2026-11-12T21:33:40.489Z",
+  "finishedAt": "2026-11-12T21:36:12.218Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "docker",
+      "status": "pass",
+      "startedAt": "2026-11-12T21:33:40.489Z",
+      "durationMs": 2378,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.12.0 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:33:42.867Z",
+      "durationMs": 19110,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"docker\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-center-lists-app.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-center-lists-app.png"
+      ],
+      "error": "page.waitForTimeout: Target page, context or browser has been closed\n    at Module.waitForWindows (/home/lufria/RAST/tests/e2e/lib/browser.mjs:190:16)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/a-install-deb.mjs:46:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "b",
+      "title": "Admin installs a portable archive and launches it",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:01.977Z",
+      "durationMs": 6,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/b-portable-archive.mjs:20:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "c",
+      "title": "Same user opens Chrome and another GUI app (shared session)",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:01.983Z",
+      "durationMs": 6,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)",
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/c-shared-session.mjs:29:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:01.989Z",
+      "durationMs": 3,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:35:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "e",
+      "title": "Two users use Chrome concurrently with separate data",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:01.993Z",
+      "durationMs": 3,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/e-two-users.mjs:31:40)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "f",
+      "title": "Concurrent launch requests reuse the intended session",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:01.996Z",
+      "durationMs": 13085,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "concurrent requests: 4 ok, 4 rejected",
+        "first rejection: POST /api/linux-apps/chrome/launch -> HTTP 503: native Linux apps are not available on this server; install the native helper          (see docs/INSTALL.md, \"Native Linux apps (Xpra)\") or set native_enabled = true",
+        "distinct Docker session ids returned: 1",
+        "all concurrent launches resolve to one session: id:b704a791-e8f1-4d66-9841-1b320f8dd3f6",
+        "Docker copies: [\"rast-linux-chrome-u2\"]"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/f-concurrent-launch.mjs:77:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "g",
+      "title": "Browser refresh reconnects without duplicating processes",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:15.081Z",
+      "durationMs": 4,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/g-refresh-reconnect.mjs:23:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "h",
+      "title": "Closing one app preserves the other apps",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:15.085Z",
+      "durationMs": 5,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/h-close-preserves.mjs:29:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "i",
+      "title": "Idle cleanup stops the session after use",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:15.090Z",
+      "durationMs": 3,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/i-idle-cleanup.mjs:28:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "j",
+      "title": "Service restart recovery",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:15.094Z",
+      "durationMs": 3,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/j-restart-recovery.mjs:53:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "k",
+      "title": "Failed install and update leave recoverable state",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:34:15.097Z",
+      "durationMs": 117105,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "invalid-corrupt.deb: install started ({\"app\":{\"backend\":\"docker\",\"command\":[],\"cpus\":6,\"createdAt\":1794519255127,\"description\":null,\"desktopId\":\"linux:invalid-corrupt-2\",\"error\":null,\"fileName\":\"invalid-corrupt.deb\",\"format\":\"deb\",\"iconUr)",
+        "failure state for invalid-corrupt.deb: {\"fileName\":\"invalid-corrupt.deb\",\"jobStatus\":\"failed\",\"jobError\":\"This file is not a valid .deb package.\",\"app\":{\"id\":\"invalid-corrupt\",\"status\":\"failed\",\"error\":\"This file is not a valid .deb package.\"}}",
+        "invalid-corrupt.deb: open on the failed app -> 409",
+        "invalid-corrupt.deb: failed app deleted cleanly",
+        "wrong-arch.deb: install started ({\"app\":{\"backend\":\"docker\",\"command\":[],\"cpus\":6,\"createdAt\":1794519290846,\"description\":null,\"desktopId\":\"linux:wrong-arch\",\"error\":null,\"fileName\":\"wrong-arch.deb\",\"format\":\"deb\",\"iconUrl\":null,\"id\")",
+        "failure state for wrong-arch.deb: {\"fileName\":\"wrong-arch.deb\",\"jobStatus\":\"failed\",\"jobError\":\"This package is built for arm64; this server needs amd64.\",\"app\":{\"id\":\"wrong-arch\",\"status\":\"failed\",\"error\":\"This package is built for arm64; this server needs amd64.\"}}",
+        "wrong-arch.deb: open on the failed app -> 409",
+        "wrong-arch.deb: failed app deleted cleanly",
+        "wrong-arch error: This package is built for arm64; this server needs amd64.",
+        "invalid-archive.tar.gz: install started ({\"app\":{\"backend\":\"docker\",\"command\":[],\"cpus\":6,\"createdAt\":1794519320485,\"description\":null,\"desktopId\":\"linux:invalid-archive\",\"error\":null,\"fileName\":\"invalid-archive.tar.gz\",\"format\":\"tarball\",\"i)",
+        "failure state for invalid-archive.tar.gz: {\"fileName\":\"invalid-archive.tar.gz\",\"jobStatus\":\"failed\",\"jobError\":\"This archive could not be unpacked (file could not be opened successfully:\",\"app\":{\"id\":\"invalid-archive\",\"status\":\"failed\",\"error\":\"This archive could not be unpacked (file could not be opened successfully:\"}}",
+        "invalid-archive.tar.gz: open on the failed app -> 409",
+        "invalid-archive.tar.gz: failed app deleted cleanly",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)",
+        "update rejected synchronously: POST /api/linux-apps/rast-test-app/update -> HTTP 400: this app has no known update source; install the new version from its file",
+        "app after failed update: status ready, version 1.0",
+        "failed update reported: POST /api/linux-apps/rast-test-app/update -> HTTP 400: this app has no known update source; install the new version from its file",
+        "existing apps remain ready"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/k-failed-installs.mjs:137:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "l",
+      "title": "Uninstall respects shared dependencies and user data choice",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:36:12.202Z",
+      "durationMs": 8,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/l-uninstall.mjs:34:21)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    },
+    {
+      "id": "m",
+      "title": "Docker app data migrates or reports a precise compatibility failure",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:36:12.210Z",
+      "durationMs": 8,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "browser.newContext: Target page, context or browser has been closed\n    at async newDesktopSession (/home/lufria/RAST/tests/e2e/lib/browser.mjs:45:19)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:98:19)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/m-migration.mjs:40:23)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:227:7)"
+    }
+  ]
+}

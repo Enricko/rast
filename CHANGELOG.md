@@ -13,6 +13,52 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+## [0.13.0] - 2026-11-13
+
+Schema v12 (`migrations/0012_native_linux_apps.sql`). The new native backend is
+the default for newly installed desktop apps when Xpra is installed; existing
+Docker-backed apps keep working and can be migrated from App Center.
+
+### Added
+
+- **Linux apps run natively.** Newly installed desktop applications (`.deb`,
+  AppImage, portable archive) no longer run inside a per-app Docker image and
+  streamed desktop; they are installed on the server and started as native
+  processes under the person's own unprivileged Linux identity. Each RAST user
+  gets one lazily started Xpra seamless session shared by all their
+  applications, and every native top-level window (including extra Chrome
+  windows and dialogs) is a RAST-managed window with its own taskbar entry,
+  title, focus, resize, minimize and close behaviour. Cold launch is much
+  faster and memory no longer duplicates a streamed desktop per application.
+  Includes: an installation preview for `.deb` packages (package identity,
+  version, architecture, dependency transaction with removals/conflicts),
+  Update from file/URL for existing apps, staged portable updates with a
+  recoverable previous version, safe archive validation (no path traversal,
+  links, special files or excessive expansion), AppImage extraction, package
+  ownership tracking so uninstall respects shared/independently installed
+  software, systemd/cgroup resource limits per session and per application,
+  memory-pressure-based admission, ACL-based access to the person's RAST home,
+  and a guided Docker->native migration of existing apps that keeps the app id,
+  shortcuts and profiles and retains the old data until cleanup.
+- Privileged native helper service (`rast-native.service`) and
+  `rast-linux.slice`; `rast doctor` checks Xpra, the helper socket, the slice
+  and the uid range.
+- New configuration keys `native_enabled`, `native_helper_socket`,
+  `linux_xpra_bin`, `linux_uid_base`, `linux_idle_minutes`,
+  `linux_session_memory_mb/cpus/tasks`, `linux_app_memory_mb/cpus/tasks` and
+  `linux_admission_reserve_mb` (see docs/CONFIGURATION.md).
+
+### Changed
+
+- The legacy Docker backend remains for apps installed before this release
+  (`backend = "docker"`) and can be enabled for new installs with
+  `native_enabled = false`; legacy apps work unchanged until an administrator
+  migrates them.
+- The unconditional 4 GiB free-memory requirement for starting a Linux app was
+  replaced by memory-pressure-based admission with a configurable reserve.
+- Chromium sandbox: native Chrome/Chromium launches keep the browser sandbox
+  enabled and run without root; the legacy image's `--no-sandbox` is gone.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

@@ -1,0 +1,128 @@
+{
+  "mode": "docker",
+  "startedAt": "2026-11-12T22:32:43.326Z",
+  "app": {
+    "id": "chrome",
+    "name": "Google Chrome"
+  },
+  "baseUrl": "http://127.0.0.1:8731",
+  "coldLaunch": {
+    "apiMs": 19,
+    "readyMs": 14821,
+    "url": "/linux-apps/97517525a4bcdf46c5ddf092149d1bcd/",
+    "session": {
+      "appId": "chrome",
+      "appName": "Google Chrome",
+      "error": null,
+      "id": "95dd68a1-1290-4064-9ff5-4fdfb6b94f68",
+      "reason": null,
+      "separateWindows": true,
+      "startedAt": 1794522794028,
+      "status": "ready",
+      "url": "/linux-apps/97517525a4bcdf46c5ddf092149d1bcd/",
+      "viewers": 0
+    }
+  },
+  "coldFirstDrawMs": 354,
+  "warmLaunch": {
+    "apiMs": 10,
+    "readyMs": 15,
+    "url": "/linux-apps/fb8bd7137fd040775412fae2cec35e43/",
+    "session": {
+      "appId": "chrome",
+      "appName": "Google Chrome",
+      "error": null,
+      "id": "7e375dca-3771-4956-93ca-7c1d2413f493",
+      "reason": null,
+      "separateWindows": true,
+      "startedAt": 1794522881350,
+      "status": "ready",
+      "url": "/linux-apps/fb8bd7137fd040775412fae2cec35e43/",
+      "viewers": 0
+    },
+    "sessionRetained": true
+  },
+  "idle": {
+    "names": [
+      "rast-linux-chrome-u2"
+    ],
+    "memoryBytes": 486957056,
+    "cgroupMemoryBytes": 486957056,
+    "statsMemoryBytes": 463051161.6,
+    "cpuPercentFromStats": 16.44,
+    "cgroups": [
+      {
+        "name": "rast-linux-chrome-u2",
+        "dir": "/sys/fs/cgroup/system.slice/docker-acf840c8c07dae3417c6e28db2e0d1ef64ed5c6d81bdab8ce4575e411c1e3e0b.scope"
+      }
+    ]
+  },
+  "inputLatencyMs": [
+    111,
+    104,
+    86
+  ],
+  "active": {
+    "durationMs": 11473,
+    "cpuPercent": 76.07430488974113,
+    "cpuPercentFromStats": 76.36,
+    "memoryBytes": 525852672,
+    "samples": 6,
+    "interaction": {
+      "durationMs": 10323,
+      "iterations": 22
+    }
+  },
+  "twoUser": {
+    "openMs": 49342,
+    "alice": {
+      "apiMs": 4,
+      "readyMs": 6,
+      "url": "/linux-apps/fb8bd7137fd040775412fae2cec35e43/",
+      "session": {
+        "appId": "chrome",
+        "appName": "Google Chrome",
+        "error": null,
+        "id": "7e375dca-3771-4956-93ca-7c1d2413f493",
+        "reason": null,
+        "separateWindows": true,
+        "startedAt": 1794522881350,
+        "status": "ready",
+        "url": "/linux-apps/fb8bd7137fd040775412fae2cec35e43/",
+        "viewers": 0
+      }
+    },
+    "bob": {
+      "apiMs": 18,
+      "readyMs": 49342,
+      "url": "/linux-apps/11c0a776f52bd072319e5465abcaeca0/",
+      "session": {
+        "appId": "chrome",
+        "appName": "Google Chrome",
+        "error": null,
+        "id": "d6353511-c37b-4658-95ff-323973206494",
+        "reason": null,
+        "separateWindows": true,
+        "startedAt": 1794523007259,
+        "status": "ready",
+        "url": "/linux-apps/11c0a776f52bd072319e5465abcaeca0/",
+        "viewers": 0
+      }
+    },
+    "memoryBytes": 1296494592,
+    "cgroupMemoryBytes": {
+      "alice": 568356864,
+      "bob": 728137728
+    },
+    "names": {
+      "alice": [
+        "rast-linux-chrome-u2"
+      ],
+      "bob": [
+        "rast-linux-chrome-u3"
+      ]
+    },
+    "cpuPercent": 326.56959205178384
+  },
+  "finishedAt": "2026-11-12T22:37:58.132Z"
+}

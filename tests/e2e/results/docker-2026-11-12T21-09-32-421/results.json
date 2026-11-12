@@ -1,0 +1,51 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8731",
+  "startedAt": "2026-11-12T21:09:33.743Z",
+  "finishedAt": "2026-11-12T21:10:36.056Z",
+  "scenarios": [
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "docker",
+      "status": "pass",
+      "startedAt": "2026-11-12T21:09:33.743Z",
+      "durationMs": 62258,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"docker\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome",
+        "first RAST window after 30.6 s: [{\"id\":\"win-1\",\"appId\":\"linux:chrome:0x1000003\",\"title\":\"New Tab - Google Chrome\",\"focused\":true,\"minimized\":false,\"maximized\":false,\"rect\":{\"x\":8,\"y\":9,\"width\":1023,\"height\":767}}]",
+        "session: {\"appId\":\"chrome\",\"appName\":\"Google Chrome\",\"error\":null,\"id\":\"46dabaad-b345-44c5-9cbe-fec979285b4b\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794517775043,\"status\":\"ready\",\"url\":\"/linux-apps/7ebec382f8f229b5a6bcd02874755aba/\",\"viewers\":1}",
+        "Docker copy: rast-linux-chrome-u2 (rast-linux/chrome:1, Up 22 seconds)",
+        "embedded app frame(s): 0",
+        "note: no iframe found; the legacy stream may be inside a canvas window"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-stream-visible.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-usable.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        },
+        "firstWindowMs": {
+          "value": 30555,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-stream-visible.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/a/app-usable.png"
+      ],
+      "error": null
+    }
+  ]
+}

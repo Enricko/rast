@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>RAST xpra PoC desktop</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        --taskbar: 52px;
+        --titlebar: 32px;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      body {
+        font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 30% 20%, #22345a, #0b1020 70%);
+        color: #e7eefc;
+      }
+      .desktop { position: absolute; inset: 0; }
+      .windows-layer { position: absolute; inset: 0 0 var(--taskbar) 0; overflow: hidden; }
+      .window {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        min-width: 240px;
+        min-height: 160px;
+        background: #0d1424;
+        border: 1px solid #2b3a5f;
+        border-radius: 8px;
+        box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55);
+        overflow: hidden;
+      }
+      .window.is-focused { border-color: #4d7cff; box-shadow: 0 20px 60px rgba(38, 84, 255, 0.35); }
+      .window.is-minimized { display: none; }
+      .window.is-dialog { border-color: #8f6bff; }
+      .window-titlebar {
+        height: var(--titlebar);
+        flex: 0 0 var(--titlebar);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 8px;
+        background: linear-gradient(#1a2440, #121a2e);
+        border-bottom: 1px solid #2b3a5f;
+        cursor: default;
+        user-select: none;
+      }
+      .window-title { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .window-task { font-size: 10px; opacity: 0.55; }
+      .window-controls { display: flex; gap: 4px; }
+      .window-controls button {
+        width: 22px; height: 20px; border-radius: 4px;
+        border: 1px solid #33446e; background: #16203a; color: #cfe0ff;
+        cursor: pointer; font-size: 12px; line-height: 1;
+      }
+      .window-body { position: relative; flex: 1 1 auto; overflow: hidden; background: #000; }
+      .window-body > div { position: absolute !important; inset: 0 !important; }
+      .dialog-parent { outline: 1px dashed #8f6bff; }
+      .taskbar {
+        position: absolute; left: 0; right: 0; bottom: 0; height: var(--taskbar);
+        display: flex; align-items: center; gap: 8px; padding: 0 12px;
+        background: rgba(10, 15, 30, 0.92); border-top: 1px solid #26345a;
+      }
+      .taskbar-entry {
+        display: flex; align-items: center; gap: 6px; max-width: 220px;
+        padding: 6px 10px; border-radius: 6px; border: 1px solid #26345a;
+        background: #14203a; color: #dce8ff; cursor: pointer; overflow: hidden;
+        white-space: nowrap; text-overflow: ellipsis;
+      }
+      .taskbar-entry.is-focused { border-color: #4d7cff; background: #1b2d55; }
+      .status-bar {
+        position: absolute; right: 12px; top: 10px; z-index: 10;
+        display: flex; gap: 10px; align-items: center;
+        padding: 6px 12px; border-radius: 999px;
+        background: rgba(8, 12, 24, 0.8); border: 1px solid #26345a; font-size: 12px;
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #e0a53a; }
+      .dot.ready { background: #3ecf7a; }
+      .dot.down { background: #ef5d6b; }
+      .log {
+        position: absolute; left: 12px; top: 10px; z-index: 10; max-width: 460px;
+        max-height: 200px; overflow: auto; font: 11px/1.45 ui-monospace, monospace;
+        color: #9fb4d8; background: rgba(8, 12, 24, 0.72); border: 1px solid #26345a;
+        border-radius: 8px; padding: 8px 10px; white-space: pre-wrap;
+      }
+      .session-frame {
+        position: fixed; left: -30000px; top: 0;
+        width: 1280px; height: 800px; border: 0;
+      }
+      /* Narrow layout: windows fill the work area, taskbar stays reachable. */
+      @media (max-width: 820px) {
+        .window {
+          left: 0 !important;
+          top: 0 !important;
+          width: 100% !important;
+          height: 100% !important;
+          border-radius: 0;
+        }
+        .window.is-minimized { display: none; }
+        .log { display: none; }
+        .status-bar { left: auto; right: 8px; top: 8px; font-size: 11px; }
+        .taskbar { overflow-x: auto; }
+        .taskbar-entry { max-width: 130px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="desktop" id="desktop">
+      <div class="windows-layer" id="windows-layer"></div>
+      <div class="taskbar" id="taskbar"></div>
+      <div class="status-bar" id="status-bar"><span class="dot" id="status-dot"></span><span id="status-text">connecting…</span></div>
+      <pre class="log" id="log"></pre>
+    </div>
+    <iframe
+      id="session-frame"
+      class="session-frame"
+      title="RAST native desktop session"
+      src="/xpra/"
+      allow="clipboard-read; clipboard-write"
+    ></iframe>
+    <script src="harness.js"></script>
+  </body>
+</html>

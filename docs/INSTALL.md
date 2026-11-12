@@ -431,6 +431,82 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 > command whitelist and no shell access, but a compromised worker is still a
 > root-level compromise. See [SECURITY.md](../SECURITY.md).
 
+## Native Linux apps (Xpra)
+
+Native Linux desktop apps (App Center → Add app) run directly on the server
+instead of inside a Docker image: each RAST user gets one unprivileged Linux
+identity and one lazily started Xpra seamless graphical session that all their
+applications share. Only the RAST reverse proxy can reach a session; the Xpra
+port is bound to loopback and is never exposed. This is the default backend for
+newly installed desktop apps.
+
+Requirements:
+
+| Component | Why |
+| --- | --- |
+| Xpra server + HTML5 client (`xpra`, `xpra-html5`, `xpra-codecs`) | Graphical session, window transport and browser client |
+| Xvfb | Virtual display for the seamless session (started by Xpra) |
+| `rast-native.service` (root) | Creates per-user identities, starts transient systemd units and runs allowed APT transactions |
+| `rast-linux.slice` | cgroup accounting and defaults for all native sessions |
+| ACL support (`acl` package, ext4/xfs with ACLs) | Lets a person's app identity open their own RAST home folder |
+| `setfacl`, `getent`, `useradd`, `apt-get`, `dpkg-deb` | Used by the helper |
+
+The official Xpra packages are newer than most distribution packages and are
+required (6.5+). To add the repository (Ubuntu example; use your distribution's
+suite name — `noble`, `resolute`, `bookworm`, …):
+
+```bash
+curl -fsSL https://xpra.org/gpg.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/xpra.gpg
+echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ resolute main" \
+  | sudo tee /etc/apt/sources.list.d/xpra.list
+sudo apt-get update
+sudo apt-get install -y xpra xpra-html5 xpra-codecs xpra-x11 xvfb
+```
+
+The installer enables native apps automatically when `xpra` is present
+(`RAST_NATIVE=auto`); force it with `RAST_NATIVE=1` or disable it with
+`RAST_NATIVE=0`. Manual native setup after a plain install:
+
+```bash
+# 1. Install the units shipped with this release.
+sudo install -m 0644 deploy/rast-linux.slice /etc/systemd/system/
+sudo install -m 0644 deploy/rast-native.service /etc/systemd/system/
+sudo install -m 0644 deploy/rast-native.tmpfiles.conf /etc/tmpfiles.d/rast-native.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/rast-native.conf
+
+# 2. Only the rast account may talk to the helper (peer-uid check).
+sudo mkdir -p /etc/systemd/system/rast-native.service.d
+printf '[Service]\nEnvironment=RAST_NATIVE_ALLOWED_UID=%s\n' "$(id -u rast)" \
+  | sudo tee /etc/systemd/system/rast-native.service.d/20-peer-uid.conf
+
+# 3. Enable it and verify.
+sudo systemctl daemon-reload
+sudo systemctl enable --now rast-native
+sudo -u rast rast doctor
+```
+
+`rast doctor` reports the Xpra binary and version, the helper socket, the
+slice, the `/tmp/.X11-unix` permissions and the configured uid range.
+
+Notes:
+
+* Per-user limits are configured with `linux_session_*` and `linux_app_*` (see
+  [CONFIGURATION.md](CONFIGURATION.md)); they are enforced with systemd
+  transient units (`rast-xpra-u<id>`, `rast-app-u<id>-…`) inside
+  `rast-linux.slice`.
+* The helper runs `apt-get` for administrator-approved `.deb` applications.
+  Inspect what an install would do in the App Center preview before confirming;
+  uninstalling only removes packages RAST added when nothing else depends on
+  them.
+* `.deb`, AppImage and portable archive uploads work as before (file, drag and
+  drop, File Station, direct HTTPS URL); source archives are rejected with an
+  explanation.
+* App data lives in `<data_dir>/linux-apps/profiles/<app>/<user>` and is not
+  reachable by other users; the person's RAST home is shared read/write with
+  that app through an ACL. Legacy Docker-backed apps keep their per-user volume
+  until an administrator migrates them and explicitly cleans up.
+
 ## Manual installation (no installer)
 
 1. Download the release assets, verify the checksum and inspect the files:
@@ -464,6 +540,21 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 3. Edit `/etc/rast/rast.toml` (at minimum `public_url` and
    `trusted_proxies`), then `sudo systemctl restart rast.service`.
 4. Continue with [Post-install steps](#post-install-steps).
+
+For native Linux apps, also install the helper and its prerequisites (see
+[Native Linux apps (Xpra)](#native-linux-apps-xpra) above):
+
+```bash
+sudo install -m 0644 deploy/rast-linux.slice /etc/systemd/system/
+sudo install -m 0644 deploy/rast-native.service /etc/systemd/system/
+sudo install -m 0644 deploy/rast-native.tmpfiles.conf /etc/tmpfiles.d/rast-native.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/rast-native.conf
+sudo mkdir -p /etc/systemd/system/rast-native.service.d
+printf '[Service]\nEnvironment=RAST_NATIVE_ALLOWED_UID=%s\n' "$(id -u rast)" \
+  | sudo tee /etc/systemd/system/rast-native.service.d/20-peer-uid.conf
+sudo systemctl daemon-reload
+sudo systemctl enable --now rast-native.service
+```
 
 When installing manually, keep the units and the binary updated from the same
 release; `rast update` expects the standard paths.

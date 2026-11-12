@@ -1,0 +1,31 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8731",
+  "startedAt": "2026-11-12T21:08:53.292Z",
+  "finishedAt": "2026-11-12T21:09:13.734Z",
+  "scenarios": [
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:08:53.292Z",
+      "durationMs": 20383,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend docker, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"docker\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)"
+      ],
+      "evidence": [],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [],
+      "error": "page.waitForSelector: Timeout 20000ms exceeded.\nCall log:\n  - waiting for locator('input[name=\"username\"], .auth-form') to be visible\n\n    at loginViaForm (/home/lufria/RAST/tests/e2e/lib/browser.mjs:88:14)\n    at async Module.openDesktop (/home/lufria/RAST/tests/e2e/lib/browser.mjs:103:5)\n    at async Object.run (/home/lufria/RAST/tests/e2e/scenarios/a-install-deb.mjs:33:26)\n    at async main (/home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    }
+  ]
+}

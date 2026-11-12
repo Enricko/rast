@@ -1,0 +1,17 @@
+{
+  "name": "rast-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "End-to-end and performance harness for RAST (native Linux apps migration).",
+  "scripts": {
+    "test": "node run.mjs",
+    "test:docker": "node run.mjs --mode=docker",
+    "test:native": "node run.mjs --mode=native",
+    "perf": "node perf/run-perf.mjs",
+    "list": "node run.mjs --list"
+  },
+  "devDependencies": {
+    "playwright": "1.55.0"
+  }
+}

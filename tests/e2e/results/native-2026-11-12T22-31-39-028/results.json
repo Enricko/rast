@@ -1,0 +1,126 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:31:40.302Z",
+  "finishedAt": "2026-11-12T22:34:40.146Z",
+  "scenarios": [
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:31:40.302Z",
+      "durationMs": 121378,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 102",
+        "native profile ancestor permissions fixed (0711)",
+        "initial Chrome windows: [\"Starting Google Chrome…\"]"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: timed out waiting for a mirrored Chrome window; windows now: []\n    at Module.waitForWindows (file:///home/lufria/RAST/tests/e2e/lib/browser.mjs:186:13)\n    at async openChromeWindowFromInside (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:22:19)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:49:7)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    },
+    {
+      "id": "e",
+      "title": "Two users use Chrome concurrently with separate data",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:33:41.681Z",
+      "durationMs": 58401,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 102",
+        "native profile ancestor permissions fixed (0711)",
+        "native launch attempt 1 failed: fetch failed"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "h",
+      "title": "Closing one app preserves the other apps",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.082Z",
+      "durationMs": 3,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "i",
+      "title": "Idle cleanup stops the session after use",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.085Z",
+      "durationMs": 2,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "j",
+      "title": "Service restart recovery",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.087Z",
+      "durationMs": 1,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "k",
+      "title": "Failed install and update leave recoverable state",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.088Z",
+      "durationMs": 2,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "l",
+      "title": "Uninstall respects shared dependencies and user data choice",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.090Z",
+      "durationMs": 1,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "m",
+      "title": "Docker app data migrates or reports a precise compatibility failure",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:34:40.091Z",
+      "durationMs": 1,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    }
+  ]
+}

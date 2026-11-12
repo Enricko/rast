@@ -4788,3 +4788,229 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
   flex: 1;
   min-width: 0;
 }
+
+/* ------------------------------------------------- native Linux apps (Xpra) */
+
+/* The single shared session viewer lives off-screen: the RAST desktop adopts
+   each remote window's DOM node into its own RAST window, so this iframe only
+   hosts the client logic and the one connection. It must stay laid out (not
+   display:none) so the client keeps painting. */
+.linux-native-session-frame {
+  position: fixed;
+  left: -30000px;
+  top: 0;
+  width: 1280px;
+  height: 800px;
+  border: 0;
+  visibility: visible;
+  pointer-events: none;
+}
+
+/* A RAST window body hosting one adopted Xpra window. */
+.win-body.linux-native-window {
+  overflow: hidden;
+  padding: 0;
+  background: #000;
+  display: block;
+  touch-action: none;
+}
+
+.win-body.linux-native-window > div {
+  position: absolute;
+  inset: 0;
+}
+
+.win-body.linux-native-window.is-popup {
+  background: transparent;
+}
+
+.linux-native-problem {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  background: var(--surface-2);
+}
+
+.linux-native-problem-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Small "Starting <app>…" status window. */
+.win-body.linux-native-starting-host {
+  display: flex;
+  overflow: hidden;
+}
+
+.linux-native-starting {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 22px;
+  width: 100%;
+}
+
+.linux-native-starting-text {
+  min-width: 0;
+}
+
+.linux-native-starting-title {
+  font-weight: 600;
+}
+
+.linux-native-starting-detail {
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+/* App Center: native app metadata, install preview and migration sections. */
+.native-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.native-badge.is-native {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.native-badge.is-docker {
+  color: var(--text-faint);
+}
+
+.native-badge.is-migration {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+}
+
+.native-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.native-info code,
+.pkg-preview code {
+  font-family: var(--mono-font, ui-monospace, monospace);
+  font-size: 11.5px;
+}
+
+.pkg-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.pkg-preview-head {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.pkg-preview-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pkg-preview-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.pkg-preview-sub {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.pkg-preview-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pkg-preview-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.pkg-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.pkg-preview-row {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface-2);
+}
+
+.pkg-preview-row.is-remove {
+  border-left: 3px solid var(--danger);
+}
+
+.pkg-preview-row.is-upgrade {
+  border-left: 3px solid var(--warning);
+}
+
+.pkg-preview-row.is-install {
+  border-left: 3px solid var(--accent);
+}
+
+.pkg-preview-mono {
+  font-family: var(--mono-font, ui-monospace, monospace);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.pkg-preview-reasons {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.pkg-preview-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-muted);
+}
+
+.native-arrow {
+  color: var(--text-faint);
+}

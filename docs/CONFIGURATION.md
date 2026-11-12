@@ -57,6 +57,18 @@ applied by `src/config.rs`.
 | `db_max_connections` | integer | `8` | 1–64 | `RAST_DB_MAX_CONNECTIONS` |
 | `worker_socket` | path | `"/run/rast/worker.sock"` | Unix socket path of the worker | `RAST_WORKER_SOCKET` |
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
+| `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service` and Xpra; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
+| `native_helper_socket` | path | `"/run/rast/native.sock"` | Unix socket of the privileged native helper | `RAST_NATIVE_HELPER_SOCKET` |
+| `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions | `RAST_LINUX_XPRA_BIN` |
+| `linux_uid_base` | integer | `200000` | First uid of the unprivileged Linux identities; a RAST user `id` gets `linux_uid_base + id`. Must not overlap existing accounts | `RAST_LINUX_UID_BASE` |
+| `linux_idle_minutes` | integer | `15` | 0–10080; extra minutes a person's graphical session keeps running after its last application exits (a short reload grace always applies first; `0` = reclaim right after the grace). Never reclaims while an app runs or a viewer is attached | `RAST_LINUX_IDLE_MINUTES` |
+| `linux_session_memory_mb` | integer | `4096` | 512–262144; cgroup memory limit of one person's graphical session | `RAST_LINUX_SESSION_MEMORY_MB` |
+| `linux_session_cpus` | integer | quarter of the CPUs, 2–8 | 1–256; CPU limit of one person's graphical session | `RAST_LINUX_SESSION_CPUS` |
+| `linux_session_tasks` | integer | `2048` | 64–131072; process limit of one person's graphical session | `RAST_LINUX_SESSION_TASKS` |
+| `linux_app_memory_mb` | integer | `2048` | 128–262144; default cgroup memory limit of one native application | `RAST_LINUX_APP_MEMORY_MB` |
+| `linux_app_cpus` | integer | `2` | 1–256; default CPU limit of one native application | `RAST_LINUX_APP_CPUS` |
+| `linux_app_tasks` | integer | `1024` | 16–131072; default process limit of one native application | `RAST_LINUX_APP_TASKS` |
+| `linux_admission_reserve_mb` | integer | `1024` | 0–1048576; free memory kept in reserve when a new application is admitted | `RAST_LINUX_ADMISSION_RESERVE_MB` |
 | `default_quota_bytes` | integer | `21474836480` (20 GiB) | `0` = unlimited; applies to newly created accounts | `RAST_DEFAULT_QUOTA_BYTES` |
 | `secure_cookies` | boolean | auto | Auto = `true` when `public_url` starts with `https://` | `RAST_SECURE_COOKIES` |
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
@@ -90,6 +102,14 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_DB_MAX_CONNECTIONS` | `db_max_connections` | 1–64 |
 | `RAST_WORKER_SOCKET` | `worker_socket` | Must match the worker unit's runtime directory |
 | `RAST_DOCKER_ENABLED` | `docker_enabled` | `true`/`false` |
+| `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
+| `RAST_NATIVE_HELPER_SOCKET` | `native_helper_socket` | Must match `rast-native.service` |
+| `RAST_LINUX_XPRA_BIN` | `linux_xpra_bin` | Xpra server binary |
+| `RAST_LINUX_UID_BASE` | `linux_uid_base` | Unprivileged identity uid range start |
+| `RAST_LINUX_IDLE_MINUTES` | `linux_idle_minutes` | 0–10080 |
+| `RAST_LINUX_SESSION_MEMORY_MB` / `RAST_LINUX_SESSION_CPUS` / `RAST_LINUX_SESSION_TASKS` | `linux_session_*` | Session cgroup limits |
+| `RAST_LINUX_APP_MEMORY_MB` / `RAST_LINUX_APP_CPUS` / `RAST_LINUX_APP_TASKS` | `linux_app_*` | Default application cgroup limits |
+| `RAST_LINUX_ADMISSION_RESERVE_MB` | `linux_admission_reserve_mb` | Free-memory reserve for admission |
 | `RAST_DEFAULT_QUOTA_BYTES` | `default_quota_bytes` | New accounts only |
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |
@@ -130,6 +150,15 @@ Additional variables that are **not** configuration-file keys:
   accidentally include user files.
 * **`docker_enabled`** alone is not enough: Docker must be installed, the
   worker unit enabled and the `rast-worker` user in the `docker` group.
+* **Native Linux apps** are the default execution backend for newly installed
+  desktop applications. They need the privileged helper unit
+  (`rast-native.service`, root), Xpra and a systemd slice; the web server only
+  talks to the helper's Unix socket. `native_enabled = false` keeps the legacy
+  Docker backend (apps installed that way keep working until they are
+  migrated). The per-user limits are enforced with transient systemd units, so
+  `MemoryMax`/`CPUQuota`/`TasksMax` show up in `systemctl status
+  rast-app-*` and `/sys/fs/cgroup/...`. `linux_uid_base` must not overlap
+  systemd's dynamic uid range or existing local accounts.
 
 ## Examples
 

@@ -124,10 +124,37 @@ starts, but hardening is reduced. `Type=simple`, `Restart=on-failure` and
 | Socket | `/var/run/docker.sock`, group `docker` | The worker user is added to `docker` when the group exists |
 | Docker absent | Applications app reports “unavailable” | The rest of RAST is fully functional |
 
-Linux apps (App Center) also need Docker with BuildKit (the default since
-Docker 23) and run on Linux hosts only (tested on x86_64; a `.deb` must match the
-host's architecture). The macOS preview does not offer them. Images are
-built on a pinned `ghcr.io/linuxserver/baseimage-selkies` digest, pulled once.
+Native Linux apps (App Center, the default since v0.13) run on Linux hosts
+only (tested on x86_64; a `.deb` must match the host's architecture) and need:
+
+| Component | Requirement | Status |
+| --- | --- | --- |
+| systemd | 249+ (transient units, cgroup v2 accounting); recommended 253+ | Required |
+| Xpra | 6.5+ from [xpra.org](https://xpra.org) (distribution packages are too old/unsupported); `xpra`, `xpra-html5`, `xpra-codecs`, `xpra-x11` | Required |
+| Xvfb | Distribution package | Required |
+| `rast-native.service` + `rast-linux.slice` | Shipped in `deploy/`, installed by the installer when Xpra is present | Required |
+| ACL support | `acl` package and an ACL-capable local filesystem (ext4/xfs/btrfs) for the RAST-home sharing | Required |
+| Unprivileged Linux identities | `useradd`/`groupadd` (shadow-utils), `setfacl`; `linux_uid_base` (default 200000) must be free of local accounts | Required |
+| Host package manager | `apt-get`/`dpkg` (Debian/Ubuntu families) for `.deb` apps; portable archives and AppImages work without it | Required for `.deb` |
+| Panel proxy | Must forward WebSockets on `/linux-apps/` and disable access logging for it (the URL carries a session key) | Required |
+| Docker | Only for legacy Docker-backed apps and the Applications app; not needed for new native installs | Optional |
+
+Portable archives and AppImage extraction work on any of the supported Linux
+distributions. A native `.deb` is installed with the host's package manager:
+the App Center preview validates the package architecture and shows the full
+dependency transaction before applying it. Native apps share one trust
+boundary per user (applications of the same user), while different users are
+isolated by distinct Linux identities, 0700 profiles and unique displays.
+
+Only one RAST instance per host may use the native backend, because the
+systemd transient units are named after the RAST user id
+(`rast-xpra-u<id>`, `rast-app-u<uid>-…`). Test/secondary instances on the same
+host must set `native_enabled = false` (or run on another host).
+
+The macOS preview does not offer Linux apps. Legacy Docker-backed apps keep
+their previous Docker + BuildKit requirement (shared base image pinned to a
+`ghcr.io/linuxserver/baseimage-selkies` digest, pulled once) until they are
+migrated.
 
 ## Browsers
 

@@ -1,0 +1,67 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:17:27.140Z",
+  "finishedAt": "2026-11-12T22:17:43.240Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:17:27.140Z",
+      "durationMs": 3040,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.12.0 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:17:30.180Z",
+      "durationMs": 13009,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"native\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome",
+        "first RAST window after 0.4 s: [{\"id\":\"win-1\",\"appId\":\"linuxnative-starting:chrome\",\"title\":\"Starting Google Chrome…\",\"focused\":true,\"minimized\":false,\"maximized\":false,\"rect\":{\"x\":11,\"y\":18,\"width\":414,\"height\":217}}]"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        },
+        "firstWindowMs": {
+          "value": 381,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png"
+      ],
+      "error": "RastApiError: POST /api/linux-apps/chrome/launch -> HTTP 503: Could not start Google Chrome: directory component /tmp/rast-native-e2e/data (mode 0750 owner 993:980) is not traversable by the native identity rast-u2 (uid 210002); every component of the profile/cwd path needs the execute bit for it — the per-user profile directory must be owned by the identity and the shared parents need path_chmod/path_acl\n    at RastApi.request (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:87:13)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async openAppForUser (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:143:22)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/a-install-deb.mjs:57:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    }
+  ]
+}

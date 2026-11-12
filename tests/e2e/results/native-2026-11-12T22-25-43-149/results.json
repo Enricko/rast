@@ -1,0 +1,75 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:25:44.483Z",
+  "finishedAt": "2026-11-12T22:25:49.880Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:25:44.483Z",
+      "durationMs": 2304,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.13.0 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:25:46.787Z",
+      "durationMs": 3030,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"native\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native session prepared: display 100",
+        "first RAST window after 0.4 s: [{\"id\":\"win-1\",\"appId\":\"linuxnative-starting:chrome\",\"title\":\"Starting Google Chrome…\",\"focused\":true,\"minimized\":false,\"maximized\":false,\"rect\":{\"x\":11,\"y\":18,\"width\":414,\"height\":217}}]",
+        "session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"03fd24967743a06a\",\"startedAt\":1794522206629,\"status\":\"exited\"},{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"b80d11e3dc197947\",\"startedAt\":1794522207120,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"683389e03357eb3c\",\"startedAt\":1794522348222,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794522197784,\"status\":\"ready\",\"url\":\"/linux-apps/session/c5374fbd22ad30a465aef800bcf9167",
+        "Linux identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-e2e/data/linux-users/2\"}",
+        "session unit rast-xpra-u2: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"1472105\",\"Result\":\"success\",\"MemoryCurrent\":\"190578688\",\"CPUUsageNSec\":\"1355636000\",\"TasksCurrent\":\"6\"}",
+        "embedded app frame(s): 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        },
+        "firstWindowMs": {
+          "value": 411,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "error": null
+    }
+  ]
+}

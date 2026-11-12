@@ -304,6 +304,8 @@ pub async fn deactivate_user(
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
     users::deactivate(&state.db, id).await?;
+    // A deactivated account must not keep graphical sessions/apps running.
+    state.linux_apps.stop_user_sessions(id).await;
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "deactivated"}),

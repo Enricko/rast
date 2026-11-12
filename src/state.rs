@@ -68,12 +68,41 @@ impl AppState {
         );
         // Restores the catalog check state and starts the periodic checker.
         packages.start().await;
+        // Native backend: the unprivileged web server drives the privileged
+        // helper over a Unix socket; sessions are started lazily per person.
+        let native_client = crate::native::client::NativeClient::from_config(&config);
+        let native_sessions = crate::linux_apps::native_session::NativeSessions::new(
+            config.clone(),
+            db.clone(),
+            native_client.clone(),
+            events.clone(),
+        );
+        // Native installation/updates/migration; the Docker backend is wired
+        // in as the legacy source for migration when it is enabled.
+        let native_apps = if config.docker_enabled {
+            crate::linux_apps::native_apps::NativeApps::with_legacy(
+                config.clone(),
+                db.clone(),
+                native_client,
+                events.clone(),
+                crate::linux_apps::native_apps::docker_legacy(docker.clone()),
+            )
+        } else {
+            crate::linux_apps::native_apps::NativeApps::new(
+                config.clone(),
+                db.clone(),
+                native_client,
+                events.clone(),
+            )
+        };
         let linux_apps = crate::linux_apps::LinuxApps::new(
             config.clone(),
             db.clone(),
             docker.clone(),
             events.clone(),
             jobs.clone(),
+            native_sessions,
+            native_apps,
         );
         // Stops copies left from before a restart, then sweeps and checks.
         linux_apps.start().await;

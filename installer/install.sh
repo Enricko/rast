@@ -34,6 +34,8 @@ CONFIG_FILE="/etc/rast/rast.toml"
 UNIT_DIR="/etc/systemd/system"
 MAIN_DROPIN_DIR="/etc/systemd/system/rast.service.d"
 WORKER_DROPIN_DIR="/etc/systemd/system/rast-worker.service.d"
+NATIVE_DROPIN_DIR="/etc/systemd/system/rast-native.service.d"
+NATIVE_TMPFILES="/etc/tmpfiles.d/rast-native.conf"
 
 # ---------------------------------------------------------------------------
 # Environment defaults (documented in --help and docs/INSTALL.md)
@@ -46,6 +48,8 @@ RAST_STORAGE_DIR=${RAST_STORAGE_DIR:-$DEFAULT_STORAGE_DIR}
 RAST_TRUSTED_PROXIES=${RAST_TRUSTED_PROXIES:-}
 RAST_DOCKER_ENABLED=${RAST_DOCKER_ENABLED:-auto}
 RAST_ENABLE_WORKER=${RAST_ENABLE_WORKER:-auto}
+RAST_NATIVE=${RAST_NATIVE:-auto}
+RAST_XPRA_BIN=${RAST_XPRA_BIN:-}
 RAST_NO_START=${RAST_NO_START:-0}
 RAST_DRY_RUN=${RAST_DRY_RUN:-0}
 RAST_REQUIRE_SIGNATURE=${RAST_REQUIRE_SIGNATURE:-}
@@ -98,6 +102,9 @@ Options:
   --no-docker            Disable the Docker/Applications integration.
   --enable-worker        Install and start rast-worker.service (needs Docker).
   --no-worker            Do not install/start rast-worker.service.
+  --native               Enable native Linux apps (needs Xpra); installs and
+                         starts rast-native.service and rast-linux.slice.
+  --no-native            Disable the native Linux apps backend.
   --no-start             Install files only; do not enable or start services.
   --dry-run              Detect, download and verify, but change nothing.
   --verify-attestation   Also verify the binary's GitHub build-provenance
@@ -115,6 +122,10 @@ Environment variables (flags take precedence):
   RAST_TRUSTED_PROXIES    Comma-separated CIDRs of trusted reverse proxies.
   RAST_DOCKER_ENABLED     auto|1|0 — Docker integration (default auto-detect).
   RAST_ENABLE_WORKER      auto|1|0 — worker unit (default auto-detect Docker).
+  RAST_NATIVE             auto|1|0 — native Linux apps backend (default
+                          auto-detect Xpra). With 1, Xpra is required.
+  RAST_XPRA_BIN           Path to the xpra binary (default: autodetected,
+                          usually /usr/bin/xpra).
   RAST_NO_START           1 to skip enabling/starting services.
   RAST_DRY_RUN            1 to run in dry-run mode.
   RAST_RELEASE_BASE_URL   Base URL containing v<version>/ directories, used for
@@ -131,6 +142,13 @@ Environment variables (flags take precedence):
 When the worker is installed, the installer also restricts its socket to the
 uid of the rast web account (RAST_WORKER_ALLOWED_UID drop-in); the worker
 accepts only whitelisted Docker operations from that account.
+
+When the native backend is enabled, the installer additionally installs
+rast-native.service (root), rast-linux.slice and a systemd-tmpfiles
+configuration, and restricts the helper socket to the rast web account
+(RAST_NATIVE_ALLOWED_UID drop-in). Native Linux apps need Xpra from the xpra.org
+apt repository; without it the backend stays disabled and Docker keeps working.
+See docs/INSTALL.md, section 'Native Linux apps (Xpra)'.
 
 The installer requires: systemd, an x86_64 or aarch64 CPU, glibc, and curl or
 wget. It runs only the documented steps, always verifies the SHA-256 checksum of
@@ -212,6 +230,8 @@ while [ "$#" -gt 0 ]; do
         --no-docker) RAST_DOCKER_ENABLED=0 ;;
         --enable-worker) RAST_ENABLE_WORKER=1 ;;
         --no-worker) RAST_ENABLE_WORKER=0 ;;
+        --native) RAST_NATIVE=1 ;;
+        --no-native) RAST_NATIVE=0 ;;
         --no-start) RAST_NO_START=1 ;;
         --dry-run) RAST_DRY_RUN=1 ;;
         --verify-attestation) RAST_VERIFY_ATTESTATION=1 ;;
@@ -665,6 +685,41 @@ log_level = "info"
 docker_enabled = false
 
 # ---------------------------------------------------------------------------
+# Native Linux apps (Xpra)
+# ---------------------------------------------------------------------------
+# Newly installed desktop apps run natively on the server, one shared Xpra
+# seamless session per RAST user (see docs/INSTALL.md "Native Linux apps
+# (Xpra)"). Needs rast-native.service (root), rast-linux.slice and Xpra.
+# Set to false to keep installing legacy Docker-backed apps instead.
+# env: RAST_NATIVE_ENABLED
+native_enabled = true
+# env: RAST_NATIVE_HELPER_SOCKET
+native_helper_socket = "/run/rast/native.sock"
+# env: RAST_LINUX_XPRA_BIN
+linux_xpra_bin = "/usr/bin/xpra"
+# First uid of the per-user Linux identities: uid = linux_uid_base + user id.
+# Must not overlap local accounts or systemd's dynamic uid range.
+# env: RAST_LINUX_UID_BASE
+linux_uid_base = 200000
+# How long a person's session stays alive after its last app exits
+# (0 = stop at once). A page reload reconnects within this window.
+# env: RAST_LINUX_IDLE_MINUTES
+linux_idle_minutes = 15
+# cgroup limits: one person's graphical session ...
+# env: RAST_LINUX_SESSION_MEMORY_MB / _CPUS / _TASKS
+linux_session_memory_mb = 4096
+# linux_session_cpus defaults to a quarter of the server's CPUs (2-8)
+linux_session_tasks = 2048
+# ... and one native application.
+# env: RAST_LINUX_APP_MEMORY_MB / _CPUS / _TASKS
+linux_app_memory_mb = 2048
+linux_app_cpus = 2
+linux_app_tasks = 1024
+# Free memory kept in reserve when a new application is admitted.
+# env: RAST_LINUX_ADMISSION_RESERVE_MB
+linux_admission_reserve_mb = 1024
+
+# ---------------------------------------------------------------------------
 # App Center
 # ---------------------------------------------------------------------------
 
@@ -867,6 +922,148 @@ RAST_EMBED_RAST_WORKER
 }
 # <<< END embedded deploy/rast-worker.service
 
+# >>> BEGIN embedded deploy/rast-native.service
+# Generated by scripts/sync-installer-assets.sh from deploy/rast-native.service — do not edit.
+write_unit_rast_native() {
+    cat > "$1" <<'RAST_EMBED_RAST_NATIVE'
+[Unit]
+Description=RAST native Linux apps privileged helper (Xpra sessions, host APT)
+Documentation=https://github.com/Enricko/rast/blob/main/docs/ARCHITECTURE.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+# Root is required: the helper is the only component allowed to create Linux
+# identities, start transient systemd units as those identities, run host APT
+# transactions and change ownership of managed profile paths. The
+# unprivileged rast.service never has these rights; it only talks to this
+# process over /run/rast/native.sock with a strict JSON protocol.
+Type=simple
+User=root
+Group=root
+ExecStart=/usr/local/bin/rast native-helper
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+KillSignal=SIGTERM
+WorkingDirectory=/var/lib/rast
+Environment=RAST_CONFIG=/etc/rast/rast.toml
+# Group owning the socket (mode 0660). rast.service runs as rast:rast, so only
+# its members can connect. Set RAST_NATIVE_ALLOWED_UID in a drop-in to also
+# pin the peer uid; the installer writes /etc/systemd/system/
+# rast-native.service.d/20-peer-uid.conf with the rast web server uid.
+Environment=RAST_NATIVE_SOCKET_GROUP=rast
+# Optional operator overrides (RAST_* variables, mode 0600 root:rast).
+EnvironmentFile=-/etc/rast/rast.env
+# Packaging tools create world-readable files; never inherit a restrictive
+# umask into apt/dpkg maintainer scripts.
+UMask=0022
+LimitNOFILE=65536
+
+# ---- Sandboxing -----------------------------------------------------------
+# The actual isolation is applied to the transient units the helper starts:
+# every session and application runs as its own unprivileged identity with
+# MemoryMax=, CPUQuota= and TasksMax= in rast-linux.slice. This unit must be
+# able to:
+#   * talk to systemd over the D-Bus system bus (systemd-run/systemctl),
+#   * run apt-get/dpkg (writes /var/lib/dpkg, /var/cache/apt, /etc/apt, /usr,
+#     /var/log/apt and reads /proc/sys),
+#   * change identities (/etc/passwd, /etc/group, /etc/shadow),
+#   * manage directories under the RAST data/storage trees and /run/rast*.
+# ProtectSystem=strict, PrivateTmp=yes, RestrictSUIDSGID=yes and
+# NoNewPrivileges=yes are deliberately NOT used here: they break APT
+# maintainer scripts, setuid files created by packages and /tmp usage.
+NoNewPrivileges=no
+ProtectSystem=no
+ProtectHome=read-only
+PrivateTmp=no
+ProtectControlGroups=no
+ProtectKernelTunables=no
+ProtectKernelModules=no
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
+RAST_EMBED_RAST_NATIVE
+}
+# <<< END embedded deploy/rast-native.service
+
+# >>> BEGIN embedded deploy/rast-linux.slice
+# Generated by scripts/sync-installer-assets.sh from deploy/rast-linux.slice — do not edit.
+write_unit_rast_linux_slice() {
+    cat > "$1" <<'RAST_EMBED_RAST_LINUX_SLICE'
+[Unit]
+Description=RAST native Linux apps (Xpra sessions and per-application cgroups)
+Documentation=https://github.com/Enricko/rast/blob/main/docs/ARCHITECTURE.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
+
+[Slice]
+# Aggregate accounting for every native RAST unit. The per-user session and
+# per-application limits are NOT configured here: `rast native-helper` sets
+# MemoryMax=, CPUQuota= and TasksMax= on every transient unit it starts, so one
+# person's session cannot starve the server and one app cannot starve the
+# session. This slice is the cgroup parent those units live in; it is also the
+# place for optional aggregate guardrails.
+CPUAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes
+# Upper bound for all native processes together. Generous by default; override
+# with a drop-in, e.g. /etc/systemd/system/rast-linux.slice.d/20-limits.conf:
+#   [Slice]
+#   MemoryHigh=75%
+#   MemoryMax=90%
+#   CPUQuota=800%
+TasksMax=8192
+
+# Optional aggregate memory/CPU guardrails (uncomment and tune):
+#MemoryHigh=75%
+#MemoryMax=90%
+#CPUQuota=800%
+RAST_EMBED_RAST_LINUX_SLICE
+}
+# <<< END embedded deploy/rast-linux.slice
+
+# >>> BEGIN embedded deploy/rast-native.tmpfiles.conf
+# Generated by scripts/sync-installer-assets.sh from deploy/rast-native.tmpfiles.conf — do not edit.
+write_native_tmpfiles() {
+    cat > "$1" <<'RAST_EMBED_RAST_NATIVE_TMPFILES'
+# RAST native Linux apps: runtime directories and the X11 socket directory.
+#
+# Installed by the RAST installer to /etc/tmpfiles.d/rast-native.conf.
+# Apply with:
+#   systemd-tmpfiles --create /etc/tmpfiles.d/rast-native.conf
+#
+# The installer rewrites /var/lib/rast when a custom RAST_DATA_DIR is used.
+#
+# /run/rast holds the native helper socket (created by rast-native.service,
+# mode 0660 root:rast). /run/rast-linux is the per-user runtime root: it must
+# be traversable by every identity, while each /run/rast-linux/<uid> is 0700
+# and created by the helper. It is deliberately separate from /run/rast, which
+# is 0750 and owned by the Docker worker account.
+#
+# Every directory component of an identity's profile/cwd path must be
+# searchable by that identity. linux-apps stays owned by rast:rast (the web
+# server manages uploads/profiles/app trees) with mode 0751: 0750 plus the
+# "others execute" bit, no read/list/write for others. profiles is
+# root:<data-dir gid> 0711. The per-user directories are 0700 and owned by the
+# identity (created by `rast native-helper`).
+d /run/rast 0750 root rast -
+d /run/rast-linux 0755 root root -
+d /var/lib/rast/linux-users 0711 root rast -
+d /var/lib/rast/linux-apps 0751 rast rast -
+d /var/lib/rast/linux-apps/profiles 0711 root rast -
+d /var/lib/rast/linux-apps/apps 0755 rast rast -
+d /var/lib/rast/linux-apps/staging 0750 rast rast -
+# Xpra/Xvfb create their X11 sockets here; every identity needs write access.
+d /tmp/.X11-unix 1777 root root -
+RAST_EMBED_RAST_NATIVE_TMPFILES
+}
+# <<< END embedded deploy/rast-native.tmpfiles.conf
+
 render_main_config() {
     # $1 destination path
     _dst=$1
@@ -879,6 +1076,8 @@ render_main_config() {
         -e "s|^data_dir = .*|data_dir = \"$_e_data\"|" \
         -e "s|^storage_dir = .*|storage_dir = \"$_e_storage\"|" \
         -e "s|^docker_enabled = .*|docker_enabled = $DOCKER_ENABLED_BOOL|" \
+        -e "s|^native_enabled = .*|native_enabled = $NATIVE_ENABLED_BOOL|" \
+        -e "s|^linux_xpra_bin = .*|linux_xpra_bin = \"$(sed_escape "$XPRA_BIN")\"|" \
         "$RAST_TMP/rast.toml.tpl" >"$RAST_TMP/rast.toml.step1"
 
     if [ -n "$PUBLIC_URL" ]; then
@@ -980,6 +1179,12 @@ case "$RAST_ENABLE_WORKER" in
     0 | false | FALSE | False | no | NO | No | off | OFF) WORKER_CHOICE=0 ;;
     *) die "invalid RAST_ENABLE_WORKER=$RAST_ENABLE_WORKER (expected auto, 1 or 0)" ;;
 esac
+case "$RAST_NATIVE" in
+    "" | auto | AUTO | Auto) NATIVE_CHOICE=auto ;;
+    1 | true | TRUE | True | yes | YES | Yes | on | ON) NATIVE_CHOICE=1 ;;
+    0 | false | FALSE | False | no | NO | No | off | OFF) NATIVE_CHOICE=0 ;;
+    *) die "invalid RAST_NATIVE=$RAST_NATIVE (expected auto, 1 or 0)" ;;
+esac
 
 [ -n "$RAST_BIND" ] || die "bind address must not be empty"
 case "$RAST_BIND" in
@@ -1052,6 +1257,80 @@ OS_ID=${_rest#*|}
 require_systemd
 require_commands
 DOCKER_DETECTED=$(detect_docker)
+
+# Native Linux apps need Xpra. Detect it before deciding, so that `auto`
+# installs the helper only when it can actually work and `--native` fails with
+# actionable instructions instead of a broken service.
+XPRA_BIN=""
+if [ -n "$RAST_XPRA_BIN" ]; then
+    case "$RAST_XPRA_BIN" in
+        /*) ;;
+        *) die "RAST_XPRA_BIN must be an absolute path, got '$RAST_XPRA_BIN'" ;;
+    esac
+    [ -x "$RAST_XPRA_BIN" ] ||
+        die "RAST_XPRA_BIN=$RAST_XPRA_BIN is not an executable file"
+    XPRA_BIN=$RAST_XPRA_BIN
+elif command -v xpra >/dev/null 2>&1; then
+    XPRA_BIN=$(command -v xpra)
+fi
+_os_codename=""
+if [ -r /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    _os_codename=${VERSION_CODENAME:-}
+fi
+[ -n "$_os_codename" ] || _os_codename="<your-release-codename>"
+
+install_xpra_hint() {
+    cat >&2 <<XPRA_HINT
+Install Xpra from the official xpra.org apt repository first:
+
+  install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://xpra.org/gpg.asc \
+      | gpg --dearmor -o /etc/apt/keyrings/xpra.gpg
+  echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ \
+${_os_codename} main" > /etc/apt/sources.list.d/xpra.list
+  apt-get update
+  apt-get install -y xpra xpra-html5 xpra-codecs xvfb
+
+Then re-run the installer. See docs/INSTALL.md, section
+'Native Linux apps (Xpra)'.
+XPRA_HINT
+}
+
+case "$NATIVE_CHOICE" in
+    auto)
+        if [ -n "$XPRA_BIN" ]; then
+            NATIVE_ENABLED=1
+        else
+            NATIVE_ENABLED=0
+            warn "native Linux apps disabled: Xpra was not found. Install it from the"
+            warn "xpra.org apt repository to enable the native backend — see"
+            warn "docs/INSTALL.md, section 'Native Linux apps (Xpra)'. Docker-backed"
+            warn "Linux apps keep working."
+        fi
+        ;;
+    1)
+        if [ -z "$XPRA_BIN" ]; then
+            printf '[rast] ERROR: RAST_NATIVE=1/--native was requested but Xpra was not found.\n' >&2
+            install_xpra_hint
+            exit 1
+        fi
+        NATIVE_ENABLED=1
+        ;;
+    0) NATIVE_ENABLED=0 ;;
+esac
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    if [ ! -d /usr/share/xpra/www ]; then
+        warn "Xpra is installed but its HTML5 client assets (/usr/share/xpra/www) are missing;"
+        warn "install the 'xpra-html5' package or native app windows will not render"
+    fi
+    if ! command -v Xvfb >/dev/null 2>&1; then
+        warn "Xvfb was not found; Xpra needs it for the per-user display (apt-get install xvfb)"
+    fi
+fi
+if [ "$NATIVE_ENABLED" -eq 1 ]; then NATIVE_ENABLED_BOOL=true; else NATIVE_ENABLED_BOOL=false; fi
+[ -n "$XPRA_BIN" ] || XPRA_BIN="/usr/bin/xpra"
 
 case "$WORKER_CHOICE" in
     auto)
@@ -1152,6 +1431,19 @@ else
     WORKER_SUMMARY="disabled (no Docker detected or disabled explicitly)"
 fi
 if [ "$DOCKER_ENABLED" -eq 1 ]; then DOCKER_STATE="enabled"; else DOCKER_STATE="disabled"; fi
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    NATIVE_STATE="enabled"
+    NATIVE_SERVICE=", rast-native.service"
+    NATIVE_SUMMARY="rast-native.service (Xpra: $XPRA_BIN)"
+else
+    NATIVE_STATE="disabled"
+    NATIVE_SERVICE=""
+    if [ -n "$XPRA_BIN" ]; then
+        NATIVE_SUMMARY="disabled explicitly (Xpra detected at $XPRA_BIN)"
+    else
+        NATIVE_SUMMARY="disabled (Xpra not detected; see docs/INSTALL.md)"
+    fi
+fi
 if [ "$NO_START" -eq 1 ]; then START_STATE="no"; else START_STATE="yes"; fi
 if [ "$ATTESTATION_VERIFY" -eq 1 ]; then
     ATTESTATION_STATE="verified via gh attestation"
@@ -1177,7 +1469,15 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  trusted proxies:  %s\n' "${TRUSTED_PROXIES:-<none>}"
     printf '  provenance:       %s\n' "$ATTESTATION_STATE"
     printf '  docker apps:      %s (worker %s)\n' "$DOCKER_STATE" "$WORKER_STATE"
-    printf '  services:         rast.service%s\n' "$WORKER_SERVICE"
+    printf '  native apps:      %s\n' "$NATIVE_STATE"
+    if [ "$NATIVE_ENABLED" -eq 1 ]; then
+        printf '  native layout:    %s/linux-users (0711 root:rast), %s/linux-apps (0751 rast:rast)\n' \
+            "$DATA_DIR" "$DATA_DIR"
+        printf '                    %s/linux-apps/apps (0755 rast:rast), staging (0750 rast:rast),\n' \
+        "$DATA_DIR"
+        printf '                    profiles (0711 root:rast); run: /run/rast-linux (0755 root:root)\n'
+    fi
+    printf '  services:         rast.service%s%s\n' "$WORKER_SERVICE" "$NATIVE_SERVICE"
     printf '  start services:   %s\n' "$START_STATE"
     printf '\nRe-run without --dry-run (or RAST_DRY_RUN=0) to apply.\n'
     exit 0
@@ -1200,6 +1500,23 @@ run install -d -m 0755 -o rast -g rast "$STORAGE_DIR" \
 # sensitive data); rast itself also enforces 0700 on .trash at startup.
 run install -d -m 0700 -o rast -g rast "$STORAGE_DIR/.trash"
 run install -d -m 0750 -o root -g rast "$CONFIG_DIR"
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    # Every directory component of an identity's profile/cwd path must be
+    # searchable by that identity. Canonical layout (also applied by the
+    # helper at startup and by deploy/rast-native.tmpfiles.conf):
+    #   linux-apps          0751 rast:rast (traverse for identities, owner writes)
+    #   linux-apps/apps     0755 rast:rast (identities read/execute installs)
+    #   linux-apps/staging  0750 rast:rast (private)
+    #   linux-apps/profiles 0711 root:rast
+    #   linux-users         0711 root:rast; per-user homes are 0700 uid:gid.
+    run install -d -m 0711 -o root -g rast "$DATA_DIR/linux-users"
+    run install -d -m 0751 -o rast -g rast "$DATA_DIR/linux-apps"
+    run install -d -m 0755 -o rast -g rast "$DATA_DIR/linux-apps/apps"
+    run install -d -m 0750 -o rast -g rast "$DATA_DIR/linux-apps/staging"
+    run install -d -m 0711 -o root -g rast "$DATA_DIR/linux-apps/profiles"
+    run install -d -m 0750 -o root -g rast /run/rast
+    run install -d -m 0755 -o root -g root /run/rast-linux
+fi
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1244,6 +1561,22 @@ if [ "$WORKER_ENABLED" -eq 1 ]; then
     install_managed_file "$RAST_TMP/rast-worker.service" "$UNIT_DIR/rast-worker.service" 0644 root root
 fi
 
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    write_unit_rast_native "$RAST_TMP/rast-native.service"
+    install_managed_file "$RAST_TMP/rast-native.service" "$UNIT_DIR/rast-native.service" 0644 root root
+    write_unit_rast_linux_slice "$RAST_TMP/rast-linux.slice"
+    install_managed_file "$RAST_TMP/rast-linux.slice" "$UNIT_DIR/rast-linux.slice" 0644 root root
+    # Runtime directories and the X11 socket directory. The embedded file uses
+    # the default data directory; rewrite it for a custom RAST_DATA_DIR.
+    write_native_tmpfiles "$RAST_TMP/rast-native.tmpfiles.raw"
+    sed "s|/var/lib/rast|$(sed_escape "$DATA_DIR")|g" \
+        "$RAST_TMP/rast-native.tmpfiles.raw" >"$RAST_TMP/rast-native.tmpfiles.conf"
+    install_managed_file "$RAST_TMP/rast-native.tmpfiles.conf" "$NATIVE_TMPFILES" 0644 root root
+    if ! run systemd-tmpfiles --create "$NATIVE_TMPFILES"; then
+        warn "could not apply $NATIVE_TMPFILES; run: systemd-tmpfiles --create $NATIVE_TMPFILES"
+    fi
+fi
+
 # systemd's ProtectSystem=strict makes everything but /usr, /boot and /etc
 # read-only; custom data/storage locations therefore need ReadWritePaths.
 if [ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ] || [ "$STORAGE_DIR" != "$DEFAULT_STORAGE_DIR" ]; then
@@ -1274,6 +1607,29 @@ if [ "$WORKER_ENABLED" -eq 1 ]; then
         install_managed_file "$RAST_TMP/20-rast-peer-uid.conf" "$WORKER_DROPIN_DIR/20-peer-uid.conf" 0644 root root
     else
         warn "could not resolve the uid of the rast user; worker socket peer-uid restriction not installed"
+    fi
+fi
+
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    # Defense in depth: only the web server's uid may connect to the native
+    # helper socket (the helper enforces this with SO_PEERCRED).
+    _rast_uid=$(id -u rast 2>/dev/null || true)
+    if [ -n "$_rast_uid" ]; then
+        run install -d -m 0755 "$NATIVE_DROPIN_DIR"
+        {
+            printf '[Service]\n'
+            printf '# Generated by the RAST installer: accept only the rast web server uid.\n'
+            printf 'Environment=RAST_NATIVE_ALLOWED_UID=%s\n' "$_rast_uid"
+        } > "$RAST_TMP/20-rast-native-peer-uid.conf"
+        install_managed_file "$RAST_TMP/20-rast-native-peer-uid.conf" "$NATIVE_DROPIN_DIR/20-peer-uid.conf" 0644 root root
+    else
+        warn "could not resolve the uid of the rast user; native helper socket peer-uid restriction not installed"
+    fi
+elif [ -f "$NATIVE_DROPIN_DIR/20-peer-uid.conf" ]; then
+    run rm -f -- "$NATIVE_DROPIN_DIR/20-peer-uid.conf"
+    log "removed stale peer-uid drop-in for rast-native.service"
+    if [ -d "$NATIVE_DROPIN_DIR" ]; then
+        run rmdir "$NATIVE_DROPIN_DIR" 2>/dev/null || true
     fi
 fi
 
@@ -1320,6 +1676,9 @@ if [ "$NO_START" -eq 1 ]; then
     if run systemctl is-active --quiet rast.service; then
         warn "rast.service is still running the previously installed binary; restart it to apply the update: systemctl restart rast.service"
     fi
+    if [ "$NATIVE_ENABLED" -eq 1 ] && run systemctl is-active --quiet rast-native.service; then
+        warn "rast-native.service is still running the previously installed binary; restart it to apply the update: systemctl restart rast-native.service"
+    fi
 else
     run systemctl enable rast.service
     if run systemctl is-active --quiet rast.service; then
@@ -1347,6 +1706,26 @@ else
     elif [ -f "$UNIT_DIR/rast-worker.service" ]; then
         run systemctl disable --now rast-worker.service 2>/dev/null || true
         log "worker disabled: rast-worker.service stopped and disabled (unit file kept)"
+    fi
+
+    if [ "$NATIVE_ENABLED" -eq 1 ]; then
+        run systemctl enable rast-native.service
+        if run systemctl is-active --quiet rast-native.service; then
+            run systemctl restart rast-native.service
+            log "restarted rast-native.service"
+        else
+            run systemctl start rast-native.service
+            if run systemctl is-active --quiet rast-native.service; then
+                log "started rast-native.service"
+            else
+                warn "rast-native.service is installed but inactive; inspect:"
+                warn "  journalctl -u rast-native.service -n 100 --no-pager"
+                warn "  rast native-helper --check"
+            fi
+        fi
+    elif [ -f "$UNIT_DIR/rast-native.service" ]; then
+        run systemctl disable --now rast-native.service 2>/dev/null || true
+        log "native helper disabled: rast-native.service stopped and disabled (unit file kept)"
     fi
 
     if wait_for_health "$BIND"; then
@@ -1382,6 +1761,7 @@ printf '  storage:       %s\n' "$STORAGE_DIR"
 printf '  service:       rast.service%s\n' \
     "$SERVICE_STATE"
     printf '  worker:        %s\n' "$WORKER_SUMMARY"
+printf '  native apps:   %s\n' "$NATIVE_SUMMARY"
 printf '  web UI:        %s\n' "$SERVICE_URL"
 printf '\nNext steps:\n'
 printf '  1. Create the first administrator (there is no default password):\n'

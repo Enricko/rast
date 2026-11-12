@@ -54,18 +54,22 @@ data, and do not run denial-of-service tests against shared infrastructure.
 * the SQLite database: users, sessions, audit logs, app definitions;
 * `secret.key` (master key for CSRF derivation and encryption of app secrets);
 * Docker applications running on the host (via the worker);
-* the host itself (Docker group membership is effectively root).
+* native Linux applications and their per-user graphical sessions;
+* the host itself (Docker group membership is effectively root; the native
+  helper runs as root by design).
 
 ### Trust boundaries
 
 ```
 untrusted network ──TLS proxy──▶ rast.service (unprivileged)
                                       │ Unix socket (0660, group rast)
-                                      ▼
-                              rast-worker.service (docker group)
-                                      │ /var/run/docker.sock
-                                      ▼
-                                Docker Engine / host
+                    ┌─────────────────┴──────────────────┐
+                    ▼                                    ▼
+        rast-worker.service (docker group)      rast-native.service (root)
+                    │ /var/run/docker.sock               │ systemd-run / apt-get / useradd
+                    ▼                                    ▼
+             Docker Engine / host              rast-linux.slice: rast-u<uid>
+                                              session + application processes
 ```
 
 1. **Network → proxy.** TLS is terminated by nginx/Caddy/Cloudflare. RAST binds
@@ -89,6 +93,24 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
    root-equivalent by design.** A compromise of the worker (or of an app
    definition it deploys) can compromise the host; only administrators can
    manage applications, and compose validation restricts what may be deployed.
+7. **RAST → native helper.** The helper is the only root component of the
+   native backend and is deliberately thin: a Unix socket (0660 root:rast,
+   optional peer-uid allowlist), JSON-lines requests with `deny_unknown_fields`,
+   no shell anywhere, absolute binaries and argument vectors, per-operation
+   field validation (usernames, units, displays, ports, argv[0] prefixes, env
+   keys, limits, managed paths), bounded timeouts/output, serialized APT
+   transactions and an admin-only trigger set. `.deb` installation is
+   explicitly *administrator-approved privileged software installation*; the
+   application processes themselves run under unprivileged identities.
+8. **Native application ↔ other users.** Each RAST user maps to a distinct
+   unprivileged Linux identity; profiles are 0700 per app/user, sessions bind
+   to loopback with Xpra authentication disabled (RAST's authenticated
+   same-origin proxy is the only path to them), and users cannot read each
+   other's homes or connect to each other's sockets. Applications inside one
+   person's session share that person's trust boundary by design. The person's
+   RAST home is shared with *their own* identity through an ACL only. Chromium
+   runs unprivileged with its sandbox enabled (`Seccomp: 2`,
+   `NoNewPrivs: 1` on renderer processes); `--no-sandbox` is never added.
 
 ### Out of scope / limitations
 
@@ -97,6 +119,11 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
 * Malicious Docker images or compose files an administrator deliberately
   deploys — administrators are trusted; the worker limits *how* commands are
   executed, not *what* the chosen containers do.
+* Malicious native application packages or installation scripts an
+  administrator deliberately installs — an admin-approved `.deb` runs its
+  maintainer scripts as root during `apt-get`; the helper bounds *which*
+  operations are possible, not what the chosen package does. Treat App Center
+  → Add app like `sudo apt install`.
 * Availability attacks that exhaust host resources (bounded by systemd limits,
   but there is no per-user request quota beyond file quotas).
 * Supply-chain compromise of crates/npm packages beyond what `Cargo.lock`,
@@ -241,6 +268,12 @@ and upgrade RAST once a build with the patched SQLite is published.
 - [ ] Enable scheduled backups and keep encrypted copies off-server.
 - [ ] Restrict the `docker` group (`rast-worker` only!) — every member is
       root-equivalent.
+- [ ] Keep `rast-native.service` limited to the `rast` peer uid, review
+      `linuxapp.*` audit entries, and remember that installing a `.deb` (App
+      Center → Add app) is privileged software installation: review the
+      dependency transaction in the preview before confirming.
+- [ ] Keep `/run/rast-linux` (0700 per user) and `/var/lib/rast/linux-users`
+      only; never add the `rast` account to a native identity's group.
 - [ ] Review Activity Logs periodically and after any suspicious event.
 - [ ] Set `RAST_MAX_UPLOAD_BYTES` and proxy body limits to values you need;
       missing limits allow disk-filling uploads by authenticated users.
