@@ -4,6 +4,12 @@ import type { JobHistory, PackageView, SystemInstall, VersionChoice } from "./ty
 
 export type PackageFilter = "all" | "installed" | "updates";
 
+/** Tile order: updates first, then installed, then the rest; by name within each. */
+export function sortForTiles(packages: PackageView[]): PackageView[] {
+  const rank = (p: PackageView) => (p.updates.length > 0 ? 0 : p.installed.length > 0 || p.system ? 1 : 2);
+  return [...packages].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}
+
 /** Packages shown by a sidebar view, filtered by a free-text query. */
 export function filterPackages(packages: PackageView[], view: PackageFilter, query = ""): PackageView[] {
   const q = query.trim().toLowerCase();
@@ -13,6 +19,82 @@ export function filterPackages(packages: PackageView[], view: PackageFilter, que
     if (!q) return true;
     return [p.name, p.id, p.description, p.publisher.name, p.sourceRepo ?? ""].some((v) => v.toLowerCase().includes(q));
   });
+}
+
+/** What a package tile offers: one action and one short line. */
+export type TileAction = "update" | "install" | "installed" | "unavailable" | "none";
+
+export interface TileState {
+  action: TileAction;
+  /** One short line under the name, e.g. "8.5.4 → 8.5.12" or "8.5.4 · System". */
+  subtitle: string;
+  /** Version the action installs (update and install only). */
+  version?: string;
+  /** Whether the installed version becomes the default (terminal command). */
+  makeDefault?: boolean;
+}
+
+/** The version a tile shows as installed: the default, else the first, else the system's. */
+export function installedLabel(p: PackageView): string | null {
+  const shown = p.installed.find((v) => v.isDefault) ?? p.installed[0];
+  if (shown) {
+    const more = p.installed.length - 1;
+    return more > 0 ? `${shown.version} +${more}` : shown.version;
+  }
+  if (p.system) return `${p.system.version ?? "Unknown version"} · System`;
+  return null;
+}
+
+export function tileState(p: PackageView): TileState {
+  const update = p.updates[0];
+  if (update) {
+    return { action: "update", subtitle: `${update.from} → ${update.to}`, version: update.to, makeDefault: update.replacesDefault };
+  }
+  const installed = installedLabel(p);
+  if (installed) return { action: "installed", subtitle: installed };
+  const next = p.official ? suggestedVersion(p) : null;
+  if (next) return { action: "install", subtitle: next.version, version: next.version, makeDefault: true };
+  if (p.unavailableReason) return { action: "unavailable", subtitle: "Not available" };
+  return { action: "none", subtitle: "Not installed" };
+}
+
+/** The coloured status line under a package's name on its page (text, not only colour). */
+export function statusLine(p: PackageView): { kind: "update" | "installed" | "available" | "unavailable"; text: string } {
+  const update = p.updates[0];
+  if (update) return { kind: "update", text: `Update available: ${update.from}${update.fromSystem ? " (system)" : ""} → ${update.to}` };
+  if (p.installed.length > 0 || p.system) {
+    const where = p.installed.length === 0 ? " (system)" : "";
+    return { kind: "installed", text: p.latest ? `Installed${where} · ${upToDateText(p).replace(/^Up/, "up")}` : `Installed${where}` };
+  }
+  if (p.official && suggestedVersion(p)) return { kind: "available", text: "Not installed" };
+  return { kind: "unavailable", text: p.unavailableReason ? "Not available for this server" : "Not installed" };
+}
+
+/** "Up to date", naming the release line when a newer line exists. */
+export function upToDateText(p: PackageView): string {
+  const current = p.installed.find((v) => v.isDefault)?.channel ?? (p.system?.version ? channelOf(p.system.version, p.versions) : null);
+  const line = current ? p.versions.find((v) => v.channel === current) : undefined;
+  if (!line || !p.latest || p.latest.channel === line.channel) return "Up to date";
+  return `Up to date in ${line.channelLabel || line.channel}`;
+}
+
+/** The catalog channel a version belongs to (longest matching channel id). */
+function channelOf(version: string, versions: VersionChoice[]): string | null {
+  let best: string | null = null;
+  for (const v of versions) {
+    const c = v.channel;
+    if ((version === c || version.startsWith(`${c}.`)) && (!best || c.length > best.length)) best = c;
+  }
+  return best;
+}
+
+/** Host part of a URL for compact links ("nodejs.org"). */
+export function linkLabel(url: string): string {
+  try {
+    return new URL(url).host.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
 }
 
 /** Short status line for a package card. */

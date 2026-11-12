@@ -9,9 +9,25 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Nothing yet.
+- Package Center has a calmer layout. Packages are shown as tiles: a large
+  icon, the name, one version line and one button (**Install**, **Update**,
+  or **Installed**). Clicking a tile opens the package page. The page has the
+  status, one main button with a menu for the other actions, the
+  description, an *Other information* grid and the versions on the server
+  with **Make default** and **Remove**. Paths, checks, consumers and job
+  history are folded away. Catalog, server and terminal PATH details moved
+  to **Settings**. The refresh button in the toolbar checks for updates.
+- When the catalog this server has lists no versions, Package Center says so
+  and offers **Check for updates**, instead of showing packages without an
+  install button.
+
+### Fixed
+
+- RAST checks the package catalog shortly after every start. Before, a
+  restart (for example `rast update`) kept the cached catalog until the check
+  interval (6 hours by default) ran out, so new versions did not appear.
 
 ### Planned
 

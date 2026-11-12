@@ -1,7 +1,8 @@
 // Package Center: verified runtimes (Python, PHP CLI, Go, Node.js, imports
-// from GitHub) installed side by side, with a selectable RAST default,
-// updates that keep the previous version for rollback, consumers that pin
-// versions, and live job progress.
+// from GitHub) installed side by side. The list is a calm grid of tiles with
+// one action each (Install, Update or Installed); a package's page has the
+// details, with paths, checks, consumers and history folded away. Catalog,
+// server and terminal information live in Settings.
 
 import type { AppContext, AppDefinition } from "../../core/app";
 import { clear, h } from "../../core/dom";
@@ -10,7 +11,7 @@ import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../compon
 import { formatBytes, formatDateTime, relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import type { Permissions } from "../../core/types";
-import { confirmDialog, copyText, errorMessage, modal } from "../../core/ui";
+import { confirmDialog, contextMenu, copyText, errorMessage, modal, type ContextMenuEntry } from "../../core/ui";
 import { AppLifecycle } from "../../components/lifecycle";
 import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
@@ -20,15 +21,20 @@ import {
   groupByChannel,
   jobActionLabel,
   jobFraction,
+  linkLabel,
   monogram,
   monogramColor,
   shortSha,
+  sortForTiles,
   stateLabel,
+  statusLine,
   suggestedVersion,
   systemSourceLabel,
+  tileState,
   updateSummary,
   versionOptionLabel,
   type PackageFilter,
+  type TileState,
 } from "./format";
 import type {
   ArtifactView,
@@ -52,10 +58,10 @@ interface LiveJob {
   message: string;
 }
 
-const VIEWS: Array<{ id: PackageFilter; label: string; icon: string; countKey: string }> = [
-  { id: "all", label: "All Packages", icon: "package", countKey: "all" },
-  { id: "installed", label: "Installed", icon: "check", countKey: "installed" },
-  { id: "updates", label: "Updates", icon: "refresh", countKey: "updates" },
+const VIEWS: Array<{ id: PackageFilter; label: string; icon: string }> = [
+  { id: "installed", label: "Installed", icon: "check" },
+  { id: "all", label: "All Packages", icon: "package" },
+  { id: "updates", label: "Updates", icon: "refresh" },
 ];
 
 class PackageCenterApp {
@@ -64,17 +70,21 @@ class PackageCenterApp {
   private readonly realtime: RealtimeStore;
   private readonly notice: NoticeBar;
   private readonly live: LiveIndicator;
+  private readonly backButton: HTMLButtonElement;
   private readonly checkButton: HTMLButtonElement;
+  private readonly search: HTMLInputElement;
   private readonly githubButton: HTMLButtonElement;
-  private readonly statusChip: HTMLElement;
+  private readonly settingsButton: HTMLButtonElement;
   private readonly sidebar: HTMLElement;
   private readonly main: HTMLElement;
   private readonly sync: { run: () => void; cancel: () => void };
 
   private overview: Overview | null = null;
   private loadError: unknown = null;
-  private view: PackageFilter = "all";
+  /** Null until the first load: Installed when something is installed, else All Packages. */
+  private view: PackageFilter | null = null;
   private query = "";
+  private grid: HTMLElement | null = null;
   private selectedId: string | null = null;
   private detail: PackageDetail | null = null;
   private detailError: unknown = null;
@@ -84,9 +94,11 @@ class PackageCenterApp {
   private readOnly = false;
   private denied = false;
   private disposed = false;
-  /** Selected version in the details picker (kept across live refreshes). */
-  private pickerVersion = new Map<string, string>();
-  private pickerDefault = new Map<string, boolean>();
+  /** Folded sections the user opened on a package page (kept across live refreshes). */
+  private readonly openSections = new Set<string>();
+  /** Selected version in the version dialog. */
+  private readonly pickerVersion = new Map<string, string>();
+  private readonly pickerDefault = new Map<string, boolean>();
 
   constructor(ctx: AppContext) {
     this.ctx = ctx;
@@ -100,28 +112,42 @@ class PackageCenterApp {
       this.sync.cancel();
     });
 
+    this.backButton = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "Back", ariaLabel: "Back" }, iconSvg("arrowLeft", 16));
+    this.backButton.addEventListener("click", () => this.closeDetail());
     this.checkButton = h(
       "button",
-      { class: "btn btn-ghost btn-sm", type: "button", title: "Fetch and verify the signed catalog now" },
-      iconSvg("refresh", 14),
-      document.createTextNode("Check updates"),
+      { class: "btn btn-ghost btn-icon btn-sm pkg-check-btn", type: "button", title: "Check for updates", ariaLabel: "Check for updates" },
+      iconSvg("refresh", 16),
     );
     this.checkButton.addEventListener("click", () => void this.checkNow());
+    this.search = h("input", { class: "input input-search pkg-search", type: "search", placeholder: "Search", ariaLabel: "Search packages" });
+    this.search.addEventListener("input", () => {
+      this.query = this.search.value;
+      if (this.selectedId) this.closeDetail();
+      else this.paintGrid();
+    });
     this.githubButton = h(
       "button",
-      { class: "btn btn-primary btn-sm", type: "button" },
+      { class: "btn btn-ghost btn-sm", type: "button", title: "Install a package from a GitHub release" },
       iconSvg("github", 14),
-      document.createTextNode("Install from GitHub"),
+      h("span", { class: "pkg-btn-label" }, "Install from GitHub"),
     );
     this.githubButton.addEventListener("click", () => this.openImport());
-    this.statusChip = h("span", { class: "pkg-status-chip", role: "status", ariaLive: "polite" });
+    this.settingsButton = h(
+      "button",
+      { class: "btn btn-ghost btn-sm", type: "button", title: "Catalog, server and terminal settings" },
+      iconSvg("settings", 14),
+      h("span", { class: "pkg-btn-label" }, "Settings"),
+    );
+    this.settingsButton.addEventListener("click", () => this.openSettings());
     const toolbar = h(
       "div",
-      { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "Package actions" },
-      this.githubButton,
+      { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "Package Center" },
+      this.backButton,
       this.checkButton,
-      this.statusChip,
-      h("div", { class: "app-toolbar-spacer" }),
+      this.search,
+      this.githubButton,
+      this.settingsButton,
       this.live.el,
     );
     this.sidebar = h("nav", { class: "app-sidebar pkg-sidebar", ariaLabel: "Package views" });
@@ -170,12 +196,13 @@ class PackageCenterApp {
           h("div", { class: "app-access-detail" }, "Your account has no access to Package Center. Ask an administrator if you need it."),
         ),
       );
-      this.checkButton.classList.add("hidden");
-      this.githubButton.classList.add("hidden");
+      for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton]) b.classList.add("hidden");
+      this.search.classList.add("hidden");
       return;
     }
     this.checkButton.classList.toggle("hidden", this.readOnly);
     this.githubButton.classList.toggle("hidden", this.readOnly);
+    for (const el of [this.settingsButton, this.backButton, this.search]) el.classList.remove("hidden");
     if (wasDenied) void this.reload();
   }
 
@@ -196,7 +223,7 @@ class PackageCenterApp {
       this.realtime.on<PackageEvent>("package.catalog", (data) => {
         if (data?.reason === "checking") {
           this.checking = true;
-          this.renderStatusChip();
+          this.renderChrome();
           return;
         }
         this.checking = false;
@@ -265,10 +292,15 @@ class PackageCenterApp {
   /** Update progress bars in place (no full re-render on every event). */
   private paintProgress(packageId: string): void {
     const job = [...this.jobs.values()].find((j) => j.packageId === packageId);
-    const hosts = this.main.querySelectorAll<HTMLElement>(`[data-progress-for="${CSS.escape(packageId)}"]`);
+    const id = CSS.escape(packageId);
+    const hosts = this.main.querySelectorAll<HTMLElement>(`[data-progress-for="${id}"]`);
     if (hosts.length === 0) {
       this.sync.run();
       return;
+    }
+    // A running job replaces the package's action button.
+    for (const action of this.main.querySelectorAll<HTMLElement>(`[data-action-for="${id}"]`)) {
+      action.classList.toggle("hidden", Boolean(job));
     }
     for (const host of hosts) {
       if (!job) {
@@ -276,14 +308,7 @@ class PackageCenterApp {
         continue;
       }
       host.classList.remove("hidden");
-      const fill = host.querySelector<HTMLElement>(".progress-bar");
-      const label = host.querySelector<HTMLElement>(".pkg-progress-label");
-      const fraction = jobFraction(job.progress, job.total);
-      if (fill) {
-        fill.style.width = job.total > 0 ? `${(fraction * 100).toFixed(1)}%` : "100%";
-        fill.classList.toggle("is-indeterminate", job.total <= 0);
-      }
-      if (label) label.textContent = job.total > 0 ? `${job.message} · ${Math.round(fraction * 100)}%` : job.message;
+      paintBar(host, job);
     }
   }
 
@@ -325,52 +350,45 @@ class PackageCenterApp {
     }
   }
 
+  private currentView(): PackageFilter {
+    if (this.view) return this.view;
+    return (this.overview?.counts.installed ?? 0) > 0 ? "installed" : "all";
+  }
+
   // ----------------------------------------------------------------- render
 
   private render(): void {
     if (this.disposed || this.denied) return;
-    this.renderStatusChip();
+    this.renderChrome();
     this.renderSidebar();
     if (this.selectedId) this.renderDetail();
     else this.renderList();
   }
 
-  private renderStatusChip(): void {
-    clear(this.statusChip);
-    const catalog = this.overview?.catalog;
-    if (this.checking || catalog?.checking) {
-      this.statusChip.className = "pkg-status-chip is-checking";
-      this.statusChip.append(h("span", { class: "spinner pkg-spinner" }), "Checking the catalog…");
-      this.checkButton.disabled = true;
-      return;
-    }
-    this.checkButton.disabled = false;
-    if (!catalog) return;
-    const stale = catalog.stale;
-    this.statusChip.className = `pkg-status-chip ${stale ? "is-stale" : "is-fresh"}`;
-    this.statusChip.append(
-      iconSvg(stale ? "warning" : "shield", 13),
-      catalog.sequence == null
-        ? "Catalog not loaded"
-        : `${stale ? "Stale · " : ""}checked ${catalog.checkedAt ? relativeTime(catalog.checkedAt) : "never"}`,
-    );
-    this.statusChip.title = catalogTooltip(catalog);
+  /** Toolbar state: back only on a package page, refresh spins while checking. */
+  private renderChrome(): void {
+    this.backButton.disabled = !this.selectedId;
+    const checking = this.checking || Boolean(this.overview?.catalog.checking);
+    this.checkButton.disabled = checking;
+    this.checkButton.classList.toggle("is-checking", checking);
+    this.checkButton.title = checking ? "Checking the catalog…" : "Check for updates";
+    const status = this.sidebar.querySelector(".pkg-catalog-status");
+    if (status) status.replaceWith(this.catalogStatus());
   }
 
   private renderSidebar(): void {
     clear(this.sidebar);
-    const counts = this.overview?.counts ?? {};
+    const updates = this.overview?.counts.updates ?? 0;
     const list = h("div", { class: "pkg-nav" });
     for (const v of VIEWS) {
-      const active = !this.selectedId && this.view === v.id;
-      const count = counts[v.countKey] ?? 0;
-      const ready = v.id === "updates" ? counts.updatesReady ?? 0 : 0;
+      const active = !this.selectedId && this.currentView() === v.id;
+      const count = v.id === "updates" && updates > 0 ? updates : 0;
       const button = h(
         "button",
         { class: `nav-item pkg-nav-item${active ? " is-active" : ""}`, type: "button", ariaPressed: active },
         iconSvg(v.icon, 16),
         h("span", { class: "pkg-nav-label" }, v.label),
-        h("span", { class: `pkg-count${ready > 0 ? " is-ready" : ""}`, title: ready > 0 ? `${ready} ready to install` : "" }, String(count)),
+        count > 0 ? h("span", { class: "pkg-count", title: `${count} with a newer version` }, String(count)) : null,
       );
       button.addEventListener("click", () => {
         this.view = v.id;
@@ -380,84 +398,49 @@ class PackageCenterApp {
       });
       list.appendChild(button);
     }
-    this.sidebar.appendChild(list);
-
-    const catalog = this.overview?.catalog;
-    if (catalog) this.sidebar.appendChild(this.catalogCard(catalog));
-    const host = this.overview?.host;
-    if (host) {
-      this.sidebar.appendChild(
-        h(
-          "div",
-          { class: "pkg-side-card" },
-          h("div", { class: "pkg-side-title" }, "This server"),
-          h("div", { class: "pkg-side-line mono" }, host.target),
-          h(
-            "div",
-            { class: "pkg-side-line" },
-            host.libc === "glibc" ? `glibc ${host.glibcVersion ?? "?"}` : host.libc,
-          ),
-          h("div", { class: "pkg-side-line" }, `RAST ${host.rastVersion}`),
-          this.shellLine(),
-        ),
-      );
-    }
+    this.sidebar.append(list, this.catalogStatus());
   }
 
-  /** Whether terminals pick up the Package Center defaults. */
-  private shellLine(): HTMLElement | null {
-    const shell = this.overview?.shell;
-    if (!shell) return null;
-    if (shell.active) {
-      return h("div", { class: "pkg-side-line", title: `${shell.profile} puts ${shell.binDir} first on PATH` }, "Terminal PATH: on");
+  /** One line at the bottom of the sidebar; Settings has the details. */
+  private catalogStatus(): HTMLElement {
+    const c = this.overview?.catalog;
+    let kind = "ok";
+    let title = "Catalog verified";
+    let detail = "";
+    if (this.checking || c?.checking) {
+      kind = "checking";
+      title = "Checking for updates…";
+    } else if (!c) {
+      kind = "checking";
+      title = "Loading…";
+    } else if (c.sequence == null) {
+      kind = "error";
+      title = "Catalog not verified";
+      detail = c.lastError ? "The last check failed" : "Not checked yet";
+    } else if (c.expired) {
+      kind = "error";
+      title = "Catalog expired";
+      detail = c.checkedAt ? `Checked ${relativeTime(c.checkedAt)}` : "";
+    } else {
+      if (c.stale || c.lastError) {
+        kind = "warn";
+        title = c.lastError ? "Last check failed" : "Catalog not checked recently";
+      }
+      detail = c.checkedAt ? `Checked ${relativeTime(c.checkedAt)}` : "";
     }
-    if (!shell.enabled) {
-      return h("div", { class: "pkg-side-line faint", title: "packages_shell_path = false" }, "Terminal PATH: off");
-    }
-    return h(
-      "div",
-      { class: "pkg-side-line pkg-side-warn", title: `Writes ${shell.profile}` },
-      "Terminal PATH not set up. Run ",
-      h("code", {}, shell.syncCommand),
+    const button = h(
+      "button",
+      { class: `pkg-catalog-status is-${kind}`, type: "button", title: c ? catalogTooltip(c) : "" },
+      kind === "checking" ? h("span", { class: "spinner pkg-spinner" }) : iconSvg(kind === "ok" ? "shield" : "warning", 15),
+      h("span", { class: "pkg-catalog-text" }, h("span", { class: "pkg-catalog-title" }, title), detail ? h("span", { class: "pkg-catalog-detail" }, detail) : null),
     );
-  }
-
-  private catalogCard(catalog: CatalogStatus): HTMLElement {
-    const badge = catalog.expired
-      ? h("span", { class: "badge error" }, "Expired")
-      : catalog.stale
-        ? h("span", { class: "badge warn" }, "Stale")
-        : h("span", { class: "badge ok" }, "Verified");
-    const card = h(
-      "div",
-      { class: "pkg-side-card" },
-      h("div", { class: "pkg-side-title" }, "Catalog", badge),
-      h("div", { class: "pkg-side-line" }, catalog.official ? "Official RAST catalog" : catalog.name || "Custom catalog"),
-      catalog.keyId
-        ? h("div", { class: "pkg-side-line", title: catalog.officialKey ? "Official signing key" : "Administrator-configured key" }, `Signed · ${catalog.keyId}`)
-        : null,
-      catalog.sequence != null ? h("div", { class: "pkg-side-line" }, `Sequence ${catalog.sequence}`) : null,
-      h(
-        "div",
-        { class: "pkg-side-line" },
-        catalog.checkedAt ? `Last verified ${relativeTime(catalog.checkedAt)}` : "Never verified",
-      ),
-      catalog.intervalMinutes > 0
-        ? h(
-            "div",
-            { class: "pkg-side-line faint" },
-            catalog.nextCheckAt ? `Next automatic check ${formatDateTime(catalog.nextCheckAt)}` : `Checks every ${formatInterval(catalog.intervalMinutes)}`,
-          )
-        : h("div", { class: "pkg-side-line faint" }, "Automatic checks are off"),
-    );
-    if (catalog.lastError) {
-      card.appendChild(h("div", { class: "pkg-side-error", role: "alert" }, `Last check failed: ${catalog.lastError}`));
-    }
-    return card;
+    button.addEventListener("click", () => this.openSettings());
+    return button;
   }
 
   private renderList(): void {
     clear(this.main);
+    this.grid = null;
     if (this.loadError && !this.overview) {
       renderLoadFailure(this.main, this.loadError, { title: "Package Center could not load", retry: () => void this.reload() });
       return;
@@ -467,143 +450,136 @@ class PackageCenterApp {
       return;
     }
     const content = h("div", { class: "app-content pkg-content" });
-    if (this.readOnly) {
-      content.appendChild(banner("info", "Read-only access", "You can review packages, versions and paths. Installing and changing versions requires an administrator."));
-    }
-    const catalog = this.overview.catalog;
-    if (catalog.sequence == null) {
-      content.appendChild(
-        banner(
-          catalog.lastError ? "error" : "info",
-          catalog.lastError ? "The package catalog could not be verified" : "The package catalog has not been loaded yet",
-          catalog.lastError ?? "Use Check updates to fetch and verify the signed catalog.",
-        ),
-      );
-    } else if (catalog.expired) {
-      content.appendChild(banner("warning", "The cached catalog has expired", "Installs still use the last verified catalog. Check for updates to refresh it."));
-    }
-
-    const search = h("input", {
-      class: "input input-search pkg-search",
-      type: "search",
-      placeholder: "Search packages",
-      value: this.query,
-      ariaLabel: "Search packages",
-    });
-    search.addEventListener("input", () => {
-      this.query = search.value;
-      this.paintCards(grid);
-    });
-    const title = VIEWS.find((v) => v.id === this.view)?.label ?? "Packages";
-    content.appendChild(h("div", { class: "pkg-list-head" }, h("h2", { class: "pkg-heading" }, title), search));
-    const grid = h("div", { class: "pkg-grid" });
-    content.appendChild(grid);
-    this.paintCards(grid);
+    for (const note of this.listNotices()) content.appendChild(note);
+    const title = VIEWS.find((v) => v.id === this.currentView())?.label ?? "Packages";
+    content.appendChild(h("h2", { class: "pkg-heading" }, title));
+    this.grid = h("div", { class: "pkg-grid" });
+    content.appendChild(this.grid);
+    this.paintGrid();
     this.main.appendChild(content);
   }
 
-  private paintCards(grid: HTMLElement): void {
+  /** Only what needs attention: access, and a catalog that cannot offer anything. */
+  private listNotices(): HTMLElement[] {
+    const notes: HTMLElement[] = [];
+    const overview = this.overview;
+    if (!overview) return notes;
+    if (this.readOnly) {
+      notes.push(banner("info", "Read-only access", "Installing and changing versions requires an administrator."));
+    }
+    const catalog = overview.catalog;
+    const checkAction = () => {
+      if (this.readOnly) return undefined;
+      const btn = h("button", { class: "btn btn-sm btn-secondary banner-action", type: "button" }, "Check for updates");
+      btn.addEventListener("click", () => void this.checkNow());
+      return btn;
+    };
+    if (catalog.sequence == null) {
+      notes.push(
+        banner(
+          catalog.lastError ? "error" : "info",
+          catalog.lastError ? "The package catalog could not be verified" : "The package catalog has not been loaded yet",
+          catalog.lastError ?? "Check for updates to fetch and verify it.",
+          checkAction(),
+        ),
+      );
+    } else if (catalog.expired) {
+      notes.push(banner("warning", "The catalog has expired", "Check for updates to refresh it.", checkAction()));
+    } else if (overview.packages.some((p) => p.official) && overview.packages.every((p) => !p.official || p.versions.length === 0)) {
+      notes.push(
+        banner(
+          "warning",
+          "No versions to install yet",
+          `This server has catalog sequence ${catalog.sequence}, which lists no versions. Check for updates to load the newest catalog.`,
+          checkAction(),
+        ),
+      );
+    }
+    return notes;
+  }
+
+  private paintGrid(): void {
+    const grid = this.grid;
+    if (!grid) return;
     clear(grid);
-    const packages = filterPackages(this.overview?.packages ?? [], this.view, this.query);
+    const view = this.currentView();
+    const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
     if (packages.length === 0) {
-      const empty =
-        this.view === "installed"
-          ? emptyBlock("Nothing installed yet", "Install a runtime from All Packages or import one from GitHub.")
-          : this.view === "updates"
-            ? emptyBlock("Everything is up to date", "Installed packages have no newer verified version.")
-            : emptyBlock(this.query ? "No matching packages" : "No packages", this.query ? "Try another search." : "Check for updates to load the catalog.");
-      grid.appendChild(empty);
+      grid.appendChild(
+        this.query
+          ? emptyBlock("No matching packages", "Try another search.")
+          : view === "installed"
+            ? emptyBlock("Nothing installed yet", "Install a runtime from All Packages.")
+            : view === "updates"
+              ? emptyBlock("Everything is up to date")
+              : emptyBlock("No packages", "Check for updates to load the catalog."),
+      );
       return;
     }
-    for (const p of packages) grid.appendChild(this.card(p));
+    for (const p of packages) grid.appendChild(this.tile(p));
   }
 
-  private card(p: PackageView): HTMLElement {
-    const def = p.installed.find((v) => v.isDefault);
-    const others = p.installed.filter((v) => !v.isDefault).map((v) => v.version);
-    const update = updateSummary(p);
-    const next = suggestedVersion(p);
-    const actions = h("div", { class: "pkg-card-actions" });
-    if (!this.readOnly) {
-      const first = p.updates[0];
-      if (first) {
-        actions.appendChild(this.actionButton(`Update to ${first.to}`, "primary", () => this.installVersion(p, first.to, "update", first.replacesDefault)));
-      } else if (p.installed.length === 0 && !p.system && next && p.official) {
-        actions.appendChild(this.actionButton(`Install ${next.version}`, "primary", () => this.installVersion(p, next.version, "install", true)));
-      }
-    }
-    const details = this.actionButton("Details", "ghost", () => this.openDetail(p.id));
-    actions.appendChild(details);
-
-    const sys = p.system;
-    const systemNote = sys ? h("span", { class: "muted", title: `${sys.path} · ${systemSourceLabel(sys)}` }, ` · system ${sys.version ?? "?"}`) : null;
-    const installedLine = def
-      ? h(
-          "div",
-          { class: "pkg-card-line" },
-          h("span", { class: "pkg-card-key" }, "Installed"),
-          h("strong", {}, def.version),
-          h("span", { class: "badge info pkg-mini-badge" }, "default"),
-          others.length ? h("span", { class: "muted" }, ` + ${others.join(", ")}`) : null,
-          systemNote,
-        )
-      : p.installed.length
-        ? h("div", { class: "pkg-card-line" }, h("span", { class: "pkg-card-key" }, "Installed"), p.installed.map((v) => v.version).join(", "), systemNote)
-        : sys
-          ? h(
-              "div",
-              { class: "pkg-card-line", title: `${sys.path} · ${systemSourceLabel(sys)}` },
-              h("span", { class: "pkg-card-key" }, "Installed"),
-              h("strong", {}, sys.version ?? "unknown version"),
-              h("span", { class: "badge pkg-mini-badge" }, "system"),
-              h("span", { class: "muted pkg-card-source" }, `${systemSourceLabel(sys)} · ${sys.path}`),
-            )
-          : h("div", { class: "pkg-card-line muted" }, h("span", { class: "pkg-card-key" }, "Installed"), "—");
-    const latestLine = h(
-      "div",
-      { class: "pkg-card-line" },
-      h("span", { class: "pkg-card-key" }, "Latest"),
-      p.latest ? h("span", {}, p.latest.version) : h("span", { class: "muted" }, "—"),
-    );
-    const card = h(
-      "article",
-      { class: "pkg-card", dataset: { packageId: p.id } },
-      h(
-        "div",
-        { class: "pkg-card-head" },
-        this.monogramEl(p),
-        h(
-          "div",
-          { class: "pkg-card-title" },
-          h("div", { class: "pkg-name" }, p.name),
-          h("div", { class: "pkg-publisher" }, p.publisher.name, " · ", p.packageType),
-        ),
-        sourceBadge(p),
-      ),
-      h("p", { class: "pkg-desc" }, p.description || "No description."),
-      installedLine,
-      latestLine,
-      update.kind !== "none"
-        ? h("div", { class: `pkg-update pkg-update-${update.kind}` }, iconSvg(update.kind === "ready" ? "download" : "clock", 13), update.text)
-        : null,
-      p.unavailableReason && p.installed.length === 0
-        ? h("div", { class: "pkg-unavailable", title: p.unavailableReason }, iconSvg("info", 13), p.unavailableReason)
-        : null,
-      update.kind === "none" && (p.installed.length > 0 || sys) && p.latest
-        ? h("div", { class: "pkg-update pkg-update-current" }, iconSvg("check", 13), upToDateText(p))
-        : null,
-      this.progressEl(p),
-      actions,
-    );
-    card.addEventListener("dblclick", (event) => {
-      if ((event.target as HTMLElement).closest("button")) return;
+  private tile(p: PackageView): HTMLElement {
+    const state = tileState(p);
+    const open = h("button", { class: "pkg-tile-name", type: "button", title: `Open ${p.name}` }, p.name);
+    open.addEventListener("click", (event) => {
+      event.stopPropagation();
       this.openDetail(p.id);
     });
-    return card;
+    const tile = h(
+      "article",
+      { class: `pkg-tile is-${state.action}`, dataset: { packageId: p.id } },
+      this.iconEl(p, "tile"),
+      h(
+        "div",
+        { class: "pkg-tile-body" },
+        open,
+        h("div", { class: "pkg-tile-sub", title: tileTitle(p, state) }, state.subtitle),
+        h("div", { class: "pkg-tile-foot" }, this.tileAction(p, state), this.progressEl(p)),
+      ),
+    );
+    tile.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button, a")) return;
+      this.openDetail(p.id);
+    });
+    return tile;
   }
 
-  private monogramEl(p: PackageView): HTMLElement {
-    const el = h("div", { class: "pkg-monogram", ariaHidden: true }, monogram(p.name, p.id));
+  private tileAction(p: PackageView, state: TileState): HTMLElement {
+    let el: HTMLElement;
+    const version = state.version;
+    if ((state.action === "update" || state.action === "install") && version && !this.readOnly) {
+      const update = state.action === "update";
+      el = this.pill(update ? "Update" : "Install", update ? "is-strong" : "is-accent", `${update ? "Update" : "Install"} ${p.name} ${version}`, () =>
+        this.installVersion(p, version, update ? "update" : "install", state.makeDefault ?? true),
+      );
+    } else {
+      const label =
+        state.action === "update" ? "Update available" : state.action === "installed" ? "Installed" : state.action === "unavailable" ? "Unavailable" : "Not installed";
+      el = h("span", { class: "pkg-pill is-static", title: state.action === "unavailable" ? p.unavailableReason ?? "" : "" }, label);
+    }
+    el.dataset.actionFor = p.id;
+    if (this.liveJobFor(p)) el.classList.add("hidden");
+    return el;
+  }
+
+  private pill(label: string, variant: string, title: string, run: () => Promise<void> | void): HTMLButtonElement {
+    const btn = h("button", { class: `pkg-pill ${variant}`, type: "button", title, ariaLabel: title }, label);
+    btn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      btn.disabled = true;
+      try {
+        await run();
+      } finally {
+        if (btn.isConnected) btn.disabled = false;
+      }
+    });
+    return btn;
+  }
+
+  private iconEl(p: PackageView, size: "tile" | "hero"): HTMLElement {
+    const text = monogram(p.name, p.id);
+    const el = h("div", { class: `pkg-icon pkg-icon-${size}`, ariaHidden: true, dataset: { len: String(text.length) } }, text);
     el.style.setProperty("--pkg-color", monogramColor(p.id));
     return el;
   }
@@ -614,19 +590,13 @@ class PackageCenterApp {
       "div",
       { class: `pkg-progress${job ? "" : " hidden"}`, role: "status", ariaLive: "polite", dataset: { progressFor: p.id } },
       h("div", { class: "progress" }, h("div", { class: "progress-bar" })),
-      h("div", { class: "pkg-progress-label small" }, job?.message ?? ""),
+      h("div", { class: "pkg-progress-label" }, ""),
     );
-    if (job) {
-      const fill = host.querySelector<HTMLElement>(".progress-bar");
-      if (fill) {
-        fill.style.width = job.total > 0 ? `${(jobFraction(job.progress, job.total) * 100).toFixed(1)}%` : "100%";
-        fill.classList.toggle("is-indeterminate", job.total <= 0);
-      }
-    }
+    if (job) paintBar(host, job);
     return host;
   }
 
-  private actionButton(label: string, variant: "primary" | "ghost" | "danger", run: () => Promise<void> | void): HTMLButtonElement {
+  private actionButton(label: string, variant: "primary" | "ghost" | "danger" | "secondary", run: () => Promise<void> | void): HTMLButtonElement {
     const btn = h("button", { class: `btn btn-sm btn-${variant}`, type: "button" }, label);
     btn.addEventListener("click", async (event) => {
       event.stopPropagation();
@@ -644,23 +614,28 @@ class PackageCenterApp {
     this.selectedId = id;
     this.detail = null;
     this.detailError = null;
+    this.openSections.clear();
     this.render();
+    this.main.scrollTop = 0;
     void this.loadDetail(id).then(() => {
       if (this.selectedId === id) this.render();
     });
   }
 
+  private closeDetail(): void {
+    if (!this.selectedId) return;
+    this.selectedId = null;
+    this.detail = null;
+    this.render();
+  }
+
   // ---------------------------------------------------------------- details
 
   private renderDetail(): void {
+    const scroll = this.main.scrollTop;
     clear(this.main);
-    const back = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, "← All packages");
-    back.addEventListener("click", () => {
-      this.selectedId = null;
-      this.detail = null;
-      this.render();
-    });
-    const content = h("div", { class: "app-content pkg-content pkg-detail" }, h("div", { class: "pkg-detail-nav" }, back));
+    this.grid = null;
+    const content = h("div", { class: "app-content pkg-content pkg-detail" });
     this.main.appendChild(content);
     if (this.detailError) {
       const host = h("div", {});
@@ -675,338 +650,304 @@ class PackageCenterApp {
     }
     const p = detail.package;
     const sections: Array<HTMLElement | null> = [
-      this.detailHeader(p),
-      this.progressEl(p),
-      this.updateSection(p),
-      this.systemSection(p),
-      this.installedSection(p),
-      this.versionPicker(p),
+      this.hero(p),
+      p.description ? h("p", { class: "pkg-about" }, p.description) : null,
+      this.infoSection(p),
+      this.versionsSection(p),
+      this.technicalSection(p),
       this.consumersSection(p),
       this.historySection(detail.jobs),
     ];
     for (const section of sections) if (section) content.appendChild(section);
+    this.main.scrollTop = scroll;
   }
 
-  private detailHeader(p: PackageView): HTMLElement {
-    const sourceLink = p.official
-      ? h("span", {}, "Official RAST catalog")
-      : h("a", { href: `https://github.com/${p.sourceRepo ?? ""}`, target: "_blank", rel: "noopener noreferrer" }, p.sourceRepo ?? "GitHub");
+  private hero(p: PackageView): HTMLElement {
+    const status = statusLine(p);
+    const pending = updateSummary(p);
+    const publisher = p.official
+      ? h("div", { class: "pkg-hero-publisher", title: p.verification.detail }, iconSvg("shield", 13), `${p.publisher.name} · Official`)
+      : h("div", { class: "pkg-hero-publisher", title: p.verification.detail }, iconSvg("github", 13), `${p.sourceRepo ?? p.publisher.name} · Third-party`);
     return h(
       "section",
-      { class: "pkg-detail-head" },
+      { class: "pkg-hero" },
+      this.iconEl(p, "hero"),
       h(
         "div",
-        { class: "pkg-detail-title" },
-        this.monogramEl(p),
-        h(
-          "div",
-          {},
-          h("h2", { class: "pkg-heading" }, p.name),
-          h("div", { class: "pkg-publisher" }, `${p.publisher.name} (${p.publisher.id}) · ${p.packageType}`),
-        ),
-        sourceBadge(p),
-      ),
-      p.description ? h("p", { class: "pkg-desc pkg-desc-full" }, p.description) : null,
-      h(
-        "dl",
-        { class: "kv pkg-kv" },
-        h("dt", {}, "Source"),
-        h("dd", {}, sourceLink),
-        h("dt", {}, "Verification"),
-        h("dd", {}, h("div", {}, h("strong", {}, p.verification.label)), h("div", { class: "small muted" }, p.verification.detail)),
-        p.homepage ? h("dt", {}, "Homepage") : null,
-        p.homepage ? h("dd", {}, h("a", { href: p.homepage, target: "_blank", rel: "noopener noreferrer" }, p.homepage)) : null,
-        p.license ? h("dt", {}, "License") : null,
-        p.license ? h("dd", {}, p.license) : null,
-        h("dt", {}, "RAST default"),
-        h(
-          "dd",
-          {},
-          p.defaultVersion
-            ? h("div", { class: "pkg-paths" }, h("div", {}, h("strong", {}, p.defaultVersion), h("span", { class: "muted" }, " · stable paths follow the default")), ...p.defaultExecutables.map((e) => pathRow(e, this.ctx)))
-            : h("span", { class: "muted" }, p.system ? "None: the system version is used" : "None selected"),
-        ),
-        h("dt", {}, "Terminal"),
-        h("dd", {}, this.terminalInfo(p)),
+        { class: "pkg-hero-body" },
+        publisher,
+        h("h2", { class: "pkg-hero-name" }, p.name),
+        h("div", { class: `pkg-hero-status is-${status.kind}` }, status.text),
+        pending.kind === "detected" ? h("div", { class: "pkg-hero-note" }, iconSvg("clock", 13), pending.text) : null,
+        p.unavailableReason && p.installed.length === 0 ? h("div", { class: "pkg-hero-note is-warn" }, p.unavailableReason) : null,
+        this.heroActions(p),
+        this.progressEl(p),
       ),
     );
   }
 
-  private terminalInfo(p: PackageView): HTMLElement {
+  /** One main button (Update, Install or Up to date) and a menu for the rest. */
+  private heroActions(p: PackageView): HTMLElement | null {
+    if (this.readOnly) return null;
+    const state = tileState(p);
+    const version = state.version;
+    let primary: HTMLButtonElement;
+    if ((state.action === "update" || state.action === "install") && version) {
+      const update = state.action === "update";
+      primary = this.actionButton(update ? `Update to ${version}` : `Install ${version}`, "primary", () =>
+        this.installVersion(p, version, update ? "update" : "install", state.makeDefault ?? true),
+      );
+    } else {
+      primary = h("button", { class: "btn btn-sm btn-secondary", type: "button", disabled: true }, state.action === "installed" ? "Up to date" : "Unavailable");
+    }
+    const items = this.menuItems(p);
+    const group = h("div", { class: "pkg-split-btn", dataset: { actionFor: p.id } }, primary);
+    if (items.length) {
+      const caret = h(
+        "button",
+        { class: `btn btn-sm ${primary.disabled ? "btn-secondary" : "btn-primary"} btn-icon pkg-caret`, type: "button", title: "More actions", ariaLabel: "More actions" },
+        iconSvg("chevronDown", 14),
+      );
+      caret.addEventListener("click", () => {
+        const rect = caret.getBoundingClientRect();
+        contextMenu(rect.left, rect.bottom + 4, items, { ariaLabel: `${p.name} actions` });
+      });
+      group.appendChild(caret);
+    }
+    if (this.liveJobFor(p)) group.classList.add("hidden");
+    return h("div", { class: "pkg-hero-actions" }, group);
+  }
+
+  private menuItems(p: PackageView): ContextMenuEntry[] {
+    const items: ContextMenuEntry[] = [];
+    if (p.official && p.versions.length > 0) {
+      items.push({ label: "Install another version…", icon: "download", onClick: () => this.openVersionDialog(p) });
+    }
+    if (!p.official) {
+      items.push({ label: "Install a newer release…", icon: "github", onClick: () => this.openImport() });
+    }
+    if (p.system && p.defaultVersion && p.system.onPath) {
+      items.push({ label: `Use the system version (${p.system.version ?? p.system.command})`, icon: "restore", onClick: () => void this.useSystem(p) });
+    }
+    if (p.homepage) {
+      const url = p.homepage;
+      if (items.length) items.push("separator");
+      items.push({ label: `Open ${linkLabel(url)}`, icon: "external", onClick: () => window.open(url, "_blank", "noopener,noreferrer") });
+    }
+    return items;
+  }
+
+  private infoSection(p: PackageView): HTMLElement {
+    const items: Array<[string, Node | string]> = [];
+    items.push(["Developer", p.publisher.url ? externalLink(p.publisher.url, p.publisher.name) : p.publisher.name]);
+    items.push(["Installed version", installedText(p)]);
+    items.push(["Newest version", p.latest?.version ?? "—"]);
+    items.push(["In the terminal", this.terminalText(p)]);
+    items.push(["Source", p.official ? "Official RAST catalog" : externalLink(`https://github.com/${p.sourceRepo ?? ""}`, p.sourceRepo ?? "GitHub")]);
+    items.push(["Category", p.packageType === "runtime" ? "Runtime" : p.packageType]);
+    if (p.license) items.push(["License", p.license]);
+    if (p.homepage) items.push(["Homepage", externalLink(p.homepage, linkLabel(p.homepage))]);
+    return h(
+      "section",
+      { class: "pkg-section" },
+      h("h3", { class: "pkg-section-title" }, "Other information"),
+      h("dl", { class: "pkg-info" }, ...items.map(([k, v]) => h("div", { class: "pkg-info-item" }, h("dt", {}, k), h("dd", {}, v)))),
+    );
+  }
+
+  private terminalText(p: PackageView): HTMLElement {
     const t = p.terminal;
     const shell = this.overview?.shell;
-    const notOnPath =
-      p.defaultVersion && shell && !shell.active
-        ? h(
-            "div",
-            { class: "small muted" },
-            shell.enabled
-              ? `Package Center versions are not on the terminal PATH yet. Run ${shell.syncCommand}.`
-              : "Package Center versions are not on the terminal PATH (packages_shell_path = false).",
-          )
-        : null;
-    if (!t) {
-      return h("div", {}, h("span", { class: "muted" }, "Not available in a terminal"), notOnPath);
+    const offPath = p.defaultVersion && shell && !shell.active;
+    const note = offPath
+      ? h(
+          "span",
+          { class: "pkg-info-sub", title: shell.enabled ? `Run ${shell.syncCommand}` : "packages_shell_path = false" },
+          "Package Center versions are not on the terminal PATH",
+        )
+      : null;
+    if (!t) return h("span", {}, "—", note);
+    return h(
+      "span",
+      { title: t.path },
+      h("code", {}, t.command),
+      ` runs ${t.version ?? "an unknown version"}`,
+      t.source === "system" ? " (system)" : "",
+      note,
+    );
+  }
+
+  private versionsSection(p: PackageView): HTMLElement {
+    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "Versions on this server"));
+    const rows: HTMLElement[] = [];
+    if (p.system) rows.push(this.systemRow(p));
+    for (const v of p.installed) rows.push(this.installedRow(p, v));
+    if (rows.length) section.appendChild(h("div", { class: "pkg-vlist" }, ...rows));
+    else section.appendChild(h("p", { class: "pkg-empty-line" }, "No version is installed."));
+    if (!this.readOnly && p.official && p.versions.length > 0) {
+      const another = h("button", { class: "btn btn-ghost btn-sm pkg-another", type: "button" }, iconSvg("plus", 14), "Install another version");
+      another.addEventListener("click", () => this.openVersionDialog(p));
+      section.appendChild(another);
+    }
+    return section;
+  }
+
+  private systemRow(p: PackageView): HTMLElement {
+    const s = p.system!;
+    // The system copy is the default only while Package Center has none.
+    const isDefault = !p.defaultVersion;
+    const actions = h("div", { class: "pkg-row-actions" });
+    if (!this.readOnly && p.defaultVersion && s.onPath) {
+      const use = this.actionButton("Make default", "ghost", () => this.useSystem(p));
+      use.title = "Terminals run the system version again";
+      actions.appendChild(use);
     }
     return h(
       "div",
-      {},
+      { class: "pkg-vrow" },
+      h("span", { class: "pkg-vrow-version" }, s.version ?? "Unknown"),
       h(
-        "div",
-        {},
-        h("code", {}, t.command),
-        " runs ",
-        h("strong", {}, t.version ?? "an unknown version"),
-        h("span", { class: "muted" }, t.source === "package-center" ? " · Package Center default" : " · system"),
+        "span",
+        { class: "pkg-vrow-info", title: s.path },
+        h("span", { class: "badge" }, "System"),
+        isDefault ? h("span", { class: "badge info" }, "Default") : null,
+        h("span", { class: "pkg-vrow-meta" }, systemSourceLabel(s)),
       ),
-      h("div", { class: "small muted mono pkg-break" }, t.path),
-      notOnPath,
+      actions,
     );
-  }
-
-  private systemSection(p: PackageView): HTMLElement | null {
-    const s = p.system;
-    if (!s) return null;
-    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "On this server"));
-    const actions = h("div", { class: "pkg-row-actions" });
-    if (!this.readOnly && p.defaultVersion && s.onPath) {
-      actions.appendChild(this.actionButton("Use the system version", "ghost", () => this.useSystem(p)));
-    }
-    const inTerminal = p.terminal?.source === "system";
-    section.appendChild(
-      h(
-        "div",
-        { class: `pkg-installed-row${inTerminal ? " is-default" : ""}` },
-        h(
-          "div",
-          { class: "pkg-installed-head" },
-          h("strong", { class: "pkg-version" }, s.version ?? "Unknown version"),
-          h(
-            "span",
-            { class: "pkg-badges" },
-            h("span", { class: "badge" }, "System"),
-            inTerminal ? h("span", { class: "badge info" }, "Used by terminals") : null,
-          ),
-          h("div", { class: "grow" }),
-          actions,
-        ),
-        h(
-          "div",
-          { class: "pkg-paths" },
-          pathRow({ name: s.command, path: s.path }, this.ctx),
-          s.realPath !== s.path ? h("div", { class: "pkg-path-root mono small", title: s.realPath }, `→ ${s.realPath}`) : null,
-        ),
-        h(
-          "div",
-          { class: "pkg-meta small muted" },
-          `${systemSourceLabel(s)} · `,
-          s.version ? `version read by running ${s.versionCommand}` : `the version could not be read (${s.versionCommand})`,
-          s.onPath ? "" : " · not on the system PATH",
-          s.detectedAt ? ` · checked ${relativeTime(s.detectedAt)}` : "",
-        ),
-        h("pre", { class: "code pkg-check-output" }, s.output),
-        h(
-          "p",
-          { class: "small muted" },
-          "Installed outside Package Center, so RAST never changes or removes it. An update installs the new version next to it; services that use this one keep using it.",
-        ),
-      ),
-    );
-    return section;
-  }
-
-  private updateSection(p: PackageView): HTMLElement | null {
-    if (p.updates.length === 0 && p.detected.length === 0 && !p.unavailableReason) return null;
-    const section = h("section", { class: "pkg-section" });
-    for (const u of p.updates) {
-      const keeps = u.from;
-      const sys = p.system;
-      const detail = u.fromSystem && sys
-        ? `Installs ${u.to} from the verified catalog next to the system's ${keeps} (${sys.path}, ${systemSourceLabel(sys)}). ${
-            u.replacesDefault
-              ? `After it passes its checks, it becomes the default and terminals run ${u.to}.`
-              : "The RAST default does not change."
-          } The system version is not modified: services that use it keep it, and Use the system version switches back.`
-        : u.replacesDefault
-          ? `Installs ${u.to} next to ${keeps}. After it passes its checks, ${u.to} becomes the RAST default; ${keeps} stays installed so you can switch back.`
-          : `Installs ${u.to} next to ${keeps}. The RAST default does not change; ${keeps} stays installed.`;
-      const action = this.readOnly
-        ? undefined
-        : this.actionButton(`Install ${u.to}`, "primary", () => this.installVersion(p, u.to, "update", u.replacesDefault));
-      section.appendChild(banner("success", `Update ready to install: ${u.from}${u.fromSystem ? " (system)" : ""} → ${u.to}`, detail, action));
-    }
-    for (const d of p.detected) {
-      const link = d.releaseUrl ? h("a", { href: d.releaseUrl, target: "_blank", rel: "noopener noreferrer", class: "banner-action" }, "View release") : undefined;
-      section.appendChild(
-        banner(
-          d.state === "failed" ? "warning" : "info",
-          d.source === "github" ? `New release ${d.version} published` : `New upstream version detected: ${d.version} (${stateLabel(d.state)})`,
-          `${d.detail}${d.detectedAt ? ` Detected ${d.detectedAt.replace("T", " ").replace("Z", " UTC")}.` : ""}`,
-          link,
-        ),
-      );
-    }
-    if (p.unavailableReason) section.appendChild(banner("warning", "Not available for this server", p.unavailableReason));
-    return section;
-  }
-
-  private installedSection(p: PackageView): HTMLElement {
-    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "Installed versions"));
-    if (p.installed.length === 0) {
-      section.appendChild(h("p", { class: "muted small" }, p.system ? "No version is installed by Package Center." : "No version is installed."));
-      return section;
-    }
-    const list = h("div", { class: "pkg-installed" });
-    for (const v of p.installed) list.appendChild(this.installedRow(p, v));
-    section.appendChild(list);
-    return section;
   }
 
   private installedRow(p: PackageView, v: InstalledView): HTMLElement {
     const actions = h("div", { class: "pkg-row-actions" });
     if (!this.readOnly) {
       if (!v.isDefault) actions.appendChild(this.actionButton("Make default", "ghost", () => this.makeDefault(p, v.version)));
-      actions.appendChild(this.actionButton("Remove", "danger", () => this.remove(p, v)));
+      // The server refuses pinned versions, and the default while others are installed.
+      if (v.pinnedBy.length === 0 && (!v.isDefault || p.installed.length === 1)) {
+        actions.appendChild(this.actionButton("Remove", "ghost", () => this.remove(p, v)));
+      }
     }
-    const badges = h(
-      "span",
-      { class: "pkg-badges" },
-      v.isDefault ? h("span", { class: "badge info" }, "RAST default") : null,
-      v.status !== "ok" ? h("span", { class: "badge error", title: "The files were removed outside RAST" }, "Files missing") : null,
-      v.pinnedBy.length ? h("span", { class: "badge warn", title: `Pinned by ${v.pinnedBy.join(", ")}` }, `Pinned by ${v.pinnedBy.length}`) : null,
-    );
-    const bundled = v.bundled.map((b) => `${b.name} ${b.version}`).join(", ");
     return h(
       "div",
-      { class: `pkg-installed-row${v.isDefault ? " is-default" : ""}` },
+      { class: "pkg-vrow" },
+      h("span", { class: "pkg-vrow-version" }, v.version, v.revision > 1 ? h("span", { class: "pkg-vrow-meta" }, ` rev ${v.revision}`) : null),
       h(
-        "div",
-        { class: "pkg-installed-head" },
-        h("strong", { class: "pkg-version" }, v.version),
-        v.revision > 1 ? h("span", { class: "muted small" }, `rev ${v.revision}`) : null,
-        badges,
-        h("div", { class: "grow" }),
-        actions,
+        "span",
+        { class: "pkg-vrow-info", title: v.path },
+        v.isDefault ? h("span", { class: "badge info" }, "Default") : null,
+        v.status !== "ok" ? h("span", { class: "badge error", title: "The files were removed outside RAST" }, "Files missing") : null,
+        v.pinnedBy.length ? h("span", { class: "badge warn", title: `Pinned by ${v.pinnedBy.join(", ")}` }, "Pinned") : null,
+        h("span", { class: "pkg-vrow-meta", title: formatDateTime(v.installedAt) }, `${formatBytes(v.sizeBytes)} · installed ${relativeTime(v.installedAt)}`),
       ),
-      h("div", { class: "pkg-paths" }, h("div", { class: "pkg-path-root mono small", title: v.path }, v.path), ...v.executables.map((e) => pathRow(e, this.ctx))),
-      h(
-        "div",
-        { class: "pkg-meta small muted" },
-        `${v.target} · ${formatBytes(v.sizeBytes)} on disk · installed ${formatDateTime(v.installedAt)} by ${v.installedBy}`,
-        bundled ? ` · bundled ${bundled}` : "",
-        v.releaseTag ? ` · release ${v.releaseTag}` : "",
-      ),
-      v.checkOutput ? h("pre", { class: "code pkg-check-output" }, v.checkOutput) : null,
-      v.pinnedBy.length ? h("div", { class: "small muted" }, `Pinned by: ${v.pinnedBy.join(", ")}`) : null,
+      actions,
     );
   }
 
-  private versionPicker(p: PackageView): HTMLElement | null {
-    if (!p.official || p.versions.length === 0) {
-      if (!p.official) {
-        return h(
-          "section",
-          { class: "pkg-section" },
-          h("h3", { class: "pkg-section-title" }, "Versions"),
-          h("p", { class: "small muted" }, "Imported packages are installed release by release. Use Install from GitHub with a newer release link to add another version."),
-        );
-      }
-      return null;
-    }
-    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "Install a version"));
-    const select = h("select", { class: "select pkg-version-select", ariaLabel: "Version" });
-    const remembered = this.pickerVersion.get(p.id);
-    const fallback = suggestedVersion(p)?.version ?? p.versions[0]?.version ?? "";
-    const chosen = p.versions.some((v) => v.version === remembered) ? remembered! : fallback;
-    for (const group of groupByChannel(p.versions)) {
-      const og = document.createElement("optgroup");
-      og.label = group.label;
-      for (const v of group.versions) {
-        const option = h("option", { value: v.version, selected: v.version === chosen }, versionOptionLabel(v));
-        og.appendChild(option);
-      }
-      select.appendChild(og);
-    }
-    const info = h("div", { class: "pkg-version-info" });
-    const makeDefault = h("input", { type: "checkbox", class: "checkbox-input" });
-    const hasDefault = Boolean(p.defaultVersion);
-    makeDefault.checked = this.pickerDefault.get(p.id) ?? !hasDefault;
-    makeDefault.addEventListener("change", () => this.pickerDefault.set(p.id, makeDefault.checked));
-    const installBtn = this.actionButton("Install", "primary", () => {
-      const v = p.versions.find((x) => x.version === select.value);
-      if (!v) return;
-      // The server labels the job (install, update or reinstall) by what it does.
-      return this.installVersion(p, v.version, "install", makeDefault.checked);
-    });
-    const paint = () => {
-      this.pickerVersion.set(p.id, select.value);
-      const v = p.versions.find((x) => x.version === select.value);
-      clear(info);
-      if (!v) return;
-      info.appendChild(versionInfo(v));
-      const installed = v.installedRevision != null && v.installedRevision >= v.revision;
-      installBtn.disabled = !v.compatible || installed || this.readOnly || this.liveJobFor(p) !== null;
-      installBtn.textContent = installed ? "Installed" : v.installedRevision != null ? `Reinstall ${v.version} (rev ${v.revision})` : `Install ${v.version}`;
-    };
-    select.addEventListener("change", paint);
-    paint();
-    const controls = h(
-      "div",
-      { class: "pkg-picker-controls" },
-      select,
-      this.readOnly
-        ? null
-        : h(
-            "label",
-            { class: "check pkg-default-check" },
-            makeDefault,
-            h(
-              "span",
-              {},
-              hasDefault
-                ? `Make it the RAST default (now ${p.defaultVersion})`
-                : p.system
-                  ? `Make it the default (terminals now run the system ${p.system.version ?? p.system.command})`
-                  : "Make it the RAST default",
-            ),
-          ),
-      this.readOnly ? null : installBtn,
+  /** A folded section that stays open across live refreshes. */
+  private fold(key: string, title: string, count: number | null, ...body: Array<Node | null>): HTMLElement {
+    const el = h(
+      "details",
+      { class: "pkg-more" },
+      h("summary", {}, title, count != null ? h("span", { class: "pkg-summary-count" }, ` ${count}`) : null),
+      h("div", { class: "pkg-more-body" }, ...body),
     );
-    section.append(controls, info);
-    if (p.unsupported.length) {
-      section.appendChild(
-        h(
-          "details",
-          { class: "pkg-unsupported" },
-          h("summary", {}, `${p.unsupported.length} catalog version${p.unsupported.length === 1 ? "" : "s"} this RAST cannot use`),
-          h("ul", {}, ...p.unsupported.map((u) => h("li", {}, h("strong", {}, u.version), ` — ${u.reason}`))),
+    el.open = this.openSections.has(key);
+    el.addEventListener("toggle", () => {
+      if (el.open) this.openSections.add(key);
+      else this.openSections.delete(key);
+    });
+    return el;
+  }
+
+  private technicalSection(p: PackageView): HTMLElement {
+    const blocks: Array<HTMLElement | null> = [];
+    blocks.push(
+      techBlock("Verification", h("div", {}, h("strong", {}, p.verification.label)), h("div", { class: "small muted" }, p.verification.detail)),
+    );
+    if (p.defaultVersion && p.defaultExecutables.length) {
+      blocks.push(
+        techBlock(
+          `Stable paths (follow the default, ${p.defaultVersion})`,
+          h("div", { class: "pkg-paths" }, ...p.defaultExecutables.map((e) => pathRow(e, this.ctx))),
         ),
       );
     }
-    return section;
+    for (const v of p.installed) {
+      const bundled = v.bundled.map((b) => `${b.name} ${b.version}`).join(", ");
+      blocks.push(
+        techBlock(
+          `${p.name} ${v.version}`,
+          h("div", { class: "pkg-paths" }, h("div", { class: "pkg-path-root mono small", title: v.path }, v.path), ...v.executables.map((e) => pathRow(e, this.ctx))),
+          h(
+            "div",
+            { class: "pkg-meta small muted" },
+            `${v.target} · installed ${formatDateTime(v.installedAt)} by ${v.installedBy}`,
+            bundled ? ` · bundled ${bundled}` : "",
+            v.releaseTag ? ` · release ${v.releaseTag}` : "",
+            v.pinnedBy.length ? ` · pinned by ${v.pinnedBy.join(", ")}` : "",
+          ),
+          v.checkOutput ? h("pre", { class: "code pkg-check-output" }, v.checkOutput) : null,
+        ),
+      );
+    }
+    const s = p.system;
+    if (s) {
+      blocks.push(
+        techBlock(
+          `System ${p.name} ${s.version ?? ""}`.trim(),
+          h(
+            "div",
+            { class: "pkg-paths" },
+            pathRow({ name: s.command, path: s.path }, this.ctx),
+            s.realPath !== s.path ? h("div", { class: "pkg-path-root mono small", title: s.realPath }, `→ ${s.realPath}`) : null,
+          ),
+          h(
+            "div",
+            { class: "pkg-meta small muted" },
+            `${systemSourceLabel(s)} · `,
+            s.version ? `version read by running ${s.versionCommand}` : `the version could not be read (${s.versionCommand})`,
+            s.onPath ? "" : " · not on the system PATH",
+            s.detectedAt ? ` · checked ${relativeTime(s.detectedAt)}` : "",
+          ),
+          h("pre", { class: "code pkg-check-output" }, s.output),
+          h("p", { class: "small muted" }, "Installed outside Package Center: RAST never changes or removes it. Updates install next to it."),
+        ),
+      );
+    }
+    for (const d of p.detected) {
+      blocks.push(
+        techBlock(
+          d.source === "github" ? `New release ${d.version}` : `Upstream ${d.version} (${stateLabel(d.state)})`,
+          h("div", { class: "small muted" }, d.detail, d.detectedAt ? ` Detected ${d.detectedAt.replace("T", " ").replace("Z", " UTC")}.` : ""),
+          d.releaseUrl ? externalLink(d.releaseUrl, "View release") : null,
+        ),
+      );
+    }
+    if (p.unsupported.length) {
+      blocks.push(
+        techBlock(
+          `${p.unsupported.length} catalog version${p.unsupported.length === 1 ? "" : "s"} this RAST cannot use`,
+          h("ul", { class: "pkg-unsupported" }, ...p.unsupported.map((u) => h("li", {}, h("strong", {}, u.version), ` — ${u.reason}`))),
+        ),
+      );
+    }
+    return this.fold("technical", "Paths and verification", null, ...blocks);
   }
 
-  private consumersSection(p: PackageView): HTMLElement {
-    const section = h(
-      "section",
-      { class: "pkg-section" },
-      h("h3", { class: "pkg-section-title" }, "Consumers"),
-      h(
-        "p",
-        { class: "small muted" },
-        "Record what uses this runtime. A consumer that follows the default moves with it; a pinned consumer keeps its version and protects it from removal.",
-      ),
-    );
+  private consumersSection(p: PackageView): HTMLElement | null {
+    if (p.installed.length === 0 && p.consumers.length === 0) return null;
+    const body: Array<HTMLElement | null> = [
+      h("p", { class: "small muted" }, "Record what uses this runtime. A consumer that follows the default moves with it; a pinned one keeps its version and protects it from removal."),
+    ];
     if (p.consumers.length) {
       const list = h("div", { class: "pkg-consumers" });
       for (const c of p.consumers) list.appendChild(this.consumerRow(p, c));
-      section.appendChild(list);
+      body.push(list);
     }
     if (!this.readOnly && p.installed.length > 0) {
       const add = this.actionButton("Add consumer", "ghost", () => this.editConsumer(p, null));
-      section.appendChild(add);
+      body.push(h("div", {}, add));
     }
-    return section;
+    return this.fold("consumers", "Consumers", p.consumers.length, ...body);
   }
 
   private consumerRow(p: PackageView, c: ConsumerView): HTMLElement {
@@ -1036,11 +977,7 @@ class PackageCenterApp {
   }
 
   private historySection(jobs: JobHistory[]): HTMLElement {
-    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "Job history"));
-    if (jobs.length === 0) {
-      section.appendChild(h("p", { class: "small muted" }, "No install or update jobs yet."));
-      return section;
-    }
+    if (jobs.length === 0) return this.fold("history", "Activity", 0, h("p", { class: "small muted" }, "No install or update jobs yet."));
     const table = h(
       "table",
       { class: "table pkg-history" },
@@ -1062,8 +999,132 @@ class PackageCenterApp {
       );
     }
     table.appendChild(body);
-    section.appendChild(h("div", { class: "pkg-table-wrap" }, table));
-    return section;
+    return this.fold("history", "Activity", jobs.length, h("div", { class: "pkg-table-wrap" }, table));
+  }
+
+  // ---------------------------------------------------------------- dialogs
+
+  private openVersionDialog(p: PackageView): void {
+    if (p.versions.length === 0) return;
+    const select = h("select", { class: "select pkg-version-select", ariaLabel: "Version" });
+    const remembered = this.pickerVersion.get(p.id);
+    const fallback = suggestedVersion(p)?.version ?? p.versions[0]?.version ?? "";
+    const chosen = p.versions.some((v) => v.version === remembered) ? remembered! : fallback;
+    for (const group of groupByChannel(p.versions)) {
+      const og = document.createElement("optgroup");
+      og.label = group.label;
+      for (const v of group.versions) og.appendChild(h("option", { value: v.version, selected: v.version === chosen }, versionOptionLabel(v)));
+      select.appendChild(og);
+    }
+    const makeDefault = h("input", { type: "checkbox", class: "checkbox-input" });
+    makeDefault.checked = this.pickerDefault.get(p.id) ?? !p.defaultVersion;
+    makeDefault.addEventListener("change", () => this.pickerDefault.set(p.id, makeDefault.checked));
+    const info = h("div", { class: "pkg-version-info" });
+    const installBtn = h("button", { class: "btn btn-primary", type: "button" }, "Install");
+    let close: () => void = () => undefined;
+    installBtn.addEventListener("click", () => {
+      const v = p.versions.find((x) => x.version === select.value);
+      if (!v) return;
+      close();
+      // The server labels the job (install, update or reinstall) by what it does.
+      void this.installVersion(p, v.version, "install", makeDefault.checked);
+    });
+    const paint = () => {
+      this.pickerVersion.set(p.id, select.value);
+      const v = p.versions.find((x) => x.version === select.value);
+      clear(info);
+      if (!v) return;
+      info.appendChild(versionInfo(v));
+      const installed = v.installedRevision != null && v.installedRevision >= v.revision;
+      installBtn.disabled = !v.compatible || installed || this.liveJobFor(p) !== null;
+      installBtn.textContent = installed ? "Installed" : v.installedRevision != null ? `Reinstall ${v.version} (rev ${v.revision})` : `Install ${v.version}`;
+    };
+    select.addEventListener("change", paint);
+    paint();
+    const defaultLabel = p.defaultVersion
+      ? `Make it the default (now ${p.defaultVersion})`
+      : p.system
+        ? `Make it the default (terminals now run the system ${p.system.version ?? p.system.command})`
+        : "Make it the default";
+    const body = h(
+      "div",
+      { class: "col pkg-version-dialog" },
+      h("label", { class: "field" }, h("span", { class: "field-label" }, "Version"), select),
+      h("label", { class: "check pkg-default-check" }, makeDefault, h("span", {}, defaultLabel)),
+      h("div", { class: "pkg-dialog-actions" }, installBtn),
+      info,
+    );
+    close = modal({
+      title: `Install ${p.name}`,
+      body,
+      wide: true,
+      actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }],
+    });
+  }
+
+  private openSettings(): void {
+    const overview = this.overview;
+    if (!overview) return;
+    const c = overview.catalog;
+    const host = overview.host;
+    const shell = overview.shell;
+    const badge = c.sequence == null
+      ? h("span", { class: "badge error" }, "Not verified")
+      : c.expired
+        ? h("span", { class: "badge error" }, "Expired")
+        : c.stale
+          ? h("span", { class: "badge warn" }, "Not checked recently")
+          : h("span", { class: "badge ok" }, "Verified");
+    const catalogRows: Array<[string, Node | string]> = [
+      ["Source", c.official ? "Official RAST catalog" : c.name || c.url],
+      ["Signing key", c.keyId ? `${c.keyId}${c.officialKey ? " (official)" : ""}` : "—"],
+      ["Sequence", c.sequence != null ? `${c.sequence}${c.generatedAt ? ` · generated ${c.generatedAt.replace("T", " ").replace("Z", " UTC")}` : ""}` : "—"],
+      ["Last verified", c.checkedAt ? `${relativeTime(c.checkedAt)} (${formatDateTime(c.checkedAt)})` : "Never"],
+      [
+        "Automatic checks",
+        c.intervalMinutes > 0
+          ? `Every ${formatInterval(c.intervalMinutes)}${c.nextCheckAt ? ` · next ${formatDateTime(c.nextCheckAt)}` : ""}`
+          : "Off",
+      ],
+    ];
+    if (c.lastError) catalogRows.push(["Last error", h("span", { class: "pkg-error-text" }, c.lastError)]);
+    let close: () => void = () => undefined;
+    const check = h("button", { class: "btn btn-secondary btn-sm", type: "button" }, iconSvg("refresh", 14), "Check for updates");
+    check.disabled = this.checking || this.readOnly;
+    check.addEventListener("click", () => {
+      close();
+      void this.checkNow();
+    });
+    const terminal = !shell
+      ? "—"
+      : shell.active
+        ? h("span", {}, "On: login shells run the Package Center defaults first", h("span", { class: "pkg-settings-sub mono" }, shell.profile))
+        : !shell.enabled
+          ? h("span", {}, "Off (packages_shell_path = false)")
+          : h("span", {}, "Not set up yet. Run this once as root:", commandLine(shell.syncCommand, this.ctx));
+    const body = h(
+      "div",
+      { class: "pkg-settings" },
+      h(
+        "section",
+        { class: "pkg-settings-section" },
+        h("h3", { class: "pkg-settings-title" }, "Catalog", badge),
+        kvList(catalogRows),
+        this.readOnly ? null : h("div", {}, check),
+      ),
+      h(
+        "section",
+        { class: "pkg-settings-section" },
+        h("h3", { class: "pkg-settings-title" }, "This server"),
+        kvList([
+          ["Platform", host.target],
+          ["C library", host.libc === "glibc" ? `glibc ${host.glibcVersion ?? "?"}` : host.libc],
+          ["RAST", host.rastVersion],
+          ["Terminal PATH", terminal],
+        ]),
+      ),
+    );
+    close = modal({ title: "Package Center settings", body, actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }] });
   }
 
   // ---------------------------------------------------------------- actions
@@ -1071,7 +1132,7 @@ class PackageCenterApp {
   private async checkNow(): Promise<void> {
     if (this.checking) return;
     this.checking = true;
-    this.renderStatusChip();
+    this.renderChrome();
     try {
       const res = await this.ctx.api.post<{ catalog: CatalogStatus }>("/api/packages/check");
       if (res.catalog.lastError) {
@@ -1114,7 +1175,7 @@ class PackageCenterApp {
     this.jobs.delete(jobId);
     if (this.disposed) return;
     if (outcome.status === "done") {
-      this.ctx.toast.success(`${p.name} ${version} installed and verified${makeDefault ? " — now the RAST default" : ""}`);
+      this.ctx.toast.success(`${p.name} ${version} installed and verified${makeDefault ? " — now the default" : ""}`);
     } else if (outcome.status === "failed") {
       this.ctx.toast.error(`${p.name} ${version} was not installed: ${outcome.error ?? "unknown error"}. Installed versions are unchanged.`);
     }
@@ -1124,14 +1185,14 @@ class PackageCenterApp {
   private async makeDefault(p: PackageView, version: string): Promise<void> {
     const ok = await confirmDialog({
       title: `Make ${p.name} ${version} the default?`,
-      message: `The stable paths under runtimes/${p.id}/current and the bin shims switch to ${version}. Consumers that follow the default switch too; pinned consumers keep their versions.${p.defaultVersion ? ` ${p.defaultVersion} stays installed.` : ""}`,
+      message: `Terminals and the stable paths under runtimes/${p.id}/current switch to ${version}. Consumers that follow the default switch too; pinned consumers keep their versions.${p.defaultVersion ? ` ${p.defaultVersion} stays installed.` : ""}`,
       confirmLabel: "Make default",
     });
     if (!ok) return;
     try {
       const res = await this.ctx.api.put<{ activation?: { conflicts?: string[] } }>(`/api/packages/${encodeURIComponent(p.id)}/default`, { version });
       const conflicts = res.activation?.conflicts ?? [];
-      this.ctx.toast.success(`${p.name} ${version} is now the RAST default`);
+      this.ctx.toast.success(`${p.name} ${version} is now the default`);
       if (conflicts.length) {
         this.ctx.toast.warning(`Shims not created for ${conflicts.join(", ")} (owned by another package).`);
       }
@@ -1146,7 +1207,7 @@ class PackageCenterApp {
     if (!s) return;
     const ok = await confirmDialog({
       title: `Use the system ${p.name} ${s.version ?? ""}?`.replace(/ \?$/, "?"),
-      message: `Terminals run ${s.path} again. The Package Center shims and runtimes/${p.id}/current are removed; ${p.defaultVersion ?? "the installed versions"} stays installed and can be made the default again.`,
+      message: `Terminals run ${s.path} again. ${p.defaultVersion ?? "The installed version"} stays installed and can be made the default again.`,
       confirmLabel: "Use the system version",
     });
     if (!ok) return;
@@ -1182,7 +1243,7 @@ class PackageCenterApp {
       const name = h("input", { class: "input", type: "text", value: existing?.name ?? "", placeholder: "e.g. billing-worker", dataset: { autofocus: "true" } });
       const description = h("input", { class: "input", type: "text", value: existing?.description ?? "", placeholder: "Optional" });
       const version = h("select", { class: "select" });
-      version.appendChild(h("option", { value: "", selected: !existing || existing.followsDefault }, `Follow the RAST default${p.defaultVersion ? ` (${p.defaultVersion})` : ""}`));
+      version.appendChild(h("option", { value: "", selected: !existing || existing.followsDefault }, `Follow the default${p.defaultVersion ? ` (${p.defaultVersion})` : ""}`));
       for (const v of p.installed) {
         version.appendChild(h("option", { value: v.version, selected: existing?.version === v.version }, `Pin ${v.version}`));
       }
@@ -1271,18 +1332,61 @@ class PackageCenterApp {
 
 // ------------------------------------------------------------------ helpers
 
-/** "Up to date", naming the release line when a newer line exists. */
-function upToDateText(p: PackageView): string {
-  const current = p.installed.find((v) => v.isDefault)?.channel ?? p.updates[0]?.channel ?? null;
-  const line = current ? p.versions.find((v) => v.channel === current) : undefined;
-  if (!line || !p.latest || p.latest.channel === line.channel) return "Up to date";
-  return `Up to date in ${line.channelLabel || line.channel}`;
+function paintBar(host: HTMLElement, job: LiveJob): void {
+  const fill = host.querySelector<HTMLElement>(".progress-bar");
+  const label = host.querySelector<HTMLElement>(".pkg-progress-label");
+  const fraction = jobFraction(job.progress, job.total);
+  if (fill) {
+    fill.style.width = job.total > 0 ? `${(fraction * 100).toFixed(1)}%` : "100%";
+    fill.classList.toggle("is-indeterminate", job.total <= 0);
+  }
+  if (label) {
+    label.textContent = job.total > 0 ? `${Math.round(fraction * 100)}% · ${job.message}` : job.message;
+    label.title = job.message;
+  }
 }
 
-function sourceBadge(p: PackageView): HTMLElement {
-  return p.official
-    ? h("span", { class: "badge ok pkg-source", title: p.verification.detail }, iconSvg("shield", 12), "Official")
-    : h("span", { class: "badge warn pkg-source", title: p.verification.detail }, iconSvg("github", 12), "Third-party");
+/** Hover text for a tile's version line. */
+function tileTitle(p: PackageView, state: TileState): string {
+  if (state.action === "update") {
+    const u = p.updates[0]!;
+    return `Update ready: ${u.from}${u.fromSystem ? " (system)" : ""} → ${u.to}`;
+  }
+  if (state.action === "installed" && p.installed.length === 0 && p.system) {
+    return `${p.system.path} · ${systemSourceLabel(p.system)}`;
+  }
+  if (state.action === "install") return `Newest version ${state.version ?? ""}`.trim();
+  return p.unavailableReason ?? "";
+}
+
+function installedText(p: PackageView): string {
+  const def = p.installed.find((v) => v.isDefault);
+  const others = p.installed.filter((v) => v !== def).map((v) => v.version);
+  const parts: string[] = [];
+  if (def) parts.push(def.version);
+  parts.push(...others);
+  if (p.system) parts.push(`${p.system.version ?? "unknown"} (system)`);
+  return parts.length ? parts.join(", ") : "—";
+}
+
+function externalLink(url: string, label: string): HTMLAnchorElement {
+  return h("a", { href: url, target: "_blank", rel: "noopener noreferrer", class: "pkg-break" }, label);
+}
+
+function techBlock(title: string, ...body: Array<Node | null>): HTMLElement {
+  return h("div", { class: "pkg-tech-block" }, h("div", { class: "pkg-tech-title" }, title), ...body);
+}
+
+function kvList(rows: Array<[string, Node | string]>): HTMLElement {
+  return h("dl", { class: "kv pkg-kv" }, ...rows.flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v)]));
+}
+
+function commandLine(command: string, ctx: AppContext): HTMLElement {
+  const copy = h("button", { class: "btn btn-icon btn-sm pkg-copy", type: "button", title: "Copy command", ariaLabel: "Copy command" }, iconSvg("copy", 13));
+  copy.addEventListener("click", async () => {
+    if (await copyText(command)) ctx.toast.success("Command copied");
+  });
+  return h("span", { class: "pkg-command" }, h("code", {}, command), copy);
 }
 
 function pathRow(e: ExecutablePath, ctx: AppContext): HTMLElement {

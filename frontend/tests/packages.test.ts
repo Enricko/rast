@@ -4,11 +4,17 @@ import test from "node:test";
 import {
   filterPackages,
   groupByChannel,
+  installedLabel,
   jobFraction,
+  linkLabel,
   monogram,
+  sortForTiles,
+  statusLine,
   suggestedVersion,
   systemSourceLabel,
+  tileState,
   updateSummary,
+  upToDateText,
   versionOptionLabel,
 } from "../src/apps/packages/format";
 import type { PackageView, VersionChoice } from "../src/apps/packages/types";
@@ -124,4 +130,59 @@ test("a runtime the system already has counts as installed and can be updated", 
   assert.equal(systemSourceLabel(system), "apt · php8.5-cli");
   assert.equal(systemSourceLabel({ source: "manual", sourcePackage: null }), "manual install");
   assert.equal(systemSourceLabel({ source: "snap" }), "snap");
+});
+
+test("each tile offers one action with one short line", () => {
+  const system = {
+    command: "php",
+    path: "/usr/bin/php",
+    realPath: "/usr/bin/php8.5",
+    version: "8.5.4",
+    versionCommand: "php -n --version",
+    output: "",
+    source: "apt",
+    onPath: true,
+    detectedAt: 0,
+  };
+  const update = pkg("php", {
+    system,
+    versions: [choice("8.5.12")],
+    updates: [{ channel: "8.5", from: "8.5.4", to: "8.5.12", revision: 1, replacesDefault: true, fromSystem: true }],
+  });
+  assert.deepEqual(tileState(update), { action: "update", subtitle: "8.5.4 → 8.5.12", version: "8.5.12", makeDefault: true });
+  assert.deepEqual(statusLine(update), { kind: "update", text: "Update available: 8.5.4 (system) → 8.5.12" });
+
+  const fresh = pkg("go", { versions: [choice("1.27.4"), choice("1.26.11")] });
+  assert.deepEqual(tileState(fresh), { action: "install", subtitle: "1.27.4", version: "1.27.4", makeDefault: true });
+  assert.deepEqual(statusLine(fresh), { kind: "available", text: "Not installed" });
+
+  const current = pkg("nodejs", {
+    installed: [{ version: "22.23.5", isDefault: true, channel: "22" } as never, { version: "24.22.3", isDefault: false } as never],
+    versions: [choice("26.13.1", { channel: "26" }), choice("22.23.5", { channel: "22", installedRevision: 1 })],
+    latest: choice("26.13.1", { channel: "26" }),
+  });
+  assert.deepEqual(tileState(current), { action: "installed", subtitle: "22.23.5 +1" });
+  assert.equal(upToDateText(current), "Up to date in 22");
+  assert.deepEqual(statusLine(current), { kind: "installed", text: "Installed · up to date in 22" });
+  assert.equal(statusLine(pkg("n", { ...current, versions: current.versions.map((v) => ({ ...v, channelLabel: `Node.js ${v.channel}` })) })).text, "Installed · up to date in Node.js 22");
+
+  const systemOnly = pkg("python", { system: { ...system, command: "python3", version: "3.14.4" }, versions: [choice("3.14.4", { channel: "3.14" })], latest: choice("3.14.4", { channel: "3.14" }) });
+  assert.equal(installedLabel(systemOnly), "3.14.4 · System");
+  assert.deepEqual(statusLine(systemOnly), { kind: "installed", text: "Installed (system) · up to date" });
+
+  const empty = pkg("lua", { unavailableReason: "No verified version is published in the catalog yet." });
+  assert.deepEqual(tileState(empty), { action: "unavailable", subtitle: "Not available" });
+  assert.equal(statusLine(empty).kind, "unavailable");
+  // Third-party packages are installed release by release, never from the tile.
+  assert.equal(tileState(pkg("tool", { official: false, versions: [choice("1.0.0")] })).action, "none");
+});
+
+test("tiles list updates first, then installed, then the rest", () => {
+  const a = pkg("a", { name: "Alpha" });
+  const b = pkg("b", { name: "Beta", installed: [{ version: "1" } as never] });
+  const c = pkg("c", { name: "Gamma", updates: [{ channel: "1", from: "1", to: "2", revision: 1, replacesDefault: true, fromSystem: false }] });
+  const d = pkg("d", { name: "Delta" });
+  assert.deepEqual(sortForTiles([a, b, c, d]).map((p) => p.id), ["c", "b", "a", "d"]);
+  assert.equal(linkLabel("https://www.python.org/downloads/"), "python.org");
+  assert.equal(linkLabel("not a url"), "not a url");
 });

@@ -10,7 +10,8 @@ in a separate repository, and third parties start from a template repository.
 | --- | --- |
 | Status | **v0.6.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): system runtimes are detected, updates go in alongside them, and the default is on every login shell's PATH. v0.5.0 (first Package Center) was deployed on 2026-11-11. See [Deploy of 0.6.0](#deploy-of-060-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
-| Next step | In Package Center, click **Check updates** once: prod still holds catalog sequence 1 from before 0.6.0. |
+| Next step | On prod (0.6.0), click **Check updates** once: prod still holds catalog sequence 1, which lists no versions, so no card has an Install or Update button until it is refreshed. |
+| Unreleased on `main` | Calmer Package Center layout (tiles with one button, package page, Settings) and a catalog check at every start. See [After 0.6.0](#after-060-unreleased). Needs an approved release. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
 
@@ -502,6 +503,49 @@ Rollback: `sudo install -m 0755 /usr/local/bin/rast.rollback-0.5.0
 To also remove the PATH entry, set `packages_shell_path = false` in
 `/etc/rast/rast.toml` and run `sudo rast packages path sync` *before* rolling
 back, because 0.5.0 has no `path` command.
+
+### After 0.6.0 (unreleased)
+
+The user found no Install or Update buttons on prod and asked for a calmer
+layout, in the style of a NAS package center. The cause of the missing
+buttons: prod's cached catalog was sequence 1, which lists no versions. The
+0.6.0 restart did not fetch a new one, because the scheduler only checked
+once the 6-hour interval had passed.
+
+* **Catalog at start:** RAST now checks the catalog 20 s after every start.
+  When the cached catalog lists no versions, the list says so and offers
+  **Check for updates**.
+* **List:** tiles with a large icon, the name, one version line and one
+  button. A tile shows *8.5.4 → 8.5.12* with **Update**, *1.27.4* with
+  **Install**, or *22.23.5* as **Installed**. Tiles with updates come first.
+  The sidebar has Installed, All Packages and Updates (with a count), plus
+  one catalog status line that opens Settings.
+* **Package page:**
+  * the icon, publisher, name and status, which is text as well as colour;
+  * one main button (*Update to …*, *Install …* or *Up to date*), with a menu
+    for *Install another version…*, *Use the system version* and the
+    homepage;
+  * the description and an *Other information* grid;
+  * *Versions on this server*, with **Make default** and **Remove**.
+    **Remove** is shown only where the server allows it: not on pinned
+    versions, and not on the default while other versions are installed.
+  * *Paths and verification*, *Consumers* and *Activity* are folded away.
+* **Settings:** the catalog (source, key, sequence, last and next check, last
+  error, **Check for updates**), this server, and the terminal PATH (with
+  the sync command when it is not set up).
+
+Checked on the scratch instance (official catalog, fictional admin) with
+light and dark themes and at 1440, 760 and 420 px wide; there were no page
+errors and no horizontal overflow on a phone. The scripted run then checked:
+
+* the catalog check after start;
+* a simulated sequence-1 catalog, which shows the banner;
+* Install Go from the tile: the progress replaces the button, and the tile
+  then shows *Installed*;
+* the Go and Node.js pages;
+* search from a package page.
+
+The frontend tests (34) and the Rust package tests (41 + 5) pass.
 
 ## Limitations
 
