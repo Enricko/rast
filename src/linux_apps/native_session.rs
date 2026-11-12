@@ -142,6 +142,9 @@ pub struct LaunchRequest {
     pub memory_mb: u32,
     pub cpus: u32,
     pub tasks: u32,
+    /// Chromium/Electron app: stale singleton files in its profile are removed
+    /// before the launch so the browser can open a window.
+    pub chromium: bool,
 }
 
 /// A person's host identity, as provisioned by the helper.
@@ -1357,6 +1360,28 @@ impl NativeSessions {
         session.lock().apps.push(run.clone());
         self.publish_session(session);
 
+        // Browsers that were killed or stopped leave Chromium/Electron
+        // singleton files in their profile; the next launch would then hang or
+        // delegate to a dead instance instead of opening a window (the legacy
+        // Docker image cleaned these in its init script). The app is not
+        // running at this point (launch is idempotent), so this is safe.
+        if request.chromium {
+            if let Err(error) = self
+                .helper
+                .call(
+                    "profile_clean_locks",
+                    json!({"appId": request.app_id, "userId": user_id}),
+                )
+                .await
+            {
+                tracing::debug!(
+                    app = %request.app_id,
+                    user_id,
+                    "could not remove stale browser singleton files: {error}"
+                );
+            }
+        }
+
         // A unit name left active by a crash is retried with the next
         // sequence instead of failing the launch.
         let mut attempt = 0;
@@ -1393,6 +1418,7 @@ impl NativeSessions {
                         .await;
                 }
                 Err(error) => {
+                    let stale_xauthority = error.code == "xauthority_unavailable";
                     let message = if error.code == "command_failed"
                         && (error.message.contains("CHDIR")
                             || error
@@ -1422,6 +1448,27 @@ impl NativeSessions {
                     };
                     self.store_run(&failed).await;
                     self.publish_session(session);
+                    if stale_xauthority {
+                        // The helper's own advice: stop the session so Xpra
+                        // regenerates the auth file. Do it now, so reopening
+                        // the app starts a fresh session instead of failing
+                        // again.
+                        self.end_session(
+                            session,
+                            "error",
+                            Some(
+                                "The graphical session's X authentication file was stale; the \
+                                 session was restarted."
+                                    .into(),
+                            ),
+                        )
+                        .await;
+                        return Err(AppError::unavailable(format!(
+                            "Could not start {}: {message} The graphical session has been \
+                             restarted; open the app again.",
+                            request.app_name
+                        )));
+                    }
                     return Err(AppError::unavailable(format!(
                         "Could not start {}: {message}",
                         request.app_name
@@ -2269,6 +2316,7 @@ mod tests {
         orphan_stops: StdMutex<Vec<String>>,
         fail_session_start: StdMutex<Option<String>>,
         broken_profile: StdMutex<bool>,
+        stale_xauthority: StdMutex<bool>,
         upstreams: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
         port: StdMutex<Option<u16>>,
     }
@@ -2415,6 +2463,14 @@ mod tests {
                     Ok(json!({"stopped": true}))
                 }
                 "app_start" => {
+                    if *self.stale_xauthority.lock().unwrap() {
+                        return Err(HelperError {
+                            code: "xauthority_unavailable".into(),
+                            message: "the session's X auth file is not readable; home was \
+                                      probably repaired after the session started"
+                                .into(),
+                        });
+                    }
                     let unit = params["unit"].as_str().unwrap_or_default().to_string();
                     if self.unit_active(&unit) {
                         return Err(HelperError {
@@ -2538,6 +2594,7 @@ mod tests {
             memory_mb: 512,
             cpus: 2,
             tasks: 256,
+            chromium: false,
         }
     }
 
@@ -2742,6 +2799,49 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("identity was repaired"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_xauthority_restarts_the_session_for_the_next_open() {
+        let (_dir, helper, sessions, _cfg) = manager().await;
+        let user = test_user(1);
+        let (_, first_session) = sessions
+            .launch(&user, launch_request("code"))
+            .await
+            .unwrap();
+        let first_url = first_session["url"].as_str().unwrap().to_string();
+
+        // The helper's new defense reports a stale X auth file for the next app.
+        *helper.stale_xauthority.lock().unwrap() = true;
+        let error = sessions
+            .launch(&user, launch_request("app"))
+            .await
+            .expect_err("stale xauthority fails the launch");
+        let text = error.to_string();
+        assert!(
+            text.contains("open the app again") && text.contains("auth"),
+            "{text}"
+        );
+        // The stale session is stopped automatically so its X auth regenerates.
+        assert!(
+            helper.call_count("session_stop") >= 1,
+            "the stale session is stopped"
+        );
+        let known = sessions.session_json(&user).await.unwrap();
+        assert!(
+            known.is_none() || known.unwrap()["status"] == "ended",
+            "the stale session must not be reused"
+        );
+
+        // Reopening the app starts a brand new session and works.
+        *helper.stale_xauthority.lock().unwrap() = false;
+        let (run, session) = sessions
+            .launch(&user, launch_request("app"))
+            .await
+            .expect("fresh launch");
+        assert_eq!(run["status"], "running");
+        assert_ne!(session["url"].as_str().unwrap(), first_url);
+        assert_eq!(session["status"], "ready");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

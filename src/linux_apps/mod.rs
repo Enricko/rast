@@ -839,6 +839,25 @@ impl LinuxApps {
             .get("workingDir")
             .and_then(Value::as_str)
             .map(PathBuf::from);
+        let chromium = launcher
+            .get("chromium")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut command = command;
+        if chromium {
+            // Keep the Chromium sandbox enabled; only add the ordinary
+            // first-run/session flags the old image passed (minus
+            // --no-sandbox, which never applies to native execution).
+            for flag in [
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--password-store=basic",
+            ] {
+                if !command.iter().any(|argument| argument == flag) {
+                    command.push(flag.to_string());
+                }
+            }
+        }
         Ok(NativeLaunchRequest {
             app_id: row.id.clone(),
             app_name: row.name.clone(),
@@ -848,6 +867,7 @@ impl LinuxApps {
             memory_mb: u32::try_from(row.memory_mb).unwrap_or(self.config.linux_app_memory_mb),
             cpus: u32::try_from(row.cpus).unwrap_or(self.config.linux_app_cpus),
             tasks: self.config.linux_app_tasks,
+            chromium,
         })
     }
 

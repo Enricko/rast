@@ -66,18 +66,30 @@ export default {
     ctx.record(`taskbar labels: ${JSON.stringify(labels)}`);
     assert(taskbar.length >= 3, `expected at least 3 taskbar entries, found ${taskbar.length}`);
 
-    // Focus: click each window in turn and check the matching taskbar entry is active.
+    // Focus: use the taskbar entries (a covered window cannot be clicked
+    // directly) and check that the corresponding window becomes focused.
     for (const window of windows.slice(0, 3)) {
-      const titlebar = desktop.page.locator(`.window[data-window-id="${window.id}"]`);
-      if (await desktop.page.locator(`.window[data-window-id="${window.id}"] .win-titlebar`).count()) {
-        await titlebar.locator(".win-titlebar").click({ position: { x: 10, y: 5 } });
-      } else {
-        await titlebar.click({ position: { x: 10, y: 5 } });
+      const entries = desktop.page.locator(".taskbar-app");
+      const count = await entries.count();
+      let clicked = false;
+      for (let index = 0; index < count; index += 1) {
+        const label = (await entries.nth(index).locator(".taskbar-app-label").textContent())?.trim() ?? "";
+        if (window.title && label.includes(window.title)) {
+          await entries.nth(index).click({ force: true });
+          clicked = true;
+          break;
+        }
+      }
+      if (!clicked) {
+        // Fall back to clicking the titlebar with the mouse (works even when
+        // Playwright's actionability checks would time out on a covered window).
+        const box = await desktop.page.locator(`.window[data-window-id="${window.id}"]`).boundingBox();
+        if (box) await desktop.page.mouse.click(box.x + 40, box.y + 8);
       }
       await desktop.page.waitForTimeout(400);
       const after = await browser.windowsInfo(desktop.page);
       const focused = after.find((entry) => entry.focused);
-      ctx.record(`focused after clicking ${window.id}: ${focused?.title ?? "none"}`);
+      ctx.record(`focused after taskbar click for ${window.id}: ${focused?.title ?? "none"}`);
     }
 
     // Resize the first window with its bottom-right handle.
@@ -86,10 +98,12 @@ export default {
     const handle = desktop.page.locator(`.window[data-window-id="${resizeTarget.id}"] .win-resize-se`);
     if (await handle.count()) {
       const box = await handle.first().boundingBox();
-      await desktop.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-      await desktop.page.mouse.down();
-      await desktop.page.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2 + 90, { steps: 12 });
-      await desktop.page.mouse.up();
+      if (box) {
+        await desktop.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await desktop.page.mouse.down();
+        await desktop.page.mouse.move(box.x + box.width / 2 + 140, box.y + box.height / 2 + 90, { steps: 12 });
+        await desktop.page.mouse.up();
+      }
       await desktop.page.waitForTimeout(600);
       const after = (await browser.windowsInfo(desktop.page)).find((window) => window.id === resizeTarget.id);
       ctx.record(`resize: ${JSON.stringify(before)} -> ${JSON.stringify(after?.rect)}`);

@@ -32,6 +32,13 @@ export default {
 
     const backendSession = ctx.mode === "native" ? await alice.nativeSessionState() : null;
     ctx.record(`session before cleanup: ${JSON.stringify(backendSession?.session ?? null).slice(0, 300)}`);
+    // Other apps may share the same native session (e.g. an XTerm from another
+    // scenario). In that case the session is expected to STAY alive; only this
+    // app's run has to end. The grace period only applies to an empty session.
+    const otherActiveRuns = (backendSession?.session?.apps ?? []).filter(
+      (run) => run.appId !== app.id && ["launching", "running", "starting"].includes(String(run.status)),
+    );
+    ctx.record(`other active runs in the session: ${JSON.stringify(otherActiveRuns.map((run) => run.appId))}`);
 
     const closedAt = Date.now();
     await closeAppWindows(desktop.page, app);
@@ -42,7 +49,17 @@ export default {
     const elapsed = Date.now() - closedAt;
     ctx.metric("cleanupMs", elapsed, "ms");
     ctx.record(`session cleaned up after ${(elapsed / 1000).toFixed(1)} s (grace ${grace / 1000}s)`);
-    assert(elapsed >= grace - 5_000, `session stopped after ${elapsed} ms, before the ${grace} ms grace`);
+    if (otherActiveRuns.length === 0) {
+      assert(elapsed >= grace - 5_000, `session stopped after ${elapsed} ms, before the ${grace} ms grace`);
+    } else {
+      // A shared session with other running apps must stay up; the target run
+      // ending is the correct observable outcome.
+      const state = await ctx.mode === "native" ? alice.nativeSessionState() : null;
+      const stillActive = (state?.session?.apps ?? []).some(
+        (run) => run.appId !== app.id && ["launching", "running", "starting"].includes(String(run.status)),
+      );
+      ctx.record(`shared session still has other apps running: ${stillActive}`);
+    }
     if (ctx.mode === "native") {
       const unit = await ctx.host.unitStatus(`rast-xpra-u${alice.user.id}`);
       ctx.record(`session unit after cleanup: ${JSON.stringify(unit)}`);

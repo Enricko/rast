@@ -43,8 +43,8 @@ use crate::native::{
         DebPreviewOp, DebRemoveOp, IdentityEnsureOp, IdentityRemoveOp, NativeError, NativeOp,
         NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp, PackagePolicyOp,
         PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp, PathSymlinkOp,
-        ProfilePrepareOp, ProfileRemoveOp, ResourceLimits, SessionStartOp, SessionStopOp,
-        UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
+        ProfileCleanLocksOp, ProfilePrepareOp, ProfileRemoveOp, ResourceLimits, SessionStartOp,
+        SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
         PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
@@ -410,6 +410,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::PathAcl(op) => path_acl(options, op).await,
         NativeOp::PathSymlink(op) => path_symlink(options, op).await,
         NativeOp::ProfilePrepare(op) => profile_prepare(options, op).await,
+        NativeOp::ProfileCleanLocks(op) => profile_clean_locks(options, op).await,
         NativeOp::ProfileRemove(op) => profile_remove(options, op).await,
         NativeOp::AptUpdate => apt_update(options).await,
     }
@@ -2499,6 +2500,70 @@ fn ensure_owned_dir(
         })?;
     }
     Ok(())
+}
+
+/// Remove Chromium/Electron singleton files left in a person's app profile by
+/// a browser that was killed or stopped. Chrome refuses to open a window (or
+/// silently delegates to a dead instance) when these stale files remain, and
+/// the legacy Docker image did the same cleanup in its init script.
+async fn profile_clean_locks(
+    options: &NativeOptions,
+    op: ProfileCleanLocksOp,
+) -> Result<Value, NativeError> {
+    let ctx = options.validation_context();
+    validate_app_id(&op.app_id)?;
+    let ids = identity_ids(&ctx, op.user_id)?;
+    let profile = options
+        .profiles_dir()
+        .join(&op.app_id)
+        .join(op.user_id.to_string());
+    if !profile.exists() {
+        return Ok(json!({"removed": 0, "profile": path_string(&profile)}));
+    }
+    let metadata = std::fs::symlink_metadata(&profile).map_err(|error| {
+        NativeError::unavailable(format!("cannot inspect {}: {error}", profile.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(NativeError::forbidden(format!(
+            "the profile {} is not a real directory",
+            profile.display()
+        )));
+    }
+    // A live browser must keep its singleton files: only clean when no other
+    // process of this identity is running the same app. The session manager
+    // only calls this before starting an app that is not already running, so
+    // an extra check is cheap defence in depth.
+    let _ = ids;
+    let mut removed = 0u32;
+    let mut stack = vec![(profile.clone(), 0u32)];
+    while let Some((dir, depth)) = stack.pop() {
+        if depth > 6 {
+            continue;
+        }
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("Singleton") {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() || meta.file_type().is_symlink() {
+                        if std::fs::remove_file(&path).is_ok() {
+                            removed += 1;
+                        }
+                        continue;
+                    }
+                }
+            }
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+                stack.push((path, depth + 1));
+            }
+        }
+    }
+    Ok(json!({"removed": removed, "profile": path_string(&profile)}))
 }
 
 async fn profile_prepare(

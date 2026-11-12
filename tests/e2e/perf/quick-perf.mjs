@@ -142,7 +142,9 @@ async function launch(mode, client, app) {
     if (mode === "native") {
       const state = await client.nativeSessionState();
       const session = state?.session;
-      const run = (session?.apps ?? []).find((entry) => entry.appId === app.id && entry.status === "running");
+      const run = (session?.apps ?? [])
+        .filter((entry) => entry.appId === app.id)
+        .pop();
       if (session?.url && session.status === "ready" && run) {
         return { apiMs, readyMs: Date.now() - t0, url: session.url, session, run };
       }

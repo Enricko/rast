@@ -256,6 +256,7 @@ pub enum NativeOp {
     PathAcl(PathAclOp),
     PathSymlink(PathSymlinkOp),
     ProfilePrepare(ProfilePrepareOp),
+    ProfileCleanLocks(ProfileCleanLocksOp),
     ProfileRemove(ProfileRemoveOp),
     PackageInstalledList(PackageInstalledListOp),
     PackageFiles(PackageFilesOp),
@@ -286,6 +287,7 @@ impl NativeOp {
             Self::PathAcl(_) => "path_acl",
             Self::PathSymlink(_) => "path_symlink",
             Self::ProfilePrepare(_) => "profile_prepare",
+            Self::ProfileCleanLocks(_) => "profile_clean_locks",
             Self::ProfileRemove(_) => "profile_remove",
             Self::PackageInstalledList(_) => "package_installed_list",
             Self::PackageFiles(_) => "package_files",
@@ -393,6 +395,7 @@ impl NativeRequest {
             NativeOp::PathAcl(op) => merge!(op),
             NativeOp::PathSymlink(op) => merge!(op),
             NativeOp::ProfilePrepare(op) => merge!(op),
+            NativeOp::ProfileCleanLocks(op) => merge!(op),
             NativeOp::ProfileRemove(op) => merge!(op),
             NativeOp::PackageInstalledList(op) => merge!(op),
             NativeOp::PackageFiles(op) => merge!(op),
@@ -504,6 +507,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "path_acl" => NativeOp::PathAcl(op_from(rest, "path_acl")?),
         "path_symlink" => NativeOp::PathSymlink(op_from(rest, "path_symlink")?),
         "profile_prepare" => NativeOp::ProfilePrepare(op_from(rest, "profile_prepare")?),
+        "profile_clean_locks" => NativeOp::ProfileCleanLocks(op_from(rest, "profile_clean_locks")?),
         "profile_remove" => NativeOp::ProfileRemove(op_from(rest, "profile_remove")?),
         "package_installed_list" => {
             NativeOp::PackageInstalledList(op_from(rest, "package_installed_list")?)
@@ -708,6 +712,15 @@ pub struct ProfilePrepareOp {
     pub home: String,
     #[serde(rename = "rastHome")]
     pub rast_home: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileCleanLocksOp {
+    #[serde(rename = "appId")]
+    pub app_id: String,
+    #[serde(rename = "userId")]
+    pub user_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

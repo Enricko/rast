@@ -451,7 +451,13 @@ export async function waitSessionGone(ctx, client, app, { timeoutMs = 180_000 } 
       const session = state?.session ?? null;
       last = session;
       const runs = session?.apps ?? session?.runs ?? [];
-      const appRuns = Array.isArray(runs) ? runs.filter((run) => run.appId === app.id) : [];
+      // The session keeps finished runs as history; only ACTIVE runs count.
+      const appRuns = Array.isArray(runs)
+        ? runs.filter(
+            (run) =>
+              run.appId === app.id && ["launching", "running", "starting"].includes(String(run.status)),
+          )
+        : [];
       if (!session || appRuns.length === 0) {
         // Also allow the session to stay ready with no runs when other apps live in it.
         if (!session) return { gone: true, session: null };
