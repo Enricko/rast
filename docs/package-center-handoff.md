@@ -1,4 +1,4 @@
-# Package Center — handoff (RAST 0.6.1)
+# Package Center — handoff (RAST 0.7.0)
 
 Package Center is a desktop application for administrators. It installs verified
 runtimes — **Python, PHP CLI, Go and Node.js** — side by side, plus packages
@@ -8,7 +8,7 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
-| Status | **v0.6.1** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): the calmer Package Center (tiles, package pages, Settings), and a catalog check after every start. v0.6.0 (system runtimes, shell PATH) and v0.5.0 (first Package Center) came before. See [Deploy of 0.6.1](#deploy-of-061-2026-11-12). |
+| Status | **v0.7.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): Uninstall, Cancel, system-wide defaults (`packages_system_wide`, on in production) and Package Center management for granted groups. Before: v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.7.0](#deploy-of-070-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
@@ -573,7 +573,7 @@ Verified afterwards:
 
 Rollback: `/usr/local/bin/rast.rollback-0.6.0` (schema unchanged).
 
-### After 0.6.1: uninstall, cancel, system-wide, group managers (unreleased)
+### After 0.6.1: uninstall, cancel, system-wide, group managers (0.7.0)
 
 The user asked for an uninstall button, a way to cancel an install while it
 downloads, and that the server itself (not only terminals) uses a newly
@@ -623,6 +623,49 @@ Before turning `packages_system_wide` on in production:
   CLI build; check that it has the extensions that job needs (php-fpm itself
   is not affected: it is `php-fpm8.5`, not `php`);
 * root then runs files the `rast` service account can change.
+
+### Deploy of 0.7.0 (2026-11-12)
+
+Approved by the user. The release-prep commit is `e9dac78` (CI 43157667721
+green). The annotated tag `v0.7.0` triggered release workflow 43157911751.
+Steps:
+
+* backup `rast-20261112-045741-db-config.tar.gz`;
+* `sudo rast update --version 0.7.0`. It took its own backup
+  (`rast-20261112-045745-db-config.tar.gz`), reported `health: ok` and schema
+  8, and ran `rast packages path sync`.
+
+Verified afterwards: `rast 0.7.0`; `rast doctor` ok (schema v8, 0 warnings);
+`/healthz` ok on loopback and on https://desktop.lufria.tech; the served
+`index-_P-eC2-R.js` is identical to the local build of `v0.7.0`;
+`/var/lib/rast` stays 0751 across the restart and CLI commands.
+
+Then, as the user had chosen, `packages_system_wide = true` was appended to
+`/etc/rast/rast.toml` (copy of the previous file:
+`/etc/rast/rast.toml.before-0.7.0`), followed by `sudo rast packages path sync`
+and a restart of `rast.service`. Before that, nothing in systemd units or cron
+ran bare `php`, `go` or `node`: `cetaphil-web` runs `php-fpm8.5`, PHP's
+session cleanup runs `/usr/bin/php8.5`, `dsh-web` runs `/opt/node24/bin/node`.
+
+* Linked: `php`, `go`, `gofmt`, and (Node.js 22.23.5 had meanwhile become the
+  Package Center default) `node`, `npm`, `npx`, `corepack`. The manual Node.js
+  22.23.4 links were moved aside to `.rast-displaced.{node,npm,npx,corepack}`
+  and still run; `pnpm`/`pnpx` still point into the manual tree and now run
+  with the linked node.
+* `sudo php -v` → 8.5.12, `sudo node -v` → v22.23.5, `sudo go version` →
+  1.27.4; the same with systemd's default PATH. `/usr/bin/php` stays apt 8.5.4.
+* `rast-packages-links.path` is enabled and active; touching the bin
+  directory ran `rast-packages-links.service` successfully (nothing to
+  change).
+
+Rollback: `/usr/local/bin/rast.rollback-0.6.1` (schema unchanged). To undo
+system-wide only: remove the line from `rast.toml`, run `sudo rast packages
+path sync` (removes the links and units, puts the manual Node.js back) and
+restart `rast.service`.
+
+Note: `rast packages path status` run as an ordinary user cannot read
+`/etc/rast/rast.toml` (0640 root:rast) and reports the defaults; run it as
+`sudo -u rast` or with `sudo`.
 
 ## Limitations
 
