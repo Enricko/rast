@@ -9,7 +9,7 @@ in a separate repository, and third parties start from a template repository.
 | | |
 | --- | --- |
 | Name | Shown as **App Center** since the rename after 0.8.0 (app id `packages`; this document keeps the old name "Package Center" in its history). The Docker app (formerly Container Manager, app id `applications`) is shown as **Docker**. |
-| Status | **v0.9.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): Docker works like Docker Desktop (containers, images, volumes, container terminal, Run image) and the App Center/Docker rename. Before: v0.8.0 (RAST's own apps in Package Center, movable desktop icons, the Applications folder), v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.9.0](#deploy-of-090-2026-11-12). |
+| Status | **v0.9.1** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): the Docker helper is restarted on update and a stale one is reported. Before: v0.9.0 (Docker like Docker Desktop: containers, images, volumes, container terminal, Run image; the App Center/Docker rename), v0.8.0 (RAST's own apps in Package Center, movable desktop icons, the Applications folder), v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.9.1](#deploy-of-091-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
@@ -728,6 +728,35 @@ warnings in the journal of `rast` or `rast-worker`.
 
 Rollback: the schema did not change, so `/usr/local/bin/rast.rollback-0.8.0`
 starts on the current database.
+
+### Deploy of 0.9.1 (2026-11-12)
+
+After 0.9.0, Docker → Images showed "Could not list images: docker worker
+protocol error: worker response id does not match the request". `rast update`
+had restarted only `rast.service`, so `rast-worker.service` still ran the
+0.8.0 binary (started 06:35, binary deleted), which did not know `image-list`.
+The worker was restarted by hand (images listed again: 43), and the fix is
+commit `712318e` (`try-restart` of the worker in `rast update`, version
+reporting, doctor warning).
+
+Approved by the user ("deploy it"). Release-prep commit `6cd37eb` (CI
+43193466395 green); tag `v0.9.1`, release workflow 43193946988. Steps:
+
+* backup `rast-20261112-094547-db-config.tar.gz`;
+* `sudo rast update --version 0.9.1` reported `health: ok`, schema 9. It was
+  run by the 0.9.0 updater, which does not restart the worker yet: `rast
+  doctor` then warned "the Docker helper runs an older RAST while RAST is
+  0.9.1", and `sudo systemctl restart rast-worker` cleared it. Updates from
+  0.9.1 on restart the worker themselves.
+
+Verified afterwards: `rast 0.9.1`; `rast doctor` ok (schema v9, 0 warnings,
+worker 0.9.1); `/healthz` ok on loopback and on https://desktop.lufria.tech;
+the served `index-Dnc-cuSb.js` is identical to the local build of `v0.9.1`;
+`image-list` through the worker socket returns 43 images; the system-wide links
+are in place; no warnings in the journal.
+
+Rollback: no schema change; `/usr/local/bin/rast.rollback-0.9.0` starts on the
+current database (restart `rast-worker` after swapping binaries).
 
 ## Limitations
 
