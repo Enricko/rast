@@ -11,6 +11,28 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.0] - 2026-11-12
+
+Docker works like Docker Desktop: every container with logs, configuration,
+live usage and a terminal; images (pull, run, clean up) and volumes. Package
+Center is now App Center and Container Manager is now Docker. No database
+migration (schema stays v9).
+
+### Added
+
 - **Docker works like Docker Desktop.** A sidebar with Containers, Images and
   Volumes. Containers lists every container on the server, grouped by Compose
   project (RAST apps first), with status, CPU, memory, port links and
@@ -48,17 +70,6 @@ this file by `scripts/changelog-section.sh`.
   `applications`), API paths, group rules, desktop layouts and pins stay.
 - Starting, stopping and restarting a RAST app no longer asks for
   confirmation (like containers); redeploy and delete still do.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.8.0] - 2026-11-12
 
