@@ -144,6 +144,19 @@ pub struct WidgetDto {
     pub y: f64,
 }
 
+/// An app placed on the desktop: its grid cell (column, row from the top
+/// left; the desktop keeps a cell visible on smaller screens).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DesktopIconDto {
+    pub id: String,
+    pub col: u32,
+    pub row: u32,
+}
+
+/// Grid limits for desktop icons (far beyond any real screen).
+pub const MAX_DESKTOP_CELL: u32 = 63;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppearanceDto {
@@ -158,6 +171,9 @@ pub struct AppearanceDto {
     /// Pinned taskbar applications in order (ids may include applications the
     /// account cannot open right now; the taskbar hides those).
     pub taskbar_pins: Vec<String>,
+    /// The apps on the desktop and their cells; `null` until the account
+    /// arranges its desktop (every app it may open, in the default order).
+    pub desktop_icons: Option<Vec<DesktopIconDto>>,
     pub uploads: Vec<AppearanceUploadDto>,
     pub limits: LimitsDto,
 }
@@ -196,6 +212,19 @@ pub struct UpdateAppearanceRequest {
     /// The complete ordered pin list (replaces the stored one when present).
     #[serde(default)]
     pub taskbar_pins: Option<Vec<String>>,
+    /// The complete desktop layout (replaces the stored one when present);
+    /// `null` goes back to the default layout.
+    #[serde(default, deserialize_with = "present")]
+    pub desktop_icons: Option<Option<Vec<DesktopIconDto>>>,
+}
+
+/// Tell an absent field (`None`) from an explicit `null` (`Some(None)`).
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 impl Default for WallpaperSettingsDto {
@@ -221,6 +250,7 @@ impl Default for AppearanceDto {
             widgets: Vec::new(),
             widgets_customized: false,
             taskbar_pins: default_taskbar_pins(),
+            desktop_icons: None,
             uploads: Vec::new(),
             limits: LimitsDto {
                 max_bytes: MAX_UPLOAD_BYTES,
@@ -414,7 +444,7 @@ pub fn validate_taskbar_pins(pins: Vec<String>) -> AppResult<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(pins.len());
     for pin in pins {
         let id = pin.trim().to_ascii_lowercase();
-        if !crate::access::APP_IDS.contains(&id.as_str()) {
+        if !crate::access::is_desktop_app(&id) {
             return Err(bad_request(format!("unknown application {:?}", pin.trim())));
         }
         if out.contains(&id) {
@@ -425,6 +455,63 @@ pub fn validate_taskbar_pins(pins: Vec<String>) -> AppResult<Vec<String>> {
     Ok(out)
 }
 
+/// Validate a complete desktop layout: known app ids, each once, every cell
+/// inside the grid and used once. An empty list is valid (a clean desktop).
+pub fn validate_desktop_icons(icons: Vec<DesktopIconDto>) -> AppResult<Vec<DesktopIconDto>> {
+    if icons.len() > 64 {
+        return Err(bad_request("too many desktop icons"));
+    }
+    let mut out: Vec<DesktopIconDto> = Vec::with_capacity(icons.len());
+    for icon in icons {
+        let id = icon.id.trim().to_ascii_lowercase();
+        if !crate::access::is_desktop_app(&id) {
+            return Err(bad_request(format!(
+                "unknown application {:?}",
+                icon.id.trim()
+            )));
+        }
+        if icon.col > MAX_DESKTOP_CELL || icon.row > MAX_DESKTOP_CELL {
+            return Err(bad_request("a desktop icon is outside the grid"));
+        }
+        if out.iter().any(|known| known.id == id) {
+            return Err(bad_request("each application can be on the desktop once"));
+        }
+        if out
+            .iter()
+            .any(|known| known.col == icon.col && known.row == icon.row)
+        {
+            return Err(bad_request("two desktop icons cannot share a place"));
+        }
+        out.push(DesktopIconDto {
+            id,
+            col: icon.col,
+            row: icon.row,
+        });
+    }
+    Ok(out)
+}
+
+/// Stored layout, dropping invalid entries instead of failing.
+fn parse_stored_desktop_icons(raw: Option<&str>) -> Option<Vec<DesktopIconDto>> {
+    let items = serde_json::from_str::<Vec<serde_json::Value>>(raw?).ok()?;
+    let mut out: Vec<DesktopIconDto> = Vec::new();
+    for item in items {
+        let Ok(icon) = serde_json::from_value::<DesktopIconDto>(item) else {
+            continue;
+        };
+        let valid = crate::access::is_desktop_app(&icon.id)
+            && icon.col <= MAX_DESKTOP_CELL
+            && icon.row <= MAX_DESKTOP_CELL
+            && !out
+                .iter()
+                .any(|k| k.id == icon.id || (k.col == icon.col && k.row == icon.row));
+        if valid {
+            out.push(icon);
+        }
+    }
+    Some(out)
+}
+
 /// Stored pins, dropping unknown or repeated ids instead of failing.
 fn parse_stored_pins(raw: &str) -> Vec<String> {
     let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(raw) else {
@@ -433,7 +520,7 @@ fn parse_stored_pins(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in items {
         if let Some(id) = item.as_str() {
-            if crate::access::APP_IDS.contains(&id) && !out.iter().any(|known| known == id) {
+            if crate::access::is_desktop_app(id) && !out.iter().any(|known| known == id) {
                 out.push(id.to_string());
             }
         }
@@ -857,6 +944,7 @@ struct StoredWallpaper {
     widgets: Vec<WidgetDto>,
     widgets_customized: bool,
     taskbar_pins: Vec<String>,
+    desktop_icons: Option<Vec<DesktopIconDto>>,
 }
 
 impl StoredWallpaper {
@@ -874,6 +962,7 @@ impl StoredWallpaper {
             widgets: Vec::new(),
             widgets_customized: false,
             taskbar_pins: default_taskbar_pins(),
+            desktop_icons: None,
         }
     }
 
@@ -915,7 +1004,7 @@ impl StoredWallpaper {
 async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpaper> {
     let row = sqlx::query(
         "SELECT theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
-                widgets, widgets_customized, taskbar_pins
+                widgets, widgets_customized, taskbar_pins, desktop_icons
          FROM user_appearance WHERE user_id = ?",
     )
     .bind(user_id)
@@ -935,6 +1024,9 @@ async fn load_stored(pool: &SqlitePool, user_id: i64) -> AppResult<StoredWallpap
             widgets: parse_stored_widgets(row.get::<String, _>("widgets").as_str()),
             widgets_customized: row.get::<i64, _>("widgets_customized") != 0,
             taskbar_pins: parse_stored_pins(row.get::<String, _>("taskbar_pins").as_str()),
+            desktop_icons: parse_stored_desktop_icons(
+                row.get::<Option<String>, _>("desktop_icons").as_deref(),
+            ),
         }
         .sanitized(),
         None => StoredWallpaper::defaults(),
@@ -993,6 +1085,7 @@ fn build_appearance(stored: StoredWallpaper, uploads: Vec<AppearanceUploadDto>) 
         widgets: stored.widgets,
         widgets_customized: stored.widgets_customized,
         taskbar_pins: stored.taskbar_pins,
+        desktop_icons: stored.desktop_icons,
         uploads,
         limits: LimitsDto {
             max_bytes: MAX_UPLOAD_BYTES,
@@ -1026,8 +1119,8 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     sqlx::query(
         "INSERT INTO user_appearance
             (user_id, theme, accent, wallpaper_kind, builtin_id, upload_id, color, fit, position, overlay,
-             widgets, widgets_customized, taskbar_pins, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             widgets, widgets_customized, taskbar_pins, desktop_icons, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id) DO UPDATE SET
             theme = excluded.theme,
             accent = excluded.accent,
@@ -1041,6 +1134,7 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
             widgets = excluded.widgets,
             widgets_customized = excluded.widgets_customized,
             taskbar_pins = excluded.taskbar_pins,
+            desktop_icons = excluded.desktop_icons,
             updated_at = excluded.updated_at",
     )
     .bind(user_id)
@@ -1056,6 +1150,12 @@ async fn store(pool: &SqlitePool, user_id: i64, stored: &StoredWallpaper) -> App
     .bind(serde_json::to_string(&stored.widgets).unwrap_or_else(|_| "[]".to_string()))
     .bind(i64::from(stored.widgets_customized))
     .bind(serde_json::to_string(&stored.taskbar_pins).unwrap_or_else(|_| "[]".to_string()))
+    .bind(
+        stored
+            .desktop_icons
+            .as_ref()
+            .map(|icons| serde_json::to_string(icons).unwrap_or_else(|_| "[]".to_string())),
+    )
     .bind(now)
     .execute(pool)
     .await?;
@@ -1114,6 +1214,9 @@ pub async fn update(
     if let Some(pins) = patch.taskbar_pins {
         stored.taskbar_pins = validate_taskbar_pins(pins)?;
     }
+    if let Some(layout) = patch.desktop_icons {
+        stored.desktop_icons = layout.map(validate_desktop_icons).transpose()?;
+    }
     match stored.kind.as_str() {
         "upload" => {
             let upload_id = stored
@@ -1149,6 +1252,7 @@ pub async fn reset(pool: &SqlitePool, user: &AuthUser) -> AppResult<AppearanceDt
         widgets: stored.widgets,
         widgets_customized: stored.widgets_customized,
         taskbar_pins: stored.taskbar_pins,
+        desktop_icons: stored.desktop_icons,
         ..defaults
     };
     store(pool, user.id, &stored).await?;
@@ -1839,6 +1943,107 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn desktop_icons_default_persist_reset_and_validate() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = pool_with_users(dir.path()).await;
+        let alice = auth_user(1, "alice");
+        let icon = |id: &str, col: u32, row: u32| DesktopIconDto {
+            id: id.into(),
+            col,
+            row,
+        };
+        assert_eq!(
+            get(&pool, 1).await.unwrap().desktop_icons,
+            None,
+            "default layout"
+        );
+
+        let layout = vec![
+            icon("files", 0, 0),
+            icon("launcher", 3, 1),
+            icon("logs", 0, 1),
+        ];
+        let saved = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                desktop_icons: Some(Some(layout.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.desktop_icons.as_deref(), Some(&layout[..]));
+        // Other changes and a wallpaper reset keep the layout.
+        update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                theme: Some("dark".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reset(&pool, &alice).await.unwrap().desktop_icons.as_deref(),
+            Some(&layout[..])
+        );
+        assert_eq!(
+            get(&pool, 2).await.unwrap().desktop_icons,
+            None,
+            "per account"
+        );
+
+        // A clean desktop is remembered; null goes back to the default.
+        let empty = update(
+            &pool,
+            &alice,
+            UpdateAppearanceRequest {
+                desktop_icons: Some(Some(Vec::new())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(empty.desktop_icons, Some(Vec::new()));
+        let back: UpdateAppearanceRequest =
+            serde_json::from_str(r#"{"desktopIcons": null}"#).unwrap();
+        assert_eq!(back.desktop_icons, Some(None));
+        let absent: UpdateAppearanceRequest = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.desktop_icons, None);
+        assert_eq!(
+            update(&pool, &alice, back).await.unwrap().desktop_icons,
+            None
+        );
+
+        for bad in [
+            vec![icon("files", 0, 0), icon("files", 1, 0)],
+            vec![icon("files", 0, 0), icon("logs", 0, 0)],
+            vec![icon("weather", 0, 0)],
+            vec![icon("files", MAX_DESKTOP_CELL + 1, 0)],
+        ] {
+            let result = update(
+                &pool,
+                &alice,
+                UpdateAppearanceRequest {
+                    desktop_icons: Some(Some(bad.clone())),
+                    ..Default::default()
+                },
+            )
+            .await;
+            assert!(result.is_err(), "{bad:?} must be rejected");
+        }
+        assert_eq!(
+            parse_stored_desktop_icons(Some(
+                r#"[{"id":"logs","col":0,"row":0},{"id":"nope","col":1,"row":0},{"id":"files","col":0,"row":0},{"id":"files","col":2,"row":0}]"#
+            )),
+            Some(vec![icon("logs", 0, 0), icon("files", 2, 0)])
+        );
+        assert_eq!(parse_stored_desktop_icons(None), None);
+    }
+
+    #[tokio::test]
     async fn defaults_update_and_reset_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let pool = pool_with_users(dir.path()).await;
@@ -1859,6 +2064,7 @@ pub(crate) mod tests {
             UpdateAppearanceRequest {
                 widgets: None,
                 taskbar_pins: None,
+                desktop_icons: None,
                 accent: None,
                 theme: Some("dark".into()),
                 wallpaper: Some(WallpaperPatch {
@@ -1924,6 +2130,7 @@ pub(crate) mod tests {
                 UpdateAppearanceRequest {
                     widgets: None,
                     taskbar_pins: None,
+                    desktop_icons: None,
                     accent: None,
                     theme: None,
                     wallpaper: Some(patch)
@@ -1938,6 +2145,7 @@ pub(crate) mod tests {
             UpdateAppearanceRequest {
                 widgets: None,
                 taskbar_pins: None,
+                desktop_icons: None,
                 accent: None,
                 theme: Some("sepia".into()),
                 wallpaper: None
@@ -2018,6 +2226,7 @@ pub(crate) mod tests {
             UpdateAppearanceRequest {
                 widgets: None,
                 taskbar_pins: None,
+                desktop_icons: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {
@@ -2138,6 +2347,7 @@ pub(crate) mod tests {
             UpdateAppearanceRequest {
                 widgets: None,
                 taskbar_pins: None,
+                desktop_icons: None,
                 accent: None,
                 theme: None,
                 wallpaper: Some(WallpaperPatch {

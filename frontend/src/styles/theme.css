@@ -184,11 +184,6 @@ pre {
   mask-image: none !important;
 }
 
-.desktop-icons {
-  z-index: 2;
-  grid-auto-columns: 104px;
-}
-
 /* ------------------------------------------------------------ desktop icons */
 
 .desktop-icon {
@@ -210,8 +205,9 @@ pre {
   outline-offset: 1px;
 }
 
-.desktop-icon.is-selected,
-.desktop-icon[aria-selected="true"] {
+/* Only a clicked or keyboard-focused icon is highlighted; aria-selected
+   marks the keyboard tab stop and is not shown. */
+.desktop-icon.is-selected {
   background: rgba(39, 133, 216, 0.26);
   border-color: rgba(255, 255, 255, 0.3);
 }
@@ -1638,10 +1634,6 @@ pre.code {
     max-width: 86px;
     padding: 1px 4px;
     -webkit-line-clamp: 2;
-  }
-
-  .desktop-icons {
-    grid-auto-columns: auto;
   }
 
   .desktop-icon-glyph {

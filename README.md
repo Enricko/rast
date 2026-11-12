@@ -9,14 +9,15 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | App | What it does |
 | --- | --- |
 | **File Station** | Browse, upload, download, rename, copy, move, delete, preview and restore files, with per-user homes, shared folders and quotas. |
-| **Applications** | Deploy and manage Docker Compose applications through a restricted administrative worker. |
+| **Applications** | One folder with every app the account may open; drag apps to the desktop or taskbar. Desktop icons can be moved and removed, per account. |
+| **Container Manager** | Deploy and manage Docker Compose applications through a restricted administrative worker. Optional: can be uninstalled in Package Center. |
 | **Resource Monitor** | Live CPU, memory, swap, disk, network and container metrics. |
 | **Control Panel** | Profile, password, users, roles, quotas, shared folders, storage locations, appearance and component health. |
 | **Appearance** | Per-user wallpaper (bundled nature scenes, solid colour or private upload), fit/position/overlay, light/dark/system mode and ten accent presets, saved on the server. |
 | **Live updates** | One authenticated event stream per tab keeps files, applications, containers, backups, audit logs, control panel data and appearance synchronized automatically — including changes made outside RAST and in other sessions. |
 | **Users & Groups** | NAS-style groups with shared-folder and application rules, multi-group membership, per-user direct overrides with an Effective Access explanation, live reauthorization and audit trail. Group grants never elevate the administrator role. |
-| **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. |
-| **Package Center** | Verified Python, PHP CLI, Go and Node.js runtimes from a signed catalog, side by side with a selectable default, updates with rollback, and packages imported from GitHub releases ([handoff](docs/package-center-handoff.md)). |
+| **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. Optional: can be uninstalled in Package Center. |
+| **Package Center** | RAST's own apps (install or uninstall the optional ones) and verified Python, PHP CLI, Go and Node.js runtimes from a signed catalog, side by side with a selectable default, updates with rollback, and packages imported from GitHub releases ([handoff](docs/package-center-handoff.md)). |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
 [![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)

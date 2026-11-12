@@ -122,7 +122,8 @@ export function fileIcon(entry: { kind: string; name: string; mime?: string }): 
 
 const APP_ICONS: Record<string, string> = {
   files: `<path d="M3.2 6.6c0-.9.7-1.6 1.6-1.6h4.1l1.9 2.2h8.4c.9 0 1.6.7 1.6 1.6v8.6c0 .9-.7 1.6-1.6 1.6H4.8c-.9 0-1.6-.7-1.6-1.6V6.6z" fill="#E9A93C"/><path d="M3.2 9.4h17.6v7.4c0 .9-.7 1.6-1.6 1.6H4.8c-.9 0-1.6-.7-1.6-1.6V9.4z" fill="#F2B95A"/><path d="M3.2 6.6c0-.9.7-1.6 1.6-1.6h4.1l1.9 2.2H3.2V6.6z" fill="#C98B2C"/><rect x="12.6" y="10.4" width="6" height="5.4" rx="0.9" fill="#FFF7E8"/><path d="M14 12h3.2M14 13.6h3.2M14 15.2h2" stroke="#D9A035" stroke-width="0.8" stroke-linecap="round"/>`,
-  applications: `<rect x="2.8" y="2.8" width="18.4" height="18.4" rx="4.2" fill="#2785D8"/><rect x="6.4" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF"/><rect x="13" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="6.4" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="13" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.62"/>`,
+  launcher: `<rect x="2.8" y="2.8" width="18.4" height="18.4" rx="4.2" fill="#2785D8"/><rect x="6.4" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF"/><rect x="13" y="6.4" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="6.4" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.82"/><rect x="13" y="13" width="4.6" height="4.6" rx="1.1" fill="#FFFFFF" opacity="0.62"/>`,
+  applications: `<path d="M2.8 13h18.4l-1.7 4.7c-.4 1.1-1.4 1.8-2.6 1.8H7.1c-1.2 0-2.2-.7-2.6-1.8z" fill="#1F7FB8"/><rect x="5.2" y="8.8" width="4.2" height="3.4" rx=".6" fill="#3BA8E0"/><rect x="9.9" y="8.8" width="4.2" height="3.4" rx=".6" fill="#62C0EC"/><rect x="14.6" y="8.8" width="4.2" height="3.4" rx=".6" fill="#3BA8E0"/><rect x="9.9" y="4.6" width="4.2" height="3.4" rx=".6" fill="#8AD3F3"/><path d="M6.6 15.8h10.8" stroke="#E8F6FD" stroke-width="1.1" stroke-linecap="round" opacity=".75"/>`,
   monitor: `<rect x="2.8" y="4" width="18.4" height="13" rx="2.4" fill="#2B9C74"/><rect x="4.6" y="5.8" width="14.8" height="9.4" rx="1.4" fill="#E6F4EE"/><path d="M6.4 11.4h2.6l1.3-2.6 2.2 4.6 1.5-2.8h3.6" fill="none" stroke="#1F7A5C" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.4 19.4h5.2M12 17v2.4" stroke="#2B9C74" stroke-width="1.7" stroke-linecap="round"/>`,
   backup: `<path d="M12 3.4a8.4 8.4 0 1 1-7.6 4.9" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round"/><path d="M4 3.6v5h5" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="7.8" y="10" width="8.4" height="7.6" rx="1.2" fill="#F4C39A"/><path d="M10.4 12.4h3.2M10.4 14.6h3.2" stroke="#C25E19" stroke-width="1" stroke-linecap="round"/>`,
   controlpanel: `<circle cx="12" cy="12" r="3" fill="none" stroke="#5A6673" stroke-width="2"/><path d="M12 2.9v3M12 18.1v3M2.9 12h3M18.1 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="#5A6673" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.3" fill="#2785D8"/>`,
@@ -131,6 +132,7 @@ const APP_ICONS: Record<string, string> = {
 };
 
 const APP_ACCENT: Record<string, string> = {
+  launcher: "applications",
   files: "files",
   applications: "applications",
   monitor: "monitor",

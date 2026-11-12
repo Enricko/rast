@@ -9,7 +9,7 @@ import { clear, h } from "../../core/dom";
 import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
 import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../components/live";
 import { formatBytes, formatDateTime, relativeTime } from "../../core/format";
-import { iconSvg } from "../../core/icons";
+import { appIconSvg, iconSvg } from "../../core/icons";
 import type { Permissions } from "../../core/types";
 import { confirmDialog, contextMenu, copyText, errorMessage, modal, type ContextMenuEntry } from "../../core/ui";
 import { AppLifecycle } from "../../components/lifecycle";
@@ -17,6 +17,7 @@ import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
 import { openGithubImport } from "./github";
 import {
+  filterApps,
   filterPackages,
   groupByChannel,
   jobActionLabel,
@@ -39,6 +40,7 @@ import {
   type TileState,
 } from "./format";
 import type {
+  AppPackage,
   ArtifactView,
   CatalogStatus,
   ConsumerView,
@@ -88,7 +90,14 @@ class PackageCenterApp {
   private view: PackageFilter | null = null;
   private query = "";
   private grid: HTMLElement | null = null;
+  private appGrid: HTMLElement | null = null;
+  private appSection: HTMLElement | null = null;
+  private runtimeSection: HTMLElement | null = null;
   private selectedId: string | null = null;
+  /** The RAST app whose page is open (instead of a package's). */
+  private selectedApp: string | null = null;
+  /** Apps this account can open now (their tiles offer Open). */
+  private openableSignature = "";
   private detail: PackageDetail | null = null;
   private detailError: unknown = null;
   private checking = false;
@@ -128,7 +137,7 @@ class PackageCenterApp {
     this.search = h("input", { class: "input input-search pkg-search", type: "search", placeholder: "Search", ariaLabel: "Search packages" });
     this.search.addEventListener("input", () => {
       this.query = this.search.value;
-      if (this.selectedId) this.closeDetail();
+      if (this.selectedId || this.selectedApp) this.closeDetail();
       else this.paintGrid();
     });
     this.githubButton = h(
@@ -167,10 +176,43 @@ class PackageCenterApp {
 
   async start(): Promise<void> {
     this.ctx.setTitle("Package Center");
+    this.applyParams(this.ctx.params);
+    this.openableSignature = this.openableApps();
+    this.ctx.onReopen((params) => {
+      this.applyParams(params);
+      this.render();
+    });
     this.applyAccess();
     if (this.denied) return;
     this.render();
     await this.reload();
+  }
+
+  /** `{ view }` opens a list, `{ app }` an app's page (Applications, the launcher). */
+  private applyParams(params: unknown): void {
+    const wanted = (params ?? {}) as { view?: unknown; app?: unknown };
+    if (wanted.view === "installed" || wanted.view === "all" || wanted.view === "updates") {
+      this.view = wanted.view;
+      this.selectedId = null;
+      this.selectedApp = null;
+      this.detail = null;
+    }
+    if (typeof wanted.app === "string" && wanted.app) {
+      this.selectedApp = wanted.app;
+      this.selectedId = null;
+      this.detail = null;
+    }
+  }
+
+  private openableApps(): string {
+    return this.ctx.desktop
+      .apps()
+      .map((app) => app.id)
+      .join(",");
+  }
+
+  private canOpen(appId: string): boolean {
+    return this.ctx.desktop.apps().some((app) => app.id === appId);
   }
 
   // ------------------------------------------------------------------ access
@@ -249,8 +291,11 @@ class PackageCenterApp {
     this.lc.add(
       this.ctx.store.subscribe(() => {
         const before = `${this.denied}|${this.readOnly}`;
+        const openable = this.openableApps();
+        const openableChanged = openable !== this.openableSignature;
+        this.openableSignature = openable;
         this.applyAccess();
-        if (`${this.denied}|${this.readOnly}` !== before && !this.denied) this.render();
+        if ((`${this.denied}|${this.readOnly}` !== before || openableChanged) && !this.denied) this.render();
       }),
     );
   }
@@ -370,13 +415,14 @@ class PackageCenterApp {
     if (this.disposed || this.denied) return;
     this.renderChrome();
     this.renderSidebar();
-    if (this.selectedId) this.renderDetail();
+    if (this.selectedApp) this.renderAppDetail();
+    else if (this.selectedId) this.renderDetail();
     else this.renderList();
   }
 
   /** Toolbar state: back only on a package page, refresh spins while checking. */
   private renderChrome(): void {
-    this.backButton.disabled = !this.selectedId;
+    this.backButton.disabled = !this.selectedId && !this.selectedApp;
     const checking = this.checking || Boolean(this.overview?.catalog.checking);
     this.checkButton.disabled = checking;
     this.checkButton.classList.toggle("is-checking", checking);
@@ -390,7 +436,7 @@ class PackageCenterApp {
     const updates = this.overview?.counts.updates ?? 0;
     const list = h("div", { class: "pkg-nav" });
     for (const v of VIEWS) {
-      const active = !this.selectedId && this.currentView() === v.id;
+      const active = !this.selectedId && !this.selectedApp && this.currentView() === v.id;
       const count = v.id === "updates" && updates > 0 ? updates : 0;
       const button = h(
         "button",
@@ -402,6 +448,7 @@ class PackageCenterApp {
       button.addEventListener("click", () => {
         this.view = v.id;
         this.selectedId = null;
+        this.selectedApp = null;
         this.detail = null;
         this.render();
       });
@@ -450,6 +497,9 @@ class PackageCenterApp {
   private renderList(): void {
     clear(this.main);
     this.grid = null;
+    this.appGrid = null;
+    this.appSection = null;
+    this.runtimeSection = null;
     if (this.loadError && !this.overview) {
       renderLoadFailure(this.main, this.loadError, { title: "Package Center could not load", retry: () => void this.reload() });
       return;
@@ -460,10 +510,23 @@ class PackageCenterApp {
     }
     const content = h("div", { class: "app-content pkg-content" });
     for (const note of this.listNotices()) content.appendChild(note);
-    const title = VIEWS.find((v) => v.id === this.currentView())?.label ?? "Packages";
+    const view = this.currentView();
+    const title = VIEWS.find((v) => v.id === view)?.label ?? "Packages";
     content.appendChild(h("h2", { class: "pkg-heading" }, title));
+    // Updates come with RAST for its own apps: the Updates view lists runtimes only.
+    if (view !== "updates" && this.overview.apps?.length) {
+      this.appGrid = h("div", { class: "pkg-grid" });
+      this.appSection = h("section", { class: "pkg-group", ariaLabel: "Apps" }, h("h3", { class: "pkg-group-title" }, "Apps"), this.appGrid);
+      content.appendChild(this.appSection);
+    }
     this.grid = h("div", { class: "pkg-grid" });
-    content.appendChild(this.grid);
+    this.runtimeSection = h(
+      "section",
+      { class: "pkg-group", ariaLabel: "Runtimes" },
+      this.appSection ? h("h3", { class: "pkg-group-title" }, "Runtimes") : null,
+      this.grid,
+    );
+    content.appendChild(this.runtimeSection);
     this.paintGrid();
     this.main.appendChild(content);
   }
@@ -512,13 +575,20 @@ class PackageCenterApp {
     if (!grid) return;
     clear(grid);
     const view = this.currentView();
+    const apps = this.appGrid ? filterApps(this.overview?.apps ?? [], view, this.query) : [];
+    if (this.appGrid && this.appSection) {
+      clear(this.appGrid);
+      for (const app of apps) this.appGrid.appendChild(this.appTile(app));
+      this.appSection.hidden = apps.length === 0;
+    }
     const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
+    if (this.runtimeSection) this.runtimeSection.hidden = packages.length === 0 && apps.length > 0 && Boolean(this.query);
     if (packages.length === 0) {
       grid.appendChild(
         this.query
           ? emptyBlock("No matching packages", "Try another search.")
           : view === "installed"
-            ? emptyBlock("Nothing installed yet", "Install a runtime from All Packages.")
+            ? emptyBlock(this.appSection ? "No runtimes installed yet" : "Nothing installed yet", "Install a runtime from All Packages.")
             : view === "updates"
               ? emptyBlock("Everything is up to date")
               : emptyBlock("No packages", "Check for updates to load the catalog."),
@@ -552,6 +622,147 @@ class PackageCenterApp {
       this.openDetail(p.id);
     });
     return tile;
+  }
+
+  // ------------------------------------------------------------------ apps
+
+  private appTile(app: AppPackage): HTMLElement {
+    const open = h("button", { class: "pkg-tile-name", type: "button", title: `About ${app.name}` }, app.name);
+    open.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.openAppPage(app.id);
+    });
+    const tile = h(
+      "article",
+      { class: `pkg-tile is-app is-${app.installed ? "installed" : "install"}`, dataset: { appId: app.id } },
+      this.appIconEl(app, "tile"),
+      h(
+        "div",
+        { class: "pkg-tile-body" },
+        open,
+        h("div", { class: "pkg-tile-sub" }, app.removable ? "Optional app" : "Built-in app"),
+        h("div", { class: "pkg-tile-foot" }, this.appTileAction(app)),
+      ),
+    );
+    tile.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button, a")) return;
+      this.openAppPage(app.id);
+    });
+    return tile;
+  }
+
+  /** Open when it is installed (and this account may open it), else Install. */
+  private appTileAction(app: AppPackage): HTMLElement {
+    if (app.installed) {
+      if (app.id !== "packages" && this.canOpen(app.id)) {
+        return this.pill("Open", "is-quiet", `Open ${app.name}`, () => this.ctx.openApp(app.id));
+      }
+      return h("span", { class: "pkg-pill is-static" }, "Installed");
+    }
+    if (this.readOnly) return h("span", { class: "pkg-pill is-static" }, "Not installed");
+    return this.pill("Install", "is-accent", `Install ${app.name}`, () => this.setAppInstalled(app, true));
+  }
+
+  private appIconEl(app: AppPackage, size: "tile" | "hero"): HTMLElement {
+    return h("div", { class: `pkg-icon pkg-icon-${size} is-app`, ariaHidden: true }, appIconSvg(app.id, "apps", size === "hero" ? 54 : 34));
+  }
+
+  private openAppPage(id: string): void {
+    this.selectedApp = id;
+    this.selectedId = null;
+    this.detail = null;
+    this.render();
+    this.main.scrollTop = 0;
+  }
+
+  private renderAppDetail(): void {
+    clear(this.main);
+    this.grid = null;
+    this.appGrid = null;
+    const content = h("div", { class: "app-content pkg-content pkg-detail" });
+    this.main.appendChild(content);
+    if (!this.overview) {
+      content.appendChild(h("div", { class: "loading-block" }, h("span", { class: "spinner" }), "Loading…"));
+      return;
+    }
+    const app = this.overview.apps?.find((candidate) => candidate.id === this.selectedApp);
+    if (!app) {
+      content.appendChild(emptyBlock("This app is not available", "Go back to the list of packages."));
+      return;
+    }
+    const kind = app.removable ? "Optional" : "Built-in";
+    content.append(
+      h(
+        "section",
+        { class: "pkg-hero" },
+        this.appIconEl(app, "hero"),
+        h(
+          "div",
+          { class: "pkg-hero-body" },
+          h("div", { class: "pkg-hero-publisher" }, iconSvg("shield", 13), `RAST · ${kind}`),
+          h("h2", { class: "pkg-hero-name" }, app.name),
+          h("div", { class: `pkg-hero-status is-${app.installed ? "installed" : "available"}` }, app.installed ? "Installed" : "Not installed"),
+          this.appActions(app),
+        ),
+      ),
+      h("p", { class: "pkg-about" }, app.description),
+    );
+    const items: Array<[string, string]> = [
+      ["Developer", "RAST"],
+      ["Version", this.ctx.store.get().version ? `RAST ${this.ctx.store.get().version}` : "Comes with RAST"],
+      ["Type", app.removable ? "Optional: can be uninstalled" : "Built-in: always installed"],
+      ["Updates", "Updated together with RAST"],
+    ];
+    if (app.removable) items.push(["When uninstalled", uninstallKeeps(app)]);
+    content.appendChild(
+      h(
+        "section",
+        { class: "pkg-section" },
+        h("h3", { class: "pkg-section-title" }, "Other information"),
+        h("dl", { class: "pkg-info" }, ...items.map(([k, v]) => h("div", { class: "pkg-info-item" }, h("dt", {}, k), h("dd", {}, v)))),
+      ),
+    );
+  }
+
+  private appActions(app: AppPackage): HTMLElement | null {
+    const buttons: HTMLButtonElement[] = [];
+    if (app.installed) {
+      if (app.id !== "packages" && this.canOpen(app.id)) buttons.push(this.actionButton("Open", "primary", () => this.ctx.openApp(app.id)));
+      if (app.removable && !this.readOnly) {
+        const uninstall = this.actionButton("Uninstall", "secondary", () => this.setAppInstalled(app, false));
+        uninstall.title = `Hide ${app.name} for everyone; its data stays`;
+        buttons.push(uninstall);
+      }
+    } else if (!this.readOnly) {
+      buttons.push(this.actionButton("Install", "primary", () => this.setAppInstalled(app, true)));
+    }
+    return buttons.length ? h("div", { class: "pkg-hero-actions" }, ...buttons) : null;
+  }
+
+  private async setAppInstalled(app: AppPackage, installed: boolean): Promise<void> {
+    if (!installed) {
+      const ok = await confirmDialog({
+        title: `Uninstall ${app.name}?`,
+        message: `${app.name} disappears from every desktop and menu, and its windows close for everyone. ${uninstallKeeps(app)} You can install it again at any time.`,
+        confirmLabel: "Uninstall",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const id = encodeURIComponent(app.id);
+    try {
+      const res = installed
+        ? await this.ctx.api.post<{ apps?: AppPackage[] }>(`/api/packages/apps/${id}/install`)
+        : await this.ctx.api.del<{ apps?: AppPackage[] }>(`/api/packages/apps/${id}`, { confirm: app.id });
+      if (this.overview && res?.apps) this.overview.apps = res.apps;
+      this.ctx.toast.success(installed ? `${app.name} is installed` : `${app.name} was uninstalled`);
+      // The desktop, menus and this window follow the new permissions.
+      await this.ctx.refreshUser().catch(() => undefined);
+    } catch (error) {
+      this.ctx.toast.error(errorMessage(error));
+    }
+    this.render();
+    this.sync.run();
   }
 
   private tileAction(p: PackageView, state: TileState): HTMLElement {
@@ -645,8 +856,9 @@ class PackageCenterApp {
   }
 
   private closeDetail(): void {
-    if (!this.selectedId) return;
+    if (!this.selectedId && !this.selectedApp) return;
     this.selectedId = null;
+    this.selectedApp = null;
     this.detail = null;
     this.render();
   }
@@ -1570,6 +1782,13 @@ function formatInterval(minutes: number): string {
   return `${minutes} minutes`;
 }
 
+/** What stays when an optional app is uninstalled. */
+function uninstallKeeps(app: AppPackage): string {
+  if (app.id === "applications") return "Running containers keep running, and their data stays.";
+  if (app.id === "backup") return "Scheduled backups keep running, and existing backups stay.";
+  return "Its data stays.";
+}
+
 function catalogTooltip(c: CatalogStatus): string {
   const lines = [c.url];
   if (c.keyId) lines.push(`Signed with ${c.keyId}${c.officialKey ? " (official key)" : ""}`);
@@ -1583,7 +1802,7 @@ export const packagesApp: AppDefinition = {
   id: "packages",
   name: "Package Center",
   icon: "package",
-  description: "Install and manage verified runtimes side by side",
+  description: "Install and manage apps and verified runtimes",
   adminOnly: true,
   singleton: true,
   defaultSize: { w: 1060, h: 700 },

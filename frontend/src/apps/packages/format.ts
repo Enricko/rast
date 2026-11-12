@@ -1,6 +1,6 @@
 // Pure helpers for the Package Center (unit-tested in tests/packages.test.ts).
 
-import type { JobHistory, PackageView, SystemInstall, SystemLinks, VersionChoice } from "./types";
+import type { AppPackage, JobHistory, PackageView, SystemInstall, SystemLinks, VersionChoice } from "./types";
 
 export type PackageFilter = "all" | "installed" | "updates";
 
@@ -8,6 +8,17 @@ export type PackageFilter = "all" | "installed" | "updates";
 export function sortForTiles(packages: PackageView[]): PackageView[] {
   const rank = (p: PackageView) => (p.updates.length > 0 ? 0 : p.installed.length > 0 || p.system ? 1 : 2);
   return [...packages].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+}
+
+/** RAST apps in a list view: Installed shows installed ones, Updates none. */
+export function filterApps(apps: AppPackage[], view: PackageFilter, query: string): AppPackage[] {
+  if (view === "updates") return [];
+  const needle = query.trim().toLowerCase();
+  return apps.filter(
+    (app) =>
+      (view !== "installed" || app.installed) &&
+      (!needle || `${app.name} ${app.description} ${app.id}`.toLowerCase().includes(needle)),
+  );
 }
 
 /** Packages shown by a sidebar view, filtered by a free-text query. */

@@ -1,8 +1,8 @@
 // Desktop shell: wallpaper, application icon grid, window layer, taskbar, tray,
 // panels (start menu / account / status / clock), context menus and shortcuts.
 
-import { appsForPermissions, findApp, isAppAllowed, permissionsSignature } from "../apps/registry";
-import type { AppContext, AppDefinition } from "../core/app";
+import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature } from "../apps/registry";
+import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
@@ -35,6 +35,7 @@ import {
 import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } from "./shared";
 import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
+import { createDesktopIcons } from "./desktop-icons";
 import { createWidgetLayer } from "./widgets";
 
 const MAX_PINNED = 8;
@@ -81,6 +82,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   let panelKind: string | null = null;
   let disposed = false;
   const windowParams = new Map<string, unknown>();
+  /** Singleton windows that show new parameters when opened again. */
+  const reopenListeners = new Map<string, (params: unknown) => void>();
   const disposers: Array<() => void> = [];
 
   const wm = new WindowManager(windowsLayer, {
@@ -92,6 +95,19 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
   const appearanceSync = getAppearanceSync(deps.api, deps.events);
+  // Desktop icons (arranged per account): created before the appearance
+  // subscription below, which refreshes them.
+  const desktopIcons = createDesktopIcons({
+    layer: iconLayer,
+    desktop,
+    appearance,
+    toast,
+    visibleApps,
+    openApp: (appId) => openApp(appId),
+    menuItems: iconContextItems,
+    dropOnTaskbar: (appId) => pinApp(appId),
+  });
+  disposers.push(() => desktopIcons.dispose());
   const widgets = createWidgetLayer({
     layer: widgetLayer,
     api: deps.api,
@@ -126,6 +142,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       if (appearance.isKnown) {
         widgets.showSaved();
         showSavedPins();
+        desktopIcons.refresh();
       }
       // An open editor owns the document while it previews a draft.
       if (isAppearancePreviewActive()) return;
@@ -179,6 +196,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     }
     closePanel();
     pushRecentApp(app.id);
+    const openBefore = new Set(wm.list().map((win) => win.id));
     const handle = wm.open(
       app,
       params,
@@ -216,6 +234,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
             });
           },
           openApp,
+          desktop: desktopActions,
           withBusy: async <T,>(promise: Promise<T>, label?: string): Promise<T> => {
             busyDepth += 1;
             if (label) busyLabel.textContent = label;
@@ -229,11 +248,17 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           },
           onResize: (callback: () => void) => mount.onResize(callback),
           onDispose: (callback: () => void) => mount.onDispose(callback),
+          onReopen: (callback: (next: unknown) => void) => {
+            const windowId = mount.window.id;
+            reopenListeners.set(windowId, callback);
+            mount.onDispose(() => reopenListeners.delete(windowId));
+          },
         };
         await app.mount(ctx);
       },
       { singleton: app.singleton },
     );
+    if (openBefore.has(handle.id) && params !== undefined) reopenListeners.get(handle.id)?.(params);
     windowParams.set(handle.id, params);
   }
 
@@ -261,27 +286,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
 
   // ------------------------------------------------------------ desk icons
-  const iconButtons: HTMLButtonElement[] = [];
-  let selectedIcon = 0;
-
   function visibleApps(): AppDefinition[] {
     return appsForPermissions(store.get().permissions, store.isAdmin());
-  }
-
-  function setIconTabStops(): void {
-    for (const [index, button] of iconButtons.entries()) {
-      const selected = index === selectedIcon;
-      button.tabIndex = selected ? 0 : -1;
-      button.classList.toggle("is-selected", selected);
-      button.setAttribute("aria-selected", String(selected));
-    }
-  }
-
-  function selectIcon(index: number, focus = true): void {
-    if (iconButtons.length === 0) return;
-    selectedIcon = Math.max(0, Math.min(iconButtons.length - 1, index));
-    setIconTabStops();
-    if (focus) iconButtons[selectedIcon]?.focus();
   }
 
   function isPinned(appId: string): boolean {
@@ -304,7 +310,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   function pinApp(appId: string): void {
-    if (isPinned(appId) || pinned.length >= MAX_PINNED) return;
+    if (isPinned(appId)) return;
+    if (pinned.length >= MAX_PINNED) {
+      toast.warning(`The taskbar holds ${MAX_PINNED} pinned apps. Unpin one first.`);
+      return;
+    }
     if (savePins([...pinned, appId])) toast.success(`Pinned ${findApp(appId)?.name ?? appId} to the taskbar`);
   }
 
@@ -319,68 +329,24 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       isPinned(app.id)
         ? { label: "Unpin from taskbar", icon: "unpin", onClick: () => unpinApp(app.id) }
         : { label: "Pin to taskbar", icon: "pin", onClick: () => pinApp(app.id) },
+      { label: "Remove from desktop", icon: "close", onClick: () => desktopIcons.remove(app.id) },
       "separator",
       { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
     ];
   }
 
-  function renderDesktopIcons(): void {
-    iconLayer.replaceChildren();
-    iconButtons.length = 0;
-    selectedIcon = 0;
-    for (const [index, app] of visibleApps().entries()) {
-      const button = h(
-        "button",
-      {
-        class: "desktop-icon",
-        type: "button",
-        role: "option",
-        ariaLabel: `${app.name} — ${app.description}`,
-        title: app.name,
-        tabIndex: index === 0 ? 0 : -1,
-        onClick: () => selectIcon(index),
-      },
-      h("span", { class: "desktop-icon-glyph" }, appIconSvg(app.id, app.icon, 30)),
-      h("span", { class: "desktop-icon-label" }, app.name),
-    );
-    button.addEventListener("dblclick", () => openApp(app.id));
-    button.addEventListener("pointerup", (event) => {
-      if (event.pointerType === "touch") openApp(app.id);
-    });
-    button.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openApp(app.id);
-        return;
-      }
-      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
-        event.preventDefault();
-        const rect = button.getBoundingClientRect();
-        contextMenu(rect.left, rect.bottom, iconContextItems(app), { ariaLabel: app.name });
-        return;
-      }
-      const columns = Math.max(1, getComputedStyle(iconLayer).gridTemplateColumns.split(" ").length);
-      if (event.key === "ArrowDown") selectIcon(index + columns);
-      else if (event.key === "ArrowUp") selectIcon(index - columns);
-      else if (event.key === "ArrowRight") selectIcon(index + 1);
-      else if (event.key === "ArrowLeft") selectIcon(index - 1);
-      else if (event.key === "Home") selectIcon(0);
-      else if (event.key === "End") selectIcon(iconButtons.length - 1);
-      else return;
-      event.preventDefault();
-    });
-    button.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      selectIcon(index, false);
-      contextMenu(event.clientX, event.clientY, iconContextItems(app), { ariaLabel: app.name });
-    });
-    button.addEventListener("focus", () => selectIcon(index, false));
-    iconButtons.push(button);
-    iconLayer.appendChild(button);
-  }
-    setIconTabStops();
-  }
-  renderDesktopIcons();
+  /** What apps (the Applications folder) may change on the desktop and taskbar. */
+  const desktopActions: DesktopActions = {
+    apps: visibleApps,
+    isOnDesktop: (appId) => desktopIcons.has(appId),
+    addToDesktop: (appId) => {
+      if (desktopIcons.add(appId)) toast.success(`Added ${findApp(appId)?.name ?? appId} to the desktop`);
+    },
+    removeFromDesktop: (appId) => desktopIcons.remove(appId),
+    isPinned,
+    pin: pinApp,
+    unpin: unpinApp,
+  };
 
   // --------------------------------------------------------------- panels
   function closePanel(): void {
@@ -490,6 +456,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (target.closest(".window, .taskbar, .menu-panel, .desktop-icon, .toast, .context-menu, .modal-backdrop")) return;
     event.preventDefault();
     const items: ContextMenuEntry[] = [
+      { label: "Applications", icon: "apps", onClick: () => openApp("launcher") },
+      { label: "Reset icon layout", icon: "grid", onClick: () => desktopIcons.reset(), disabled: !desktopIcons.isCustomized() },
+      "separator",
       { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
       { label: "Widgets…", icon: "activity", onClick: () => widgets.openCatalog() },
       { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
@@ -978,7 +947,13 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // Group/rule changes are pushed per affected user. We refetch the effective
   // permissions and apply them in place (launcher, taskbar, open windows).
   let accessRefreshTimer: number | undefined;
+  // App installs/uninstalls reach every account: they update the desktop
+  // quietly (a closed window still says why).
+  const QUIET_ACCESS_REASONS = new Set(["app_installed", "app_uninstalled"]);
+  let announceAccess = false;
   const refreshAccess = async (): Promise<void> => {
+    const announce = announceAccess;
+    announceAccess = false;
     try {
       const fresh = await deps.api.get<MeResponse>("/api/auth/me");
       if (disposed) return;
@@ -990,14 +965,15 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         csrfToken: fresh.csrfToken,
         sessionExpiresAt: fresh.sessionExpiresAt,
       });
-      toast.info("Your access was updated");
+      if (announce) toast.info("Your access was updated");
     } catch (error) {
       console.warn("could not refresh effective access", error);
     }
   };
   disposers.push(
-    realtime.on<{ reason?: string; userId?: number; changedBy?: string }>("access.changed", () => {
+    realtime.on<{ reason?: string; userId?: number; changedBy?: string }>("access.changed", (data) => {
       if (disposed) return;
+      if (!QUIET_ACCESS_REASONS.has(data?.reason ?? "")) announceAccess = true;
       if (accessRefreshTimer !== undefined) window.clearTimeout(accessRefreshTimer);
       accessRefreshTimer = window.setTimeout(() => {
         accessRefreshTimer = undefined;
@@ -1073,6 +1049,28 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
   taskbar.addEventListener("contextmenu", onTaskbarContext);
 
+  // Apps dragged from the Applications folder (or a desktop icon) pin here.
+  const carriesApp = (event: DragEvent): boolean => Boolean(event.dataTransfer?.types.includes(APP_DRAG_TYPE));
+  taskbar.addEventListener("dragover", (event) => {
+    if (!carriesApp(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    taskbar.classList.add("is-drop-target");
+  });
+  taskbar.addEventListener("dragleave", (event) => {
+    if (!(event.relatedTarget instanceof Node) || !taskbar.contains(event.relatedTarget)) taskbar.classList.remove("is-drop-target");
+  });
+  taskbar.addEventListener("drop", (event) => {
+    if (!carriesApp(event)) return;
+    event.preventDefault();
+    taskbar.classList.remove("is-drop-target");
+    const appId = event.dataTransfer?.getData(APP_DRAG_TYPE) ?? "";
+    if (appId && findApp(appId)) pinApp(appId);
+  });
+  const clearTaskbarDrop = (): void => taskbar.classList.remove("is-drop-target");
+  document.addEventListener("dragend", clearTaskbarDrop);
+  disposers.push(() => document.removeEventListener("dragend", clearTaskbarDrop));
+
   // ------------------------------------------------------ store reactivity
   // Permission changes are applied in place: rebuild launcher/taskbar, close
   // windows that lost access and keep every other window exactly where it is.
@@ -1084,12 +1082,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (signature === accessSignature) return;
     accessSignature = signature;
     closePanel();
-    renderDesktopIcons();
+    desktopIcons.refresh();
     for (const win of wm.list()) {
       if (isAppAllowed(win.appId, store.get().permissions, store.isAdmin())) continue;
       const app = findApp(win.appId);
       wm.close(win.id);
-      toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);
+      if (!isAppInstalled(win.appId, store.get().permissions)) {
+        toast.warning(`${app?.name ?? "The application"} was uninstalled — its window has been closed.`);
+      } else {
+        toast.warning(`${app?.name ?? "Application"} access was revoked — the window has been closed.`);
+      }
     }
     renderTaskbar();
     widgets.permissionsChanged();

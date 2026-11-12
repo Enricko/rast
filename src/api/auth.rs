@@ -296,6 +296,9 @@ pub struct AppPermissionDto {
     pub allowed: bool,
     pub read_only: bool,
     pub label: String,
+    /// False when the app was uninstalled in Package Center (then `allowed`
+    /// is false for everyone, administrators included).
+    pub installed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -336,6 +339,7 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
                 allowed: grant.allowed,
                 read_only: grant.read_only,
                 label: app_label(app_id).to_string(),
+                installed: grant.fallback != "not-installed",
             },
         );
     }

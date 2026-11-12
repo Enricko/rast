@@ -64,6 +64,8 @@ pub fn routes() -> Router<AppState> {
             "/api/packages/consumers/{id}",
             put(update_consumer).delete(delete_consumer),
         )
+        .route("/api/packages/apps/{id}/install", post(install_app))
+        .route("/api/packages/apps/{id}", delete(uninstall_app))
         .route("/api/packages/{id}", get(package).delete(uninstall))
         .route("/api/packages/{id}/install", post(install))
         .route("/api/packages/{id}/update", post(update))
@@ -79,8 +81,115 @@ pub async fn overview(State(state): State<AppState>, user: AuthUser) -> AppResul
     access::app_surface(&state.db, &state, &user, "packages").await?;
     let manage = can_manage(&state, &user).await?;
     let overview = state.packages.overview(manage).await?;
+    let mut body = serde_json::to_value(overview).map_err(|e| AppError::internal(e.to_string()))?;
+    body["apps"] = json!(apps_state(&state).await);
+    Ok(Json(body))
+}
+
+/// RAST's own apps as Package Center lists them: built-in ones are always
+/// installed; removable ones can be uninstalled and installed again.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppPackage {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub installed: bool,
+    pub removable: bool,
+}
+
+pub async fn apps_state(state: &AppState) -> Vec<AppPackage> {
+    let removed = access::removed_apps(&state.db).await;
+    std::iter::once(access::LAUNCHER_APP)
+        .chain(access::APP_IDS.iter().copied())
+        .map(|id| AppPackage {
+            id: id.to_string(),
+            name: access::app_label(id).to_string(),
+            description: access::app_description(id).to_string(),
+            installed: !removed.iter().any(|r| r == id),
+            removable: access::REMOVABLE_APPS.contains(&id),
+        })
+        .collect()
+}
+
+/// POST /api/packages/apps/{id}/install
+pub async fn install_app(
+    State(state): State<AppState>,
+    PackageManager(user): PackageManager,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    set_app(&state, &user, &id, true).await
+}
+
+/// DELETE /api/packages/apps/{id}?confirm=<id> — hide the app and close its
+/// API for everyone; its data, schedules and running containers stay.
+pub async fn uninstall_app(
+    State(state): State<AppState>,
+    PackageManager(user): PackageManager,
+    Path(id): Path<String>,
+    Query(q): Query<UninstallQuery>,
+) -> AppResult<Json<Value>> {
+    if q.confirm.as_deref() != Some(id.as_str()) {
+        return Err(AppError::bad_request(
+            "Uninstalling must be confirmed: pass confirm=<app id>.",
+        ));
+    }
+    set_app(&state, &user, &id, false).await
+}
+
+async fn set_app(
+    state: &AppState,
+    user: &AuthUser,
+    id: &str,
+    installed: bool,
+) -> AppResult<Json<Value>> {
+    if !access::is_desktop_app(id) {
+        return Err(AppError::NotFound("unknown application"));
+    }
+    let label = access::app_label(id);
+    let action = if installed {
+        "package.app_install"
+    } else {
+        "package.app_uninstall"
+    };
+    let log = crate::audit::AuditLog::new(action)
+        .actor(user)
+        .object("app", id.to_string())
+        .path(label.to_string());
+    let changed = match access::set_app_installed(&state.db, id, installed).await {
+        Ok(changed) => changed,
+        Err(e) => {
+            crate::audit::record_with_events(
+                &state.db,
+                &state.events,
+                log.failure().detail(e.public_message()),
+            )
+            .await;
+            return Err(e);
+        }
+    };
+    if changed {
+        crate::audit::record_with_events(
+            &state.db,
+            &state.events,
+            log.success().detail(if installed {
+                "installed"
+            } else {
+                "uninstalled"
+            }),
+        )
+        .await;
+        // Every open desktop reloads its permissions and app list.
+        state.events.publish(
+            "access.changed",
+            json!({"reason": if installed { "app_installed" } else { "app_uninstalled" }, "appId": id}),
+        );
+        state
+            .events
+            .publish("package.changed", json!({"reason": "app", "appId": id}));
+    }
     Ok(Json(
-        serde_json::to_value(overview).map_err(|e| AppError::internal(e.to_string()))?,
+        json!({ "ok": true, "changed": changed, "apps": apps_state(state).await }),
     ))
 }
 

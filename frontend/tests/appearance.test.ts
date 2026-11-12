@@ -14,6 +14,7 @@ import {
   appearancePatch,
   hasAppearanceChanges,
   normalizeAppearance,
+  normalizeDesktopIcons,
   normalizeTaskbarPins,
   type Appearance,
 } from "../src/core/appearance";
@@ -279,4 +280,51 @@ test("taskbar pin changes send only the pin list and the newest list wins", asyn
   assert.equal(await second, true);
   assert.deepEqual(service.value.taskbarPins, ["logs"]);
   assert.equal(service.pendingTaskbarPins, null);
+});
+
+test("desktop icons: null is the default layout, saves send only the layout, reset sends null", async () => {
+  assert.equal(normalizeAppearance({} as Partial<Appearance>).desktopIcons, null);
+  assert.equal(normalizeDesktopIcons(null), null);
+  assert.deepEqual(normalizeDesktopIcons([]), [], "an empty desktop is a choice");
+  assert.deepEqual(
+    normalizeDesktopIcons([
+      { id: "files", col: 0, row: 0 },
+      { id: "files", col: 1, row: 0 },
+      { id: "logs", col: 0, row: 0 },
+      { id: "Bad Id", col: 2, row: 0 },
+      { id: "monitor", col: 64, row: 0 },
+      { id: "backup", col: 1.5, row: 0 },
+      { id: "monitor", col: 3, row: 2 },
+    ]),
+    [
+      { id: "files", col: 0, row: 0 },
+      { id: "monitor", col: 3, row: 2 },
+    ],
+    "duplicates, bad ids, shared cells and out-of-range cells are dropped",
+  );
+
+  const { api, calls } = fakeApi();
+  const service = new AppearanceService(api);
+  const loading = service.load(23);
+  calls.shift()!.resolve(saved());
+  await loading;
+  assert.equal(service.value.desktopIcons, null);
+
+  const saving = service.saveDesktopIcons([{ id: "files", col: 2, row: 1 }]);
+  assert.deepEqual(service.pendingDesktopIcons, [{ id: "files", col: 2, row: 1 }]);
+  await tick();
+  const put = calls.shift()!;
+  assert.deepEqual(put.body, { desktopIcons: [{ id: "files", col: 2, row: 1 }] });
+  put.resolve({ ...saved(), desktopIcons: [{ id: "files", col: 2, row: 1 }] });
+  assert.equal(await saving, true);
+  assert.deepEqual(service.value.desktopIcons, [{ id: "files", col: 2, row: 1 }]);
+  assert.equal(service.pendingDesktopIcons, null);
+
+  const resetting = service.resetDesktopIcons();
+  await tick();
+  const reset = calls.shift()!;
+  assert.deepEqual(reset.body, { desktopIcons: null });
+  reset.resolve({ ...saved(), desktopIcons: null });
+  assert.equal(await resetting, true);
+  assert.equal(service.value.desktopIcons, null);
 });

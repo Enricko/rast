@@ -1084,3 +1084,114 @@ async fn granted_groups_manage_packages_and_uninstall_removes_everything() {
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
 }
+
+#[tokio::test]
+async fn optional_apps_are_uninstalled_and_installed_in_package_center() {
+    let server = Server::start().await;
+    let admin = server.login("admin", Role::Admin).await;
+    let viewer = server.login("viewer", Role::User).await;
+
+    let (status, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let apps = body["apps"].as_array().unwrap();
+    let app = |id: &str| apps.iter().find(|a| a["id"] == id).cloned().unwrap();
+    assert_eq!(app("launcher")["name"], "Applications");
+    assert_eq!(app("applications")["name"], "Container Manager");
+    assert_eq!(app("applications")["removable"], true);
+    assert_eq!(app("backup")["installed"], true);
+    assert_eq!(app("files")["removable"], false);
+
+    // Built-in apps cannot be uninstalled; the confirmation is required.
+    let (status, _) = server
+        .request(
+            "DELETE",
+            "/api/packages/apps/files?confirm=files",
+            None,
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = server
+        .request("DELETE", "/api/packages/apps/backup", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = server
+        .request(
+            "DELETE",
+            "/api/packages/apps/backup?confirm=backup",
+            None,
+            viewer.clone(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "Package Center is closed to viewers"
+    );
+
+    let (status, _) = server
+        .request("GET", "/api/backups", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = server
+        .request(
+            "DELETE",
+            "/api/packages/apps/backup?confirm=backup",
+            None,
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["changed"], true);
+
+    // Uninstalled: closed for administrators too, and reported as such.
+    let (status, _) = server
+        .request("GET", "/api/backups", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, me) = server
+        .request("GET", "/api/auth/me", None, admin.clone())
+        .await;
+    assert_eq!(me["permissions"]["apps"]["backup"]["installed"], false);
+    assert_eq!(me["permissions"]["apps"]["backup"]["allowed"], false);
+    assert_eq!(me["features"]["backup"], false);
+    assert_eq!(me["permissions"]["apps"]["files"]["installed"], true);
+    let audit = server.audit("package.app_uninstall").await;
+    assert_eq!(
+        audit,
+        [
+            ("failure".to_string(), "File Station".to_string()),
+            ("success".to_string(), "Backup Center".to_string())
+        ]
+    );
+
+    // Uninstalling again changes nothing; installing opens it again.
+    let (_, body) = server
+        .request(
+            "DELETE",
+            "/api/packages/apps/backup?confirm=backup",
+            None,
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(body["changed"], false);
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/backup/install",
+            None,
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = server
+        .request("GET", "/api/backups", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, me) = server
+        .request("GET", "/api/auth/me", None, admin.clone())
+        .await;
+    assert_eq!(me["permissions"]["apps"]["backup"]["installed"], true);
+}

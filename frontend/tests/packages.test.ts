@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  filterApps,
   filterPackages,
   groupByChannel,
   installedLabel,
@@ -19,7 +20,7 @@ import {
   upToDateText,
   versionOptionLabel,
 } from "../src/apps/packages/format";
-import type { PackageView, VersionChoice } from "../src/apps/packages/types";
+import type { AppPackage, PackageView, VersionChoice } from "../src/apps/packages/types";
 
 function choice(version: string, extra: Partial<VersionChoice> = {}): VersionChoice {
   return {
@@ -212,4 +213,17 @@ test("sudo and services follow the system-wide links", () => {
   assert.equal(systemWideText(p, { ...links, linked: [] })?.text, "Linking…");
   assert.equal(systemWideText(pkg("php", { defaultVersion: null, terminal, system }), links), null, "no Package Center default");
   assert.equal(systemSourceLabel({ source: "manual", sourcePackage: null, displaced: true }), "manual install · moved aside");
+});
+
+test("RAST apps: Installed hides uninstalled ones, Updates has none, search matches name and description", () => {
+  const apps: AppPackage[] = [
+    { id: "files", name: "File Station", description: "Browse files.", installed: true, removable: false },
+    { id: "applications", name: "Container Manager", description: "Docker containers.", installed: false, removable: true },
+    { id: "backup", name: "Backup Center", description: "Back up data.", installed: true, removable: true },
+  ];
+  assert.deepEqual(filterApps(apps, "installed", "").map((a) => a.id), ["files", "backup"]);
+  assert.deepEqual(filterApps(apps, "all", "").map((a) => a.id), ["files", "applications", "backup"]);
+  assert.deepEqual(filterApps(apps, "updates", ""), []);
+  assert.deepEqual(filterApps(apps, "all", "docker").map((a) => a.id), ["applications"]);
+  assert.deepEqual(filterApps(apps, "installed", "docker"), []);
 });

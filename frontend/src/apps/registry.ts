@@ -6,11 +6,13 @@ import { applicationsApp } from "./applications";
 import { backupApp } from "./backup";
 import { controlPanelApp } from "./controlpanel";
 import { filesApp } from "./files";
+import { launcherApp } from "./launcher";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
 import { packagesApp } from "./packages";
 
 export const APPS: AppDefinition[] = [
+  launcherApp,
   filesApp,
   applicationsApp,
   monitorApp,
@@ -37,10 +39,12 @@ export function appsForRole(isAdmin: boolean): AppDefinition[] {
  * defaults so older servers keep working unchanged.
  */
 export function isAppAllowed(appId: string, permissions: Permissions | null, isAdmin: boolean): boolean {
-  if (isAdmin) return true;
   const app = findApp(appId);
   if (!app) return false;
   const granted = permissions?.apps?.[appId];
+  // Uninstalled in Package Center: closed for everyone, administrators included.
+  if (granted?.installed === false) return false;
+  if (isAdmin) return true;
   if (granted && typeof granted.allowed === "boolean") return granted.allowed;
   return !app.adminOnly;
 }
@@ -55,6 +59,11 @@ export function isAppReadOnly(appId: string, permissions: Permissions | null, is
   if (isAdmin) return false;
   const granted = permissions?.apps?.[appId];
   return Boolean(granted?.readOnly && granted.allowed);
+}
+
+/** Whether an app is installed (uninstalled apps live only in Package Center). */
+export function isAppInstalled(appId: string, permissions: Permissions | null): boolean {
+  return permissions?.apps?.[appId]?.installed !== false;
 }
 
 /** Stable signature used to detect effective permission changes. */

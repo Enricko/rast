@@ -180,6 +180,8 @@ export interface GroupImpact {
 export interface AppPermission {
   allowed: boolean;
   readOnly: boolean;
+  /** False when the app was uninstalled in Package Center (closed for everyone). */
+  installed?: boolean;
 }
 
 export interface Permissions {

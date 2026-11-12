@@ -229,7 +229,18 @@ export interface HostInfo {
   rastVersion: string;
 }
 
+/** One of RAST's own apps: built-in ones are always installed. */
+export interface AppPackage {
+  id: string;
+  name: string;
+  description: string;
+  installed: boolean;
+  removable: boolean;
+}
+
 export interface Overview {
+  /** RAST's own apps (absent on older servers). */
+  apps?: AppPackage[];
   host: HostInfo;
   catalog: CatalogStatus;
   shell?: ShellPath | null;

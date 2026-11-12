@@ -70,11 +70,17 @@ across renames.
 | `monitor` | Resource Monitor | allowed | — |
 | `logs` | Activity Logs | allowed (own events; admins see all) | — |
 | `controlpanel` | Control Panel | allowed (own profile/appearance only; admin tabs stay role-gated) | — |
-| `applications` | Applications | **denied** (admin-only) | read-only status metadata: list/detail (no env values → `envCount`/`secretCount`, no compose), history without `detail`, container inventory in Resource Monitor. Logs, log stream, deploy/start/stop/delete remain admin-only |
+| `applications` | Container Manager | **denied** (admin-only) | read-only status metadata: list/detail (no env values → `envCount`/`secretCount`, no compose), history without `detail`, container inventory in Resource Monitor. Logs, log stream, deploy/start/stop/delete remain admin-only |
 | `backup` | Backup Center | **denied** (admin-only) | read-only status metadata: list (no file name/checksum/note, `downloadable:false`) and schedule. Archive download, restore guide, create/delete/verify/schedule-write remain admin-only (archives contain the account DB, the master key and possibly every user's files) |
 | `packages` | Package Center | **denied** (admin-only) | manage packages: check the catalog, install, update, change the default, remove versions, uninstall, cancel package jobs, edit consumers. Approving a new GitHub source stays admin-only. With `packages_system_wide`, what they install runs for `sudo` and services too, so grant it only to people you would trust with root on runtimes |
 
 Explicit `none` always wins and blocks the API prefix + live events + launcher.
+
+Container Manager and Backup Center can be uninstalled in Package Center.
+An uninstalled app is closed for every account, administrators included, before
+any rule is looked at (Effective Access shows "Not installed"). Rules are kept
+and apply again once the app is installed. The Applications folder (`launcher`)
+is not an access-controlled app: it lists only apps the account may open.
 
 ## 3. Precedence (one evaluator used by enforcement *and* Effective Access)
 
@@ -203,7 +209,7 @@ for the group editor. Rename keeps rules (stable ids); delete cascades rules.
   `403 {"error":{"code":"forbidden","message":"…access denied by group policy"}}`
   when the app is denied. Read-only app grants allow `GET/HEAD/OPTIONS` only for
   applications/backup; writes still hit the existing `AdminUser` checks.
-* Applications/Backup read handlers: accept admins **or** users with a read-only
+* Container Manager/Backup read handlers: accept admins **or** users with a read-only
   grant (`access::app_surface`), returning the same payload (secrets stay masked).
   Mutations keep `AdminUser`.
 * Activity Logs: non-admins keep own-events behaviour; `logs` denial blocks the
@@ -254,7 +260,7 @@ for deliveries immediately (generation cache) and the API emits
 * File Station: on `access.changed` revalidate the current directory; on
   `403/404` clear inaccessible rows/selections and show an access message;
   events are already filtered server-side.
-* Applications/Backup: when `readOnly` hide/disable mutation affordances and show
+* Container Manager/Backup: when `readOnly` hide/disable mutation affordances and show
   a read-only banner; direct API denials stay surfaced.
 
 ## 9. Required tests

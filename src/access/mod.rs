@@ -42,16 +42,99 @@ pub const APP_IDS: &[&str] = &[
     "controlpanel",
 ];
 
+/// The "Applications" folder on the desktop: lists every installed app the
+/// account may open. It is not an access-controlled surface (it only links
+/// to other apps), so it is not in [`APP_IDS`]; it can be pinned and placed
+/// on the desktop like the others.
+pub const LAUNCHER_APP: &str = "launcher";
+
+/// Apps Package Center can uninstall and install again. Uninstalling hides
+/// the app and closes its API for everyone (administrators included); its
+/// data, schedules and running containers stay. Every other app is built in.
+pub const REMOVABLE_APPS: &[&str] = &["applications", "backup"];
+
+const REMOVED_APPS_SETTING: &str = "apps.removed";
+
+/// Ids that may be pinned to the taskbar or placed on the desktop.
+pub fn is_desktop_app(app_id: &str) -> bool {
+    app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
+}
+
+/// Removable apps that were uninstalled in Package Center.
+pub async fn removed_apps(pool: &SqlitePool) -> Vec<String> {
+    crate::db::get_setting(pool, REMOVED_APPS_SETTING)
+        .await
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|id| REMOVABLE_APPS.contains(&id.as_str()))
+        .collect()
+}
+
+/// Whether an app is installed (built-in apps always are).
+pub async fn app_installed(pool: &SqlitePool, app_id: &str) -> bool {
+    !REMOVABLE_APPS.contains(&app_id) || !removed_apps(pool).await.iter().any(|id| id == app_id)
+}
+
+/// Install or uninstall a removable app. Returns whether anything changed.
+pub async fn set_app_installed(
+    pool: &SqlitePool,
+    app_id: &str,
+    installed: bool,
+) -> AppResult<bool> {
+    if !REMOVABLE_APPS.contains(&app_id) {
+        return Err(AppError::bad_request(format!(
+            "{} is built in and cannot be installed or uninstalled",
+            app_label(app_id)
+        )));
+    }
+    let mut removed = removed_apps(pool).await;
+    let was_installed = !removed.iter().any(|id| id == app_id);
+    if was_installed == installed {
+        return Ok(false);
+    }
+    if installed {
+        removed.retain(|id| id != app_id);
+    } else {
+        removed.push(app_id.to_string());
+    }
+    removed.sort();
+    crate::db::set_setting(
+        pool,
+        REMOVED_APPS_SETTING,
+        &serde_json::to_string(&removed).unwrap_or_else(|_| "[]".into()),
+    )
+    .await?;
+    bump_generation();
+    Ok(true)
+}
+
 pub fn app_label(app_id: &str) -> &'static str {
     match app_id {
         "files" => "File Station",
-        "applications" => "Applications",
+        "applications" => "Container Manager",
+        "launcher" => "Applications",
         "monitor" => "Resource Monitor",
         "backup" => "Backup Center",
         "packages" => "Package Center",
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
         _ => "Unknown application",
+    }
+}
+
+/// One line about an application (Package Center's app pages).
+pub fn app_description(app_id: &str) -> &'static str {
+    match app_id {
+        "files" => "Browse, upload, download and organise your files.",
+        "applications" => "Deploy and manage Docker containers and Compose apps.",
+        "launcher" => "Every app you can open, in one folder.",
+        "monitor" => "Live CPU, memory, disk and network metrics.",
+        "backup" => "Back up and restore RAST configuration and data on a schedule.",
+        "packages" => "Install and manage apps and verified runtimes.",
+        "logs" => "Audit trail of sign-ins, file operations and administrative actions.",
+        "controlpanel" => "Profile, users, shared folders, storage and system settings.",
+        _ => "",
     }
 }
 
@@ -191,7 +274,7 @@ pub struct AppAccess {
     /// Applications/Backup; this flag drives UI and mutation guards.
     pub read_only: bool,
     pub sources: Vec<RuleSource>,
-    /// `admin`, `default`, `explicit` or `none`.
+    /// `admin`, `default`, `explicit`, `none` or `not-installed`.
     pub fallback: String,
 }
 
@@ -474,6 +557,16 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
         return Err(AppError::bad_request(format!(
             "unknown application {app_id:?}"
         )));
+    }
+    // An uninstalled app is closed for everyone, administrators included.
+    if !app_installed(pool, app_id).await {
+        return Ok(AppAccess {
+            app_id: app_id.to_string(),
+            allowed: false,
+            read_only: false,
+            sources: Vec::new(),
+            fallback: "not-installed".into(),
+        });
     }
     if user.is_admin() {
         return Ok(AppAccess {

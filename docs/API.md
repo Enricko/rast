@@ -140,7 +140,7 @@ Shared folders (admin CRUD; ACL enforced on every files endpoint):
 | PATCH | `/api/shares/{id}` | `{name?, description?, members?}` |
 | DELETE | `/api/shares/{id}` | removes the share definition, keeps data |
 
-## Applications (Docker, admin)
+## Container Manager (Docker, admin; app id `applications`)
 
 Requires `RAST_DOCKER_ENABLED=true` and a running `rast-worker.service`.
 When unavailable: `503` with `{"error":{"code":"unavailable","message":"docker worker unavailable"}}`
@@ -221,7 +221,7 @@ place`), after which it finishes.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/packages` | `{catalog:{url,name,official,keyId,officialKey,sequence,generatedAt,expiresAt,checkedAt,lastAttemptAt,nextCheckAt,intervalMinutes,checking,stale,expired,lastError}, host:{os,arch,target,libc,glibcVersion,kernel,rastVersion}, shell:{enabled,installed,active,profile,binDir,syncCommand,system:{enabled,linked,pending,displaced,directory,watcher}}, counts:{all,installed,updates,updatesReady}, canManage, packages:[PackageView]}`. `PackageView.system` is the runtime the operating system already has (`{command,path,realPath,version,versionCommand,output,source:"apt"\|"snap"\|"manual",sourcePackage,onPath,displaced,detectedAt}`, `displaced` while a manual install is moved aside for the system-wide link; the version is read by running the command, confined), `terminal` what a login shell runs (`{command,source:"package-center"\|"system",version,path}`); an update with `fromSystem: true` installs a newer version of the system runtime's release line next to it. `installed` counts system runtimes |
+| GET | `/api/packages` | `{catalog:{url,name,official,keyId,officialKey,sequence,generatedAt,expiresAt,checkedAt,lastAttemptAt,nextCheckAt,intervalMinutes,checking,stale,expired,lastError}, host:{os,arch,target,libc,glibcVersion,kernel,rastVersion}, shell:{enabled,installed,active,profile,binDir,syncCommand,system:{enabled,linked,pending,displaced,directory,watcher}}, counts:{all,installed,updates,updatesReady}, canManage, apps:[{id,name,description,installed,removable}], packages:[PackageView]}`. `PackageView.system` is the runtime the operating system already has (`{command,path,realPath,version,versionCommand,output,source:"apt"\|"snap"\|"manual",sourcePackage,onPath,displaced,detectedAt}`, `displaced` while a manual install is moved aside for the system-wide link; the version is read by running the command, confined), `terminal` what a login shell runs (`{command,source:"package-center"\|"system",version,path}`); an update with `fromSystem: true` installs a newer version of the system runtime's release line next to it. `installed` counts system runtimes |
 | GET | `/api/packages/{id}` | `{package: PackageView, jobs:[{jobId,packageId,version,action,status,progress,total,message,error,username,createdAt,finishedAt}]}`; `message` of a finished job is a summary (`Installed and verified Go 1.26.11 · RAST default`) |
 | POST | `/api/packages/check` | fetch and verify the signed catalog now (also looks for new releases of imported packages) → `{catalog}`; a refused catalog keeps the last verified one and reports `lastError`/`stale` |
 | POST | `/api/packages/{id}/install` | `{version, makeDefault?}` → `{jobId}`; only versions of the verified catalog that are compatible with this host; 503 while the catalog is expired |
@@ -229,6 +229,8 @@ place`), after which it finishes.
 | PUT | `/api/packages/{id}/default` | `{version}` → `{ok, activation:{shims,conflicts}}`; switches `runtimes/<id>/current` and the `bin/` shims atomically. `{system: true}` goes back to the system's runtime: removes `current` and the shims, keeps the installed versions (400 without a system runtime on PATH, 409 while consumers follow the default) |
 | DELETE | `/api/packages/{id}/versions/{version}?confirm={version}` | `confirm` must repeat the version; the default and pinned versions are refused (409) |
 | DELETE | `/api/packages/{id}?confirm={id}` | uninstall: removes every installed version, `current` and the `bin/` shims (the system's own runtime, if any, is used again). `confirm` must repeat the id; 409 while any consumer uses the package, 404 when nothing is installed |
+| POST | `/api/packages/apps/{id}/install` | install one of RAST's optional apps again (`applications` = Container Manager, `backup` = Backup Center) → `{ok, changed, apps}`; 400 for built-in apps, 404 for unknown ids |
+| DELETE | `/api/packages/apps/{id}?confirm={id}` | uninstall an optional app → `{ok, changed, apps}`: it disappears from every desktop and its API answers 403 for every account, administrators included. Data, containers and backup schedules stay. `confirm` must repeat the id. Both calls publish `access.changed` (`reason: app_installed\|app_uninstalled`, `appId`) and `package.changed` (`reason: app`) and are audited (`package.app_install`, `package.app_uninstall`) |
 | POST | `/api/packages/consumers` | `{name, packageId, version\|null, description?}`; `null` follows the default, a version pins it (and protects it from removal) |
 | PUT / DELETE | `/api/packages/consumers/{id}` | edit / delete a consumer |
 | POST | `/api/packages/github/inspect` | `{url}` (repository or release link) → `{inspectionId, repo, repoUrl, release, manifest, manifestSha256, checks:[{label,status,detail}], official, sourceApproved, sourceApprovedBy, hostTarget, compatible, reason, artifact, alreadyInstalled, expiresAt}`; nothing is installed |
@@ -288,13 +290,13 @@ Uploaded wallpapers are private: only the owner can read or delete them.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, widgets:[{id,x,y}], widgetsCustomized, taskbarPins:[appId], uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
-| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}, widgets?:[{id,x,y}], taskbarPins?:[appId]}` (partial merge: omitted fields keep their saved value; `widgets` and `taskbarPins`, when present, replace the whole list; concurrent updates are serialised) |
+| GET | `/api/appearance` | `{theme, accent, wallpaper:{kind,builtinId,uploadId,color,fit,position,overlay}, widgets:[{id,x,y}], widgetsCustomized, taskbarPins:[appId], desktopIcons:[{id,col,row}]\|null, uploads:[{id,width,height,sizeBytes,mime,createdAt,url}], limits:{maxBytes,maxUploads}}` |
+| PUT | `/api/appearance` | `{theme?, accent?, wallpaper:{kind?,builtinId?,uploadId?,color?,fit?,position?,overlay?}, widgets?:[{id,x,y}], taskbarPins?:[appId], desktopIcons?:[{id,col,row}]\|null}` (partial merge: omitted fields keep their saved value; `widgets`, `taskbarPins` and `desktopIcons`, when present, replace the whole list; concurrent updates are serialised). `desktopIcons` is the account's desktop layout: grid cells from the top left (0–63), at most 64 icons, one per cell and app id; `null` means the default layout (every app the account may open, in order); `[]` is an empty desktop |
 | GET | `/api/appearance/wallpapers` | owner-only list of uploaded wallpapers |
 | POST | `/api/appearance/wallpapers` | raw image body (`image/jpeg`, `image/png` or `image/webp`, max 10 MiB, Content-Length required) -> created upload; validated by magic bytes and dimensions |
 | GET | `/api/appearance/wallpapers/{id}` | streamed image, owner only (`404` for every other account, including admins, also when revalidating); `Cache-Control: private, no-cache` + ETag, so a shared browser never reuses a previous account's image without the owner check |
 | DELETE | `/api/appearance/wallpapers/{id}` | deletes the file; if it is the active wallpaper the account falls back to the default built-in |
-| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme, accent, widgets and taskbar pins are kept) |
+| POST | `/api/appearance/reset` | reset wallpaper to defaults (theme, accent, widgets, taskbar pins and desktop icons are kept) |
 
 Allowed values: theme `light|dark|system`, accent `ocean|forest|teal|sage|amber|terracotta|rose|plum|indigo|graphite`, kind `builtin|upload|color`,
 fit `cover|contain|center`, position `center|top|bottom|left|right|top-left|top-right|bottom-left|bottom-right`,
@@ -329,7 +331,7 @@ folder policy, and group permissions never grant administrator capabilities.
 
 Folder rules: `inherit | none | read | write`. Application rules:
 `inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
-`logs`, `controlpanel`, `packages` (group `allow` for Applications/Backup is read-only
+`logs`, `controlpanel`, `packages` (group `allow` for Container Manager/Backup is read-only
 status metadata: no env values, logs, archive downloads or restore guide;
 deploy/config/mutations remain admin-only; for Package Center it lets the
 group manage packages, except approving a new GitHub source). Folder rules reference shared
@@ -353,7 +355,7 @@ returned with the current name.
 | GET | `/api/users/{id}/effective-access?q=&level=&page=&perPage=` | evaluator explanation: `{user,groups,folders:[{shareId,shareName,path,level,sources,fallback,conflict?}],foldersTotal,foldersAll,page,perPage,levelCounts,apps:[...]}`; `fallback` is `admin`, `explicit`, `legacy-acl` or `none` |
 | GET | `/api/access/me` | caller's own effective access, same query (hidden shares omitted) |
 
-`GET /api/auth/me` includes `permissions: {apps: {<id>:{allowed,readOnly,label}},
+`GET /api/auth/me` includes `permissions: {apps: {<id>:{allowed,readOnly,label,installed}},
 groups:[{id,name}]}` used by the launcher. Live updates: `group.changed`
 (admin, `{reason,groupId}`) and `access.changed` (user-scoped,
 `{reason,groupId?,userId,changedBy}`); SSE events are additionally filtered by

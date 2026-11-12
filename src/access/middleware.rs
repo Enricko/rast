@@ -58,12 +58,19 @@ pub async fn enforce_app_policy(
         // the request to the existing auth layer which returns a 401.
         return next.run(request).await;
     };
-    if user.is_admin() {
-        return next.run(request).await;
-    }
     let Some(app_id) = app_for_path(request.uri().path()) else {
         return next.run(request).await;
     };
+    // An app uninstalled in Package Center is closed for everyone.
+    if !access::app_installed(&state.db, app_id).await {
+        return AppError::Forbidden(
+            "this application is not installed; install it from Package Center",
+        )
+        .into_response();
+    }
+    if user.is_admin() {
+        return next.run(request).await;
+    }
     match access::app_access(&state.db, &user, app_id).await {
         Ok(grant) if grant.allowed => {
             if grant.read_only && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS") {

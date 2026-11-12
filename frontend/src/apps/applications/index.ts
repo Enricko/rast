@@ -1,4 +1,4 @@
-// Applications: Docker status, managed app lifecycle, deploy dialog, logs,
+// Container Manager (app id `applications`): Docker status, managed app lifecycle, deploy dialog, logs,
 // deployment history and explicit import of discovered containers.
 // OWNER: teammate `frontend-apps`.
 
@@ -268,7 +268,7 @@ class ApplicationsApp {
     if (grant && typeof grant.allowed === "boolean") {
       return { allowed: grant.allowed, readOnly: grant.allowed && Boolean(grant.readOnly) };
     }
-    // Fallback to the pre-groups behaviour: Applications is admin-only.
+    // Fallback to the pre-groups behaviour: Container Manager is admin-only.
     const admin = this.ctx.store.isAdmin();
     return { allowed: admin, readOnly: false };
   }
@@ -319,11 +319,11 @@ class ApplicationsApp {
       h(
         "div",
         { class: "app-access-state", role: "alert" },
-        h("div", { class: "app-access-title" }, "Applications access changed"),
+        h("div", { class: "app-access-title" }, "Container Manager access changed"),
         h(
           "div",
           { class: "app-access-detail" },
-          "Your access to Applications was revoked by a group policy change. Ask an administrator if you need access again.",
+          "Your access to Container Manager was revoked by a group policy change. Ask an administrator if you need access again.",
         ),
         (() => {
           const btn = h("button", { class: "btn btn-ghost", type: "button" }, "Close window");
@@ -336,8 +336,8 @@ class ApplicationsApp {
     this.statusBadge.textContent = "Access denied";
     this.deployButton.classList.add("hidden");
     this.importButton.classList.add("hidden");
-    this.notice.show("Your access to Applications was changed.", { kind: "warning" });
-    this.ctx.toast.warning("Your access to Applications was changed.");
+    this.notice.show("Your access to Container Manager was changed.", { kind: "warning" });
+    this.ctx.toast.warning("Your access to Container Manager was changed.");
   }
 
   // -------------------------------------------------------------- realtime
@@ -425,7 +425,7 @@ class ApplicationsApp {
   }
 
   async start(): Promise<void> {
-    this.ctx.setTitle("Applications");
+    this.ctx.setTitle("Container Manager");
     await this.hydratePermissions();
     this.applyAccessPolicy();
     if (this.denied) return;
@@ -549,7 +549,7 @@ class ApplicationsApp {
         banner(
           "info",
           "Read-only access",
-          "A group policy grants you read-only access to Applications. You can inspect applications, containers, logs and history, but deployment and lifecycle actions require an administrator.",
+          "A group policy grants you read-only access to Container Manager. You can inspect applications, containers, logs and history, but deployment and lifecycle actions require an administrator.",
         ),
       );
     }
@@ -852,11 +852,11 @@ class ApplicationsApp {
 
   private async performAction(app: ManagedAppView, action: AppAction): Promise<void> {
     if (this.denied) {
-      this.ctx.toast.warning("Your access to Applications was changed.");
+      this.ctx.toast.warning("Your access to Container Manager was changed.");
       return;
     }
     if (this.readOnly) {
-      this.ctx.toast.warning("You have read-only access to Applications.");
+      this.ctx.toast.warning("You have read-only access to Container Manager.");
       return;
     }
     const labels: Record<AppAction, string> = {
@@ -900,7 +900,7 @@ class ApplicationsApp {
   private async openDeployDialog(): Promise<void> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
-        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+        this.denied ? "Your access to Container Manager was changed." : "You have read-only access to Container Manager.",
       );
       return;
     }
@@ -1662,7 +1662,7 @@ class ApplicationsApp {
   private async openDeleteDialog(app: ManagedAppView): Promise<void> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
-        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+        this.denied ? "Your access to Container Manager was changed." : "You have read-only access to Container Manager.",
       );
       return;
     }
@@ -1746,7 +1746,7 @@ class ApplicationsApp {
   private async importSelected(): Promise<void> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
-        this.denied ? "Your access to Applications was changed." : "You have read-only access to Applications.",
+        this.denied ? "Your access to Container Manager was changed." : "You have read-only access to Container Manager.",
       );
       return;
     }
@@ -1911,9 +1911,9 @@ function validateCompose(compose: string): string | null {
 
 export const applicationsApp: AppDefinition = {
   id: "applications",
-  name: "Applications",
-  icon: "apps",
-  description: "Deploy and manage containerised applications",
+  name: "Container Manager",
+  icon: "docker",
+  description: "Deploy and manage Docker containers",
   adminOnly: true,
   singleton: true,
   defaultSize: { w: 1040, h: 680 },

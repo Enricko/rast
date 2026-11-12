@@ -72,6 +72,16 @@ export interface DesktopWidget {
   y: number;
 }
 
+/** An app placed on the desktop and its grid cell (column, row from the top left). */
+export interface DesktopIcon {
+  id: string;
+  col: number;
+  row: number;
+}
+
+/** Grid limit for desktop icons (matches the server). */
+export const MAX_DESKTOP_CELL = 63;
+
 export interface Appearance {
   theme: ThemeSetting;
   accent: AccentId;
@@ -85,6 +95,11 @@ export interface Appearance {
   widgetsCustomized: boolean;
   /** Pinned taskbar application ids, in order (the account's own choice). */
   taskbarPins: string[];
+  /**
+   * The apps on the desktop and their cells; null until the account arranges
+   * its desktop (every app it may open, in the default order).
+   */
+  desktopIcons: DesktopIcon[] | null;
   uploads: AppearanceUpload[];
   limits?: { maxBytes: number; maxUploads: number };
 }
@@ -210,6 +225,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   widgets: [],
   widgetsCustomized: true,
   taskbarPins: [...DEFAULT_TASKBAR_PINS],
+  desktopIcons: null,
   uploads: [],
   limits: { maxBytes: 10 * 1024 * 1024, maxUploads: 20 },
 };
@@ -335,6 +351,21 @@ export function normalizeTaskbarPins(input: unknown): string[] {
   return out;
 }
 
+/** Valid, unique icons (ids and cells); null keeps the default layout. */
+export function normalizeDesktopIcons(input: unknown): DesktopIcon[] | null {
+  if (!Array.isArray(input)) return null;
+  const out: DesktopIcon[] = [];
+  for (const item of input) {
+    if (!item || typeof item !== "object") continue;
+    const { id, col, row } = item as DesktopIcon;
+    if (typeof id !== "string" || !/^[a-z]+$/.test(id)) continue;
+    if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col > MAX_DESKTOP_CELL || row > MAX_DESKTOP_CELL) continue;
+    if (out.some((icon) => icon.id === id || (icon.col === col && icon.row === row))) continue;
+    out.push({ id, col, row });
+  }
+  return out;
+}
+
 /** Fill in missing fields defensively (older cache entries, partial responses). */
 export function normalizeAppearance(input: Partial<Appearance> | null | undefined): Appearance {
   const wallpaper = { ...DEFAULT_APPEARANCE.wallpaper, ...(input?.wallpaper ?? {}) };
@@ -354,6 +385,7 @@ export function normalizeAppearance(input: Partial<Appearance> | null | undefine
     widgets: normalizeWidgets(input?.widgets),
     widgetsCustomized: input?.widgetsCustomized !== false,
     taskbarPins: normalizeTaskbarPins(input?.taskbarPins),
+    desktopIcons: normalizeDesktopIcons(input?.desktopIcons),
     uploads: Array.isArray(input?.uploads) ? input!.uploads! : [],
     limits: input?.limits ?? DEFAULT_APPEARANCE.limits,
   };
@@ -457,6 +489,8 @@ export interface AppearancePatch {
   widgets?: DesktopWidget[];
   /** The complete ordered pin list (replaces the saved one). */
   taskbarPins?: string[];
+  /** The complete desktop layout (replaces the saved one); null restores the default. */
+  desktopIcons?: DesktopIcon[] | null;
 }
 
 /**
@@ -489,7 +523,8 @@ function isEmptyPatch(patch: AppearancePatch): boolean {
     patch.accent === undefined &&
     patch.wallpaper === undefined &&
     patch.widgets === undefined &&
-    patch.taskbarPins === undefined
+    patch.taskbarPins === undefined &&
+    patch.desktopIcons === undefined
   );
 }
 
@@ -499,7 +534,7 @@ export function hasAppearanceChanges(baseline: Appearance, draft: Appearance): b
 }
 
 /** Fields arranged on the desktop itself and saved with coalescing. */
-type DesktopField = "widgets" | "taskbarPins";
+type DesktopField = "widgets" | "taskbarPins" | "desktopIcons";
 
 interface DesktopQueue<T> {
   wanted: T | null;
@@ -532,6 +567,7 @@ export class AppearanceService {
   private desktopQueues: { [K in DesktopField]: DesktopQueue<NonNullable<AppearancePatch[K]>> } = {
     widgets: emptyQueue(),
     taskbarPins: emptyQueue(),
+    desktopIcons: emptyQueue(),
   };
 
   constructor(private readonly api: ApiClient) {}
@@ -569,6 +605,12 @@ export class AppearanceService {
   /** The widget layout being saved (newest wins), or null when idle. */
   get pendingWidgets(): DesktopWidget[] | null {
     const queue = this.desktopQueues.widgets;
+    return queue.saving ? queue.latest : null;
+  }
+
+  /** The desktop layout being saved (newest wins), or null when idle. */
+  get pendingDesktopIcons(): DesktopIcon[] | null {
+    const queue = this.desktopQueues.desktopIcons;
     return queue.saving ? queue.latest : null;
   }
 
@@ -618,7 +660,7 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
-    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue() };
+    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue(), desktopIcons: emptyQueue() };
   }
 
   /**
@@ -686,6 +728,7 @@ export class AppearanceService {
     if (patch.wallpaper && Object.keys(patch.wallpaper).length > 0) payload.wallpaper = { ...patch.wallpaper };
     if (patch.widgets !== undefined) payload.widgets = normalizeWidgets(patch.widgets);
     if (patch.taskbarPins !== undefined) payload.taskbarPins = normalizeTaskbarPins(patch.taskbarPins);
+    if (patch.desktopIcons !== undefined) payload.desktopIcons = patch.desktopIcons === null ? null : normalizeDesktopIcons(patch.desktopIcons);
     const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
     return this.commit(generation, updated, options);
   }
@@ -815,6 +858,25 @@ export class AppearanceService {
     );
   }
 
+  /** Persist the complete desktop layout (same coalescing as widgets). */
+  saveDesktopIcons(icons: DesktopIcon[]): Promise<boolean> {
+    return this.saveDesktopField("desktopIcons", normalizeDesktopIcons(icons) ?? [], (current, next) =>
+      JSON.stringify(current.desktopIcons) === JSON.stringify(next),
+    );
+  }
+
+  /** Go back to the default desktop layout (every app, default order). */
+  async resetDesktopIcons(): Promise<boolean> {
+    try {
+      await this.save({ desktopIcons: null });
+      return true;
+    } catch (error) {
+      if (isStaleAppearanceError(error)) return true;
+      console.warn("could not reset the desktop icons", error);
+      return false;
+    }
+  }
+
   private saveDesktopField<K extends DesktopField>(
     field: K,
     value: NonNullable<AppearancePatch[K]>,
@@ -869,7 +931,7 @@ export class AppearanceService {
     this.lastErrorValue = null;
     this.themeWanted = null;
     this.themeSaving = null;
-    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue() };
+    this.desktopQueues = { widgets: emptyQueue(), taskbarPins: emptyQueue(), desktopIcons: emptyQueue() };
   }
 }
 

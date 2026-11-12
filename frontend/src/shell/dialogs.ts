@@ -114,6 +114,8 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["?"], label: "Show this keyboard shortcuts dialog" },
   { keys: ["Esc"], label: "Close menus, dialogs and popovers" },
   { keys: ["↑", "↓", "←", "→"], label: "Move between desktop icons or search results" },
+  { keys: ["Alt", "↑ ↓ ← →"], label: "Move the selected desktop icon (or drag it)" },
+  { keys: ["Delete"], label: "Remove the selected icon from the desktop" },
   { keys: ["Enter"], label: "Open the selected application" },
   { keys: ["Tab"], label: "Move focus between controls" },
   { keys: ["Double-click"], label: "Maximize or restore a window title bar" },

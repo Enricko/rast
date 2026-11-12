@@ -11,7 +11,37 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Movable desktop icons.** Drag an icon to any spot on the desktop; it
+  snaps to a grid, and dropping it on another icon swaps the two. Drop an icon
+  on the taskbar to pin it. Alt+arrow keys move the selected icon one cell.
+- **Remove from desktop.** Right-click an icon (or press Delete) to take it
+  off the desktop, with Undo. The desktop menu has **Reset icon layout**.
+  Each account keeps its own layout (`desktopIcons` in `/api/appearance`).
+- **Applications folder.** A new desktop app, **Applications**, lists every
+  app the account may open, with search. Drag an app from it to the desktop
+  or taskbar, or use its menu to add or remove the desktop icon and taskbar
+  pin.
+- **Apps in Package Center.** Package Center lists RAST's own apps next to
+  the runtimes. Built-in apps (File Station, Control Panel, Package Center,
+  Applications, Resource Monitor, Activity Logs) are always installed.
+  Container Manager and Backup Center can be uninstalled and installed again
+  (`POST /api/packages/apps/{id}/install`,
+  `DELETE /api/packages/apps/{id}?confirm={id}`, audited as
+  `package.app_install` / `package.app_uninstall`). Uninstalling hides the app
+  and closes its API for every account, administrators included. Its data
+  stays: containers keep running and scheduled backups keep their schedule.
+
+### Changed
+
+- The Docker app is now called **Container Manager**. Its app id
+  (`applications`), API paths and group rules are unchanged.
+- `GET /api/auth/me` reports `installed` for each app. An uninstalled app is
+  hidden from the desktop, start menu and taskbar, and its open windows close.
+
+### Migration
+
+- Schema version 9 adds `user_appearance.desktop_icons`. An older binary
+  refuses to start on this database; restore the pre-update backup to go back.
 
 ### Planned
 
