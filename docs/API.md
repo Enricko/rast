@@ -203,29 +203,36 @@ group grants. A read-only `backup` grant receives status metadata only:
 | POST | `/api/backups/{id}/verify` | integrity check |
 | GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
 
-## Package Center (admin; read-only grant can view)
+## Package Center (admins and granted groups)
 
-Verified runtimes installed side by side under `<data_dir>/packages/`. Reads
-need the `packages` application (administrators, or a group `allow` grant,
-which is read-only: `canManage:false`). Every mutation is administrator-only
-and audited (`package.install`, `package.update`, `package.reinstall`,
-`package.activate`, `package.remove`, `package.consumer_*`,
-`package.source_approve`, `package.catalog_check`). Installs and updates run as
-jobs (`job.*` events with kind `package.install|update|reinstall`).
+Verified runtimes installed side by side under `<data_dir>/packages/`.
+Package Center is for administrators and the members of groups granted the
+`packages` application (`allow`); everyone else gets 403. Both may check,
+install, update, change the default, remove, uninstall, cancel package jobs and
+edit consumers (`canManage:true`); approving a new GitHub source stays
+administrator-only. Every mutation is audited (`package.install`,
+`package.update`, `package.reinstall`, `package.activate`, `package.remove`,
+`package.uninstall`, `package.consumer_*`, `package.source_approve`,
+`package.catalog_check`, `job.cancel`). Installs and updates run as jobs
+(`job.*` events with kind `package.install|update|reinstall`, delivered to
+every account that may open Package Center); `POST /api/jobs/{id}/cancel`
+stops one until its files are moved into place (progress message `Moving into
+place`), after which it finishes.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/packages` | `{catalog:{url,name,official,keyId,officialKey,sequence,generatedAt,expiresAt,checkedAt,lastAttemptAt,nextCheckAt,intervalMinutes,checking,stale,expired,lastError}, host:{os,arch,target,libc,glibcVersion,kernel,rastVersion}, shell:{enabled,installed,active,profile,binDir,syncCommand}, counts:{all,installed,updates,updatesReady}, canManage, packages:[PackageView]}`. `PackageView.system` is the runtime the operating system already has (`{command,path,realPath,version,versionCommand,output,source:"apt"\|"snap"\|"manual",sourcePackage,onPath,detectedAt}`; the version is read by running the command, confined), `terminal` what a login shell runs (`{command,source:"package-center"\|"system",version,path}`); an update with `fromSystem: true` installs a newer version of the system runtime's release line next to it. `installed` counts system runtimes |
+| GET | `/api/packages` | `{catalog:{url,name,official,keyId,officialKey,sequence,generatedAt,expiresAt,checkedAt,lastAttemptAt,nextCheckAt,intervalMinutes,checking,stale,expired,lastError}, host:{os,arch,target,libc,glibcVersion,kernel,rastVersion}, shell:{enabled,installed,active,profile,binDir,syncCommand,system:{enabled,linked,pending,displaced,directory,watcher}}, counts:{all,installed,updates,updatesReady}, canManage, packages:[PackageView]}`. `PackageView.system` is the runtime the operating system already has (`{command,path,realPath,version,versionCommand,output,source:"apt"\|"snap"\|"manual",sourcePackage,onPath,displaced,detectedAt}`, `displaced` while a manual install is moved aside for the system-wide link; the version is read by running the command, confined), `terminal` what a login shell runs (`{command,source:"package-center"\|"system",version,path}`); an update with `fromSystem: true` installs a newer version of the system runtime's release line next to it. `installed` counts system runtimes |
 | GET | `/api/packages/{id}` | `{package: PackageView, jobs:[{jobId,packageId,version,action,status,progress,total,message,error,username,createdAt,finishedAt}]}`; `message` of a finished job is a summary (`Installed and verified Go 1.26.11 · RAST default`) |
 | POST | `/api/packages/check` | fetch and verify the signed catalog now (also looks for new releases of imported packages) → `{catalog}`; a refused catalog keeps the last verified one and reports `lastError`/`stale` |
 | POST | `/api/packages/{id}/install` | `{version, makeDefault?}` → `{jobId}`; only versions of the verified catalog that are compatible with this host; 503 while the catalog is expired |
 | POST | `/api/packages/{id}/update` | `{version?, makeDefault?}` → `{jobId}`; without `version`: newest compatible version of the default's channel (without a default: of the system runtime's release line). Installs next to the current version, which stays for rollback. Without `makeDefault`, the first Package Center version becomes the default unless the system already provides the command |
 | PUT | `/api/packages/{id}/default` | `{version}` → `{ok, activation:{shims,conflicts}}`; switches `runtimes/<id>/current` and the `bin/` shims atomically. `{system: true}` goes back to the system's runtime: removes `current` and the shims, keeps the installed versions (400 without a system runtime on PATH, 409 while consumers follow the default) |
 | DELETE | `/api/packages/{id}/versions/{version}?confirm={version}` | `confirm` must repeat the version; the default and pinned versions are refused (409) |
+| DELETE | `/api/packages/{id}?confirm={id}` | uninstall: removes every installed version, `current` and the `bin/` shims (the system's own runtime, if any, is used again). `confirm` must repeat the id; 409 while any consumer uses the package, 404 when nothing is installed |
 | POST | `/api/packages/consumers` | `{name, packageId, version\|null, description?}`; `null` follows the default, a version pins it (and protects it from removal) |
 | PUT / DELETE | `/api/packages/consumers/{id}` | edit / delete a consumer |
 | POST | `/api/packages/github/inspect` | `{url}` (repository or release link) → `{inspectionId, repo, repoUrl, release, manifest, manifestSha256, checks:[{label,status,detail}], official, sourceApproved, sourceApprovedBy, hostTarget, compatible, reason, artifact, alreadyInstalled, expiresAt}`; nothing is installed |
-| POST | `/api/packages/github/install` | `{inspectionId, approveSource, makeDefault?}` → `{jobId}`; pinned to the inspected release and digests (inspection valid 30 minutes). Ownership is checked again: 409 when the id belongs to another source, repository or publisher, to the official catalog, or the package provides an official command name; 503 when no verified catalog is loaded or the kernel lacks Landlock. The source approval is recorded only once the install is queued |
+| POST | `/api/packages/github/install` | `{inspectionId, approveSource, makeDefault?}` → `{jobId}`; `approveSource: true` is administrator-only (403); pinned to the inspected release and digests (inspection valid 30 minutes). Ownership is checked again: 409 when the id belongs to another source, repository or publisher, to the official catalog, or the package provides an official command name; 503 when no verified catalog is loaded or the kernel lacks Landlock. The source approval is recorded only once the install is queued |
 
 `PackageView`: `{id, name, description, homepage, license, publisher:{id,name,url}, packageType, official, source, sourceRepo, inCatalog, verification:{label,detail}, installed:[{version,revision,channel,isDefault,status,path,executables:[{name,path}],bundled,target,artifact,sizeBytes,installedAt,installedBy,checkOutput,pinnedBy,releaseTag}], defaultVersion, defaultExecutables, latest, versions:[{version,revision,channel,channelLabel,channelStatus,compatible,reason,prerelease,targets,artifact,bundled,extensions,executables,installedRevision,releaseDate,notes}], unsupported:[{version,reason}], updates:[{from,to,channel,replacesDefault,revision}], detected:[{version,channel,state,detail,detectedAt,source,releaseUrl}], updateState: none|detected|ready, unavailableReason, consumers:[{id,name,packageId,version,followsDefault,effectiveVersion,executables,description,createdBy,updatedAt}], activeJob}`.
 `updates` are verified versions ready to install; `detected` are new upstream
@@ -246,7 +253,7 @@ installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.
 | --- | --- | --- |
 | GET | `/api/jobs?page&perPage&status` | own jobs (admin: all) |
 | GET | `/api/jobs/{id}` | `{id, kind, status, progress, total, message, result, error}` |
-| POST | `/api/jobs/{id}/cancel` | cooperative cancellation |
+| POST | `/api/jobs/{id}/cancel` | cooperative cancellation → `{ok, cancelRequested}` (`false` when the job already finished); the owner, an administrator, or for package jobs any Package Center manager |
 
 ## System & settings (admin)
 
@@ -322,9 +329,10 @@ folder policy, and group permissions never grant administrator capabilities.
 
 Folder rules: `inherit | none | read | write`. Application rules:
 `inherit | none | allow` for ids `files`, `applications`, `monitor`, `backup`,
-`logs`, `controlpanel`, `packages` (group `allow` for Applications/Backup/Package Center is read-only
+`logs`, `controlpanel`, `packages` (group `allow` for Applications/Backup is read-only
 status metadata: no env values, logs, archive downloads or restore guide;
-deploy/config/mutations remain admin-only). Folder rules reference shared
+deploy/config/mutations remain admin-only; for Package Center it lets the
+group manage packages, except approving a new GitHub source). Folder rules reference shared
 folders by stable id (`shareId`); `shareName` is accepted on input and always
 returned with the current name.
 

@@ -78,12 +78,13 @@ impl JobContext {
             "message": message,
             "userId": self.user_id,
         });
-        match self.user_id {
-            Some(uid) => self
-                .events
-                .publish_user_and_admin("job.progress", uid, payload),
-            None => self.events.publish_admin("job.progress", payload),
-        };
+        publish_job(
+            &self.events,
+            "job.progress",
+            &self.kind,
+            self.user_id,
+            payload,
+        );
     }
 
     pub async fn set_message(&self, message: &str) {
@@ -93,6 +94,20 @@ impl JobContext {
             .execute(&self.db)
             .await;
     }
+}
+
+/// Job events go to the job's owner and administrators; package jobs go to
+/// everyone, and the event stream delivers them only to accounts that may use
+/// Package Center (every package manager can follow and cancel them).
+fn publish_job(events: &EventBus, kind: &str, job_kind: &str, owner: Option<i64>, data: Value) {
+    if job_kind.starts_with("package") {
+        events.publish(kind, data);
+        return;
+    }
+    match owner {
+        Some(uid) => events.publish_user_and_admin(kind, uid, data),
+        None => events.publish_admin(kind, data),
+    };
 }
 
 type BoxFuture = Pin<Box<dyn Future<Output = Result<Value, AppError>> + Send>>;
@@ -201,12 +216,7 @@ impl JobManager {
             flags.insert(id.clone(), cancel.clone());
         }
         let queued = json!({"id": id, "kind": spec.kind, "userId": spec.user_id});
-        match spec.user_id {
-            Some(uid) => self
-                .events
-                .publish_user_and_admin("job.queued", uid, queued),
-            None => self.events.publish_admin("job.queued", queued),
-        };
+        publish_job(&self.events, "job.queued", &spec.kind, spec.user_id, queued);
         match self
             .tx
             .try_send(Task {
@@ -299,10 +309,7 @@ async fn run_job(
         .await;
     let owner = spec.user_id;
     let start_event = json!({"id": id, "kind": spec.kind, "userId": owner});
-    match owner {
-        Some(uid) => events.publish_user_and_admin("job.start", uid, start_event),
-        None => events.publish_admin("job.start", start_event),
-    };
+    publish_job(&events, "job.start", &spec.kind, owner, start_event);
 
     let ctx = JobContext {
         id: id.clone(),
@@ -328,10 +335,7 @@ async fn run_job(
             .execute(&db)
             .await;
             let done_event = json!({"id": id, "kind": job_kind, "result": value, "userId": owner});
-            match owner {
-                Some(uid) => events.publish_user_and_admin("job.done", uid, done_event),
-                None => events.publish_admin("job.done", done_event),
-            };
+            publish_job(&events, "job.done", &job_kind, owner, done_event);
         }
         Err(AppError::Cancelled) => {
             let _ = sqlx::query(
@@ -342,10 +346,7 @@ async fn run_job(
             .execute(&db)
             .await;
             let cancelled_event = json!({"id": id, "kind": job_kind, "userId": owner});
-            match owner {
-                Some(uid) => events.publish_user_and_admin("job.cancelled", uid, cancelled_event),
-                None => events.publish_admin("job.cancelled", cancelled_event),
-            };
+            publish_job(&events, "job.cancelled", &job_kind, owner, cancelled_event);
         }
         Err(err) => {
             let message = err.public_message();
@@ -359,10 +360,7 @@ async fn run_job(
             .await;
             let failed_event =
                 json!({"id": id, "kind": job_kind, "error": message, "userId": owner});
-            match owner {
-                Some(uid) => events.publish_user_and_admin("job.failed", uid, failed_event),
-                None => events.publish_admin("job.failed", failed_event),
-            };
+            publish_job(&events, "job.failed", &job_kind, owner, failed_event);
         }
     }
     // Drop the cancellation flag now that the job is finished so the map stays

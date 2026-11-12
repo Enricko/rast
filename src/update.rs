@@ -32,7 +32,7 @@ const API_LATEST: &str = "https://api.github.com/repos/Enricko/rast/releases/lat
 const API_TAG: &str = "https://api.github.com/repos/Enricko/rast/releases/tags";
 const DOWNLOAD_BASE: &str = "https://github.com/Enricko/rast/releases/download";
 const SERVICE: &str = "rast.service";
-const BIN_PATH: &str = "/usr/local/bin/rast";
+pub const BIN_PATH: &str = "/usr/local/bin/rast";
 
 pub async fn run(
     cfg: Config,

@@ -136,3 +136,13 @@ docker_enabled = false
 # `sudo rast packages path sync` (the installer and `rast update` run it).
 # env: RAST_PACKAGES_SHELL_PATH
 packages_shell_path = true
+
+# Also link those defaults into /usr/local/bin, so sudo, systemd services and
+# scripts run them too, not only login shells. Files installed by apt are never
+# changed. A command installed by hand in /usr/local/bin (for example a manual
+# Node.js) is moved aside to /usr/local/bin/.rast-displaced.<name>, and it is
+# put back when you choose "Use the system version" or uninstall. Note: root
+# then runs files the rast service account can change. Needs
+# packages_shell_path. Apply with `sudo rast packages path sync`.
+# env: RAST_PACKAGES_SYSTEM_WIDE
+packages_system_wide = false

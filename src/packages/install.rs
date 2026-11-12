@@ -278,6 +278,9 @@ pub fn install_version(
     result
 }
 
+/// The progress message from which an install can no longer be cancelled.
+pub const CANCEL_ENDS_AT: &str = "Moving into place";
+
 fn install_staged(
     layout: &Layout,
     manifest: &Manifest,
@@ -298,6 +301,11 @@ fn install_staged(
                 human(free)
             ));
         }
+    }
+    // Cancel works until the files are moved into place (step 5); after
+    // that the install finishes. `CANCEL_ENDS_AT` names that phase.
+    if reporter.cancelled() {
+        return Err("cancelled".into());
     }
     // 1. Download with origin checks; size and SHA-256 must match the pin.
     let download = stage.join("artifact.tar.gz");
@@ -354,9 +362,15 @@ fn install_staged(
             .map_err(|e| format!("executable {}: {e}", exe.name))?;
     }
     // 4. Version checks in the staging location.
+    if reporter.cancelled() {
+        return Err("cancelled".into());
+    }
     let home = stage.join("home");
     fs::create_dir_all(&home).ok();
     run_checks(manifest, &root, &home, untrusted)?;
+    if reporter.cancelled() {
+        return Err("cancelled".into());
+    }
 
     // 5. Record what was installed, then move into place.
     let marker = serde_json::json!({
@@ -374,7 +388,7 @@ fn install_staged(
         serde_json::to_vec_pretty(&marker).unwrap_or_default(),
     )
     .map_err(|e| format!("cannot write install marker: {e}"))?;
-    reporter.phase(0, 0, "Moving into place");
+    reporter.phase(0, 0, CANCEL_ENDS_AT);
     let target = layout.version_dir(&manifest.id, &manifest.version);
     fs::create_dir_all(layout.package_dir(&manifest.id))
         .map_err(|e| format!("cannot create package directory: {e}"))?;

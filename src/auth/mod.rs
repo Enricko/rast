@@ -300,6 +300,7 @@ mod tests {
             packages_check_interval_minutes: 0,
             packages_github_token: None,
             packages_shell_path: false,
+            packages_system_wide: false,
             loaded_from: None,
         }
     }

@@ -89,6 +89,9 @@ pub struct FileConfig {
     /// Put the Package Center defaults on every login shell's PATH
     /// (`/etc/profile.d/rast-packages.sh`, written by `rast packages path sync`).
     pub packages_shell_path: Option<bool>,
+    /// Also link the defaults into /usr/local/bin so sudo, services and
+    /// scripts run them (needs `packages_shell_path`; root-run link step).
+    pub packages_system_wide: Option<bool>,
 }
 
 /// Fully resolved configuration.
@@ -116,6 +119,7 @@ pub struct Config {
     pub packages_check_interval_minutes: u64,
     pub packages_github_token: Option<String>,
     pub packages_shell_path: bool,
+    pub packages_system_wide: bool,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
 }
@@ -346,6 +350,9 @@ impl Config {
         let packages_shell_path =
             parse_env_bool(&env, "RAST_PACKAGES_SHELL_PATH", file.packages_shell_path)?
                 .unwrap_or(true);
+        let packages_system_wide =
+            parse_env_bool(&env, "RAST_PACKAGES_SYSTEM_WIDE", file.packages_system_wide)?
+                .unwrap_or(false);
 
         if data_dir.as_os_str().is_empty() || storage_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invalid(
@@ -376,6 +383,7 @@ impl Config {
             packages_check_interval_minutes,
             packages_github_token,
             packages_shell_path,
+            packages_system_wide,
             loaded_from,
         })
     }
@@ -423,8 +431,15 @@ impl Config {
             std::fs::create_dir_all(&dir)?;
         }
         // Data dir contains secrets: 0750. Storage roots stay 0755 so that
-        // per-user homes (0700) inherit sane defaults.
-        let _ = std::fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o750));
+        // per-user homes (0700) inherit sane defaults. With the Package
+        // Center shell PATH, others keep the traverse bit (no listing, no
+        // reading): resetting it would hide every installed runtime from
+        // other users until the next `rast packages path sync`.
+        let traverse = if self.packages_shell_path { 0o001 } else { 0 };
+        let _ = std::fs::set_permissions(
+            &self.data_dir,
+            std::fs::Permissions::from_mode(0o750 | traverse),
+        );
         Ok(())
     }
 }
@@ -506,7 +521,20 @@ pub fn warnings(cfg: &Config) -> Vec<String> {
     if cfg.storage_dir.starts_with(&cfg.data_dir) {
         out.push("storage_dir is inside data_dir; separate volumes are recommended".into());
     }
+    if cfg.packages_system_wide && !cfg.packages_shell_path {
+        out.push(
+            "packages_system_wide needs packages_shell_path; the Package Center defaults are not linked into /usr/local/bin"
+                .into(),
+        );
+    }
     out
+}
+
+impl Config {
+    /// Whether the Package Center defaults are linked into /usr/local/bin.
+    pub fn packages_links_enabled(&self) -> bool {
+        self.packages_shell_path && self.packages_system_wide
+    }
 }
 
 /// Serialize a config to TOML; used by the installer/doctor to render examples.
@@ -534,6 +562,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         packages_catalog_keys: &'a [String],
         packages_check_interval_minutes: u64,
         packages_shell_path: bool,
+        packages_system_wide: bool,
         // packages_github_token is a secret and is never written here.
     }
     let ex = Example {
@@ -558,6 +587,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         packages_catalog_keys: &cfg.packages_catalog_keys,
         packages_check_interval_minutes: cfg.packages_check_interval_minutes,
         packages_shell_path: cfg.packages_shell_path,
+        packages_system_wide: cfg.packages_system_wide,
     };
     let body = toml::to_string_pretty(&ex).unwrap_or_default();
     format!(
@@ -599,6 +629,48 @@ mod tests {
         let cfg = Config::from_parts(None, file, env).unwrap();
         assert_eq!(cfg.bind, "0.0.0.0:8721".parse().unwrap());
         assert_eq!(cfg.log_level, "warn");
+    }
+
+    #[test]
+    fn ensure_dirs_keeps_the_traverse_bit_for_the_package_shell_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let config = |shell: bool, system_wide: bool| {
+            Config::from_parts(
+                None,
+                FileConfig {
+                    data_dir: Some(dir.path().join("data")),
+                    storage_dir: Some(dir.path().join("storage")),
+                    packages_shell_path: Some(shell),
+                    packages_system_wide: Some(system_wide),
+                    ..Default::default()
+                },
+                no_env,
+            )
+            .unwrap()
+        };
+        let mode = || {
+            std::fs::metadata(dir.path().join("data"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        let on = config(true, true);
+        on.ensure_dirs().unwrap();
+        assert_eq!(mode(), 0o751);
+        assert!(on.packages_links_enabled());
+        assert!(warnings(&on)
+            .iter()
+            .all(|w| !w.contains("packages_system_wide")));
+        let off = config(false, true);
+        off.ensure_dirs().unwrap();
+        assert_eq!(mode(), 0o750);
+        assert!(!off.packages_links_enabled(), "needs the shell PATH");
+        assert!(warnings(&off)
+            .iter()
+            .any(|w| w.contains("packages_system_wide")));
+        assert!(!config(true, false).packages_links_enabled());
     }
 
     #[test]

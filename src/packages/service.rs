@@ -8,6 +8,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    path::Path,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
@@ -21,6 +22,7 @@ use super::{
     github::{self, Check, GithubRef},
     host::{self, HostInfo},
     install::{self, Layout, Reporter},
+    links,
     manifest::{self, Artifact, Manifest, Provenance, Requirements},
     sandbox, shell,
     store::{self, ConsumerRow, JobHistory, PackageRow, VersionRow},
@@ -370,6 +372,9 @@ impl PackageManager {
         self.recover_displaced().await;
         let me = self.clone();
         tokio::spawn(async move { me.refresh_system().await });
+        if self.config.packages_links_enabled() {
+            self.watch_links();
+        }
         // The cache on disk must not be older than the accepted catalog.
         let floor: Option<u64> = db::get_setting(&self.db, "packages.catalogSequence")
             .await
@@ -556,9 +561,16 @@ impl PackageManager {
             .await
             .unwrap_or_default();
         let key = |m: &HashMap<String, SystemInstall>| {
-            let mut v: Vec<(String, String, Option<String>)> = m
+            let mut v: Vec<(String, String, String, Option<String>)> = m
                 .iter()
-                .map(|(id, s)| (id.clone(), s.real_path.clone(), s.version.clone()))
+                .map(|(id, s)| {
+                    (
+                        id.clone(),
+                        s.path.clone(),
+                        s.real_path.clone(),
+                        s.version.clone(),
+                    )
+                })
                 .collect();
             v.sort();
             v
@@ -576,6 +588,42 @@ impl PackageManager {
             self.events
                 .publish("package.changed", json!({"reason": "system"}));
         }
+    }
+
+    /// With `packages_system_wide`, a root watcher re-links /usr/local/bin
+    /// after every change to the shims, moving a manual command aside or
+    /// putting it back. Detect the system runtimes again once it has run, so
+    /// "Use the system version" and the paths shown stay right.
+    fn watch_links(self: &Arc<Self>) {
+        let me = self.clone();
+        let mut rx = self.events.subscribe();
+        let mut shutdown = self.events.shutdown_receiver();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    e = rx.recv() => e,
+                    _ = shutdown.changed() => return,
+                };
+                let relevant = match event {
+                    Ok(e) => {
+                        e.kind == "package.changed"
+                            && !matches!(
+                                e.data.get("reason").and_then(|r| r.as_str()),
+                                Some("system" | "catalog")
+                            )
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(_) => return,
+                };
+                if !relevant {
+                    continue;
+                }
+                // Let the watcher finish; changes in the meantime are folded in.
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                while rx.try_recv().is_ok() {}
+                me.refresh_system().await;
+            }
+        });
     }
 
     /// Tests: use these system runtimes instead of detecting the host's,
@@ -606,11 +654,18 @@ impl PackageManager {
             .read()
             .map(|p| p.clone())
             .unwrap_or_else(|_| shell::PROFILE_SCRIPT.into());
-        shell::status(
+        let mut st = shell::status(
             self.config.packages_shell_path,
             &self.layout.bin_dir(),
             &profile,
-        )
+        );
+        st.system = links::status(
+            self.config.packages_links_enabled(),
+            &self.layout.bin_dir(),
+            Path::new(links::SYSTEM_BIN),
+            Path::new(links::UNIT_DIR),
+        );
+        st
     }
 
     /// Fetch and verify the catalog now; also look for new releases of
@@ -2010,6 +2065,121 @@ impl PackageManager {
         self.events.publish(
             "package.changed",
             json!({"packageId": id, "version": version, "reason": "removed"}),
+        );
+        Ok(())
+    }
+
+    /// Remove every installed version of a package and its commands. The
+    /// system's own copy (apt, manual) is untouched and takes over again;
+    /// with `packages_system_wide` the watcher removes the /usr/local/bin
+    /// links and puts back what it moved aside.
+    pub async fn uninstall(&self, user: &AuthUser, id: &str) -> AppResult<()> {
+        let row = store::package(&self.db, id)
+            .await?
+            .ok_or(AppError::NotFound("package is not installed"))?;
+        let _guard = self.lock(id, &row.name)?;
+        let log = AuditLog::new("package.uninstall")
+            .actor(user)
+            .object("package", id.to_string())
+            .path(id.to_string());
+        let consumers = store::consumers(&self.db).await?;
+        let users: Vec<&str> = consumers
+            .iter()
+            .filter(|c| c.package_id == id)
+            .map(|c| c.name.as_str())
+            .collect();
+        if !users.is_empty() {
+            let message = format!(
+                "{} use {}. Remove those consumers first.",
+                users.join(", "),
+                row.name
+            );
+            audit::record_with_events(
+                &self.db,
+                &self.events,
+                log.failure().detail(message.clone()),
+            )
+            .await;
+            return Err(AppError::conflict(message));
+        }
+        let versions = store::versions(&self.db, Some(id)).await?;
+        let default = row.default_version.clone();
+        // The default goes last: until then its commands keep working.
+        let mut order: Vec<_> = versions.iter().collect();
+        order.sort_by_key(|v| default.as_deref() == Some(v.version.as_str()));
+        let mut removed = Vec::new();
+        for v in order {
+            let is_default = default.as_deref() == Some(v.version.as_str());
+            let manifest = v.manifest.clone();
+            let layout = self.layout.clone();
+            let (pid, ver) = (id.to_string(), v.version.clone());
+            let result = tokio::task::spawn_blocking(move || {
+                if is_default {
+                    install::deactivate(&layout, &manifest);
+                }
+                install::remove_version(&layout, &pid, &ver)
+            })
+            .await
+            .map_err(|e| AppError::internal(format!("uninstall task failed: {e}")))
+            .and_then(|r| r.map_err(AppError::internal));
+            if let Err(e) = result {
+                let detail = format!(
+                    "stopped at {} (removed: {}): {}",
+                    v.version,
+                    if removed.is_empty() {
+                        "nothing".to_string()
+                    } else {
+                        removed.join(", ")
+                    },
+                    e.public_message()
+                );
+                audit::record_with_events(&self.db, &self.events, log.failure().detail(detail))
+                    .await;
+                self.events.publish(
+                    "package.changed",
+                    json!({"packageId": id, "reason": "removed"}),
+                );
+                return Err(e);
+            }
+            store::delete_version(&self.db, id, &v.version).await?;
+            removed.push(v.version.clone());
+        }
+        let layout = self.layout.clone();
+        let pid = id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let dir = layout.package_dir(&pid);
+            let _ = std::fs::remove_file(layout.current_link(&pid));
+            if std::fs::read_dir(&dir).is_ok_and(|mut e| e.next().is_none()) {
+                let _ = std::fs::remove_dir(&dir);
+            }
+        })
+        .await;
+        let system = self
+            .system_install(id)
+            .filter(|s| row.source == "official" && s.on_path);
+        audit::record_with_events(
+            &self.db,
+            &self.events,
+            log.success().detail(format!(
+                "removed {}{}",
+                if removed.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    removed.join(", ")
+                },
+                system
+                    .map(|s| format!(
+                        "; the system {} is used again ({})",
+                        s.version.as_deref().unwrap_or("version"),
+                        s.path
+                    ))
+                    .unwrap_or_default()
+            )),
+        )
+        .await;
+        self.events.publish(
+            "package.changed",
+            json!({"packageId": id, "reason": "uninstalled"}),
         );
         Ok(())
     }

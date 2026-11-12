@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod github;
 pub mod host;
 pub mod install;
+pub mod links;
 pub mod manifest;
 pub mod net;
 pub mod sandbox;

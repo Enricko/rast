@@ -1,10 +1,11 @@
 //! Package Center API.
 //!
-//! Reading the catalog, installed versions and job history requires the
-//! `packages` application (administrators, or a read-only group grant).
-//! Every mutation — checking the catalog, approving a source, installing,
-//! updating, activating, removing and editing consumers — is
-//! administrator-only and audited by [`crate::packages::service`].
+//! Package Center is for administrators and the members of groups an
+//! administrator granted the `packages` application; everyone else is
+//! refused. Those package managers may check the catalog, install, update,
+//! change the default, remove, uninstall, cancel and edit consumers.
+//! Approving a new GitHub source stays administrator-only. Every mutation
+//! is audited by [`crate::packages::service`].
 
 use axum::{
     extract::{Path, Query, State},
@@ -16,10 +17,41 @@ use serde_json::{json, Value};
 
 use crate::{
     access,
-    auth::{AdminUser, AuthUser},
+    auth::AuthUser,
     error::{AppError, AppResult},
     state::AppState,
 };
+
+/// Whether `user` may change packages (see the module docs).
+pub async fn can_manage(state: &AppState, user: &AuthUser) -> AppResult<bool> {
+    if user.is_admin() {
+        return Ok(true);
+    }
+    let access = access::app_access(&state.db, user, "packages").await?;
+    Ok(access.allowed && !access.read_only)
+}
+
+/// An account allowed to change packages: an administrator or a member of a
+/// group granted Package Center.
+pub struct PackageManager(pub AuthUser);
+
+impl axum::extract::FromRequestParts<AppState> for PackageManager {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        if can_manage(state, &user).await? {
+            Ok(Self(user))
+        } else {
+            Err(AppError::Forbidden(
+                "Package Center is for administrators and the groups they grant it to",
+            ))
+        }
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -32,7 +64,7 @@ pub fn routes() -> Router<AppState> {
             "/api/packages/consumers/{id}",
             put(update_consumer).delete(delete_consumer),
         )
-        .route("/api/packages/{id}", get(package))
+        .route("/api/packages/{id}", get(package).delete(uninstall))
         .route("/api/packages/{id}/install", post(install))
         .route("/api/packages/{id}/update", post(update))
         .route("/api/packages/{id}/default", put(set_default))
@@ -45,7 +77,8 @@ pub fn routes() -> Router<AppState> {
 /// GET /api/packages
 pub async fn overview(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     access::app_surface(&state.db, &state, &user, "packages").await?;
-    let overview = state.packages.overview(user.is_admin()).await?;
+    let manage = can_manage(&state, &user).await?;
+    let overview = state.packages.overview(manage).await?;
     Ok(Json(
         serde_json::to_value(overview).map_err(|e| AppError::internal(e.to_string()))?,
     ))
@@ -58,7 +91,8 @@ pub async fn package(
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
     access::app_surface(&state.db, &state, &user, "packages").await?;
-    let (view, jobs) = state.packages.package(&id, user.is_admin()).await?;
+    let manage = can_manage(&state, &user).await?;
+    let (view, jobs) = state.packages.package(&id, manage).await?;
     Ok(Json(
         json!({ "package": view, "jobs": jobs, "host": state.packages.host }),
     ))
@@ -67,7 +101,7 @@ pub async fn package(
 /// POST /api/packages/check — fetch and verify the catalog now.
 pub async fn check(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
 ) -> AppResult<Json<Value>> {
     let status = state.packages.check_now(Some(&user)).await?;
     Ok(Json(json!({ "catalog": status })))
@@ -83,7 +117,7 @@ pub struct InstallRequest {
 /// POST /api/packages/{id}/install — install a specific catalog version.
 pub async fn install(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path(id): Path<String>,
     Json(body): Json<InstallRequest>,
 ) -> AppResult<Json<Value>> {
@@ -105,7 +139,7 @@ pub async fn install(
 /// current ones. The previous version stays installed for rollback.
 pub async fn update(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path(id): Path<String>,
     Json(body): Json<InstallRequest>,
 ) -> AppResult<Json<Value>> {
@@ -134,7 +168,7 @@ pub struct DefaultRequest {
 /// (`{"version": "1.27.4"}`) or the system's runtime (`{"system": true}`).
 pub async fn set_default(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path(id): Path<String>,
     Json(body): Json<DefaultRequest>,
 ) -> AppResult<Json<Value>> {
@@ -163,7 +197,7 @@ pub struct RemoveQuery {
 /// DELETE /api/packages/{id}/versions/{version}?confirm=<version>
 pub async fn remove_version(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path((id, version)): Path<(String, String)>,
     Query(q): Query<RemoveQuery>,
 ) -> AppResult<Json<Value>> {
@@ -173,6 +207,28 @@ pub async fn remove_version(
         ));
     }
     state.packages.remove_version(&user, &id, &version).await?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UninstallQuery {
+    pub confirm: Option<String>,
+}
+
+/// DELETE /api/packages/{id}?confirm=<id> — remove every installed version
+/// and its commands; the system's own copy (if any) is used again.
+pub async fn uninstall(
+    State(state): State<AppState>,
+    PackageManager(user): PackageManager,
+    Path(id): Path<String>,
+    Query(q): Query<UninstallQuery>,
+) -> AppResult<Json<Value>> {
+    if q.confirm.as_deref() != Some(id.as_str()) {
+        return Err(AppError::bad_request(
+            "Uninstalling must be confirmed: pass confirm=<package id>.",
+        ));
+    }
+    state.packages.uninstall(&user, &id).await?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -190,7 +246,7 @@ pub struct ConsumerRequest {
 /// POST /api/packages/consumers
 pub async fn create_consumer(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Json(body): Json<ConsumerRequest>,
 ) -> AppResult<Json<Value>> {
     let package_id = body
@@ -212,7 +268,7 @@ pub async fn create_consumer(
 /// PUT /api/packages/consumers/{id}
 pub async fn update_consumer(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path(id): Path<i64>,
     Json(body): Json<ConsumerRequest>,
 ) -> AppResult<Json<Value>> {
@@ -231,7 +287,7 @@ pub async fn update_consumer(
 /// DELETE /api/packages/consumers/{id}
 pub async fn delete_consumer(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Path(id): Path<i64>,
 ) -> AppResult<Json<Value>> {
     state.packages.delete_consumer(&user, id).await?;
@@ -248,7 +304,7 @@ pub struct InspectRequest {
 /// validate its manifest and return a preview pinned to that release.
 pub async fn github_inspect(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Json(body): Json<InspectRequest>,
 ) -> AppResult<Json<Value>> {
     if body.url.len() > 500 {
@@ -273,9 +329,14 @@ pub struct GithubInstallRequest {
 /// and install exactly the inspected release.
 pub async fn github_install(
     State(state): State<AppState>,
-    AdminUser(user): AdminUser,
+    PackageManager(user): PackageManager,
     Json(body): Json<GithubInstallRequest>,
 ) -> AppResult<Json<Value>> {
+    if body.approve_source && !user.is_admin() {
+        return Err(AppError::Forbidden(
+            "Only an administrator can approve a new package source.",
+        ));
+    }
     let job_id = state
         .packages
         .install_inspection(

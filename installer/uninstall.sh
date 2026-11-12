@@ -29,6 +29,7 @@ RUNTIME_DIR="/run/rast"
 MAIN_DROPIN_DIR="/etc/systemd/system/rast.service.d"
 WORKER_DROPIN_DIR="/etc/systemd/system/rast-worker.service.d"
 UNITS="rast.service rast-worker.service"
+LINK_UNITS="rast-packages-links.path rast-packages-links.service"
 PROFILE_SCRIPT="/etc/profile.d/rast-packages.sh"
 
 RAST_PURGE=${RAST_PURGE:-0}
@@ -275,6 +276,43 @@ log "data directory:    $DATA_DIR"
 log "storage directory: $STORAGE_DIR"
 log "purge data:        $([ "$PURGE" -eq 1 ] && printf yes || printf no)"
 log "service accounts:  $([ "$REMOVE_USER" -eq 1 ] && printf 'remove' || printf 'keep')"
+
+# ---------------------------------------------------------------------------
+# Package Center system-wide commands (packages_system_wide): stop the
+# watcher, remove RAST's links in /usr/local/bin and put back what it moved
+# aside. Only files RAST wrote are touched.
+# ---------------------------------------------------------------------------
+LINKS_BIN="/usr/local/bin"
+PACKAGES_BIN="$DATA_DIR/packages/bin"
+for _unit in $LINK_UNITS; do
+    if [ -f "$UNIT_DIR/$_unit" ] && head -n 1 "$UNIT_DIR/$_unit" | grep -q '^# Managed by RAST'; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log "dry run: would stop, disable and remove $_unit"
+        else
+            systemctl_maybe disable --now "$_unit"
+            remove_file "$UNIT_DIR/$_unit"
+        fi
+    fi
+done
+for _link in "$LINKS_BIN"/*; do
+    [ -L "$_link" ] || continue
+    _name=${_link##*/}
+    if [ "$(readlink "$_link")" = "$PACKAGES_BIN/$_name" ]; then
+        remove_file "$_link"
+    fi
+done
+for _aside in "$LINKS_BIN"/.rast-displaced.*; do
+    [ -e "$_aside" ] || [ -L "$_aside" ] || continue
+    _name=${_aside##*/.rast-displaced.}
+    if [ -e "$LINKS_BIN/$_name" ] || [ -L "$LINKS_BIN/$_name" ]; then
+        warn "kept $_aside: $LINKS_BIN/$_name exists again"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        log "dry run: would put $LINKS_BIN/$_name back"
+    else
+        run mv -- "$_aside" "$LINKS_BIN/$_name"
+        log "put back: $LINKS_BIN/$_name"
+    fi
+done
 
 # ---------------------------------------------------------------------------
 # Stop and remove services

@@ -20,6 +20,7 @@ import {
   filterPackages,
   groupByChannel,
   jobActionLabel,
+  jobCancellable,
   jobFraction,
   linkLabel,
   monogram,
@@ -30,6 +31,7 @@ import {
   statusLine,
   suggestedVersion,
   systemSourceLabel,
+  systemWideText,
   tileState,
   updateSummary,
   versionOptionLabel,
@@ -52,6 +54,7 @@ import type {
 } from "./types";
 
 interface LiveJob {
+  jobId: string;
   packageId: string;
   progress: number;
   total: number;
@@ -91,6 +94,8 @@ class PackageCenterApp {
   private checking = false;
   private readonly jobs = new Map<string, LiveJob>();
   private readonly busy = new Set<string>();
+  /** Jobs this window asked to cancel (the button shows "Cancelling…"). */
+  private readonly cancelling = new Set<string>();
   private readOnly = false;
   private denied = false;
   private disposed = false;
@@ -213,7 +218,7 @@ class PackageCenterApp {
       this.realtime.on<PackageEvent>("package.changed", (data) => {
         if (data?.jobId && data.packageId) {
           const live = this.jobs.get(data.jobId);
-          if (!live) this.jobs.set(data.jobId, { packageId: data.packageId, progress: 0, total: 0, message: "Queued" });
+          if (!live) this.jobs.set(data.jobId, { jobId: data.jobId, packageId: data.packageId, progress: 0, total: 0, message: "Queued" });
         }
         if (data?.reason === "failed" && data.jobId && this.jobs.has(data.jobId)) this.jobs.delete(data.jobId);
         this.sync.run();
@@ -254,6 +259,9 @@ class PackageCenterApp {
     if (this.disposed || !data?.id || !String(data.kind ?? "").startsWith("package")) return;
     const id = data.id;
     if (kind === "job.done" || kind === "job.failed" || kind === "job.cancelled") {
+      const known = this.jobs.get(id);
+      // installVersion reports its own jobs; this covers jobs started elsewhere.
+      if (!this.busy.has(id) && this.cancelling.delete(id)) this.reportCancel(kind, known?.packageId ?? this.packageForJob(id));
       this.jobs.delete(id);
       this.sync.run();
       return;
@@ -265,6 +273,7 @@ class PackageCenterApp {
       return;
     }
     this.jobs.set(id, {
+      jobId: id,
       packageId,
       progress: typeof data.progress === "number" ? data.progress : known?.progress ?? 0,
       total: typeof data.total === "number" ? data.total : known?.total ?? 0,
@@ -283,8 +292,8 @@ class PackageCenterApp {
   private liveJobFor(p: PackageView): LiveJob | null {
     for (const job of this.jobs.values()) if (job.packageId === p.id) return job;
     const active = p.activeJob;
-    if (active && (active.status === "running" || active.status === "queued")) {
-      return { packageId: p.id, progress: active.progress, total: active.total, message: active.message || jobActionLabel(active) };
+    if (active && (active.status === "running" || active.status === "pending" || active.status === "queued")) {
+      return { jobId: active.jobId, packageId: p.id, progress: active.progress, total: active.total, message: active.message || jobActionLabel(active) };
     }
     return null;
   }
@@ -308,7 +317,7 @@ class PackageCenterApp {
         continue;
       }
       host.classList.remove("hidden");
-      paintBar(host, job);
+      paintBar(host, job, this.cancelling.has(job.jobId));
     }
   }
 
@@ -584,15 +593,28 @@ class PackageCenterApp {
     return el;
   }
 
-  private progressEl(p: PackageView): HTMLElement {
+  private progressEl(p: PackageView, size: "tile" | "hero" = "tile"): HTMLElement {
     const job = this.liveJobFor(p);
+    const cancel = this.readOnly
+      ? null
+      : h(
+          "button",
+          { class: `btn btn-sm pkg-cancel ${size === "hero" ? "btn-secondary" : "btn-ghost btn-icon"}`, type: "button", title: "Cancel", ariaLabel: `Cancel ${p.name}` },
+          iconSvg("close", 14),
+          size === "hero" ? h("span", {}, "Cancel") : null,
+        );
+    cancel?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const live = this.liveJobFor(p);
+      if (live) void this.cancelJob(p, live);
+    });
     const host = h(
       "div",
-      { class: `pkg-progress${job ? "" : " hidden"}`, role: "status", ariaLive: "polite", dataset: { progressFor: p.id } },
-      h("div", { class: "progress" }, h("div", { class: "progress-bar" })),
+      { class: `pkg-progress is-${size}${job ? "" : " hidden"}`, role: "status", ariaLive: "polite", dataset: { progressFor: p.id } },
+      h("div", { class: "pkg-progress-row" }, h("div", { class: "progress" }, h("div", { class: "progress-bar" })), cancel),
       h("div", { class: "pkg-progress-label" }, ""),
     );
-    if (job) paintBar(host, job);
+    if (job) paintBar(host, job, this.cancelling.has(job.jobId));
     return host;
   }
 
@@ -681,7 +703,7 @@ class PackageCenterApp {
         pending.kind === "detected" ? h("div", { class: "pkg-hero-note" }, iconSvg("clock", 13), pending.text) : null,
         p.unavailableReason && p.installed.length === 0 ? h("div", { class: "pkg-hero-note is-warn" }, p.unavailableReason) : null,
         this.heroActions(p),
-        this.progressEl(p),
+        this.progressEl(p, "hero"),
       ),
     );
   }
@@ -701,7 +723,7 @@ class PackageCenterApp {
       primary = h("button", { class: "btn btn-sm btn-secondary", type: "button", disabled: true }, state.action === "installed" ? "Up to date" : "Unavailable");
     }
     const items = this.menuItems(p);
-    const group = h("div", { class: "pkg-split-btn", dataset: { actionFor: p.id } }, primary);
+    const group = h("div", { class: "pkg-split-btn" }, primary);
     if (items.length) {
       const caret = h(
         "button",
@@ -714,8 +736,14 @@ class PackageCenterApp {
       });
       group.appendChild(caret);
     }
-    if (this.liveJobFor(p)) group.classList.add("hidden");
-    return h("div", { class: "pkg-hero-actions" }, group);
+    const uninstall =
+      p.installed.length > 0
+        ? this.actionButton("Uninstall", "secondary", () => this.uninstall(p))
+        : null;
+    if (uninstall) uninstall.title = `Remove every ${p.name} version installed by Package Center`;
+    const actions = h("div", { class: "pkg-hero-actions", dataset: { actionFor: p.id } }, group, uninstall);
+    if (this.liveJobFor(p)) actions.classList.add("hidden");
+    return actions;
   }
 
   private menuItems(p: PackageView): ContextMenuEntry[] {
@@ -743,6 +771,13 @@ class PackageCenterApp {
     items.push(["Installed version", installedText(p)]);
     items.push(["Newest version", p.latest?.version ?? "—"]);
     items.push(["In the terminal", this.terminalText(p)]);
+    const everywhere = systemWideText(p, this.overview?.shell?.system);
+    if (everywhere) {
+      items.push([
+        "sudo and services",
+        h("span", {}, everywhere.text, everywhere.sub ? h("span", { class: "pkg-info-sub" }, everywhere.sub) : null),
+      ]);
+    }
     items.push(["Source", p.official ? "Official RAST catalog" : externalLink(`https://github.com/${p.sourceRepo ?? ""}`, p.sourceRepo ?? "GitHub")]);
     items.push(["Category", p.packageType === "runtime" ? "Runtime" : p.packageType]);
     if (p.license) items.push(["License", p.license]);
@@ -1102,6 +1137,20 @@ class PackageCenterApp {
         : !shell.enabled
           ? h("span", {}, "Off (packages_shell_path = false)")
           : h("span", {}, "Not set up yet. Run this once as root:", commandLine(shell.syncCommand, this.ctx));
+    const links = shell?.system;
+    const everywhere = !links
+      ? "—"
+      : !links.enabled
+        ? h("span", {}, "Off: only login shells use Package Center versions", h("span", { class: "pkg-settings-sub mono" }, "packages_system_wide = false"))
+        : !links.watcher
+          ? h("span", {}, "Not set up yet. Run this once as root:", commandLine(shell.syncCommand, this.ctx))
+          : h(
+              "span",
+              {},
+              links.linked.length ? `On: ${links.linked.join(", ")}` : "On: nothing linked yet",
+              h("span", { class: "pkg-settings-sub mono" }, links.directory),
+              links.displaced.length ? h("span", { class: "pkg-settings-sub" }, `Moved aside: ${links.displaced.join(", ")}`) : null,
+            );
     const body = h(
       "div",
       { class: "pkg-settings" },
@@ -1121,6 +1170,7 @@ class PackageCenterApp {
           ["C library", host.libc === "glibc" ? `glibc ${host.glibcVersion ?? "?"}` : host.libc],
           ["RAST", host.rastVersion],
           ["Terminal PATH", terminal],
+          ["sudo and services", everywhere],
         ]),
       ),
     );
@@ -1159,7 +1209,7 @@ class PackageCenterApp {
       return;
     }
     this.busy.add(jobId);
-    this.jobs.set(jobId, { packageId: p.id, progress: 0, total: 0, message: `Queued: ${action === "update" ? "update to" : "install"} ${version}` });
+    this.jobs.set(jobId, { jobId, packageId: p.id, progress: 0, total: 0, message: `Queued: ${action === "update" ? "update to" : "install"} ${version}` });
     this.paintProgress(p.id);
     this.ctx.toast.info(`${action === "update" ? "Updating" : "Installing"} ${p.name} ${version}…`);
     const outcome = await watchJob(this.ctx, this.lc, jobId, (u) => {
@@ -1173,11 +1223,70 @@ class PackageCenterApp {
     });
     this.busy.delete(jobId);
     this.jobs.delete(jobId);
+    const askedToCancel = this.cancelling.delete(jobId);
     if (this.disposed) return;
     if (outcome.status === "done") {
-      this.ctx.toast.success(`${p.name} ${version} installed and verified${makeDefault ? " — now the default" : ""}`);
+      this.ctx.toast.success(
+        `${askedToCancel ? "Too late to cancel: " : ""}${p.name} ${version} installed and verified${makeDefault ? " — now the default" : ""}`,
+      );
     } else if (outcome.status === "failed") {
       this.ctx.toast.error(`${p.name} ${version} was not installed: ${outcome.error ?? "unknown error"}. Installed versions are unchanged.`);
+    } else if (askedToCancel) {
+      this.ctx.toast.info(`${p.name} ${version} cancelled. Nothing was changed.`);
+    }
+    this.sync.run();
+  }
+
+  private async cancelJob(p: PackageView, job: LiveJob): Promise<void> {
+    if (!job.jobId || this.cancelling.has(job.jobId)) return;
+    this.cancelling.add(job.jobId);
+    this.paintProgress(p.id);
+    try {
+      const res = await this.ctx.api.post<{ cancelRequested: boolean }>(`/api/jobs/${encodeURIComponent(job.jobId)}/cancel`);
+      if (!res.cancelRequested) {
+        this.cancelling.delete(job.jobId);
+        this.ctx.toast.info(`${p.name}: the job already finished.`);
+        this.sync.run();
+      }
+    } catch (error) {
+      this.cancelling.delete(job.jobId);
+      this.paintProgress(p.id);
+      this.ctx.toast.error(`Cannot cancel: ${errorMessage(error)}`);
+    }
+  }
+
+  private reportCancel(kind: string, packageId: string | null): void {
+    const name = this.overview?.packages.find((x) => x.id === packageId)?.name ?? "The package";
+    if (kind === "job.cancelled") this.ctx.toast.info(`${name}: cancelled. Nothing was changed.`);
+    else if (kind === "job.done") this.ctx.toast.info(`${name}: too late to cancel, the install finished.`);
+  }
+
+  private async uninstall(p: PackageView): Promise<void> {
+    const versions = p.installed.map((v) => v.version).join(", ");
+    const size = p.installed.reduce((sum, v) => sum + v.sizeBytes, 0);
+    const s = p.system;
+    const after = s
+      ? `The system ${p.name} ${s.version ?? ""} (${systemSourceLabel({ ...s, displaced: false })}) is used again.`.replace(/ +\(/, " (")
+      : `${p.name} will no longer be available on this server.`;
+    const ok = await confirmDialog({
+      title: `Uninstall ${p.name}?`,
+      message: `This removes ${versions} (${formatBytes(size)}) and its commands from Package Center. ${after} You can install it again later.`,
+      confirmLabel: "Uninstall",
+      danger: true,
+      requireTyped: p.id,
+    });
+    if (!ok) return;
+    try {
+      await this.ctx.api.del(`/api/packages/${encodeURIComponent(p.id)}`, { confirm: p.id });
+      this.ctx.toast.success(`${p.name} uninstalled`);
+      // An imported package is gone entirely; an official one can be installed again.
+      if (!p.official && this.selectedId === p.id) {
+        this.selectedId = null;
+        this.detail = null;
+        this.render();
+      }
+    } catch (error) {
+      this.ctx.toast.error(errorMessage(error));
     }
     this.sync.run();
   }
@@ -1305,7 +1414,7 @@ class PackageCenterApp {
     openGithubImport(this.ctx, {
       onStarted: (jobId, packageId, version) => {
         this.busy.add(jobId);
-        this.jobs.set(jobId, { packageId, progress: 0, total: 0, message: `Queued: install ${version}` });
+        this.jobs.set(jobId, { jobId, packageId, progress: 0, total: 0, message: `Queued: install ${version}` });
         this.view = "installed";
         this.selectedId = null;
         void this.reload();
@@ -1320,9 +1429,11 @@ class PackageCenterApp {
         }).then((outcome) => {
           this.busy.delete(jobId);
           this.jobs.delete(jobId);
+          const askedToCancel = this.cancelling.delete(jobId);
           if (this.disposed) return;
           if (outcome.status === "done") this.ctx.toast.success(`${packageId} ${version} installed from GitHub`);
           else if (outcome.status === "failed") this.ctx.toast.error(`Import failed: ${outcome.error ?? "unknown error"}`);
+          else if (askedToCancel) this.ctx.toast.info(`${packageId} ${version} cancelled. Nothing was changed.`);
           this.sync.run();
         });
       },
@@ -1332,9 +1443,16 @@ class PackageCenterApp {
 
 // ------------------------------------------------------------------ helpers
 
-function paintBar(host: HTMLElement, job: LiveJob): void {
+function paintBar(host: HTMLElement, job: LiveJob, cancelRequested = false): void {
   const fill = host.querySelector<HTMLElement>(".progress-bar");
   const label = host.querySelector<HTMLElement>(".pkg-progress-label");
+  const cancel = host.querySelector<HTMLButtonElement>(".pkg-cancel");
+  if (cancel) {
+    cancel.hidden = !job.jobId || !jobCancellable(job.message);
+    cancel.disabled = cancelRequested;
+    const text = cancel.querySelector("span");
+    if (text) text.textContent = cancelRequested ? "Cancelling…" : "Cancel";
+  }
   const fraction = jobFraction(job.progress, job.total);
   if (fill) {
     fill.style.width = job.total > 0 ? `${(fraction * 100).toFixed(1)}%` : "100%";

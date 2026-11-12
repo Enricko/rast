@@ -52,6 +52,9 @@ pub struct ShellPath {
     pub bin_dir: String,
     /// What to run when the script is missing or outdated.
     pub sync_command: String,
+    /// The defaults linked into /usr/local/bin (`packages_system_wide`);
+    /// filled in by the caller.
+    pub system: super::links::SystemLinks,
 }
 
 pub fn status(enabled: bool, bin_dir: &Path, profile: &Path) -> ShellPath {
@@ -65,6 +68,7 @@ pub fn status(enabled: bool, bin_dir: &Path, profile: &Path) -> ShellPath {
         profile: profile.display().to_string(),
         bin_dir: bin_dir.display().to_string(),
         sync_command: SYNC_COMMAND.into(),
+        system: Default::default(),
     }
 }
 

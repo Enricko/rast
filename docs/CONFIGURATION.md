@@ -66,6 +66,7 @@ applied by `src/config.rs`.
 | `packages_catalog_keys` | array of strings | `[]` | Extra trusted catalog keys, each `"<key-id>:<base64 Ed25519 public key>"` (32 bytes); invalid entries fail startup. The official key is always trusted | `RAST_PACKAGES_CATALOG_KEYS` (comma separated) |
 | `packages_check_interval_minutes` | integer | `360` | 0–10080; `0` disables automatic checks, including the one at start (the refresh button, *Check for updates*, still works) | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` |
 | `packages_shell_path` | bool | `true` | Put the Package Center defaults (`<data_dir>/packages/bin`) first on every login shell's PATH through `/etc/profile.d/rast-packages.sh`, and let other users read the installed runtimes (the data directory and package root get only the traverse bit for others). Applied by `sudo rast packages path sync`, which the installer and `rast update` run | `RAST_PACKAGES_SHELL_PATH` |
+| `packages_system_wide` | bool | `false` | Also link the official defaults into `/usr/local/bin`, so `sudo`, systemd services, cron (`/etc/crontab`) and scripts run them, not only login shells. A root watcher (`rast-packages-links.path`) re-links after every change. apt files are never changed (`/usr/local/bin` only shadows `/usr/bin`); a command installed there by hand is moved aside to `.rast-displaced.<name>` and put back by *Use the system version* or *Uninstall*. Only the commands of official PHP, Node.js, Go and Python are linked. Root then runs files the `rast` account can change. Needs `packages_shell_path`; applied by `sudo rast packages path sync` | `RAST_PACKAGES_SYSTEM_WIDE` |
 | `packages_github_token` | string | unset | Optional token for GitHub API lookups by Install from GitHub (rate limit only; public repositories need no token). Never printed by `rast config` | `RAST_PACKAGES_GITHUB_TOKEN` |
 
 ## Environment variables
@@ -97,6 +98,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_PACKAGES_CATALOG_KEYS` | `packages_catalog_keys` | Comma-separated `<key-id>:<base64>` |
 | `RAST_PACKAGES_CHECK_INTERVAL_MINUTES` | `packages_check_interval_minutes` | 0–10080 |
 | `RAST_PACKAGES_SHELL_PATH` | `packages_shell_path` | `true`/`false` |
+| `RAST_PACKAGES_SYSTEM_WIDE` | `packages_system_wide` | `true`/`false` |
 | `RAST_PACKAGES_GITHUB_TOKEN` | `packages_github_token` | Secret; prefer the environment file over the TOML file |
 
 Additional variables that are **not** configuration-file keys:
@@ -212,10 +214,15 @@ Installed runtimes live under `<data_dir>/packages/` (`runtimes/<id>/<version>/`
 `/etc/profile.d/rast-packages.sh` puts `bin/` first on every login shell's PATH,
 so a terminal runs the version chosen with *Make default*. A package without a
 Package Center default has no shim there, and the system's own command is used.
-RAST never modifies the operating system's own runtimes (apt packages, manual
-installs): it lists them as *System* and installs updates next to them. `sudo`
-keeps its own `secure_path`, so commands run with `sudo` use the system
-versions. See [package-center-handoff.md](package-center-handoff.md).
+RAST never modifies the operating system's own runtimes (apt packages): it
+lists them as *System* and installs updates next to them. `sudo` keeps its own
+`secure_path` and services have their own PATH, so they use the system
+versions unless `packages_system_wide` links the defaults into
+`/usr/local/bin` (which comes first in both). Before turning it on, check that
+services and cron jobs that run `php`, `node`, `python3` or `go` by name work
+with the Package Center build (for example its PHP extensions); per-user
+crontabs use `PATH=/usr/bin:/bin` and are not affected. See
+[package-center-handoff.md](package-center-handoff.md).
 
 ## CLI overrides
 

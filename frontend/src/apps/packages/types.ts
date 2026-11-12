@@ -92,6 +92,8 @@ export interface SystemInstall {
   source: "apt" | "snap" | "manual" | string;
   sourcePackage?: string | null;
   onPath: boolean;
+  /** Moved aside (`.rast-displaced.<command>`) while Package Center provides the command system-wide. */
+  displaced?: boolean;
   detectedAt: number;
 }
 
@@ -103,6 +105,17 @@ export interface TerminalView {
   path: string;
 }
 
+/** The defaults linked into /usr/local/bin for sudo, services and scripts (`packages_system_wide`). */
+export interface SystemLinks {
+  enabled: boolean;
+  linked: string[];
+  pending: string[];
+  displaced: string[];
+  directory: string;
+  /** The root watcher (systemd path unit) is installed. */
+  watcher: boolean;
+}
+
 /** Package Center on the login-shell PATH (/etc/profile.d). */
 export interface ShellPath {
   enabled: boolean;
@@ -111,6 +124,7 @@ export interface ShellPath {
   profile: string;
   binDir: string;
   syncCommand: string;
+  system?: SystemLinks;
 }
 
 export interface DetectedView {

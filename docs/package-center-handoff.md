@@ -253,7 +253,7 @@ stubbed for these local runs. It runs for real in CI.
 | Sandboxed checks | Real Go, Node.js and Python checks in the sandbox on a server running with `rast.service`'s hardening; the template's Lua checks with Landlock mandatory; a hostile check could not read the database, write to the data directory or connect over TCP (see [Security review](#security-review)) | Pass |
 | Install from GitHub | Non-GitHub link, release without `rast-package.json` (Enricko/rast v0.4.1), missing repository, missing tag, install without a valid inspection — all refused with a clear message | Pass |
 | Template import | GitHub's API base is fixed, so the template could not be imported until its repository exists. Rehearsed instead: the template's real release output (manifest + locally built Lua archive) ran through RAST's own `manifest::parse`, `github::cross_check`, host compatibility, `install_version` and `activate`. All checks passed and `lua -e` ran through the shim. A modified archive, an asset of another release, a manifest digest mismatch, an unsafe executable path and a wrong SHA-256 at install were all refused | Pass (rehearsal) |
-| Permissions | Non-admin without a grant: not in the start menu, opening refused, API 403. Group `allow`: read-only (banner, no install/default/remove/consumer/import controls; every mutating endpoint 403). Removing the group closes access in the open window in 0.4 s. Package events reach only accounts allowed to open Package Center | Pass |
+| Permissions | Non-admin without a grant: not in the start menu, opening refused, API 403. Group `allow` (0.6.1 and earlier): read-only (banner, no install/default/remove/consumer/import controls; every mutating endpoint 403); after 0.6.1 it manages packages, see below. Removing the group closes access in the open window in 0.4 s. Package events reach only accounts allowed to open Package Center | Pass |
 | Themes and sizes | Light and dark; window 1440 (maximized), 1024, 760, 480 px; phone viewport 390 px; no horizontal overflow, nothing outside the window, dialog fits | Pass |
 | Audit | `package.install/update/activate/remove/consumer_create/catalog_check` with actor and result (`source_approve` needs a real GitHub import) | Pass |
 | Host untouched | OS Python/Node/PHP versions, `/usr/local/bin`, `/etc/profile.d` unchanged | Pass |
@@ -572,6 +572,57 @@ Verified afterwards:
 * the journal shows no warnings.
 
 Rollback: `/usr/local/bin/rast.rollback-0.6.0` (schema unchanged).
+
+### After 0.6.1: uninstall, cancel, system-wide, group managers (unreleased)
+
+The user asked for an uninstall button, a way to cancel an install while it
+downloads, and that the server itself (not only terminals) uses a newly
+installed version. They chose: system-wide, including `sudo` and services, with
+the risk accepted; and Package Center for administrators plus the groups they
+grant it to, who may then manage packages.
+
+* **Uninstall** (package page, next to the main button): removes every
+  installed version, `current` and the shims after a typed confirmation;
+  refused while consumers use the package. The system's runtime takes over.
+* **Cancel** (× on the tile, *Cancel* on the package page) works until
+  `Moving into place`; the staging directory is removed and the job is
+  recorded as cancelled. Package job events now reach every account allowed
+  to open Package Center, and any of them may cancel package jobs.
+* **`packages_system_wide`** (default off): `sudo rast packages path sync`
+  installs `rast-packages-links.path` + `.service` (root, oneshot,
+  `ProtectSystem=strict`, writes only `/usr/local/bin`). The watcher links
+  `/usr/local/bin/<name> -> <data_dir>/packages/bin/<name>` for a fixed list
+  of official command names whose shim points into the owning package's
+  `current` tree; a third-party package can never take those names (the
+  ownership check refuses official ids and command names). A manual command
+  of the same name is renamed to `.rast-displaced.<name>` and renamed back
+  when the link goes; system detection still finds it there (`displaced`).
+  The uninstaller removes the units and links and restores what was moved
+  aside.
+* **Access**: a group `allow` for `packages` is now a full grant
+  (`app_grant_manages`); approving a new GitHub source stays admin-only.
+* **Fix**: `ensure_dirs` (every CLI command and start) reset the data
+  directory to 0750 and hid the runtimes from other users until the next
+  `sync`. It now keeps the traverse bit while `packages_shell_path` is on.
+
+Verified on the scratch instance (fictional accounts `keeper`, in a group
+granted Package Center, and `visitor`, without): `visitor` gets 403;
+`keeper` cancelled a Go 1.27.4 download at about 10 MB from the tile and
+from the package page (two `cancelled` jobs, nothing left in `runtimes/go` or
+`staging/`), installed it, and uninstalled it from the page (files and shim
+gone, `package.uninstall` audited). The root link step was tested with
+temporary directories (unit tests, uninstaller block); it runs on a real
+server only after the release.
+
+Before turning `packages_system_wide` on in production:
+
+* per-user crontabs default to `PATH=/usr/bin:/bin`, so they keep the system
+  versions; `/etc/crontab`, `sudo` (`secure_path`) and systemd services use
+  `/usr/local/bin` first;
+* a service or cron job that runs `php` by name switches to the static PHP
+  CLI build; check that it has the extensions that job needs (php-fpm itself
+  is not affected: it is `php-fpm8.5`, not `php`);
+* root then runs files the `rast` service account can change.
 
 ## Limitations
 

@@ -11,7 +11,32 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- Package Center: **Uninstall** on a package page removes every installed
+  version and its commands (`DELETE /api/packages/{id}?confirm={id}`, audited
+  as `package.uninstall`); the system's own runtime is used again.
+- Package Center: **Cancel** next to the progress bar (tile and package page)
+  stops an install or update while it downloads, extracts or runs its checks;
+  nothing is changed. From "Moving into place" the install finishes.
+- `packages_system_wide` (off by default): the official defaults are also
+  linked into `/usr/local/bin`, so `sudo`, systemd services and scripts run
+  the version chosen in Package Center, not only login shells. A root systemd
+  path unit (`rast-packages-links.path`, installed by `sudo rast packages path
+  sync`) keeps the links current; apt files are never changed and a manual
+  install is moved aside and put back. New `rast packages path links`.
+
+### Changed
+
+- A group granted Package Center now manages packages (install, update,
+  default, remove, uninstall, cancel, consumers) instead of only viewing;
+  approving a new GitHub source stays administrator-only. Package job events
+  reach every account allowed to open Package Center.
+
+### Fixed
+
+- Any RAST command or a restart reset the data directory to `0750`, so other
+  users lost access to the Package Center runtimes until the next
+  `rast packages path sync`.
+- Queued package jobs showed no progress bar after a reload.
 
 ### Planned
 

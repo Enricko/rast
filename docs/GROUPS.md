@@ -72,6 +72,7 @@ across renames.
 | `controlpanel` | Control Panel | allowed (own profile/appearance only; admin tabs stay role-gated) | — |
 | `applications` | Applications | **denied** (admin-only) | read-only status metadata: list/detail (no env values → `envCount`/`secretCount`, no compose), history without `detail`, container inventory in Resource Monitor. Logs, log stream, deploy/start/stop/delete remain admin-only |
 | `backup` | Backup Center | **denied** (admin-only) | read-only status metadata: list (no file name/checksum/note, `downloadable:false`) and schedule. Archive download, restore guide, create/delete/verify/schedule-write remain admin-only (archives contain the account DB, the master key and possibly every user's files) |
+| `packages` | Package Center | **denied** (admin-only) | manage packages: check the catalog, install, update, change the default, remove versions, uninstall, cancel package jobs, edit consumers. Approving a new GitHub source stays admin-only. With `packages_system_wide`, what they install runs for `sudo` and services too, so grant it only to people you would trust with root on runtimes |
 
 Explicit `none` always wins and blocks the API prefix + live events + launcher.
 

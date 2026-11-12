@@ -64,6 +64,19 @@ fn app_default_read_only(_app_id: &str) -> bool {
     false
 }
 
+/// Admin-only surfaces whose group grant is a full grant rather than
+/// read-only: members of a group granted Package Center install, update,
+/// uninstall and cancel packages (approving a new GitHub source stays
+/// administrator-only).
+fn app_grant_manages(app_id: &str) -> bool {
+    matches!(app_id, "packages")
+}
+
+/// Whether an explicit group allow is read-only for this application.
+fn app_grant_read_only(app_id: &str) -> bool {
+    !app_default_allowed(app_id) && !app_grant_manages(app_id)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FolderRule {
     Inherit,
@@ -550,12 +563,13 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
             }
         } else if explicit_allow {
             // A group grant for a normally-admin-only surface (Applications,
-            // Backup Center, Package Center) is read-only; for surfaces every account may use
-            // by default an explicit allow is just a regular grant.
+            // Backup Center) is read-only; Package Center's lets the group
+            // manage packages; for surfaces every account may use by
+            // default an explicit allow is just a regular grant.
             AppAccess {
                 app_id: app_id.to_string(),
                 allowed: true,
-                read_only: !app_default_allowed(app_id),
+                read_only: app_grant_read_only(app_id),
                 sources,
                 fallback: "explicit".into(),
             }
@@ -956,7 +970,7 @@ pub fn merge_app<'a>(
     if deny {
         (false, false)
     } else if allow {
-        (true, !app_default_allowed(app_id))
+        (true, app_grant_read_only(app_id))
     } else {
         (app_default_allowed(app_id), app_default_read_only(app_id))
     }
@@ -974,6 +988,19 @@ mod tests {
             sources: Vec::new(),
             fallback: None,
         })
+    }
+
+    #[test]
+    fn a_package_center_grant_manages_while_other_admin_apps_stay_read_only() {
+        assert_eq!(merge_app("packages", None, ["allow"]), (true, false));
+        assert_eq!(merge_app("applications", None, ["allow"]), (true, true));
+        assert_eq!(merge_app("backup", None, ["allow"]), (true, true));
+        assert_eq!(merge_app("packages", None, ["inherit"]), (false, false));
+        assert_eq!(
+            merge_app("packages", Some("none"), ["allow"]),
+            (false, false)
+        );
+        assert_eq!(merge_app("files", None, ["allow"]), (true, false));
     }
 
     #[test]

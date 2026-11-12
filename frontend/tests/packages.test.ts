@@ -5,6 +5,7 @@ import {
   filterPackages,
   groupByChannel,
   installedLabel,
+  jobCancellable,
   jobFraction,
   linkLabel,
   monogram,
@@ -12,6 +13,7 @@ import {
   statusLine,
   suggestedVersion,
   systemSourceLabel,
+  systemWideText,
   tileState,
   updateSummary,
   upToDateText,
@@ -185,4 +187,29 @@ test("tiles list updates first, then installed, then the rest", () => {
   assert.deepEqual(sortForTiles([a, b, c, d]).map((p) => p.id), ["c", "b", "a", "d"]);
   assert.equal(linkLabel("https://www.python.org/downloads/"), "python.org");
   assert.equal(linkLabel("not a url"), "not a url");
+});
+
+test("an install can be cancelled until it moves into place", () => {
+  for (const m of ["Queued: install 8.5.12", "Downloading 3.0 MB of 30.0 MB", "Extracting (120 files)", "Checking executables", "Verified SHA-256 and size"]) {
+    assert.equal(jobCancellable(m), true, m);
+  }
+  for (const m of ["Moving into place", "Recording installation", "Making it the RAST default"]) {
+    assert.equal(jobCancellable(m), false, m);
+  }
+});
+
+test("sudo and services follow the system-wide links", () => {
+  const terminal = { command: "php", source: "package-center", version: "8.5.12", path: "/var/lib/rast/packages/bin/php" };
+  const system = {
+    command: "php", path: "/usr/bin/php", realPath: "/usr/bin/php8.5", version: "8.5.4", versionCommand: "php -n --version",
+    output: "PHP 8.5.4", source: "apt", sourcePackage: "php8.5-cli", onPath: true, detectedAt: 0,
+  };
+  const p = pkg("php", { defaultVersion: "8.5.12", terminal, system });
+  const links = { enabled: true, linked: ["php"], pending: [], displaced: [], directory: "/usr/local/bin", watcher: true };
+  assert.deepEqual(systemWideText(p, links), { text: "run 8.5.12", sub: "Linked in /usr/local/bin" });
+  assert.equal(systemWideText(p, { ...links, enabled: false })?.text, "run the system 8.5.4");
+  assert.equal(systemWideText(p, { ...links, linked: [], watcher: false })?.text, "Not linked yet");
+  assert.equal(systemWideText(p, { ...links, linked: [] })?.text, "Linking…");
+  assert.equal(systemWideText(pkg("php", { defaultVersion: null, terminal, system }), links), null, "no Package Center default");
+  assert.equal(systemSourceLabel({ source: "manual", sourcePackage: null, displaced: true }), "manual install · moved aside");
 });

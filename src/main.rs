@@ -114,13 +114,19 @@ enum PackagesCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand, Debug, PartialEq, Eq)]
 enum PathCommand {
     /// Write or remove /etc/profile.d/rast-packages.sh to match
-    /// packages_shell_path, and set the runtime permissions (needs root)
+    /// packages_shell_path, set the runtime permissions and, with
+    /// packages_system_wide, install the watcher that links the defaults
+    /// into /usr/local/bin (needs root)
     Sync,
-    /// Show whether login shells use the Package Center defaults
+    /// Show whether login shells, sudo and services use the Package Center
+    /// defaults
     Status,
+    /// Link the defaults into /usr/local/bin now (run as root by the
+    /// rast-packages-links watcher after every change)
+    Links,
 }
 
 #[derive(Subcommand, Debug)]
@@ -268,7 +274,7 @@ async fn run(
                 }
                 Command::Packages {
                     cmd: PackagesCommand::Path { cmd },
-                } => packages_path(&cfg, matches!(cmd, PathCommand::Sync)),
+                } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
                 Command::Serve { .. } | Command::Version => unreachable!(),
             }
@@ -276,25 +282,83 @@ async fn run(
     }
 }
 
-fn packages_path(cfg: &Config, sync: bool) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    use rast::packages::{install::Layout, shell};
+fn packages_path(cfg: &Config, cmd: PathCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::{install::Layout, links, shell};
+    use std::path::Path;
     let layout = Layout::new(cfg.packages_dir());
-    let profile = std::path::Path::new(shell::PROFILE_SCRIPT);
-    if sync {
+    let bin_dir = layout.bin_dir();
+    let profile = Path::new(shell::PROFILE_SCRIPT);
+    let system_bin = Path::new(links::SYSTEM_BIN);
+    let unit_dir = Path::new(links::UNIT_DIR);
+    let links_on = cfg.packages_links_enabled();
+    if cmd != PathCommand::Status {
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             return Err(format!(
-                "writing {} needs root: run `{}`",
+                "changing {} and {} needs root: run `{}`",
                 shell::PROFILE_SCRIPT,
+                links::SYSTEM_BIN,
                 shell::SYNC_COMMAND
             )
             .into());
         }
+    }
+    if cmd == PathCommand::Links {
+        // Shims can change while this runs (an install activating several
+        // commands): repeat until a pass changes nothing.
+        for _ in 0..5 {
+            let done = links::sync(links_on, &bin_dir, system_bin)?;
+            for line in &done {
+                println!("{line}");
+            }
+            if done.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    if cmd == PathCommand::Sync {
         for line in shell::sync(cfg.packages_shell_path, &cfg.data_dir, &layout, profile)? {
             println!("{line}");
         }
+        let config = cfg
+            .loaded_from
+            .as_deref()
+            .filter(|p| *p != Path::new(rast::config::DEFAULT_CONFIG_PATH));
+        let units = links::units(rast::update::BIN_PATH, &bin_dir, &cfg.data_dir, config);
+        let systemctl = |args: &[&str]| -> Result<(), String> {
+            let out = std::process::Command::new("systemctl")
+                .args(args)
+                .output()
+                .map_err(|e| format!("cannot run systemctl: {e}"))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "systemctl {} failed: {}",
+                    args.join(" "),
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ))
+            }
+        };
+        // Links first when turning off (the watcher would only redo them),
+        // the watcher first when turning on.
+        if links_on {
+            for line in links::sync_units(true, unit_dir, &units, &systemctl)? {
+                println!("{line}");
+            }
+        }
+        for line in links::sync(links_on, &bin_dir, system_bin)? {
+            println!("{line}");
+        }
+        if !links_on {
+            for line in links::sync_units(false, unit_dir, &units, &systemctl)? {
+                println!("{line}");
+            }
+        }
     }
-    let st = shell::status(cfg.packages_shell_path, &layout.bin_dir(), profile);
+    let st = shell::status(cfg.packages_shell_path, &bin_dir, profile);
     let state = if st.active {
         "on: login shells run the Package Center defaults first"
     } else if !st.enabled {
@@ -307,7 +371,30 @@ fn packages_path(cfg: &Config, sync: bool) -> Result<ExitCode, Box<dyn std::erro
     println!("shell PATH: {state}");
     println!("  profile script: {}", st.profile);
     println!("  bin directory:  {}", st.bin_dir);
-    if st.enabled && !st.active {
+    let sys = links::status(links_on, &bin_dir, system_bin, unit_dir);
+    let system = if !sys.enabled {
+        "off (packages_system_wide = false)".to_string()
+    } else if !sys.watcher {
+        "not set up yet".to_string()
+    } else if !sys.pending.is_empty() {
+        format!("pending: {}", sys.pending.join(", "))
+    } else if sys.linked.is_empty() {
+        "on: nothing to link yet (no official defaults)".to_string()
+    } else {
+        "on: sudo, services and scripts run the Package Center defaults".to_string()
+    };
+    println!("system-wide: {system}");
+    if !sys.linked.is_empty() {
+        println!("  linked in {}: {}", sys.directory, sys.linked.join(", "));
+    }
+    if !sys.displaced.is_empty() {
+        println!(
+            "  moved aside ({}<name>): {}",
+            links::DISPLACED_PREFIX,
+            sys.displaced.join(", ")
+        );
+    }
+    if (st.enabled && !st.active) || (sys.enabled && !sys.watcher) {
         println!("  run: {}", st.sync_command);
     }
     Ok(ExitCode::SUCCESS)

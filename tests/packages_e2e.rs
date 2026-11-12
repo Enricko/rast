@@ -786,6 +786,7 @@ async fn a_system_runtime_is_listed_updated_alongside_and_restored() {
         source: "apt".into(),
         source_package: Some("lua5.4".into()),
         on_path: true,
+        displaced: false,
         detected_at: 0,
     };
     let profile = server.dir.path().join("profile.d/rast-packages.sh");
@@ -909,4 +910,177 @@ async fn a_system_runtime_is_listed_updated_alongside_and_restored() {
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn granted_groups_manage_packages_and_uninstall_removes_everything() {
+    let server = Server::start().await;
+    let admin = server.login("admin", Role::Admin).await;
+    let viewer = server.login("viewer", Role::User).await;
+    let keeper = server.login("keeper", Role::User).await;
+    let bytes = catalog(1);
+    server.publish(&bytes, &server.signer.sign(&bytes));
+    server
+        .request("POST", "/api/packages/check", None, admin.clone())
+        .await;
+    let old_root = server.record_installed("5.4.7").await;
+    let new_root = server.record_installed("5.4.8").await;
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/packages/lua/default",
+            Some(json!({"version": "5.4.8"})),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let shim = server.state.packages.layout.bin_dir().join("lua");
+    assert!(shim.is_symlink());
+
+    // Without a grant Package Center is closed, uninstall included.
+    let (status, _) = server
+        .request(
+            "DELETE",
+            "/api/packages/lua?confirm=lua",
+            None,
+            viewer.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // A group granted Package Center manages packages.
+    let keeper_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE username = 'keeper'")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/groups",
+            Some(json!({
+                "name": "Runtime Keepers",
+                "members": [keeper_id],
+                "appRules": [{"appId": "packages", "rule": "allow"}]
+            })),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = server
+        .request("GET", "/api/packages", None, keeper.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["canManage"], true);
+    let (_, body) = server
+        .request("GET", "/api/packages", None, viewer.clone())
+        .await;
+    assert_ne!(body["canManage"], true);
+
+    // Uninstall must be confirmed and is refused while a consumer uses it.
+    let (status, _) = server
+        .request("DELETE", "/api/packages/lua", None, keeper.clone())
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/packages/consumers",
+            Some(json!({"name": "site", "packageId": "lua", "version": "5.4.7"})),
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let consumer = body["id"].as_i64().unwrap();
+    let (status, body) = server
+        .request(
+            "DELETE",
+            "/api/packages/lua?confirm=lua",
+            None,
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(old_root.exists() && new_root.exists(), "nothing removed");
+    server
+        .request(
+            "DELETE",
+            &format!("/api/packages/consumers/{consumer}"),
+            None,
+            keeper.clone(),
+        )
+        .await;
+
+    let (status, body) = server
+        .request(
+            "DELETE",
+            "/api/packages/lua?confirm=lua",
+            None,
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!old_root.exists() && !new_root.exists());
+    assert!(!shim.exists() && !shim.is_symlink(), "commands removed");
+    assert!(!server.state.packages.layout.package_dir("lua").exists());
+    let (_, body) = server
+        .request("GET", "/api/packages", None, keeper.clone())
+        .await;
+    let pkg = lua(&body);
+    assert!(pkg["installed"].as_array().unwrap().is_empty(), "{pkg}");
+    assert!(pkg["defaultVersion"].is_null());
+    let audit = server.audit("package.uninstall").await;
+    assert_eq!(
+        audit.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+        ["failure", "success"]
+    );
+    let (status, _) = server
+        .request(
+            "DELETE",
+            "/api/packages/lua?confirm=lua",
+            None,
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nothing left to uninstall");
+
+    // Approving a new GitHub source stays administrator-only.
+    let (status, _) = server
+        .request(
+            "POST",
+            "/api/packages/github/install",
+            Some(json!({"inspectionId": "x", "approveSource": true})),
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Any package manager may cancel a package job, others cannot see it.
+    let (status, body) = server
+        .request(
+            "POST",
+            "/api/packages/lua/install",
+            Some(json!({"version": "5.4.8", "makeDefault": true})),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let job = body["jobId"].as_str().unwrap().to_string();
+    let (status, _) = server
+        .request(
+            "POST",
+            &format!("/api/jobs/{job}/cancel"),
+            None,
+            viewer.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = server
+        .request(
+            "POST",
+            &format!("/api/jobs/{job}/cancel"),
+            None,
+            keeper.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }

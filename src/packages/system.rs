@@ -97,6 +97,11 @@ pub struct SystemInstall {
     /// False for well-known locations a shell does not search, such as
     /// `/usr/local/go/bin` without a PATH entry.
     pub on_path: bool,
+    /// Moved aside (`.rast-displaced.<command>`) while Package Center
+    /// provides the command system-wide; it is put back by "Use the system
+    /// version" or an uninstall.
+    #[serde(default)]
+    pub displaced: bool,
     pub detected_at: i64,
 }
 
@@ -178,6 +183,7 @@ pub fn detect_with(
                 source: source.into(),
                 source_package,
                 on_path: f.on_path,
+                displaced: f.displaced,
                 detected_at: now,
             },
         );
@@ -189,6 +195,7 @@ struct Found {
     path: PathBuf,
     real: PathBuf,
     on_path: bool,
+    displaced: bool,
 }
 
 fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
@@ -203,23 +210,38 @@ fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
         .map(|d| (d, true))
         .chain(extra.map(|d| (d, false)));
     for (dir, on_path) in dirs {
-        let path = dir.join(probe.command);
-        let Ok(real) = fs::canonicalize(&path) else {
-            continue;
-        };
-        // Package Center's own shims, wherever they are linked from.
-        if real.starts_with(own) {
-            continue;
-        }
-        let executable = fs::metadata(&real)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false);
-        if executable {
-            return Some(Found {
-                path,
-                real,
-                on_path,
-            });
+        // A command moved aside for Package Center's system-wide link
+        // belongs where the link is now.
+        let candidates = [
+            (dir.join(probe.command), false),
+            (
+                dir.join(format!(
+                    "{}{}",
+                    super::links::DISPLACED_PREFIX,
+                    probe.command
+                )),
+                true,
+            ),
+        ];
+        for (path, displaced) in candidates {
+            let Ok(real) = fs::canonicalize(&path) else {
+                continue;
+            };
+            // Package Center's own shims, wherever they are linked from.
+            if real.starts_with(own) {
+                continue;
+            }
+            let executable = fs::metadata(&real)
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false);
+            if executable {
+                return Some(Found {
+                    path,
+                    real,
+                    on_path,
+                    displaced,
+                });
+            }
         }
     }
     None
@@ -499,6 +521,34 @@ mod tests {
             fs::read_dir(&scratch).unwrap().next().is_none(),
             "scratch cleaned"
         );
+    }
+
+    #[test]
+    fn a_command_moved_aside_for_the_system_wide_link_is_still_found() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("usr/local/bin");
+        let own = dir.path().join("own");
+        fs::create_dir_all(own.join("bin")).unwrap();
+        fs::create_dir_all(dir.path().join("usr/local/lib/nodejs/bin")).unwrap();
+        fs::create_dir_all(&local).unwrap();
+        let manual = dir.path().join("usr/local/lib/nodejs/bin/node");
+        fs::write(&manual, "#!/bin/sh\necho v22.23.4\n").unwrap();
+        fs::set_permissions(&manual, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(own.join("bin/node"), "#!/bin/sh\necho v22.23.5\n").unwrap();
+        fs::set_permissions(own.join("bin/node"), fs::Permissions::from_mode(0o755)).unwrap();
+        symlink(own.join("bin/node"), local.join("node")).unwrap();
+        symlink("../lib/nodejs/bin/node", local.join(".rast-displaced.node")).unwrap();
+        let search = Search {
+            path: vec![local.clone()],
+            extra_root: dir.path().to_path_buf(),
+            dpkg_info: dir.path().join("missing"),
+        };
+        let probe = PROBES.iter().find(|p| p.id == "nodejs").unwrap();
+        let found = find(probe, &search, &fs::canonicalize(&own).unwrap()).unwrap();
+        assert!(found.displaced && found.on_path);
+        assert_eq!(found.path, local.join(".rast-displaced.node"));
+        assert_eq!(found.real, fs::canonicalize(&manual).unwrap());
     }
 
     #[test]

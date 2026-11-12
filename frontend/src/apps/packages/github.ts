@@ -77,7 +77,7 @@ export function openGithubImport(ctx: AppContext, callbacks: ImportCallbacks): v
     const failed = p.checks.some((c) => c.status === "failed");
     const approve = h("input", { type: "checkbox", class: "checkbox-input" });
     const makeDefault = h("input", { type: "checkbox", class: "checkbox-input", checked: true });
-    const installBtn = h("button", { class: "btn btn-primary", type: "button" }, `Approve and install ${m.version}`);
+    const installBtn = h("button", { class: "btn btn-primary", type: "button" }, p.sourceApproved ? `Install ${m.version}` : `Approve and install ${m.version}`);
     const blocked = failed || !p.compatible || p.alreadyInstalled;
     const sync = () => {
       installBtn.disabled = blocked || (!p.sourceApproved && !approve.checked);
@@ -152,6 +152,16 @@ export function openGithubImport(ctx: AppContext, callbacks: ImportCallbacks): v
       ),
     );
     const options = h("div", { class: "col pkg-import-options" });
+    if (!p.sourceApproved && !ctx.store.isAdmin()) {
+      // Group package managers install from approved sources only.
+      installBtn.disabled = true;
+      options.appendChild(
+        h("div", { class: "small muted" }, `An administrator must approve ${p.repo} as a package source before it can be installed.`),
+      );
+      options.appendChild(h("div", { class: "pkg-import-actions" }, installBtn));
+      preview.appendChild(options);
+      return;
+    }
     if (p.sourceApproved) {
       options.appendChild(h("div", { class: "small muted" }, `${p.repo} was approved as a source by ${p.sourceApprovedBy ?? "an administrator"} for publisher ${m.publisher.id}.`));
     } else {

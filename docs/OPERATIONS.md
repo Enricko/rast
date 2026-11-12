@@ -405,8 +405,9 @@ sudo -u rast rast setup-token                                   # one-shot web s
 ## Package Center on the shell PATH
 
 ```bash
-rast packages path status        # is /etc/profile.d/rast-packages.sh in place and current?
-sudo rast packages path sync     # write or remove it to match packages_shell_path
+rast packages path status        # login shells, sudo and services: what runs the defaults?
+sudo rast packages path sync     # apply packages_shell_path and packages_system_wide
+sudo rast packages path links    # re-link /usr/local/bin now (the watcher does this)
 ```
 
 `sync` writes the profile script only when it is RAST's own (a file someone
@@ -414,6 +415,19 @@ else wrote is never replaced or removed), and sets the permissions that let
 other users run the installed runtimes. The installer and `rast update` run it.
 New login shells pick it up; an open shell can run
 `. /etc/profile.d/rast-packages.sh`.
+
+With `packages_system_wide = true`, `sync` also installs and starts
+`rast-packages-links.path`: a root systemd path unit that watches
+`<data_dir>/packages/bin` and runs `rast packages path links` after every
+change (install, *Make default*, *Use the system version*, uninstall). It
+links only the commands of official packages (`php`, `node`, `npm`, `npx`,
+`corepack`, `go`, `gofmt`, `python3`, `pip3`, `python3.N`, `pip3.N`) into
+`/usr/local/bin`; nothing else there is touched. A command installed by hand
+under that name is renamed to `.rast-displaced.<name>` and renamed back when
+RAST stops providing it. Turning the setting off and running `sync` again
+removes the links and the units and puts everything back; so does the
+uninstaller. Check with `systemctl status rast-packages-links.path` and
+`journalctl -u rast-packages-links.service`.
 
 * Passwords must be at least 10 characters. Use `--password-stdin` (or the
   interactive prompt) instead of `--password`, which is visible in process

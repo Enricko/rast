@@ -1,6 +1,6 @@
 // Pure helpers for the Package Center (unit-tested in tests/packages.test.ts).
 
-import type { JobHistory, PackageView, SystemInstall, VersionChoice } from "./types";
+import type { JobHistory, PackageView, SystemInstall, SystemLinks, VersionChoice } from "./types";
 
 export type PackageFilter = "all" | "installed" | "updates";
 
@@ -163,10 +163,10 @@ export function versionOptionLabel(v: VersionChoice): string {
 }
 
 /** Where a system runtime comes from, e.g. "apt · php8.5-cli" or "manual install". */
-export function systemSourceLabel(s: Pick<SystemInstall, "source" | "sourcePackage">): string {
+export function systemSourceLabel(s: Pick<SystemInstall, "source" | "sourcePackage" | "displaced">): string {
   if (s.source === "apt") return s.sourcePackage ? `apt · ${s.sourcePackage}` : "apt";
   if (s.source === "snap") return "snap";
-  return "manual install";
+  return s.displaced ? "manual install · moved aside" : "manual install";
 }
 
 /** The version a fresh install would pick: newest compatible, not installed, stable. */
@@ -178,6 +178,31 @@ export function suggestedVersion(p: PackageView): VersionChoice | null {
 export function jobActionLabel(job: Pick<JobHistory, "action" | "version">): string {
   const verb = job.action === "update" ? "Update to" : job.action === "reinstall" ? "Reinstall" : "Install";
   return `${verb} ${job.version}`;
+}
+
+/**
+ * Whether a running install can still be cancelled. From "Moving into place"
+ * (the server's `CANCEL_ENDS_AT`) the install finishes; everything before it
+ * (queued, downloading, extracting, checking) stops cleanly.
+ */
+export function jobCancellable(message: string): boolean {
+  return !/^(Moving into place|Recording installation|Making it the RAST default)/.test(message);
+}
+
+/** What `sudo`, services and scripts run for the package's main command. */
+export function systemWideText(
+  p: Pick<PackageView, "official" | "defaultVersion" | "terminal" | "system">,
+  links: SystemLinks | undefined,
+): { text: string; sub?: string } | null {
+  const command = p.terminal?.command;
+  if (!p.official || !p.defaultVersion || !command) return null;
+  if (!links?.enabled) {
+    const system = p.system && !p.system.displaced ? `the system ${p.system.version ?? "version"}` : "nothing (not on their PATH)";
+    return { text: `run ${system}`, sub: "Package Center versions are for login shells only (packages_system_wide = false)" };
+  }
+  if (links.linked.includes(command)) return { text: `run ${p.defaultVersion}`, sub: `Linked in ${links.directory}` };
+  if (!links.watcher) return { text: "Not linked yet", sub: "Run sudo rast packages path sync once" };
+  return { text: "Linking…" };
 }
 
 export function jobFraction(progress: number, total: number): number {

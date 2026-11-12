@@ -136,7 +136,15 @@ pub async fn cancel_job(
         .await?
         .ok_or(AppError::NotFound("job not found"))?;
     let owner = job.get("userId").and_then(|v| v.as_i64());
-    if !user.is_admin() && owner != Some(user.id) {
+    // Package managers may cancel any package job (another manager's too).
+    let package_job = job
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .is_some_and(|k| k.starts_with("package"));
+    if !user.is_admin()
+        && owner != Some(user.id)
+        && !(package_job && crate::api::packages::can_manage(&state, &user).await?)
+    {
         return Err(AppError::NotFound("job not found"));
     }
     let cancelled = state.jobs.cancel(&id);

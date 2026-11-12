@@ -2649,6 +2649,30 @@ button.pkg-pill {
   min-width: 0;
 }
 
+.pkg-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.pkg-progress-row > .progress {
+  flex: 1;
+  min-width: 0;
+}
+
+.pkg-progress.is-tile .pkg-cancel {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin: -6px -4px -6px 0;
+  flex-shrink: 0;
+}
+
+.pkg-progress.is-hero .pkg-cancel {
+  flex-shrink: 0;
+}
+
 .pkg-progress-label {
   font-size: var(--font-size-xs);
   color: var(--text-dim);
@@ -2759,6 +2783,7 @@ button.pkg-pill {
 
 .pkg-hero-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 12px;
 }
