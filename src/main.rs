@@ -83,6 +83,11 @@ enum Command {
     },
     /// Print version information
     Version,
+    /// Package Center administration
+    Packages {
+        #[command(subcommand)]
+        cmd: PackagesCommand,
+    },
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
@@ -98,6 +103,24 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum PackagesCommand {
+    /// Package Center defaults on every login shell's PATH
+    Path {
+        #[command(subcommand)]
+        cmd: PathCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PathCommand {
+    /// Write or remove /etc/profile.d/rast-packages.sh to match
+    /// packages_shell_path, and set the runtime permissions (needs root)
+    Sync,
+    /// Show whether login shells use the Package Center defaults
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -243,11 +266,51 @@ async fn run(
                 Command::Update { version, check } => {
                     rast::update::run(cfg, version.as_deref(), check).await
                 }
+                Command::Packages {
+                    cmd: PackagesCommand::Path { cmd },
+                } => packages_path(&cfg, matches!(cmd, PathCommand::Sync)),
                 Command::Worker => rast::worker::run(cfg).await,
                 Command::Serve { .. } | Command::Version => unreachable!(),
             }
         }
     }
+}
+
+fn packages_path(cfg: &Config, sync: bool) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::{install::Layout, shell};
+    let layout = Layout::new(cfg.packages_dir());
+    let profile = std::path::Path::new(shell::PROFILE_SCRIPT);
+    if sync {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return Err(format!(
+                "writing {} needs root: run `{}`",
+                shell::PROFILE_SCRIPT,
+                shell::SYNC_COMMAND
+            )
+            .into());
+        }
+        for line in shell::sync(cfg.packages_shell_path, &cfg.data_dir, &layout, profile)? {
+            println!("{line}");
+        }
+    }
+    let st = shell::status(cfg.packages_shell_path, &layout.bin_dir(), profile);
+    let state = if st.active {
+        "on: login shells run the Package Center defaults first"
+    } else if !st.enabled {
+        "off (packages_shell_path = false)"
+    } else if st.installed {
+        "outdated: the profile script names another directory"
+    } else {
+        "not set up yet"
+    };
+    println!("shell PATH: {state}");
+    println!("  profile script: {}", st.profile);
+    println!("  bin directory:  {}", st.bin_dir);
+    if st.enabled && !st.active {
+        println!("  run: {}", st.sync_command);
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn init_tracing(level: &str) {

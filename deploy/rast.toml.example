@@ -124,3 +124,15 @@ log_level = "info"
 # rast-worker.service; the server itself never accesses the Docker socket.
 # env: RAST_DOCKER_ENABLED
 docker_enabled = false
+
+# ---------------------------------------------------------------------------
+# Package Center
+# ---------------------------------------------------------------------------
+
+# Put the runtimes chosen with "Make default" on every login shell's PATH,
+# ahead of /usr/bin, so `go`, `node`, `php` and `python3` in a terminal run
+# them. Runtimes the system already has stay installed and are used again
+# when you choose "Use the system version". Apply a change with
+# `sudo rast packages path sync` (the installer and `rast update` run it).
+# env: RAST_PACKAGES_SHELL_PATH
+packages_shell_path = true

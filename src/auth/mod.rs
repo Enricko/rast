@@ -299,6 +299,7 @@ mod tests {
             packages_catalog_keys: Vec::new(),
             packages_check_interval_minutes: 0,
             packages_github_token: None,
+            packages_shell_path: false,
             loaded_from: None,
         }
     }

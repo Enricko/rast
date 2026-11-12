@@ -23,7 +23,7 @@ use rast::{
     api,
     auth::Role,
     config::{Config, FileConfig},
-    packages::{manifest, store},
+    packages::{install::Layout, manifest, shell, store, system::SystemInstall},
     state::AppState,
     users,
 };
@@ -760,4 +760,153 @@ async fn versions_side_by_side_default_switch_and_protected_removal() {
         ["failure", "failure", "success"]
     );
     assert_eq!(removals[2].1, "lua 5.4.8");
+}
+
+#[tokio::test]
+async fn a_system_runtime_is_listed_updated_alongside_and_restored() {
+    let server = Server::start().await;
+    let admin = server.login("admin", Role::Admin).await;
+    let bytes = catalog(1);
+    server.publish(&bytes, &server.signer.sign(&bytes));
+    server
+        .request("POST", "/api/packages/check", None, admin.clone())
+        .await;
+
+    // The server already has Lua 5.4.7 from apt.
+    let sys_bin = server.dir.path().join("sys/usr/bin");
+    std::fs::create_dir_all(&sys_bin).unwrap();
+    write_script(&sys_bin.join("lua5.4"), "Lua 5.4.7");
+    let system = SystemInstall {
+        command: "lua".into(),
+        path: sys_bin.join("lua").display().to_string(),
+        real_path: sys_bin.join("lua5.4").display().to_string(),
+        version: Some("5.4.7".into()),
+        version_command: "lua -v".into(),
+        output: "Lua 5.4.7".into(),
+        source: "apt".into(),
+        source_package: Some("lua5.4".into()),
+        on_path: true,
+        detected_at: 0,
+    };
+    let profile = server.dir.path().join("profile.d/rast-packages.sh");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+    let packages = &server.state.packages;
+    packages.set_system_for_tests(
+        [("lua".to_string(), system.clone())].into_iter().collect(),
+        profile.clone(),
+    );
+
+    let (_, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    let pkg = lua(&body);
+    assert_eq!(pkg["system"]["version"], "5.4.7");
+    assert_eq!(pkg["system"]["sourcePackage"], "lua5.4");
+    assert_eq!(
+        body["counts"]["installed"], 1,
+        "a system runtime counts as installed"
+    );
+    assert_eq!(pkg["updateState"], "ready");
+    assert_eq!(pkg["updates"][0]["from"], "5.4.7");
+    assert_eq!(pkg["updates"][0]["to"], "5.4.8");
+    assert_eq!(pkg["updates"][0]["fromSystem"], true);
+    assert_eq!(pkg["updates"][0]["replacesDefault"], true);
+    assert_eq!(pkg["terminal"]["source"], "system");
+    assert_eq!(pkg["terminal"]["version"], "5.4.7");
+    assert_eq!(body["shell"]["active"], false);
+
+    // The update is installed next to it and made the default.
+    server.record_installed("5.4.8").await;
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/packages/lua/default",
+            Some(json!({"version": "5.4.8"})),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    let pkg = lua(&body);
+    assert_eq!(pkg["updates"].as_array().unwrap().len(), 0, "{pkg}");
+    assert_eq!(
+        pkg["system"]["version"], "5.4.7",
+        "the system runtime stays"
+    );
+    // Without the profile script, a terminal still finds the system one.
+    assert_eq!(pkg["terminal"]["source"], "system");
+
+    // With the PATH entry in place, the default's shim comes first.
+    let data = server.state.config.data_dir.clone();
+    let layout = Layout::new(server.state.config.packages_dir());
+    shell::sync(true, &data, &layout, &profile).unwrap();
+    let (_, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    assert_eq!(body["shell"]["active"], true);
+    let pkg = lua(&body);
+    assert_eq!(pkg["terminal"]["source"], "package-center");
+    assert_eq!(pkg["terminal"]["version"], "5.4.8");
+    let shim = layout.bin_dir().join("lua");
+    assert_eq!(pkg["terminal"]["path"], shim.display().to_string());
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(". '{}'; lua", profile.display()))
+        .env_clear()
+        .env("PATH", format!("{}:/usr/bin:/bin", sys_bin.display()))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "Lua 5.4.8\n");
+
+    // Malformed requests are refused.
+    for body in [json!({}), json!({"version": "5.4.8", "system": true})] {
+        let (status, _) = server
+            .request(
+                "PUT",
+                "/api/packages/lua/default",
+                Some(body),
+                admin.clone(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // Back to the system runtime: no shim, no default; 5.4.8 stays installed.
+    let (status, body) = server
+        .request(
+            "PUT",
+            "/api/packages/lua/default",
+            Some(json!({"system": true})),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!shim.exists());
+    assert!(std::fs::symlink_metadata(layout.current_link("lua")).is_err());
+    let (_, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    let pkg = lua(&body);
+    assert!(pkg["defaultVersion"].is_null());
+    assert_eq!(pkg["installed"].as_array().unwrap().len(), 1);
+    assert_eq!(pkg["terminal"]["source"], "system");
+    let audit = server.audit("package.activate").await;
+    assert_eq!(
+        audit.last().unwrap(),
+        &("success".to_string(), "lua system".to_string())
+    );
+
+    // Without a system runtime there is nothing to go back to.
+    packages.set_system_for_tests(Default::default(), profile);
+    let (status, _) = server
+        .request(
+            "PUT",
+            "/api/packages/lua/default",
+            Some(json!({"system": true})),
+            admin.clone(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }

@@ -25,6 +25,7 @@ import {
   shortSha,
   stateLabel,
   suggestedVersion,
+  systemSourceLabel,
   updateSummary,
   versionOptionLabel,
   type PackageFilter,
@@ -397,9 +398,28 @@ class PackageCenterApp {
             host.libc === "glibc" ? `glibc ${host.glibcVersion ?? "?"}` : host.libc,
           ),
           h("div", { class: "pkg-side-line" }, `RAST ${host.rastVersion}`),
+          this.shellLine(),
         ),
       );
     }
+  }
+
+  /** Whether terminals pick up the Package Center defaults. */
+  private shellLine(): HTMLElement | null {
+    const shell = this.overview?.shell;
+    if (!shell) return null;
+    if (shell.active) {
+      return h("div", { class: "pkg-side-line", title: `${shell.profile} puts ${shell.binDir} first on PATH` }, "Terminal PATH: on");
+    }
+    if (!shell.enabled) {
+      return h("div", { class: "pkg-side-line faint", title: "packages_shell_path = false" }, "Terminal PATH: off");
+    }
+    return h(
+      "div",
+      { class: "pkg-side-line pkg-side-warn", title: `Writes ${shell.profile}` },
+      "Terminal PATH not set up. Run ",
+      h("code", {}, shell.syncCommand),
+    );
   }
 
   private catalogCard(catalog: CatalogStatus): HTMLElement {
@@ -508,13 +528,15 @@ class PackageCenterApp {
       const first = p.updates[0];
       if (first) {
         actions.appendChild(this.actionButton(`Update to ${first.to}`, "primary", () => this.installVersion(p, first.to, "update", first.replacesDefault)));
-      } else if (p.installed.length === 0 && next && p.official) {
+      } else if (p.installed.length === 0 && !p.system && next && p.official) {
         actions.appendChild(this.actionButton(`Install ${next.version}`, "primary", () => this.installVersion(p, next.version, "install", true)));
       }
     }
     const details = this.actionButton("Details", "ghost", () => this.openDetail(p.id));
     actions.appendChild(details);
 
+    const sys = p.system;
+    const systemNote = sys ? h("span", { class: "muted", title: `${sys.path} · ${systemSourceLabel(sys)}` }, ` · system ${sys.version ?? "?"}`) : null;
     const installedLine = def
       ? h(
           "div",
@@ -523,10 +545,20 @@ class PackageCenterApp {
           h("strong", {}, def.version),
           h("span", { class: "badge info pkg-mini-badge" }, "default"),
           others.length ? h("span", { class: "muted" }, ` + ${others.join(", ")}`) : null,
+          systemNote,
         )
       : p.installed.length
-        ? h("div", { class: "pkg-card-line" }, h("span", { class: "pkg-card-key" }, "Installed"), p.installed.map((v) => v.version).join(", "))
-        : h("div", { class: "pkg-card-line muted" }, h("span", { class: "pkg-card-key" }, "Installed"), "—");
+        ? h("div", { class: "pkg-card-line" }, h("span", { class: "pkg-card-key" }, "Installed"), p.installed.map((v) => v.version).join(", "), systemNote)
+        : sys
+          ? h(
+              "div",
+              { class: "pkg-card-line", title: `${sys.path} · ${systemSourceLabel(sys)}` },
+              h("span", { class: "pkg-card-key" }, "Installed"),
+              h("strong", {}, sys.version ?? "unknown version"),
+              h("span", { class: "badge pkg-mini-badge" }, "system"),
+              h("span", { class: "muted pkg-card-source" }, `${systemSourceLabel(sys)} · ${sys.path}`),
+            )
+          : h("div", { class: "pkg-card-line muted" }, h("span", { class: "pkg-card-key" }, "Installed"), "—");
     const latestLine = h(
       "div",
       { class: "pkg-card-line" },
@@ -556,6 +588,9 @@ class PackageCenterApp {
         : null,
       p.unavailableReason && p.installed.length === 0
         ? h("div", { class: "pkg-unavailable", title: p.unavailableReason }, iconSvg("info", 13), p.unavailableReason)
+        : null,
+      update.kind === "none" && (p.installed.length > 0 || sys) && p.latest
+        ? h("div", { class: "pkg-update pkg-update-current" }, iconSvg("check", 13), upToDateText(p))
         : null,
       this.progressEl(p),
       actions,
@@ -643,6 +678,7 @@ class PackageCenterApp {
       this.detailHeader(p),
       this.progressEl(p),
       this.updateSection(p),
+      this.systemSection(p),
       this.installedSection(p),
       this.versionPicker(p),
       this.consumersSection(p),
@@ -688,10 +724,95 @@ class PackageCenterApp {
           {},
           p.defaultVersion
             ? h("div", { class: "pkg-paths" }, h("div", {}, h("strong", {}, p.defaultVersion), h("span", { class: "muted" }, " · stable paths follow the default")), ...p.defaultExecutables.map((e) => pathRow(e, this.ctx)))
-            : h("span", { class: "muted" }, "None selected"),
+            : h("span", { class: "muted" }, p.system ? "None: the system version is used" : "None selected"),
+        ),
+        h("dt", {}, "Terminal"),
+        h("dd", {}, this.terminalInfo(p)),
+      ),
+    );
+  }
+
+  private terminalInfo(p: PackageView): HTMLElement {
+    const t = p.terminal;
+    const shell = this.overview?.shell;
+    const notOnPath =
+      p.defaultVersion && shell && !shell.active
+        ? h(
+            "div",
+            { class: "small muted" },
+            shell.enabled
+              ? `Package Center versions are not on the terminal PATH yet. Run ${shell.syncCommand}.`
+              : "Package Center versions are not on the terminal PATH (packages_shell_path = false).",
+          )
+        : null;
+    if (!t) {
+      return h("div", {}, h("span", { class: "muted" }, "Not available in a terminal"), notOnPath);
+    }
+    return h(
+      "div",
+      {},
+      h(
+        "div",
+        {},
+        h("code", {}, t.command),
+        " runs ",
+        h("strong", {}, t.version ?? "an unknown version"),
+        h("span", { class: "muted" }, t.source === "package-center" ? " · Package Center default" : " · system"),
+      ),
+      h("div", { class: "small muted mono pkg-break" }, t.path),
+      notOnPath,
+    );
+  }
+
+  private systemSection(p: PackageView): HTMLElement | null {
+    const s = p.system;
+    if (!s) return null;
+    const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "On this server"));
+    const actions = h("div", { class: "pkg-row-actions" });
+    if (!this.readOnly && p.defaultVersion && s.onPath) {
+      actions.appendChild(this.actionButton("Use the system version", "ghost", () => this.useSystem(p)));
+    }
+    const inTerminal = p.terminal?.source === "system";
+    section.appendChild(
+      h(
+        "div",
+        { class: `pkg-installed-row${inTerminal ? " is-default" : ""}` },
+        h(
+          "div",
+          { class: "pkg-installed-head" },
+          h("strong", { class: "pkg-version" }, s.version ?? "Unknown version"),
+          h(
+            "span",
+            { class: "pkg-badges" },
+            h("span", { class: "badge" }, "System"),
+            inTerminal ? h("span", { class: "badge info" }, "Used by terminals") : null,
+          ),
+          h("div", { class: "grow" }),
+          actions,
+        ),
+        h(
+          "div",
+          { class: "pkg-paths" },
+          pathRow({ name: s.command, path: s.path }, this.ctx),
+          s.realPath !== s.path ? h("div", { class: "pkg-path-root mono small", title: s.realPath }, `→ ${s.realPath}`) : null,
+        ),
+        h(
+          "div",
+          { class: "pkg-meta small muted" },
+          `${systemSourceLabel(s)} · `,
+          s.version ? `version read by running ${s.versionCommand}` : `the version could not be read (${s.versionCommand})`,
+          s.onPath ? "" : " · not on the system PATH",
+          s.detectedAt ? ` · checked ${relativeTime(s.detectedAt)}` : "",
+        ),
+        h("pre", { class: "code pkg-check-output" }, s.output),
+        h(
+          "p",
+          { class: "small muted" },
+          "Installed outside Package Center, so RAST never changes or removes it. An update installs the new version next to it; services that use this one keep using it.",
         ),
       ),
     );
+    return section;
   }
 
   private updateSection(p: PackageView): HTMLElement | null {
@@ -699,13 +820,20 @@ class PackageCenterApp {
     const section = h("section", { class: "pkg-section" });
     for (const u of p.updates) {
       const keeps = u.from;
-      const detail = u.replacesDefault
-        ? `Installs ${u.to} next to ${keeps}. After it passes its checks, ${u.to} becomes the RAST default; ${keeps} stays installed so you can switch back.`
-        : `Installs ${u.to} next to ${keeps}. The RAST default does not change; ${keeps} stays installed.`;
+      const sys = p.system;
+      const detail = u.fromSystem && sys
+        ? `Installs ${u.to} from the verified catalog next to the system's ${keeps} (${sys.path}, ${systemSourceLabel(sys)}). ${
+            u.replacesDefault
+              ? `After it passes its checks, it becomes the default and terminals run ${u.to}.`
+              : "The RAST default does not change."
+          } The system version is not modified: services that use it keep it, and Use the system version switches back.`
+        : u.replacesDefault
+          ? `Installs ${u.to} next to ${keeps}. After it passes its checks, ${u.to} becomes the RAST default; ${keeps} stays installed so you can switch back.`
+          : `Installs ${u.to} next to ${keeps}. The RAST default does not change; ${keeps} stays installed.`;
       const action = this.readOnly
         ? undefined
         : this.actionButton(`Install ${u.to}`, "primary", () => this.installVersion(p, u.to, "update", u.replacesDefault));
-      section.appendChild(banner("success", `Update ready to install: ${u.from} → ${u.to}`, detail, action));
+      section.appendChild(banner("success", `Update ready to install: ${u.from}${u.fromSystem ? " (system)" : ""} → ${u.to}`, detail, action));
     }
     for (const d of p.detected) {
       const link = d.releaseUrl ? h("a", { href: d.releaseUrl, target: "_blank", rel: "noopener noreferrer", class: "banner-action" }, "View release") : undefined;
@@ -725,7 +853,7 @@ class PackageCenterApp {
   private installedSection(p: PackageView): HTMLElement {
     const section = h("section", { class: "pkg-section" }, h("h3", { class: "pkg-section-title" }, "Installed versions"));
     if (p.installed.length === 0) {
-      section.appendChild(h("p", { class: "muted small" }, "No version is installed."));
+      section.appendChild(h("p", { class: "muted small" }, p.system ? "No version is installed by Package Center." : "No version is installed."));
       return section;
     }
     const list = h("div", { class: "pkg-installed" });
@@ -832,7 +960,15 @@ class PackageCenterApp {
             "label",
             { class: "check pkg-default-check" },
             makeDefault,
-            h("span", {}, hasDefault ? `Make it the RAST default (now ${p.defaultVersion})` : "Make it the RAST default"),
+            h(
+              "span",
+              {},
+              hasDefault
+                ? `Make it the RAST default (now ${p.defaultVersion})`
+                : p.system
+                  ? `Make it the default (terminals now run the system ${p.system.version ?? p.system.command})`
+                  : "Make it the RAST default",
+            ),
           ),
       this.readOnly ? null : installBtn,
     );
@@ -1005,6 +1141,24 @@ class PackageCenterApp {
     this.sync.run();
   }
 
+  private async useSystem(p: PackageView): Promise<void> {
+    const s = p.system;
+    if (!s) return;
+    const ok = await confirmDialog({
+      title: `Use the system ${p.name} ${s.version ?? ""}?`.replace(/ \?$/, "?"),
+      message: `Terminals run ${s.path} again. The Package Center shims and runtimes/${p.id}/current are removed; ${p.defaultVersion ?? "the installed versions"} stays installed and can be made the default again.`,
+      confirmLabel: "Use the system version",
+    });
+    if (!ok) return;
+    try {
+      await this.ctx.api.put(`/api/packages/${encodeURIComponent(p.id)}/default`, { system: true });
+      this.ctx.toast.success(`Terminals use the system ${p.name} again`);
+    } catch (error) {
+      this.ctx.toast.error(errorMessage(error));
+    }
+    this.sync.run();
+  }
+
   private async remove(p: PackageView, v: InstalledView): Promise<void> {
     const ok = await confirmDialog({
       title: `Remove ${p.name} ${v.version}?`,
@@ -1116,6 +1270,14 @@ class PackageCenterApp {
 }
 
 // ------------------------------------------------------------------ helpers
+
+/** "Up to date", naming the release line when a newer line exists. */
+function upToDateText(p: PackageView): string {
+  const current = p.installed.find((v) => v.isDefault)?.channel ?? p.updates[0]?.channel ?? null;
+  const line = current ? p.versions.find((v) => v.channel === current) : undefined;
+  if (!line || !p.latest || p.latest.channel === line.channel) return "Up to date";
+  return `Up to date in ${line.channelLabel || line.channel}`;
+}
 
 function sourceBadge(p: PackageView): HTMLElement {
   return p.official

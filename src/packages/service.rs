@@ -22,8 +22,9 @@ use super::{
     host::{self, HostInfo},
     install::{self, Layout, Reporter},
     manifest::{self, Artifact, Manifest, Provenance, Requirements},
-    sandbox,
+    sandbox, shell,
     store::{self, ConsumerRow, JobHistory, PackageRow, VersionRow},
+    system::{self, SystemInstall},
     version,
 };
 use crate::{
@@ -93,6 +94,12 @@ pub struct PackageManager {
     catalog: RwLock<Option<Verified>>,
     status: RwLock<CatalogStatus>,
     github_updates: RwLock<HashMap<String, GithubUpdate>>,
+    /// Runtimes the operating system provides, by package id.
+    system: RwLock<HashMap<String, SystemInstall>>,
+    /// Set by tests that provide their own system runtimes.
+    system_fixed: std::sync::atomic::AtomicBool,
+    /// The login-shell profile script (see [`shell`]).
+    profile: RwLock<std::path::PathBuf>,
     busy: Arc<Mutex<HashSet<String>>>,
     check_lock: tokio::sync::Mutex<()>,
 }
@@ -185,6 +192,20 @@ pub struct UpdateView {
     pub revision: u32,
     /// The installed version this replaces is the RAST default.
     pub replaces_default: bool,
+    /// `from` is the system's own runtime (apt or manual install); the update
+    /// is installed next to it.
+    pub from_system: bool,
+}
+
+/// What a terminal runs for the package's main command.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalView {
+    pub command: String,
+    /// `package-center` (the default's shim, first on PATH) or `system`.
+    pub source: String,
+    pub version: Option<String>,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -253,6 +274,10 @@ pub struct PackageView {
     pub active_job: Option<JobHistory>,
     pub consumers: Vec<ConsumerView>,
     pub unavailable_reason: Option<String>,
+    /// The runtime the operating system already has, if any.
+    pub system: Option<SystemInstall>,
+    /// What a login shell runs for the main command.
+    pub terminal: Option<TerminalView>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,6 +285,7 @@ pub struct PackageView {
 pub struct Overview {
     pub host: HostInfo,
     pub catalog: CatalogStatus,
+    pub shell: shell::ShellPath,
     pub packages: Vec<PackageView>,
     pub counts: BTreeMap<String, usize>,
     pub can_manage: bool,
@@ -309,6 +335,9 @@ impl PackageManager {
             tracing::warn!(error = %e, "cannot create the package directory");
         }
         layout.clean_temporary();
+        if let Err(e) = shell::share(&config.data_dir, &layout, config.packages_shell_path) {
+            tracing::warn!(error = %e, "cannot set the permissions of the package directory");
+        }
         let keys = catalog::trusted_keys(&config.packages_catalog_keys);
         let cached = catalog::load_cache(&layout.catalog_dir(), &keys);
         let status = CatalogStatus {
@@ -324,6 +353,9 @@ impl PackageManager {
             catalog: RwLock::new(cached),
             status: RwLock::new(status),
             github_updates: RwLock::new(HashMap::new()),
+            system: RwLock::new(HashMap::new()),
+            system_fixed: std::sync::atomic::AtomicBool::new(false),
+            profile: RwLock::new(std::path::PathBuf::from(shell::PROFILE_SCRIPT)),
             busy: Arc::new(Mutex::new(HashSet::new())),
             check_lock: tokio::sync::Mutex::new(()),
             config,
@@ -336,6 +368,8 @@ impl PackageManager {
     /// Restore the persisted check state and start the periodic checker.
     pub async fn start(self: &Arc<Self>) {
         self.recover_displaced().await;
+        let me = self.clone();
+        tokio::spawn(async move { me.refresh_system().await });
         // The cache on disk must not be older than the accepted catalog.
         let floor: Option<u64> = db::get_setting(&self.db, "packages.catalogSequence")
             .await
@@ -509,6 +543,73 @@ impl PackageManager {
             .and_then(|g| g.as_ref().map(|v| v.catalog.clone()))
     }
 
+    /// Look again for the runtimes the operating system provides (at start
+    /// and with every catalog check). Publishes `package.changed` when the
+    /// result differs.
+    pub async fn refresh_system(&self) {
+        let root = self.layout.root.clone();
+        let scratch = self.layout.staging();
+        let found = tokio::task::spawn_blocking(move || system::detect_all(&root, &scratch))
+            .await
+            .unwrap_or_default();
+        let key = |m: &HashMap<String, SystemInstall>| {
+            let mut v: Vec<(String, String, Option<String>)> = m
+                .iter()
+                .map(|(id, s)| (id.clone(), s.real_path.clone(), s.version.clone()))
+                .collect();
+            v.sort();
+            v
+        };
+        let changed = match self.system.write() {
+            Ok(_) if self.system_fixed.load(std::sync::atomic::Ordering::SeqCst) => false,
+            Ok(mut g) => {
+                let changed = key(&g) != key(&found);
+                *g = found;
+                changed
+            }
+            Err(_) => false,
+        };
+        if changed {
+            self.events
+                .publish("package.changed", json!({"reason": "system"}));
+        }
+    }
+
+    /// Tests: use these system runtimes instead of detecting the host's,
+    /// and this profile script instead of `/etc/profile.d`.
+    #[doc(hidden)]
+    pub fn set_system_for_tests(
+        &self,
+        found: HashMap<String, SystemInstall>,
+        profile: std::path::PathBuf,
+    ) {
+        self.system_fixed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut g) = self.system.write() {
+            *g = found;
+        }
+        if let Ok(mut p) = self.profile.write() {
+            *p = profile;
+        }
+    }
+
+    fn system_install(&self, id: &str) -> Option<SystemInstall> {
+        self.system.read().ok().and_then(|g| g.get(id).cloned())
+    }
+
+    fn shell_status(&self) -> shell::ShellPath {
+        let profile = self
+            .profile
+            .read()
+            .map(|p| p.clone())
+            .unwrap_or_else(|_| shell::PROFILE_SCRIPT.into());
+        shell::status(
+            self.config.packages_shell_path,
+            &self.layout.bin_dir(),
+            &profile,
+        )
+    }
+
     /// Fetch and verify the catalog now; also look for new releases of
     /// imported packages. Returns the resulting status.
     pub async fn check_now(self: &Arc<Self>, actor: Option<&AuthUser>) -> AppResult<CatalogStatus> {
@@ -591,6 +692,7 @@ impl PackageManager {
             s.last_error = error.clone();
         }
         let github_changed = self.check_github_sources().await;
+        self.refresh_system().await;
         if let Ok(mut s) = self.status.write() {
             s.checking = false;
         }
@@ -670,6 +772,8 @@ impl PackageManager {
         let versions = store::versions(&self.db, None).await?;
         let consumers = store::consumers(&self.db).await?;
         let active = store::active_jobs(&self.db).await?;
+        let systems = self.system.read().map(|g| g.clone()).unwrap_or_default();
+        let shell = self.shell_status();
         let mut ids: Vec<String> = Vec::new();
         if let Some(c) = &catalog {
             ids.extend(c.packages.iter().map(|p| p.id.clone()));
@@ -687,9 +791,16 @@ impl PackageManager {
             let pkg_consumers: Vec<&ConsumerRow> =
                 consumers.iter().filter(|c| c.package_id == id).collect();
             let job = active.iter().find(|j| j.package_id == id).cloned();
-            if let Some(view) =
-                self.package_view(&id, catalog.as_ref(), row, &installed, &pkg_consumers, job)
-            {
+            if let Some(view) = self.package_view(
+                &id,
+                catalog.as_ref(),
+                row,
+                &installed,
+                &pkg_consumers,
+                job,
+                systems.get(&id),
+                shell.active,
+            ) {
                 packages.push(view);
             }
         }
@@ -702,7 +813,10 @@ impl PackageManager {
         counts.insert("all".to_string(), packages.len());
         counts.insert(
             "installed".to_string(),
-            packages.iter().filter(|p| !p.installed.is_empty()).count(),
+            packages
+                .iter()
+                .filter(|p| !p.installed.is_empty() || p.system.is_some())
+                .count(),
         );
         counts.insert(
             "updates".to_string(),
@@ -718,6 +832,7 @@ impl PackageManager {
         Ok(Overview {
             host: self.host.clone(),
             catalog: self.status_snapshot(),
+            shell,
             packages,
             counts,
             can_manage,
@@ -775,6 +890,7 @@ impl PackageManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn package_view(
         &self,
         id: &str,
@@ -783,12 +899,16 @@ impl PackageManager {
         installed: &[&VersionRow],
         consumers: &[&ConsumerRow],
         active_job: Option<JobHistory>,
+        system: Option<&SystemInstall>,
+        shell_active: bool,
     ) -> Option<PackageView> {
         let from_catalog = catalog.and_then(|c| c.package(id));
         let source = row
             .map(|r| r.source.clone())
             .unwrap_or_else(|| "official".into());
         let official = source == "official";
+        // Only official runtimes are matched with the system's commands.
+        let system = system.filter(|_| official);
         // Official packages come from the catalog; installed official packages
         // that left the catalog are still shown from their stored manifests.
         let newest_installed = installed.first().map(|v| &v.manifest);
@@ -916,7 +1036,36 @@ impl PackageManager {
                         x.manifest.channel() == ch
                             && default_version.as_deref() == Some(x.version.as_str())
                     }),
+                    from_system: false,
                 });
+            }
+        }
+        // The system's own runtime: a newer verified version of its release
+        // line (unless Package Center already has that line) is an update,
+        // installed next to it. It becomes the default when nothing else is.
+        let channel_ids: Vec<String> = channels.iter().map(|c| c.id.clone()).collect();
+        let system_version = system.and_then(|s| s.version.clone());
+        let system_channel = system_version
+            .as_deref()
+            .map(|v| system::channel_of(v, &channel_ids));
+        if let (Some(sv), Some(sch)) = (&system_version, &system_channel) {
+            if !channels_installed.contains(sch) {
+                let candidate = versions.iter().find(|c| {
+                    &c.channel == sch
+                        && c.compatible
+                        && !c.prerelease
+                        && version::compare(&c.version, sv) == std::cmp::Ordering::Greater
+                });
+                if let Some(c) = candidate {
+                    updates.push(UpdateView {
+                        channel: sch.clone(),
+                        from: sv.clone(),
+                        to: c.version.clone(),
+                        revision: c.revision,
+                        replaces_default: default_version.is_none(),
+                        from_system: true,
+                    });
+                }
             }
         }
         // Detected: upstream versions newer than everything verified in their
@@ -959,12 +1108,14 @@ impl PackageManager {
                 }
             }
         }
-        let relevant_detected = detected
-            .iter()
-            .any(|d| d.source == "github" || channels_installed.contains(&d.channel));
+        let relevant_detected = detected.iter().any(|d| {
+            d.source == "github"
+                || channels_installed.contains(&d.channel)
+                || system_channel.as_deref() == Some(d.channel.as_str())
+        });
         let update_state = if !updates.is_empty() {
             "ready"
-        } else if !installed.is_empty() && relevant_detected {
+        } else if (!installed.is_empty() || system.is_some()) && relevant_detected {
             "detected"
         } else {
             "none"
@@ -981,6 +1132,31 @@ impl PackageManager {
             .iter()
             .map(|c| self.consumer_view(c, installed, default_version.as_deref()))
             .collect();
+        // A login shell finds the default's shim first when the PATH entry is
+        // in place; otherwise the system's command, if it is on PATH.
+        let command = system::primary_command(id).map(str::to_string).or_else(|| {
+            default_manifest
+                .and_then(|m| m.runtime.executables.first())
+                .map(|e| e.name.clone())
+        });
+        let shim = command
+            .as_ref()
+            .filter(|c| default_manifest.is_some_and(|m| m.executable(c).is_some()));
+        let terminal = match (shim, system.filter(|s| s.on_path)) {
+            (Some(c), _) if shell_active => Some(TerminalView {
+                command: c.clone(),
+                source: "package-center".into(),
+                version: default_version.clone(),
+                path: self.layout.bin_dir().join(c).display().to_string(),
+            }),
+            (_, Some(s)) => Some(TerminalView {
+                command: s.command.clone(),
+                source: "system".into(),
+                version: s.version.clone(),
+                path: s.path.clone(),
+            }),
+            _ => None,
+        };
         let unavailable_reason =
             if official && !versions.is_empty() && !versions.iter().any(|v| v.compatible) {
                 versions.first().and_then(|v| v.reason.clone())
@@ -1060,6 +1236,8 @@ impl PackageManager {
             active_job,
             consumers: consumer_views,
             unavailable_reason,
+            system: system.cloned(),
+            terminal,
         })
     }
 
@@ -1163,12 +1341,21 @@ impl PackageManager {
                 // streams are majors, not major.minor).
                 let row = store::package(&self.db, id).await?;
                 let installed = store::versions(&self.db, Some(id)).await?;
-                let channel = row.and_then(|r| r.default_version).and_then(|dv| {
-                    installed
-                        .iter()
-                        .find(|v| v.version == dv)
-                        .map(|v| v.manifest.channel())
-                });
+                let channel_ids: Vec<String> = pkg.channels.iter().map(|c| c.id.clone()).collect();
+                // Without a default, the system runtime's release line.
+                let channel = row
+                    .and_then(|r| r.default_version)
+                    .and_then(|dv| {
+                        installed
+                            .iter()
+                            .find(|v| v.version == dv)
+                            .map(|v| v.manifest.channel())
+                    })
+                    .or_else(|| {
+                        self.system_install(id)
+                            .and_then(|s| s.version)
+                            .map(|v| system::channel_of(&v, &channel_ids))
+                    });
                 pkg.versions
                     .iter()
                     .find(|m| {
@@ -1220,7 +1407,13 @@ impl PackageManager {
             .as_ref()
             .and_then(|r| r.default_version.clone())
             .is_some();
-        let make_default = make_default.unwrap_or(!has_default) || !has_default;
+        // The first Package Center version becomes the default, unless the
+        // system already provides the command (then the caller decides).
+        let system = self
+            .system_install(&manifest.id)
+            .filter(|_| source == "official");
+        let make_default =
+            make_default.unwrap_or(!has_default) || (!has_default && system.is_none());
         let policy = match source {
             "official" => self
                 .current_catalog()
@@ -1228,14 +1421,24 @@ impl PackageManager {
                 .ok_or_else(|| AppError::unavailable("catalog not loaded"))?,
             _ => github::download_policy(),
         };
-        let action = install_action(
+        let mut action = install_action(
             installed
                 .iter()
                 .map(|v| (v.version.as_str(), v.manifest.channel())),
             &manifest.version,
             &manifest.channel(),
-        )
-        .to_string();
+        );
+        // A newer version of the system runtime's own release line.
+        let channel = manifest.channel();
+        if action == "install"
+            && system.and_then(|s| s.version).is_some_and(|sv| {
+                system::channel_of(&sv, std::slice::from_ref(&channel)) == channel
+                    && version::compare(&manifest.version, &sv) == std::cmp::Ordering::Greater
+            })
+        {
+            action = "update";
+        }
+        let action = action.to_string();
         let me = self.clone();
         let actor = user.clone();
         let title = format!(
@@ -1472,6 +1675,12 @@ impl PackageManager {
             Err(e) if e == "cancelled" => return Err(AppError::Cancelled),
             Err(e) => return Err(AppError::bad_request(e)),
         };
+        // Other users run it through the login-shell PATH.
+        if self.config.packages_shell_path {
+            if let Err(e) = shell::share_version(&self.layout, &manifest.id, &manifest.version) {
+                tracing::warn!(package = %manifest.id, error = %e, "cannot make the installed version readable by other users");
+            }
+        }
         let check_output = installed
             .checks
             .iter()
@@ -1623,6 +1832,81 @@ impl PackageManager {
         result
     }
 
+    /// Go back to the system's own runtime: remove the default's `current`
+    /// link and shims, so a terminal finds the system command again. The
+    /// installed versions stay.
+    pub async fn use_system(&self, user: &AuthUser, id: &str) -> AppResult<()> {
+        let row = store::package(&self.db, id)
+            .await?
+            .ok_or(AppError::NotFound("package is not installed"))?;
+        let _guard = self.lock(id, &row.name)?;
+        let system = self
+            .system_install(id)
+            .filter(|s| s.on_path && row.source == "official")
+            .ok_or_else(|| {
+                AppError::bad_request(format!(
+                    "This server has no system {} on its PATH.",
+                    row.name
+                ))
+            })?;
+        let Some(previous) = row.default_version.clone() else {
+            return Ok(());
+        };
+        let consumers = store::consumers(&self.db).await?;
+        let followers: Vec<&str> = consumers
+            .iter()
+            .filter(|c| c.package_id == id && c.version.is_none())
+            .map(|c| c.name.as_str())
+            .collect();
+        let log = AuditLog::new("package.activate")
+            .actor(user)
+            .object("package", id.to_string())
+            .path(format!("{id} system"));
+        if !followers.is_empty() {
+            let message = format!(
+                "{} follow the default {} version. Pin them to a version or remove them first.",
+                followers.join(", "),
+                row.name
+            );
+            audit::record_with_events(
+                &self.db,
+                &self.events,
+                log.failure().detail(message.clone()),
+            )
+            .await;
+            return Err(AppError::conflict(message));
+        }
+        let versions = store::versions(&self.db, Some(id)).await?;
+        let manifest = versions
+            .iter()
+            .find(|v| v.version == previous)
+            .map(|v| v.manifest.clone());
+        let layout = self.layout.clone();
+        tokio::task::spawn_blocking(move || {
+            if let Some(m) = &manifest {
+                install::deactivate(&layout, m);
+            }
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("deactivation task failed: {e}")))?;
+        store::set_default(&self.db, id, None).await?;
+        audit::record_with_events(
+            &self.db,
+            &self.events,
+            log.success().detail(format!(
+                "default {previous} -> system {} ({})",
+                system.version.as_deref().unwrap_or("unknown version"),
+                system.path
+            )),
+        )
+        .await;
+        self.events.publish(
+            "package.changed",
+            json!({"packageId": id, "reason": "default"}),
+        );
+        Ok(())
+    }
+
     pub async fn remove_version(&self, user: &AuthUser, id: &str, version: &str) -> AppResult<()> {
         let row = store::package(&self.db, id)
             .await?
@@ -1664,8 +1948,13 @@ impl PackageManager {
         if is_default {
             if versions.len() > 1 {
                 return refuse(format!(
-                    "{} {version} is the RAST default. Make another version the default first.",
-                    row.name
+                    "{} {version} is the RAST default. Make another version the default{} first.",
+                    row.name,
+                    if self.system_install(id).is_some_and(|s| s.on_path) {
+                        " (or use the system version)"
+                    } else {
+                        ""
+                    }
                 ))
                 .await;
             }

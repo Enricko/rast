@@ -124,21 +124,35 @@ pub async fn update(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DefaultRequest {
-    pub version: String,
+    pub version: Option<String>,
+    /// `true` goes back to the system's own runtime instead of a version.
+    #[serde(default)]
+    pub system: bool,
 }
 
-/// PUT /api/packages/{id}/default — select the RAST default version.
+/// PUT /api/packages/{id}/default — select the RAST default version
+/// (`{"version": "1.27.4"}`) or the system's runtime (`{"system": true}`).
 pub async fn set_default(
     State(state): State<AppState>,
     AdminUser(user): AdminUser,
     Path(id): Path<String>,
     Json(body): Json<DefaultRequest>,
 ) -> AppResult<Json<Value>> {
-    let activation = state
-        .packages
-        .set_default(&user, &id, body.version.trim())
-        .await?;
-    Ok(Json(json!({ "ok": true, "activation": activation })))
+    match (body.version.as_deref().map(str::trim), body.system) {
+        (Some(version), false) if !version.is_empty() => {
+            let activation = state.packages.set_default(&user, &id, version).await?;
+            Ok(Json(json!({ "ok": true, "activation": activation })))
+        }
+        (None, true) => {
+            state.packages.use_system(&user, &id).await?;
+            Ok(Json(
+                json!({ "ok": true, "activation": { "shims": [], "conflicts": [] } }),
+            ))
+        }
+        _ => Err(AppError::bad_request(
+            "Send either a version or \"system\": true.",
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]

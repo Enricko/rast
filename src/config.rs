@@ -86,6 +86,9 @@ pub struct FileConfig {
     pub packages_check_interval_minutes: Option<u64>,
     /// Optional GitHub token for "Install from GitHub" API lookups.
     pub packages_github_token: Option<String>,
+    /// Put the Package Center defaults on every login shell's PATH
+    /// (`/etc/profile.d/rast-packages.sh`, written by `rast packages path sync`).
+    pub packages_shell_path: Option<bool>,
 }
 
 /// Fully resolved configuration.
@@ -112,6 +115,7 @@ pub struct Config {
     pub packages_catalog_keys: Vec<String>,
     pub packages_check_interval_minutes: u64,
     pub packages_github_token: Option<String>,
+    pub packages_shell_path: bool,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
 }
@@ -339,6 +343,9 @@ impl Config {
         }
         let packages_github_token =
             get_str(file.packages_github_token, "RAST_PACKAGES_GITHUB_TOKEN");
+        let packages_shell_path =
+            parse_env_bool(&env, "RAST_PACKAGES_SHELL_PATH", file.packages_shell_path)?
+                .unwrap_or(true);
 
         if data_dir.as_os_str().is_empty() || storage_dir.as_os_str().is_empty() {
             return Err(ConfigError::Invalid(
@@ -368,6 +375,7 @@ impl Config {
             packages_catalog_keys,
             packages_check_interval_minutes,
             packages_github_token,
+            packages_shell_path,
             loaded_from,
         })
     }
@@ -525,6 +533,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         packages_catalog_url: &'a str,
         packages_catalog_keys: &'a [String],
         packages_check_interval_minutes: u64,
+        packages_shell_path: bool,
         // packages_github_token is a secret and is never written here.
     }
     let ex = Example {
@@ -548,6 +557,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         packages_catalog_url: &cfg.packages_catalog_url,
         packages_catalog_keys: &cfg.packages_catalog_keys,
         packages_check_interval_minutes: cfg.packages_check_interval_minutes,
+        packages_shell_path: cfg.packages_shell_path,
     };
     let body = toml::to_string_pretty(&ex).unwrap_or_default();
     format!(

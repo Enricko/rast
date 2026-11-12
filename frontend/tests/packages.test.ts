@@ -7,6 +7,7 @@ import {
   jobFraction,
   monogram,
   suggestedVersion,
+  systemSourceLabel,
   updateSummary,
   versionOptionLabel,
 } from "../src/apps/packages/format";
@@ -64,7 +65,7 @@ test("views filter installed packages and packages with updates", () => {
 test("ready updates and detected upstream versions are described differently", () => {
   const ready = pkg("go", {
     updateState: "ready",
-    updates: [{ channel: "1.26", from: "1.26.10", to: "1.26.11", revision: 1, replacesDefault: true }],
+    updates: [{ channel: "1.26", from: "1.26.10", to: "1.26.11", revision: 1, replacesDefault: true, fromSystem: false }],
   });
   assert.deepEqual(updateSummary(ready), { kind: "ready", text: "Update ready: 1.26.10 → 1.26.11" });
   const detected = pkg("go", {
@@ -97,4 +98,30 @@ test("progress fraction is bounded and monograms are short", () => {
   assert.equal(jobFraction(3, 0), 0);
   assert.equal(monogram("Node.js", "nodejs"), "JS");
   assert.equal(monogram("Example Tool"), "Ex");
+});
+
+test("a runtime the system already has counts as installed and can be updated", () => {
+  const system = {
+    command: "php",
+    path: "/usr/bin/php",
+    realPath: "/usr/bin/php8.5",
+    version: "8.5.4",
+    versionCommand: "php -n --version",
+    output: "PHP 8.5.4 (cli)",
+    source: "apt",
+    sourcePackage: "php8.5-cli",
+    onPath: true,
+    detectedAt: 0,
+  };
+  const php = pkg("php", {
+    system,
+    updateState: "ready",
+    updates: [{ channel: "8.5", from: "8.5.4", to: "8.5.12", revision: 1, replacesDefault: true, fromSystem: true }],
+  });
+  const go = pkg("go");
+  assert.deepEqual(filterPackages([php, go], "installed").map((p) => p.id), ["php"]);
+  assert.deepEqual(updateSummary(php), { kind: "ready", text: "Update ready: 8.5.4 (system) → 8.5.12" });
+  assert.equal(systemSourceLabel(system), "apt · php8.5-cli");
+  assert.equal(systemSourceLabel({ source: "manual", sourcePackage: null }), "manual install");
+  assert.equal(systemSourceLabel({ source: "snap" }), "snap");
 });

@@ -1,6 +1,6 @@
 // Pure helpers for the Package Center (unit-tested in tests/packages.test.ts).
 
-import type { JobHistory, PackageView, VersionChoice } from "./types";
+import type { JobHistory, PackageView, SystemInstall, VersionChoice } from "./types";
 
 export type PackageFilter = "all" | "installed" | "updates";
 
@@ -8,7 +8,7 @@ export type PackageFilter = "all" | "installed" | "updates";
 export function filterPackages(packages: PackageView[], view: PackageFilter, query = ""): PackageView[] {
   const q = query.trim().toLowerCase();
   return packages.filter((p) => {
-    if (view === "installed" && p.installed.length === 0) return false;
+    if (view === "installed" && p.installed.length === 0 && !p.system) return false;
     if (view === "updates" && p.updateState === "none") return false;
     if (!q) return true;
     return [p.name, p.id, p.description, p.publisher.name, p.sourceRepo ?? ""].some((v) => v.toLowerCase().includes(q));
@@ -20,7 +20,8 @@ export function updateSummary(p: PackageView): { kind: "ready" | "detected" | "n
   const ready = p.updates[0];
   if (ready) {
     const more = p.updates.length > 1 ? ` (+${p.updates.length - 1} more)` : "";
-    return { kind: "ready", text: `Update ready: ${ready.from} → ${ready.to}${more}` };
+    const from = ready.fromSystem ? `${ready.from} (system)` : ready.from;
+    return { kind: "ready", text: `Update ready: ${from} → ${ready.to}${more}` };
   }
   const detected = p.detected[0];
   if (p.updateState === "detected" && detected) {
@@ -77,6 +78,13 @@ export function versionOptionLabel(v: VersionChoice): string {
   }
   if (!v.compatible) parts.push("unavailable");
   return parts.join(" · ");
+}
+
+/** Where a system runtime comes from, e.g. "apt · php8.5-cli" or "manual install". */
+export function systemSourceLabel(s: Pick<SystemInstall, "source" | "sourcePackage">): string {
+  if (s.source === "apt") return s.sourcePackage ? `apt · ${s.sourcePackage}` : "apt";
+  if (s.source === "snap") return "snap";
+  return "manual install";
 }
 
 /** The version a fresh install would pick: newest compatible, not installed, stable. */

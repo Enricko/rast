@@ -2442,6 +2442,16 @@
   overflow-wrap: anywhere;
 }
 
+.pkg-side-warn {
+  margin-top: 4px;
+  color: var(--warning-strong);
+  overflow-wrap: anywhere;
+}
+
+.pkg-side-warn code {
+  font-size: 0.92em;
+}
+
 .pkg-side-error {
   margin-top: 4px;
   padding: 6px 8px;
@@ -2610,6 +2620,20 @@
 .pkg-update-detected {
   background: var(--accent-soft);
   color: var(--text);
+}
+
+.pkg-update-current {
+  color: var(--text-dim);
+  font-weight: 500;
+  padding-left: 0;
+}
+
+.pkg-card-source {
+  flex-basis: 100%;
+  font-size: var(--font-size-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pkg-unavailable {

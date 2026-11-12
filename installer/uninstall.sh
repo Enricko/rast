@@ -29,6 +29,7 @@ RUNTIME_DIR="/run/rast"
 MAIN_DROPIN_DIR="/etc/systemd/system/rast.service.d"
 WORKER_DROPIN_DIR="/etc/systemd/system/rast-worker.service.d"
 UNITS="rast.service rast-worker.service"
+PROFILE_SCRIPT="/etc/profile.d/rast-packages.sh"
 
 RAST_PURGE=${RAST_PURGE:-0}
 RAST_ASSUME_YES=${RAST_ASSUME_YES:-0}
@@ -313,6 +314,10 @@ if [ -d "$WORKER_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
 fi
 
 remove_file "$RUNTIME_DIR/worker.sock"
+# Package Center's login-shell PATH entry (only the script RAST wrote).
+if [ -f "$PROFILE_SCRIPT" ] && head -n 1 "$PROFILE_SCRIPT" | grep -q '^# Managed by RAST'; then
+    remove_file "$PROFILE_SCRIPT"
+fi
 remove_tree "$RUNTIME_DIR"
 
 # ---------------------------------------------------------------------------

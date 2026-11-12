@@ -77,6 +77,40 @@ export interface UpdateView {
   to: string;
   revision: number;
   replacesDefault: boolean;
+  /** `from` is the system's own runtime; the update installs next to it. */
+  fromSystem: boolean;
+}
+
+/** A runtime the operating system already has (apt, manual install, snap). */
+export interface SystemInstall {
+  command: string;
+  path: string;
+  realPath: string;
+  version?: string | null;
+  versionCommand: string;
+  output: string;
+  source: "apt" | "snap" | "manual" | string;
+  sourcePackage?: string | null;
+  onPath: boolean;
+  detectedAt: number;
+}
+
+/** What a login shell runs for the package's main command. */
+export interface TerminalView {
+  command: string;
+  source: "package-center" | "system" | string;
+  version?: string | null;
+  path: string;
+}
+
+/** Package Center on the login-shell PATH (/etc/profile.d). */
+export interface ShellPath {
+  enabled: boolean;
+  installed: boolean;
+  active: boolean;
+  profile: string;
+  binDir: string;
+  syncCommand: string;
 }
 
 export interface DetectedView {
@@ -148,6 +182,8 @@ export interface PackageView {
   activeJob?: JobHistory | null;
   consumers: ConsumerView[];
   unavailableReason?: string | null;
+  system?: SystemInstall | null;
+  terminal?: TerminalView | null;
 }
 
 export interface CatalogStatus {
@@ -182,6 +218,7 @@ export interface HostInfo {
 export interface Overview {
   host: HostInfo;
   catalog: CatalogStatus;
+  shell?: ShellPath | null;
   packages: PackageView[];
   counts: Record<string, number>;
   canManage: boolean;

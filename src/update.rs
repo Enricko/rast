@@ -165,6 +165,23 @@ pub async fn run(
         return Err("health check failed after update; rolled back".into());
     }
 
+    // Package Center on the login-shell PATH (needs root, which only this
+    // command has). Run by the new binary: it knows the current script.
+    // Best effort: an older target release may not have the command.
+    match std::process::Command::new(BIN_PATH)
+        .args(["packages", "path", "sync"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            print!("{}", String::from_utf8_lossy(&out.stdout));
+        }
+        Ok(out) => eprintln!(
+            "note: `rast packages path sync` did not complete: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!("note: cannot run `rast packages path sync`: {e}"),
+    }
+
     // Schema compatibility: the new binary may have applied migrations. Only
     // report; automatic DB rollback is intentionally NOT performed.
     // Read it without running this (previous) binary's migrations.

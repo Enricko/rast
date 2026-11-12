@@ -11,7 +11,20 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- Package Center lists the runtimes the server already has (for example PHP
+  and Python from apt, or Node.js installed by hand) as installed *System*
+  versions. It reads each version by running the command, confined, and names
+  the apt package. When the signed catalog has a newer version of the same
+  release line, the card offers **Update**. The update installs the new
+  version next to the system one, which stays untouched, so services such as
+  PHP-FPM keep working. **Use the system version** switches back.
+- Package Center versions work in a terminal. `/etc/profile.d/rast-packages.sh`
+  puts the default of each package first on every login shell's PATH, and the
+  installed runtimes are readable by all users. The data directory gets only
+  the traverse bit for others; the database, keys and backups stay private.
+  Controlled by `packages_shell_path` (default on). `sudo rast packages path
+  sync` applies it, and the installer and `rast update` run that command.
+- The official catalog tracks Node.js 22 (maintenance LTS).
 
 ### Fixed
 

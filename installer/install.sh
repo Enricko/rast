@@ -663,6 +663,18 @@ log_level = "info"
 # rast-worker.service; the server itself never accesses the Docker socket.
 # env: RAST_DOCKER_ENABLED
 docker_enabled = false
+
+# ---------------------------------------------------------------------------
+# Package Center
+# ---------------------------------------------------------------------------
+
+# Put the runtimes chosen with "Make default" on every login shell's PATH,
+# ahead of /usr/bin, so `go`, `node`, `php` and `python3` in a terminal run
+# them. Runtimes the system already has stay installed and are used again
+# when you choose "Use the system version". Apply a change with
+# `sudo rast packages path sync` (the installer and `rast update` run it).
+# env: RAST_PACKAGES_SHELL_PATH
+packages_shell_path = true
 RAST_EMBED_CONFIG_TEMPLATE
 }
 # <<< END embedded deploy/rast.toml.example
@@ -1282,6 +1294,13 @@ else
 fi
 
 run systemctl daemon-reload
+
+# Package Center: put the runtimes chosen with "Make default" on every login
+# shell's PATH (packages_shell_path in rast.toml, on by default). Writes
+# /etc/profile.d/rast-packages.sh and lets other users read the runtimes.
+if ! run env RAST_CONFIG="$CONFIG_FILE" "$BIN_PATH" packages path sync; then
+    warn "could not set up the Package Center shell PATH; run later: sudo rast packages path sync"
+fi
 
 # ---------------------------------------------------------------------------
 # Enable and start
