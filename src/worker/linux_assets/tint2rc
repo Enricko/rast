@@ -1,0 +1,53 @@
+# RAST window bar: one button per window of the app.
+rounded = 4
+border_width = 0
+background_color = #1b2027 100
+border_color = #1b2027 0
+
+rounded = 4
+border_width = 0
+background_color = #2b333d 100
+border_color = #2b333d 0
+
+rounded = 4
+border_width = 0
+background_color = #3d6fd9 100
+border_color = #3d6fd9 0
+
+panel_items = T
+panel_monitor = all
+panel_position = bottom center horizontal
+panel_size = 100% 30
+panel_margin = 0 0
+panel_padding = 4 3 4
+panel_dock = 0
+panel_layer = top
+panel_background_id = 1
+wm_menu = 0
+strut_policy = follow_size
+
+taskbar_mode = single_desktop
+taskbar_padding = 0 0 4
+taskbar_background_id = 0
+taskbar_active_background_id = 0
+taskbar_name = 0
+
+task_text = 1
+task_icon = 1
+task_centered = 0
+task_maximum_size = 220 24
+task_padding = 8 2 6
+task_font = Sans 9
+task_font_color = #d5dbe3 100
+task_active_font_color = #ffffff 100
+task_iconified_font_color = #9aa5b1 100
+task_background_id = 2
+task_active_background_id = 3
+task_iconified_background_id = 2
+task_tooltip = 0
+
+mouse_left = toggle_iconify
+mouse_middle = none
+mouse_right = none
+mouse_scroll_up = none
+mouse_scroll_down = none

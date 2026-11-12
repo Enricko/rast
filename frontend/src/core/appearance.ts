@@ -340,12 +340,15 @@ export function normalizeWidgets(input: unknown): DesktopWidget[] {
   return out.slice(0, WIDGET_IDS.length);
 }
 
+/** A built-in app id, or an installed Linux app (`linux:<id>`). */
+const SHORTCUT_ID = /^(?:[a-z]+|linux:[a-z0-9][a-z0-9-]{0,47})$/;
+
 /** Unique application ids in order; defaults when the field is missing. */
 export function normalizeTaskbarPins(input: unknown): string[] {
   if (!Array.isArray(input)) return [...DEFAULT_TASKBAR_PINS];
   const out: string[] = [];
   for (const item of input) {
-    if (typeof item !== "string" || !/^[a-z]+$/.test(item) || out.includes(item)) continue;
+    if (typeof item !== "string" || !SHORTCUT_ID.test(item) || out.includes(item)) continue;
     out.push(item);
   }
   return out;
@@ -358,7 +361,7 @@ export function normalizeDesktopIcons(input: unknown): DesktopIcon[] | null {
   for (const item of input) {
     if (!item || typeof item !== "object") continue;
     const { id, col, row } = item as DesktopIcon;
-    if (typeof id !== "string" || !/^[a-z]+$/.test(id)) continue;
+    if (typeof id !== "string" || !SHORTCUT_ID.test(id)) continue;
     if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col > MAX_DESKTOP_CELL || row > MAX_DESKTOP_CELL) continue;
     if (out.some((icon) => icon.id === id || (icon.col === col && icon.row === row))) continue;
     out.push({ id, col, row });

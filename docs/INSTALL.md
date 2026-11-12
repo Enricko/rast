@@ -268,6 +268,11 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host  $host;
 
+        # WebSockets (Linux app windows, terminals). Needs, at the http level:
+        #   map $http_upgrade $connection_upgrade { default upgrade; "" ""; }
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
         # Stream uploads straight through instead of buffering them on disk.
         proxy_request_buffering off;
         proxy_buffering off;

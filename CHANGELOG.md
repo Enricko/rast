@@ -24,6 +24,30 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.10.3] - 2026-11-12
+
+No database migration (schema stays v10). Apps installed before this release
+get the window bar and the settings fix after *Reinstall* (the app's page,
+More actions), or after uninstalling and adding them again.
+
+### Added
+
+- **Several windows in one Linux app.** When an app opens a second window
+  (another browser window, a profile chooser) or one is minimized, a slim
+  window bar appears at the bottom of its RAST window to switch between them.
+  With a single window the app fills the whole RAST window as before.
+- **Reinstall** on a Linux app's page rebuilds it from its official source.
+
+### Fixed
+
+- Linux apps can be pinned to the taskbar and placed on the desktop: the
+  browser dropped them from the saved layout.
+- A Linux app whose saved settings belonged to another system account quit
+  right after starting ("WebSocket disconnected"). RAST now fixes the owner
+  when the app starts.
+- Behind nginx, Linux app windows need the WebSocket upgrade headers; see
+  [docs/OPERATIONS.md](docs/OPERATIONS.md#linux-apps).
+
 ## [0.10.2] - 2026-11-12
 
 No database migration (schema stays v10).

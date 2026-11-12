@@ -4,6 +4,11 @@
 
 rm -f /tmp/.rast-app-exited
 
+# The app's saved settings must belong to the account it runs as (they do not
+# after the owner of the home folder changed). `-xdev` stays out of the
+# person's RAST home, which is mounted below /config.
+find /config -xdev ! -user abc -exec chown -h abc:abc {} + 2>/dev/null || true
+
 # Only one copy of this app runs for this person, so profile locks left by a
 # copy that was stopped are stale (Chrome and Electron apps refuse to start
 # when they find one, as "in use on another computer").

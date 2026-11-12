@@ -335,6 +335,9 @@ export class LinuxApps {
     if (app.status === "ready" && app.update.source) {
       items.push({ label: "Check for updates", icon: "refresh", onClick: () => void this.check(app) });
     }
+    if (app.status === "ready" && app.update.source) {
+      items.push({ label: "Reinstall", icon: "restart", onClick: () => void this.update(app) });
+    }
     if (app.status === "ready") {
       items.push({ label: "Memory and CPU…", icon: "cpu", onClick: () => this.openLimits(app) });
     }

@@ -39,6 +39,9 @@ use crate::docker::{
 const BASE_DOCKERFILE: &str = include_str!("linux_assets/Dockerfile.base");
 const INSTALL_SCRIPT: &str = include_str!("linux_assets/rast-install.py");
 const AUTOSTART: &str = include_str!("linux_assets/autostart");
+/// Shows a window bar while the app has several windows or a minimized one.
+const WINDOWS_SCRIPT: &str = include_str!("linux_assets/windows");
+const WINDOW_BAR_CONFIG: &str = include_str!("linux_assets/tint2rc");
 const INIT_SCRIPT: &str = include_str!("linux_assets/init-rast");
 const EXIT_SERVICE: &str = include_str!("linux_assets/svc-rast-exit.run");
 
@@ -99,6 +102,8 @@ fn base_entries() -> Vec<TarEntry> {
         TarEntry::dir("rast/bin"),
         TarEntry::bytes("rast/bin/rast-install", 0o755, INSTALL_SCRIPT),
         TarEntry::bytes("rast/autostart", 0o644, AUTOSTART),
+        TarEntry::bytes("rast/windows", 0o755, WINDOWS_SCRIPT),
+        TarEntry::bytes("rast/tint2rc", 0o644, WINDOW_BAR_CONFIG),
         TarEntry::dir("custom-cont-init.d"),
         TarEntry::bytes("custom-cont-init.d/50-rast", 0o755, INIT_SCRIPT),
         TarEntry::dir("s6"),

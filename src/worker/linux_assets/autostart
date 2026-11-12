@@ -1,3 +1,5 @@
 # RAST: start the app. When it closes, the container stops (svc-rast-exit).
+# The window bar appears only while the app has more than one window.
+/rast/windows &
 /rast/launch
 touch /tmp/.rast-app-exited

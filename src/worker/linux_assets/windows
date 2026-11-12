@@ -1,0 +1,25 @@
+#!/bin/sh
+# RAST: show a slim window bar while the app has more than one window, or a
+# minimized one, so every window can be reached. With a single window the app
+# fills the whole RAST window.
+bar=""
+while :; do
+  count=0
+  hidden=0
+  for id in $(xprop -root _NET_CLIENT_LIST 2>/dev/null | sed 's/.*# *//; s/,/ /g'); do
+    info=$(xprop -id "$id" _NET_WM_WINDOW_TYPE _NET_WM_STATE 2>/dev/null) || continue
+    case "$info" in *_NET_WM_WINDOW_TYPE_DOCK*) continue ;; esac
+    count=$((count + 1))
+    case "$info" in *_NET_WM_STATE_HIDDEN*) hidden=1 ;; esac
+  done
+  if [ "$count" -ge 2 ] || [ "$hidden" = 1 ]; then
+    if [ -z "$bar" ] || ! kill -0 "$bar" 2>/dev/null; then
+      tint2 -c /rast/tint2rc >/dev/null 2>&1 &
+      bar=$!
+    fi
+  elif [ -n "$bar" ]; then
+    kill "$bar" 2>/dev/null
+    bar=""
+  fi
+  sleep 1
+done

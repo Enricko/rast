@@ -457,6 +457,14 @@ docker images 'rast-linux/*'; docker images rast-linux-base  # app images and th
 docker volume ls --filter label=rast.managed=linux-app     # per-person app settings
 ```
 
+* Reverse proxies must pass WebSockets on `/linux-apps/` (the app's picture
+  and input). For nginx, inside the `location`:
+  `proxy_set_header Upgrade $http_upgrade;` and
+  `proxy_set_header Connection $connection_upgrade;` with
+  `map $http_upgrade $connection_upgrade { default upgrade; "" ""; }` at the
+  `http` level. Turn the access log off for that location: the address holds
+  the copy's secret key. Without the headers the window stays black with
+  "WebSocket disconnected".
 * Disk: the first app downloads the shared base (about 3.7 GB); each app
   adds roughly 1 GB.
 * RAST removes old builds after an update and everything of an app on
