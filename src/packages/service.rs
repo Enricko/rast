@@ -378,24 +378,45 @@ impl PackageManager {
         let me = self.clone();
         tokio::spawn(async move {
             let mut shutdown = me.events.shutdown_receiver();
-            // First check shortly after start, then every interval.
+            // First check shortly after start, then every interval. After a
+            // failed check, retry sooner with backoff instead of staying
+            // stale for a whole interval.
+            let full = Duration::from_secs((interval * 60).clamp(60, 7 * 24 * 3600));
+            let mut failures: u32 = 0;
             let mut wait = Duration::from_secs(20);
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(wait) => {}
                     _ = shutdown.changed() => return,
                 }
-                let due = me
-                    .status_snapshot()
-                    .checked_at
-                    .map(|t| db::now_ms() - t >= (interval as i64) * 60_000 - 5_000)
-                    .unwrap_or(true);
+                let due = failures > 0
+                    || me
+                        .status_snapshot()
+                        .checked_at
+                        .map(|t| db::now_ms() - t >= (interval as i64) * 60_000 - 5_000)
+                        .unwrap_or(true);
                 if due {
-                    if let Err(e) = me.check_now(None).await {
-                        tracing::warn!(error = %e, "package catalog check failed");
+                    let error = match me.check_now(None).await {
+                        Ok(status) => status.last_error,
+                        Err(e) => Some(e.to_string()),
+                    };
+                    match error {
+                        None => failures = 0,
+                        Some(error) => {
+                            failures = failures.saturating_add(1);
+                            let retry = retry_delay(failures).min(full);
+                            tracing::warn!(
+                                %error,
+                                failures,
+                                retry_in_minutes = retry.as_secs() / 60,
+                                "package catalog check failed"
+                            );
+                            wait = retry;
+                            continue;
+                        }
                     }
                 }
-                wait = Duration::from_secs((interval * 60).clamp(60, 7 * 24 * 3600));
+                wait = full;
                 if !due {
                     // Align with the last successful check.
                     let since = me
@@ -2038,6 +2059,13 @@ impl PackageManager {
     }
 }
 
+/// Delay before retrying a failed catalog check: 5, 10, 20, 40 … minutes
+/// (the caller caps it at the check interval).
+fn retry_delay(failures: u32) -> Duration {
+    let minutes = 5u64.saturating_mul(1u64 << failures.saturating_sub(1).min(16));
+    Duration::from_secs(minutes.saturating_mul(60))
+}
+
 /// Label of an install job (job title, history, audit action), derived from
 /// what actually happens rather than which endpoint was called: `update` when
 /// it supersedes an older installed version of the same channel, `reinstall`
@@ -2110,10 +2138,21 @@ impl Reporter for JobReporter {
 
 #[cfg(test)]
 mod tests {
-    use super::install_action;
+    use super::{install_action, retry_delay};
 
     fn installed(list: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
         list.iter().map(|(v, c)| (*v, c.to_string())).collect()
+    }
+
+    #[test]
+    fn failed_catalog_checks_retry_with_backoff() {
+        let minutes = |n| retry_delay(n).as_secs() / 60;
+        assert_eq!(
+            [minutes(1), minutes(2), minutes(3), minutes(4)],
+            [5, 10, 20, 40]
+        );
+        // Large failure counts neither overflow nor shrink the delay.
+        assert!(retry_delay(u32::MAX) >= retry_delay(10));
     }
 
     #[test]

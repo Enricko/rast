@@ -13,6 +13,12 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Fixed
+
+- A failed package catalog check is now logged and retried after 5, 10, 20,
+  40… minutes (capped at the check interval) instead of waiting a full interval,
+  so a catalog published after RAST started is picked up within minutes.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless
