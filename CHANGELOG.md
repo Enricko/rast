@@ -11,6 +11,27 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.8.0] - 2026-11-12
+
+Movable and removable desktop icons, a new Applications folder, and RAST's
+own apps in Package Center (Container Manager and Backup Center can be
+uninstalled). Database migration to schema v9.
+
+### Added
+
 - **Movable desktop icons.** Drag an icon to any spot on the desktop; it
   snaps to a grid, and dropping it on another icon swaps the two. Drop an icon
   on the taskbar to pin it. Alt+arrow keys move the selected icon one cell.
@@ -42,17 +63,6 @@ this file by `scripts/changelog-section.sh`.
 
 - Schema version 9 adds `user_appearance.desktop_icons`. An older binary
   refuses to start on this database; restore the pre-update backup to go back.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.7.0] - 2026-11-12
 
