@@ -148,7 +148,7 @@ and `/api/docker/status` reports why.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/docker/status` | `{enabled, available, version, reason}` |
+| GET | `/api/docker/status` | `{enabled, available, version, reason, workerVersion, workerOutdated}`; `workerOutdated` is true when the Docker helper runs another RAST version (it needs `systemctl restart rast-worker.service`; helpers before 0.9.1 report no version) |
 | GET | `/api/apps` | managed apps with status (read-only grant: no `env`/`compose`; `envCount`, `secretCount`, first line of `lastError`) |
 | POST | `/api/apps` | `{name, compose, env:[{key,value,secret}]}` → validates compose then `{app, jobId}` |
 | GET | `/api/apps/{id}` | detail: status, containers, ports, volumes, resources, lastError |

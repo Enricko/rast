@@ -25,6 +25,14 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- **Docker: "Could not list images" after updating to 0.9.0.** `rast update`
+  restarted only `rast.service`, so the Docker helper (`rast-worker.service`)
+  kept running the old binary. That binary did not know the image and volume
+  actions and answered with a reply the server could not match ("worker
+  response id does not match the request"). The updater now restarts the
+  helper too. The helper reports its RAST version: `rast doctor` and the
+  Docker app say when it needs a restart. A request the helper cannot read
+  now gets a reason instead of the id error.
 - On aarch64 Linux, File Station now refuses symlinks when it opens a file
   (downloads, copies, wallpapers). The `O_NOFOLLOW` value was hard-coded for
   x86_64, and on aarch64 that value means `O_LARGEFILE`. The inode check after

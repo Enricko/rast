@@ -681,7 +681,32 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
             .unwrap_or_default();
         let socket_ok = cfg.worker_socket.exists();
         if worker_unit == "active" && socket_ok {
-            println!("ok (rast-worker.service + {})", cfg.worker_socket.display());
+            // The helper runs the same binary: after an update it must have
+            // been restarted too, or newer Docker actions are refused.
+            let status = rast::docker::DockerManager::new(&cfg)
+                .refresh_status()
+                .await;
+            if status["workerOutdated"] == true {
+                warnings += 1;
+                println!(
+                    "WARN: {}",
+                    status["reason"]
+                        .as_str()
+                        .unwrap_or("the Docker helper is outdated")
+                );
+            } else if status["available"] == true {
+                println!(
+                    "ok (rast-worker.service {} + {})",
+                    status["workerVersion"].as_str().unwrap_or("?"),
+                    cfg.worker_socket.display()
+                );
+            } else {
+                println!(
+                    "ok (rast-worker.service + {}; version not checked: {})",
+                    cfg.worker_socket.display(),
+                    status["reason"].as_str().unwrap_or("no answer")
+                );
+            }
         } else if socket_ok {
             warnings += 1;
             println!(

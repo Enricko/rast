@@ -161,12 +161,27 @@ impl DockerManager {
             });
         }
         match self.send(&WorkerRequest::new(WorkerOp::Version)).await {
-            Ok(data) => json!({
-                "enabled": true,
-                "available": true,
-                "version": data.get("version").cloned().unwrap_or(Value::Null),
-                "reason": "docker worker is reachable",
-            }),
+            Ok(data) => {
+                // Helpers before 0.9.1 do not report their version.
+                let worker = data.get("rastVersion").and_then(Value::as_str);
+                let outdated = worker != Some(crate::VERSION);
+                json!({
+                    "enabled": true,
+                    "available": true,
+                    "version": data.get("version").cloned().unwrap_or(Value::Null),
+                    "workerVersion": worker,
+                    "workerOutdated": outdated,
+                    "reason": if outdated {
+                        format!(
+                            "the Docker helper runs {} while RAST is {}; restart rast-worker.service",
+                            worker.map_or_else(|| "an older RAST".to_string(), |v| format!("RAST {v}")),
+                            crate::VERSION
+                        )
+                    } else {
+                        "docker worker is reachable".to_string()
+                    },
+                })
+            }
             Err(err) => json!({
                 "enabled": true,
                 "available": false,
@@ -368,7 +383,10 @@ fn parse_response(request: &WorkerRequest, raw: &[u8]) -> Result<Value, DockerEr
     }
     let response: WorkerResponse = serde_json::from_slice(raw)
         .map_err(|e| DockerError::Protocol(format!("invalid worker response: {e}")))?;
-    if response.id != request.id {
+    // An error with an empty id means the worker could not read the request
+    // at all (an older helper may not even echo the id): report its reason.
+    let unreadable = response.id.is_empty() && !response.ok;
+    if response.id != request.id && !unreadable {
         return Err(DockerError::Protocol(
             "worker response id does not match the request".into(),
         ));
@@ -380,6 +398,15 @@ fn parse_response(request: &WorkerRequest, raw: &[u8]) -> Result<Value, DockerEr
         code: "unknown".into(),
         message: "worker reported an error without details".into(),
     });
+    if unreadable {
+        // RAST validated the request before sending it, so this is never the
+        // caller's fault: most likely the helper still runs an older binary.
+        return Err(DockerError::Unavailable(format!(
+            "the Docker helper could not read this request ({}); if RAST was just updated, \
+             restart rast-worker.service",
+            error.message
+        )));
+    }
     match error.code.as_str() {
         "invalid_request" | "not_found" | "forbidden" => {
             Err(DockerError::BadRequest(error.message))
@@ -388,7 +415,7 @@ fn parse_response(request: &WorkerRequest, raw: &[u8]) -> Result<Value, DockerEr
             "docker operation timed out: {}",
             error.message
         ))),
-        "unavailable" => Err(DockerError::Unavailable(error.message)),
+        "unavailable" | "unsupported" => Err(DockerError::Unavailable(error.message)),
         _ => Err(DockerError::Failed(error.message)),
     }
 }
@@ -530,7 +557,53 @@ mod tests {
         assert_eq!(status["enabled"], true);
         assert_eq!(status["available"], true);
         assert_eq!(status["version"], "26.1.4");
+        // A helper that does not report its RAST version predates 0.9.1.
+        assert_eq!(status["workerOutdated"], true);
+        let reason = status["reason"].as_str().unwrap();
+        assert!(reason.contains("restart rast-worker.service"), "{reason}");
         worker.abort();
+
+        let socket = dir.path().join("current.sock");
+        let worker = fake_worker(socket.clone(), |_| {
+            Ok(json!({"version": "26.1.4", "rastVersion": crate::VERSION}))
+        })
+        .await;
+        let status = manager_with_timeouts(socket, StdDuration::from_secs(5))
+            .status()
+            .await;
+        assert_eq!(status["workerOutdated"], false);
+        assert_eq!(status["workerVersion"], crate::VERSION);
+        assert_eq!(status["reason"], "docker worker is reachable");
+        worker.abort();
+    }
+
+    #[test]
+    fn unreadable_requests_report_the_helpers_reason() {
+        let request = WorkerRequest::new(WorkerOp::ImageList);
+        // An older helper that cannot parse the request answers without an id.
+        let raw = br#"{"id":"","ok":false,"error":{"code":"invalid_request","message":"malformed JSON request: unknown variant `image-list`"}}"#;
+        match parse_response(&request, raw) {
+            Err(DockerError::Unavailable(message)) => {
+                assert!(message.contains("unknown variant"), "{message}");
+                assert!(message.contains("restart rast-worker.service"), "{message}");
+            }
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+        // A newer helper echoes the id and says the action is unknown to it.
+        let raw = format!(
+            r#"{{"id":"{}","ok":false,"error":{{"code":"unsupported","message":"restart it"}}}}"#,
+            request.id
+        );
+        assert!(matches!(
+            parse_response(&request, raw.as_bytes()),
+            Err(DockerError::Unavailable(_))
+        ));
+        // A reply for some other request is still a protocol error.
+        let raw = br#"{"id":"someone-else","ok":true,"data":{}}"#;
+        assert!(matches!(
+            parse_response(&request, raw),
+            Err(DockerError::Protocol(_))
+        ));
     }
 
     #[tokio::test]

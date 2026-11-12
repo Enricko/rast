@@ -32,6 +32,8 @@ const API_LATEST: &str = "https://api.github.com/repos/Enricko/rast/releases/lat
 const API_TAG: &str = "https://api.github.com/repos/Enricko/rast/releases/tags";
 const DOWNLOAD_BASE: &str = "https://github.com/Enricko/rast/releases/download";
 const SERVICE: &str = "rast.service";
+/// The Docker helper runs the same binary; it must be restarted with it.
+const WORKER_SERVICE: &str = "rast-worker.service";
 pub const BIN_PATH: &str = "/usr/local/bin/rast";
 
 pub async fn run(
@@ -153,8 +155,10 @@ pub async fn run(
     let restarted = run_cmd("systemctl", &["restart", SERVICE]).await?;
     if !restarted {
         rollback(&rollback_path)?;
+        restart_worker().await;
         return Err("service failed to restart after update; previous binary restored".into());
     }
+    restart_worker().await;
 
     // Health check (bounded retries).
     let healthy = wait_for_health(Duration::from_secs(20)).await;
@@ -162,6 +166,7 @@ pub async fn run(
         eprintln!("new version is not healthy; rolling back binary");
         rollback(&rollback_path)?;
         let _ = run_cmd("systemctl", &["restart", SERVICE]).await;
+        restart_worker().await;
         return Err("health check failed after update; rolled back".into());
     }
 
@@ -346,6 +351,18 @@ fn download_file(url: &str, target: &Path) -> Result<String, Box<dyn std::error:
     // Compute SHA-256 of the downloaded artifact.
     use sha2::{Digest, Sha256};
     Ok(hex::encode(Sha256::digest(&bytes)))
+}
+
+/// Restart the Docker helper if it is running, so it uses the binary now in
+/// place (a helper left on the old binary refuses actions added since). Not
+/// fatal: the server is already up, and `rast doctor` reports a stale helper.
+async fn restart_worker() {
+    match run_cmd("systemctl", &["try-restart", WORKER_SERVICE]).await {
+        Ok(true) => println!("restarted {WORKER_SERVICE} (if it was running)"),
+        Ok(false) | Err(_) => eprintln!(
+            "note: could not restart {WORKER_SERVICE}; run `systemctl restart {WORKER_SERVICE}`"
+        ),
+    }
 }
 
 async fn run_cmd(program: &str, args: &[&str]) -> Result<bool, Box<dyn std::error::Error>> {

@@ -449,6 +449,10 @@ export interface DockerStatus {
   available: boolean;
   version?: string;
   reason?: string;
+  /** RAST version of the Docker helper (null before 0.9.1). */
+  workerVersion?: string | null;
+  /** The helper still runs another RAST binary and needs a restart. */
+  workerOutdated?: boolean;
 }
 
 export interface ContainerInfo {

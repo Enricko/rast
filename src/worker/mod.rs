@@ -366,16 +366,46 @@ async fn handle_connection(
                 return;
             }
             Ok(request) => process_request(request, &options, &semaphore).await,
-            Err(error) => WorkerResponse::failure(
-                "",
-                "invalid_request",
-                format!("malformed JSON request: {error}"),
-            ),
+            Err(error) => unreadable_request(&line, &error),
         };
         if write_response(&mut write_half, &response).await.is_err() {
             break;
         }
     }
+}
+
+/// Answer a request this worker cannot decode. The id is echoed when it can
+/// be read, so the caller sees this error instead of a mismatched reply. An
+/// unknown operation usually means RAST was updated and this helper still
+/// runs the previous binary.
+fn unreadable_request(line: &[u8], error: &serde_json::Error) -> WorkerResponse {
+    let value = serde_json::from_slice::<Value>(line).ok();
+    let field = |name: &str| {
+        value
+            .as_ref()
+            .and_then(|v| v.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let id = field("id").unwrap_or_default();
+    if let Some(op) = field("op") {
+        if serde_json::from_value::<WorkerOp>(Value::String(op.clone())).is_err() {
+            return WorkerResponse::failure(
+                &id,
+                "unsupported",
+                format!(
+                    "this Docker helper (RAST {}) does not know the action '{op}'; \
+                     restart rast-worker.service so it runs the same version as RAST",
+                    crate::VERSION
+                ),
+            );
+        }
+    }
+    WorkerResponse::failure(
+        &id,
+        "invalid_request",
+        format!("malformed JSON request: {error}"),
+    )
 }
 
 pub(crate) async fn write_response(
@@ -706,7 +736,12 @@ async fn docker_version(options: &WorkerOptions) -> Result<Value, WorkerError> {
             "docker daemon returned an empty version",
         ));
     }
-    Ok(json!({"version": version, "protocolVersion": PROTOCOL_VERSION}))
+    Ok(json!({
+        "version": version,
+        "protocolVersion": PROTOCOL_VERSION,
+        // Lets RAST notice a helper still running an older binary.
+        "rastVersion": crate::VERSION,
+    }))
 }
 
 async fn docker_info(options: &WorkerOptions) -> Result<Value, WorkerError> {
@@ -1650,16 +1685,32 @@ exit 0
         let env = TestEnv::start(OK_SCRIPT).await;
         let response = env.call(WorkerRequest::new(WorkerOp::Version)).await;
         assert!(response.ok, "{response:?}");
-        assert_eq!(response.data.unwrap()["version"], "26.1.4");
+        let data = response.data.unwrap();
+        assert_eq!(data["version"], "26.1.4");
+        assert_eq!(data["rastVersion"], crate::VERSION);
     }
 
     #[tokio::test]
     async fn unknown_operation_and_extra_fields_are_rejected() {
         let env = TestEnv::start(OK_SCRIPT).await;
+        // An action this helper does not know (e.g. one added by a newer
+        // RAST): the id is echoed and the reason says to restart the helper.
         let response = env
             .call_raw(r#"{"id":"1","op":"run-shell","slug":"shop"}"#)
             .await;
         assert!(!response.ok);
+        assert_eq!(response.id, "1");
+        let error = response.error.unwrap();
+        assert_eq!(error.code, "unsupported");
+        assert!(
+            error.message.contains("restart rast-worker.service"),
+            "{}",
+            error.message
+        );
+
+        let response = env.call_raw("not json").await;
+        assert!(!response.ok);
+        assert_eq!(response.id, "");
         assert_eq!(response.error.unwrap().code, "invalid_request");
 
         let response = env

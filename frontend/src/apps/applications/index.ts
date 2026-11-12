@@ -646,7 +646,9 @@ class ApplicationsApp {
       return;
     }
     const usable = this.dockerUsable();
-    this.statusBadge.className = `dk-engine small is-${usable ? "ok" : this.docker?.enabled === false ? "idle" : "warn"}`;
+    const outdated = usable && this.docker?.workerOutdated === true;
+    this.statusBadge.className = `dk-engine small is-${usable && !outdated ? "ok" : this.docker?.enabled === false ? "idle" : "warn"}`;
+    this.statusBadge.title = outdated ? (this.docker?.reason ?? "") : "";
     this.statusBadge.replaceChildren(
       h("span", { class: "dk-dot", ariaHidden: true }),
       h(
@@ -659,7 +661,9 @@ class ApplicationsApp {
           : !this.docker.enabled
             ? "Docker is turned off"
             : this.docker.available
-              ? `Engine running${this.docker.version ? ` · ${this.docker.version}` : ""}`
+              ? outdated
+                ? "Docker helper needs a restart"
+                : `Engine running${this.docker.version ? ` · ${this.docker.version}` : ""}`
               : "Engine not reachable",
       ),
     );

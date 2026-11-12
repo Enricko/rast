@@ -270,7 +270,13 @@ What `rast update` does:
    the expected version.
 4. Creates a database backup (`db` scope) **before** any migration can run.
 5. Saves the previous binary as `/usr/local/bin/rast.rollback-<current>`.
-6. Replaces the binary atomically and restarts `rast.service`.
+6. Replaces the binary atomically and restarts `rast.service`, then
+   `rast-worker.service` if it is running (`systemctl try-restart`). The Docker
+   helper runs the same binary; left on the old one it refuses Docker actions
+   added since. Updates *from* releases before 0.9.1 run the old updater,
+   which skips this step: restart the helper yourself with
+   `sudo systemctl restart rast-worker.service`. `rast doctor` warns when the
+   helper runs a different version.
 7. Polls `/healthz`; if the service does not become healthy, restores the
    previous binary and restarts again.
 8. Reports the resulting database schema version. Database migrations are
