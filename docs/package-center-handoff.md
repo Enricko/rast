@@ -25,11 +25,12 @@ in a separate repository, and third parties start from a template repository.
 To publish them (as the account owner):
 
 ```sh
-cd rast-packages          && gh repo create Enricko/rast-packages --public --source . --push
-gh secret set CATALOG_SIGNING_KEY --repo Enricko/rast-packages < rast-catalog-2026-11.pem   # private key, see "Signing key"
-gh workflow run catalog.yml --repo Enricko/rast-packages                                   # first catalog
-cd ../rast-package-template && gh repo create Enricko/rast-package-template --public --source . --push --template
-git tag v5.4.9-1 && git push origin v5.4.9-1                                              # first template release
+cd rast-packages && gh repo create Enricko/rast-packages --public --source . --push
+gh secret set CATALOG_SIGNING_KEY --repo Enricko/rast-packages < /path/to/rast-catalog-2026-11.pem   # private key, see "Signing key"
+gh workflow run catalog.yml --repo Enricko/rast-packages                                            # first catalog
+cd ../rast-package-template && gh repo create Enricko/rast-package-template --public --source . --push
+gh repo edit Enricko/rast-package-template --template                                               # "Use this template"
+git tag v5.4.9-1 && git push origin v5.4.9-1                                                       # first template release
 ```
 
 The first catalog run publishes the `catalog` release whose
