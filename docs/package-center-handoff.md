@@ -1,4 +1,4 @@
-# Package Center — handoff (RAST 0.5.0)
+# Package Center — handoff (RAST 0.6.0)
 
 Package Center is a desktop application for administrators. It installs verified
 runtimes — **Python, PHP CLI, Go and Node.js** — side by side, plus packages
@@ -8,9 +8,9 @@ in a separate repository, and third parties start from a template repository.
 
 | | |
 | --- | --- |
-| Status | Released as **v0.5.0** and deployed to desktop.lufria.tech on 2026-11-11 (schema v8). Verified on a scratch instance (linux-x86_64) before release. |
-| Blocked | The two new public repositories could not be created from this session (see [Repositories](#repositories)). Until they exist, servers have no published catalog: Package Center shows "The package catalog could not be verified" and installs nothing. |
-| Needs the account owner | Creating the two repositories, the `CATALOG_SIGNING_KEY` secret and the first catalog run. Until then the deployed Package Center reports the catalog as not verified. |
+| Status | **v0.6.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v8): system runtimes are detected, updates go in alongside them, and the default is on every login shell's PATH. v0.5.0 (first Package Center) was deployed on 2026-11-11. See [Deploy of 0.6.0](#deploy-of-060-2026-11-12). |
+| Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
+| Next step | In Package Center, click **Check updates** once: prod still holds catalog sequence 1 from before 0.6.0. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
 
@@ -444,17 +444,74 @@ the official catalog URL and only the built-in key. The run covered:
 Prod still holds sequence 1 from 00:14:59 until its next check (about 06:15
 UTC) or until **Check updates** is clicked.
 
+### Deploy of 0.6.0 (2026-11-12)
+
+Approved by the user. It contains `b473666` (catalog retry) and `6f0a877`
+(system runtimes and the shell PATH). The release-prep commit is `8ce0e9c`
+(CI 43134721294 green). The annotated tag `v0.6.0` triggered release workflow
+43135016754, which published both binaries, `SHA256SUMS` and the installer.
+Steps:
+
+* backup `rast-20261112-013102-db-config.tar.gz`;
+* `sudo rast update --version 0.6.0` (checksum
+  `cdf064c7…0303282f09`, its own backup
+  `rast-20261112-013402-db-config.tar.gz`, rollback binary
+  `/usr/local/bin/rast.rollback-0.5.0`), which reported `health: ok` and
+  schema 8;
+* `sudo rast packages path sync`, once. The 0.5.0 updater that ran the update
+  does not know this step; from 0.6.0 on, `rast update` runs it.
+
+Verified afterwards:
+
+* `rast 0.6.0`; `rast doctor`: ok, schema v8, 0 warnings; `rast.service` active
+  with no restarts;
+* `/healthz` ok on loopback (127.0.0.1:8720) and on https://desktop.lufria.tech;
+* the served `index-RAPMKdfe.js` (sha256 `f57088dd…69195e0a56e01`) is
+  identical to the local build of `v0.6.0`;
+* `/etc/profile.d/rast-packages.sh` is 0644 root:root, with the managed marker;
+* `/var/lib/rast` and `/var/lib/rast/packages` are 0751 (traversal only),
+  `runtimes/` and `bin/` are 0755, while `rast.db` (0640), `secret.key` (0600),
+  `catalog/` and `backups/` (0750) are unchanged;
+* a login shell has `/var/lib/rast/packages/bin` on PATH ahead of the system
+  directories. A user's own `~/.profile` entries, such as `~/.local/bin`, still
+  come first. `bin/` is empty until a default is chosen, so `node`, `python3`
+  and `php` still resolve to the system's;
+* `rast packages path status`: on;
+* the journal shows no warnings or errors since the restart (01:34:05 UTC).
+
+Expected after **Check updates** (sequence 8), as on the scratch instance:
+
+| Card | System | Offer |
+| --- | --- | --- |
+| PHP CLI | 8.5.4 (apt) | Update to 8.5.12 |
+| Python | 3.14.4 (apt) | Update to 3.14.10 |
+| Node.js | 22.23.4 (manual, `/usr/local/bin/node`) | Update to 22.23.5 |
+| Go | none | Install 1.27.4 |
+
+Updating a system runtime installs the catalog version next to it and makes
+that version the login-shell default. **Use the system version** switches
+back. apt and manual files are never touched. `sudo`, cron and systemd
+services keep the system versions. php8.5-fpm and the sites that use it are
+not affected. After Python is updated, `python3` and `pip3` in login shells
+are Package Center's, and modules installed with apt are not visible to that
+interpreter. Shells that are already open pick up the PATH after a new login
+or `. /etc/profile.d/rast-packages.sh`.
+
+Rollback: `sudo install -m 0755 /usr/local/bin/rast.rollback-0.5.0
+/usr/local/bin/rast && sudo systemctl restart rast` (schema unchanged at v8).
+To also remove the PATH entry, set `packages_shell_path = false` in
+`/etc/rast/rast.toml` and run `sudo rast packages path sync` *before* rolling
+back, because 0.5.0 has no `path` command.
+
 ## Limitations
 
-* Only **linux-x86_64** was verified. The aarch64 artifacts are produced and
-  verified by the catalog workflow on native runners, which has not run yet.
-* **PHP CLI** builds have not run (they need the rast-packages CI). Until then
-  the catalog has no PHP version, and Package Center says so on the card.
+* RAST itself was exercised on **linux-x86_64** only. The catalog workflow
+  verifies every artifact on native x86_64 and aarch64 runners.
 * The **template import** was rehearsed against RAST's import code, not
   through GitHub. Run it for real after the first template release.
-* Until rast-packages is published, servers on 0.5.0 show the catalog as not
-  verified. That is harmless, but release 0.5.0 only after the first catalog
-  exists.
+* System detection knows `go`, `node`, `python3` and `php`. It looks on the
+  standard system PATH and in `/usr/local/go/bin`, not in users' home
+  directories (nvm, pyenv and similar are not seen).
 * The catalog and its signature are two release assets; a check in the moment
   between their uploads can be refused once ("signature does not verify"). The
   next check succeeds, and the last verified catalog stays in use meanwhile.
