@@ -11,6 +11,29 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.1] - 2026-11-12
+
+Fixes "Could not list images" after updating to 0.9.0: `rast update` now
+restarts the Docker helper too and RAST reports a helper that runs an older
+version. Also a preview of RAST on macOS (built from source; the release
+binaries stay Linux-only) and a symlink fix for aarch64 Linux. No database
+migration (schema stays v9).
+
+### Added
+
 - **macOS preview.** RAST builds and runs on Apple Silicon Macs from source.
   `scripts/run-local.sh` starts it as your user, with everything in one
   folder and the web desktop on `127.0.0.1` only. On the first run it prints a
@@ -37,17 +60,6 @@ this file by `scripts/changelog-section.sh`.
   (downloads, copies, wallpapers). The `O_NOFOLLOW` value was hard-coded for
   x86_64, and on aarch64 that value means `O_LARGEFILE`. The inode check after
   opening already stopped symlink swaps there.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.0] - 2026-11-12
 
