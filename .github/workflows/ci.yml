@@ -202,6 +202,92 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # macOS (Apple Silicon): lint, tests, a release build and a real start through
+  # scripts/run-local.sh (first-run setup token, setup, login). The runner has
+  # no Docker engine, so this also covers "Docker off".
+  # ---------------------------------------------------------------------------
+  macos:
+    name: macOS build and tests (arm64)
+    needs: frontend
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download frontend assets
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --all-targets
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Start RAST with scripts/run-local.sh
+        run: |
+          set -euo pipefail
+          ./target/release/rast version
+          work=$(mktemp -d)
+          pid=""
+          cleanup() {
+            if [ -n "$pid" ]; then kill -INT "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi
+            cat "$work/out.log" || true
+            rm -rf "$work"
+          }
+          trap cleanup EXIT
+          RAST_LOCAL_DIR="$work/local" RAST_PORT=18720 scripts/run-local.sh >"$work/out.log" 2>&1 &
+          pid=$!
+          healthy=no
+          for _ in $(seq 1 80); do
+            if curl -fsS --max-time 2 http://127.0.0.1:18720/healthz >/dev/null 2>&1; then
+              healthy=yes
+              break
+            fi
+            sleep 0.25
+          done
+          test "$healthy" = yes
+          token=$(grep -o 'rast_setup_[0-9a-f]*' "$work/out.log" | head -n 1)
+          test -n "$token"
+          origin=http://127.0.0.1:18720
+          setup_code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $origin" \
+            -d "{\"token\":\"$token\",\"username\":\"smoke\",\"password\":\"Runtime-Smoke-Passw0rd-1!\"}" \
+            "$origin/api/setup")
+          test "$setup_code" = 200
+          login_code=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H "Origin: $origin" \
+            -d '{"username":"smoke","password":"Runtime-Smoke-Passw0rd-1!"}' \
+            "$origin/api/auth/login")
+          test "$login_code" = 200
+          grep -q 'Docker app stays off' "$work/out.log"
+          echo "RAST started, was set up and accepted a login on macOS"
+
+      - name: Upload macOS binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rast-macos-aarch64
+          path: target/release/rast
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Security: secret scanning and dependency auditing
   # ---------------------------------------------------------------------------
   security:

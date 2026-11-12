@@ -25,6 +25,27 @@ means a release binary is produced there but runtime behaviour is unverified.
 | Alpine, other musl systems | — | **Unsupported** | No musl/static build is published; glibc binaries do not run |
 | Non-systemd init (OpenRC, runit, s6, containers without systemd) | — | **Unsupported** | The binary may run under a custom supervisor, but the installer and units assume systemd; unsupported configurations are not covered by support |
 | WSL2 | x86_64 | Untested | Recent WSL2 has systemd; treat as best effort |
+| macOS 15 (11+ expected) | Apple Silicon (arm64) | **Preview: CI only (native arm64)** | Builds from source; no release binary yet. CI runs clippy and the test suite on `macos-15` and starts the server through `scripts/run-local.sh` (setup token, setup, login). Runs as your user, not as a service; see [macOS](#macos-preview) |
+| macOS 11+ | Intel (x86_64) | Expected, untested | Same code path as Apple Silicon; not built in CI |
+
+### macOS (preview)
+
+On a Mac, RAST runs as your own user through `scripts/run-local.sh`: one
+folder (default `~/RAST-local`) holds the database and the files, the web
+desktop listens on `127.0.0.1` only, and Ctrl+C stops it. There is no
+installer, no launchd service and no `rast update` for macOS yet.
+
+* **Docker** works when the `docker` command does (Docker Desktop). The
+  Docker helper (`rast worker`) runs as you, with your Docker access.
+  Bind mounts must sit in folders Docker Desktop shares (by default
+  `/Users`, which includes `~/RAST-local`).
+* **App Center** lists apps but installs no packages. The catalog only
+  publishes Linux builds. The version checks that every install runs need
+  seccomp and Landlock, which exist only on Linux, so on macOS RAST refuses
+  to run them rather than run package code unconfined. Imported GitHub
+  packages are refused with an explanation.
+* Everything else (File Station, accounts, Control Panel, Resource Monitor,
+  backups) uses the same code as on Linux.
 
 ### glibc baseline of the release binaries
 

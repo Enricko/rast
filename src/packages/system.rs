@@ -437,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
     fn detects_system_runtimes_with_owner_and_version() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();

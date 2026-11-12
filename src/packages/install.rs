@@ -676,6 +676,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
     fn checks_run_without_shell_and_validate_output() {
         let dir = tempfile::tempdir().unwrap();
         let archive_path = dir.path().join("a.tar.gz");
@@ -735,6 +736,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
     fn staged_install_verifies_and_failures_keep_the_working_version() {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path().join("packages"));

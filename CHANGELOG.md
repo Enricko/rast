@@ -11,7 +11,17 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **macOS preview.** RAST builds and runs on Apple Silicon Macs from source.
+  `scripts/run-local.sh` starts it as your user, with everything in one
+  folder and the web desktop on `127.0.0.1` only. On the first run it prints a
+  setup token. With Docker Desktop running, the Docker app works too. CI now
+  lints, tests and starts RAST on macOS (see docs/COMPATIBILITY.md).
+
+### Changed
+
+- Package version checks need Linux (seccomp and Landlock). On other systems
+  RAST refuses to run them instead of running package code unconfined, so the
+  App Center installs no packages there.
 
 ### Fixed
 
