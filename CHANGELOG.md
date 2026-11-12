@@ -11,22 +11,7 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- **Linux apps for every signed-in user.** Installed Linux apps now appear on
-  each account's desktop (and in the Applications folder and taskbar); every
-  user opens their own copy with their own settings, sign-ins and windows.
-  Installing, updating, removing, limiting and changing who can use an app stay
-  administrator actions. A new **Who can use it** setting (App Center → the
-  app's page → More actions) can restrict an app to administrators; shared is
-  the default. Schema v11 (a `visibility` column on `linux_apps`) is applied
-  automatically on the next start.
-
-### Changed
-
-- **Closing a Linux app from inside it closes its RAST window.** When the app
-  quits from its own close button (for example Chrome's ×) the RAST window now
-  closes instead of staying blank while the server notices; RAST checks whether
-  the app is still running as soon as its picture stops rather than waiting for
-  the periodic sweep. Reloading the page reconnects to the same copy.
+- Nothing yet.
 
 ### Planned
 
@@ -38,6 +23,30 @@ this file by `scripts/changelog-section.sh`.
 - Automated restore drills and a documented JSON schema for backup manifests.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.11.0] - 2026-11-12
+
+Database migration 0011 (schema v11): `linux_apps` gains a `visibility`
+column. It applies automatically on the next start; apps installed before this
+release are shared with every signed-in user.
+
+### Added
+
+- **Linux apps for every signed-in user.** Installed Linux apps now appear on
+  each account's desktop (and in the Applications folder and taskbar); every
+  user opens their own copy with their own settings, sign-ins and windows.
+  Installing, updating, removing, limiting and changing who can use an app stay
+  administrator actions. A new **Who can use it** setting (App Center → the
+  app's page → More actions) can restrict an app to administrators; shared is
+  the default.
+
+### Changed
+
+- **Closing a Linux app from inside it closes its RAST window.** When the app
+  quits from its own close button (for example Chrome's ×) the RAST window now
+  closes instead of staying blank while the server notices; RAST checks whether
+  the app is still running as soon as its picture stops rather than waiting for
+  the periodic sweep. Reloading the page reconnects to the same copy.
 
 ## [0.10.3] - 2026-11-12
 
