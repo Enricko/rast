@@ -9,7 +9,7 @@ in a separate repository, and third parties start from a template repository.
 | | |
 | --- | --- |
 | Name | Shown as **App Center** since the rename after 0.8.0 (app id `packages`; this document keeps the old name "Package Center" in its history). The Docker app (formerly Container Manager, app id `applications`) is shown as **Docker**. |
-| Status | **v0.8.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): RAST's own apps in Package Center (Container Manager and Backup Center can be uninstalled), movable desktop icons and the Applications folder. Before: v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.8.0](#deploy-of-080-2026-11-12). |
+| Status | **v0.9.0** deployed to desktop.lufria.tech on 2026-11-12 (schema v9): Docker works like Docker Desktop (containers, images, volumes, container terminal, Run image) and the App Center/Docker rename. Before: v0.8.0 (RAST's own apps in Package Center, movable desktop icons, the Applications folder), v0.7.0 (Uninstall, Cancel, system-wide defaults, group managers), v0.6.1 (calmer layout), v0.6.0 (system runtimes, shell PATH), v0.5.0 (first Package Center). See [Deploy of 0.9.0](#deploy-of-090-2026-11-12). |
 | Catalog | Published by rast-packages CI and signed with `rast-official-2026-11`; sequence 8 on 2026-11-12, every version verified on x86_64 and aarch64. |
 
 ![Package Center, all packages](screenshots/package-center-all.jpg)
@@ -707,6 +707,27 @@ system-wide links are still in place; no errors in the journal.
 
 Rollback: schema v9 is new, so `/usr/local/bin/rast.rollback-0.7.0` only
 starts after restoring `rast-20261112-060323-db-config.tar.gz`.
+
+### Deploy of 0.9.0 (2026-11-12)
+
+Approved by the user. Contents: the App Center/Docker rename (`3f36e31`) and
+Docker in the style of Docker Desktop (`ef2cff8`, `d17d3f9`, `e0e9c51`). No
+migration. The release-prep commit is `2ac12a3` (CI 43181540880 green). The
+annotated tag `v0.9.0` triggered release workflow 43181976819. Steps:
+
+* backup `rast-20261112-082204-db-config.tar.gz`;
+* `sudo rast update --version 0.9.0`. It took its own backup
+  (`rast-20261112-082216-db-config.tar.gz`) and reported `health: ok` and
+  schema 9.
+
+Verified afterwards: `rast 0.9.0`; `rast doctor` ok (schema v9, 0 warnings,
+worker socket up); `/healthz` ok on loopback and on
+https://desktop.lufria.tech; the served `index-CyG7bcS0.js` is identical to
+the local build of `v0.9.0`; the system-wide links are still in place; no
+warnings in the journal of `rast` or `rast-worker`.
+
+Rollback: the schema did not change, so `/usr/local/bin/rast.rollback-0.8.0`
+starts on the current database.
 
 ## Limitations
 
