@@ -339,9 +339,9 @@ RAST (`main`):
 * `652bf21` test(packages): keep the fictional test password out of JSON literals
 * the commit that records this list
 
-rast-packages (local, not pushed): `5966ffb` signed catalog with discover/verify/build/publish workflow · `acc67dc` optional executables only when shipped · `8194487` keep re-verified versions installable · `ec0af98` no invented workflow run URL.
+rast-packages (pushed): `5966ffb` signed catalog with discover/verify/build/publish workflow · `acc67dc` optional executables only when shipped · `8194487` keep re-verified versions installable · `ec0af98` no invented workflow run URL · `245ea13` authenticated static-php-cli downloads · `5cc1369` collect the upstream verify results.
 
-rast-package-template (local, not pushed): `ce85da7` forkable template with a static Lua example.
+rast-package-template (pushed): `ce85da7` forkable template with a static Lua example.
 
 ## Push and deploy status
 
@@ -349,7 +349,8 @@ rast-package-template (local, not pushed): `ce85da7` forkable template with a st
   CI for `c25bc96` was green except the secrets scan, where gitleaks flagged
   the fictional e2e test password (false positive, fixed in `652bf21`; `cargo
   audit`, skipped by that failure, passes locally).
-* rast-packages, rast-package-template: not pushed (repositories not created).
+* rast-packages, rast-package-template: created by the user and pushed on
+  2026-11-12.
 * Deploy: **done on 2026-11-11.** Annotated tag `v0.5.0` on `13cdc23` (CI
   green); the release workflow published both binaries, `SHA256SUMS` and the
   installer. Steps:
@@ -376,6 +377,52 @@ rast-package-template (local, not pushed): `ce85da7` forkable template with a st
 
   **Still to verify** once the catalog exists: catalog verified, install one
   runtime, Make default, live progress.
+
+### After the deploy (2026-11-12)
+
+The user created both repositories and the `CATALOG_SIGNING_KEY` secret, then
+ran the catalog workflow. Three problems showed up; all are fixed:
+
+* **Prod stayed on "catalog.json was not found (404)".** RAST's first check ran
+  before the catalog existed, and 0.5.0 only checks again after the full
+  interval (6 hours), silently. Restarting `rast.service` loaded the catalog
+  (00:14:59 UTC). Fix on `main`, **not released yet**: `b473666`
+  fix(packages): retry a failed catalog check sooner. It logs each failure and
+  retries after 5, 10, 20, 40… minutes, capped at the interval. It was checked
+  on a scratch instance against a missing catalog (`WARN package catalog check
+  failed … failures=1 retry_in_minutes=5`). On 0.5.0, **Check updates** in
+  Package Center fetches the catalog immediately.
+* **The PHP 8.4.27 x86_64 build failed.** static-php-cli made anonymous
+  GitHub API calls and hit the rate limit (403). rast-packages `245ea13` passes
+  the job's read-only token and retries downloads.
+* **Python, Go and Node.js never became installable.** Their verify jobs
+  passed, but the publish job did not find the results. upload-artifact drops
+  the common directory of a single-path upload, so the files were not under
+  `results/`. Every one of those versions was published as "no result". Only
+  PHP got in, because it uploads `dist/` and `results/`. rast-packages
+  `5cc1369` matches both layouts, and fails the publish if verify succeeded
+  but no results were collected. The step was replayed locally against both
+  layouts.
+
+Catalog run `43126964365` (on `5cc1369`) verified every Python, Go and Node.js
+version on native x86_64 and aarch64 runners. It published **sequence 6** with
+13 installable versions (Python 3.15.2/3.14.10/3.13.18, PHP 8.5.12/8.4.27, Go
+1.27.4/1.27.3/1.26.11/1.26.10, Node.js 26.13.1/26.13.0/24.22.3/24.22.2) and
+nothing pending. RAST's own fetch code accepts it with the built-in key.
+
+The same path prod takes was exercised on a fresh scratch instance that uses
+the official catalog URL and only the built-in key. The run covered:
+
+* Check updates: verified, sequence 6, not stale;
+* installed PHP CLI 8.4.27 (the CI build) as the default in 1.8 s, and Python
+  3.14.10 in 9.7 s;
+* Make default for Python published the `python3`, `python3.14` and `pip3`
+  shims without conflicts;
+* 33 `job.progress` events arrived over SSE;
+* the shims ran `PHP 8.4.27 (cli)`, `Python 3.14.10` and `pip 26.3`.
+
+Prod still holds sequence 1 from 00:14:59 until its next check (about 06:15
+UTC) or until **Check updates** is clicked.
 
 ## Limitations
 
