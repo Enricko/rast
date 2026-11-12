@@ -53,8 +53,8 @@ use crate::{
     docker::{
         compose,
         containers::{
-            parse_compose_logs, parse_container_logs, parse_images_json, parse_inspect_json,
-            parse_ps_json, parse_stats_json, parse_volumes_json,
+            parse_compose_logs, parse_container_logs, parse_image_inspect_json, parse_images_json,
+            parse_inspect_json, parse_ps_json, parse_stats_json, parse_volumes_json,
         },
         exec::{self, MAX_EXEC_SESSIONS},
         protocol::{
@@ -460,6 +460,7 @@ async fn dispatch(action: ValidatedAction, options: &WorkerOptions) -> Result<Va
         ValidatedAction::Image { op, reference } => match op {
             WorkerOp::ImagePull => docker_image_pull(options, &reference).await,
             WorkerOp::ImageRemove => docker_image_remove(options, &reference).await,
+            WorkerOp::ImageInspect => docker_image_inspect(options, &reference).await,
             _ => Err(WorkerError::invalid(format!(
                 "operation '{}' does not take an image",
                 op.as_str()
@@ -1078,6 +1079,27 @@ async fn docker_image_pull(options: &WorkerOptions, reference: &str) -> Result<V
 
 /// `docker image rm -- <reference>`, never `--force`: Docker refuses images
 /// that a container uses.
+async fn docker_image_inspect(
+    options: &WorkerOptions,
+    reference: &str,
+) -> Result<Value, WorkerError> {
+    validate_image_ref(reference).map_err(WorkerError::invalid)?;
+    let args = os_args(&["image", "inspect", "--", reference]);
+    let output = run_docker(options, args, None, options.quick_timeout, MAX_CMD_OUTPUT).await?;
+    if !output.success {
+        let message = stderr_summary(&output);
+        if message.contains("No such image") {
+            return Err(WorkerError::not_found(message));
+        }
+        return Err(WorkerError::command_failed(format!(
+            "cannot inspect {reference}: {message}"
+        )));
+    }
+    parse_image_inspect_json(&output.stdout).map_err(|error| {
+        WorkerError::command_failed(format!("cannot parse docker image inspect: {error}"))
+    })
+}
+
 async fn docker_image_remove(
     options: &WorkerOptions,
     reference: &str,
@@ -1586,6 +1608,11 @@ case "$1" in
     case "$2" in
       ls) echo '{"Containers":"1","CreatedAt":"2026-11-01 10:00:00 +0000 UTC","CreatedSince":"2 weeks ago","Digest":"<none>","ID":"sha256:713f","Repository":"nginx","Size":"94.5MB","Tag":"alpine"}' ;;
       rm) echo "Untagged: nginx:alpine" ;;
+      inspect)
+        case "$4" in
+          nginx:alpine) echo '[{"Id":"sha256:713f","RepoTags":["nginx:alpine"],"Os":"linux","Architecture":"amd64","Size":1000,"Config":{"ExposedPorts":{"80/tcp":{}},"Volumes":{"/data":{}},"Env":["A=1"]}}]' ;;
+          *) echo "Error: No such image: $4" >&2; exit 1 ;;
+        esac ;;
       prune) printf 'Deleted Images:\ndeleted: sha256:aa\ndeleted: sha256:bb\n\nTotal reclaimed space: 12.5MB\n' ;;
     esac ;;
   compose)
@@ -1855,11 +1882,27 @@ exit 0
                 && call.iter().any(|arg| arg == "-f" || arg == "--force")
         }));
 
-        let before = env.logged_args().len();
-        let response = env
-            .call(WorkerRequest::new(WorkerOp::ImagePull).image("--help"))
+        let inspect = env
+            .call(WorkerRequest::new(WorkerOp::ImageInspect).image("nginx:alpine"))
             .await;
-        assert_eq!(response.error.unwrap().code, "invalid_request");
+        assert!(inspect.ok, "{inspect:?}");
+        let data = inspect.data.unwrap();
+        assert_eq!(data["exposedPorts"][0]["port"], 80);
+        assert_eq!(data["volumes"][0], "/data");
+        assert_eq!(
+            env.logged_args().last().unwrap(),
+            &vec!["image", "inspect", "--", "nginx:alpine"]
+        );
+        let missing = env
+            .call(WorkerRequest::new(WorkerOp::ImageInspect).image("missing:1"))
+            .await;
+        assert_eq!(missing.error.unwrap().code, "not_found");
+
+        let before = env.logged_args().len();
+        for op in [WorkerOp::ImagePull, WorkerOp::ImageInspect] {
+            let response = env.call(WorkerRequest::new(op).image("--help")).await;
+            assert_eq!(response.error.unwrap().code, "invalid_request");
+        }
         assert_eq!(env.logged_args().len(), before);
     }
 

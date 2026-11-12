@@ -58,6 +58,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/docker/containers/{id}/logs", get(container_logs))
         .route("/api/docker/stats", get(stats))
         .route("/api/docker/images", get(list_images))
+        .route("/api/docker/images/inspect", get(inspect_image))
         .route("/api/docker/images/pull", post(pull_image))
         .route("/api/docker/images/remove", post(remove_image))
         .route("/api/docker/images/prune", post(prune_images))
@@ -397,6 +398,33 @@ fn image_users(image: &Value, containers: &[Value]) -> Vec<String> {
 }
 
 /// GET /api/docker/images
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageQuery {
+    pub image: String,
+}
+
+/// GET /api/docker/images/inspect?image=<ref> — exposed ports, volumes and
+/// defaults of one image (prefills "Run image").
+pub async fn inspect_image(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Query(query): Query<ImageQuery>,
+) -> AppResult<Json<Value>> {
+    let reference = query.image.trim();
+    validate_image_ref(reference).map_err(AppError::bad_request)?;
+    state.docker.ensure_available().await?;
+    let data = state
+        .docker
+        .call(WorkerRequest::new(WorkerOp::ImageInspect).image(reference))
+        .await
+        .map_err(|error| match error {
+            DockerError::BadRequest(_) => AppError::NotFound("image not found"),
+            other => AppError::from(other),
+        })?;
+    Ok(Json(data))
+}
+
 pub async fn list_images(
     State(state): State<AppState>,
     _admin: AdminUser,

@@ -184,6 +184,7 @@ container gone…) is `409 conflict` with Docker's message.
 | GET | `/api/docker/containers/{id}/logs?tail=300&since=<unix secs>` | `{lines:[{ts, stream:"stdout"|"stderr", message}], tail}`, both streams merged by time; `tail` ≤ 2000 |
 | GET | `/api/docker/stats` | `{items:[{id, name, cpuPercent, memoryBytes, memoryLimitBytes, memoryPercent, netRxBytes, netTxBytes, blockReadBytes, blockWriteBytes, pids}], sampledAt}` |
 | GET | `/api/docker/images` | `{items:[{id, repository, tag, reference, digest, sizeBytes, size, createdAt, createdSince, containers, usedBy:[names], inUse}], totalBytes}`; untagged images have an empty `reference` |
+| GET | `/api/docker/images/inspect?image=<ref>` | `{id, tags, exposedPorts:[{port, protocol}], volumes:[paths], env:[{key, value}], cmd, entrypoint, workingDir, user, os, architecture, sizeBytes, created}`; `404` when the image is not on the server. Used to prefill "Run image", which creates a normal app through `POST /api/apps` |
 | POST | `/api/docker/images/pull` | `{image}` → `{jobId, image}`; job kind `docker.pull`, audited when it ends |
 | POST | `/api/docker/images/remove` | `{image}` (reference or id); never forced, so images in use stay |
 | POST | `/api/docker/images/prune` | removes untagged images no container uses → `{deleted, reclaimed}` |

@@ -19,6 +19,11 @@ this file by `scripts/changelog-section.sh`.
   and live usage charts.
 - Images: list with size and usage, pull from Docker Hub or a registry (runs as
   a background job), delete unused images, and clean up untagged ones.
+- **Run an image.** The Run button on an image opens a short form: name, the
+  ports to publish (prefilled with free host ports), volumes for the image's
+  data folders and environment variables. RAST turns it into a Compose file
+  and runs it as a normal app, so it can be stopped, redeployed and backed up.
+  Environment values stay out of the Compose file (secrets stay encrypted).
 - Volumes: list with the containers using each one; delete unused volumes
   after typing the name.
 - **Terminal into containers.** A Terminal tab on the container page opens a

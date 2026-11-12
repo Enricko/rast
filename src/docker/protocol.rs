@@ -117,6 +117,9 @@ pub enum WorkerOp {
     ContainerLogs,
     /// `docker image ls -a`.
     ImageList,
+    /// `docker image inspect <image>`: exposed ports, volumes and defaults
+    /// used to prefill "Run image".
+    ImageInspect,
     /// `docker pull <image>`.
     ImagePull,
     /// `docker image rm <image>` (never `--force`).
@@ -157,6 +160,7 @@ impl WorkerOp {
             Self::ContainerRemove => "container-remove",
             Self::ContainerLogs => "container-logs",
             Self::ImageList => "image-list",
+            Self::ImageInspect => "image-inspect",
             Self::ImagePull => "image-pull",
             Self::ImageRemove => "image-remove",
             Self::ImagePrune => "image-prune",
@@ -181,6 +185,7 @@ impl WorkerOp {
             | Self::ComposeLogsSince
             | Self::ContainerLogs
             | Self::ImageList
+            | Self::ImageInspect
             | Self::VolumeList
             | Self::ContainerExec => TimeoutClass::Quick,
             Self::ComposeUp
@@ -451,7 +456,7 @@ pub fn validate_request(req: &WorkerRequest, apps_dir: &Path) -> Result<Validate
             let (cols, rows) = super::exec::clamp_size(req.cols, req.rows);
             Ok(ValidatedAction::Exec { id, cols, rows })
         }
-        WorkerOp::ImagePull | WorkerOp::ImageRemove => {
+        WorkerOp::ImagePull | WorkerOp::ImageRemove | WorkerOp::ImageInspect => {
             accept_only(req, &["image"])?;
             let reference = req
                 .image

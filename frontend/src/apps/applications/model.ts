@@ -423,3 +423,196 @@ export function pushSample(series: number[], value: number, max = 60): number[] 
   const next = [...series, Number.isFinite(value) ? value : 0];
   return next.length > max ? next.slice(next.length - max) : next;
 }
+
+// ------------------------------------------------------------------ run image
+
+/** What `GET /api/docker/images/inspect` reports about one image. */
+export interface ImageDetails {
+  id: string;
+  tags: string[];
+  exposedPorts: Array<{ port: number; protocol: string }>;
+  volumes: string[];
+  env: Array<{ key: string; value: string }>;
+  cmd: string;
+  entrypoint: string;
+  workingDir: string;
+  user: string;
+  os: string;
+  architecture: string;
+  sizeBytes: number | null;
+  created: string;
+}
+
+export interface RunPort {
+  container: number;
+  protocol: string;
+  /** Host port to publish on; `null` keeps the port private. */
+  host: number | null;
+}
+
+export interface RunVolume {
+  /** Named volume owned by the app. */
+  name: string;
+  /** Absolute path inside the container. */
+  path: string;
+}
+
+export interface RunEnv {
+  key: string;
+  value: string;
+  secret: boolean;
+}
+
+/** Everything "Run image" turns into a managed app. */
+export interface RunPlan {
+  name: string;
+  image: string;
+  ports: RunPort[];
+  volumes: RunVolume[];
+  env: RunEnv[];
+}
+
+const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const VOLUME_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+/** Lowercase words joined by dashes, like the server's app slugs. */
+export function slugWords(value: string, fallback = "app"): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/, "");
+  return slug || fallback;
+}
+
+/** A friendly default app name from an image reference:
+ * `louislam/uptime-kuma:2` → `uptime-kuma`. */
+export function suggestAppName(reference: string): string {
+  const withoutDigest = reference.split("@")[0] ?? reference;
+  const lastSegment = withoutDigest.split("/").pop() ?? withoutDigest;
+  const repository = lastSegment.split(":")[0] ?? lastSegment;
+  return slugWords(repository);
+}
+
+/** Host ports already published by containers, as `port/protocol`. */
+export function usedHostPorts(containers: EngineContainer[]): Set<string> {
+  const used = new Set<string>();
+  for (const container of containers) {
+    for (const port of container.ports ?? []) {
+      if (port.hostPort) used.add(`${port.hostPort}/${(port.protocol || "tcp").toLowerCase()}`);
+    }
+  }
+  return used;
+}
+
+/** The container's own port when it is free on the host; otherwise the next
+ * free one (ports below 1024 move to 8000+, like 80 → 8080). */
+export function suggestHostPort(port: number, protocol: string, used: Set<string>): number {
+  const free = (candidate: number): boolean => !used.has(`${candidate}/${protocol}`);
+  if (free(port)) return port;
+  const start = port < 1024 ? 8000 + port : port + 1;
+  for (let candidate = start; candidate <= 65535 && candidate < start + 1000; candidate += 1) {
+    if (free(candidate)) return candidate;
+  }
+  return port;
+}
+
+/** Volume names for the image's volume paths: `/app/data` → `data`,
+ * `/var/lib/postgresql/data` → `postgresql-data` when `data` is taken. */
+export function volumesFor(paths: string[]): RunVolume[] {
+  const taken = new Set<string>();
+  const out: RunVolume[] = [];
+  for (const path of paths) {
+    const parts = path.split("/").filter(Boolean).map((part) => slugWords(part, ""));
+    const last = parts[parts.length - 1] || "data";
+    const candidates = [last, parts.slice(-2).filter(Boolean).join("-"), "data"];
+    let name = candidates.find((candidate) => candidate && !taken.has(candidate)) ?? "data";
+    for (let n = 2; taken.has(name); n += 1) name = `${last}-${n}`;
+    taken.add(name);
+    out.push({ name, path });
+  }
+  return out;
+}
+
+/** A first plan for an image: its name, every exposed port on a free host
+ * port, and a named volume for every volume path. */
+export function initialRunPlan(reference: string, details: ImageDetails, containers: EngineContainer[]): RunPlan {
+  const used = usedHostPorts(containers);
+  const ports: RunPort[] = [];
+  for (const exposed of details.exposedPorts) {
+    const protocol = exposed.protocol.toLowerCase();
+    const host = suggestHostPort(exposed.port, protocol, used);
+    used.add(`${host}/${protocol}`);
+    ports.push({ container: exposed.port, protocol, host });
+  }
+  return { name: suggestAppName(reference), image: reference, ports, volumes: volumesFor(details.volumes), env: [] };
+}
+
+/** Problems that stop the plan from running, in reading order. */
+export function runPlanErrors(plan: RunPlan, used: Set<string> = new Set()): string[] {
+  const errors: string[] = [];
+  if (!plan.name.trim()) errors.push("Enter a name for the app.");
+  else if (plan.name.trim().length > 80) errors.push("The name is too long (80 characters at most).");
+  const imageError = imageRefError(plan.image);
+  if (imageError) errors.push(imageError);
+  const hostPorts = new Set<string>();
+  for (const port of plan.ports) {
+    if (port.host === null) continue;
+    if (!Number.isInteger(port.host) || port.host < 1 || port.host > 65535) {
+      errors.push(`Port ${port.container}: the host port must be between 1 and 65535.`);
+      continue;
+    }
+    const key = `${port.host}/${port.protocol}`;
+    if (hostPorts.has(key)) errors.push(`Host port ${port.host} is used twice.`);
+    else if (used.has(key)) errors.push(`Host port ${port.host} is already used by another container.`);
+    hostPorts.add(key);
+  }
+  const volumeNames = new Set<string>();
+  const volumePaths = new Set<string>();
+  for (const volume of plan.volumes) {
+    if (!VOLUME_NAME.test(volume.name)) errors.push(`Volume “${volume.name || "(empty)"}”: use letters, digits, . _ - and start with a letter or digit.`);
+    else if (volumeNames.has(volume.name)) errors.push(`Volume “${volume.name}” is listed twice.`);
+    if (!volume.path.startsWith("/") || /["\n\r]/.test(volume.path) || volume.path.includes(":")) errors.push(`Volume “${volume.name}”: the container path must be absolute, like /data.`);
+    else if (volumePaths.has(volume.path)) errors.push(`The container path ${volume.path} is used twice.`);
+    volumeNames.add(volume.name);
+    volumePaths.add(volume.path);
+  }
+  const keys = new Set<string>();
+  for (const variable of plan.env) {
+    if (!ENV_KEY.test(variable.key)) errors.push(`Invalid variable name “${variable.key || "(empty)"}”.`);
+    else if (keys.has(variable.key)) errors.push(`The variable ${variable.key} is listed twice.`);
+    keys.add(variable.key);
+  }
+  return errors;
+}
+
+/** The Compose file for a plan. Values of environment variables stay out of
+ * it: they are passed as `${KEY}` and kept in the app's environment, where
+ * secrets stay hidden. */
+export function composeForRun(plan: RunPlan): string {
+  const service = slugWords(plan.name);
+  const q = (value: string): string => JSON.stringify(value);
+  const lines = ["services:", `  ${service}:`, `    image: ${q(plan.image.trim())}`, "    restart: unless-stopped"];
+  const published = plan.ports.filter((port) => port.host !== null);
+  if (published.length) {
+    lines.push("    ports:");
+    for (const port of published) {
+      const suffix = port.protocol === "tcp" ? "" : `/${port.protocol}`;
+      lines.push(`      - ${q(`${port.host}:${port.container}${suffix}`)}`);
+    }
+  }
+  if (plan.volumes.length) {
+    lines.push("    volumes:");
+    for (const volume of plan.volumes) lines.push(`      - ${q(`${volume.name}:${volume.path}`)}`);
+  }
+  if (plan.env.length) {
+    lines.push("    environment:");
+    for (const variable of plan.env) lines.push(`      ${variable.key}: ${q(`\${${variable.key}}`)}`);
+  }
+  if (plan.volumes.length) {
+    lines.push("volumes:");
+    for (const volume of plan.volumes) lines.push(`  ${volume.name}: {}`);
+  }
+  return `${lines.join("\n")}\n`;
+}

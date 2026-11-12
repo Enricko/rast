@@ -516,6 +516,98 @@ pub fn parse_container_logs(stdout: &str, stderr: &str) -> Vec<Value> {
     entries.into_iter().map(|(_, _, value)| value).collect()
 }
 
+/// Parse `docker image inspect <image>` output into what "Run image" needs:
+/// exposed ports, volume paths, default environment and the command.
+pub fn parse_image_inspect_json(output: &str) -> Result<Value, String> {
+    let parsed: Value = serde_json::from_str(output.trim())
+        .map_err(|e| format!("cannot parse docker image inspect output: {e}"))?;
+    let image = parsed
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(Value::as_object)
+        .ok_or_else(|| "docker image inspect returned no image".to_string())?;
+    let config = image.get("Config");
+    let words = |value: Option<&Value>| -> String {
+        match value {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" "),
+            Some(Value::String(text)) => text.clone(),
+            _ => String::new(),
+        }
+    };
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).unwrap_or("").to_string();
+
+    let mut ports: Vec<(u16, String)> = config
+        .and_then(|c| c.get("ExposedPorts"))
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.keys()
+                .filter_map(|key| {
+                    let (port, protocol) = key.split_once('/').unwrap_or((key.as_str(), "tcp"));
+                    let port = port.parse::<u16>().ok().filter(|port| *port > 0)?;
+                    let protocol = protocol.to_ascii_lowercase();
+                    matches!(protocol.as_str(), "tcp" | "udp" | "sctp").then_some((port, protocol))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ports.sort();
+    ports.dedup();
+    let mut volumes: Vec<String> = config
+        .and_then(|c| c.get("Volumes"))
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.keys()
+                .filter(|path| path.starts_with('/') && path.len() <= 255)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    volumes.sort();
+    let env: Vec<Value> = config
+        .and_then(|c| c.get("Env"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|entry| entry.split_once('='))
+                .take(100)
+                .map(|(key, value)| json!({"key": key, "value": value}))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tags: Vec<String> = image
+        .get("RepoTags")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "id": text(image.get("Id")),
+        "tags": tags,
+        "exposedPorts": ports.iter().map(|(port, protocol)| json!({"port": port, "protocol": protocol})).collect::<Vec<_>>(),
+        "volumes": volumes,
+        "env": env,
+        "cmd": words(config.and_then(|c| c.get("Cmd"))),
+        "entrypoint": words(config.and_then(|c| c.get("Entrypoint"))),
+        "workingDir": text(config.and_then(|c| c.get("WorkingDir"))),
+        "user": text(config.and_then(|c| c.get("User"))),
+        "os": text(image.get("Os")),
+        "architecture": text(image.get("Architecture")),
+        "sizeBytes": image.get("Size").and_then(Value::as_u64),
+        "created": text(image.get("Created")),
+    }))
+}
+
 /// Parse `docker image ls --all --no-trunc --format '{{json .}}'` output.
 pub fn parse_images_json(output: &str) -> Vec<Value> {
     let mut out = Vec::new();
@@ -952,6 +1044,37 @@ mod tests {
             "untimed lines keep the previous time"
         );
         assert_eq!(lines[3]["stream"], "stdout");
+    }
+
+    #[test]
+    fn image_inspect_lists_ports_volumes_and_defaults() {
+        let output = r#"[{"Id":"sha256:713f","RepoTags":["nginx:alpine"],"Os":"linux","Architecture":"amd64","Size":52428800,"Created":"2026-11-01T10:00:00Z",
+            "Config":{"ExposedPorts":{"80/tcp":{},"443/tcp":{},"53/UDP":{},"0/tcp":{},"x/tcp":{},"9/raw":{}},
+            "Volumes":{"/var/cache/nginx":{},"relative":{}},
+            "Env":["PATH=/usr/local/sbin:/usr/bin","NGINX_VERSION=1.29.3","BROKEN"],
+            "Cmd":["nginx","-g","daemon off;"],"Entrypoint":["/docker-entrypoint.sh"],"WorkingDir":"","User":""}}]"#;
+        let image = parse_image_inspect_json(output).unwrap();
+        assert_eq!(image["id"], "sha256:713f");
+        assert_eq!(image["tags"], json!(["nginx:alpine"]));
+        assert_eq!(
+            image["exposedPorts"],
+            json!([{"port": 53, "protocol": "udp"}, {"port": 80, "protocol": "tcp"}, {"port": 443, "protocol": "tcp"}])
+        );
+        assert_eq!(image["volumes"], json!(["/var/cache/nginx"]));
+        assert_eq!(
+            image["env"][1],
+            json!({"key": "NGINX_VERSION", "value": "1.29.3"})
+        );
+        assert_eq!(image["env"].as_array().unwrap().len(), 2);
+        assert_eq!(image["cmd"], "nginx -g daemon off;");
+        assert_eq!(image["entrypoint"], "/docker-entrypoint.sh");
+        assert_eq!(image["sizeBytes"], 52428800);
+        // An image without a Config still parses.
+        let bare = parse_image_inspect_json(r#"[{"Id":"sha256:aa"}]"#).unwrap();
+        assert_eq!(bare["exposedPorts"], json!([]));
+        assert_eq!(bare["volumes"], json!([]));
+        assert!(parse_image_inspect_json("[]").is_err());
+        assert!(parse_image_inspect_json("not json").is_err());
     }
 
     #[test]

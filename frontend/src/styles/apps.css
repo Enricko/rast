@@ -3778,7 +3778,7 @@ button.pkg-pill {
 }
 
 .dk-images {
-  --dk-cols: minmax(0, 1fr) 96px 112px 84px 48px;
+  --dk-cols: minmax(0, 1fr) 96px 112px 84px 66px;
 }
 
 .dk-volumes {
@@ -4278,6 +4278,93 @@ button.pkg-pill {
   font-weight: 600;
 }
 
+/* Run image dialog. */
+.dk-run-form {
+  gap: 14px;
+}
+
+.dk-run-image {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-inset, var(--bg-elev));
+}
+
+.dk-run-ref {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+.dk-run-ports,
+.dk-run-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dk-run-port-row {
+  display: grid;
+  grid-template-columns: 140px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.dk-run-port {
+  width: 100%;
+  height: 30px;
+}
+
+.dk-run-arrow {
+  text-align: center;
+}
+
+.dk-run-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.7fr) auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.dk-run-small {
+  height: 30px;
+  font-size: 12px;
+}
+
+.dk-run-more {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+}
+
+.dk-run-more > summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 2px 0;
+}
+
+.dk-run-more[open] > summary {
+  margin-bottom: 10px;
+}
+
+.dk-run-more > .field + .field {
+  margin-top: 12px;
+}
+
+.dk-run-more .btn {
+  justify-self: start;
+  align-self: flex-start;
+}
+
+.dk-run-noports,
+.dk-run-note {
+  margin: 0;
+}
+
 /* Terminal: xterm.js on the same dark surface as the log viewer. */
 .dk-term-wrap {
   display: flex;
@@ -4450,7 +4537,7 @@ button.pkg-pill {
   }
 
   .dk-images {
-    --dk-cols: minmax(0, 1fr) 84px 48px;
+    --dk-cols: minmax(0, 1fr) 84px 66px;
   }
 
   .dk-volumes {
@@ -4496,6 +4583,11 @@ button.pkg-pill {
   }
 
   .dk-containers .dk-cell-actions {
+    display: none;
+  }
+
+  /* Phones: Run stays in the row's menu. */
+  .dk-images .dk-run-btn {
     display: none;
   }
 

@@ -30,6 +30,7 @@ import {
   unavailableReason,
 } from "../../components/states";
 import { mountContainerPage, type ContainerPage } from "./container-page";
+import { openRunDialog } from "./run-dialog";
 import {
   containerStateLabel,
   containerTone,
@@ -1272,10 +1273,16 @@ class ApplicationsApp {
     if (this.busy.has(busyKey)) {
       actions.append(h("span", { class: "spinner spinner-sm", ariaLabel: "Working" }));
     } else if (this.canChange()) {
+      if (image.reference) {
+        const run = this.iconButton("play", `Run ${label}`, () => void this.runImage(image.reference, busyKey));
+        run.classList.add("dk-run-btn");
+        actions.append(run);
+      }
       actions.append(
         this.menuButton(label, () => {
           const items: ContextMenuEntry[] = [];
           if (image.reference) {
+            items.push({ label: "Run…", icon: "play", onClick: () => void this.runImage(image.reference, busyKey) });
             items.push({ label: "Pull again", icon: "download", onClick: () => void this.pullImage(image.reference) });
           }
           items.push({
@@ -1303,6 +1310,32 @@ class ApplicationsApp {
       h("span", { class: "dk-cell dk-cell-num", role: "cell" }, image.sizeBytes !== null ? formatBytes(image.sizeBytes) : image.size || "—"),
       actions,
     );
+  }
+
+  /** Run an image as a new RAST app (Docker Desktop's Run). */
+  private async runImage(reference: string, busyKey: string): Promise<void> {
+    if (!this.canChange() || this.busy.has(busyKey)) return;
+    if (!this.dockerUsable()) {
+      this.ctx.toast.warning("Docker is not ready, so the image cannot run now.");
+      return;
+    }
+    this.busy.add(busyKey);
+    this.renderView();
+    try {
+      await openRunDialog({
+        ctx: this.ctx,
+        lc: this.lc,
+        reference,
+        containers: this.containers,
+        onStarted: () => {
+          void Promise.all([this.loadApps(), this.loadContainers(), this.loadImages()]);
+          this.switchView("containers");
+        },
+      });
+    } finally {
+      this.busy.delete(busyKey);
+      if (!this.disposed) this.renderView();
+    }
   }
 
   private openPullDialog(initial = ""): void {
