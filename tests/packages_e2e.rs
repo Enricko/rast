@@ -3,6 +3,10 @@
 //! the audit trail. Uses a local `file://` catalog signed with a test key, so
 //! no network access is needed. Real downloads are covered by
 //! `packages::install` unit tests and the isolated verification run.
+//!
+//! Linux only: the fixture catalog publishes Linux builds and package checks
+//! need the Linux sandbox; on macOS the App Center installs nothing.
+#![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
 
