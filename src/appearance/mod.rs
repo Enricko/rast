@@ -1570,7 +1570,10 @@ pub(crate) mod tests {
             assert!(validate_taskbar_pins(vec![bad.into()]).is_err(), "{bad}");
         }
         let stored = parse_stored_pins(r#"["linux:obsidian", "linux:../x", "files"]"#);
-        assert_eq!(stored, vec!["linux:obsidian".to_string(), "files".to_string()]);
+        assert_eq!(
+            stored,
+            vec!["linux:obsidian".to_string(), "files".to_string()]
+        );
     }
 
     // ------------------------------------------------------------- image tests

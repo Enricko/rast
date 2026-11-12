@@ -406,7 +406,9 @@ impl LinuxApps {
     /// Linux apps need Docker on a Linux host (not the macOS preview).
     async fn ensure_available(&self) -> AppResult<()> {
         if !SUPPORTED {
-            return Err(AppError::unavailable("Linux apps run on Linux servers only"));
+            return Err(AppError::unavailable(
+                "Linux apps run on Linux servers only",
+            ));
         }
         self.docker.ensure_available().await
     }
