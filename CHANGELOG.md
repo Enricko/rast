@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.24] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Widgets could feel impossible to move: only the title bar started a drag,
+  and the collision reflow immediately re-arranged a tile dropped over
+  another. The whole tile is now a drag handle (except its action buttons),
+  and the column reflow runs only when the desktop size actually changes, so
+  a placement the user chooses sticks.
+
 ## [0.11.23] - 2026-11-14
 
 No database migration (schema stays v12).

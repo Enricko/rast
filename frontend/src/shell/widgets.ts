@@ -459,6 +459,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   let dragging: WidgetId | null = null;
   let disposed = false;
   let keySaveTimer: number | undefined;
+  let lastLayerSize: { w: number; h: number } | null = null;
   let catalogRefresh: (() => void) | null = null;
 
   const offFeed = feed.subscribe(() => {
@@ -515,7 +516,12 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       a.y < b.y + b.h + gap &&
       a.y + a.h + gap > b.y;
     const hasOverlap = visible.some((a, index) => visible.slice(index + 1).some((b) => collides(a, b)));
-    if (!hasOverlap) {
+    const layerSize = { w: layer.clientWidth, h: layer.clientHeight };
+    const viewportChanged =
+      lastLayerSize !== null &&
+      (lastLayerSize.w !== layerSize.w || lastLayerSize.h !== layerSize.h);
+    lastLayerSize = layerSize;
+    if (!hasOverlap || !viewportChanged) {
       for (const item of visible) {
         item.card.el.style.left = `${item.x}px`;
         item.card.el.style.top = `${item.y}px`;
@@ -660,9 +666,12 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
 
   // ------------------------------------------------------------- dragging
   function attachDrag(card: Card): void {
-    card.head.addEventListener("pointerdown", (event) => {
+    // The whole tile is a handle (the title bar keeps the grab cursor), except
+    // the action buttons; the body is not selectable, so this cannot steal a
+    // text selection.
+    card.el.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
-      if ((event.target as Element).closest("button")) return;
+      if ((event.target as Element).closest("button, a, input, select, textarea")) return;
       event.preventDefault();
       const startX = event.clientX;
       const startY = event.clientY;
@@ -671,7 +680,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       dragging = card.id;
       bringToFront(card.id);
       card.el.classList.add("is-dragging");
-      card.head.setPointerCapture(event.pointerId);
+      card.el.setPointerCapture(event.pointerId);
       const area = freeArea(card);
       let left = startLeft;
       let top = startTop;
@@ -682,9 +691,9 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
         card.el.style.top = `${Math.round(top)}px`;
       };
       const end = (): void => {
-        card.head.removeEventListener("pointermove", move);
-        card.head.removeEventListener("pointerup", end);
-        card.head.removeEventListener("pointercancel", end);
+        card.el.removeEventListener("pointermove", move);
+        card.el.removeEventListener("pointerup", end);
+        card.el.removeEventListener("pointercancel", end);
         card.el.classList.remove("is-dragging");
         dragging = null;
         const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
@@ -693,9 +702,9 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
         position(card, layout.find((widget) => widget.id === card.id)!);
         if (moved || layout[layout.length - 1]?.id === card.id) persist();
       };
-      card.head.addEventListener("pointermove", move);
-      card.head.addEventListener("pointerup", end);
-      card.head.addEventListener("pointercancel", end);
+      card.el.addEventListener("pointermove", move);
+      card.el.addEventListener("pointerup", end);
+      card.el.addEventListener("pointercancel", end);
     });
   }
 
