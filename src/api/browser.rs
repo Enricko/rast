@@ -66,8 +66,15 @@ pub async fn page(
     let result = tokio::task::spawn_blocking(move || fetch_page(&requested))
         .await
         .map_err(|error| AppError::internal(error.to_string()))?;
-    let page = result.map_err(AppError::bad_request)?;
-    Ok((
+    let body = match result {
+        Ok(page) => page.html,
+        Err(message) => error_document(&message),
+    };
+    Ok(document_response(body))
+}
+
+fn document_response(body: String) -> Response {
+    (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
             (header::CACHE_CONTROL, "no-store".to_string()),
@@ -84,9 +91,23 @@ pub async fn page(
                     .to_string(),
             ),
         ],
-        page.html,
+        body,
     )
-        .into_response())
+        .into_response()
+}
+
+/// A readable page shown inside the Browser window when a fetch fails.
+fn error_document(message: &str) -> String {
+    let message = escape_attribute(message);
+    format!(
+        "<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content=\"width=device-width, initial-scale=1\">\
+         <title>Cannot open page</title><style>body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
+         background:#f2f3f7;color:#1e2430;font:15px/1.5 Inter,'Segoe UI',system-ui,sans-serif;}}\
+         .card{{max-width:520px;padding:32px;border-radius:16px;background:#fff;box-shadow:0 8px 30px rgba(16,24,40,.08);}}\
+         h1{{margin:0 0 8px;font-size:20px}}p{{margin:0 0 16px;color:#5a6474}}code{{background:#f4f5f8;padding:2px 6px;border-radius:6px}}\
+         </style><div class=card><h1>This page could not be opened</h1><p>{message}</p>\
+         <p>Try another address, or use the search box.</p></div></html>"
+    )
 }
 
 struct FetchedPage {
@@ -140,8 +161,20 @@ fn fetch_page(input: &str) -> Result<FetchedPage, String> {
             .reader()
             .read_to_end(&mut body)
             .map_err(|error| format!("Cannot read the page: {error}"))?;
-        let html = String::from_utf8_lossy(&body);
-        let document = inject_for_browser(&html, &current)?;
+        let text = String::from_utf8_lossy(&body).to_string();
+        // Google answers server-side fetches from datacenter IPs with a
+        // JavaScript-only "redirecting" page. Fall back to Brave, which serves
+        // the same kind of results as plain HTML, so search always works.
+        if let Some(query) = google_search_query(&current) {
+            if is_blocked_google(&text) {
+                let brave = format!("https://search.brave.com/search?q={query}");
+                current = brave
+                    .parse()
+                    .map_err(|_| "The search service is unavailable.".to_string())?;
+                continue;
+            }
+        }
+        let document = inject_for_browser(&text, &current)?;
         return Ok(FetchedPage { html: document });
     }
     Err("Too many redirects.".into())
@@ -220,6 +253,30 @@ fn resolve_redirect(base: &Uri, location: &str) -> Result<Uri, String> {
         )
     };
     parse_https_url(&absolute)
+}
+
+/// The percent-encoded `q` value when `uri` is a Google search URL.
+fn google_search_query(uri: &Uri) -> Option<String> {
+    if uri.host()? != "www.google.com" || !uri.path().starts_with("/search") {
+        return None;
+    }
+    let query = uri.query()?.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == "q" && !value.is_empty()).then(|| value.to_string())
+    })?;
+    let safe = query
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '%' | '+' | '-' | '.' | '_' | '~'));
+    safe.then_some(query)
+}
+
+/// Google's anti-bot response (English or Indonesian interface).
+fn is_blocked_google(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("if you are not redirected")
+        || lower.contains("trouble accessing google search")
+        || lower.contains("tidak dialihkan")
+        || lower.contains("mengalami masalah saat mengakses google penelusuran")
 }
 
 fn inject_for_browser(html: &str, final_url: &Uri) -> Result<String, String> {

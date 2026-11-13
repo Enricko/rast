@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.13] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Browser page proxy: Google search URLs that answer with Google's
+  JavaScript-only anti-bot page are transparently retried on Brave Search
+  (plain HTML results), so searching keeps working from a datacenter IP.
+- Failed page fetches now return a readable HTML error page inside the
+  Browser window instead of a JSON API error.
+
 ## [0.11.12] - 2026-11-13
 
 No database migration (schema stays v12).
