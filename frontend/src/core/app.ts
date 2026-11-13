@@ -21,7 +21,11 @@ export interface DesktopActions {
   pin(appId: string): void;
   unpin(appId: string): void;
   /** Open an installed app-type Package Center package in a desktop window. */
-  openPackageApp(packageId: string, name: string): void;
+  openPackageApp(
+    packageId: string,
+    name: string,
+    app?: { kind?: string | null; entry?: string | null } | null,
+  ): void;
 }
 
 export interface AppContext {

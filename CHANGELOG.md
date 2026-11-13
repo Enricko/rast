@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.9] - 2026-11-13
+
+No database migration (schema stays v12). Docker-only 0.11 line.
+
+### Added
+
+- **Web app packages.** App-type manifests may declare
+  `"app": {"kind": "web", "entry": "index.html"}`; App Center's Open button
+  then renders the package's `app/` page in a desktop window (files served by
+  RAST only to signed-in accounts, path-safe, `nosniff` and a restrictive
+  CSP). The calculator package uses this for its full scientific keypad while
+  its Rust CLI stays available in the terminal.
+
 ## [0.11.8] - 2026-11-13
 
 Schema v12 (`migrations/0012_packages_app_type.sql`): `packages.type` may be

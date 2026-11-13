@@ -198,6 +198,8 @@ export interface PackageView {
   unavailableReason?: string | null;
   system?: SystemInstall | null;
   terminal?: TerminalView | null;
+  /** App presentation: command runner or a web entry inside the package. */
+  app?: { kind: string; entry?: string | null } | null;
 }
 
 export interface CatalogStatus {

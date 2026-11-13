@@ -740,7 +740,7 @@ class PackageCenterApp {
           "div",
           { class: "pkg-tile-foot" },
           this.pill("Open", "is-quiet", `Open ${pkg.name}`, () =>
-            this.ctx.desktop.openPackageApp(pkg.id, pkg.name),
+            this.ctx.desktop.openPackageApp(pkg.id, pkg.name, pkg.app),
           ),
         ),
       ),

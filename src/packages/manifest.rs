@@ -102,6 +102,9 @@ pub struct Requirements {
     /// Free-text host dependency notes shown to administrators.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Presentation for app-type packages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppSpec>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +125,18 @@ pub struct Provenance {
     /// Build-provenance attestation location, when published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attestation_url: Option<String>,
+}
+
+/// How an app-type package is presented in App Center.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppSpec {
+    /// `command` (run an executable in a window) or `web` (serve files from
+    /// the package's `app/` directory in a window).
+    pub kind: String,
+    /// Entry page for `web` apps, relative to `app/` (default index.html).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +186,9 @@ pub struct Manifest {
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Presentation for app-type packages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppSpec>,
 }
 
 impl Manifest {
@@ -337,6 +355,21 @@ pub fn validate(m: &Manifest) -> Result<(), String> {
     }
     if !SUPPORTED_TYPES.contains(&m.package_type.as_str()) {
         return Err(format!("unsupported package type {:?}", m.package_type));
+    }
+    if let Some(app) = &m.app {
+        if m.package_type != "app" {
+            return Err("app metadata is only allowed on app-type packages".into());
+        }
+        match app.kind.as_str() {
+            "command" => {}
+            "web" => {
+                let entry = app.entry.as_deref().unwrap_or("index.html");
+                if !is_safe_relative_path(entry) {
+                    return Err("app.entry must be a safe path inside the package".into());
+                }
+            }
+            other => return Err(format!("unknown app kind {other:?}")),
+        }
     }
     text("name", &m.name, 1, 64)?;
     text("description", &m.description, 0, 500)?;

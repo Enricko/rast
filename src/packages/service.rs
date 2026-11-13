@@ -288,6 +288,8 @@ pub struct PackageView {
     pub system: Option<SystemInstall>,
     /// What a login shell runs for the main command.
     pub terminal: Option<TerminalView>,
+    /// Presentation for app-type packages (command runner or web entry).
+    pub app: Option<manifest::AppSpec>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -991,6 +993,60 @@ impl PackageManager {
         })
     }
 
+    /// Read one static file of an installed web app package (`app/` tree).
+    pub async fn app_asset(&self, package_id: &str, path: &str) -> AppResult<(Vec<u8>, String)> {
+        let versions = store::versions(&self.db, Some(package_id)).await?;
+        let Some(installed) = versions
+            .into_iter()
+            .filter(|version| version.manifest.package_type == "app")
+            .max_by_key(|version| version.installed_at)
+        else {
+            return Err(AppError::NotFound("This application is not installed."));
+        };
+        let app = installed
+            .manifest
+            .app
+            .as_ref()
+            .filter(|app| app.kind == "web")
+            .ok_or(AppError::NotFound("This application has no web interface."))?;
+        let root = std::path::Path::new(&installed.install_path).join("app");
+        let root = std::fs::canonicalize(&root)
+            .map_err(|_| AppError::NotFound("The application files are missing."))?;
+        let requested = if path.trim().is_empty() {
+            app.entry.as_deref().unwrap_or("index.html").to_string()
+        } else {
+            path.to_string()
+        };
+        if !manifest::is_safe_relative_path(&requested) {
+            return Err(AppError::bad_request("invalid application path"));
+        }
+        let candidate = root.join(&requested);
+        let candidate =
+            std::fs::canonicalize(&candidate).map_err(|_| AppError::NotFound("File not found."))?;
+        if !candidate.starts_with(&root) {
+            return Err(AppError::NotFound("File not found."));
+        }
+        let bytes = std::fs::read(&candidate).map_err(|_| AppError::NotFound("File not found."))?;
+        let content_type = match candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("")
+        {
+            "html" | "htm" => "text/html; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "js" | "mjs" => "application/javascript; charset=utf-8",
+            "json" => "application/json; charset=utf-8",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "woff2" => "font/woff2",
+            "wasm" => "application/wasm",
+            _ => "application/octet-stream",
+        };
+        Ok((bytes, content_type.to_string()))
+    }
+
     pub async fn package(
         &self,
         id: &str,
@@ -1390,6 +1446,7 @@ impl PackageManager {
             unavailable_reason,
             system: system.cloned(),
             terminal,
+            app: base.and_then(|b| b.app.clone()),
         })
     }
 

@@ -341,11 +341,36 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
    * App-type packages installed from App Center (GitHub packages) open in a
    * small generic window that runs their command and shows the output.
    */
-  function openPackageApp(packageId: string, name: string): void {
+  function openPackageApp(
+    packageId: string,
+    name: string,
+    appSpec?: { kind?: string | null; entry?: string | null } | null,
+  ): void {
     const appId = `package-app-${packageId}`;
     const existing = wm.findWindow(appId);
     if (existing) {
       existing.focus();
+      return;
+    }
+    if (appSpec?.kind === "web") {
+      const entry = (appSpec.entry || "index.html").replace(/^\/+/, "");
+      wm.open(
+        {
+          id: appId,
+          name,
+          icon: "package",
+          defaultSize: { w: 760, h: 560 },
+          minSize: { w: 420, h: 380 },
+        },
+        undefined,
+        (ctx) => {
+          const frame = document.createElement("iframe");
+          frame.className = "package-app-frame";
+          frame.title = name;
+          frame.src = `/api/packages/${encodeURIComponent(packageId)}/app/${entry}`;
+          ctx.contentEl.appendChild(frame);
+        },
+      );
       return;
     }
     wm.open(
