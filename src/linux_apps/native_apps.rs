@@ -2293,6 +2293,7 @@ impl NativeApps {
              architecture = ?, package_version = ?, package_preexisting = ?, dependencies = ?, \
              packages_added = ?, compatibility = ?, install_path = ?, previous_path = ?, \
              launcher = ?, install_source = ?, size_bytes = ?, backend = 'native', \
+             memory_mb = ?, cpus = ?, \
              latest_version = NULL, checked_at = NULL, check_error = NULL, updated_at = ? \
              WHERE id = ?",
         )
@@ -2324,6 +2325,11 @@ impl NativeApps {
         .bind(metadata.launcher.to_string())
         .bind(source)
         .bind(metadata.size_bytes.map(|size| size as i64))
+        // Native limits are enforced at launch; a migrated legacy app may carry
+        // larger Docker-era resource values, so reset them to this server's
+        // native configuration instead of inheriting them.
+        .bind(self.config.linux_app_memory_mb as i64)
+        .bind(self.config.linux_app_cpus as i64)
         .bind(db::now_ms())
         .bind(id)
         .execute(&self.db)
