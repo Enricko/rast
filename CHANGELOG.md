@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.17] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Reader view forwards ordinary GET form submissions (search boxes on Google,
+  Brave, Wikipedia, …) back through the proxy, so their in-page search buttons
+  work instead of doing nothing. POST forms remain blocked.
+
 ## [0.11.16] - 2026-11-13
 
 No database migration (schema stays v12).

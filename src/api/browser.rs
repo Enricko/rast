@@ -293,7 +293,15 @@ fn inject_for_browser(html: &str, final_url: &Uri) -> Result<String, String> {
          document.addEventListener('click',function(event){{var link=event.target.closest&&event.target.closest('a');\
          if(!link||!link.href)return;var href=link.href;if(!/^https:/i.test(href))return;\
          event.preventDefault();parent.postMessage({{type:'rast-browser-navigate',url:href}},'*');}},true);\
-         document.addEventListener('submit',function(event){{event.preventDefault();}},true);}})();</script>",
+         document.addEventListener('submit',function(event){{var form=event.target;\
+         if(!form||String(form.tagName).toLowerCase()!=='form')return;\
+         event.preventDefault();var method=(form.getAttribute('method')||'get').toLowerCase();\
+         if(method!=='get')return;var action=form.getAttribute('action')||'';\
+         var absolute;try{{absolute=new URL(action||document.baseURI,document.baseURI).href;}}catch(e){{return;}}\
+         if(!/^https:/i.test(absolute))return;\
+         try{{var query=new URLSearchParams(new FormData(form)).toString();\
+         if(query)absolute+=(absolute.indexOf('?')>=0?'&':'?')+query;}}catch(e){{}}\
+         parent.postMessage({{type:'rast-browser-navigate',url:absolute}},'*');}},true);}})();</script>",
         escape_attribute(&final_url.to_string())
     );
     let mut output = String::with_capacity(html.len() + 256);
