@@ -138,6 +138,8 @@ const DISCONNECT_GRACE_MS = 8000;
 const START_TIMEOUT_MS = 240_000;
 /** How often the shell re-reads the shim snapshot as a safety net. */
 const SNAPSHOT_POLL_MS = 1_000;
+/** Reload the embedded viewer if a launched app's window has not appeared. */
+const LAUNCH_VIEWER_RECOVERY_MS = 8_000;
 const RESIZE_DEBOUNCE_MS = 90;
 const ATTACH_DELAYS = [40, 120, 300, 700, 1500, 3000, 6000];
 const FORCE_FORGET_MS = 12_000;
@@ -222,6 +224,9 @@ export class NativeLinuxHost {
    * its listeners (a session created during a first launch does exactly that),
    * in which case no later window event would ever arrive. */
   private snapshotTimer = 0;
+  /** One-shot recovery when a fresh session's viewer connected before the
+   * Xpra web server was ready (first UI launch): reload the viewer once. */
+  private launchRecoveryTimer = 0;
   private lastLaunchSlug: string | null = null;
   private lastLaunchAt = 0;
   private disposed = false;
@@ -299,6 +304,7 @@ export class NativeLinuxHost {
     this.disposed = true;
     window.clearInterval(this.pollTimer);
     window.clearInterval(this.snapshotTimer);
+    window.clearTimeout(this.launchRecoveryTimer);
     window.clearTimeout(this.reconnectTimer);
     window.clearTimeout(this.attachTimer);
     for (const unsubscribe of this.unsubscribers.splice(0)) {
@@ -522,6 +528,23 @@ export class NativeLinuxHost {
       this.reconnectTimer = 0;
       void this.reconnect();
     }, DISCONNECT_GRACE_MS);
+  }
+
+  /** Reload only the embedded viewer (remote apps/session stay untouched). */
+  private reloadViewer(): void {
+    if (this.disposed || !this.iframe) return;
+    this.quiet = true;
+    this.closeAllWindows(true);
+    this.quiet = false;
+    this.lastSnapshot = null;
+    this.shim = null;
+    window.clearInterval(this.snapshotTimer);
+    try {
+      this.iframe.contentWindow?.location.reload();
+    } catch {
+      if (this.session?.url) this.iframe.src = this.session.url;
+    }
+    this.attachShim(0);
   }
 
   private async reconnect(): Promise<void> {
@@ -962,6 +985,15 @@ export class NativeLinuxHost {
       if (run && (run.status === "running" || run.status === "ready")) {
         starting.detailEl.textContent = "Opening its window…";
       }
+      // A session created by this launch can take a moment before the Xpra web
+      // server accepts the embedded viewer; if no window shows up, reload the
+      // viewer once (the session and app keep running).
+      window.clearTimeout(this.launchRecoveryTimer);
+      this.launchRecoveryTimer = window.setTimeout(() => {
+        if (this.disposed || !this.starting.has(app.id)) return;
+        if (this.framesFor(app.id).length > 0) return;
+        this.reloadViewer();
+      }, LAUNCH_VIEWER_RECOVERY_MS);
     } catch (error) {
       this.closeStarting(app.id);
       if (isHttpStatus(error, 404) || isHttpStatus(error, 405) || isHttpStatus(error, 501)) {
