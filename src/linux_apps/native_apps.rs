@@ -2986,7 +2986,34 @@ impl NativeApps {
             job.check_cancelled()?;
             let identity = self.identity_ensure(*user_id).await?;
             let profile = self.profile_dir(app_id, *user_id);
-            self.create_profile_dirs(&profile)?;
+            // `<data_dir>/linux-apps/profiles` is root-owned 0711 (identities
+            // may traverse it, only the privileged helper may create entries),
+            // so the server cannot create the profile itself. Ask the helper to
+            // create the canonical profile tree owned by the identity.
+            let identity_home = self.config.linux_users_dir().join(user_id.to_string());
+            let username = format!("rast-u{user_id}");
+            let rast_home = self.config.homes_dir().join(&username);
+            if !rast_home.is_dir() {
+                if let Err(error) = std::fs::create_dir_all(&rast_home) {
+                    tracing::warn!(
+                        user_id = *user_id,
+                        "cannot create the RAST home {}: {error}",
+                        rast_home.display()
+                    );
+                }
+            }
+            self.call_helper(
+                "profile_prepare",
+                json!({
+                    "appId": app_id,
+                    "userId": user_id,
+                    "uid": identity.uid,
+                    "gid": identity.gid,
+                    "home": identity_home.to_string_lossy(),
+                    "rastHome": rast_home.to_string_lossy(),
+                }),
+            )
+            .await?;
             // The export belongs to the worker; make it readable for the
             // unprivileged server before copying it.
             self.path_chmod(export_dir, 0o755, true).await?;
@@ -3127,18 +3154,6 @@ impl NativeApps {
             .linux_profiles_dir()
             .join(app_id)
             .join(user_id.to_string())
-    }
-
-    fn create_profile_dirs(&self, profile: &Path) -> AppResult<()> {
-        use std::os::unix::fs::PermissionsExt;
-        for subdir in ["home", "config", "data", "cache", "state", "tmp"] {
-            let path = profile.join(subdir);
-            fs::create_dir_all(&path).map_err(|error| {
-                AppError::internal(format!("cannot prepare the app profile: {error}"))
-            })?;
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).ok();
-        }
-        Ok(())
     }
 
     /// Roll a migrated app back to the Docker backend (data was retained).
@@ -4290,6 +4305,9 @@ mod tests {
                     "home": "/srv/rast/linux-users",
                     "created": true,
                 }))
+            }
+            "profile_prepare" => {
+                ok(json!({"home": params.get("home").cloned().unwrap_or(Value::Null)}))
             }
             "path_chmod" | "path_chown" | "path_remove" => ok(json!({"ok": true})),
             _ => helper_failure("unsupported", &format!("unexpected helper op {op}")),
