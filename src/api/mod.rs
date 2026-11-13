@@ -12,6 +12,7 @@ pub mod appearance;
 pub mod apps;
 pub mod auth;
 pub mod backup;
+pub mod browser;
 pub mod docker;
 pub mod events;
 pub mod files;
@@ -44,6 +45,7 @@ pub fn router(state: AppState) -> Router {
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
+        .merge(browser::routes())
         .merge(linux_apps::routes())
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(

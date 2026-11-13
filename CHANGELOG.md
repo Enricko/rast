@@ -24,6 +24,22 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.11] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Added
+
+- **Web viewer proxy for the Browser app.** `GET /api/browser/page?url=…`
+  fetches one public HTTPS HTML page for a signed-in account: HTTPS on port
+  443 only, a pinned DNS resolver that rejects any private/loopback/
+  link-local/multicast address (no DNS rebinding), manually re-validated
+  redirects, 4 MiB / timeout limits, no cookies. The returned document gets a
+  `<base>` tag and link interception and is framed `SAMEORIGIN` with a
+  restrictive CSP, so the Browser package can offer address bar,
+  back/forward, reload and home without exposing the RAST origin. Sites that
+  require cookies, logins or heavy SPA JavaScript may not work.
+
 ## [0.11.10] - 2026-11-13
 
 No database migration (schema stays v12).
