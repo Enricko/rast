@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.15] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Browser page proxy lets page scripts run again, with compatibility shims for
+  cookies and local/session storage inside the sandboxed frame. Stripping
+  scripts (0.11.14) kept server-rendered results visible but made normal
+  JavaScript sites, including single-page apps, render blank.
+
 ## [0.11.14] - 2026-11-13
 
 No database migration (schema stays v12).
