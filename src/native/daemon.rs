@@ -4028,6 +4028,8 @@ exit 1
             std::fs::write(dir.join("group.exists"), b"x").unwrap();
             options.systemctl_bin = systemctl_script(dir);
             options.systemd_run_bin = systemd_run_script(dir);
+            // /usr/bin/xpra does not exist on the CI runners.
+            options.xpra_bin = fake_xpra(dir);
             std::fs::write(dir.join("failed-rast-app-demo.service"), b"x").unwrap();
             std::fs::write(dir.join("failed-rast-xpra-u7.service"), b"x").unwrap();
         })

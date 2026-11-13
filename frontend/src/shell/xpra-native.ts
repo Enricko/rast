@@ -133,7 +133,9 @@ export interface NativeLinuxDeps {
 
 const SESSION_POLL_MS = 5000;
 const DISCONNECT_GRACE_MS = 8000;
-const START_TIMEOUT_MS = 30_000;
+// A first native launch can include creating the person's graphical session and
+// a cold browser start (the profile may be large); 30 s was far too optimistic.
+const START_TIMEOUT_MS = 240_000;
 const RESIZE_DEBOUNCE_MS = 90;
 const ATTACH_DELAYS = [40, 120, 300, 700, 1500, 3000, 6000];
 const FORCE_FORGET_MS = 12_000;

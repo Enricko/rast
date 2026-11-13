@@ -857,6 +857,15 @@ impl LinuxApps {
                     command.push(flag.to_string());
                 }
             }
+            // Without a session bus Chromium retries D-Bus calls with long
+            // timeouts at startup (minutes on a large migrated profile).
+            // dbus-run-session gives the app a private, working session bus.
+            let dbus_session = Path::new("/usr/bin/dbus-run-session");
+            if dbus_session.is_file() {
+                let mut wrapped = vec![dbus_session.display().to_string(), "--".to_string()];
+                wrapped.append(&mut command);
+                command = wrapped;
+            }
         }
         Ok(NativeLaunchRequest {
             app_id: row.id.clone(),

@@ -2242,8 +2242,11 @@ mod tests {
     fn argv0_allowlist_blocks_other_locations() {
         let temp = tempfile::tempdir().unwrap();
         let ctx = ctx(&temp);
+        // `/usr/bin/firefox` is a snap wrapper on Ubuntu CI runners whose
+        // canonical target lives outside the allow-listed prefixes, so use
+        // binaries that are guaranteed to exist or not exist anywhere.
         for ok in [
-            "/usr/bin/firefox",
+            "/usr/bin/true",
             "/bin/sh",
             "/usr/local/bin/tool",
             "/opt/google/chrome/google-chrome",
