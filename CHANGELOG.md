@@ -50,6 +50,20 @@ Docker-backed apps keep working and can be migrated from App Center.
 
 ### Fixed
 
+- Native windows now reliably appear after a launch initiated from the desktop
+  UI (the user-visible "Google Chrome did not open in time" case): the shell
+  re-reads the shim window snapshot once per second (a session created by the
+  launch could publish its state before the shell attached its listeners),
+  reloads only the embedded viewer once if a launched app still has no window
+  after eight seconds (the viewer could connect before the Xpra web server was
+  ready), pulls the first frame right after adopting a window (no more
+  momentarily black bodies), and the first-launch window timeout is 240 s
+  instead of 30 s. Chromium/Electron apps run through `dbus-run-session`, so
+  they no longer stall for minutes retrying D-Bus calls during a cold start.
+- CI: the macOS job is disabled for now (the native Linux back-end and its
+  tests are Linux-only) and two native unit tests no longer depend on the CI
+  runner's binaries (`/usr/bin/xpra` is provided by the test fixture;
+  `/usr/bin/firefox` on Ubuntu runners is a snap wrapper).
 - Migration of a Docker app to the native backend works on a real host: the
   Docker worker may write legacy volume exports under
   `<data_dir>/linux-apps/migrations` (its sandbox previously returned EROFS),
