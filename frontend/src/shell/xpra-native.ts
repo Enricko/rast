@@ -784,6 +784,9 @@ export class NativeLinuxHost {
       window.setTimeout(() => {
         if (frame.closing || frame.remoteGone) return;
         this.scheduleRemoteResize(frame, ctx.contentEl, 0);
+        // The first paint after adoption can be an all-black buffer until a
+        // damage event arrives; ask the client to pull the window contents.
+        shim?.requestRefresh(frame.wid);
       }, retryMs);
     }
     if (!frame.popup) shim?.focusWindow(frame.wid);
