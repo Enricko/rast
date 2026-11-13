@@ -249,6 +249,14 @@ pub struct ConsumerView {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AppRunOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PackageView {
     pub id: String,
     pub package_type: String,
@@ -894,6 +902,92 @@ impl PackageManager {
             packages,
             counts,
             can_manage,
+        })
+    }
+
+    /// Run the installed command of an app-type package (used by App Center's
+    /// Open button). Only the first declared executable is run; arguments come
+    /// from the browser and are passed as argv, never through a shell.
+    pub async fn run_package_app(
+        &self,
+        package_id: &str,
+        args: Vec<String>,
+    ) -> AppResult<AppRunOutput> {
+        if args.len() > 32 {
+            return Err(AppError::bad_request("too many arguments"));
+        }
+        let mut total = 0usize;
+        for arg in &args {
+            total = total.saturating_add(arg.len());
+            if arg.len() > 512 || arg.chars().any(|c| c.is_control()) || total > 4096 {
+                return Err(AppError::bad_request("invalid argument"));
+            }
+        }
+        let versions = store::versions(&self.db, Some(package_id)).await?;
+        let Some(installed) = versions
+            .into_iter()
+            .filter(|version| version.manifest.package_type == "app")
+            .max_by_key(|version| version.installed_at)
+        else {
+            return Err(AppError::NotFound("This application is not installed."));
+        };
+        let executable = installed
+            .manifest
+            .runtime
+            .executables
+            .first()
+            .ok_or_else(|| AppError::bad_request("the package declares no executable"))?;
+        let install_path = std::path::PathBuf::from(&installed.install_path);
+        let program = install_path.join(&executable.path);
+        let resolved = std::fs::canonicalize(&program)
+            .map_err(|_| AppError::NotFound("The application executable is missing."))?;
+        let root = std::fs::canonicalize(&install_path)
+            .map_err(|_| AppError::NotFound("The application installation is missing."))?;
+        if !resolved.starts_with(&root) {
+            return Err(AppError::bad_request(
+                "The application executable is outside its installation.",
+            ));
+        }
+        let mut command = tokio::process::Command::new(&resolved);
+        command
+            .args(&args)
+            .current_dir(&root)
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = command.spawn().map_err(|error| {
+            AppError::internal(format!("cannot start the application: {error}"))
+        })?;
+        let output =
+            match tokio::time::timeout(Duration::from_secs(10), child.wait_with_output()).await {
+                Ok(result) => result.map_err(|error| {
+                    AppError::internal(format!("cannot read the application output: {error}"))
+                })?,
+                Err(_) => {
+                    return Err(AppError::bad_request(
+                        "The application did not finish within 10 seconds.",
+                    ))
+                }
+            };
+        fn text(bytes: &[u8]) -> String {
+            let limit = 64 * 1024;
+            let (slice, truncated) = if bytes.len() > limit {
+                (&bytes[..limit], true)
+            } else {
+                (bytes, false)
+            };
+            let mut value = String::from_utf8_lossy(slice).into_owned();
+            if truncated {
+                value.push_str("\n[output truncated]");
+            }
+            value
+        }
+        Ok(AppRunOutput {
+            stdout: text(&output.stdout),
+            stderr: text(&output.stderr),
+            exit_code: output.status.code(),
         })
     }
 

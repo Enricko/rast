@@ -34,9 +34,9 @@ pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Host targets RAST knows about (`<os>-<arch>`).
 pub const KNOWN_TARGETS: &[&str] = &["linux-x86_64", "linux-aarch64"];
 /// Package types this RAST can install.
-pub const SUPPORTED_TYPES: &[&str] = &["runtime"];
+pub const SUPPORTED_TYPES: &[&str] = &["runtime", "app"];
 /// Package types reserved for future releases (rejected with a specific note).
-pub const PLANNED_TYPES: &[&str] = &["app", "service"];
+pub const PLANNED_TYPES: &[&str] = &["service"];
 /// Ids that collide with API path segments (`/api/packages/<id>`).
 pub const RESERVED_IDS: &[&str] = &["check", "consumers", "github", "host", "catalog", "bin"];
 

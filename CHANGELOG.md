@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.7] - 2026-11-13
+
+No database migration (schema stays v11). Docker-only 0.11 line.
+
+### Added
+
+- **App packages from GitHub.** Package Center accepts manifests with
+  `type: "app"`; installed app packages appear under **Apps** (not Runtimes)
+  with an **Open** button. Open runs the app's command in a desktop window
+  (arguments from the text field are passed as argv, never through a shell;
+  10 s timeout, output capped). The Rust calculator package uses this to be a
+  real App Center app.
+
 ## [0.11.6] - 2026-11-13
 
 No database migration (schema stays v11). Docker-only 0.11 line.

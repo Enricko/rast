@@ -337,8 +337,84 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   /** What apps (the Applications folder) may change on the desktop and taskbar. */
+  /**
+   * App-type packages installed from App Center (GitHub packages) open in a
+   * small generic window that runs their command and shows the output.
+   */
+  function openPackageApp(packageId: string, name: string): void {
+    const appId = `package-app-${packageId}`;
+    const existing = wm.findWindow(appId);
+    if (existing) {
+      existing.focus();
+      return;
+    }
+    wm.open(
+      {
+        id: appId,
+        name,
+        icon: "package",
+        defaultSize: { w: 560, h: 440 },
+        minSize: { w: 360, h: 280 },
+      },
+      undefined,
+      (ctx) => {
+        const input = h("input", {
+          class: "input package-app-input",
+          type: "text",
+          placeholder: "Arguments (optional)",
+          ariaLabel: "Arguments",
+          spellcheck: false,
+        });
+        const runButton = h("button", { class: "btn btn-primary btn-sm", type: "button" }, "Run");
+        const output = h("pre", { class: "package-app-output" }, "Click Run to start the application.");
+        let busy = false;
+        const run = async (): Promise<void> => {
+          if (busy) return;
+          busy = true;
+          runButton.disabled = true;
+          output.textContent = "Running…";
+          const value = input.value.trim();
+          try {
+            const result = await deps.api.post<{
+              stdout: string;
+              stderr: string;
+              exitCode: number | null;
+            }>(`/api/packages/${encodeURIComponent(packageId)}/run`, {
+              args: value ? [value] : [],
+            });
+            const parts: string[] = [];
+            if (result.stdout) parts.push(result.stdout.trimEnd());
+            if (result.stderr) parts.push(result.stderr.trimEnd());
+            if (result.exitCode !== null && result.exitCode !== 0) {
+              parts.push(`exit code ${result.exitCode}`);
+            }
+            output.textContent = parts.join("\n") || "(no output)";
+          } catch (error) {
+            output.textContent = errorMessage(error);
+          } finally {
+            busy = false;
+            runButton.disabled = false;
+          }
+        };
+        runButton.addEventListener("click", () => void run());
+        input.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") void run();
+        });
+        ctx.contentEl.appendChild(
+          h(
+            "div",
+            { class: "package-app" },
+            h("div", { class: "package-app-row" }, input, runButton),
+            output,
+          ),
+        );
+      },
+    );
+  }
+
   const desktopActions: DesktopActions = {
     apps: visibleApps,
+    openPackageApp,
     isOnDesktop: (appId) => desktopIcons.has(appId),
     addToDesktop: (appId) => {
       if (desktopIcons.add(appId)) toast.success(`Added ${findApp(appId)?.name ?? appId} to the desktop`);

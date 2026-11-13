@@ -625,10 +625,12 @@ class PackageCenterApp {
     clear(grid);
     const view = this.currentView();
     const apps = this.appGrid ? filterApps(this.overview?.apps ?? [], view, this.query) : [];
+    const packageApps = this.appGrid ? this.appPackageViews(view) : [];
     if (this.appGrid && this.appSection) {
       clear(this.appGrid);
       for (const app of apps) this.appGrid.appendChild(this.appTile(app));
-      this.appSection.hidden = apps.length === 0;
+      for (const pkg of packageApps) this.appGrid.appendChild(this.appPackageTile(pkg));
+      this.appSection.hidden = apps.length === 0 && packageApps.length === 0;
     }
     const linuxApps = this.linux.filtered(view, this.query);
     if (this.linuxGrid && this.linuxSection) {
@@ -638,7 +640,11 @@ class PackageCenterApp {
       // listed and can be opened/updated, but no install entry is offered.
       this.linuxSection.hidden = linuxApps.length === 0;
     }
-    const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
+    // App-type packages are shown in the Apps section above, not as runtimes.
+    const runtimePackages = (this.overview?.packages ?? []).filter(
+      (pkg) => pkg.packageType !== "app",
+    );
+    const packages = sortForTiles(filterPackages(runtimePackages, view, this.query));
     if (this.runtimeSection) {
       this.runtimeSection.hidden = packages.length === 0 && (apps.length > 0 || linuxApps.length > 0) && (Boolean(this.query) || view === "updates");
     }
@@ -684,6 +690,67 @@ class PackageCenterApp {
   }
 
   // ------------------------------------------------------------------ apps
+
+  /** Installed app-type packages (from GitHub) shown next to the built-in apps. */
+  private appPackageViews(view: PackageFilter): PackageView[] {
+    const query = this.query.trim().toLowerCase();
+    return (this.overview?.packages ?? []).filter((pkg) => {
+      if (pkg.packageType !== "app" || pkg.installed.length === 0) return false;
+      if (view === "updates" && pkg.updateState !== "ready") return false;
+      if (!query) return true;
+      return (
+        pkg.name.toLowerCase().includes(query) ||
+        pkg.description.toLowerCase().includes(query)
+      );
+    });
+  }
+
+  private appPackageTile(pkg: PackageView): HTMLElement {
+    const installed = pkg.installed[pkg.installed.length - 1];
+    const nameButton = h(
+      "button",
+      { class: "pkg-tile-name", type: "button", title: `About ${pkg.name}` },
+      pkg.name,
+    );
+    nameButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      this.openDetail(pkg.id);
+    });
+    const tile = h(
+      "article",
+      {
+        class: "pkg-tile is-app is-installed",
+        dataset: { appId: pkg.id },
+      },
+      h(
+        "div",
+        { class: "pkg-icon pkg-icon-tile is-app", ariaHidden: true },
+        h(
+          "span",
+          { class: "pkg-monogram", style: `--monogram-color:${monogramColor(pkg.id)}` },
+          monogram(pkg.name),
+        ),
+      ),
+      h(
+        "div",
+        { class: "pkg-tile-body" },
+        nameButton,
+        h("div", { class: "pkg-tile-sub" }, `Package app · ${installed?.version ?? ""}`),
+        h(
+          "div",
+          { class: "pkg-tile-foot" },
+          this.pill("Open", "is-quiet", `Open ${pkg.name}`, () =>
+            this.ctx.desktop.openPackageApp(pkg.id, pkg.name),
+          ),
+        ),
+      ),
+    );
+    tile.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button, a")) return;
+      this.openDetail(pkg.id);
+    });
+    return tile;
+  }
 
   private appTile(app: AppPackage): HTMLElement {
     const open = h("button", { class: "pkg-tile-name", type: "button", title: `About ${app.name}` }, app.name);

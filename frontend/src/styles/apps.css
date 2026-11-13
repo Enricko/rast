@@ -4767,3 +4767,50 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
   flex: 1;
   min-width: 0;
 }
+
+/* App-type Package Center package: generic command window. */
+.package-app {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  padding: 14px;
+  box-sizing: border-box;
+}
+
+.package-app-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.package-app-input {
+  flex: 1;
+}
+
+.package-app-output {
+  flex: 1;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font: 13px/1.5 var(--font-mono, monospace);
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+}
+
+.pkg-icon .pkg-monogram {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--monogram-color, var(--accent));
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.9em;
+  letter-spacing: 0.02em;
+}

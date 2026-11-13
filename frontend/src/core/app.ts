@@ -20,6 +20,8 @@ export interface DesktopActions {
   isPinned(appId: string): boolean;
   pin(appId: string): void;
   unpin(appId: string): void;
+  /** Open an installed app-type Package Center package in a desktop window. */
+  openPackageApp(packageId: string, name: string): void;
 }
 
 export interface AppContext {

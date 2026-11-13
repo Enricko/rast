@@ -67,6 +67,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/packages/apps/{id}/install", post(install_app))
         .route("/api/packages/apps/{id}", delete(uninstall_app))
         .route("/api/packages/{id}", get(package).delete(uninstall))
+        .route("/api/packages/{id}/run", post(run_package_app))
         .route("/api/packages/{id}/install", post(install))
         .route("/api/packages/{id}/update", post(update))
         .route("/api/packages/{id}/default", put(set_default))
@@ -401,6 +402,28 @@ pub async fn delete_consumer(
 ) -> AppResult<Json<Value>> {
     state.packages.delete_consumer(&user, id).await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunAppRequest {
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+/// POST /api/packages/{id}/run — run an installed app-type package's command
+/// and return its output (App Center → Apps → Open).
+pub async fn run_package_app(
+    State(state): State<AppState>,
+    PackageManager(user): PackageManager,
+    Path(id): Path<String>,
+    Json(body): Json<RunAppRequest>,
+) -> AppResult<Json<Value>> {
+    access::app_surface(&state.db, &state, &user, "packages").await?;
+    let output = state.packages.run_package_app(&id, body.args).await?;
+    Ok(Json(
+        serde_json::to_value(output).map_err(|e| AppError::internal(e.to_string()))?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
