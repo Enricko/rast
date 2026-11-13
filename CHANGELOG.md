@@ -50,6 +50,19 @@ Docker-backed apps keep working and can be migrated from App Center.
 
 ### Fixed
 
+- Migration of a Docker app to the native backend works on a real host: the
+  Docker worker may write legacy volume exports under
+  `<data_dir>/linux-apps/migrations` (its sandbox previously returned EROFS),
+  legacy data is imported into the identity-owned profile by the privileged
+  helper (`profile_install`, with a server-writable staging tree), and the
+  adopted app gets the configured native memory/CPU limits instead of the old
+  Docker values (which made the first launch fail validation).
+- The first painting of a native window now always fills its RAST window; a
+  freshly started browser window that initially matched the Xpra virtual screen
+  could keep its old scale and show only in the top-left corner until resized.
+- `rast doctor` no longer warns that an unprivileged run "must be root": the
+  root requirement belongs to `rast-native.service`, whose state is checked
+  separately.
 - Native Chromium launches no longer hang or delegate to a dead instance when a
   previous browser process left `Singleton*` files in its profile: the
   privileged helper removes those stale files (narrowly scoped to the person's
