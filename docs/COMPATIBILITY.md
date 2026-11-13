@@ -25,7 +25,7 @@ means a release binary is produced there but runtime behaviour is unverified.
 | Alpine, other musl systems | — | **Unsupported** | No musl/static build is published; glibc binaries do not run |
 | Non-systemd init (OpenRC, runit, s6, containers without systemd) | — | **Unsupported** | The binary may run under a custom supervisor, but the installer and units assume systemd; unsupported configurations are not covered by support |
 | WSL2 | x86_64 | Untested | Recent WSL2 has systemd; treat as best effort |
-| macOS 15 (11+ expected) | Apple Silicon (arm64) | **Preview: CI only (native arm64)** | Builds from source; no release binary yet. CI runs clippy and the test suite on `macos-15` and starts the server through `scripts/run-local.sh` (setup token, setup, login). Runs as your user, not as a service; see [macOS](#macos-preview) |
+| macOS 15 (11+ expected) | Apple Silicon (arm64) | **Experimental, CI temporarily disabled** | No release binary; native Xpra integration is Linux-only. Source builds and the local runner are unverified after the native-backend changes; see [macOS](#macos-preview) |
 | macOS 11+ | Intel (x86_64) | Expected, untested | Same code path as Apple Silicon; not built in CI |
 
 ### macOS (preview)

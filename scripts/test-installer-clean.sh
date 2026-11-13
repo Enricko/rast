@@ -610,6 +610,16 @@ run_installer() {
     "${exec_cmd[@]}" >"$outfile" 2>&1
 }
 
+run_installer_with() {
+    # $1 output file, rest: extra installer arguments (always --no-start).
+    local outfile=$1
+    shift
+    "${DOCKER[@]}" exec "$CONTAINER" env RAST_RELEASE_BASE_URL=file:///releases \
+        RAST_VERSION="$VERSION" RAST_NO_START=1 \
+        sh "$CONTAINER_RELEASES/install.sh" --version "$VERSION" --no-start "$@" \
+        >"$outfile" 2>&1
+}
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -631,7 +641,14 @@ common_checks() {
     check_value "config mode/owner" "640 root:rast" "$(capture_sh 'stat -c "%a %U:%G" /etc/rast/rast.toml')"
     check_contains "config bind address" 'bind = "127.0.0.1:8720"' "$(capture_sh 'cat /etc/rast/rast.toml')"
     check_contains "config docker_enabled=false" "docker_enabled = false" "$(capture_sh 'cat /etc/rast/rast.toml')"
-    check_value "data dir mode/owner" "750 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /var/lib/rast')"
+    # The installer creates the data directory 0750; `rast packages path sync`
+    # (run by the installer) lets the server add the "others execute" bit so
+    # package runtimes and native app identities can traverse it (0751).
+    check_value "data dir mode/owner" "751 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /var/lib/rast')"
+    check_sh "linux-apps staging area absent when no Linux app backend is enabled" \
+        'test ! -e /var/lib/rast/linux-apps'
+    check_contains "service unit WorkingDirectory is the data directory" \
+        "WorkingDirectory=/var/lib/rast" "$(capture_sh 'cat /etc/systemd/system/rast.service')"
     check_value "storage dir mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast')"
     check_value "storage homes mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/homes')"
     check_value "storage shared mode/owner" "755 rast:rast" "$(capture_sh 'stat -c "%a %U:%G" /srv/rast/shared')"
@@ -719,6 +736,10 @@ idempotent_reinstall_checks() {
         reinstall_output=$(cat "$out")
         pass "reinstall exits 0"
         check_contains "reinstall preserves existing configuration" "preserving existing configuration" "$reinstall_output"
+        check_contains "reinstall preserves the configured data directory" \
+            "preserving configured data directory: /var/lib/rast" "$reinstall_output"
+        check_contains "reinstall preserves the configured backend choice" \
+            "preserving native backend setting: native_enabled = false" "$reinstall_output"
     else
         fail "reinstall exits 0" "see $out"
         sed -e 's/^/      /' "$out" | tail -n 30 >>"$EVIDENCE" || true
@@ -782,6 +803,103 @@ uninstall_checks() {
     check_sh "binary removed by --purge" 'test ! -e /usr/local/bin/rast'
     check_sh "service unit removed by --purge" 'test ! -e /etc/systemd/system/rast.service'
     check_sh "no RAST process left running" '! pgrep -x rast >/dev/null 2>&1'
+}
+
+# Custom data/storage directories and upgrade preservation. Runs after the
+# default installation was purged, so it starts from a clean machine.
+custom_data_checks() {
+    record "--- custom data/storage directory and upgrade checks ---"
+    local out="$WORK/custom-install.log"
+    if run_installer_with "$out" --data-dir /srv/rast-data --storage-dir /srv/rast-storage \
+        --enable-worker --no-native; then
+        pass "installer with custom data/storage directories exits 0"
+    else
+        fail "installer with custom data/storage directories exits 0" "see $out"
+        sed -e 's/^/      /' "$out" | tail -n 40 >>"$EVIDENCE" || true
+        return 0
+    fi
+    # 0751 for the same reason as the default data directory above.
+    check_value "custom data dir mode/owner" "751 rast:rast" \
+        "$(capture_sh 'stat -c "%a %U:%G" /srv/rast-data')"
+    check_value "custom storage dir mode/owner" "755 rast:rast" \
+        "$(capture_sh 'stat -c "%a %U:%G" /srv/rast-storage')"
+    check_contains "config points at the custom data dir" 'data_dir = "/srv/rast-data"' \
+        "$(capture_sh 'cat /etc/rast/rast.toml')"
+    check_contains "config points at the custom storage dir" 'storage_dir = "/srv/rast-storage"' \
+        "$(capture_sh 'cat /etc/rast/rast.toml')"
+    check_value "linux-apps base exists for the enabled worker" "750 rast:rast" \
+        "$(capture_sh 'stat -c "%a %U:%G" /srv/rast-data/linux-apps')"
+    check_contains "main unit WorkingDirectory uses the custom data dir" \
+        "WorkingDirectory=/srv/rast-data" "$(capture_sh 'cat /etc/systemd/system/rast.service')"
+    check_contains "main path drop-in lists both custom paths" \
+        "ReadWritePaths=/srv/rast-data /srv/rast-storage" \
+        "$(capture_sh 'cat /etc/systemd/system/rast.service.d/10-rast-paths.conf')"
+    check_contains "worker unit WorkingDirectory uses the custom data dir" \
+        "WorkingDirectory=/srv/rast-data" "$(capture_sh 'cat /etc/systemd/system/rast-worker.service')"
+    check_contains "worker unit ReadWritePaths covers apps and linux-apps" \
+        "ReadWritePaths=/srv/rast-data/apps /srv/rast-data/linux-apps" \
+        "$(capture_sh 'cat /etc/systemd/system/rast-worker.service')"
+    check_contains "worker path drop-in keeps linux-apps" \
+        "/srv/rast-data/linux-apps" \
+        "$(capture_sh 'cat /etc/systemd/system/rast-worker.service.d/10-rast-paths.conf')"
+    check_sh "native unit not installed without Xpra" \
+        'test ! -e /etc/systemd/system/rast-native.service'
+
+    # An operator enables the native backend in the existing configuration;
+    # the next installer run must preserve that choice (warning about Xpra).
+    check_sh "enable native_enabled in the existing config" \
+        "sed -i 's/^native_enabled = .*/native_enabled = true/' /etc/rast/rast.toml"
+    local config_sum_before config_sum_after
+    config_sum_before=$(capture_sh 'sha256sum /etc/rast/rast.toml | cut -d" " -f1')
+    local again="$WORK/custom-reinstall.log"
+    if run_installer_with "$again"; then
+        pass "reinstall with a preserved native backend exits 0"
+        check_contains "reinstall preserves native_enabled=true from the config" \
+            "preserving native backend setting: native_enabled = true" "$(cat "$again")"
+        check_contains "reinstall warns that Xpra is missing but keeps the choice" \
+            "preserved from" "$(cat "$again")"
+    else
+        fail "reinstall with a preserved native backend exits 0" "see $again"
+        sed -e 's/^/      /' "$again" | tail -n 40 >>"$EVIDENCE" || true
+    fi
+    config_sum_after=$(capture_sh 'sha256sum /etc/rast/rast.toml | cut -d" " -f1')
+    check_value "reinstall did not rewrite the existing configuration" \
+        "$config_sum_before" "$config_sum_after"
+    check_sh "native unit installed for the preserved backend" \
+        'test -f /etc/systemd/system/rast-native.service'
+    check_contains "native unit WorkingDirectory uses the custom data dir" \
+        "WorkingDirectory=/srv/rast-data" \
+        "$(capture_sh 'cat /etc/systemd/system/rast-native.service')"
+    check_contains "native tmpfiles asset rewritten for the custom data dir" \
+        "/srv/rast-data/linux-apps" "$(capture_sh 'cat /etc/tmpfiles.d/rast-native.conf')"
+
+    # Explicit conflicting values against an existing configuration must fail
+    # with an actionable error and change nothing.
+    local mismatch="$WORK/custom-mismatch.log"
+    if run_installer_with "$mismatch" --data-dir /srv/other-data; then
+        fail "conflicting --data-dir against the existing config is rejected" \
+            "installer exited 0"
+    else
+        pass "conflicting --data-dir against the existing config is rejected"
+    fi
+    check_contains "conflicting --data-dir error is actionable" \
+        "never rewrites an existing configuration" "$(cat "$mismatch")"
+    check_sh "conflicting run changed nothing" \
+        'test -d /srv/rast-data && test ! -e /srv/other-data'
+
+    record "--- purge of the custom installation ---"
+    local purge="$WORK/custom-purge.log"
+    if printf 'PURGE\n' | "${DOCKER[@]}" exec -i "$CONTAINER" \
+        sh "$CONTAINER_RELEASES/uninstall.sh" --purge >"$purge" 2>&1; then
+        pass "uninstaller --purge exits 0 for the custom installation"
+    else
+        fail "uninstaller --purge exits 0 for the custom installation" "see $purge"
+        sed -e 's/^/      /' "$purge" | tail -n 30 >>"$EVIDENCE" || true
+    fi
+    check_sh "custom data directory removed by purge" 'test ! -e /srv/rast-data'
+    check_sh "custom storage directory removed by purge" 'test ! -e /srv/rast-storage'
+    check_sh "custom-path drop-ins removed by purge" \
+        'test ! -e /etc/systemd/system/rast.service.d/10-rast-paths.conf'
 }
 
 # ---------------------------------------------------------------------------
@@ -866,6 +984,7 @@ fi
 login_checks
 idempotent_reinstall_checks
 uninstall_checks
+custom_data_checks
 
 record ""
 record "=== summary: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped ==="

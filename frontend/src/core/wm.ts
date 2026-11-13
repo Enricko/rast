@@ -394,7 +394,7 @@ export class WindowManager {
 
   focus(id: string): void {
     const record = this.records.get(id);
-    if (!record) return;
+    if (!record || this.focusedId === id) return;
     this.focusedId = id;
     this.zCounter += 1;
     record.el.style.zIndex = String(this.zCounter);

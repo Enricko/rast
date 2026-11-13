@@ -104,6 +104,7 @@ export interface NativeShimApi {
   detachWindow(wid: string): boolean;
   setMinimized(wid: string, minimized: boolean): boolean;
   requestRefresh(wid: string): boolean;
+  unlockAudio?(): boolean;
   sendKey(pressed: boolean, init: KeyboardInit): boolean;
   sendClipboardText(text: string): boolean;
   clipboardText(): string;
@@ -234,6 +235,7 @@ export class NativeLinuxHost {
   private nativeUnavailable = false;
   private lastRemoteClipboard = "";
   private focusedWid: string | null = null;
+  private lastRemoteFocus: string | null = null;
   private readonly onPasteHandler: (event: ClipboardEvent) => void;
   private readonly onKeyDownHandler: (event: KeyboardEvent) => void;
   private readonly onKeyUpHandler: (event: KeyboardEvent) => void;
@@ -442,11 +444,13 @@ export class NativeLinuxHost {
     iframe.title = "Native desktop session";
     // The Xpra client must stay same-origin and unsandboxed: the RAST desktop
     // adopts the remote windows' DOM nodes and forwards input.
-    iframe.setAttribute("allow", "clipboard-read; clipboard-write");
+    iframe.setAttribute("allow", "autoplay; clipboard-read; clipboard-write");
     iframe.addEventListener("load", () => {
       this.attachShim(0);
     });
-    iframe.src = url;
+    const viewerUrl = new URL(url, window.location.href);
+    viewerUrl.searchParams.set("sound", "true");
+    iframe.src = viewerUrl.href;
     this.deps.host.appendChild(iframe);
     this.iframe = iframe;
     this.attachShim(0);
@@ -488,6 +492,7 @@ export class NativeLinuxHost {
   private connectShim(shim: NativeShimApi): void {
     if (this.shim === shim) return;
     this.shim = shim;
+    this.lastRemoteFocus = null;
     this.quiet = true;
     this.closeAllWindows(true);
     this.quiet = false;
@@ -828,6 +833,11 @@ export class NativeLinuxHost {
 
   private syncRemoteFocus(snapshot: NativeShimState): void {
     const focused = snapshot.windows.find((window) => window.focused);
+    const wid = focused?.wid ?? null;
+    // Snapshots are repeated as a recovery fallback, not a request to raise
+    // Chrome every second (which stole focus from other desktop applications).
+    if (wid === this.lastRemoteFocus) return;
+    this.lastRemoteFocus = wid;
     if (!focused) return;
     const frame = this.frames.get(focused.wid);
     if (!frame?.handle || frame.closing) return;

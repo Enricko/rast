@@ -29,7 +29,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.0.0";
+  var VERSION = "1.1.0";
   var ROOT = window;
 
   /* ------------------------------------------------------------------ state */
@@ -191,6 +191,14 @@
     } catch (e) {
       /* ignore */
     }
+    // The viewer is intentionally offscreen; Chromium may throttle that
+    // document's animation frames even though its adopted canvases are visible.
+    // Schedule its paints on the visible desktop's clock instead.
+    var parent = parentWindow();
+    if (parent && parent.requestAnimationFrame) {
+      window.requestAnimationFrame = parent.requestAnimationFrame.bind(parent);
+      window.cancelAnimationFrame = parent.cancelAnimationFrame.bind(parent);
+    }
     patchClient(client);
     state.ready = true;
     log("captured XpraClient, version", VERSION);
@@ -209,6 +217,7 @@
   function findClient() {
     try {
       if (window.client && window.client.container) return window.client;
+      if (window.__RAST_XPRA_CAPTURED_CLIENT) return window.__RAST_XPRA_CAPTURED_CLIENT;
     } catch (e) {
       /* ignore */
     }
@@ -229,8 +238,8 @@
       var OriginalClient = typeof ROOT.XpraClient === "function" ? ROOT.XpraClient : null;
       if (OriginalClient) {
         var WrappedClient = class extends OriginalClient {
-          constructor() {
-            super.apply(null, arguments);
+          constructor(...args) {
+            super(...args);
             try {
               window.__RAST_XPRA_CAPTURED_CLIENT = this;
               whenClient(this);
@@ -378,6 +387,11 @@
       desktopHeight: desktopHeight,
       clipboardEnabled: !!(client && client.clipboard_enabled),
       captureKeyboard: !!(client && client.capture_keyboard),
+      audio: {
+        enabled: !!(client && client.audio_enabled),
+        state: client ? client.audio_state : "",
+        codec: client ? client.audio_codec : null,
+      },
       windows: windows,
     };
   }
@@ -542,9 +556,16 @@
     if (typeof original !== "function" || original.__rastWrapped) return;
     var wrapped = function (event, win) {
       try {
+        // Xpra passes win for button/wheel events, but NOT pointer motion or
+        // stale-button release. Resolve those from the adopted event target.
+        var nativeEvent = event && (event.originalEvent || event);
+        if (!win && nativeEvent && nativeEvent.target) {
+          var target = nativeEvent.target;
+          var adopted = target.closest && target.closest("[data-rast-native-wid]");
+          if (adopted) win = getWindow(adopted.getAttribute("data-rast-native-wid"));
+        }
         var content = win && win.__rastContentEl;
-        if (content && event) {
-          var nativeEvent = event.originalEvent || event;
+        if (content && nativeEvent) {
           if (nativeEvent && typeof nativeEvent.clientX === "number") {
             var rect = content.getBoundingClientRect();
             var button = 0;
@@ -553,9 +574,13 @@
             } else if (typeof nativeEvent.button === "number") {
               button = Math.max(0, nativeEvent.button) + 1;
             }
+            win.__rastLastPointerEvent = nativeEvent;
             return {
-              x: nativeEvent.clientX - rect.left + (content.scrollLeft || 0),
-              y: nativeEvent.clientY - rect.top + (content.scrollTop || 0),
+              // Keep absolute X11 desktop coordinates AND consistent relative
+              // coordinates (the client subtracts get_internal_geometry).
+              // During a resize the backing canvas may still have the old size.
+              x: win.x + (nativeEvent.clientX - rect.left) * win.w / (rect.width || win.w),
+              y: win.y + (nativeEvent.clientY - rect.top) * win.h / (rect.height || win.h),
               button: button,
             };
           }
@@ -571,6 +596,38 @@
     } catch (e) {
       warn("could not patch getMouse", e);
     }
+  }
+
+  /** Preserve button-up while dragging tabs beyond an adopted canvas. The
+   * iframe's document/screen handlers cannot see events in the parent page. */
+  function installInputRecovery(win) {
+    if (!win.canvas || win.__rastInputRecovery) return;
+    var canvas = win.canvas;
+    var parent = canvas.ownerDocument.defaultView;
+    var down = function (event) {
+      if (event.pointerType === "touch") return;
+      try { canvas.setPointerCapture(event.pointerId); } catch (e) { /* unsupported */ }
+      unlockAudio();
+    };
+    var release = function () {
+      var client = state.client;
+      if (client && typeof client.release_buttons === "function") client.release_buttons(win.__rastLastPointerEvent, win);
+    };
+    canvas.addEventListener("pointerdown", down);
+    canvas.addEventListener("pointercancel", release);
+    if (parent) parent.addEventListener("blur", release);
+    var destroy = win.destroy;
+    win.destroy = function () {
+      if (win.__rastInputRecovery) win.__rastInputRecovery();
+      win.__rastInputRecovery = null;
+      return destroy.apply(this, arguments);
+    };
+    win.__rastInputRecovery = function () {
+      canvas.removeEventListener("pointerdown", down);
+      canvas.removeEventListener("pointercancel", release);
+      if (parent) parent.removeEventListener("blur", release);
+      win.destroy = destroy;
+    };
   }
 
   /* ------------------------------------------------------- polling fallback */
@@ -667,10 +724,6 @@
       if (win.w !== width || win.h !== height) {
         win.w = width;
         win.h = height;
-        if (win.__rastContentEl) {
-          win.x = 0;
-          win.y = 0;
-        }
         try {
           if (typeof win.updateCSSGeometry === "function") win.updateCSSGeometry();
         } catch (e) {
@@ -786,13 +839,13 @@
         /* ignore */
       }
       win.__rastContentEl = container;
-      win.x = 0;
-      win.y = 0;
+      win.div.setAttribute("data-rast-native-wid", String(wid));
       patchWindowForFill(win);
       if (win.div.parentNode !== container) {
         var adopted = doc.adoptNode(win.div);
         container.appendChild(adopted);
       }
+      installInputRecovery(win);
       try {
         win.updateCSSGeometry();
       } catch (e) {
@@ -899,6 +952,9 @@
     try {
       var screen = document.querySelector("#screen");
       var original = win.__rastOriginal;
+      if (win.__rastInputRecovery) win.__rastInputRecovery();
+      win.__rastInputRecovery = null;
+      win.div.removeAttribute("data-rast-native-wid");
       win.__rastContentEl = null;
       win.__rastFillPatched = false;
       win._set_decorated = original._set_decorated;
@@ -1047,6 +1103,34 @@
     }
   }
 
+  /* -------------------------------------------------------------- playback */
+
+  /** Called synchronously from a trusted parent gesture. Microphone capture is
+   * never requested: this only unlocks output from the user's private session. */
+  function unlockAudio() {
+    var client = state.client;
+    if (!client) return false;
+    try {
+      if (client.audio_context && client.audio_context.state === "suspended") {
+        client.audio_context.resume().catch(function () { /* next gesture can retry */ });
+      }
+      if (client.audio && client.audio.paused) {
+        var playing = client.audio.play();
+        if (playing && playing.catch) playing.catch(function () { /* autoplay blocked */ });
+      } else if (client.connected && client.audio_enabled && client.audio_codec &&
+          !client.audio && !client.audio_aurora_ctx && !client.__rastAudioStarting &&
+          typeof client._sound_start_receiving === "function") {
+        client.__rastAudioStarting = true;
+        try { client._sound_start_receiving(); }
+        finally { client.__rastAudioStarting = false; }
+      }
+      return true;
+    } catch (error) {
+      warn("could not unlock audio", error);
+      return false;
+    }
+  }
+
   /* ------------------------------------------------------------ page commands */
 
   function reconnect() {
@@ -1111,6 +1195,7 @@
     sendKey: sendKey,
     setKeyboardCapture: setKeyboardCapture,
     requestRefresh: requestRefresh,
+    unlockAudio: unlockAudio,
     sendClipboardText: sendClipboardText,
     clipboardText: clipboardText,
     requestClipboard: requestClipboard,

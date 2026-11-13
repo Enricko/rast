@@ -1044,6 +1044,7 @@ impl NativeSessions {
             runtime.join("sockets"),
             runtime.join("tmp"),
             runtime.join("cache"),
+            runtime.join("pulse"),
         ];
         // Deduplicate while keeping order (runtime first: the helper creates
         // parents as root and only chowns the final component).
@@ -1328,6 +1329,11 @@ impl NativeSessions {
         for (name, value) in &request.env {
             env.insert(name.clone(), value.clone());
         }
+        // Launcher/profile settings must not select a host sound server or
+        // autospawn another daemon. The helper pins these again at its boundary.
+        env.extend(crate::native::audio::environment(&runtime_dir(
+            identity.uid,
+        )));
 
         let run_id = random_hex(RUN_HEX_CHARS / 2);
         let started_at = db::now_ms();
@@ -2090,7 +2096,10 @@ fn runtime_dir(uid: u32) -> PathBuf {
 ///   port, so Xpra itself must not ask the HTML5 client for a password.
 /// * `--html=on`: the same TCP port serves the HTML5 client (HTTP) and its
 ///   WebSocket.
-/// * everything not needed is disabled (audio, printing, webcam, mDNS, ...).
+/// * playback travels as Xpra packets over that same authenticated WebSocket;
+///   microphone forwarding remains disabled, as do printing, webcam and mDNS.
+/// * a foreground, playback-only PulseAudio child captures only the person's
+///   virtual speaker; no default.pa or host/global sound device is loaded.
 fn xpra_args(display: u32, port: u16, runtime: &Path) -> Vec<String> {
     vec![
         "start".to_string(),
@@ -2107,12 +2116,17 @@ fn xpra_args(display: u32, port: u16, runtime: &Path) -> Vec<String> {
         format!("--log-file={}", runtime.join("xpra.log").display()),
         "--xvfb=Xvfb".to_string(),
         "--dpi=96".to_string(),
-        "--audio=no".to_string(),
-        "--speaker=disabled".to_string(),
+        "--audio=yes".to_string(),
+        "--speaker=on".to_string(),
         "--microphone=disabled".to_string(),
+        "--audio-source=pulse:device=Xpra-Speaker.monitor".to_string(),
         "--webcam=no".to_string(),
         "--printing=no".to_string(),
-        "--pulseaudio=no".to_string(),
+        "--pulseaudio=yes".to_string(),
+        format!(
+            "--pulseaudio-command={}",
+            crate::native::audio::pulseaudio_command()
+        ),
         "--dbus=no".to_string(),
     ]
 }
@@ -2133,6 +2147,11 @@ fn session_env(identity: &Identity, runtime: &Path) -> BTreeMap<String, String> 
         runtime.join("cache").display().to_string(),
     );
     env.insert("TMPDIR".into(), runtime.join("tmp").display().to_string());
+    env.extend(crate::native::audio::environment(runtime));
+    // Keep Xpra's own Pulse bookkeeping at the stable per-user socket that
+    // independently launched app units use, even inside a container. Only one
+    // seamless session exists per identity; the enclosing runtime is 0700.
+    env.insert("XPRA_PRIVATE_PULSEAUDIO".into(), "0".into());
     env
 }
 
@@ -2663,6 +2682,70 @@ mod tests {
         assert!(args.contains(&"--log-file=/run/rast-linux/200901/xpra.log".to_string()));
         assert!(args.contains(&"--xvfb=Xvfb".to_string()));
         assert!(!args.iter().any(|arg| arg == "--daemon=yes"));
+        assert!(args.contains(&"--audio=yes".to_string()));
+        assert!(args.contains(&"--speaker=on".to_string()));
+        assert!(args.contains(&"--microphone=disabled".to_string()));
+        assert!(args.contains(&"--audio-source=pulse:device=Xpra-Speaker.monitor".to_string()));
+        assert!(args.contains(&"--pulseaudio=yes".to_string()));
+        // List-valued CLI options append to distro config in Xpra 6.5.5.
+        // The helper replaces this via its fixed final config layer instead.
+        assert!(!args
+            .iter()
+            .any(|arg| arg.starts_with("--pulseaudio-configure-commands=")));
+        assert!(args.contains(&format!(
+            "--pulseaudio-command={}",
+            crate::native::audio::pulseaudio_command()
+        )));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--audio=no" || arg == "--pulseaudio=no"));
+    }
+
+    #[test]
+    fn session_audio_uses_the_same_stable_private_endpoint_as_apps() {
+        let identity = Identity {
+            username: "rast-u1".into(),
+            uid: 200_001,
+            gid: 200_001,
+            home: PathBuf::from("/var/lib/rast/linux-users/1"),
+        };
+        let runtime = runtime_dir(identity.uid);
+        let env = session_env(&identity, &runtime);
+        for (key, value) in crate::native::audio::environment(&runtime) {
+            assert_eq!(env.get(&key), Some(&value));
+        }
+        assert_eq!(env["XPRA_PRIVATE_PULSEAUDIO"], "0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launch_pins_playback_to_the_users_runtime_after_launcher_env() {
+        let (_dir, helper, sessions, _cfg) = manager().await;
+        let mut request = launch_request("one");
+        request.env = vec![
+            (
+                "PULSE_SERVER".into(),
+                "unix:/run/user/1000/pulse/native".into(),
+            ),
+            ("PULSE_COOKIE".into(), "/tmp/someone-else/cookie".into()),
+            ("PULSE_SOURCE".into(), "host-microphone".into()),
+        ];
+        sessions.launch(&test_user(1), request).await.unwrap();
+        let calls = helper.calls();
+        for op in ["session_start", "app_start"] {
+            let (_, params) = calls.iter().find(|(name, _)| name == op).unwrap();
+            for (key, value) in crate::native::audio::environment(&runtime_dir(200_001)) {
+                assert_eq!(params["env"][key], value);
+            }
+        }
+        let pulse_mkdir = calls
+            .iter()
+            .find(|(name, params)| {
+                name == "path_mkdir" && params["path"] == "/run/rast-linux/200001/pulse"
+            })
+            .unwrap();
+        assert_eq!(pulse_mkdir.1["uid"], 200_001);
+        assert_eq!(pulse_mkdir.1["gid"], 200_001);
+        assert_eq!(pulse_mkdir.1["mode"], 0o700);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

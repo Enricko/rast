@@ -41,6 +41,18 @@ NATIVE_TMPFILES="/etc/tmpfiles.d/rast-native.conf"
 # Environment defaults (documented in --help and docs/INSTALL.md)
 # ---------------------------------------------------------------------------
 RAST_VERSION=${RAST_VERSION:-$RAST_DEFAULT_VERSION}
+_BIND_EXPLICIT=0
+_DATA_DIR_EXPLICIT=0
+_STORAGE_DIR_EXPLICIT=0
+_DOCKER_EXPLICIT=0
+_WORKER_EXPLICIT=0
+_NATIVE_EXPLICIT=0
+[ -z "${RAST_BIND:-}" ] || _BIND_EXPLICIT=1
+[ -z "${RAST_DATA_DIR:-}" ] || _DATA_DIR_EXPLICIT=1
+[ -z "${RAST_STORAGE_DIR:-}" ] || _STORAGE_DIR_EXPLICIT=1
+[ -z "${RAST_DOCKER_ENABLED:-}" ] || _DOCKER_EXPLICIT=1
+[ -z "${RAST_ENABLE_WORKER:-}" ] || _WORKER_EXPLICIT=1
+[ -z "${RAST_NATIVE:-}" ] || _NATIVE_EXPLICIT=1
 RAST_BIND=${RAST_BIND:-$DEFAULT_BIND}
 RAST_PUBLIC_URL=${RAST_PUBLIC_URL:-}
 RAST_DATA_DIR=${RAST_DATA_DIR:-$DEFAULT_DATA_DIR}
@@ -63,6 +75,8 @@ RAST_TMP=""
 SUDO=""
 NOLOGIN=""
 PARSED_BOOL=""
+NATIVE_FROM_CONFIG=0
+AUDIO_SUMMARY="not evaluated"
 
 # System administration binaries live in sbin directories that are not on the
 # PATH of unprivileged or non-login shells; the installer must find useradd,
@@ -148,7 +162,20 @@ rast-native.service (root), rast-linux.slice and a systemd-tmpfiles
 configuration, and restricts the helper socket to the rast web account
 (RAST_NATIVE_ALLOWED_UID drop-in). Native Linux apps need Xpra from the xpra.org
 apt repository; without it the backend stays disabled and Docker keeps working.
+If native apps are enabled, the installer also installs the audio runtime
+packages they need (PulseAudio client tools, GStreamer plugins and
+xpra-audio-server when the modular Xpra packaging offers it). It simulates the
+APT transaction first and refuses to run it when anything would be removed;
+failures are reported with the exact manual command and never abort the
+installation.
 See docs/INSTALL.md, section 'Native Linux apps (Xpra)'.
+
+Re-running the installer upgrades in place: an existing rast.toml is preserved
+and its data_dir, storage_dir, bind and native_enabled values are used for the
+rendered units and the health check. Explicit --data-dir/--storage-dir/--bind/
+--native/--no-native values that contradict the existing configuration are
+refused with instructions (nothing is changed); older configurations without a
+native_enabled key get it added once to match the installer's decision.
 
 The installer requires: systemd, an x86_64 or aarch64 CPU, glibc, and curl or
 wget. It runs only the documented steps, always verifies the SHA-256 checksum of
@@ -200,8 +227,12 @@ while [ "$#" -gt 0 ]; do
             shift
             [ "$#" -gt 0 ] || die "--bind requires a value"
             RAST_BIND=$1
+            _BIND_EXPLICIT=1
             ;;
-        --bind=*) RAST_BIND=${1#*=} ;;
+        --bind=*)
+            RAST_BIND=${1#*=}
+            _BIND_EXPLICIT=1
+            ;;
         --public-url)
             shift
             [ "$#" -gt 0 ] || die "--public-url requires a value"
@@ -212,26 +243,52 @@ while [ "$#" -gt 0 ]; do
             shift
             [ "$#" -gt 0 ] || die "--data-dir requires a value"
             RAST_DATA_DIR=$1
+            _DATA_DIR_EXPLICIT=1
             ;;
-        --data-dir=*) RAST_DATA_DIR=${1#*=} ;;
+        --data-dir=*)
+            RAST_DATA_DIR=${1#*=}
+            _DATA_DIR_EXPLICIT=1
+            ;;
         --storage-dir)
             shift
             [ "$#" -gt 0 ] || die "--storage-dir requires a value"
             RAST_STORAGE_DIR=$1
+            _STORAGE_DIR_EXPLICIT=1
             ;;
-        --storage-dir=*) RAST_STORAGE_DIR=${1#*=} ;;
+        --storage-dir=*)
+            RAST_STORAGE_DIR=${1#*=}
+            _STORAGE_DIR_EXPLICIT=1
+            ;;
         --trusted-proxies)
             shift
             [ "$#" -gt 0 ] || die "--trusted-proxies requires a value"
             RAST_TRUSTED_PROXIES=$1
             ;;
         --trusted-proxies=*) RAST_TRUSTED_PROXIES=${1#*=} ;;
-        --docker) RAST_DOCKER_ENABLED=1 ;;
-        --no-docker) RAST_DOCKER_ENABLED=0 ;;
-        --enable-worker) RAST_ENABLE_WORKER=1 ;;
-        --no-worker) RAST_ENABLE_WORKER=0 ;;
-        --native) RAST_NATIVE=1 ;;
-        --no-native) RAST_NATIVE=0 ;;
+        --docker)
+            RAST_DOCKER_ENABLED=1
+            _DOCKER_EXPLICIT=1
+            ;;
+        --no-docker)
+            RAST_DOCKER_ENABLED=0
+            _DOCKER_EXPLICIT=1
+            ;;
+        --enable-worker)
+            RAST_ENABLE_WORKER=1
+            _WORKER_EXPLICIT=1
+            ;;
+        --no-worker)
+            RAST_ENABLE_WORKER=0
+            _WORKER_EXPLICIT=1
+            ;;
+        --native)
+            RAST_NATIVE=1
+            _NATIVE_EXPLICIT=1
+            ;;
+        --no-native)
+            RAST_NATIVE=0
+            _NATIVE_EXPLICIT=1
+            ;;
         --no-start) RAST_NO_START=1 ;;
         --dry-run) RAST_DRY_RUN=1 ;;
         --verify-attestation) RAST_VERIFY_ATTESTATION=1 ;;
@@ -262,6 +319,44 @@ sed_escape() {
     printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/[|&]/\\&/g'
 }
 
+# Read `key = "value"` from a TOML configuration file.
+config_value() {
+    # $1 file, $2 key
+    [ -r "$1" ] || return 0
+    awk -v key="$2" '
+        $1 == key && $2 == "=" {
+            line = $0
+            sub(/^[^"]*"/, "", line)
+            sub(/".*$/, "", line)
+            print line
+            exit
+        }
+    ' "$1"
+}
+
+# Read `key = true|false` from a TOML configuration file.
+config_bool_value() {
+    # $1 file, $2 key
+    [ -r "$1" ] || return 0
+    awk -v key="$2" '
+        $1 == key && $2 == "=" {
+            value = $3
+            gsub(/[ \t;]/, "", value)
+            if (value == "true" || value == "false") print value
+            exit
+        }
+    ' "$1"
+}
+
+# Read `KEY=value` from an EnvironmentFile (last assignment wins).
+env_file_value() {
+    # $1 file, $2 KEY
+    [ -r "$1" ] || return 0
+    sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" |
+        tail -n 1 |
+        sed -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//'
+}
+
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum -- "$1" | awk '{print $1}'
@@ -272,6 +367,52 @@ sha256_file() {
     else
         die "no SHA-256 tool found (need sha256sum, shasum or openssl)"
     fi
+}
+
+# Configurations created before the native backend existed have no
+# native_enabled key; the server would fall back to its default. Record the
+# installer's decision explicitly so both agree (the key is added once).
+add_missing_native_key() {
+    if [ "$HAS_CONFIG" -ne 1 ] || [ "$CONFIG_NATIVE_KEY" -eq 1 ]; then
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "dry run: would add native_enabled = $NATIVE_ENABLED_BOOL to $CONFIG_FILE (key was missing)"
+        return 0
+    fi
+    _cfg_tmp=$RAST_TMP/rast.toml.native-key
+    awk -v line="native_enabled = $NATIVE_ENABLED_BOOL" '
+        !done && /^[[:space:]]*docker_enabled[[:space:]]*=/ {
+            print
+            print ""
+            print "# Added by the RAST installer upgrade: the native Linux apps backend"
+            print "# (requires Xpra) is enabled explicitly for this server."
+            print line
+            done = 1
+            next
+        }
+        !done && /^[[:space:]]*\[/ {
+            print "# Added by the RAST installer upgrade: the native Linux apps backend"
+            print "# (requires Xpra) is enabled explicitly for this server."
+            print line
+            print ""
+            done = 1
+        }
+        { print }
+        END {
+            if (!done) {
+                print ""
+                print "# Added by the RAST installer upgrade: the native Linux apps backend"
+                print "# (requires Xpra) is enabled explicitly for this server."
+                print line
+            }
+        }
+    ' "$CONFIG_FILE" >"$_cfg_tmp"
+    _cfg_mode=$(stat -c '%a' "$CONFIG_FILE")
+    _cfg_owner=$(stat -c '%U' "$CONFIG_FILE")
+    _cfg_group=$(stat -c '%G' "$CONFIG_FILE")
+    run install -m "$_cfg_mode" -o "$_cfg_owner" -g "$_cfg_group" "$_cfg_tmp" "$CONFIG_FILE"
+    log "added native_enabled = $NATIVE_ENABLED_BOOL to $CONFIG_FILE (key was missing)"
 }
 
 # ---------------------------------------------------------------------------
@@ -318,6 +459,122 @@ detect_docker() {
         printf '1\n'
     else
         printf '0\n'
+    fi
+}
+
+# The official xpra.org repository ships modular packages (xpra-html5,
+# xpra-codecs, xpra-audio-server, ...), while distributions usually package
+# Xpra as one `xpra` package. Detection decides whether xpra-audio-server is
+# requested and what to tell the operator.
+detect_xpra_packaging() {
+    _packaging=distro
+    _audio_available=0
+    if command -v xpra-audio-server >/dev/null 2>&1; then
+        _packaging=modular
+        _audio_available=1
+    elif command -v dpkg-query >/dev/null 2>&1 &&
+        dpkg-query -W -f='${Status}' xpra-audio-server 2>/dev/null |
+        grep -q 'install ok installed'; then
+        _packaging=modular
+        _audio_available=1
+    elif command -v apt-cache >/dev/null 2>&1 &&
+        apt-cache show xpra-audio-server >/dev/null 2>&1; then
+        _packaging=modular
+        _audio_available=1
+    elif command -v dpkg-query >/dev/null 2>&1 &&
+        dpkg-query -W -f='${Status}' xpra-codecs 2>/dev/null |
+        grep -q 'install ok installed'; then
+        _packaging=modular
+    fi
+    printf '%s|%s\n' "$_packaging" "$_audio_available"
+}
+
+# Install the host audio runtime packages the native session needs (PulseAudio
+# client tools + GStreamer plugins, plus xpra-audio-server for the modular
+# Xpra packaging). Purely additive: the transaction is simulated first and
+# refused when it would remove any package. Failures are warnings with the
+# exact manual command; they never abort the installation.
+install_native_audio_deps() {
+    AUDIO_SUMMARY="not needed (native backend disabled)"
+    [ "$NATIVE_ENABLED" -eq 1 ] || return 0
+    if [ "$XPRA_FOUND" -ne 1 ]; then
+        AUDIO_SUMMARY="skipped (Xpra is not installed)"
+        warn "native audio dependencies were not installed because Xpra is missing"
+        return 0
+    fi
+    if [ "$OS_FAMILY" != "debian" ]; then
+        AUDIO_SUMMARY="manual (automatic install is only supported on Debian/Ubuntu)"
+        warn "native audio dependencies: automatic installation is only supported on Debian/Ubuntu"
+        warn "(detected distribution: $OS_PRETTY). Install the equivalent packages for your"
+        warn "system: PulseAudio (or PipeWire) client tools and GStreamer pulse/plugins-good."
+        return 0
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        AUDIO_SUMMARY="manual (apt-get not found)"
+        warn "install the native audio runtime packages manually (pulseaudio-utils,"
+        warn "gstreamer1.0-pulseaudio, python3-gst-1.0, gstreamer1.0-plugins-good)"
+        return 0
+    fi
+    _audio_packages="pulseaudio pulseaudio-utils gstreamer1.0-pulseaudio python3-gst-1.0 gstreamer1.0-plugins-good"
+    if [ "$XPRA_AUDIO_PKG_AVAILABLE" -eq 1 ]; then
+        _audio_packages="$_audio_packages xpra-audio-server"
+    else
+        warn "xpra-audio-server is not offered by the configured APT sources"
+        warn "(distribution Xpra packaging); relying on the distribution's Xpra"
+        warn "audio support and the GStreamer packages below"
+    fi
+    _missing=""
+    for _pkg in $_audio_packages; do
+        if ! dpkg-query -W -f='${Status}' "$_pkg" 2>/dev/null |
+            grep -q 'install ok installed'; then
+            _missing="$_missing $_pkg"
+        fi
+    done
+    if [ -z "$_missing" ]; then
+        AUDIO_SUMMARY="installed"
+        log "native audio dependencies are already installed"
+        return 0
+    fi
+    _manual_cmd="apt-get install -y --no-install-recommends$_missing"
+    # Fixed package identifiers above, deliberately split once into argv.
+    # shellcheck disable=SC2086
+    set -- $_missing
+    if _sim_output=$(apt-get -s install -y --no-install-recommends "$@" 2>&1); then
+        _sim_failed=0
+    else
+        _sim_failed=1
+    fi
+    if [ "$_sim_failed" -eq 1 ]; then
+        AUDIO_SUMMARY="manual (APT simulation failed)"
+        warn "could not simulate installing the native audio dependencies;"
+        warn "nothing was installed. Install them manually:"
+        warn "  sudo apt-get update && sudo $_manual_cmd"
+        return 0
+    fi
+    _removals=$(printf '%s\n' "$_sim_output" | awk '/^(Remv|Purg) / {print $2}' | tr '\n' ' ')
+    if [ -n "$_removals" ]; then
+        AUDIO_SUMMARY="manual (would remove:${_removals% })"
+        warn "refusing to install the native audio dependencies automatically: the"
+        warn "APT transaction would remove: ${_removals% }"
+        warn "Install them manually if that is intended:"
+        warn "  sudo $_manual_cmd"
+        return 0
+    fi
+    _to_install=$(printf '%s\n' "$_sim_output" | awk '/^Inst / {c++} END {print c + 0}')
+    if [ "$DRY_RUN" -eq 1 ]; then
+        AUDIO_SUMMARY="would install $_to_install package(s):$_missing"
+        log "dry run: would install native audio dependencies:$_missing"
+        return 0
+    fi
+    log "installing native audio dependencies (additive; APT simulation shows no removals):$_missing"
+    if run env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"; then
+        AUDIO_SUMMARY="installed"
+        log "native audio dependencies installed"
+    else
+        AUDIO_SUMMARY="manual (automatic install failed)"
+        warn "could not install the native audio dependencies automatically."
+        warn "Native Linux apps still run, but they will not have sound until you run:"
+        warn "  sudo apt-get update && sudo $_manual_cmd"
     fi
 }
 
@@ -1108,6 +1365,22 @@ render_main_config() {
     cp -- "$RAST_TMP/rast.toml.step1" "$_dst"
 }
 
+# Point the default install paths in a rendered unit at the configured
+# directories. The embedded units are generated from deploy/ with the default
+# paths; a custom data/storage directory must not leave WorkingDirectory or
+# ReadWritePaths behind.
+render_unit_paths() {
+    # $1 source, $2 destination
+    # Placeholders prevent a data directory like /srv/rast-data from being
+    # rewritten a second time by the storage replacement (sed expressions run
+    # sequentially over the same line).
+    sed -e 's|/var/lib/rast|@RAST_DATA_DIR@|g' \
+        -e 's|/srv/rast|@RAST_STORAGE_DIR@|g' \
+        -e "s|@RAST_DATA_DIR@|$(sed_escape "$DATA_DIR")|g" \
+        -e "s|@RAST_STORAGE_DIR@|$(sed_escape "$STORAGE_DIR")|g" \
+        "$1" >"$2"
+}
+
 write_paths_dropin() {
     # $1 destination, rest: paths
     _dst=$1
@@ -1159,6 +1432,131 @@ wait_for_health() {
     done
     return 1
 }
+
+# ---------------------------------------------------------------------------
+# Existing installation: preserve the configured paths and backend choice
+# ---------------------------------------------------------------------------
+# Re-running the installer upgrades in place and keeps rast.toml untouched.
+# The effective values must therefore be read back BEFORE directories, units
+# and the health check are computed; otherwise an existing custom data or bind
+# would be ignored by the rendered units.
+RAST_ENV_FILE="/etc/rast/rast.env"
+HAS_CONFIG=0
+CONFIG_NATIVE_KEY=0
+CONFIG_DATA_DIR=""
+CONFIG_STORAGE_DIR=""
+CONFIG_BIND=""
+CONFIG_NATIVE=""
+CONFIG_DOCKER=""
+CONFIG_XPRA_BIN=""
+if [ -f "$CONFIG_FILE" ]; then
+    HAS_CONFIG=1
+fi
+# rast.env may point the service at a different configuration file. The
+# installer only manages /etc/rast/rast.toml, so tell the operator instead of
+# guessing paths from a file it will never update.
+if [ -r "$RAST_ENV_FILE" ]; then
+    _env_config=$(env_file_value "$RAST_ENV_FILE" RAST_CONFIG)
+    if [ -n "$_env_config" ] && [ "${_env_config%/}" != "$CONFIG_FILE" ]; then
+        warn "rast.env sets RAST_CONFIG=$_env_config; the installer only manages"
+        warn "$CONFIG_FILE. Keep that file's data_dir/storage_dir in sync manually."
+    fi
+fi
+if [ "$HAS_CONFIG" -eq 1 ] && [ -r "$CONFIG_FILE" ]; then
+    CONFIG_DATA_DIR=$(config_value "$CONFIG_FILE" data_dir)
+    CONFIG_STORAGE_DIR=$(config_value "$CONFIG_FILE" storage_dir)
+    CONFIG_BIND=$(config_value "$CONFIG_FILE" bind)
+    CONFIG_NATIVE=$(config_bool_value "$CONFIG_FILE" native_enabled)
+    CONFIG_DOCKER=$(config_bool_value "$CONFIG_FILE" docker_enabled)
+    CONFIG_XPRA_BIN=$(config_value "$CONFIG_FILE" linux_xpra_bin)
+    [ -z "$CONFIG_NATIVE" ] || CONFIG_NATIVE_KEY=1
+fi
+
+# An existing configuration is never silently contradicted: explicit values
+# that differ from it are an actionable error (the operator either repeats the
+# configured value or edits/removes rast.toml).
+require_matching_config() {
+    # $1 description, $2 configured value, $3 requested value
+    if [ -n "$2" ] && [ "$2" != "$3" ]; then
+        die "the existing configuration $CONFIG_FILE has $1 = '$2', but this run requests '$3'.
+The installer never rewrites an existing configuration. Repeat the configured
+value, or edit/remove $CONFIG_FILE and re-run the installer. Nothing was changed."
+    fi
+}
+
+if [ "$HAS_CONFIG" -eq 1 ]; then
+    log "preserving existing configuration: $CONFIG_FILE"
+    if [ "$_DATA_DIR_EXPLICIT" -eq 1 ]; then
+        require_matching_config "data_dir" "$CONFIG_DATA_DIR" "${RAST_DATA_DIR%/}"
+    fi
+    if [ "$_STORAGE_DIR_EXPLICIT" -eq 1 ]; then
+        require_matching_config "storage_dir" "$CONFIG_STORAGE_DIR" "${RAST_STORAGE_DIR%/}"
+    fi
+    if [ "$_BIND_EXPLICIT" -eq 1 ]; then
+        require_matching_config "bind" "$CONFIG_BIND" "$RAST_BIND"
+    fi
+    if [ "$_NATIVE_EXPLICIT" -eq 1 ] && [ "$CONFIG_NATIVE_KEY" -eq 1 ]; then
+        case "$RAST_NATIVE" in
+            1) _requested_native=true ;;
+            0) _requested_native=false ;;
+            *) _requested_native=auto ;;
+        esac
+        if [ "$_requested_native" != "auto" ] && [ "$_requested_native" != "$CONFIG_NATIVE" ]; then
+            die "the existing configuration $CONFIG_FILE has native_enabled = $CONFIG_NATIVE, but this run requests native_enabled = $_requested_native.
+The installer never rewrites an existing configuration. Repeat the configured
+value, or edit/remove $CONFIG_FILE and re-run the installer. Nothing was changed."
+        fi
+    fi
+    if [ "$_DOCKER_EXPLICIT" -eq 1 ] && [ -n "$CONFIG_DOCKER" ]; then
+        case "$RAST_DOCKER_ENABLED" in
+            1) _requested_docker=true ;;
+            0) _requested_docker=false ;;
+            *) _requested_docker=auto ;;
+        esac
+        if [ "$_requested_docker" != "auto" ] && [ "$_requested_docker" != "$CONFIG_DOCKER" ]; then
+            die "the existing configuration $CONFIG_FILE has docker_enabled = $CONFIG_DOCKER, but this run requests docker_enabled = $_requested_docker.
+The installer never rewrites an existing configuration. Repeat the configured
+value, or edit/remove $CONFIG_FILE and re-run the installer. Nothing was changed."
+        fi
+    fi
+    if [ "$_WORKER_EXPLICIT" -eq 1 ] && [ "$RAST_ENABLE_WORKER" = "1" ] && [ "$CONFIG_DOCKER" = "false" ]; then
+        die "the existing configuration $CONFIG_FILE has docker_enabled = false, so rast-worker.service cannot be enabled.
+Set --no-worker, or edit/remove $CONFIG_FILE and re-run the installer. Nothing was changed."
+    fi
+    # Use the configured values when the operator did not override them.
+    if [ "$_DATA_DIR_EXPLICIT" -eq 0 ] && [ -n "$CONFIG_DATA_DIR" ]; then
+        RAST_DATA_DIR=$CONFIG_DATA_DIR
+        log "preserving configured data directory: $RAST_DATA_DIR"
+    fi
+    if [ "$_STORAGE_DIR_EXPLICIT" -eq 0 ] && [ -n "$CONFIG_STORAGE_DIR" ]; then
+        RAST_STORAGE_DIR=$CONFIG_STORAGE_DIR
+        log "preserving configured storage directory: $RAST_STORAGE_DIR"
+    fi
+    if [ "$_BIND_EXPLICIT" -eq 0 ] && [ -n "$CONFIG_BIND" ]; then
+        RAST_BIND=$CONFIG_BIND
+        log "preserving configured bind address: $RAST_BIND"
+    fi
+    # `auto` means "let the installer detect"; on an existing installation the
+    # configured value is the operator's explicit choice, so it wins over
+    # detection (an explicit --native/--no-native was checked above).
+    if [ "$CONFIG_NATIVE_KEY" -eq 1 ]; then
+        case "$RAST_NATIVE" in
+            1 | 0) ;;
+            *)
+                NATIVE_FROM_CONFIG=1
+                case "$CONFIG_NATIVE" in
+                    true) RAST_NATIVE=1 ;;
+                    false) RAST_NATIVE=0 ;;
+                esac
+                log "preserving native backend setting: native_enabled = $CONFIG_NATIVE"
+                ;;
+        esac
+    fi
+    if [ -z "$RAST_XPRA_BIN" ] && [ -n "$CONFIG_XPRA_BIN" ] &&
+        [ -x "$CONFIG_XPRA_BIN" ]; then
+        RAST_XPRA_BIN=$CONFIG_XPRA_BIN
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Parse boolean/mode settings and validate the requested configuration
@@ -1265,6 +1663,7 @@ DOCKER_DETECTED=$(detect_docker)
 # installs the helper only when it can actually work and `--native` fails with
 # actionable instructions instead of a broken service.
 XPRA_BIN=""
+XPRA_FOUND=0
 if [ -n "$RAST_XPRA_BIN" ]; then
     case "$RAST_XPRA_BIN" in
         /*) ;;
@@ -1273,8 +1672,24 @@ if [ -n "$RAST_XPRA_BIN" ]; then
     [ -x "$RAST_XPRA_BIN" ] ||
         die "RAST_XPRA_BIN=$RAST_XPRA_BIN is not an executable file"
     XPRA_BIN=$RAST_XPRA_BIN
+    XPRA_FOUND=1
 elif command -v xpra >/dev/null 2>&1; then
     XPRA_BIN=$(command -v xpra)
+    XPRA_FOUND=1
+fi
+# Official xpra.org packages are modular; distributions ship one xpra package.
+# This decides whether the native audio server package can be requested.
+XPRA_PACKAGING=unknown
+XPRA_AUDIO_PKG_AVAILABLE=0
+if [ -n "$XPRA_BIN" ]; then
+    _xpra_packaging_info=$(detect_xpra_packaging)
+    XPRA_PACKAGING=${_xpra_packaging_info%%|*}
+    XPRA_AUDIO_PKG_AVAILABLE=${_xpra_packaging_info##*|}
+    if [ "$XPRA_PACKAGING" = modular ]; then
+        log "Xpra packaging: modular (official xpra.org packages)"
+    else
+        log "Xpra packaging: distribution package"
+    fi
 fi
 _os_codename=""
 if [ -r /etc/os-release ]; then
@@ -1285,6 +1700,11 @@ fi
 [ -n "$_os_codename" ] || _os_codename="<your-release-codename>"
 
 install_xpra_hint() {
+    _xpra_audio_hint=""
+    if command -v apt-cache >/dev/null 2>&1 &&
+        apt-cache show xpra-audio-server >/dev/null 2>&1; then
+        _xpra_audio_hint=" xpra-audio-server"
+    fi
     cat >&2 <<XPRA_HINT
 Install Xpra from the official xpra.org apt repository first:
 
@@ -1294,7 +1714,11 @@ Install Xpra from the official xpra.org apt repository first:
   echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ \
 ${_os_codename} main" > /etc/apt/sources.list.d/xpra.list
   apt-get update
-  apt-get install -y xpra xpra-html5 xpra-codecs xvfb
+  apt-get install -y xpra xpra-html5 xpra-codecs xvfb${_xpra_audio_hint:-}
+
+The installer adds the native audio runtime packages (PulseAudio client tools,
+GStreamer plugins and xpra-audio-server when the modular packaging provides
+it) on the next run; the same packages can be installed at the same time.
 
 Then re-run the installer. See docs/INSTALL.md, section
 'Native Linux apps (Xpra)'.
@@ -1315,9 +1739,16 @@ case "$NATIVE_CHOICE" in
         ;;
     1)
         if [ -z "$XPRA_BIN" ]; then
-            printf '[rast] ERROR: RAST_NATIVE=1/--native was requested but Xpra was not found.\n' >&2
-            install_xpra_hint
-            exit 1
+            if [ "$NATIVE_FROM_CONFIG" -eq 1 ]; then
+                warn "native_enabled = true is preserved from $CONFIG_FILE, but Xpra was not found."
+                warn "rast-native.service is installed but native apps cannot start until you install"
+                warn "Xpra from the xpra.org apt repository (then: systemctl restart rast-native.service):"
+                install_xpra_hint
+            else
+                printf '[rast] ERROR: RAST_NATIVE=1/--native was requested but Xpra was not found.\n' >&2
+                install_xpra_hint
+                exit 1
+            fi
         fi
         NATIVE_ENABLED=1
         ;;
@@ -1416,6 +1847,13 @@ if [ -x "$BIN_PATH" ]; then
     esac
 fi
 
+# Native audio runtime packages (additive APT install; non-fatal on failure).
+install_native_audio_deps
+
+# Record the effective native backend state in configurations that predate the
+# native feature (idempotent; does nothing once the key exists).
+add_missing_native_key
+
 # ---------------------------------------------------------------------------
 # Plan
 # ---------------------------------------------------------------------------
@@ -1437,7 +1875,11 @@ if [ "$DOCKER_ENABLED" -eq 1 ]; then DOCKER_STATE="enabled"; else DOCKER_STATE="
 if [ "$NATIVE_ENABLED" -eq 1 ]; then
     NATIVE_STATE="enabled"
     NATIVE_SERVICE=", rast-native.service"
-    NATIVE_SUMMARY="rast-native.service (Xpra: $XPRA_BIN)"
+    if [ "$NATIVE_FROM_CONFIG" -eq 1 ]; then
+        NATIVE_SUMMARY="rast-native.service (Xpra: $XPRA_BIN; preserved from configuration)"
+    else
+        NATIVE_SUMMARY="rast-native.service (Xpra: $XPRA_BIN)"
+    fi
 else
     NATIVE_STATE="disabled"
     NATIVE_SERVICE=""
@@ -1473,6 +1915,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  provenance:       %s\n' "$ATTESTATION_STATE"
     printf '  docker apps:      %s (worker %s)\n' "$DOCKER_STATE" "$WORKER_STATE"
     printf '  native apps:      %s\n' "$NATIVE_STATE"
+    printf '  native audio:     %s\n' "$AUDIO_SUMMARY"
     if [ "$NATIVE_ENABLED" -eq 1 ]; then
         printf '  native layout:    %s/linux-users (0711 root:rast), %s/linux-apps (0751 rast:rast)\n' \
             "$DATA_DIR" "$DATA_DIR"
@@ -1503,6 +1946,13 @@ run install -d -m 0755 -o rast -g rast "$STORAGE_DIR" \
 # sensitive data); rast itself also enforces 0700 on .trash at startup.
 run install -d -m 0700 -o rast -g rast "$STORAGE_DIR/.trash"
 run install -d -m 0750 -o root -g rast "$CONFIG_DIR"
+# Docker-backed Linux apps, uploads and the migration tooling always use
+# <data>/linux-apps as their staging area; rast-worker.service lists it in
+# ReadWritePaths even without the native backend. Create it whenever one of the
+# Linux app backends is enabled (the native block below tightens the layout).
+if [ "$WORKER_ENABLED" -eq 1 ] || [ "$NATIVE_ENABLED" -eq 1 ]; then
+    run install -d -m 0750 -o rast -g rast "$DATA_DIR/linux-apps"
+fi
 if [ "$NATIVE_ENABLED" -eq 1 ]; then
     # Every directory component of an identity's profile/cwd path must be
     # searchable by that identity. Canonical layout (also applied by the
@@ -1556,16 +2006,19 @@ log "installed: $BIN_PATH"
 # ---------------------------------------------------------------------------
 # systemd units
 # ---------------------------------------------------------------------------
-write_unit_rast_service "$RAST_TMP/rast.service"
+write_unit_rast_service "$RAST_TMP/rast.service.raw"
+render_unit_paths "$RAST_TMP/rast.service.raw" "$RAST_TMP/rast.service"
 install_managed_file "$RAST_TMP/rast.service" "$UNIT_DIR/rast.service" 0644 root root
 
 if [ "$WORKER_ENABLED" -eq 1 ]; then
-    write_unit_rast_worker "$RAST_TMP/rast-worker.service"
+    write_unit_rast_worker "$RAST_TMP/rast-worker.service.raw"
+    render_unit_paths "$RAST_TMP/rast-worker.service.raw" "$RAST_TMP/rast-worker.service"
     install_managed_file "$RAST_TMP/rast-worker.service" "$UNIT_DIR/rast-worker.service" 0644 root root
 fi
 
 if [ "$NATIVE_ENABLED" -eq 1 ]; then
-    write_unit_rast_native "$RAST_TMP/rast-native.service"
+    write_unit_rast_native "$RAST_TMP/rast-native.service.raw"
+    render_unit_paths "$RAST_TMP/rast-native.service.raw" "$RAST_TMP/rast-native.service"
     install_managed_file "$RAST_TMP/rast-native.service" "$UNIT_DIR/rast-native.service" 0644 root root
     write_unit_rast_linux_slice "$RAST_TMP/rast-linux.slice"
     install_managed_file "$RAST_TMP/rast-linux.slice" "$UNIT_DIR/rast-linux.slice" 0644 root root
@@ -1639,7 +2092,8 @@ fi
 if [ "$WORKER_ENABLED" -eq 1 ]; then
     if [ "$DATA_DIR" != "$DEFAULT_DATA_DIR" ]; then
         run install -d -m 0755 "$WORKER_DROPIN_DIR"
-        write_paths_dropin "$RAST_TMP/10-rast-worker-paths.conf" "$DATA_DIR/apps"
+        write_paths_dropin "$RAST_TMP/10-rast-worker-paths.conf" \
+            "$DATA_DIR/apps" "$DATA_DIR/linux-apps"
         install_managed_file "$RAST_TMP/10-rast-worker-paths.conf" "$WORKER_DROPIN_DIR/10-rast-paths.conf" 0644 root root
     else
         if [ -f "$WORKER_DROPIN_DIR/10-rast-paths.conf" ]; then
@@ -1765,6 +2219,9 @@ printf '  service:       rast.service%s\n' \
     "$SERVICE_STATE"
     printf '  worker:        %s\n' "$WORKER_SUMMARY"
 printf '  native apps:   %s\n' "$NATIVE_SUMMARY"
+if [ "$NATIVE_ENABLED" -eq 1 ]; then
+    printf '  native audio:  %s\n' "$AUDIO_SUMMARY"
+fi
 printf '  web UI:        %s\n' "$SERVICE_URL"
 printf '\nNext steps:\n'
 printf '  1. Create the first administrator (there is no default password):\n'

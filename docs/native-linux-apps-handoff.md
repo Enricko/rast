@@ -235,8 +235,14 @@ Docs and deployment: `docs/API.md`, `docs/ARCHITECTURE.md`,
   Development/test instances must be run one at a time (or with
   `native_enabled = false`). The Docker-backed backend does not have this
   limitation.
-* Audio is not forwarded by the native backend (the legacy streamed desktop had
-  Selkies audio; Xpra audio is disabled by default in this integration).
+* **Audio (0.13.1):** playback is forwarded from a per-user PulseAudio null sink
+  through the authenticated Xpra WebSocket. Requires the Xpra audio component,
+  PulseAudio and GStreamer Pulse/codecs (the installer checks dependencies).
+  Browser autoplay policy requires a click on the native app canvas; microphone
+  forwarding is disabled. Sessions created by older releases retain their old
+  audio-disabled startup options: save work, End session, then launch again.
+  The default remains software rendering/encoding, not low-latency gaming or
+  hardware-accelerated video; network latency and server CPU limits still apply.
 * The old Docker backend stays compiled in for compatibility; the Applications
   app (Docker Compose management) is unchanged and independent.
 

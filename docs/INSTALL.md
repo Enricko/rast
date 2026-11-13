@@ -446,6 +446,7 @@ Requirements:
 | --- | --- |
 | Xpra server + HTML5 client (`xpra`, `xpra-html5`, `xpra-codecs`) | Graphical session, window transport and browser client |
 | Xvfb | Virtual display for the seamless session (started by Xpra) |
+| Xpra audio (`xpra-audio-server` on modular packages), `pulseaudio`, `pulseaudio-utils`, `python3-gst-1.0`, `gstreamer1.0-pulseaudio`, `gstreamer1.0-plugins-good` | Playback-only output from the account's private virtual speaker to the browser |
 | `rast-native.service` (root) | Creates per-user identities, starts transient systemd units and runs allowed APT transactions |
 | `rast-linux.slice` | cgroup accounting and defaults for all native sessions |
 | ACL support (`acl` package, ext4/xfs with ACLs) | Lets a person's app identity open their own RAST home folder |
@@ -461,7 +462,9 @@ curl -fsSL https://xpra.org/gpg.asc \
 echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ resolute main" \
   | sudo tee /etc/apt/sources.list.d/xpra.list
 sudo apt-get update
-sudo apt-get install -y xpra xpra-html5 xpra-codecs xpra-x11 xvfb
+sudo apt-get install -y xpra xpra-html5 xpra-codecs xpra-x11 xvfb \
+  xpra-audio-server pulseaudio pulseaudio-utils python3-gst-1.0 \
+  gstreamer1.0-pulseaudio gstreamer1.0-plugins-good acl dbus
 ```
 
 The installer enables native apps automatically when `xpra` is present
@@ -491,6 +494,11 @@ slice, the `/tmp/.X11-unix` permissions and the configured uid range.
 
 Notes:
 
+* Audio uses a private null sink and authenticated Unix socket inside each
+  account's 0700 runtime directory, not a host audio device. Microphone forwarding
+  is disabled. A click in the native app allows browser playback; browsers may
+  block sound before a user gesture. After upgrading an older audio-disabled
+  session, save work and use App Center → End session, then launch again.
 * Per-user limits are configured with `linux_session_*` and `linux_app_*` (see
   [CONFIGURATION.md](CONFIGURATION.md)); they are enforced with systemd
   transient units (`rast-xpra-u<id>`, `rast-app-u<id>-…`) inside

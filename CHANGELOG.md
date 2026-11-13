@@ -13,6 +13,49 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+## [0.13.1] - 2026-11-13
+
+First published native-app release since 0.11.4; includes all 0.12.0 and 0.13.0
+changes below. Schema v12: back up the database and app profiles before upgrading.
+Rolling back to 0.11.4 requires its matching pre-upgrade database backup.
+
+### Added
+
+- Native Linux desktop apps share one isolated Xpra session per RAST account,
+  rather than a Docker desktop per app. Top-level app windows, additional Chrome
+  windows and dialogs integrate into the RAST desktop. App Center supports native
+  package installation, preview, updates and guided legacy-profile migration;
+  existing Docker apps are not automatically migrated.
+- Playback-only audio forwarding from a private per-user virtual speaker to the
+  browser. No host audio device, host microphone or browser microphone is used.
+  Xpra audio/GStreamer/PulseAudio packages are required; the installer checks an
+  additive package plan before installing dependencies. Click the native window
+  to allow sound under browser autoplay policies.
+
+### Fixed
+
+- Pointer motion, clicks and drags use the same remote-window coordinates,
+  including moved and scaled windows. Preserve button release outside a canvas
+  when dragging a Chrome tab into another window.
+- Repeated session snapshots no longer raise Chrome over other apps. Focusing an
+  already focused RAST window no longer recursively notifies window subscribers.
+- Adopted canvas repaint uses the visible desktop's animation clock rather than
+  the hidden viewer's clock, avoiding background-frame throttling.
+- Cold-launch recovery, private Chromium D-Bus sessions and initial frame refresh
+  from the unpublished 0.13.0 deployment are included.
+
+### Upgrade notes
+
+- Install Xpra 6.5+ with its HTML5/X11/audio components for native apps. Without
+  Xpra, legacy Docker apps remain available. Chromium's sandbox stays enabled.
+- Use the release installer for upgrades from 0.11.4 so native helper units,
+  permissions and audio dependencies are installed. Refresh open desktop tabs to
+  load the updated input/audio bridge. Existing graphical sessions keep their
+  startup options until ended and opened again; save work before ending a
+  session to enable audio.
+- Linux CI and release builds cover x86_64 and aarch64; macOS CI is temporarily
+  disabled. This release does not provide a macOS server binary.
+
 ## [0.13.0] - 2026-11-13
 
 Schema v12 (`migrations/0012_native_linux_apps.sql`). The new native backend is

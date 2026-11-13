@@ -26,9 +26,10 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.3.0 — first public release series (2026-11-11). APIs and data
-> formats may still change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for the
-> exact feature set and known limitations.
+> **Status:** v0.13.1 — native Linux apps, per-window desktop integration and
+> playback-only session audio (2026-11-13). APIs and data formats may still
+> change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for upgrade requirements
+> and known limitations.
 
 ## Screenshots
 
@@ -43,10 +44,11 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 
 ## Verified deployment
 
-RAST 0.3.0 is deployed and publicly reachable at
-<https://desktop.lufria.tech> behind Cloudflare Tunnel + nginx. Measured on the
-reference host (Ubuntu, x86_64, 12 cores / 30 GiB RAM) after a clean restart,
-60-second idle window:
+RAST is deployed at <https://desktop.lufria.tech> behind Cloudflare Tunnel +
+nginx. The measurements below are historical **0.3.0 core-service** results,
+not a performance claim for native Chrome/Xpra/audio sessions. They were
+measured on the reference host (Ubuntu, x86_64, 12 cores / 30 GiB RAM) after a
+clean restart and a 60-second idle window:
 
 | Process | CPU (idle) | RSS |
 | --- | --- | --- |

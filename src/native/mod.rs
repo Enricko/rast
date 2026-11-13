@@ -25,6 +25,7 @@
 //! Run `rast native-helper --check` to validate the environment (root, systemd,
 //! Xpra, required binaries, socket group) without binding the socket.
 
+pub(crate) mod audio;
 pub mod client;
 pub mod daemon;
 pub mod identity;
@@ -328,6 +329,15 @@ impl NativeOptions {
                  apt repository — see docs/INSTALL.md, section 'Native Linux apps (Xpra)'",
                 self.xpra_bin.display()
             ));
+        }
+        for binary in ["/usr/bin/pulseaudio", "/usr/bin/pactl"] {
+            if !is_executable(Path::new(binary)) {
+                warnings.push(format!(
+                    "native app audio requires {binary}; install xpra-audio-server and \
+                     gstreamer1.0-plugins-good from the documented Xpra setup (this also \
+                     installs xpra-audio, PulseAudio, the GStreamer Pulse plugin and Python bindings)"
+                ));
+            }
         }
         if self.setfacl_bin.is_none() {
             warnings.push(

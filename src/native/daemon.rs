@@ -106,6 +106,10 @@ pub async fn serve(options: NativeOptions, shutdown: impl Future<Output = ()>) -
         .map_err(|error| io::Error::new(io::ErrorKind::NotFound, error.message))?;
     crate::native::ensure_managed_roots(&options, rast_gid)
         .map_err(|error| io::Error::other(error.message))?;
+    // Prepare the immutable final Xpra audio config before accepting requests:
+    // concurrent session starts must never read a partially rewritten file.
+    super::audio::prepare_config(&options.run_dir)
+        .map_err(|error| io::Error::other(error.message))?;
     prepare_socket_path(&options.socket_path)?;
     let listener = UnixListener::bind(&options.socket_path)?;
     apply_socket_permissions(&options.socket_path, rast_gid, options.is_test_mode())?;
@@ -499,6 +503,12 @@ fn effective_session_env(
         path_string(&identity.home.join(".Xauthority")),
     );
     env.insert("XDG_RUNTIME_DIR".to_string(), path_string(runtime_dir));
+    env.extend(super::audio::environment(runtime_dir));
+    env.insert("XPRA_PRIVATE_PULSEAUDIO".to_string(), "0".to_string());
+    env.insert(
+        "XPRA_USER_CONF_DIRS".to_string(),
+        path_string(&super::audio::config_dir(&options.run_dir)),
+    );
     env.insert("USER".to_string(), identity.username.clone());
     env.insert("LOGNAME".to_string(), identity.username.clone());
     env.insert("RAST_USER_ID".to_string(), identity.user_id.to_string());
@@ -542,6 +552,7 @@ fn effective_app_env(
         .or(provided)
         .unwrap_or_else(|| identity.home.join(".Xauthority"));
     env.insert("XAUTHORITY".to_string(), path_string(&auth));
+    env.extend(super::audio::environment(runtime_dir));
     env.insert("USER".to_string(), identity.username.clone());
     env.insert("LOGNAME".to_string(), identity.username.clone());
     env.insert("RAST_USER_ID".to_string(), identity.user_id.to_string());
@@ -628,6 +639,11 @@ fn prepare_runtime_dir(
         }
         None => base.clone(),
     };
+    if !target.starts_with(&base) {
+        return Err(NativeError::forbidden(
+            "the session runtime path must belong to this native identity",
+        ));
+    }
     std::fs::create_dir_all(&target).map_err(|error| {
         NativeError::command_failed(format!(
             "cannot create runtime directory {}: {error}",
@@ -1137,6 +1153,14 @@ async fn session_start(options: &NativeOptions, op: SessionStartOp) -> Result<Va
     // layout) heals before Xvfb starts.
     crate::native::identity::ensure_home(options, &identity).await?;
     let runtime_dir = prepare_runtime_dir(options, &identity, Some(&op.runtime_dir))?;
+    // PulseAudio's socket/cookie/state must be writable by this identity, not
+    // root or the web service. Reuse the checked 0700 directory provisioning;
+    // never chown or attach to a host /run/user/<uid>/pulse directory.
+    prepare_runtime_dir(
+        options,
+        &identity,
+        Some(&path_string(&runtime_dir.join("pulse"))),
+    )?;
     ensure_identity_traversal(options, &runtime_dir)?;
     check_memory_admission(options, limits.memory_max_mb, "graphical session")?;
 
@@ -3250,6 +3274,12 @@ exit 0
         assert_eq!(result["unit"], "rast-xpra-u7");
         assert_eq!(result["active"], true);
         assert!(runtime_dir.is_dir());
+        let pulse = runtime_dir.join("pulse");
+        assert!(pulse.is_dir());
+        assert_eq!(
+            std::fs::metadata(&pulse).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
 
         let log = helper
             .options
@@ -3271,6 +3301,13 @@ exit 0
         assert!(args.contains(&"--property=KillMode=control-group".to_string()));
         assert!(args.contains(&"--property=Restart=no".to_string()));
         assert!(args.contains(&"--setenv=DISPLAY=:102".to_string()));
+        for (key, value) in super::super::audio::environment(&runtime_dir) {
+            assert!(args.contains(&format!("--setenv={key}={value}")));
+        }
+        assert!(args.contains(&"--setenv=XPRA_PRIVATE_PULSEAUDIO=0".to_string()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("CAP_SYS_NICE") || arg.contains("--uid=0")));
         assert!(args
             .iter()
             .any(|arg| arg.starts_with("--setenv=XAUTHORITY=")));
@@ -3286,6 +3323,71 @@ exit 0
         assert_eq!(&args[separator + 2], "start");
         assert_eq!(&args[separator + 3], ":102");
         assert_eq!(&args[separator + 4], "--daemon=no");
+    }
+
+    #[test]
+    fn runtime_preparation_cannot_chown_another_users_audio_or_helper_config() {
+        let root = tempfile::tempdir().unwrap();
+        let options = NativeOptions::for_test(
+            root.path().join("native.sock"),
+            root.path().join("data"),
+            root.path().join("run"),
+        );
+        std::fs::create_dir_all(&options.run_dir).unwrap();
+        super::super::audio::prepare_config(&options.run_dir).unwrap();
+        let identity = Identity::derive(&options, 7).unwrap();
+        for target in [
+            options.run_dir.join("200008/pulse"),
+            super::super::audio::config_dir(&options.run_dir),
+        ] {
+            let error =
+                prepare_runtime_dir(&options, &identity, Some(&path_string(&target))).unwrap_err();
+            assert_eq!(error.code, "forbidden");
+        }
+        let pulse = options.run_dir.join("200007/pulse");
+        prepare_runtime_dir(&options, &identity, Some(&path_string(&pulse))).unwrap();
+        assert_eq!(
+            std::fs::metadata(pulse).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+
+    #[test]
+    fn session_and_app_audio_env_cannot_select_a_host_or_other_users_server() {
+        let options = NativeOptions::for_test(
+            PathBuf::from("/tmp/audio-env-test/native.sock"),
+            PathBuf::from("/tmp/audio-env-test/data"),
+            PathBuf::from("/tmp/audio-env-test/run"),
+        );
+        let identity = Identity::derive(&options, 7).unwrap();
+        let runtime = options.run_dir.join(identity.uid.to_string());
+        let requested = BTreeMap::from([
+            (
+                "PULSE_SERVER".into(),
+                "unix:/run/user/1000/pulse/native".into(),
+            ),
+            ("PULSE_COOKIE".into(), "/tmp/other-user-cookie".into()),
+            ("PULSE_SINK".into(), "host-speakers".into()),
+            ("PULSE_SOURCE".into(), "host-microphone".into()),
+            ("PULSE_RUNTIME_PATH".into(), "/tmp/other-runtime".into()),
+            ("PULSE_STATE_PATH".into(), "/tmp/other-state".into()),
+            ("PULSE_CONFIG_PATH".into(), "/etc/pulse".into()),
+            ("XPRA_PRIVATE_PULSEAUDIO".into(), "1".into()),
+            ("HOME".into(), "/tmp/application-profile".into()),
+        ]);
+        let session = effective_session_env(&options, &identity, &requested, &runtime);
+        let app = effective_app_env(&options, &identity, &requested, &runtime, None);
+        for (key, value) in super::super::audio::environment(&runtime) {
+            assert_eq!(session.get(&key), Some(&value));
+            assert_eq!(app.get(&key), Some(&value));
+        }
+        assert_eq!(session["XPRA_PRIVATE_PULSEAUDIO"], "0");
+        assert_eq!(
+            session["XPRA_USER_CONF_DIRS"],
+            path_string(&super::super::audio::config_dir(&options.run_dir))
+        );
+        assert_eq!(app["HOME"], "/tmp/application-profile");
+        assert_eq!(session["HOME"], path_string(&identity.home));
     }
 
     #[tokio::test]
