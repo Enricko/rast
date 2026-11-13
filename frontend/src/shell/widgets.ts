@@ -493,7 +493,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     // tiny. Positions stay fractions of the free area, so this only changes
     // the card size, never the relative placement.
     const scale = Math.min(
-      1.5,
+      1.1,
       Math.max(0.9, Math.min(layer.clientWidth / 1500, layer.clientHeight / 850)),
     );
     layer.style.setProperty("--widget-scale", scale.toFixed(3));

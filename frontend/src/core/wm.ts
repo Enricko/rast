@@ -24,6 +24,8 @@ export interface WindowInfo {
   maximized: boolean;
   tiled: "left" | "right" | null;
   focused: boolean;
+  /** Current geometry inside the desktop layer. */
+  rect: WindowRect;
 }
 
 export interface WindowHandle {
@@ -126,7 +128,13 @@ export class WindowManager {
       onResize: (cb: () => void) => () => void;
       onDispose: (cb: () => void) => () => void;
     }) => void | Promise<void>,
-    options: { singleton?: boolean } = {},
+    options: {
+      singleton?: boolean;
+      /** Restore a previous position/size (clamped to the current viewport). */
+      rect?: WindowRect;
+      maximized?: boolean;
+      minimized?: boolean;
+    } = {},
   ): WindowHandle {
     if (options.singleton) {
       const existing = this.findByApp(app.id);
@@ -195,7 +203,17 @@ export class WindowManager {
     };
     this.records.set(id, record);
     this.host.appendChild(el);
-    this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
+    if (options.rect) {
+      const bounds = this.bounds();
+      const rect = options.rect;
+      const w = Math.min(rect.w, Math.max(MIN_SIZE.w, bounds.w - 16));
+      const h = Math.min(rect.h, Math.max(MIN_SIZE.h, bounds.h - 16));
+      const x = Math.min(Math.max(8, rect.x), Math.max(8, bounds.w - w - 8));
+      const y = Math.min(Math.max(8, rect.y), Math.max(8, bounds.h - h - 8));
+      this.setRect(record, { x, y, w, h });
+    } else {
+      this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
+    }
 
     // Drag and resize.
     if (titlebar) {
@@ -233,6 +251,8 @@ export class WindowManager {
 
     this.focus(id);
     this.emitChange();
+    if (options.maximized) this.toggleMaximize(id);
+    if (options.minimized) this.minimize(id);
     requestAnimationFrame(() => el.classList.remove("entering"));
 
     // Mount the application asynchronously; errors are shown inside the window.
@@ -489,6 +509,7 @@ export class WindowManager {
       maximized: record.maximized,
       tiled: record.tiled,
       focused: this.focusedId === record.id,
+      rect: this.rectOf(record),
     }));
   }
 

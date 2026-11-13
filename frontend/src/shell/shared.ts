@@ -13,8 +13,17 @@ export interface ShellDeps {
 }
 
 /** Enough state to reopen the same applications after a session expires. */
+export interface WindowSnapshot {
+  appId: string;
+  params?: unknown;
+  /** Position/size at the time of the snapshot (desktop coordinates). */
+  rect?: { x: number; y: number; w: number; h: number };
+  maximized?: boolean;
+  minimized?: boolean;
+}
+
 export interface SessionSnapshot {
-  apps: Array<{ appId: string; params?: unknown }>;
+  apps: WindowSnapshot[];
   focusedAppId: string | null;
 }
 

@@ -24,6 +24,26 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.21] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Added
+
+- **Workspace restore on refresh.** The open windows (including Linux apps
+  such as Google Chrome, and package apps), their position, size, maximized/
+  minimized state and the focused window are saved in `sessionStorage` on
+  page hide/refresh and reopened after the page reloads. A different account
+  signing in never inherits another account's windows.
+
+### Changed
+
+- Widgets no longer grow to 1.5× on very large monitors; the cap is 1.1× so
+  they stay proportionate at 1440p/4K.
+- The account's appearance is loaded before the desktop is painted, and
+  appearance requests bypass the browser cache, so a refresh reliably shows
+  the saved custom wallpaper instead of the previous one.
+
 ## [0.11.20] - 2026-11-14
 
 No database migration (schema stays v12).

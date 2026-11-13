@@ -23,7 +23,7 @@ import {
 import { ToastCenter } from "../core/toast";
 import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from "../core/ui";
 import { getRealtime } from "../core/realtime";
-import { WindowManager, type WindowInfo } from "../core/wm";
+import { WindowManager, type WindowInfo, type WindowRect } from "../core/wm";
 import { setFavicon } from "./brand";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
@@ -186,7 +186,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   // ------------------------------------------------------------ app launch
-  function openApp(appId: string, params?: unknown): void {
+  function openApp(
+    appId: string,
+    params?: unknown,
+    restore?: { rect?: WindowRect; maximized?: boolean; minimized?: boolean },
+  ): void {
     const app: AppDefinition | undefined = findApp(appId);
     if (!app) {
       toast.error(`Unknown application: ${appId}`);
@@ -258,7 +262,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         };
         await app.mount(ctx);
       },
-      { singleton: app.singleton },
+      { singleton: app.singleton, ...(restore ?? {}) },
     );
     if (openBefore.has(handle.id) && params !== undefined) reopenListeners.get(handle.id)?.(params);
     windowParams.set(handle.id, params);
@@ -1179,17 +1183,44 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   // --------------------------------------------------- restore after login
+  // Windows reopened after a refresh or re-login. Linux apps (Chrome) and
+  // package apps are not in the registry yet at this point, so keep them
+  // pending and retry when their catalogs load.
+  const pendingRestore = new Map<
+    string,
+    { params?: unknown; rect?: WindowRect; maximized?: boolean; minimized?: boolean }
+  >();
+  const restoreFocusId = options.restore?.focusedAppId ?? null;
   if (options.restore) {
-    const toRestore = options.restore.apps.slice(0, MAX_WINDOWS);
-    for (const entry of toRestore) {
-      if (entry.appId.startsWith(LINUX_PREFIX)) continue;
-      const app = findApp(entry.appId);
-      if (!app || !isAppAllowed(app.id, store.get().permissions, store.isAdmin())) continue;
-      openApp(entry.appId, entry.params);
+    for (const entry of options.restore.apps.slice(0, MAX_WINDOWS)) {
+      pendingRestore.set(entry.appId, {
+        params: entry.params,
+        rect: entry.rect,
+        maximized: entry.maximized,
+        minimized: entry.minimized,
+      });
     }
-    const focusedAppId = options.restore.focusedAppId;
-    if (focusedAppId) {
-      const focused = wm.list().find((win) => win.appId === focusedAppId);
+    disposers.push(onLinuxApps(() => attemptRestore()));
+    disposers.push(onPackageApps(() => attemptRestore()));
+    attemptRestore();
+    window.setTimeout(() => attemptRestore(), 1_500);
+  }
+
+  function attemptRestore(): void {
+    if (disposed || pendingRestore.size === 0) return;
+    for (const [appId, state] of [...pendingRestore]) {
+      const app = findApp(appId);
+      if (!app) continue;
+      pendingRestore.delete(appId);
+      if (!isAppAllowed(appId, store.get().permissions, store.isAdmin())) continue;
+      openApp(appId, state.params, {
+        rect: state.rect,
+        maximized: state.maximized,
+        minimized: state.minimized,
+      });
+    }
+    if (pendingRestore.size === 0 && restoreFocusId) {
+      const focused = wm.list().find((win) => win.appId === restoreFocusId);
       if (focused) wm.focus(focused.id);
     }
   }
@@ -1218,9 +1249,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   function snapshot(): SessionSnapshot {
     const snapshotApps: SessionSnapshot["apps"] = [];
     for (const win of wm.list().slice(0, MAX_WINDOWS)) {
-      const entry: { appId: string; params?: unknown } = { appId: win.appId };
+      const entry: SessionSnapshot["apps"][number] = { appId: win.appId, rect: win.rect };
       const params = windowParams.get(win.id);
       if (params !== undefined) entry.params = params;
+      if (win.maximized) entry.maximized = true;
+      if (win.minimized) entry.minimized = true;
       snapshotApps.push(entry);
     }
     return { apps: snapshotApps, focusedAppId: wm.focusedAppId() };

@@ -685,7 +685,7 @@ export class AppearanceService {
       }
     }
     try {
-      const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
+      const fresh = normalizeAppearance(await this.api.get<Appearance>(`/api/appearance?t=${Date.now()}`));
       return this.commit(generation, fresh);
     } catch (error) {
       this.assertCurrent(generation);
@@ -710,7 +710,7 @@ export class AppearanceService {
   async reload(): Promise<Appearance> {
     if (this.userId === null) throw new StaleAppearanceError();
     const generation = this.generation;
-    const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
+    const fresh = normalizeAppearance(await this.api.get<Appearance>(`/api/appearance?t=${Date.now()}`));
     return this.commit(generation, fresh);
   }
 
