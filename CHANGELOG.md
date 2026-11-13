@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.10] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Web app packages can be framed by the RAST desktop: their files are served
+  with `X-Frame-Options: SAMEORIGIN` and `frame-ancestors 'self'` instead of
+  inheriting the API's `DENY`, so the App Center application window shows the
+  calculator page instead of an empty frame.
+
 ## [0.11.9] - 2026-11-13
 
 No database migration (schema stays v12). Docker-only 0.11 line.

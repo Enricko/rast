@@ -427,9 +427,10 @@ pub async fn package_app_asset(
             (header::CONTENT_TYPE, content_type),
             (header::CACHE_CONTROL, "no-store".to_string()),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            (header::X_FRAME_OPTIONS, "SAMEORIGIN".to_string()),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:".to_string(),
+                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'self'".to_string(),
             ),
         ],
         bytes,
