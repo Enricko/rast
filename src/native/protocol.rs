@@ -511,6 +511,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "path_symlink" => NativeOp::PathSymlink(op_from(rest, "path_symlink")?),
         "profile_prepare" => NativeOp::ProfilePrepare(op_from(rest, "profile_prepare")?),
         "profile_clean_locks" => NativeOp::ProfileCleanLocks(op_from(rest, "profile_clean_locks")?),
+        "profile_install" => NativeOp::ProfileInstall(op_from(rest, "profile_install")?),
         "profile_remove" => NativeOp::ProfileRemove(op_from(rest, "profile_remove")?),
         "package_installed_list" => {
             NativeOp::PackageInstalledList(op_from(rest, "package_installed_list")?)
@@ -1868,6 +1869,11 @@ mod tests {
                 tasks_max: 512,
             }),
             NativeOp::SessionStop(SessionStopOp { user_id: 7 }),
+            NativeOp::ProfileInstall(ProfileInstallOp {
+                app_id: "demo".into(),
+                user_id: 7,
+                source: "/var/lib/rast/linux-apps/migrations/demo/7/mapped".into(),
+            }),
             NativeOp::UnitStatus(UnitStatusOp {
                 unit: "rast-app-demo".into(),
             }),
