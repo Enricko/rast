@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.12] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Added
+
+- **Installed app packages are first-class applications.** App-type packages
+  from App Center now appear in the **Applications** folder next to the
+  built-in apps, can be dragged to the desktop or pinned to the taskbar, and
+  open through the normal app window path. The list refreshes on the
+  `package.changed` event; web apps keep their in-window UI, command apps
+  keep the argument/output window.
+
 ## [0.11.11] - 2026-11-13
 
 No database migration (schema stays v12).

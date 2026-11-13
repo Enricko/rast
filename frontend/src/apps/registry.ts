@@ -11,6 +11,7 @@ import { linuxAppDefinitions } from "./linuxapp";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
 import { packagesApp } from "./packages";
+import { packageAppDefinitions } from "./package-apps";
 
 export const APPS: AppDefinition[] = [
   launcherApp,
@@ -25,11 +26,15 @@ export const APPS: AppDefinition[] = [
 
 /** Built-in apps followed by the installed Linux apps (`linux:<id>`, administrators only). */
 export function allApps(): AppDefinition[] {
-  return [...APPS, ...linuxAppDefinitions()];
+  return [...APPS, ...linuxAppDefinitions(), ...packageAppDefinitions()];
 }
 
 export function findApp(id: string): AppDefinition | undefined {
-  return APPS.find((app) => app.id === id) ?? linuxAppDefinitions().find((app) => app.id === id);
+  return (
+    APPS.find((app) => app.id === id) ??
+    linuxAppDefinitions().find((app) => app.id === id) ??
+    packageAppDefinitions().find((app) => app.id === id)
+  );
 }
 
 /** Apps visible to the current role (fallback when permissions are absent). */

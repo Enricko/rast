@@ -1686,7 +1686,7 @@ checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rast"
-version = "0.11.11"
+version = "0.11.12"
 dependencies = [
  "aes-gcm",
  "argon2",

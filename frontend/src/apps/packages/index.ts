@@ -16,6 +16,7 @@ import { AppLifecycle } from "../../components/lifecycle";
 import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
 import { openGithubImport } from "./github";
+import { setPackagesFromOverview } from "../package-apps";
 import { LinuxApps } from "./linux";
 import { onLinuxApps } from "../linuxapp/catalog";
 import {
@@ -411,6 +412,7 @@ class PackageCenterApp {
     if (this.disposed || this.denied) return;
     try {
       this.overview = await this.ctx.api.get<Overview>("/api/packages");
+      setPackagesFromOverview(this.overview.packages);
       this.loadError = null;
       this.checking = this.overview.catalog.checking;
       // Forget live jobs the server no longer reports as active.
@@ -740,7 +742,7 @@ class PackageCenterApp {
           "div",
           { class: "pkg-tile-foot" },
           this.pill("Open", "is-quiet", `Open ${pkg.name}`, () =>
-            this.ctx.desktop.openPackageApp(pkg.id, pkg.name, pkg.app),
+            this.ctx.desktop.openPackageApp(pkg.id),
           ),
         ),
       ),
