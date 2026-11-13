@@ -24,6 +24,15 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.19] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Widget scaling from 0.11.18 did not apply: the card's own `--widget-scale: 1`
+  default shadowed the layer value. Cards now inherit the computed scale.
+
 ## [0.11.18] - 2026-11-13
 
 No database migration (schema stays v12).

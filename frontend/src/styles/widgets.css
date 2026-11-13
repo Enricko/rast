@@ -17,17 +17,16 @@
 }
 
 .desktop-widget {
-  --widget-scale: 1;
-  --font-size-sm: calc(12px * var(--widget-scale));
-  --font-size-xs: calc(11px * var(--widget-scale));
+  --font-size-sm: calc(12px * var(--widget-scale, 1));
+  --font-size-xs: calc(11px * var(--widget-scale, 1));
   position: absolute;
   left: 0;
   top: 0;
-  width: min(calc(260px * var(--widget-scale)), calc(100% - 16px));
+  width: min(calc(260px * var(--widget-scale, 1)), calc(100% - 16px));
   display: flex;
   flex-direction: column;
-  gap: calc(8px * var(--widget-scale));
-  padding: calc(10px * var(--widget-scale)) calc(12px * var(--widget-scale));
+  gap: calc(8px * var(--widget-scale, 1));
+  padding: calc(10px * var(--widget-scale, 1)) calc(12px * var(--widget-scale, 1));
   border-radius: var(--radius-lg);
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   background: color-mix(in srgb, var(--surface) 88%, transparent);
@@ -54,8 +53,8 @@
 .widget-head {
   display: flex;
   align-items: center;
-  gap: calc(7px * var(--widget-scale));
-  min-height: calc(24px * var(--widget-scale));
+  gap: calc(7px * var(--widget-scale, 1));
+  min-height: calc(24px * var(--widget-scale, 1));
   cursor: grab;
   touch-action: none;
 }
