@@ -897,7 +897,10 @@ AmbientCapabilities=
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/rast/apps
+# Desktop-app migrations export legacy Docker volumes into
+# <data_dir>/linux-apps/migrations (the web server pre-creates those folders
+# group-writable for the worker's `rast` group).
+ReadWritePaths=/var/lib/rast/apps /var/lib/rast/linux-apps
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

@@ -2921,6 +2921,20 @@ impl NativeApps {
             fs::create_dir_all(&dest).map_err(|error| {
                 AppError::internal(format!("cannot prepare the migration folder: {error}"))
             })?;
+            // The Docker worker (group `rast`, ProtectSystem=strict with a
+            // READ-WRITE allowance for this tree) performs the volume export;
+            // make the chain group-writable so it can write there.
+            for dir in [
+                self.config.linux_migration_dir(),
+                migration_root.clone(),
+                user_root.clone(),
+                dest.clone(),
+            ] {
+                let _ = std::fs::set_permissions(
+                    &dir,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o770),
+                );
+            }
             self.legacy
                 .volume_export(app_id, volume.user_id, &dest)
                 .await
