@@ -76,7 +76,8 @@ impl TemplatePackage {
 /// Read the repository's `package.json`.
 pub fn load_template(path: &Path) -> Result<TemplatePackage, String> {
     let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{} is not a valid package.json: {e}", path.display()))
+    serde_json::from_slice(&bytes)
+        .map_err(|e| format!("{} is not a valid package.json: {e}", path.display()))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,27 +90,24 @@ pub struct TemplateSource {
 
 /// `v<version>-<revision>`, e.g. `v5.4.9-1`.
 pub fn parse_tag(tag: &str) -> Result<(String, u32), String> {
-    let rest = tag
-        .strip_prefix('v')
-        .ok_or_else(|| format!("release tag {tag:?} must look like v<version>-<revision>, e.g. v5.4.9-1"))?;
+    let rest = tag.strip_prefix('v').ok_or_else(|| {
+        format!("release tag {tag:?} must look like v<version>-<revision>, e.g. v5.4.9-1")
+    })?;
     let (version, revision) = rest.rsplit_once('-').ok_or_else(|| {
         format!("release tag {tag:?} must look like v<version>-<revision>, e.g. v5.4.9-1")
     })?;
     let valid_version = !version.is_empty()
         && version.len() <= 64
-        && version
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_digit())
+        && version.chars().next().is_some_and(|c| c.is_ascii_digit())
         && version
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '+' | '-'));
     if !valid_version {
         return Err(format!("release tag {tag:?} has an invalid version part"));
     }
-    let revision: u32 = revision
-        .parse()
-        .map_err(|_| format!("release tag {tag:?} has an invalid revision (expected a positive number)"))?;
+    let revision: u32 = revision.parse().map_err(|_| {
+        format!("release tag {tag:?} has an invalid revision (expected a positive number)")
+    })?;
     if revision == 0 {
         return Err(format!("release tag {tag:?} revision must be at least 1"));
     }
@@ -117,7 +115,8 @@ pub fn parse_tag(tag: &str) -> Result<(String, u32), String> {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    let mut file = fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut file =
+        fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
     loop {
@@ -282,20 +281,17 @@ pub fn smoke(archive_path: &Path, package: &TemplatePackage) -> Result<Vec<Strin
     fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
     fs::create_dir_all(&home).map_err(|e| format!("cannot create {}: {e}", home.display()))?;
     let mut progress = |_stats: &archive::ExtractStats| {};
-    archive::extract_tar_gz(
-        archive_path,
-        &root,
-        1,
-        SMOKE_ROOM,
-        &mut progress,
-        &|| false,
-    )?;
+    archive::extract_tar_gz(archive_path, &root, 1, SMOKE_ROOM, &mut progress, &|| false)?;
 
     let mut executables = BTreeMap::new();
     for executable in &runtime.executables {
         let path = root.join(&executable.path);
-        let metadata = fs::metadata(&path)
-            .map_err(|_| format!("executable {} ({}) is missing", executable.name, executable.path))?;
+        let metadata = fs::metadata(&path).map_err(|_| {
+            format!(
+                "executable {} ({}) is missing",
+                executable.name, executable.path
+            )
+        })?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -398,7 +394,11 @@ fn run_with_timeout(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
-    let status = child.wait().map_err(|e| e.to_string())?.code().unwrap_or(-1);
+    let status = child
+        .wait()
+        .map_err(|e| e.to_string())?
+        .code()
+        .unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&out_rx.recv().unwrap_or_default()).into_owned();
     let stderr = String::from_utf8_lossy(&err_rx.recv().unwrap_or_default()).into_owned();
     Ok((stdout, stderr, timed_out, status))
@@ -579,7 +579,11 @@ mod tests {
         )
         .unwrap();
         let manifest_path = dir.path().join("rast-package.json");
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
         validate_file(&manifest_path, Some(&dir.path())).unwrap();
         fs::write(&archive, b"tampered").unwrap();
         assert!(validate_file(&manifest_path, Some(&dir.path())).is_err());

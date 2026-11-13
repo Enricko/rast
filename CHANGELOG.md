@@ -24,6 +24,27 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.5] - 2026-11-13
+
+No database migration (schema stays v11). This is the Docker-only 0.11 line:
+the native Linux apps backend is not part of this build.
+
+### Added
+
+- `rast package` authoring commands used by the package repositories, all in
+  Rust and sharing RAST's own rules: `manifest` (write `rast-package.json` for
+  a release tag from `dist/`), `validate` (schema plus local archive size and
+  SHA-256), `smoke` (extract like the installer and run the runtime checks) and
+  `check-release` (the same digest/asset cross-check as App Center → Install
+  from GitHub). The `rast-package-template` and `rast-packages` repositories no
+  longer need `scripts/package.py` / `scripts/rastpkg.py`.
+
+### Changed
+
+- App Center no longer offers **Add app** (the toolbar button, empty-state
+  tile and drag-and-drop installer): adding Linux apps is disabled for now,
+  while installed apps/runtimes remain manageable.
+
 ## [0.11.4] - 2026-11-13
 
 No database migration (schema stays v11). Apps installed before this release
