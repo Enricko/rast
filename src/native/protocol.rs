@@ -257,6 +257,7 @@ pub enum NativeOp {
     PathSymlink(PathSymlinkOp),
     ProfilePrepare(ProfilePrepareOp),
     ProfileCleanLocks(ProfileCleanLocksOp),
+    ProfileInstall(ProfileInstallOp),
     ProfileRemove(ProfileRemoveOp),
     PackageInstalledList(PackageInstalledListOp),
     PackageFiles(PackageFilesOp),
@@ -288,6 +289,7 @@ impl NativeOp {
             Self::PathSymlink(_) => "path_symlink",
             Self::ProfilePrepare(_) => "profile_prepare",
             Self::ProfileCleanLocks(_) => "profile_clean_locks",
+            Self::ProfileInstall(_) => "profile_install",
             Self::ProfileRemove(_) => "profile_remove",
             Self::PackageInstalledList(_) => "package_installed_list",
             Self::PackageFiles(_) => "package_files",
@@ -396,6 +398,7 @@ impl NativeRequest {
             NativeOp::PathSymlink(op) => merge!(op),
             NativeOp::ProfilePrepare(op) => merge!(op),
             NativeOp::ProfileCleanLocks(op) => merge!(op),
+            NativeOp::ProfileInstall(op) => merge!(op),
             NativeOp::ProfileRemove(op) => merge!(op),
             NativeOp::PackageInstalledList(op) => merge!(op),
             NativeOp::PackageFiles(op) => merge!(op),
@@ -721,6 +724,19 @@ pub struct ProfileCleanLocksOp {
     pub app_id: String,
     #[serde(rename = "userId")]
     pub user_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileInstallOp {
+    #[serde(rename = "appId")]
+    pub app_id: String,
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    /// Directory under `<data_dir>/linux-apps/migrations/...` holding the
+    /// mapped profile tree (`home/`, `config/`, ...); copied into the person's
+    /// profile and owned by their identity.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

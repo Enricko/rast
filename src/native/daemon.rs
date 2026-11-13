@@ -43,9 +43,9 @@ use crate::native::{
         DebPreviewOp, DebRemoveOp, IdentityEnsureOp, IdentityRemoveOp, NativeError, NativeOp,
         NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp, PackagePolicyOp,
         PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp, PathSymlinkOp,
-        ProfileCleanLocksOp, ProfilePrepareOp, ProfileRemoveOp, ResourceLimits, SessionStartOp,
-        SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
-        PROTOCOL_VERSION,
+        ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp, ResourceLimits,
+        SessionStartOp, SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES,
+        MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
 };
@@ -411,6 +411,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::PathSymlink(op) => path_symlink(options, op).await,
         NativeOp::ProfilePrepare(op) => profile_prepare(options, op).await,
         NativeOp::ProfileCleanLocks(op) => profile_clean_locks(options, op).await,
+        NativeOp::ProfileInstall(op) => profile_install(options, op).await,
         NativeOp::ProfileRemove(op) => profile_remove(options, op).await,
         NativeOp::AptUpdate => apt_update(options).await,
     }
@@ -2564,6 +2565,149 @@ async fn profile_clean_locks(
         }
     }
     Ok(json!({"removed": removed, "profile": path_string(&profile)}))
+}
+
+/// Copy a mapped profile tree (created by the unprivileged server under the
+/// migration directory) into the person's native profile and hand it to their
+/// unprivileged identity. The helper runs as root, so the identity-owned 0700
+/// profile can be written without ever exposing it to the server.
+async fn profile_install(
+    options: &NativeOptions,
+    op: ProfileInstallOp,
+) -> Result<Value, NativeError> {
+    validate_app_id(&op.app_id)?;
+    let ids = identity_ids(&options.validation_context(), op.user_id)?;
+    let expected_home = options.linux_users_dir().join(op.user_id.to_string());
+    let username = crate::native::protocol::username_for(op.user_id);
+    let rast_home = options.homes_dir.join(&username);
+    if !rast_home.is_dir() {
+        std::fs::create_dir_all(&rast_home).map_err(|error| {
+            NativeError::command_failed(format!("cannot create {}: {error}", rast_home.display()))
+        })?;
+        if let Ok((uid, gid)) = crate::native::data_dir_owner(options, ids.gid) {
+            let _ = std::os::unix::fs::chown(&rast_home, Some(uid), Some(gid));
+        }
+    }
+    let prepared = profile_prepare(
+        options,
+        ProfilePrepareOp {
+            app_id: op.app_id.clone(),
+            user_id: op.user_id,
+            uid: ids.uid,
+            gid: ids.gid,
+            home: path_string(&expected_home),
+            rast_home: path_string(&rast_home),
+        },
+    )
+    .await?;
+    let profile = prepared
+        .get("profile")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| NativeError::protocol("profile_prepare returned no profile"))?;
+    let source = validate_absolute_path(&op.source)?;
+    let canonical = std::fs::canonicalize(&source).map_err(|error| {
+        NativeError::invalid(format!("cannot resolve {}: {error}", source.display()))
+    })?;
+    let migrations_root = std::fs::canonicalize(options.linux_apps_dir().join("migrations"))
+        .map_err(|_| NativeError::forbidden("the migration directory is not available"))?;
+    if !canonical.starts_with(&migrations_root) || canonical == migrations_root {
+        return Err(NativeError::forbidden(
+            "the profile import source must be a migration directory",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(&canonical).map_err(|error| {
+        NativeError::invalid(format!("cannot inspect {}: {error}", canonical.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(NativeError::forbidden(
+            "the profile import source must be a real directory",
+        ));
+    }
+    let (files, dirs, skipped) = copy_profile_tree(&canonical, &profile, ids.uid, ids.gid)?;
+    Ok(json!({"files": files, "dirs": dirs, "skipped": skipped}))
+}
+
+/// Recursively copy `source` into the identity-owned `target` (root, so
+/// permission bits are not an obstacle), chowning everything to the identity.
+/// Symlinks and special files are skipped: app profiles are data, not code,
+/// and the migration must never follow a link out of the exported tree.
+fn copy_profile_tree(
+    source: &Path,
+    target: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(u64, u64, u64), NativeError> {
+    let mut files = 0u64;
+    let mut dirs = 0u64;
+    let mut skipped = 0u64;
+    let mut entries_seen = 0u64;
+    let mut stack = vec![(source.to_path_buf(), target.to_path_buf(), 0u32)];
+    while let Some((from, to, depth)) = stack.pop() {
+        if depth > 64 {
+            continue;
+        }
+        if entries_seen > 1_000_000 {
+            return Err(NativeError::invalid(
+                "the saved app data has too many files to migrate",
+            ));
+        }
+        let entries = std::fs::read_dir(&from).map_err(|error| {
+            NativeError::command_failed(format!("cannot read {}: {error}", from.display()))
+        })?;
+        for entry in entries.flatten() {
+            entries_seen += 1;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let child_from = entry.path();
+            let child_to = to.join(&name);
+            let meta = match std::fs::symlink_metadata(&child_from) {
+                Ok(meta) => meta,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            if meta.file_type().is_symlink() || !meta.file_type().is_dir() && !meta.is_file() {
+                skipped += 1;
+                continue;
+            }
+            if meta.is_dir() {
+                if name_str == ".." {
+                    skipped += 1;
+                    continue;
+                }
+                std::fs::create_dir_all(&child_to).map_err(|error| {
+                    NativeError::command_failed(format!(
+                        "cannot create {}: {error}",
+                        child_to.display()
+                    ))
+                })?;
+                let _ = std::fs::set_permissions(
+                    &child_to,
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                );
+                let _ = std::os::unix::fs::chown(&child_to, Some(uid), Some(gid));
+                dirs += 1;
+                stack.push((child_from, child_to, depth + 1));
+                continue;
+            }
+            let mode = meta.permissions().mode() & 0o700;
+            std::fs::copy(&child_from, &child_to).map_err(|error| {
+                NativeError::command_failed(format!(
+                    "cannot copy {}: {error}",
+                    child_from.display()
+                ))
+            })?;
+            let _ = std::fs::set_permissions(
+                &child_to,
+                std::os::unix::fs::PermissionsExt::from_mode(mode.max(0o600)),
+            );
+            let _ = std::os::unix::fs::chown(&child_to, Some(uid), Some(gid));
+            files += 1;
+        }
+    }
+    Ok((files, dirs, skipped))
 }
 
 async fn profile_prepare(

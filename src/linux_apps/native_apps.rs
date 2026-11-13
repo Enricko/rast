@@ -1062,20 +1062,6 @@ impl NativeApps {
         Ok(())
     }
 
-    async fn path_chown(&self, path: &Path, uid: u32, gid: u32, recursive: bool) -> AppResult<()> {
-        self.call_helper(
-            "path_chown",
-            json!({
-                "path": path.to_string_lossy(),
-                "uid": uid,
-                "gid": gid,
-                "recursive": recursive,
-            }),
-        )
-        .await?;
-        Ok(())
-    }
-
     async fn path_remove(&self, path: &Path) -> AppResult<()> {
         self.call_helper("path_remove", json!({"path": path.to_string_lossy()}))
             .await?;
@@ -2984,7 +2970,7 @@ impl NativeApps {
         let mut profile_users: Vec<Value> = Vec::new();
         for (user_id, _volume_name, export_dir) in &exported {
             job.check_cancelled()?;
-            let identity = self.identity_ensure(*user_id).await?;
+            let _identity = self.identity_ensure(*user_id).await?;
             let profile = self.profile_dir(app_id, *user_id);
             // `<data_dir>/linux-apps/profiles` is root-owned 0711 (identities
             // may traverse it, only the privileged helper may create entries),
@@ -3007,34 +2993,49 @@ impl NativeApps {
                 json!({
                     "appId": app_id,
                     "userId": user_id,
-                    "uid": identity.uid,
-                    "gid": identity.gid,
+                    "uid": _identity.uid,
+                    "gid": _identity.gid,
                     "home": identity_home.to_string_lossy(),
                     "rastHome": rast_home.to_string_lossy(),
                 }),
             )
             .await?;
-            // The profile tree is identity-owned 0700, so the unprivileged
-            // server cannot copy into it directly. Let the helper grant the
-            // server's group temporary write access (the copy is the only
-            // writer during this window), then restore the identity-only mode
-            // after the ownership is fixed below.
-            let profile_for_chmod = profile.clone();
-            self.path_chmod(&profile_for_chmod, 0o770, true).await?;
             // The export belongs to the worker; make it readable for the
             // unprivileged server before copying it.
             self.path_chmod(export_dir, 0o755, true).await?;
+            // Map the exported volume into the profile layout in a staging
+            // directory the server can write, then let the helper import it
+            // into the identity-owned profile (root copies and chowns, so the
+            // profile never has to become group-writable).
+            let user_root = migration_root.join(user_id.to_string());
+            let mapped = user_root.join("mapped");
+            if mapped.exists() {
+                let _ = fs::remove_dir_all(&mapped);
+            }
+            fs::create_dir_all(&mapped).map_err(|error| {
+                AppError::internal(format!(
+                    "cannot prepare the migration staging folder: {error}"
+                ))
+            })?;
             let export_clone = export_dir.clone();
-            let profile_clone = profile.clone();
+            let mapped_clone = mapped.clone();
             tokio::task::spawn_blocking(move || {
-                map_volume_into_profile(&export_clone, &profile_clone)
+                map_volume_into_profile(&export_clone, &mapped_clone)
             })
             .await
             .map_err(|error| AppError::internal(error.to_string()))?
             .map_err(AppError::bad_request)?;
-            self.path_chown(&profile, identity.uid, identity.gid, true)
-                .await?;
-            self.path_chmod(&profile, 0o700, true).await?;
+            self.call_helper(
+                "profile_install",
+                json!({
+                    "appId": app_id,
+                    "userId": user_id,
+                    "source": mapped.to_string_lossy(),
+                }),
+            )
+            .await?;
+            let _ = fs::remove_dir_all(&mapped);
+            self.path_remove_quiet(&mapped).await;
             self.path_remove_quiet(export_dir).await;
             profile_users.push(json!({
                 "userId": user_id,
@@ -4186,6 +4187,21 @@ mod tests {
     // Fixtures
     // -----------------------------------------------------------------
 
+    fn copy_test_tree(source: &Path, target: &Path) {
+        if let Ok(entries) = std::fs::read_dir(source) {
+            for entry in entries.flatten() {
+                let from = entry.path();
+                let to = target.join(entry.file_name());
+                if from.is_dir() {
+                    let _ = std::fs::create_dir_all(&to);
+                    copy_test_tree(&from, &to);
+                } else {
+                    let _ = std::fs::copy(&from, &to);
+                }
+            }
+        }
+    }
+
     fn write_file(path: &Path, data: &[u8], mode: u32) {
         use std::os::unix::fs::PermissionsExt;
         if let Some(parent) = path.parent() {
@@ -4316,6 +4332,23 @@ mod tests {
             }
             "profile_prepare" => {
                 ok(json!({"home": params.get("home").cloned().unwrap_or(Value::Null)}))
+            }
+            "profile_install" => {
+                let source = params
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if let Some(profile) = source.strip_suffix("/mapped") {
+                    let profile = profile.replace("/migrations/", "/profiles/");
+                    copy_test_tree(Path::new(&source), Path::new(&profile));
+                    ok(json!({"files": 1, "dirs": 1, "skipped": 0}))
+                } else {
+                    helper_failure(
+                        "invalid",
+                        "profile_install source is not a mapped directory",
+                    )
+                }
             }
             "path_chmod" | "path_chown" | "path_remove" => ok(json!({"ok": true})),
             _ => helper_failure("unsupported", &format!("unexpected helper op {op}")),
@@ -4973,7 +5006,10 @@ mod tests {
             "hello"
         );
         assert!(!env.helper.calls("identity_ensure").is_empty());
-        assert!(!env.helper.calls("path_chown").is_empty());
+        // The identity-owned profile is filled by the privileged helper (the
+        // server only prepares a writable staging directory).
+        assert!(!env.helper.calls("profile_prepare").is_empty());
+        assert!(!env.helper.calls("profile_install").is_empty());
 
         let rolled = env.apps.rollback_migration(1, "demo").await.unwrap();
         assert_eq!(rolled["backend"], "docker");
