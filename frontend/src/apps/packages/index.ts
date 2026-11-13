@@ -182,7 +182,6 @@ class PackageCenterApp {
       this.backButton,
       this.checkButton,
       this.search,
-      this.linuxButton,
       this.githubButton,
       this.settingsButton,
       this.live.el,
@@ -191,7 +190,8 @@ class PackageCenterApp {
     this.main = h("div", { class: "app-main pkg-main" });
     ctx.root.classList.add("packages-app");
     ctx.root.append(toolbar, this.notice.el, h("div", { class: "app-split pkg-split" }, this.sidebar, this.main));
-    this.linux.attachDrop(ctx.root);
+    // "Add app" is hidden for now; drag-and-drop installation is disabled
+    // with it so the feature cannot be reached accidentally.
 
     this.subscribe();
     // Keep relative times and the stale indicator honest without a reload.
@@ -634,10 +634,9 @@ class PackageCenterApp {
     if (this.linuxGrid && this.linuxSection) {
       clear(this.linuxGrid);
       for (const app of linuxApps) this.linuxGrid.appendChild(this.linux.tile(app));
-      // An empty All Packages list offers the install as a tile.
-      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.dockerEnabled;
-      if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
-      this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
+      // Adding Linux apps ("Add app") is hidden for now: installed apps stay
+      // listed and can be opened/updated, but no install entry is offered.
+      this.linuxSection.hidden = linuxApps.length === 0;
     }
     const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
     if (this.runtimeSection) {
