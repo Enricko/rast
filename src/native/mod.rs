@@ -1005,6 +1005,12 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
         warn(&mut report, warning);
     }
     for error in errors {
+        // `rast doctor` is normally run as the unprivileged service account;
+        // the root requirement belongs to the helper unit (checked above),
+        // not to the diagnostic itself.
+        if error.starts_with("must run as root") {
+            continue;
+        }
         // Translated to WARN: the native backend being down is not fatal for
         // the rest of RAST.
         warn(&mut report, error);
