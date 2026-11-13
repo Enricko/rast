@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.8] - 2026-11-13
+
+Schema v12 (`migrations/0012_packages_app_type.sql`): `packages.type` may be
+`runtime` or `app`. Rolling back to 0.11.4 requires its matching pre-upgrade
+database backup.
+
+### Fixed
+
+- Installing an app-type package over an existing runtime package of the same
+  id updates the stored package type, so App Center moves it from Runtimes to
+  Apps after the update.
+
 ## [0.11.7] - 2026-11-13
 
 No database migration (schema stays v11). Docker-only 0.11 line.

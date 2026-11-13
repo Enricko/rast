@@ -191,7 +191,8 @@ pub async fn record_install(pool: &SqlitePool, v: NewVersion<'_>) -> AppResult<(
         "INSERT INTO packages (id, type, name, source, source_repo, publisher_id, publisher_name,
                                default_version, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, publisher_name = excluded.publisher_name,
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, type = excluded.type,
+                                       publisher_name = excluded.publisher_name,
                                        updated_at = excluded.updated_at",
     )
     .bind(&v.manifest.id)
