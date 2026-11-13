@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.28] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Hovering a widget showed its action buttons inline and clipped the title
+  again. The buttons are now an overlay that replaces the status pill, so the
+  title always fits on the narrow app-grid tiles.
+
 ## [0.11.27] - 2026-11-14
 
 No database migration (schema stays v12).

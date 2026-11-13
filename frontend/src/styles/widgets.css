@@ -114,7 +114,14 @@
 
 .widget-actions {
   display: none;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 2;
   gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
 }
 
 .desktop-widget:hover .widget-actions,
@@ -122,9 +129,19 @@
   display: inline-flex;
 }
 
+/* On hover the action buttons take the status pill's place instead of
+   squeezing the title. */
+.desktop-widget:hover .widget-pill,
+.desktop-widget:focus-within .widget-pill {
+  visibility: hidden;
+}
+
 @media (hover: none) {
   .widget-actions {
     display: inline-flex;
+  }
+  .widget-pill {
+    visibility: hidden;
   }
 }
 
