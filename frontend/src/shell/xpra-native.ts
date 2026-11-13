@@ -136,6 +136,8 @@ const DISCONNECT_GRACE_MS = 8000;
 // A first native launch can include creating the person's graphical session and
 // a cold browser start (the profile may be large); 30 s was far too optimistic.
 const START_TIMEOUT_MS = 240_000;
+/** How often the shell re-reads the shim snapshot as a safety net. */
+const SNAPSHOT_POLL_MS = 1_000;
 const RESIZE_DEBOUNCE_MS = 90;
 const ATTACH_DELAYS = [40, 120, 300, 700, 1500, 3000, 6000];
 const FORCE_FORGET_MS = 12_000;
@@ -216,6 +218,10 @@ export class NativeLinuxHost {
   private pollTimer = 0;
   private reconnectTimer = 0;
   private attachTimer = 0;
+  /** Safety poll: the shim may publish its snapshot before this page attaches
+   * its listeners (a session created during a first launch does exactly that),
+   * in which case no later window event would ever arrive. */
+  private snapshotTimer = 0;
   private lastLaunchSlug: string | null = null;
   private lastLaunchAt = 0;
   private disposed = false;
@@ -292,6 +298,7 @@ export class NativeLinuxHost {
     if (this.disposed) return;
     this.disposed = true;
     window.clearInterval(this.pollTimer);
+    window.clearInterval(this.snapshotTimer);
     window.clearTimeout(this.reconnectTimer);
     window.clearTimeout(this.attachTimer);
     for (const unsubscribe of this.unsubscribers.splice(0)) {
@@ -441,6 +448,7 @@ export class NativeLinuxHost {
 
   private removeIframe(): void {
     window.clearTimeout(this.attachTimer);
+    window.clearInterval(this.snapshotTimer);
     if (!this.iframe) return;
     const iframe = this.iframe;
     this.iframe = null;
@@ -500,6 +508,12 @@ export class NativeLinuxHost {
     });
     const snapshot = shim.snapshot();
     if (snapshot) this.applySnapshot(snapshot);
+    window.clearInterval(this.snapshotTimer);
+    this.snapshotTimer = window.setInterval(() => {
+      if (this.disposed || !this.shim) return;
+      const state = this.shim.snapshot?.();
+      if (state?.ready) this.applySnapshot(state);
+    }, SNAPSHOT_POLL_MS);
   }
 
   private scheduleReconnect(): void {
