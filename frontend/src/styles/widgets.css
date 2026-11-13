@@ -73,7 +73,7 @@
 .widget-title {
   flex: 1;
   min-width: 0;
-  font-size: var(--font-size-sm);
+  font-size: 12px;
   font-weight: 650;
   white-space: nowrap;
   overflow: hidden;
@@ -84,9 +84,9 @@
   flex: 0 0 auto;
   padding: 1px 7px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
-  line-height: 16px;
+  line-height: 15px;
   border: 1px solid var(--border);
   color: var(--text-dim);
   background: var(--surface-2);
@@ -113,8 +113,19 @@
 }
 
 .widget-actions {
-  display: inline-flex;
+  display: none;
   gap: 2px;
+}
+
+.desktop-widget:hover .widget-actions,
+.desktop-widget:focus-within .widget-actions {
+  display: inline-flex;
+}
+
+@media (hover: none) {
+  .widget-actions {
+    display: inline-flex;
+  }
 }
 
 .widget-action {

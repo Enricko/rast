@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.27] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- The narrower (two app-column) widget tiles clipped their titles. The
+  action buttons only take space while hovered/focused, and the title/pill
+  font sizes were reduced, so "System Health" and "CPU & Memory" fit fully.
+
 ## [0.11.26] - 2026-11-14
 
 No database migration (schema stays v12).
