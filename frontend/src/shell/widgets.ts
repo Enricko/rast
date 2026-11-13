@@ -494,13 +494,52 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     // the card size, never the relative placement.
     const scale = Math.min(
       1.5,
-      Math.max(0.8, Math.min(layer.clientWidth / 1500, layer.clientHeight / 850)),
+      Math.max(0.9, Math.min(layer.clientWidth / 1500, layer.clientHeight / 850)),
     );
     layer.style.setProperty("--widget-scale", scale.toFixed(3));
-    for (const widget of layout) {
-      if (widget.id === dragging) continue;
+    const visible = layout.flatMap((widget) => {
+      if (widget.id === dragging) return [];
       const card = cards.get(widget.id);
-      if (card) position(card, widget);
+      if (!card) return [];
+      const area = freeArea(card);
+      return [{
+        widget,
+        card,
+        x: Math.round(widget.x * area.width),
+        y: Math.round(widget.y * area.height),
+        w: card.el.offsetWidth,
+        h: card.el.offsetHeight,
+      }];
+    });
+    const gap = Math.max(8, Math.round(10 * scale));
+    const collides = (a: (typeof visible)[number], b: (typeof visible)[number]): boolean =>
+      a.x < b.x + b.w + gap &&
+      a.x + a.w + gap > b.x &&
+      a.y < b.y + b.h + gap &&
+      a.y + a.h + gap > b.y;
+    const hasOverlap = visible.some((a, index) => visible.slice(index + 1).some((b) => collides(a, b)));
+    if (!hasOverlap) {
+      for (const item of visible) {
+        item.card.el.style.left = `${item.x}px`;
+        item.card.el.style.top = `${item.y}px`;
+      }
+      return;
+    }
+    // The saved fractional layout is only relative: on a smaller monitor the
+    // cards would pile on top of each other. Reflow them into non-overlapping,
+    // right-aligned columns instead (order is preserved).
+    const width = Math.max(0, ...visible.map((item) => item.w));
+    const height = layer.clientHeight;
+    let columnX = Math.max(0, layer.clientWidth - width);
+    let cursorY = 0;
+    for (const item of visible) {
+      if (cursorY > 0 && cursorY + item.h > height) {
+        columnX = Math.max(0, columnX - width - gap);
+        cursorY = 0;
+      }
+      item.card.el.style.left = `${columnX + Math.max(0, width - item.w)}px`;
+      item.card.el.style.top = `${cursorY}px`;
+      cursorY += item.h + gap;
     }
   }
 

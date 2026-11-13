@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.20] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Widget layout on a smaller monitor: the saved fractional positions could
+  make cards overlap when the screen shrank. On collision they now reflow into
+  non-overlapping, right-aligned columns (order preserved), and the minimum
+  scale was raised to 0.9 so they stay readable. A layout that does not
+  collide keeps the account's exact arrangement.
+
 ## [0.11.19] - 2026-11-13
 
 No database migration (schema stays v12).
