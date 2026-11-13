@@ -1,7 +1,8 @@
 //! RAST command-line interface and server entry point.
 //!
 //! Commands: `serve`, `status`, `doctor`, `user create-admin`, `setup-token`,
-//! `backup`, `update`, `version`, `worker` (internal), `restore`.
+//! `backup`, `update`, `version`, `package` (authoring), `worker` (internal),
+//! `restore`.
 
 use std::{
     io::{IsTerminal, Read, Write},
@@ -88,6 +89,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PackagesCommand,
     },
+    /// Author or verify a package repository release (no server needed)
+    Package {
+        #[command(subcommand)]
+        cmd: PackageCommand,
+    },
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
@@ -102,6 +108,59 @@ enum Command {
         /// Skip the confirmation prompt
         #[arg(long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PackageCommand {
+    /// Validate rast-package.json (optionally against local archives)
+    Validate {
+        /// Manifest to check (default: rast-package.json)
+        manifest: Option<PathBuf>,
+        /// Directory that holds the release archives
+        #[arg(long, value_name = "DIR")]
+        dist: Option<PathBuf>,
+    },
+    /// Write rast-package.json for a release tag from archives in dist/
+    Manifest {
+        /// Repository package.json with the manifest template
+        #[arg(long, value_name = "FILE", default_value = "package.json")]
+        package: PathBuf,
+        /// Release tag, e.g. v5.4.9-1
+        #[arg(long, value_name = "TAG")]
+        tag: String,
+        /// GitHub repository, owner/name
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: String,
+        /// Directory with the built archives (default: dist)
+        #[arg(long, value_name = "DIR", default_value = "dist")]
+        dist: PathBuf,
+        /// Attestation URL per target, as TARGET=URL (repeatable)
+        #[arg(long, value_name = "TARGET=URL")]
+        attestation: Vec<String>,
+        /// Skip targets whose archive has not been built
+        #[arg(long)]
+        allow_missing: bool,
+        /// Output file (default: rast-package.json)
+        #[arg(long, value_name = "FILE", default_value = "rast-package.json")]
+        out: PathBuf,
+    },
+    /// Extract an archive like the installer and run the manifest checks
+    Smoke {
+        /// Built archive to test
+        archive: PathBuf,
+        /// Repository package.json with the manifest template
+        #[arg(long, value_name = "FILE", default_value = "package.json")]
+        package: PathBuf,
+    },
+    /// Cross-check a published GitHub release like Install from GitHub does
+    CheckRelease {
+        /// GitHub repository, owner/name
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: String,
+        /// Release tag, e.g. v5.4.9-1
+        #[arg(long, value_name = "TAG")]
+        tag: String,
     },
 }
 
@@ -198,6 +257,7 @@ async fn run(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match command {
         Command::Serve { bind } => serve(config_path, log_level, bind).await,
+        Command::Package { cmd } => package_command(cmd),
         Command::Version => {
             // Render once and tolerate a closed stdout: release pipelines and
             // shell recipes routinely run `rast version | head -n 1`, which is
@@ -276,10 +336,90 @@ async fn run(
                     cmd: PackagesCommand::Path { cmd },
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
-                Command::Serve { .. } | Command::Version => unreachable!(),
+                Command::Serve { .. } | Command::Version | Command::Package { .. } => {
+                    unreachable!()
+                }
             }
         }
     }
+}
+
+fn package_command(cmd: PackageCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::authoring;
+    use std::collections::BTreeMap;
+    match cmd {
+        PackageCommand::Validate { manifest, dist } => {
+            let path = manifest.unwrap_or_else(|| PathBuf::from("rast-package.json"));
+            let value = authoring::validate_file(&path, dist.as_deref())?;
+            println!(
+                "{}: valid ({} {} rev {})",
+                path.display(),
+                value.id,
+                value.version,
+                value.revision
+            );
+        }
+        PackageCommand::Manifest {
+            package,
+            tag,
+            repo,
+            dist,
+            attestation,
+            allow_missing,
+            out,
+        } => {
+            let template = authoring::load_template(&package)?;
+            let mut attestations = BTreeMap::new();
+            for entry in attestation {
+                let (target, url) = entry
+                    .split_once('=')
+                    .ok_or_else(|| format!("--attestation expects TARGET=URL, got {entry:?}"))?;
+                attestations.insert(target.trim().to_string(), url.trim().to_string());
+            }
+            let run_url = std::env::var("GITHUB_RUN_ID").ok().map(|id| {
+                format!(
+                    "{}/{}/actions/runs/{id}",
+                    std::env::var("GITHUB_SERVER_URL")
+                        .unwrap_or_else(|_| "https://github.com".into()),
+                    std::env::var("GITHUB_REPOSITORY").unwrap_or_default()
+                )
+            });
+            let manifest = authoring::build_manifest(
+                &template,
+                &tag,
+                &repo,
+                &dist,
+                &attestations,
+                allow_missing,
+                run_url.as_deref(),
+            )?;
+            let bytes = serde_json::to_vec_pretty(&manifest)?;
+            std::fs::write(&out, [bytes.as_slice(), b"\n"].concat())?;
+            println!(
+                "wrote {}: {} {} revision {}, targets {:?}",
+                out.display(),
+                manifest.id,
+                manifest.version,
+                manifest.revision,
+                manifest.targets()
+            );
+        }
+        PackageCommand::Smoke { archive, package } => {
+            let template = authoring::load_template(&package)?;
+            for line in authoring::smoke(&archive, &template)? {
+                println!("{line}");
+            }
+        }
+        PackageCommand::CheckRelease { repo, tag } => {
+            let token = std::env::var("GH_TOKEN")
+                .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                .ok();
+            for line in authoring::check_release(&repo, &tag, token.as_deref())? {
+                println!("{line}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn packages_path(cfg: &Config, cmd: PathCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
