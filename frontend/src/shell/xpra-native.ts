@@ -735,7 +735,18 @@ export class NativeLinuxHost {
       );
       return;
     }
+    // The first remote configure can race the Xpra window becoming mapped
+    // (especially for a browser window that starts at the virtual-screen size),
+    // leaving the picture at its old scale in the top-left corner. Re-apply the
+    // RAST content size a couple of times so the remote window always matches
+    // the window the person sees.
     window.requestAnimationFrame(() => this.scheduleRemoteResize(frame, ctx.contentEl, 0));
+    for (const retryMs of [350, 1200]) {
+      window.setTimeout(() => {
+        if (frame.closing || frame.remoteGone) return;
+        this.scheduleRemoteResize(frame, ctx.contentEl, 0);
+      }, retryMs);
+    }
     if (!frame.popup) shim?.focusWindow(frame.wid);
   }
 
