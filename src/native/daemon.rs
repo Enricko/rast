@@ -1211,6 +1211,14 @@ async fn unit_status(options: &NativeOptions, op: UnitStatusOp) -> Result<Value,
     }))
 }
 
+/// Does this unit's main process run Xpra with playback audio enabled?
+/// `None` when the command line cannot be read.
+fn unit_plays_audio(main_pid: Option<u32>) -> Option<bool> {
+    let cmdline = std::fs::read(format!("/proc/{}/cmdline", main_pid?)).ok()?;
+    let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    Some(args.contains(&&b"--audio=yes"[..]) && args.contains(&&b"--speaker=on"[..]))
+}
+
 async fn units_list(options: &NativeOptions) -> Result<Value, NativeError> {
     let units = systemctl_show(options, &["rast-xpra-*.service", "rast-app-*.service"]).await?;
     let mut items: Vec<Value> = Vec::new();
@@ -1226,6 +1234,10 @@ async fn units_list(options: &NativeOptions) -> Result<Value, NativeError> {
             "unit": info.unit,
             "active": info.active,
             "mainPid": info.main_pid,
+            // Root can read another identity's /proc entry; the server runs
+            // with ProtectProc=invisible and cannot. Used to recognise Xpra
+            // sessions started before playback audio existed.
+            "audio": unit_plays_audio(info.main_pid),
         }));
     }
     items.sort_by(|left, right| left["unit"].as_str().cmp(&right["unit"].as_str()));
@@ -3388,6 +3400,15 @@ exit 0
         );
         assert_eq!(app["HOME"], "/tmp/application-profile");
         assert_eq!(session["HOME"], path_string(&identity.home));
+    }
+
+    #[test]
+    fn audio_flags_are_read_from_the_unit_command_line() {
+        // The test binary itself is not Xpra: it must be reported as silent,
+        // not as unknowable, so an upgrade can replace such a session.
+        assert_eq!(unit_plays_audio(Some(std::process::id())), Some(false));
+        assert_eq!(unit_plays_audio(None), None);
+        assert_eq!(unit_plays_audio(Some(u32::MAX)), None);
     }
 
     #[tokio::test]
