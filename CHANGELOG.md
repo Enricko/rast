@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.23] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Widgets are fixed-size tiles (280 px, roughly a 2×2 block of desktop apps)
+  instead of scaling with the monitor, and their type sizes are fixed too, so
+  text and titles are no longer shrunk or clipped on smaller/larger screens.
+  When the saved arrangement would overlap, they still reflow into columns.
+
 ## [0.11.22] - 2026-11-14
 
 No database migration (schema stays v12).

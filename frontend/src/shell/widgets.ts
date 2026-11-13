@@ -488,14 +488,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
 
   function positionAll(): void {
     if (disposed) return;
-    // Scale the cards with the desktop size: at 1080p they are comfortable,
-    // on a small/large monitor they shrink/grow instead of looking cramped or
-    // tiny. Positions stay fractions of the free area, so this only changes
-    // the card size, never the relative placement.
-    const scale = Math.min(
-      1.1,
-      Math.max(0.9, Math.min(layer.clientWidth / 1500, layer.clientHeight / 850)),
-    );
+    // Widgets are fixed-size tiles (roughly a 2x2 block of app icons), not
+    // scaled with the screen: changing the monitor must never shrink the text
+    // or clip titles. When the saved arrangement would overlap on a smaller
+    // screen, the cards reflow into columns instead (see below).
+    const scale = 1;
     layer.style.setProperty("--widget-scale", scale.toFixed(3));
     const visible = layout.flatMap((widget) => {
       if (widget.id === dragging) return [];
