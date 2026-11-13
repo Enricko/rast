@@ -430,6 +430,26 @@ export function applyAppearance(appearance: Appearance, options: { preview?: boo
   }
   if (!options.preview) {
     root.dataset.wallpaperApplied = "true";
+    // The boot splash (index.html + /boot-wallpaper.js) paints this on the
+    // next refresh before the app bundle knows who is signed in.
+    try {
+      if (!url || wallpaper.kind === "color") {
+        window.localStorage.removeItem("rast.wallpaper.splash.v1");
+      } else {
+        window.localStorage.setItem(
+          "rast.wallpaper.splash.v1",
+          JSON.stringify({
+            url,
+            color: wallpaper.color,
+            overlay: wallpaper.overlay,
+            fit: wallpaper.fit,
+            position: positionCss(wallpaper.position),
+          }),
+        );
+      }
+    } catch {
+      /* storage unavailable: the splash keeps its built-in background */
+    }
   }
 }
 

@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.22] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- The boot splash (the RAST logo while the page loads) painted the built-in
+  alpine wallpaper even when the account uses a custom wallpaper. The last
+  applied wallpaper is cached locally and a tiny same-origin script paints it
+  on the splash before the app bundle loads, so a refresh no longer flashes
+  the default background.
+
 ## [0.11.21] - 2026-11-14
 
 No database migration (schema stays v12).
