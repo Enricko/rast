@@ -900,6 +900,9 @@
       hideXpraChrome(this);
     };
     win.updateCSSGeometry = function () {
+      var resized = this.w !== this.__rastCanvasW || this.h !== this.__rastCanvasH;
+      this.__rastCanvasW = this.w;
+      this.__rastCanvasH = this.h;
       try {
         this.updateCanvasGeometry();
       } catch (e) {
@@ -930,6 +933,8 @@
         canvasStyle.maxHeight = "none";
         canvasStyle.display = "block";
       }
+      // Server-initiated resize also clears the canvas backing store.
+      if (resized) scheduleRefresh(this.wid);
     };
     win.update_zindex = function () {
       if (!this.div) return;

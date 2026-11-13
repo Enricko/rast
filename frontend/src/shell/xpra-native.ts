@@ -366,7 +366,6 @@ export class NativeLinuxHost {
   private applySession(session: NativeSession | null): void {
     if (this.disposed) return;
     const previous = this.session;
-    const sameStatus = previous?.status === session?.status;
     this.session = session;
     // Only notify the app list when the session actually changed: the poll
     // runs every few seconds and re-setting an identical snapshot would make
@@ -388,8 +387,18 @@ export class NativeLinuxHost {
       if (session?.status === "ended" && (wasAlive || previous?.status === "ready")) this.announceEnded(session);
       return;
     }
+    // Starting sessions already have a proxy URL, but Xpra is not listening
+    // yet. Loading now would leave an HTML 502 page in the iframe indefinitely.
+    if (session.status !== "ready") {
+      if (this.iframe && !this.shim) this.removeIframe();
+      return;
+    }
+    if (previous?.url !== session.url && this.iframe) {
+      this.removeIframe();
+      this.shim = null;
+    }
     if (session.url && !this.iframe) this.createIframe(session.url);
-    if (this.iframe && !sameStatus) this.attachShim(0);
+    else if (this.iframe && !this.shim) this.attachShim(0);
   }
 
   private announceEnded(session: NativeSession): void {
@@ -595,7 +604,8 @@ export class NativeLinuxHost {
         if (!existing.closing) this.updateFrame(existing, window);
         continue;
       }
-      const parent = window.transientFor ? this.frames.get(window.transientFor) : undefined;
+      const anchorWid = window.transientFor ?? (isPopupWindow(window) ? this.focusedWid : null);
+      const parent = anchorWid ? this.frames.get(anchorWid) : undefined;
       if (window.transientFor && !parent) {
         deferred.push(window);
         continue;
@@ -604,7 +614,8 @@ export class NativeLinuxHost {
     }
     for (const window of deferred) {
       if (this.frames.has(window.wid)) continue;
-      const parent = window.transientFor ? this.frames.get(window.transientFor) : undefined;
+      const anchorWid = window.transientFor ?? (isPopupWindow(window) ? this.focusedWid : null);
+      const parent = anchorWid ? this.frames.get(anchorWid) : undefined;
       this.createFrame(window, parent ?? null);
     }
     for (const frame of [...this.frames.values()]) {
@@ -884,7 +895,7 @@ export class NativeLinuxHost {
         frame.autoMinimized = false;
         this.deps.wm.toggleMinimize(frame.handle.id);
       }
-      if (ownerInfo.minimized || frame.autoMinimized || frame.popup) continue;
+      if (ownerInfo.minimized || frame.autoMinimized) continue;
       const dx = ownerInfo.rect.x + frame.dialogOffset.x;
       const dy = ownerInfo.rect.y + frame.dialogOffset.y;
       const rect = frame.handle.getRect();
