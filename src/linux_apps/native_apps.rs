@@ -3014,6 +3014,13 @@ impl NativeApps {
                 }),
             )
             .await?;
+            // The profile tree is identity-owned 0700, so the unprivileged
+            // server cannot copy into it directly. Let the helper grant the
+            // server's group temporary write access (the copy is the only
+            // writer during this window), then restore the identity-only mode
+            // after the ownership is fixed below.
+            let profile_for_chmod = profile.clone();
+            self.path_chmod(&profile_for_chmod, 0o770, true).await?;
             // The export belongs to the worker; make it readable for the
             // unprivileged server before copying it.
             self.path_chmod(export_dir, 0o755, true).await?;
@@ -3027,6 +3034,7 @@ impl NativeApps {
             .map_err(AppError::bad_request)?;
             self.path_chown(&profile, identity.uid, identity.gid, true)
                 .await?;
+            self.path_chmod(&profile, 0o700, true).await?;
             self.path_remove_quiet(export_dir).await;
             profile_users.push(json!({
                 "userId": user_id,
