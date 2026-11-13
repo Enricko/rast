@@ -94,6 +94,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PackageCommand,
     },
+    /// Discover, verify, assemble, sign and check the official catalog
+    Catalog {
+        #[command(subcommand)]
+        cmd: CatalogCommand,
+    },
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
@@ -161,6 +166,138 @@ enum PackageCommand {
         /// Release tag, e.g. v5.4.9-1
         #[arg(long, value_name = "TAG")]
         tag: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CatalogCommand {
+    /// Fetch and verify the published catalog (absent on the first run)
+    Previous {
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        out: PathBuf,
+    },
+    /// Discover upstream versions and write the catalog plan
+    Discover {
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        out: PathBuf,
+        /// Versions to withhold, comma separated (e.g. go@1.26.11,nodejs@24.22.2)
+        #[arg(long, value_name = "LIST", default_value = "")]
+        withhold: String,
+        /// Re-verify versions that are already in the catalog
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Publish-ready catalog that lists new versions as detected
+    Interim {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "FILE", default_value = "work/out/catalog.json")]
+        out: PathBuf,
+    },
+    /// Download, verify and smoke-test upstream artifacts for one target
+    Verify {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Smoke-test a CI-built PHP archive and record the result
+    PhpResult {
+        #[arg(long, value_name = "FILE")]
+        archive: PathBuf,
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "URL", default_value = "")]
+        attestation_url: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Final catalog: carried versions plus newly verified ones
+    Assemble {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/results")]
+        results: PathBuf,
+        /// JSON object of PHP release tags per version, or a file containing it
+        #[arg(long, value_name = "JSON|FILE", default_value = "")]
+        php_releases: String,
+        #[arg(long, value_name = "FILE", default_value = "work/out/catalog.json")]
+        out: PathBuf,
+    },
+    /// Ed25519 signature (catalog.json.sig) for a catalog
+    Sign {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+    },
+    /// Validate every manifest and verify the signature
+    Check {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "")]
+        previous: String,
+        #[arg(long, value_name = "new|all", value_parser = ["new", "all"])]
+        download: Option<String>,
+    },
+    /// Print the PHP build inputs for a workflow step
+    PhpInputs {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Publish CI-built PHP archives as releases and report their tags
+    PhpPublish {
+        #[arg(long, value_name = "DIR")]
+        results: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        archives: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Collect downloaded workflow artifacts into a work directory
+    Collect {
+        #[arg(long, value_name = "DIR")]
+        artifacts: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work")]
+        work: PathBuf,
+        #[arg(long, value_name = "RESULT", default_value = "")]
+        verify_result: String,
+    },
+    /// Print a catalog's sequence number
+    Sequence {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+    },
+    /// Build a static PHP CLI for one target with static-php-cli in Docker
+    BuildPhp {
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "SHA256")]
+        source_sha256: String,
+        #[arg(long, value_name = "LIST")]
+        extensions: String,
+        #[arg(long, value_name = "VERSION")]
+        spc_version: String,
+        #[arg(long, value_name = "IMAGE")]
+        builder: String,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
     },
 }
 
@@ -258,6 +395,7 @@ async fn run(
     match command {
         Command::Serve { bind } => serve(config_path, log_level, bind).await,
         Command::Package { cmd } => package_command(cmd),
+        Command::Catalog { cmd } => catalog_command(cmd),
         Command::Version => {
             // Render once and tolerate a closed stdout: release pipelines and
             // shell recipes routinely run `rast version | head -n 1`, which is
@@ -336,9 +474,10 @@ async fn run(
                     cmd: PackagesCommand::Path { cmd },
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
-                Command::Serve { .. } | Command::Version | Command::Package { .. } => {
-                    unreachable!()
-                }
+                Command::Serve { .. }
+                | Command::Version
+                | Command::Package { .. }
+                | Command::Catalog { .. } => unreachable!(),
             }
         }
     }
@@ -419,6 +558,123 @@ fn package_command(cmd: PackageCommand) -> Result<ExitCode, Box<dyn std::error::
             }
         }
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn catalog_command(cmd: CatalogCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::catalog_cli::{self, Command as PortCommand, DownloadMode};
+    let command = match cmd {
+        CatalogCommand::Previous { out } => PortCommand::Previous { out },
+        CatalogCommand::Discover {
+            previous,
+            out,
+            withhold,
+            force,
+            github_output,
+        } => PortCommand::Discover {
+            previous,
+            out,
+            withhold,
+            force,
+            github_output,
+        },
+        CatalogCommand::Interim {
+            plan,
+            previous,
+            out,
+        } => PortCommand::Interim {
+            plan,
+            previous,
+            out,
+        },
+        CatalogCommand::Verify { plan, target, out } => PortCommand::Verify { plan, target, out },
+        CatalogCommand::PhpResult {
+            archive,
+            version,
+            target,
+            attestation_url,
+            out,
+        } => PortCommand::PhpResult {
+            archive,
+            version,
+            target,
+            attestation_url,
+            out,
+        },
+        CatalogCommand::Assemble {
+            plan,
+            previous,
+            results,
+            php_releases,
+            out,
+        } => PortCommand::Assemble {
+            plan,
+            previous,
+            results,
+            php_releases: (!php_releases.is_empty()).then(|| PathBuf::from(php_releases)),
+            out,
+        },
+        CatalogCommand::Sign { catalog } => PortCommand::Sign { catalog },
+        CatalogCommand::Check {
+            catalog,
+            previous,
+            download,
+        } => PortCommand::Check {
+            catalog,
+            previous: (!previous.is_empty()).then(|| PathBuf::from(previous)),
+            download: match download.as_deref() {
+                Some("new") => Some(DownloadMode::New),
+                Some("all") => Some(DownloadMode::All),
+                _ => None,
+            },
+        },
+        CatalogCommand::PhpInputs {
+            plan,
+            version,
+            github_output,
+        } => PortCommand::PhpInputs {
+            plan,
+            version,
+            github_output,
+        },
+        CatalogCommand::PhpPublish {
+            results,
+            archives,
+            github_output,
+        } => PortCommand::PhpPublish {
+            results,
+            archives,
+            github_output,
+        },
+        CatalogCommand::Collect {
+            artifacts,
+            work,
+            verify_result,
+        } => PortCommand::Collect {
+            artifacts,
+            work,
+            verify_result,
+        },
+        CatalogCommand::Sequence { catalog } => PortCommand::Sequence { catalog },
+        CatalogCommand::BuildPhp {
+            version,
+            target,
+            source_sha256,
+            extensions,
+            spc_version,
+            builder,
+            out,
+        } => PortCommand::BuildPhp {
+            version,
+            target,
+            source_sha256,
+            extensions,
+            spc_version,
+            builder,
+            out,
+        },
+    };
+    catalog_cli::run(command).map_err(std::io::Error::other)?;
     Ok(ExitCode::SUCCESS)
 }
 

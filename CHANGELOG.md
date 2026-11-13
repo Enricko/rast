@@ -24,6 +24,23 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.6] - 2026-11-13
+
+No database migration (schema stays v11). Docker-only 0.11 line.
+
+### Added
+
+- **The whole catalog pipeline is now Rust.** `rast catalog` implements
+  `previous`, `discover`, `interim`, `verify`, `php-result`, `assemble`,
+  `sign`, `check`, `php-inputs`, `php-publish`, `collect`, `sequence` and
+  `build-php`, replacing `scripts/catalog.py`, `scripts/rastpkg.py` and
+  `scripts/build-php.sh` in the official catalog repository. Catalog
+  manifests are validated with RAST's own validator, Ed25519 signing and
+  verification use `ring` (no openssl), artifacts are extracted with the same
+  safe extractor the installer uses, and the PHP build orchestration moved
+  from shell into the binary. The package-template and catalog repositories
+  now run registered RAST release binaries only — no Python at all.
+
 ## [0.11.5] - 2026-11-13
 
 No database migration (schema stays v11). This is the Docker-only 0.11 line:
