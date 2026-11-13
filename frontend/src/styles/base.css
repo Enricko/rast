@@ -534,12 +534,16 @@ pre {
   cursor: ns-resize;
 }
 
+/* The grab strips sit *outside* the window so the content keeps every pixel:
+   an adopted Xpra canvas paints to its full edge, and an overlay strip would
+   swallow clicks on controls near the border (Chrome's profile/menu buttons). */
+
 .win-resize-n {
-  top: -3px;
+  top: -6px;
 }
 
 .win-resize-s {
-  bottom: -3px;
+  bottom: -6px;
 }
 
 .win-resize-e,
@@ -551,11 +555,11 @@ pre {
 }
 
 .win-resize-e {
-  right: -3px;
+  right: -6px;
 }
 
 .win-resize-w {
-  left: -3px;
+  left: -6px;
 }
 
 .win-resize-ne,
@@ -567,26 +571,26 @@ pre {
 }
 
 .win-resize-ne {
-  top: -4px;
-  right: -4px;
+  top: -8px;
+  right: -8px;
   cursor: nesw-resize;
 }
 
 .win-resize-nw {
-  top: -4px;
-  left: -4px;
+  top: -8px;
+  left: -8px;
   cursor: nwse-resize;
 }
 
 .win-resize-se {
-  bottom: -4px;
-  right: -4px;
+  bottom: -8px;
+  right: -8px;
   cursor: nwse-resize;
 }
 
 .win-resize-sw {
-  bottom: -4px;
-  left: -4px;
+  bottom: -8px;
+  left: -8px;
   cursor: nesw-resize;
 }
 

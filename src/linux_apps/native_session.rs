@@ -1622,7 +1622,8 @@ impl NativeSessions {
             } else {
                 row.unit.clone()
             };
-            let active = units.get(&unit).is_some_and(|unit| unit.active);
+            let unit_info = units.get(&unit).copied();
+            let active = unit_info.is_some_and(|info| info.active);
             if !active || port == 0 || display_number == 0 {
                 tracing::info!(
                     user_id = row.user_id,
@@ -1637,6 +1638,28 @@ impl NativeSessions {
                     .execute(&self.db)
                     .await;
                 continue;
+            }
+            // A session keeps the command line it was started with. One created
+            // before native audio existed would stay silent after an upgrade;
+            // recreate it once (the person's apps restart on their next launch).
+            if let Some(pid) = unit_info.and_then(|info| info.main_pid) {
+                if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+                    if cmdline_lacks_audio(&cmdline) {
+                        tracing::info!(
+                            user_id = row.user_id,
+                            "ending a native session created without playback audio"
+                        );
+                        let _ = self
+                            .helper
+                            .call("session_stop", json!({"userId": row.user_id}))
+                            .await;
+                        let _ = sqlx::query("DELETE FROM linux_sessions WHERE user_id = ?")
+                            .bind(row.user_id)
+                            .execute(&self.db)
+                            .await;
+                        continue;
+                    }
+                }
             }
             let identity = match self.ensure_identity(row.user_id).await {
                 Ok((identity, repaired)) => {
@@ -1960,11 +1983,20 @@ impl NativeSessions {
     }
 }
 
+/// Does this Xpra command line lack the playback flags of the current release?
+/// The session unit keeps its original argv across RAST upgrades, so audio
+/// stays off until the session is recreated. Callers only act when `/proc` was
+/// readable; an unreadable command line keeps the session.
+fn cmdline_lacks_audio(cmdline: &[u8]) -> bool {
+    let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    let has = |flag: &[u8]| args.contains(&flag);
+    !(has(b"--audio=yes") && has(b"--speaker=on"))
+}
+
 /// One unit as reported by the helper's `units_list`.
 #[derive(Debug, Clone, Copy)]
 struct UnitInfo {
     active: bool,
-    #[allow(dead_code)]
     main_pid: Option<u32>,
 }
 
@@ -3046,6 +3078,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn sessions_started_before_audio_are_recognised() {
+        let old = b"/usr/bin/xpra\0start\0:100\0--audio=no\0--speaker=disabled\0";
+        assert!(cmdline_lacks_audio(old));
+        let new = b"/usr/bin/xpra\0start\0:100\0--audio=yes\0--speaker=on\0";
+        assert!(!cmdline_lacks_audio(new));
+        assert!(cmdline_lacks_audio(b""));
+        // Only playback flags matter: a session with the new audio flags but
+        // custom Pulse settings is still current.
+        let custom = b"/usr/bin/xpra\0--audio=yes\0--speaker=on\0--pulseaudio=yes\0";
+        assert!(!cmdline_lacks_audio(custom));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

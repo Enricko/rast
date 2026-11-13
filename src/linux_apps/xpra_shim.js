@@ -605,8 +605,11 @@
     var canvas = win.canvas;
     var parent = canvas.ownerDocument.defaultView;
     var down = function (event) {
-      if (event.pointerType === "touch") return;
-      try { canvas.setPointerCapture(event.pointerId); } catch (e) { /* unsupported */ }
+      // Mouse capture changes compatibility mouse-event delivery in some
+      // browsers; only capture touch/pen, where it is required for dragging.
+      if (event.pointerType !== "mouse") {
+        try { canvas.setPointerCapture(event.pointerId); } catch (e) { /* unsupported */ }
+      }
       unlockAudio();
     };
     var release = function () {
@@ -615,7 +618,12 @@
     };
     canvas.addEventListener("pointerdown", down);
     canvas.addEventListener("pointercancel", release);
-    if (parent) parent.addEventListener("blur", release);
+    // The iframe cannot see a button release over the parent document (tab
+    // tear-out, drag out of the window): release on the visible page instead.
+    if (parent) {
+      parent.addEventListener("pointerup", release);
+      parent.addEventListener("blur", release);
+    }
     var destroy = win.destroy;
     win.destroy = function () {
       if (win.__rastInputRecovery) win.__rastInputRecovery();
@@ -625,7 +633,10 @@
     win.__rastInputRecovery = function () {
       canvas.removeEventListener("pointerdown", down);
       canvas.removeEventListener("pointercancel", release);
-      if (parent) parent.removeEventListener("blur", release);
+      if (parent) {
+        parent.removeEventListener("pointerup", release);
+        parent.removeEventListener("blur", release);
+      }
       win.destroy = destroy;
     };
   }

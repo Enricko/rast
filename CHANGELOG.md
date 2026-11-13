@@ -13,6 +13,27 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+## [0.13.2] - 2026-11-13
+
+### Fixed
+
+- **Mouse clicks near a window edge are no longer swallowed.** The window
+  resize grab strips now sit outside the window instead of covering the last
+  few pixels of the application, so controls at the right edge (Chrome's menu
+  and profile buttons) receive clicks. Dragging a tab out of a window still
+  releases the remote button when the pointer moves over the desktop.
+- **Sound works on sessions created before native audio existed.** A running
+  Xpra session keeps its original command line across RAST restarts, so an
+  older session stayed silent after the upgrade. On startup RAST now recognises
+  such sessions from their process arguments, ends that stale session once and
+  starts a fresh audio-enabled one on the next app launch. Apps running in the
+  old session are stopped, as with any service upgrade that changes session
+  flags.
+- **Video playback is smoother.** The reference deployment raises the native
+  session to 6 CPUs / 6144 MiB and each application to 4 CPUs / 3072 MiB
+  (`linux_session_*`, `linux_app_*`); the previous 2-CPU app cap throttled
+  software video decoding and made YouTube playback stutter.
+
 ## [0.13.1] - 2026-11-13
 
 First published native-app release since 0.11.4; includes all 0.12.0 and 0.13.0
