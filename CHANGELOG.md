@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.14] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Browser page proxy strips page scripts and `javascript:` links. Remote pages
+  are server-rendered documents; running their scripts in the sandbox made
+  some (Brave Search) hide their whole content when storage access was denied.
+  The injected link-interception script is added after stripping.
+
 ## [0.11.13] - 2026-11-13
 
 No database migration (schema stays v12).

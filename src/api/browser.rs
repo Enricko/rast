@@ -279,7 +279,57 @@ fn is_blocked_google(html: &str) -> bool {
         || lower.contains("mengalami masalah saat mengakses google penelusuran")
 }
 
+/// Remove page scripts and `javascript:` URLs. The proxy returns remote pages
+/// into a sandboxed frame; without scripts they cannot touch the browser or
+/// hide their already server-rendered content behind a hydration failure.
+fn strip_active_content(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let lower_bytes = lower.as_bytes();
+    let bytes = html.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if lower_bytes[index..].starts_with(b"<script") {
+            let Some(open_offset) = lower_bytes[index..].iter().position(|byte| *byte == b'>')
+            else {
+                break;
+            };
+            let after_open = index + open_offset + 1;
+            if let Some(close_offset) = lower_bytes[after_open..]
+                .windows(b"</script".len())
+                .position(|window| window == b"</script")
+            {
+                let close_start = after_open + close_offset;
+                let close_end = lower_bytes[close_start..]
+                    .iter()
+                    .position(|byte| *byte == b'>')
+                    .map(|offset| close_start + offset + 1)
+                    .unwrap_or(bytes.len());
+                index = close_end;
+            } else {
+                index = after_open;
+            }
+            continue;
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    let text = String::from_utf8_lossy(&out);
+    let mut cleaned = String::with_capacity(text.len());
+    let lower_text = text.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(offset) = lower_text[cursor..].find("javascript:") {
+        cleaned.push_str(&text[cursor..cursor + offset]);
+        cleaned.push_str("about:blank#");
+        cursor += offset + "javascript:".len();
+    }
+    cleaned.push_str(&text[cursor..]);
+    cleaned
+}
+
 fn inject_for_browser(html: &str, final_url: &Uri) -> Result<String, String> {
+    let html = strip_active_content(html);
+    let html = html.as_str();
     let lower = html.to_ascii_lowercase();
     let injection = format!(
         "<base href=\"{}\"><script>window.__RAST_BROWSER__=true;\
