@@ -408,3 +408,19 @@
     transition: none;
   }
 }
+
+/* Where a dragged widget will be clipped into place on drop. */
+.widget-drop-preview {
+  position: absolute;
+  z-index: 5;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+  display: none;
+}
+
+.widget-drop-preview.is-visible {
+  display: block;
+}

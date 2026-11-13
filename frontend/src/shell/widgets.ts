@@ -460,6 +460,16 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   let disposed = false;
   let keySaveTimer: number | undefined;
   let lastLayerSize: { w: number; h: number } | null = null;
+  /** Snap grid for widget drops: half a 2×2 tile (tile width + gap). */
+  const SNAP_STEP = 144;
+  const snapValue = (value: number, max: number): number =>
+    Math.max(0, Math.min(max, Math.round(value / SNAP_STEP) * SNAP_STEP));
+  const dropPreview = h("div", {
+    class: "widget-drop-preview",
+    ariaHidden: true,
+    hidden: true,
+  });
+  layer.appendChild(dropPreview);
   let catalogRefresh: (() => void) | null = null;
 
   const offFeed = feed.subscribe(() => {
@@ -684,20 +694,35 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const area = freeArea(card);
       let left = startLeft;
       let top = startTop;
+      let targetLeft = startLeft;
+      let targetTop = startTop;
       const move = (moveEvent: PointerEvent): void => {
         left = Math.max(0, Math.min(area.width, startLeft + moveEvent.clientX - startX));
         top = Math.max(0, Math.min(area.height, startTop + moveEvent.clientY - startY));
+        targetLeft = snapValue(left, area.width);
+        targetTop = snapValue(top, area.height);
         card.el.style.left = `${Math.round(left)}px`;
         card.el.style.top = `${Math.round(top)}px`;
+        // Show where the tile will be clipped into place on drop.
+        dropPreview.hidden = false;
+        dropPreview.style.left = `${targetLeft}px`;
+        dropPreview.style.top = `${targetTop}px`;
+        dropPreview.style.width = `${card.el.offsetWidth}px`;
+        dropPreview.style.height = `${card.el.offsetHeight}px`;
+        dropPreview.classList.add("is-visible");
       };
       const end = (): void => {
         card.el.removeEventListener("pointermove", move);
         card.el.removeEventListener("pointerup", end);
         card.el.removeEventListener("pointercancel", end);
         card.el.classList.remove("is-dragging");
+        dropPreview.classList.remove("is-visible");
+        dropPreview.hidden = true;
         dragging = null;
         const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
-        const { x, y } = fractionsFor(card, left, top);
+        const snappedLeft = snapValue(left, area.width);
+        const snappedTop = snapValue(top, area.height);
+        const { x, y } = fractionsFor(card, snappedLeft, snappedTop);
         layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
         position(card, layout.find((widget) => widget.id === card.id)!);
         if (moved || layout[layout.length - 1]?.id === card.id) persist();
@@ -727,8 +752,8 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       if (!move) return;
       event.preventDefault();
       const area = freeArea(card);
-      const left = Math.max(0, Math.min(area.width, card.el.offsetLeft + move[0]));
-      const top = Math.max(0, Math.min(area.height, card.el.offsetTop + move[1]));
+      const left = snapValue(card.el.offsetLeft + move[0], area.width);
+      const top = snapValue(card.el.offsetTop + move[1], area.height);
       const { x, y } = fractionsFor(card, left, top);
       layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
       position(card, layout.find((widget) => widget.id === card.id)!);

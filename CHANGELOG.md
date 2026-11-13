@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.25] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Dragging a widget now snaps it to a 2×2-tile grid and shows a dashed
+  **drop preview** of the exact slot it will be clipped into before you
+  release the pointer (arrow-key moves snap to the same grid).
+
 ## [0.11.24] - 2026-11-14
 
 No database migration (schema stays v12).
