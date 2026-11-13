@@ -435,6 +435,8 @@ export interface WidgetLayerOptions {
   toast: ToastCenter;
   isMonitorAllowed: () => boolean;
   openMonitor: () => void;
+  /** Desktop app-icon rectangles + the desktop grid cell size. */
+  obstacles?: () => { rects: Array<{ x: number; y: number; w: number; h: number }>; cellW: number; cellH: number };
 }
 
 export interface WidgetLayer {
@@ -459,11 +461,6 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   let dragging: WidgetId | null = null;
   let disposed = false;
   let keySaveTimer: number | undefined;
-  let lastLayerSize: { w: number; h: number } | null = null;
-  /** Snap grid for widget drops: half a 2×2 tile (tile width + gap). */
-  const SNAP_STEP = 144;
-  const snapValue = (value: number, max: number): number =>
-    Math.max(0, Math.min(max, Math.round(value / SNAP_STEP) * SNAP_STEP));
   const dropPreview = h("div", {
     class: "widget-drop-preview",
     ariaHidden: true,
@@ -484,11 +481,76 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const onWindowResize = (): void => positionAll();
   if (!resizeObserver) window.addEventListener("resize", onWindowResize);
 
+  interface Rect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+  }
+
+  /** Grid of the desktop app icons; widgets span two columns of it. */
+  function grid(): { rects: Rect[]; cellW: number; cellH: number } {
+    return options.obstacles?.() ?? { rects: [], cellW: 104, cellH: 108 };
+  }
+
+  const intersects = (a: Rect, b: Rect, gap = 4): boolean =>
+    a.x < b.x + b.w + gap &&
+    a.x + a.w + gap > b.x &&
+    a.y < b.y + b.h + gap &&
+    a.y + a.h + gap > b.y;
+
   function freeArea(card: Card): { width: number; height: number } {
     return {
       width: Math.max(0, layer.clientWidth - card.el.offsetWidth),
       height: Math.max(0, layer.clientHeight - card.el.offsetHeight),
     };
+  }
+
+  /** Two app-icon columns wide, so widgets line up with the icon grid. */
+  function tileWidth(cellW: number): number {
+    return Math.max(184, Math.round(cellW * 2 - 4));
+  }
+
+  /** Nearest free snapped slot for a rectangle, avoiding apps and widgets. */
+  function findFreeSpot(
+    rect: Rect,
+    obstacles: Rect[],
+    cellW: number,
+    cellH: number,
+    gap = 4,
+  ): Rect | null {
+    const maxLeft = Math.max(2, layer.clientWidth - rect.w);
+    const maxTop = Math.max(2, layer.clientHeight - rect.h);
+    let best: Rect | null = null;
+    let bestDistance = Infinity;
+    for (let top = 2; top <= maxTop; top += cellH) {
+      for (let left = 2; left <= maxLeft; left += cellW) {
+        const candidate = { x: left, y: top, w: rect.w, h: rect.h };
+        if (obstacles.some((other) => intersects(other, candidate, gap))) continue;
+        const distance = (left - rect.x) ** 2 + (top - rect.y) ** 2;
+        if (distance < bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  }
+
+  /** Current rectangles of the other widgets (optionally excluding one). */
+  function widgetRects(except?: WidgetId): Rect[] {
+    const out: Rect[] = [];
+    for (const [id, card] of cards) {
+      if (id === except) continue;
+      if (!card.el.isConnected || card.el.hidden) continue;
+      out.push({
+        x: card.el.offsetLeft,
+        y: card.el.offsetTop,
+        w: card.el.offsetWidth,
+        h: card.el.offsetHeight,
+      });
+    }
+    return out;
   }
 
   function position(card: Card, widget: DesktopWidget): void {
@@ -499,60 +561,41 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
 
   function positionAll(): void {
     if (disposed) return;
-    // Widgets are fixed-size tiles (roughly a 2x2 block of app icons), not
-    // scaled with the screen: changing the monitor must never shrink the text
-    // or clip titles. When the saved arrangement would overlap on a smaller
-    // screen, the cards reflow into columns instead (see below).
-    const scale = 1;
-    layer.style.setProperty("--widget-scale", scale.toFixed(3));
-    const visible = layout.flatMap((widget) => {
-      if (widget.id === dragging) return [];
+    const { rects: appRects, cellW, cellH } = grid();
+    const width = tileWidth(cellW);
+    for (const card of cards.values()) card.el.style.width = `${width}px`;
+    const placed: Rect[] = [...appRects];
+    for (const widget of layout) {
+      if (widget.id === dragging) continue;
       const card = cards.get(widget.id);
-      if (!card) return [];
+      if (!card) continue;
       const area = freeArea(card);
-      return [{
-        widget,
-        card,
+      const w = card.el.offsetWidth;
+      const h = card.el.offsetHeight;
+      const desired = {
         x: Math.round(widget.x * area.width),
         y: Math.round(widget.y * area.height),
-        w: card.el.offsetWidth,
-        h: card.el.offsetHeight,
-      }];
-    });
-    const gap = Math.max(8, Math.round(10 * scale));
-    const collides = (a: (typeof visible)[number], b: (typeof visible)[number]): boolean =>
-      a.x < b.x + b.w + gap &&
-      a.x + a.w + gap > b.x &&
-      a.y < b.y + b.h + gap &&
-      a.y + a.h + gap > b.y;
-    const hasOverlap = visible.some((a, index) => visible.slice(index + 1).some((b) => collides(a, b)));
-    const layerSize = { w: layer.clientWidth, h: layer.clientHeight };
-    const viewportChanged =
-      lastLayerSize !== null &&
-      (lastLayerSize.w !== layerSize.w || lastLayerSize.h !== layerSize.h);
-    lastLayerSize = layerSize;
-    if (!hasOverlap || !viewportChanged) {
-      for (const item of visible) {
-        item.card.el.style.left = `${item.x}px`;
-        item.card.el.style.top = `${item.y}px`;
-      }
-      return;
-    }
-    // The saved fractional layout is only relative: on a smaller monitor the
-    // cards would pile on top of each other. Reflow them into non-overlapping,
-    // right-aligned columns instead (order is preserved).
-    const width = Math.max(0, ...visible.map((item) => item.w));
-    const height = layer.clientHeight;
-    let columnX = Math.max(0, layer.clientWidth - width);
-    let cursorY = 0;
-    for (const item of visible) {
-      if (cursorY > 0 && cursorY + item.h > height) {
-        columnX = Math.max(0, columnX - width - gap);
-        cursorY = 0;
-      }
-      item.card.el.style.left = `${columnX + Math.max(0, width - item.w)}px`;
-      item.card.el.style.top = `${cursorY}px`;
-      cursorY += item.h + gap;
+        w,
+        h,
+      };
+      const snapped: Rect = {
+        x: Math.max(2, Math.round((desired.x - 2) / cellW) * cellW + 2),
+        y: Math.max(2, Math.round((desired.y - 2) / cellH) * cellH + 2),
+        w,
+        h,
+      };
+      const clamped: Rect = {
+        x: Math.min(snapped.x, Math.max(2, layer.clientWidth - w)),
+        y: Math.min(snapped.y, Math.max(2, layer.clientHeight - h)),
+        w,
+        h,
+      };
+      const target = placed.some((rect) => intersects(rect, clamped))
+        ? findFreeSpot(clamped, placed, cellW, cellH) ?? clamped
+        : clamped;
+      card.el.style.left = `${Math.round(target.x)}px`;
+      card.el.style.top = `${Math.round(target.y)}px`;
+      placed.push(target);
     }
   }
 
@@ -694,37 +737,60 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const area = freeArea(card);
       let left = startLeft;
       let top = startTop;
-      let targetLeft = startLeft;
-      let targetTop = startTop;
+      let snapped = { x: startLeft, y: startTop };
       const move = (moveEvent: PointerEvent): void => {
         left = Math.max(0, Math.min(area.width, startLeft + moveEvent.clientX - startX));
         top = Math.max(0, Math.min(area.height, startTop + moveEvent.clientY - startY));
-        targetLeft = snapValue(left, area.width);
-        targetTop = snapValue(top, area.height);
         card.el.style.left = `${Math.round(left)}px`;
         card.el.style.top = `${Math.round(top)}px`;
-        // Show where the tile will be clipped into place on drop.
+        const { rects: appRects, cellW, cellH } = grid();
+        snapped = {
+          x: Math.max(2, Math.round((left - 2) / cellW) * cellW + 2),
+          y: Math.max(2, Math.round((top - 2) / cellH) * cellH + 2),
+        };
+        const candidate = {
+          x: Math.min(snapped.x, Math.max(2, layer.clientWidth - card.el.offsetWidth)),
+          y: Math.min(snapped.y, Math.max(2, layer.clientHeight - card.el.offsetHeight)),
+          w: card.el.offsetWidth,
+          h: card.el.offsetHeight,
+        };
+        const blocked = [...appRects, ...widgetRects(card.id)].some((rect) =>
+          intersects(rect, candidate),
+        );
         dropPreview.hidden = false;
-        dropPreview.style.left = `${targetLeft}px`;
-        dropPreview.style.top = `${targetTop}px`;
-        dropPreview.style.width = `${card.el.offsetWidth}px`;
-        dropPreview.style.height = `${card.el.offsetHeight}px`;
+        dropPreview.style.left = `${candidate.x}px`;
+        dropPreview.style.top = `${candidate.y}px`;
+        dropPreview.style.width = `${candidate.w}px`;
+        dropPreview.style.height = `${candidate.h}px`;
         dropPreview.classList.add("is-visible");
+        dropPreview.classList.toggle("is-blocked", blocked);
       };
       const end = (): void => {
         card.el.removeEventListener("pointermove", move);
         card.el.removeEventListener("pointerup", end);
         card.el.removeEventListener("pointercancel", end);
         card.el.classList.remove("is-dragging");
-        dropPreview.classList.remove("is-visible");
+        dropPreview.classList.remove("is-visible", "is-blocked");
         dropPreview.hidden = true;
         dragging = null;
         const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
-        const snappedLeft = snapValue(left, area.width);
-        const snappedTop = snapValue(top, area.height);
-        const { x, y } = fractionsFor(card, snappedLeft, snappedTop);
+        const { rects: appRects, cellW, cellH } = grid();
+        const w = card.el.offsetWidth;
+        const h = card.el.offsetHeight;
+        const desired = {
+          x: Math.min(snapped.x, Math.max(2, layer.clientWidth - w)),
+          y: Math.min(snapped.y, Math.max(2, layer.clientHeight - h)),
+          w,
+          h,
+        };
+        const obstacles = [...appRects, ...widgetRects(card.id)];
+        const target = obstacles.some((rect) => intersects(rect, desired))
+          ? findFreeSpot(desired, obstacles, cellW, cellH) ?? desired
+          : desired;
+        card.el.style.left = `${Math.round(target.x)}px`;
+        card.el.style.top = `${Math.round(target.y)}px`;
+        const { x, y } = fractionsFor(card, target.x, target.y);
         layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
-        position(card, layout.find((widget) => widget.id === card.id)!);
         if (moved || layout[layout.length - 1]?.id === card.id) persist();
       };
       card.el.addEventListener("pointermove", move);
@@ -751,10 +817,34 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const move = delta[event.key];
       if (!move) return;
       event.preventDefault();
-      const area = freeArea(card);
-      const left = snapValue(card.el.offsetLeft + move[0], area.width);
-      const top = snapValue(card.el.offsetTop + move[1], area.height);
-      const { x, y } = fractionsFor(card, left, top);
+      const { rects: appRects, cellW, cellH } = grid();
+      const w = card.el.offsetWidth;
+      const h = card.el.offsetHeight;
+      const desired = {
+        x: Math.max(
+          2,
+          Math.min(
+            Math.max(2, layer.clientWidth - w),
+            Math.round((card.el.offsetLeft + move[0]) / cellW) * cellW + 2,
+          ),
+        ),
+        y: Math.max(
+          2,
+          Math.min(
+            Math.max(2, layer.clientHeight - h),
+            Math.round((card.el.offsetTop + move[1]) / cellH) * cellH + 2,
+          ),
+        ),
+        w,
+        h,
+      };
+      const obstacles = [...appRects, ...widgetRects(card.id)];
+      const target = obstacles.some((rect) => intersects(rect, desired))
+        ? findFreeSpot(desired, obstacles, cellW, cellH) ?? desired
+        : desired;
+      card.el.style.left = `${Math.round(target.x)}px`;
+      card.el.style.top = `${Math.round(target.y)}px`;
+      const { x, y } = fractionsFor(card, target.x, target.y);
       layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
       position(card, layout.find((widget) => widget.id === card.id)!);
       window.clearTimeout(keySaveTimer);

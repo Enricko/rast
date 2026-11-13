@@ -118,6 +118,23 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     toast,
     isMonitorAllowed: () => isAppAllowed("monitor", store.get().permissions, store.isAdmin()),
     openMonitor: () => openApp("monitor"),
+    obstacles: () => {
+      // App icons in widget-layer coordinates, plus the desktop grid cell.
+      const style = getComputedStyle(iconLayer);
+      const cellW = Number.parseFloat(style.getPropertyValue("--icon-cell-w")) || 104;
+      const cellH = Number.parseFloat(style.getPropertyValue("--icon-cell-h")) || 108;
+      const layerRect = widgetLayer.getBoundingClientRect();
+      const rects = [...iconLayer.querySelectorAll<HTMLElement>(".desktop-icon")].map((icon) => {
+        const rect = icon.getBoundingClientRect();
+        return {
+          x: rect.left - layerRect.left,
+          y: rect.top - layerRect.top,
+          w: rect.width,
+          h: rect.height,
+        };
+      });
+      return { rects, cellW, cellH };
+    },
   });
   disposers.push(() => widgets.dispose());
   /** Show the pins being saved, else the account's saved pins. */

@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.26] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Widgets use the **same desktop grid as application icons**: two app columns
+  wide, snapped to icon cells. A widget can no longer be dropped on an app
+  icon or on another widget — the drop preview turns red and the tile moves to
+  the nearest free grid slot. Existing/saved layouts are also nudged off
+  occupied cells when the desktop changes.
+
 ## [0.11.25] - 2026-11-14
 
 No database migration (schema stays v12).
