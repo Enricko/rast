@@ -488,6 +488,15 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
 
   function positionAll(): void {
     if (disposed) return;
+    // Scale the cards with the desktop size: at 1080p they are comfortable,
+    // on a small/large monitor they shrink/grow instead of looking cramped or
+    // tiny. Positions stay fractions of the free area, so this only changes
+    // the card size, never the relative placement.
+    const scale = Math.min(
+      1.5,
+      Math.max(0.8, Math.min(layer.clientWidth / 1500, layer.clientHeight / 850)),
+    );
+    layer.style.setProperty("--widget-scale", scale.toFixed(3));
     for (const widget of layout) {
       if (widget.id === dragging) continue;
       const card = cards.get(widget.id);

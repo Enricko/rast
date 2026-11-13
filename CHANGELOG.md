@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.18] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Desktop resource widgets scale with the desktop size (0.8×–1.5×) and keep
+  their relative positions, so switching to a smaller or larger monitor leaves
+  them readable and inside the screen instead of cramped or tiny.
+
 ## [0.11.17] - 2026-11-13
 
 No database migration (schema stays v12).
