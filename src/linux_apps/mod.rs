@@ -85,6 +85,18 @@ const SWEEP_EVERY: Duration = Duration::from_secs(10);
 const RECONCILE_EVERY: u32 = 3;
 /// Update sources are asked at most this often (an administrator can ask
 /// at any time).
+/// Ordinary flags for native Chromium apps (the sandbox is never disabled).
+/// `--hide-crash-restore-bubble` matters: after a session restart Chromium
+/// otherwise draws a "Restore pages?" bubble over the top-right of the window,
+/// which looks like an invisible border and swallows clicks on the profile and
+/// menu buttons underneath it.
+const CHROMIUM_LAUNCH_FLAGS: [&str; 4] = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--password-store=basic",
+    "--hide-crash-restore-bubble",
+];
+
 const CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 const CHECK_TICK: Duration = Duration::from_secs(60 * 60);
 /// Default memory limit of a new app, in MiB.
@@ -845,14 +857,7 @@ impl LinuxApps {
             .unwrap_or(false);
         let mut command = command;
         if chromium {
-            // Keep the Chromium sandbox enabled; only add the ordinary
-            // first-run/session flags the old image passed (minus
-            // --no-sandbox, which never applies to native execution).
-            for flag in [
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--password-store=basic",
-            ] {
+            for flag in CHROMIUM_LAUNCH_FLAGS {
                 if !command.iter().any(|argument| argument == flag) {
                     command.push(flag.to_string());
                 }
@@ -3146,6 +3151,15 @@ fn gib(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromium_flags_keep_the_sandbox_and_hide_the_restore_bubble() {
+        assert!(CHROMIUM_LAUNCH_FLAGS.contains(&"--hide-crash-restore-bubble"));
+        assert!(CHROMIUM_LAUNCH_FLAGS.contains(&"--no-first-run"));
+        assert!(!CHROMIUM_LAUNCH_FLAGS
+            .iter()
+            .any(|flag| flag.contains("no-sandbox")));
+    }
 
     #[tokio::test]
     async fn window_service_requests_are_read() {
