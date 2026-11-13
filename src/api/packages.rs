@@ -430,7 +430,7 @@ pub async fn package_app_asset(
             (header::X_FRAME_OPTIONS, "SAMEORIGIN".to_string()),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'self'".to_string(),
+                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src https:; frame-ancestors 'self'".to_string(),
             ),
         ],
         bytes,

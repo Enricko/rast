@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.16] - 2026-11-13
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Web app packages may embed external `https:` pages in their window
+  (`frame-src https:`), so the Browser app can offer a direct compatibility
+  view for sites that allow framing. Their documents still cannot run in the
+  RAST origin (the iframe is sandboxed).
+
 ## [0.11.15] - 2026-11-13
 
 No database migration (schema stays v12).
