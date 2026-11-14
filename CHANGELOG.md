@@ -24,6 +24,16 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.34] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Fine-grid shortcut moves did not stick: saving used the previous display
+  rectangle instead of the new pixel fields. Pixel positions are now the
+  source of truth for save/render, so Alt+Arrow and drags persist.
+
 ## [0.11.33] - 2026-11-14
 
 No database migration (schema stays v12).

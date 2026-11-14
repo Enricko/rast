@@ -341,10 +341,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     const hidden = previous.filter(
       (icon) => !visible.has(icon.id) && !next.some((known) => known.id === icon.id),
     );
-    const layout = [...next, ...hidden].map((icon) => {
-      const rect = displayRects.get(icon.id) ?? iconRect(icon);
-      return toV2(icon, rect);
-    });
+    const layout = [...next, ...hidden].map((icon) => toV2(icon, iconRect(icon)));
     shown = next;
     void appearance.saveDesktopIcons(layout).then((ok) => {
       if (ok || disposed) return;
