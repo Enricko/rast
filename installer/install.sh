@@ -953,6 +953,11 @@ docker_enabled = false
 # Set to false to keep installing legacy Docker-backed apps instead.
 # env: RAST_NATIVE_ENABLED
 native_enabled = true
+# Offer the Linux apps workflow at all (default: on). Set to false to
+# quarantine the whole feature — native and legacy Docker-backed installs —
+# while keeping its implementation in the binary.
+# env: RAST_LINUX_APPS_ENABLED
+linux_apps_enabled = true
 # env: RAST_NATIVE_HELPER_SOCKET
 native_helper_socket = "/run/rast/native.sock"
 # env: RAST_LINUX_XPRA_BIN
