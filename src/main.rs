@@ -109,6 +109,22 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Internal: per-user terminal agent (PTY shell, runs as the mapped identity)
+    #[command(hide = true)]
+    TerminalAgent {
+        /// Unix socket the RAST server connects to.
+        #[arg(long)]
+        socket: PathBuf,
+        /// One-time token file written by the helper (deleted after use).
+        #[arg(long = "token-file")]
+        token_file: PathBuf,
+        /// Approved shell to execute.
+        #[arg(long)]
+        shell: PathBuf,
+        /// Working directory for the shell.
+        #[arg(long)]
+        cwd: PathBuf,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -482,6 +498,17 @@ async fn run(
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
                 Command::NativeHelper { check } => rast::native::run(cfg, check).await,
+                Command::TerminalAgent {
+                    socket,
+                    token_file,
+                    shell,
+                    cwd,
+                } => rast::terminal::agent::run(socket, token_file, shell, cwd)
+                    .await
+                    .map(|_| ExitCode::SUCCESS)
+                    .map_err(|error| -> Box<dyn std::error::Error> {
+                        format!("terminal agent failed: {error}").into()
+                    }),
                 Command::Serve { .. }
                 | Command::Version
                 | Command::Package { .. }

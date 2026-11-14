@@ -11,6 +11,38 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **Terminal: a first-class native application with real PTY shells.** Open
+  interactive Linux shells from the desktop (multiple tabs and windows) through
+  xterm.js over an authenticated, same-origin WebSocket. Shells run directly on
+  the server as the mapped unprivileged `rast-u<id>` identity — no Docker, VM,
+  Xpra, VNC or graphical session — with a private home, shell history and
+  caches. Bash is preferred with an explicit `sh` fallback; resizing sends
+  SIGWINCH, Ctrl+C/D/Z and job control work, and the app offers copy, paste,
+  search, scrollback, clear, font-size controls, reconnect after network
+  interruptions (same shell, no duplicates), and visible connecting/connected/
+  disconnected/exited states. File Station gets **Open in Terminal** on folders
+  the account may access: the browser passes a RAST folder reference, the
+  server resolves it with the storage ACLs, and the helper grants the identity
+  the matching OS ACL, so a shell cannot read folders the account cannot open.
+  Administrators always receive an unprivileged shell; ordinary accounts are
+  denied until an administrator grants the `terminal` application. Sessions are
+  bounded (count, memory, CPU, tasks), re-checked for auth/permission every 30
+  seconds, and terminate their own process tree only. Requires the native
+  helper (`rast-native.service`) and the `acl` package; it does not require the
+  native GUI apps feature. New settings: `terminal_enabled`,
+  `terminal_max_sessions`, `terminal_grace_seconds`, `terminal_idle_minutes`,
+  `terminal_memory_mb`, `terminal_cpus`, `terminal_tasks`; see
+  [docs/TERMINAL.md](docs/TERMINAL.md).
+- **Terminal runtime environment panel.** New shells receive the PATH and
+  runtime variables of the selected managed runtimes (Rust, Temurin JDK, Bun,
+  Deno, .NET, Python, PHP, Go, Node.js) without restarting the RAST server.
+  Per-user defaults and per-tab overrides are supported; the panel shows
+  available versions, executable locations, whether a runtime comes from RAST
+  or the operating system, and missing dependencies (e.g. a missing linker for
+  Rust or `libicu` for .NET). Shared runtime binaries stay read-only and
+  writable caches live in the user's private home. Existing tabs are left
+  untouched and the UI says when a tab must be reopened.
+
 
 - **A clear "Install Linux App" workflow in App Center.** Administrators get a
   prominent primary button (and matching empty-state tile) that opens one
@@ -42,6 +74,28 @@ this file by `scripts/changelog-section.sh`.
   that Chromium-family apps run with `--password-store=basic` because a
   headless session has no unlocked OS keyring; saved site credentials live in
   the per-person profile (0700) and are not protected by keyring encryption.
+
+- **Managed runtime catalog: Rust, Eclipse Temurin JDK, Bun, Deno and .NET
+  SDK.** App Center's signed catalog now discovers, verifies and publishes
+  five additional runtimes for `linux-x86_64` and `linux-aarch64`, alongside
+  the existing Python, PHP CLI, Go and Node.js entries. Rust is installed as a
+  standalone component-merged toolchain (rustc, cargo, rust-std, rustfmt,
+  clippy) from the GPG-signed `static.rust-lang.org` stable channel manifest
+  (manifest SHA-256 + gpgv with the pinned Rust release-key fingerprint);
+  Eclipse Temurin JDKs 8/11/17/21/25/27 come from the Adoptium API with the
+  GitHub asset digest and published `.sha256.txt` cross-checked; Bun and Deno
+  are verified against their upstream checksum files plus, for Deno, GitHub
+  build-provenance attestations; .NET SDK 10.0 LTS and 11.0 STS come from
+  Microsoft's release metadata with SHA-512 verification and runtime checks.
+  The manifest schema gained safe `zip` support and optional multi-archive
+  installs (Rust components merge into one prefix) plus `runtime.env`/
+  `runtime.pathDirs` hints; existing manifests stay compatible. Managed
+  prefixes are read-only and caches stay per user. .NET/Java/Bun/Deno JITs run
+  normally in Terminal shells (no service-wide hardening change; install-time
+  checks read only their own `/proc/<pid>` under Landlock).
+  Limits: aarch64 artifacts are hash/metadata verified but exercised in CI
+  only; publishing the new versions requires a catalog workflow run with the
+  `v0.14.0` RAST tool (see rast-packages README).
 
 ### Fixed
 

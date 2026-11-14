@@ -11,11 +11,13 @@ import { linuxAppDefinitions } from "./linuxapp";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
 import { packagesApp } from "./packages";
+import { terminalApp } from "./terminal";
 import { packageAppDefinitions } from "./package-apps";
 
 export const APPS: AppDefinition[] = [
   launcherApp,
   filesApp,
+  terminalApp,
   applicationsApp,
   monitorApp,
   backupApp,

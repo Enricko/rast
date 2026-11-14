@@ -97,10 +97,15 @@ pub struct NativeOptions {
     pub run_dir: PathBuf,
     /// `<storage_dir>/homes`: only reachable through ACL/chmod path ops.
     pub homes_dir: PathBuf,
+    /// `<storage_dir>` root: terminal working directories must stay inside it
+    /// (or inside the identity home).
+    pub storage_dir: PathBuf,
     pub xpra_bin: PathBuf,
     pub uid_base: u32,
     pub session_limits: ResourceLimits,
     pub app_limits: ResourceLimits,
+    /// Per-terminal maxima from configuration.
+    pub terminal_limits: ResourceLimits,
     /// Free memory kept in reserve when admitting a new session or app.
     pub admission_reserve_mb: u32,
     pub idle_timeout: Duration,
@@ -151,6 +156,7 @@ impl NativeOptions {
             data_dir: cfg.data_dir.clone(),
             run_dir,
             homes_dir: cfg.homes_dir(),
+            storage_dir: cfg.storage_dir.clone(),
             xpra_bin: cfg.linux_xpra_bin.clone(),
             uid_base: cfg.linux_uid_base,
             session_limits: ResourceLimits::from_config(
@@ -162,6 +168,11 @@ impl NativeOptions {
                 cfg.linux_app_memory_mb,
                 cfg.linux_app_cpus,
                 cfg.linux_app_tasks,
+            ),
+            terminal_limits: ResourceLimits::from_config(
+                cfg.terminal.memory_mb,
+                cfg.terminal.cpus,
+                cfg.terminal.tasks,
             ),
             admission_reserve_mb: cfg.linux_admission_reserve_mb,
             idle_timeout: CONNECTION_IDLE_TIMEOUT,
@@ -200,10 +211,12 @@ impl NativeOptions {
             data_dir,
             run_dir,
             homes_dir,
+            storage_dir: PathBuf::from("/srv/rast"),
             xpra_bin: PathBuf::from("/usr/bin/xpra"),
             uid_base: 200_000,
             session_limits: ResourceLimits::from_config(4096, 4, 2048),
             app_limits: ResourceLimits::from_config(2048, 2, 1024),
+            terminal_limits: ResourceLimits::from_config(1024, 2, 512),
             admission_reserve_mb: 0,
             idle_timeout: Duration::from_secs(10),
             max_concurrent: MAX_CONCURRENT_OPS,
@@ -280,6 +293,7 @@ impl NativeOptions {
             uid_base: self.uid_base,
             session_limits: self.session_limits,
             app_limits: self.app_limits,
+            terminal_limits: self.terminal_limits,
         }
     }
 

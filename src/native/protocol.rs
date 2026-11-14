@@ -230,6 +230,8 @@ pub struct ValidationContext {
     pub session_limits: ResourceLimits,
     /// Per-application maxima from configuration.
     pub app_limits: ResourceLimits,
+    /// Per-terminal maxima from configuration.
+    pub terminal_limits: ResourceLimits,
 }
 
 /// Operations accepted over the socket. Anything else is refused.
@@ -244,6 +246,8 @@ pub enum NativeOp {
     UnitsList,
     AppStart(AppStartOp),
     AppStop(AppStopOp),
+    TerminalStart(TerminalStartOp),
+    TerminalStop(TerminalStopOp),
     DebPreview(DebPreviewOp),
     DebInstall(DebInstallOp),
     DebRemove(DebRemoveOp),
@@ -277,6 +281,8 @@ impl NativeOp {
             Self::UnitsList => "units_list",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
+            Self::TerminalStart(_) => "terminal_start",
+            Self::TerminalStop(_) => "terminal_stop",
             Self::DebPreview(_) => "deb_preview",
             Self::DebInstall(_) => "deb_install",
             Self::DebRemove(_) => "deb_remove",
@@ -308,6 +314,7 @@ impl NativeOp {
             Self::DebDownload(_) => DEB_DOWNLOAD_TIMEOUT,
             Self::AptUpdate => APT_UPDATE_TIMEOUT,
             Self::IdentityEnsure(_) | Self::IdentityRemove(_) => IDENTITY_OP_TIMEOUT,
+            Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
         }
     }
@@ -387,6 +394,8 @@ impl NativeRequest {
             NativeOp::UnitStatus(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
+            NativeOp::TerminalStart(op) => merge!(op),
+            NativeOp::TerminalStop(op) => merge!(op),
             NativeOp::DebPreview(op) => merge!(op),
             NativeOp::DebInstall(op) => merge!(op),
             NativeOp::DebRemove(op) => merge!(op),
@@ -501,6 +510,8 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
+        "terminal_start" => NativeOp::TerminalStart(op_from(rest, "terminal_start")?),
+        "terminal_stop" => NativeOp::TerminalStop(op_from(rest, "terminal_stop")?),
         "deb_preview" => NativeOp::DebPreview(op_from(rest, "deb_preview")?),
         "deb_install" => NativeOp::DebInstall(op_from(rest, "deb_install")?),
         "deb_remove" => NativeOp::DebRemove(op_from(rest, "deb_remove")?),
@@ -616,6 +627,42 @@ pub struct AppStartOp {
 #[serde(deny_unknown_fields)]
 pub struct AppStopOp {
     pub unit: String,
+}
+
+/// Open a native PTY terminal as the mapped identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "TerminalStartOp", deny_unknown_fields)]
+pub struct TerminalStartOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    /// 32 lowercase hex characters; also part of the transient unit name.
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+    /// Approved shell path (bash preferred, sh/dash fallback).
+    pub shell: String,
+    /// Absolute working directory, or empty to use the identity home.
+    pub cwd: String,
+    /// RAST folder permission allows writing (drives the recursive ACL grant).
+    #[serde(rename = "writeAccess")]
+    pub write_access: bool,
+    /// Runtime environment entries composed by the server (PATH, JAVA_HOME…).
+    pub env: BTreeMap<String, String>,
+    #[serde(rename = "memoryMaxMb")]
+    pub memory_max_mb: u32,
+    #[serde(rename = "cpuQuotaPercent")]
+    pub cpu_quota_percent: u32,
+    #[serde(rename = "tasksMax")]
+    pub tasks_max: u32,
+}
+
+/// Stop a native PTY terminal and remove its runtime directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "TerminalStopOp", deny_unknown_fields)]
+pub struct TerminalStopOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1069,7 +1116,7 @@ pub fn session_unit(user_id: i64) -> Result<String, NativeError> {
 /// Managed unit prefixes; `units_list`, `unit_status` and `app_stop` only ever
 /// address these. In particular `rast-worker.service` (Docker) is never
 /// reachable through the native helper.
-pub const MANAGED_UNIT_PREFIXES: &[&str] = &["rast-xpra-u", "rast-app-"];
+pub const MANAGED_UNIT_PREFIXES: &[&str] = &["rast-xpra-u", "rast-app-", "rast-term-"];
 
 pub fn is_managed_unit(unit: &str) -> bool {
     MANAGED_UNIT_PREFIXES
@@ -1848,6 +1895,7 @@ mod tests {
             uid_base: 200_000,
             session_limits: ResourceLimits::from_config(4096, 4, 2048),
             app_limits: ResourceLimits::from_config(2048, 2, 1024),
+            terminal_limits: ResourceLimits::from_config(1024, 2, 512),
         }
     }
 
@@ -1908,6 +1956,21 @@ mod tests {
             }),
             NativeOp::AppStop(AppStopOp {
                 unit: "rast-app-demo-abc123".into(),
+            }),
+            NativeOp::TerminalStart(TerminalStartOp {
+                user_id: 7,
+                session_id: "0123456789abcdef0123456789abcdef".into(),
+                shell: "/bin/bash".into(),
+                cwd: String::new(),
+                write_access: false,
+                env: BTreeMap::new(),
+                memory_max_mb: 512,
+                cpu_quota_percent: 100,
+                tasks_max: 256,
+            }),
+            NativeOp::TerminalStop(TerminalStopOp {
+                user_id: 7,
+                session_id: "0123456789abcdef0123456789abcdef".into(),
             }),
             NativeOp::DebPreview(DebPreviewOp {
                 path: "/var/lib/rast/linux-apps/staging/x.deb".into(),

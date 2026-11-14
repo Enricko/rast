@@ -415,6 +415,39 @@ unsaved-changes dialog appears as a dialog window); terminating an application
 is the separate `session/runs/{run}/close` action. Window titles from the
 application are escaped before the Xpra HTML5 client renders them.
 
+## Native Terminal (app id `terminal`)
+
+Interactive PTY shells as the mapped per-user identity. Administrators always
+have access; ordinary accounts need a group grant for the `terminal`
+application. Starting a shell requires the native helper
+(`rast-native.service`), but not Docker, Xpra or a graphical session.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/terminal/env` | Runtime panel: available runtimes/versions, selected version, source (`rast`/`system`), executable locations, missing dependencies, this user's defaults |
+| PATCH | `/api/terminal/env` | Save defaults: `{"defaults":{"rust":"1.100.0",…}}`; versions must be installed |
+| GET | `/api/terminal/sessions` | This account's live sessions (`id`, `shell`, `cwd`, `state`, `startedAt`, `viewers`) |
+| POST | `/api/terminal/sessions/{id}/close` | Close one session you own |
+| GET (WebSocket) | `/api/terminal/ws` | Same-origin upgrade; cookie session; CSRF token in the first message |
+
+WebSocket messages:
+
+* client → server: text `{"type":"start","csrf":"…","cols":120,"rows":32,
+  "folder":{"path":"/shared/team"}?,"runtimes":{"rust":"1.100.0"}?,
+  "session":"<id>"?}`; then binary keyboard bytes; text
+  `{"type":"resize","cols":N,"rows":N}`; text `{"type":"close"}`.
+* server → client: text `{"type":"ready","sessionId":"…","shell":"…",
+  "cwd":"…","reconnected":false,"runtimes":{…}}`; binary output; text
+  `{"type":"exit","code":N|null}`; text `{"type":"error","message":"…"}`.
+
+`folder.path` is a File Station logical path (`/`, `/sub`, or
+`/shared/<name>/…`), never a POSIX path: the server resolves it with the
+storage ACLs and the helper grants the identity the matching OS ACL. Sending a
+previous `session` id reattaches to the existing shell within the reconnect
+grace period instead of starting a duplicate. Authentication, the session row
+and the app permission are re-checked every 30 seconds; sign-out, account
+disablement or permission removal eventually closes the shell.
+
 ## Activity logs
 
 | Method | Path | Notes |

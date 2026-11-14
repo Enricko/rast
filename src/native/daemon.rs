@@ -44,8 +44,9 @@ use crate::native::{
         NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp, PackagePolicyOp,
         PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp, PathSymlinkOp,
         ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp, ProfileSummaryOp,
-        ResourceLimits, SessionStartOp, SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES,
-        MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
+        ResourceLimits, SessionStartOp, SessionStopOp, TerminalStartOp, TerminalStopOp,
+        UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
+        PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
 };
@@ -406,6 +407,8 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::UnitsList => units_list(options).await,
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
+        NativeOp::TerminalStart(op) => terminal_start(options, op).await,
+        NativeOp::TerminalStop(op) => terminal_stop(options, op).await,
         NativeOp::DebPreview(op) => deb_preview(options, op).await,
         NativeOp::DebInstall(op) => deb_install(options, op).await,
         NativeOp::DebRemove(op) => deb_remove(options, op).await,
@@ -1344,6 +1347,578 @@ async fn app_start(options: &NativeOptions, op: AppStartOp) -> Result<Value, Nat
 async fn app_stop(options: &NativeOptions, op: AppStopOp) -> Result<Value, NativeError> {
     validate_app_unit(&op.unit)?;
     stop_unit(options, &op.unit).await?;
+    Ok(json!({"stopped": true}))
+}
+
+// ---------------------------------------------------------------------------
+// Native PTY terminals (independent from the graphical native apps)
+// ---------------------------------------------------------------------------
+
+/// Shells a terminal may execute. The identity's login shell stays nologin;
+/// the authenticated PTY explicitly starts one of these approved shells.
+const TERMINAL_SHELLS: &[&str] = &[
+    "/bin/bash",
+    "/usr/bin/bash",
+    "/bin/sh",
+    "/usr/bin/sh",
+    "/bin/dash",
+    "/usr/bin/dash",
+];
+
+/// Environment variables the server may set for a shell. HOME/USER/LOGNAME/
+/// SHELL/TERM are always constructed by the helper (a client cannot spoof
+/// the identity it runs as).
+const TERMINAL_ENV_ALLOWED: &[&str] = &[
+    "PATH",
+    "JAVA_HOME",
+    "DOTNET_ROOT",
+    "DOTNET_CLI_TELEMETRY_OPTOUT",
+    "DOTNET_NOLOGO",
+    "DENO_NO_UPDATE_CHECK",
+    "CARGO_NET_OFFLINE",
+    "GOROOT",
+    "GOPATH",
+    "NODE_OPTIONS",
+    "NPM_CONFIG_PREFIX",
+    "BUN_INSTALL",
+    "DENO_DIR",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+];
+
+const TERMINAL_ENV_FORBIDDEN: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "XDG_RUNTIME_DIR",
+    "TMPDIR",
+];
+
+fn validate_terminal_session_id(session_id: &str) -> Result<(), NativeError> {
+    if session_id.len() != 32 || !session_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(NativeError::invalid(
+            "invalid terminal session id: expected 32 hexadecimal characters",
+        ));
+    }
+    if session_id.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return Err(NativeError::invalid(
+            "invalid terminal session id: expected lowercase hexadecimal",
+        ));
+    }
+    Ok(())
+}
+
+fn terminal_unit(identity: &Identity, session_id: &str) -> String {
+    format!("rast-term-u{}-{}", identity.uid, session_id)
+}
+
+fn terminal_base_dir(options: &NativeOptions) -> PathBuf {
+    options.run_dir.join("terminal")
+}
+
+/// Remove the runtime directory of a terminal that failed to start.
+fn cleanup_terminal_session(options: &NativeOptions, session_id: &str) {
+    let base = terminal_base_dir(options);
+    let dir = base.join(session_id);
+    if dir.starts_with(&base) && dir != base && dir.exists() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Create `<run_dir>/terminal` (root:rast, 0750): the RAST service group can
+/// traverse to the per-session sockets, other accounts cannot.
+fn prepare_terminal_base(options: &NativeOptions, gid: u32) -> Result<(), NativeError> {
+    let base = terminal_base_dir(options);
+    std::fs::create_dir_all(&base).map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot create the terminal runtime directory {}: {error}",
+            base.display()
+        ))
+    })?;
+    let metadata = std::fs::symlink_metadata(&base).map_err(|error| {
+        NativeError::unavailable(format!("cannot inspect {}: {error}", base.display()))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(NativeError::forbidden(
+            "the terminal runtime directory must be a real directory",
+        ));
+    }
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o750)).map_err(|error| {
+        NativeError::command_failed(format!("cannot chmod {}: {error}", base.display()))
+    })?;
+    if !options.is_test_mode() {
+        std::os::unix::fs::chown(&base, Some(0), Some(gid)).map_err(|error| {
+            NativeError::command_failed(format!("cannot chown {}: {error}", base.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// One per-session directory: owned by the identity (it creates the agent
+/// socket there), group `rast` so the unprivileged server can traverse and
+/// connect, mode 0750.
+fn prepare_terminal_session_dir(
+    options: &NativeOptions,
+    dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(), NativeError> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir).map_err(|error| {
+            NativeError::command_failed(format!(
+                "cannot reset terminal directory {}: {error}",
+                dir.display()
+            ))
+        })?;
+    }
+    std::fs::create_dir_all(dir).map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot create terminal directory {}: {error}",
+            dir.display()
+        ))
+    })?;
+    // Setgid so the agent's socket inherits the helper's group (`rast`, or the
+    // service group in tests) and the unprivileged server can connect to it.
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o2750)).map_err(|error| {
+        NativeError::command_failed(format!("cannot chmod {}: {error}", dir.display()))
+    })?;
+    for sub in ["runtime", "tmp"] {
+        let path = dir.join(sub);
+        std::fs::create_dir_all(&path).map_err(|error| {
+            NativeError::command_failed(format!("cannot create {}: {error}", path.display()))
+        })?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                NativeError::command_failed(format!("cannot chmod {}: {error}", path.display()))
+            },
+        )?;
+        if !options.is_test_mode() {
+            std::os::unix::fs::chown(&path, Some(uid), Some(gid)).map_err(|error| {
+                NativeError::command_failed(format!("cannot chown {}: {error}", path.display()))
+            })?;
+        }
+    }
+    if !options.is_test_mode() {
+        std::os::unix::fs::chown(dir, Some(uid), Some(gid)).map_err(|error| {
+            NativeError::command_failed(format!("cannot chown {}: {error}", dir.display()))
+        })?;
+    }
+    Ok(())
+}
+
+fn random_terminal_token() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn write_terminal_token(
+    options: &NativeOptions,
+    path: &Path,
+    token: &str,
+    uid: u32,
+    gid: u32,
+) -> Result<(), NativeError> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            NativeError::command_failed(format!("cannot create {}: {error}", path.display()))
+        })?;
+    file.write_all(token.as_bytes()).map_err(|error| {
+        NativeError::command_failed(format!("cannot write {}: {error}", path.display()))
+    })?;
+    file.flush().ok();
+    drop(file);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)).map_err(|error| {
+        NativeError::command_failed(format!("cannot chmod {}: {error}", path.display()))
+    })?;
+    if !options.is_test_mode() {
+        std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|error| {
+            NativeError::command_failed(format!("cannot chown {}: {error}", path.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// Build the deliberate shell environment from scratch (never inherited from
+/// the service): identity, private runtime/tmp/config dirs and the server's
+/// runtime PATH.
+fn terminal_environment(
+    identity: &Identity,
+    session_dir: &Path,
+    shell: &str,
+    extra: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, NativeError> {
+    let home = identity.home.display().to_string();
+    let runtime = session_dir.join("runtime");
+    let tmp = session_dir.join("tmp");
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    env.insert("HOME".into(), home.clone());
+    env.insert("USER".into(), identity.username.clone());
+    env.insert("LOGNAME".into(), identity.username.clone());
+    env.insert("SHELL".into(), shell.to_string());
+    env.insert("TERM".into(), "xterm-256color".into());
+    env.insert("LANG".into(), "C.UTF-8".into());
+    env.insert("XDG_RUNTIME_DIR".into(), runtime.display().to_string());
+    env.insert("TMPDIR".into(), tmp.display().to_string());
+    env.insert("XDG_CONFIG_HOME".into(), format!("{home}/.config"));
+    env.insert("XDG_CACHE_HOME".into(), format!("{home}/.cache"));
+    env.insert("XDG_DATA_HOME".into(), format!("{home}/.local/share"));
+    env.insert("XDG_STATE_HOME".into(), format!("{home}/.local/state"));
+    // The managed runtimes are read-only; their caches live under HOME.
+    if !extra.contains_key("CARGO_HOME") {
+        env.insert("CARGO_HOME".into(), format!("{home}/.cargo"));
+        env.insert("NPM_CONFIG_CACHE".into(), format!("{home}/.npm"));
+        env.insert("DOTNET_CLI_HOME".into(), home.clone());
+        env.insert("NUGET_PACKAGES".into(), format!("{home}/.nuget/packages"));
+        env.insert("DENO_DIR".into(), format!("{home}/.cache/deno"));
+        env.insert("BUN_INSTALL".into(), format!("{home}/.bun"));
+    }
+    for (key, value) in extra {
+        if key == "PATH" {
+            continue;
+        }
+        env.insert(key.clone(), value.clone());
+    }
+    let path = extra.get("PATH").cloned().unwrap_or_else(|| {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
+    });
+    env.insert("PATH".into(), path);
+    Ok(env)
+}
+
+/// Validate a requested terminal working directory and map the RAST folder
+/// permission to OS ACLs for the identity.
+///
+/// The server resolves the RAST folder reference with the storage layer first;
+/// the helper independently requires a canonical directory inside the storage
+/// roots (or the identity's private home) and grants the identity exactly the
+/// read (`rX`) or read/write (`rwX`) access the RAST permission allows, so a
+/// shell cannot read folders the account may not open.
+async fn terminal_working_directory(
+    options: &NativeOptions,
+    identity: &Identity,
+    requested: &str,
+    write_access: bool,
+) -> Result<PathBuf, NativeError> {
+    let path = Path::new(requested);
+    if !path.is_absolute() {
+        return Err(NativeError::invalid(
+            "the terminal working directory must be an absolute path",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        NativeError::cwd_inaccessible(format!(
+            "cannot inspect terminal working directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(NativeError::cwd_inaccessible(
+            "the terminal working directory must be a real directory",
+        ));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        NativeError::cwd_inaccessible(format!("cannot resolve {}: {error}", path.display()))
+    })?;
+    let identity_home =
+        std::fs::canonicalize(&identity.home).unwrap_or_else(|_| identity.home.clone());
+    let homes_root = std::fs::canonicalize(&options.homes_dir).ok();
+    let storage_root = std::fs::canonicalize(&options.storage_dir).ok();
+    let allowed = canonical.starts_with(&identity_home)
+        || homes_root
+            .as_ref()
+            .is_some_and(|root| canonical.starts_with(root))
+        || storage_root
+            .as_ref()
+            .is_some_and(|root| canonical.starts_with(root));
+    if !allowed {
+        return Err(NativeError::cwd_inaccessible(format!(
+            "{} is outside the RAST storage (or your home) and cannot be opened in a terminal",
+            canonical.display()
+        )));
+    }
+    // Private service data must never become a shell directory (the identity
+    // home is the only allowed path under data_dir).
+    if canonical.starts_with(&options.data_dir) && !canonical.starts_with(&identity_home) {
+        return Err(NativeError::forbidden(
+            "terminal working directories cannot point into RAST's private data directory",
+        ));
+    }
+    ensure_storage_traversal(options, &canonical)?;
+    grant_terminal_acl(options, identity, &canonical, write_access).await?;
+    ensure_identity_traversal(options, &canonical)?;
+    validate_cwd_traversable(options, &canonical, identity)?;
+    Ok(canonical)
+}
+
+/// Add the "others execute" bit on storage ancestors (never on files) so the
+/// identity can search its way to the granted folder. Listing still requires
+/// the ACL below.
+fn ensure_storage_traversal(options: &NativeOptions, path: &Path) -> Result<(), NativeError> {
+    let roots: Vec<PathBuf> = [
+        std::fs::canonicalize(&options.homes_dir).ok(),
+        std::fs::canonicalize(&options.storage_dir).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut current = path.to_path_buf();
+    loop {
+        let inside =
+            roots.iter().any(|root| current.starts_with(root)) || current == options.storage_dir;
+        if !inside {
+            break;
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&current) {
+            if metadata.file_type().is_dir() && metadata.permissions().mode() & 0o001 == 0 {
+                let mode = metadata.permissions().mode();
+                std::fs::set_permissions(&current, std::fs::Permissions::from_mode(mode | 0o001))
+                    .map_err(|error| {
+                    NativeError::command_failed(format!(
+                        "cannot make {} traversable for the terminal identity: {error}",
+                        current.display()
+                    ))
+                })?;
+            }
+        }
+        match current.parent() {
+            Some(parent) if parent != current => current = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+/// Grant the identity OS access matching the RAST folder permission. Shared
+/// runtimes/storage stay owned by RAST; the ACL is the mapping between RAST's
+/// folder rules and Linux permissions.
+async fn grant_terminal_acl(
+    options: &NativeOptions,
+    identity: &Identity,
+    path: &Path,
+    write_access: bool,
+) -> Result<(), NativeError> {
+    let Some(setfacl) = options.setfacl_bin.as_ref() else {
+        return Err(NativeError::unavailable(
+            "the 'acl' package (setfacl) is required for terminals: install it with              `apt-get install acl` and restart rast-native.service",
+        ));
+    };
+    let perms = if write_access { "rwX" } else { "rX" };
+    let output = run_command(
+        setfacl,
+        vec![
+            OsString::from("-R"),
+            OsString::from("-m"),
+            OsString::from(format!("u:{}:{}", identity.uid, perms)),
+            OsString::from(path),
+        ],
+        &[],
+        Duration::from_secs(60),
+        64 * 1024,
+        64 * 1024,
+    )
+    .await?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(NativeError::command_failed(format!(
+            "cannot grant the terminal identity access to {}: {}",
+            path.display(),
+            summarize_command(&output)
+        )))
+    }
+}
+
+/// systemd-run arguments for one terminal agent unit.
+fn build_terminal_systemd_args(
+    unit: &str,
+    identity: &Identity,
+    limits: ResourceLimits,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    argv: &[String],
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![
+        OsString::from(format!("--unit={unit}")),
+        OsString::from(format!("--uid={}", identity.uid)),
+        OsString::from(format!("--gid={}", identity.gid)),
+        OsString::from("--collect"),
+        OsString::from("--quiet"),
+        OsString::from("--property=Type=exec"),
+        OsString::from(format!("--property=MemoryMax={}M", limits.memory_max_mb)),
+        OsString::from(format!("--property=CPUQuota={}%", limits.cpu_quota_percent)),
+        OsString::from(format!("--property=TasksMax={}", limits.tasks_max)),
+        OsString::from("--property=KillMode=control-group"),
+        OsString::from(format!("--property=WorkingDirectory={}", path_string(cwd))),
+        // Hardening except executable-memory restrictions: Rust/Java/Bun/
+        // Deno/.NET JITs need PROT_EXEC mappings.
+        OsString::from("--property=NoNewPrivileges=yes"),
+        OsString::from("--property=PrivateTmp=yes"),
+        OsString::from("--property=ProtectSystem=full"),
+        OsString::from("--property=ProtectControlGroups=yes"),
+        OsString::from("--property=ProtectKernelTunables=yes"),
+        OsString::from("--property=ProtectKernelModules=yes"),
+        OsString::from("--property=ProtectClock=yes"),
+        OsString::from("--property=ProtectHostname=yes"),
+        OsString::from("--property=RestrictSUIDSGID=yes"),
+        OsString::from("--property=RestrictRealtime=yes"),
+        OsString::from("--property=LockPersonality=yes"),
+        OsString::from("--property=SystemCallArchitectures=native"),
+        OsString::from("--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"),
+        OsString::from("--property=UMask=0022"),
+    ];
+    for (key, value) in env {
+        args.push(OsString::from(format!("--setenv={key}={value}")));
+    }
+    args.push(OsString::from("--"));
+    args.extend(argv.iter().map(OsString::from));
+    args
+}
+
+async fn terminal_start(
+    options: &NativeOptions,
+    op: TerminalStartOp,
+) -> Result<Value, NativeError> {
+    let ctx = options.validation_context();
+    validate_terminal_session_id(&op.session_id)?;
+    if !TERMINAL_SHELLS.contains(&op.shell.as_str()) {
+        return Err(NativeError::invalid(format!(
+            "{:?} is not an approved terminal shell",
+            op.shell
+        )));
+    }
+    validate_env(&op.env)?;
+    for key in TERMINAL_ENV_FORBIDDEN {
+        if op.env.contains_key(*key) {
+            return Err(NativeError::invalid(format!(
+                "the terminal environment may not override {key}"
+            )));
+        }
+    }
+    for (key, value) in &op.env {
+        if !TERMINAL_ENV_ALLOWED.contains(&key.as_str()) {
+            return Err(NativeError::invalid(format!(
+                "the terminal environment may not set {key}"
+            )));
+        }
+        if value.contains('\n') || value.contains('\r') || value.contains('\0') {
+            return Err(NativeError::invalid(format!(
+                "the terminal environment value for {key} contains a control character"
+            )));
+        }
+        if value.len() > 4096 {
+            return Err(NativeError::invalid(format!(
+                "the terminal environment value for {key} is too long"
+            )));
+        }
+    }
+    let limits = ResourceLimits {
+        memory_max_mb: op.memory_max_mb,
+        cpu_quota_percent: op.cpu_quota_percent,
+        tasks_max: op.tasks_max,
+    };
+    validate_limits(limits, ctx.terminal_limits, "terminal")?;
+    let (identity, _created) = identity::ensure_identity(options, op.user_id).await?;
+    identity::ensure_home(options, &identity).await?;
+    let cwd = if op.cwd.is_empty() {
+        identity.home.clone()
+    } else {
+        terminal_working_directory(options, &identity, &op.cwd, op.write_access).await?
+    };
+    ensure_identity_traversal(options, &cwd)?;
+    validate_cwd_traversable(options, &cwd, &identity)?;
+    let gid = options.effective_rast_gid()?;
+    prepare_terminal_base(options, gid)?;
+    let session_dir = terminal_base_dir(options).join(&op.session_id);
+    prepare_terminal_session_dir(options, &session_dir, identity.uid, gid)?;
+    ensure_identity_traversal(options, &session_dir)?;
+    let token = random_terminal_token();
+    let token_file = session_dir.join("token");
+    write_terminal_token(options, &token_file, &token, identity.uid, gid)?;
+    let socket = session_dir.join("agent.sock");
+    let env = terminal_environment(&identity, &session_dir, &op.shell, &op.env)?;
+    let exe = std::env::current_exe().map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot locate the RAST binary for the terminal agent: {error}"
+        ))
+    })?;
+    let argv = vec![
+        exe.display().to_string(),
+        "terminal-agent".into(),
+        "--socket".into(),
+        socket.display().to_string(),
+        "--token-file".into(),
+        token_file.display().to_string(),
+        "--shell".into(),
+        op.shell.clone(),
+        "--cwd".into(),
+        cwd.display().to_string(),
+    ];
+    let unit = terminal_unit(&identity, &op.session_id);
+    validate_unit(&unit)?;
+    let args = build_terminal_systemd_args(&unit, &identity, limits, &cwd, &env, &argv);
+    if let Err(error) = run_systemd_unit(options, &unit, args).await {
+        cleanup_terminal_session(options, &op.session_id);
+        return Err(error);
+    }
+    let mut active = false;
+    for _ in 0..50 {
+        let info = unit_state(options, &unit).await?;
+        if info.active {
+            active = true;
+            break;
+        }
+        if info.state == "failed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !active {
+        let _ = stop_unit(options, &unit).await;
+        cleanup_terminal_session(options, &op.session_id);
+        return Err(NativeError::command_failed(format!(
+            "the terminal unit {unit} did not start; check `journalctl -u {unit}`"
+        )));
+    }
+    tracing::info!(
+        user_id = op.user_id,
+        uid = identity.uid,
+        %unit,
+        cwd = %cwd.display(),
+        write_access = op.write_access,
+        "started native terminal"
+    );
+    Ok(json!({
+        "unit": unit,
+        "socket": socket.display().to_string(),
+        "token": token,
+        "home": identity.home.display().to_string(),
+        "cwd": cwd.display().to_string(),
+        "shell": op.shell,
+        "uid": identity.uid,
+        "gid": identity.gid,
+    }))
+}
+
+async fn terminal_stop(options: &NativeOptions, op: TerminalStopOp) -> Result<Value, NativeError> {
+    validate_terminal_session_id(&op.session_id)?;
+    let identity = Identity::derive(options, op.user_id)?;
+    let unit = terminal_unit(&identity, &op.session_id);
+    validate_unit(&unit)?;
+    stop_unit(options, &unit).await?;
+    let session_dir = terminal_base_dir(options).join(&op.session_id);
+    let base = terminal_base_dir(options);
+    if session_dir.starts_with(&base) && session_dir != base && session_dir.exists() {
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+    tracing::info!(user_id = op.user_id, %unit, "stopped native terminal");
     Ok(json!({"stopped": true}))
 }
 
@@ -4463,5 +5038,132 @@ exit 0
         std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
         std::fs::write(&socket, b"not a socket").unwrap();
         assert!(prepare_socket_path(&socket).is_err());
+    }
+
+    #[test]
+    fn terminal_session_ids_are_strict() {
+        validate_terminal_session_id("0123456789abcdef0123456789abcdef").unwrap();
+        for bad in [
+            "",
+            "0123",
+            "0123456789ABCDEF0123456789abcdef",
+            "0123456789abcdef0123456789abcdeg",
+            "../../etc/passwd",
+        ] {
+            assert!(validate_terminal_session_id(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_units_are_managed_and_validated() {
+        let identity = Identity {
+            user_id: 7,
+            username: "rast-u7".into(),
+            uid: 200_007,
+            gid: 200_007,
+            home: PathBuf::from("/var/lib/rast/linux-users/7"),
+        };
+        let unit = terminal_unit(&identity, "0123456789abcdef0123456789abcdef");
+        assert_eq!(unit, "rast-term-u200007-0123456789abcdef0123456789abcdef");
+        validate_unit(&unit).unwrap();
+        assert!(crate::native::protocol::is_managed_unit(&unit));
+    }
+
+    #[test]
+    fn terminal_environment_is_deliberate_and_private() {
+        let identity = Identity {
+            user_id: 7,
+            username: "rast-u7".into(),
+            uid: 200_007,
+            gid: 200_007,
+            home: PathBuf::from("/var/lib/rast/linux-users/7"),
+        };
+        let session_dir = Path::new("/run/rast-linux/terminal/abc");
+        let mut extra = BTreeMap::new();
+        extra.insert(
+            "PATH".to_string(),
+            "/opt/runtimes/rust/bin:/usr/bin".to_string(),
+        );
+        extra.insert("JAVA_HOME".to_string(), "/opt/runtimes/java".to_string());
+        let env = terminal_environment(&identity, session_dir, "/bin/bash", &extra).unwrap();
+        assert_eq!(
+            env.get("HOME").map(String::as_str),
+            Some("/var/lib/rast/linux-users/7")
+        );
+        assert_eq!(env.get("USER").map(String::as_str), Some("rast-u7"));
+        assert_eq!(env.get("SHELL").map(String::as_str), Some("/bin/bash"));
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(
+            env.get("JAVA_HOME").map(String::as_str),
+            Some("/opt/runtimes/java")
+        );
+        assert_eq!(
+            env.get("PATH").map(String::as_str),
+            Some("/opt/runtimes/rust/bin:/usr/bin")
+        );
+        assert_eq!(
+            env.get("XDG_RUNTIME_DIR").map(String::as_str),
+            Some("/run/rast-linux/terminal/abc/runtime")
+        );
+        assert_eq!(
+            env.get("TMPDIR").map(String::as_str),
+            Some("/run/rast-linux/terminal/abc/tmp")
+        );
+        // Caches live under the private home, never in shared writable dirs.
+        assert_eq!(
+            env.get("CARGO_HOME").map(String::as_str),
+            Some("/var/lib/rast/linux-users/7/.cargo")
+        );
+        assert_eq!(
+            env.get("NUGET_PACKAGES").map(String::as_str),
+            Some("/var/lib/rast/linux-users/7/.nuget/packages")
+        );
+        assert!(!env.contains_key("RAST_CONFIG"));
+    }
+
+    #[test]
+    fn terminal_systemd_arguments_are_hardened_without_blocking_jits() {
+        let identity = Identity {
+            user_id: 7,
+            username: "rast-u7".into(),
+            uid: 200_007,
+            gid: 200_007,
+            home: PathBuf::from("/var/lib/rast/linux-users/7"),
+        };
+        let limits = ResourceLimits::from_config(512, 2, 256);
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "/usr/bin".to_string());
+        let argv = vec![
+            "/usr/local/bin/rast".to_string(),
+            "terminal-agent".to_string(),
+        ];
+        let args: Vec<String> = build_terminal_systemd_args(
+            "rast-term-u200007-0123456789abcdef0123456789abcdef",
+            &identity,
+            limits,
+            Path::new("/srv/rast/homes/admin"),
+            &env,
+            &argv,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+        let joined = args.join(" ");
+        assert!(joined.contains("--uid=200007"));
+        assert!(joined.contains("--gid=200007"));
+        assert!(joined.contains("MemoryMax=512M"));
+        assert!(joined.contains("CPUQuota=200%"));
+        assert!(joined.contains("TasksMax=256"));
+        assert!(joined.contains("NoNewPrivileges=yes"));
+        assert!(joined.contains("ProtectSystem=full"));
+        assert!(joined.contains("KillMode=control-group"));
+        assert!(joined.contains("WorkingDirectory=/srv/rast/homes/admin"));
+        assert!(joined.contains("--setenv=PATH=/usr/bin"));
+        // Never block executable memory: Java/Bun/Deno/.NET JITs need it.
+        assert!(!joined.contains("MemoryDenyWriteExecute"));
+        // Terminals do not need the native-apps slice (which may not exist).
+        assert!(!joined.contains("--slice="));
+        assert!(args.iter().any(|arg| arg == "--"));
+        assert_eq!(args.last().unwrap(), "terminal-agent");
     }
 }

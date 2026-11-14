@@ -40,6 +40,7 @@ pub const APP_IDS: &[&str] = &[
     "packages",
     "logs",
     "controlpanel",
+    "terminal",
 ];
 
 /// The "Applications" folder on the desktop: lists every installed app the
@@ -129,6 +130,7 @@ pub fn app_label(app_id: &str) -> &'static str {
         "packages" => "App Center",
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
+        "terminal" => "Terminal",
         _ => "Unknown application",
     }
 }
@@ -144,6 +146,7 @@ pub fn app_description(app_id: &str) -> &'static str {
         "packages" => "Install and manage apps and verified runtimes.",
         "logs" => "Audit trail of sign-ins, file operations and administrative actions.",
         "controlpanel" => "Profile, users, shared folders, storage and system settings.",
+        "terminal" => "Interactive Linux shell running as your own unprivileged account.",
         _ => "",
     }
 }

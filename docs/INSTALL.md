@@ -545,6 +545,30 @@ Notes:
   (tab close vs. sign-out vs. force quit) are described in
   [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
+## Native Terminal (optional, no Docker or Xpra)
+
+RAST 0.14 adds a native Terminal application: interactive shells on the server
+as the mapped per-user identity. It uses the same privileged helper as native
+Linux apps (`rast-native.service`) for identity creation, OS ACL mapping and
+systemd transient units, but **none** of the Xpra/nftables/display machinery:
+opening a terminal does not start a graphical session and works with
+`native_enabled = false` or `linux_apps_enabled = false`.
+
+Requirements:
+
+* the `rast-native.service` helper unit installed and running (the installer
+  installs it on Linux; if you quarantined native apps earlier, reinstall the
+  unit and leave `native_enabled = false`);
+* the `acl` package (`setfacl`) so File Station "Open in Terminal" can map RAST
+  folder permissions to OS ACLs;
+* `/bin/bash` (preferred) or `/bin/sh`;
+* `terminal_enabled = true` (default).
+
+Grant the app to groups in Control Panel → Groups → application access.
+Administrators always receive an unprivileged shell; they do not get sudo or
+root. See [TERMINAL.md](TERMINAL.md) for configuration, limits and the runtime
+environment panel.
+
 ## Manual installation (no installer)
 
 1. Download the release assets, verify the checksum and inspect the files:

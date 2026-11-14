@@ -59,6 +59,13 @@ applied by `src/config.rs`.
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
 | `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
 | `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
+| `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
+| `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
+| `terminal_grace_seconds` | integer | `30` | Reconnect grace period for a disconnected terminal before its process tree is terminated (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
+| `terminal_idle_minutes` | integer | `240` | Close terminals with no viewer after this many idle minutes; `0` keeps only the reconnect grace | `RAST_TERMINAL_IDLE_MINUTES` |
+| `terminal_memory_mb` | integer | `1024` | `MemoryMax` of one terminal session | `RAST_TERMINAL_MEMORY_MB` |
+| `terminal_cpus` | integer | `2` | `CPUQuota` of one terminal session, in CPUs | `RAST_TERMINAL_CPUS` |
+| `terminal_tasks` | integer | `512` | `TasksMax` (processes/threads) of one terminal session | `RAST_TERMINAL_TASKS` |
 | `native_helper_socket` | path | `"/run/rast/native.sock"` | Unix socket of the privileged native helper | `RAST_NATIVE_HELPER_SOCKET` |
 | `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions; **Xpra 6.5+ is required** and the version is checked by `rast doctor`, `rast native-helper --check` and the installer | `RAST_LINUX_XPRA_BIN` |
 | `linux_uid_base` | integer | `200000` | First uid of the unprivileged Linux identities; a RAST user `id` gets `linux_uid_base + id`. Must not overlap existing accounts | `RAST_LINUX_UID_BASE` |
@@ -105,6 +112,13 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_DOCKER_ENABLED` | `docker_enabled` | `true`/`false` |
 | `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
 | `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
+| `RAST_TERMINAL_ENABLED` | `terminal_enabled` | `true`/`false` |
+| `RAST_TERMINAL_MAX_SESSIONS` | `terminal_max_sessions` | integer |
+| `RAST_TERMINAL_GRACE_SECONDS` | `terminal_grace_seconds` | integer |
+| `RAST_TERMINAL_IDLE_MINUTES` | `terminal_idle_minutes` | integer |
+| `RAST_TERMINAL_MEMORY_MB` | `terminal_memory_mb` | integer |
+| `RAST_TERMINAL_CPUS` | `terminal_cpus` | integer |
+| `RAST_TERMINAL_TASKS` | `terminal_tasks` | integer |
 | `RAST_NATIVE_HELPER_SOCKET` | `native_helper_socket` | Must match `rast-native.service` |
 | `RAST_LINUX_XPRA_BIN` | `linux_xpra_bin` | Xpra server binary |
 | `RAST_LINUX_UID_BASE` | `linux_uid_base` | Unprivileged identity uid range start |

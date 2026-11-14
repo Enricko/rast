@@ -16,6 +16,7 @@ import {
 import { fileIcon, iconSvg } from "../../core/icons";
 import { confirmDialog, contextMenu, errorMessage, promptDialog } from "../../core/ui";
 import { isLinuxPackageName } from "../linuxapp/catalog";
+import { folderMenuTarget } from "../terminal/model";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { boxesIntersect, dedupeDescendants, validMoveTarget } from "../../shell/selection";
@@ -1728,6 +1729,23 @@ export class FileStation {
       icon: entry.kind === "dir" ? "folder" : "file",
       onClick: () => this.openEntry(entry),
     });
+    // Directories can be handed to the Terminal app with their File Station
+    // logical path; the server re-applies the same folder ACL as the listing
+    // and enforces "directory only" before starting the shell.
+    const terminalFolder = folderMenuTarget({
+      terminalAllowed: this.ctx.desktop.apps().some((app) => app.id === "terminal"),
+      section: this.section,
+      accessBlocked: this.accessBlocked,
+      entryKind: entry.kind,
+      path: entry.path,
+    });
+    if (terminalFolder) {
+      items.push({
+        label: "Open in Terminal",
+        icon: "terminal",
+        onClick: () => this.ctx.openApp("terminal", { folder: terminalFolder }),
+      });
+    }
     if (entry.kind === "file") {
       items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
       if (this.ctx.store.isAdmin() && isLinuxPackageName(entry.name)) {

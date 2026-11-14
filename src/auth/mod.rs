@@ -314,6 +314,7 @@ mod tests {
             linux_app_cpus: crate::config::DEFAULT_LINUX_APP_CPUS,
             linux_app_tasks: crate::config::DEFAULT_LINUX_APP_TASKS,
             linux_admission_reserve_mb: crate::config::DEFAULT_LINUX_ADMISSION_RESERVE_MB,
+            terminal: crate::config::TerminalConfig::default(),
             loaded_from: None,
         }
     }

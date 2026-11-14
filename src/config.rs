@@ -143,6 +143,24 @@ pub struct FileConfig {
     pub linux_app_tasks: Option<u32>,
     /// Free memory kept in reserve when admitting a new native application.
     pub linux_admission_reserve_mb: Option<u32>,
+
+    // ---- Native Terminal (PTY) ------------------------------------------
+    /// Enable the server-wide Terminal application (admins must still grant
+    /// the app to groups; ordinary accounts are denied by default).
+    pub terminal_enabled: Option<bool>,
+    /// Maximum concurrent terminal sessions per user.
+    pub terminal_max_sessions: Option<u32>,
+    /// Seconds a disconnected terminal stays alive for reconnection.
+    pub terminal_grace_seconds: Option<u32>,
+    /// Minutes without any viewer after which a terminal is closed (0 = only
+    /// close after the reconnect grace period).
+    pub terminal_idle_minutes: Option<u32>,
+    /// Memory limit of one terminal session (MiB).
+    pub terminal_memory_mb: Option<u32>,
+    /// CPU limit of one terminal session (in CPUs).
+    pub terminal_cpus: Option<u32>,
+    /// Process (task) limit of one terminal session.
+    pub terminal_tasks: Option<u32>,
 }
 
 /// Fully resolved configuration.
@@ -186,8 +204,36 @@ pub struct Config {
     pub linux_app_cpus: u32,
     pub linux_app_tasks: u32,
     pub linux_admission_reserve_mb: u32,
+    /// Native Terminal settings (PTY shells under the per-user identity).
+    pub terminal: TerminalConfig,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
+}
+
+/// Settings for the native Terminal application.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalConfig {
+    pub enabled: bool,
+    pub max_sessions: u32,
+    pub grace_seconds: u32,
+    pub idle_minutes: u32,
+    pub memory_mb: u32,
+    pub cpus: u32,
+    pub tasks: u32,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_sessions: 8,
+            grace_seconds: 30,
+            idle_minutes: 240,
+            memory_mb: 1024,
+            cpus: 2,
+            tasks: 512,
+        }
+    }
 }
 
 impl Config {
@@ -525,6 +571,41 @@ impl Config {
             ));
         }
 
+        let terminal = TerminalConfig {
+            enabled: parse_env_bool(&env, "RAST_TERMINAL_ENABLED", file.terminal_enabled)?
+                .unwrap_or(true),
+            max_sessions: parse_env_num(
+                &env,
+                "RAST_TERMINAL_MAX_SESSIONS",
+                file.terminal_max_sessions,
+            )?
+            .unwrap_or(8)
+            .clamp(1, 64),
+            grace_seconds: parse_env_num(
+                &env,
+                "RAST_TERMINAL_GRACE_SECONDS",
+                file.terminal_grace_seconds,
+            )?
+            .unwrap_or(30)
+            .clamp(0, 300),
+            idle_minutes: parse_env_num(
+                &env,
+                "RAST_TERMINAL_IDLE_MINUTES",
+                file.terminal_idle_minutes,
+            )?
+            .unwrap_or(240)
+            .clamp(0, 10_080),
+            memory_mb: parse_env_num(&env, "RAST_TERMINAL_MEMORY_MB", file.terminal_memory_mb)?
+                .unwrap_or(1024)
+                .clamp(64, 1_048_576),
+            cpus: parse_env_num(&env, "RAST_TERMINAL_CPUS", file.terminal_cpus)?
+                .unwrap_or(2)
+                .clamp(1, 256),
+            tasks: parse_env_num(&env, "RAST_TERMINAL_TASKS", file.terminal_tasks)?
+                .unwrap_or(512)
+                .clamp(16, 65_536),
+        };
+
         Ok(Self {
             bind,
             public_url,
@@ -562,6 +643,7 @@ impl Config {
             linux_app_cpus,
             linux_app_tasks,
             linux_admission_reserve_mb,
+            terminal,
             loaded_from,
         })
     }

@@ -32,6 +32,8 @@ pub struct AppState {
     pub docker: Arc<crate::docker::DockerManager>,
     pub packages: Arc<crate::packages::PackageManager>,
     pub linux_apps: Arc<crate::linux_apps::LinuxApps>,
+    /// Native PTY terminals (independent from the Docker terminal).
+    pub terminal: Arc<crate::terminal::manager::TerminalManager>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -106,6 +108,14 @@ impl AppState {
         );
         // Stops copies left from before a restart, then sweeps and checks.
         linux_apps.start().await;
+        // Native PTY terminals: not tied to the graphical/native-apps feature,
+        // they only reuse the identity mapping and the helper socket.
+        let terminal = crate::terminal::manager::TerminalManager::new(
+            config.clone(),
+            db.clone(),
+            crate::native::client::NativeClient::from_config(&config),
+        );
+        terminal.spawn_sweeper();
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -133,6 +143,7 @@ impl AppState {
             docker,
             packages,
             linux_apps,
+            terminal,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

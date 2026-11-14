@@ -958,6 +958,30 @@ native_enabled = true
 # while keeping its implementation in the binary.
 # env: RAST_LINUX_APPS_ENABLED
 linux_apps_enabled = true
+
+# ---- Terminal (native PTY shells) ----------------------------------------
+# Interactive shells run as the mapped per-user identity through the native
+# helper (rast-native.service) — no Docker, Xpra or graphical session needed.
+# Administrators keep access; ordinary accounts are denied until a group grant
+# allows the "terminal" application.
+# env: RAST_TERMINAL_ENABLED
+terminal_enabled = true
+# Maximum concurrent terminals per account.
+# env: RAST_TERMINAL_MAX_SESSIONS
+terminal_max_sessions = 8
+# How long a disconnected tab may reconnect to the same shell (seconds).
+# env: RAST_TERMINAL_GRACE_SECONDS
+terminal_grace_seconds = 30
+# Close terminals with no viewer after this many idle minutes (0 = grace only).
+# env: RAST_TERMINAL_IDLE_MINUTES
+terminal_idle_minutes = 240
+# Per-terminal systemd limits.
+# env: RAST_TERMINAL_MEMORY_MB
+terminal_memory_mb = 1024
+# env: RAST_TERMINAL_CPUS
+terminal_cpus = 2
+# env: RAST_TERMINAL_TASKS
+terminal_tasks = 512
 # env: RAST_NATIVE_HELPER_SOCKET
 native_helper_socket = "/run/rast/native.sock"
 # env: RAST_LINUX_XPRA_BIN

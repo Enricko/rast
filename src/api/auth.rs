@@ -333,10 +333,14 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
     let mut apps = BTreeMap::new();
     for app_id in APP_IDS {
         let grant = access::app_access(&state.db, &user, app_id).await?;
+        // The Terminal is unavailable when the server administrator disabled
+        // it (or on non-Linux hosts): the launcher must not offer a dead app.
+        let available = *app_id != "terminal"
+            || (state.config.terminal.enabled && crate::terminal::manager::supported());
         apps.insert(
             (*app_id).to_string(),
             AppPermissionDto {
-                allowed: grant.allowed,
+                allowed: grant.allowed && available,
                 read_only: grant.read_only,
                 label: app_label(app_id).to_string(),
                 installed: grant.fallback != "not-installed",
@@ -365,6 +369,8 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
 /// POST /api/auth/logout
 pub async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<Response> {
     session::revoke(&state.db, &user.session_id).await?;
+    // Signed-out accounts must not keep a live shell around.
+    state.terminal.close_user(user.id).await;
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -502,6 +508,7 @@ pub async fn revoke_all_sessions(
     user: AuthUser,
 ) -> AppResult<Json<serde_json::Value>> {
     let n = session::revoke_all_for_user(&state.db, user.id, Some(&user.session_id)).await?;
+    state.terminal.close_user(user.id).await;
     audit::record_with_events(
         &state.db,
         &state.events,

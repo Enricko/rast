@@ -2313,8 +2313,8 @@ async fn effective_access_matches_api_decisions_for_every_account() {
     assert_eq!(page["folders"][0]["level"], "write");
     assert_eq!(
         page["apps"].as_array().unwrap().len(),
-        7,
-        "apps always complete"
+        8,
+        "apps always complete (the Terminal is a first-class app)"
     );
     let (_, _, none_only) = server
         .request(
@@ -2926,7 +2926,7 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         ),
         (
             "unknown application",
-            json!({"appRules": [{"appId": "terminal", "rule": "allow"}]}),
+            json!({"appRules": [{"appId": "no-such-app", "rule": "allow"}]}),
         ),
         (
             "bad application rule",

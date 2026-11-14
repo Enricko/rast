@@ -41,6 +41,8 @@ pub fn app_for_path(path: &str) -> Option<&'static str> {
         Some("applications")
     } else if path == "/api/backups" || path.starts_with("/api/backups/") {
         Some("backup")
+    } else if path == "/api/terminal" || path.starts_with("/api/terminal/") {
+        Some("terminal")
     } else {
         // Linux app windows are not the Docker app: every signed-in user may
         // list and open the apps shared with them (the Linux apps API enforces

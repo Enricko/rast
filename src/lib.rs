@@ -25,6 +25,7 @@ pub mod secrets;
 pub mod server;
 pub mod state;
 pub mod storage;
+pub mod terminal;
 pub mod update;
 pub mod users;
 pub mod worker;
