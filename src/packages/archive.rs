@@ -1,4 +1,7 @@
-//! Safe extraction of `tar.gz` artifacts into a fresh staging directory.
+//! Safe extraction of `tar.gz` and `zip` artifacts into a fresh staging
+//! directory.
+//!
+//! Both formats share the same rules:
 //!
 //! * Paths are normalised (`./` removed), `..` and absolute paths are refused,
 //!   and `stripComponents` leading directories are dropped.
@@ -20,12 +23,15 @@ use std::{
 
 use flate2::read::GzDecoder;
 use tar::EntryType;
+use zip::ZipArchive;
 
 pub const MAX_ENTRIES: usize = 200_000;
 pub const MAX_TOTAL_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Largest GNU long-name/long-link or PAX extension record accepted. The tar
 /// reader buffers these records whole, so they are checked before extraction.
 pub const MAX_EXTENSION_BYTES: u64 = 64 * 1024;
+/// Longest symbolic-link target accepted (the link name is one path).
+pub const MAX_SYMLINK_TARGET_BYTES: u64 = 4096;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ExtractStats {
@@ -337,6 +343,159 @@ fn rel(root: &Path, path: &Path) -> String {
         .unwrap_or_else(|_| path.display().to_string())
 }
 
+/// Extract one archive in the manifest's declared format.
+pub fn extract_archive(
+    archive: &Path,
+    root: &Path,
+    format: &str,
+    strip: u32,
+    room: u64,
+    progress: &mut dyn FnMut(&ExtractStats),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<ExtractStats, String> {
+    match format {
+        "tar.gz" => extract_tar_gz(archive, root, strip, room, progress, cancelled),
+        "zip" => extract_zip(archive, root, strip, room, progress, cancelled),
+        other => Err(format!(
+            "archive format {other:?} is not supported (tar.gz, zip)"
+        )),
+    }
+}
+
+/// Extract `archive` (a ZIP file) into the empty directory `root` with the
+/// same path, link and size rules as [`extract_tar_gz`].
+pub fn extract_zip(
+    archive: &Path,
+    root: &Path,
+    strip: u32,
+    room: u64,
+    progress: &mut dyn FnMut(&ExtractStats),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<ExtractStats, String> {
+    let limit = room.min(MAX_TOTAL_BYTES);
+    let file = fs::File::open(archive).map_err(|e| format!("cannot open download: {e}"))?;
+    let mut zip = ZipArchive::new(file).map_err(|e| format!("cannot read zip archive: {e}"))?;
+    if zip.len() > MAX_ENTRIES {
+        return Err(format!("archive has more than {MAX_ENTRIES} entries"));
+    }
+    let mut stats = ExtractStats::default();
+    let mut links: Vec<PathBuf> = Vec::new();
+    for index in 0..zip.len() {
+        if index.is_multiple_of(500) {
+            if cancelled() {
+                return Err("cancelled".into());
+            }
+            progress(&stats);
+        }
+        let mut entry = zip
+            .by_index(index)
+            .map_err(|e| format!("archive is corrupt: {e}"))?;
+        if entry.encrypted() {
+            return Err("archive contains an encrypted entry".into());
+        }
+        let name = entry
+            .name()
+            .map_err(|_| "archive contains a non-UTF-8 path".to_string())?
+            .into_owned();
+        let Some(parts) = archive_components(name.as_bytes(), strip)? else {
+            continue;
+        };
+        let dest = join(root, &parts);
+        ensure_parents(root, &parts)?;
+        let mode = entry.unix_mode();
+        let file_type = mode.map(|mode| mode & 0o170000);
+        if entry.is_dir() || file_type == Some(0o040000) {
+            match fs::symlink_metadata(&dest) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "archive replaces a file with a directory: {}",
+                        parts.join("/")
+                    ))
+                }
+                Err(_) => {
+                    fs::create_dir(&dest).map_err(|e| format!("cannot create directory: {e}"))?
+                }
+            }
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).ok();
+            stats.dirs += 1;
+            continue;
+        }
+        if entry.is_symlink() || file_type == Some(0o120000) {
+            let target = read_zip_link_target(&mut entry, &parts)?;
+            if lexical_target(&parts[..parts.len() - 1], &target).is_none() {
+                return Err(format!(
+                    "symbolic link {} points outside the package ({target})",
+                    parts.join("/")
+                ));
+            }
+            clear_existing(&dest)?;
+            std::os::unix::fs::symlink(&target, &dest)
+                .map_err(|e| format!("cannot create link {}: {e}", parts.join("/")))?;
+            links.push(dest);
+            stats.links += 1;
+            continue;
+        }
+        if !matches!(file_type, None | Some(0o100000)) {
+            return Err(format!(
+                "archive entry {} has an unsupported type",
+                parts.join("/")
+            ));
+        }
+        // A regular file.
+        let size = entry.size();
+        stats.bytes += size;
+        if stats.bytes > limit {
+            return Err(if limit < MAX_TOTAL_BYTES {
+                "not enough free disk space to extract the archive".into()
+            } else {
+                "archive expands beyond the size limit".into()
+            });
+        }
+        clear_existing(&dest)?;
+        let mut out = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dest)
+            .map_err(|e| format!("cannot create {}: {e}", parts.join("/")))?;
+        let copied = io::copy(&mut (&mut entry).take(size), &mut out)
+            .map_err(|e| format!("cannot extract {}: {e}", parts.join("/")))?;
+        if copied != size {
+            return Err(format!("archive entry {} is truncated", parts.join("/")));
+        }
+        // Keep execute bits; drop setuid/setgid/sticky and group/other write.
+        let safe = if mode.is_some_and(|mode| mode & 0o111 != 0) {
+            0o755
+        } else {
+            0o644
+        };
+        fs::set_permissions(&dest, fs::Permissions::from_mode(safe)).ok();
+        stats.files += 1;
+    }
+    verify_links(root, &links)?;
+    progress(&stats);
+    Ok(stats)
+}
+
+fn read_zip_link_target(
+    entry: &mut zip::read::ZipFile<'_, fs::File>,
+    parts: &[String],
+) -> Result<String, String> {
+    let mut target = Vec::new();
+    (&mut *entry)
+        .take(MAX_SYMLINK_TARGET_BYTES + 1)
+        .read_to_end(&mut target)
+        .map_err(|e| format!("cannot read link {}: {e}", parts.join("/")))?;
+    if target.len() as u64 > MAX_SYMLINK_TARGET_BYTES {
+        return Err(format!(
+            "symbolic link {} has an oversized target",
+            parts.join("/")
+        ));
+    }
+    String::from_utf8(target)
+        .map_err(|_| format!("symbolic link {} has a non-UTF-8 target", parts.join("/")))
+}
+
 /// `true` when `path` (inside `root`) resolves to an executable regular file
 /// inside `root`.
 pub fn executable_inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
@@ -367,6 +526,7 @@ pub fn executable_inside(root: &Path, relative: &str) -> Result<PathBuf, String>
 pub(crate) mod tests {
     use super::*;
     use flate2::{write::GzEncoder, Compression};
+    use std::io::Write as _;
 
     pub enum Item<'a> {
         Dir(&'a str),
@@ -572,5 +732,168 @@ pub(crate) mod tests {
         );
         assert!(lexical_target(&parent, "../../x").is_none());
         assert!(lexical_target(&parent, "/abs").is_none());
+    }
+
+    // ------------------------------------------------------------------ zip
+
+    pub enum ZipItem<'a> {
+        Dir(&'a str),
+        File(&'a str, &'a [u8], u32),
+        Symlink(&'a str, &'a str),
+        Fifo(&'a str),
+    }
+
+    /// Build a test ZIP archive (including entries a safe extractor must
+    /// refuse, which a normal writer would never produce).
+    pub fn build_zip(path: &Path, items: &[ZipItem<'_>]) {
+        use zip::write::{SimpleFileOptions, ZipWriter};
+        let file = fs::File::create(path).unwrap();
+        let mut writer = ZipWriter::new(file);
+        for item in items {
+            match item {
+                ZipItem::Dir(name) => {
+                    writer
+                        .add_directory(*name, SimpleFileOptions::default().unix_permissions(0o755))
+                        .unwrap();
+                }
+                ZipItem::File(name, data, mode) => {
+                    writer
+                        .start_file(*name, SimpleFileOptions::default().unix_permissions(*mode))
+                        .unwrap();
+                    writer.write_all(data).unwrap();
+                }
+                ZipItem::Symlink(name, target) => {
+                    writer
+                        .add_symlink(*name, *target, SimpleFileOptions::default())
+                        .unwrap();
+                }
+                ZipItem::Fifo(name) => {
+                    writer
+                        .start_file(
+                            *name,
+                            SimpleFileOptions::default().external_attributes(0o010644 << 16),
+                        )
+                        .unwrap();
+                }
+            }
+        }
+        writer.finish().unwrap();
+    }
+
+    fn run_zip(
+        items: &[ZipItem<'_>],
+        strip: u32,
+    ) -> (tempfile::TempDir, Result<ExtractStats, String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        build_zip(&archive, items);
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let result = extract_zip(&archive, &root, strip, u64::MAX, &mut |_| {}, &|| false);
+        (dir, result)
+    }
+
+    #[test]
+    fn extracts_zip_layout_with_strip_and_links() {
+        let (dir, result) = run_zip(
+            &[
+                ZipItem::Dir("pkg-1.0/"),
+                ZipItem::Dir("pkg-1.0/bin/"),
+                ZipItem::File("pkg-1.0/bin/tool-1.0", b"#!/bin/sh\necho 1.0\n", 0o4755),
+                ZipItem::Symlink("pkg-1.0/bin/tool", "tool-1.0"),
+                ZipItem::Dir("pkg-1.0/lib/"),
+                ZipItem::File("pkg-1.0/lib/data.txt", b"data", 0o666),
+                ZipItem::Symlink("pkg-1.0/bin/data", "../lib/data.txt"),
+            ],
+            1,
+        );
+        let stats = result.unwrap();
+        let root = dir.path().join("root");
+        assert_eq!(stats.files, 2);
+        assert_eq!(stats.links, 2);
+        let mode = fs::metadata(root.join("bin/tool-1.0"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o755, "setuid and write bits dropped");
+        let mode = fs::metadata(root.join("lib/data.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o644);
+        assert!(executable_inside(&root, "bin/tool").is_ok());
+        assert!(executable_inside(&root, "lib/data.txt").is_err());
+    }
+
+    #[test]
+    fn zip_refuses_escapes_and_special_files() {
+        let cases: Vec<(&str, Vec<ZipItem<'_>>)> = vec![
+            (
+                "dotdot path",
+                vec![ZipItem::File("pkg/../../evil", b"x", 0o644)],
+            ),
+            (
+                "absolute path",
+                vec![ZipItem::File("/etc/passwd", b"x", 0o644)],
+            ),
+            (
+                "absolute link",
+                vec![
+                    ZipItem::Dir("pkg/"),
+                    ZipItem::Symlink("pkg/l", "/etc/passwd"),
+                ],
+            ),
+            (
+                "escaping link",
+                vec![ZipItem::Dir("pkg/"), ZipItem::Symlink("pkg/l", "../../etc")],
+            ),
+            (
+                "write through link",
+                vec![
+                    ZipItem::Dir("pkg/"),
+                    ZipItem::Dir("pkg/d/"),
+                    ZipItem::Symlink("pkg/l", "d"),
+                    ZipItem::File("pkg/l/x", b"x", 0o644),
+                ],
+            ),
+            ("fifo", vec![ZipItem::Dir("pkg/"), ZipItem::Fifo("pkg/f")]),
+            (
+                "dangling",
+                vec![ZipItem::Dir("pkg/"), ZipItem::Symlink("pkg/l", "missing")],
+            ),
+        ];
+        for (name, items) in cases {
+            let (_dir, result) = run_zip(&items, 1);
+            assert!(result.is_err(), "{name} accepted");
+        }
+    }
+
+    #[test]
+    fn zip_stops_when_the_disk_would_fill() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        build_zip(&archive, &[ZipItem::File("big", &[0u8; 4096], 0o644)]);
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let err = extract_zip(&archive, &root, 0, 1024, &mut |_| {}, &|| false).unwrap_err();
+        assert!(err.contains("free disk space"), "{err}");
+    }
+
+    #[test]
+    fn extract_archive_dispatches_by_declared_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        build_zip(&archive, &[ZipItem::File("bin/tool", b"x", 0o755)]);
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        extract_archive(&archive, &root, "zip", 0, u64::MAX, &mut |_| {}, &|| false).unwrap();
+        assert!(root.join("bin/tool").is_file());
+        let err = extract_archive(&archive, &root, "tar.xz", 0, u64::MAX, &mut |_| {}, &|| {
+            false
+        })
+        .unwrap_err();
+        assert!(err.contains("not supported"), "{err}");
     }
 }

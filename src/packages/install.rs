@@ -290,13 +290,14 @@ fn install_staged(
     untrusted: bool,
     reporter: &mut dyn Reporter,
 ) -> Result<Installed, String> {
-    // Never fill the disk: the download must fit with room to spare.
+    // Never fill the disk: every archive must fit with room to spare.
+    let total_size = artifact.total_size();
     let free = available_bytes(stage);
     if let Some(free) = free {
-        if free < artifact.size.saturating_add(DISK_RESERVE) {
+        if free < total_size.saturating_add(DISK_RESERVE) {
             return Err(format!(
                 "not enough free disk space: the download needs {} and {} must stay free ({} available)",
-                human(artifact.size),
+                human(total_size),
                 human(DISK_RESERVE),
                 human(free)
             ));
@@ -307,53 +308,95 @@ fn install_staged(
     if reporter.cancelled() {
         return Err("cancelled".into());
     }
-    // 1. Download with origin checks; size and SHA-256 must match the pin.
-    let download = stage.join("artifact.tar.gz");
-    reporter.phase(0, artifact.size, "Downloading");
-    let flag = reporter.cancel_flag();
-    {
-        let mut last = Instant::now() - Duration::from_secs(1);
-        let mut progress = |done: u64, total: u64| {
-            if last.elapsed() >= Duration::from_millis(300) || done == total {
-                last = Instant::now();
-                reporter.phase(
-                    done,
-                    total,
-                    &format!("Downloading {} of {}", human(done), human(total)),
-                );
-            }
-        };
-        let cancelled = || flag.load(std::sync::atomic::Ordering::Relaxed);
-        net::download_verified(
-            &artifact.url,
-            policy,
-            &download,
-            artifact.size,
-            &artifact.sha256,
-            &mut progress,
-            &cancelled,
-        )?;
-    }
-    if reporter.cancelled() {
-        return Err("cancelled".into());
-    }
-    reporter.phase(artifact.size, artifact.size, "Verified SHA-256 and size");
-
-    // 2. Extract into a fresh directory with path and link validation.
+    // 1./2. Download each archive with origin checks (size and SHA-256 must
+    // match the pin), then extract it into the shared staging root with path
+    // and link validation. Multi-component runtimes (Rust) merge several
+    // archives into one standalone prefix.
     let root = stage.join("root");
     fs::create_dir(&root).map_err(|e| format!("cannot create staging root: {e}"))?;
-    let room = available_bytes(stage)
-        .map(|free| free.saturating_sub(DISK_RESERVE))
-        .unwrap_or(u64::MAX);
-    let stats = archive::extract_tar_gz(
-        &download,
-        &root,
-        artifact.strip_components,
-        room,
-        &mut |s| reporter.phase(0, 0, &format!("Extracting ({} files)", s.files)),
-        &|| flag.load(std::sync::atomic::Ordering::Relaxed),
-    )?;
-    let _ = fs::remove_file(&download);
+    let flag = reporter.cancel_flag();
+    let cancelled = || flag.load(std::sync::atomic::Ordering::Relaxed);
+    let parts = artifact.archives();
+    let count = parts.len();
+    let mut stats = archive::ExtractStats::default();
+    let mut downloaded = 0u64;
+    for (index, part) in parts.iter().enumerate() {
+        if reporter.cancelled() {
+            return Err("cancelled".into());
+        }
+        let label = if count == 1 {
+            "archive".to_string()
+        } else {
+            format!("component {}/{count}", index + 1)
+        };
+        let download = stage.join(format!("artifact-{index}.{}", part.format));
+        reporter.phase(
+            downloaded,
+            total_size,
+            &format!(
+                "Downloading {label} ({} of {})",
+                human(downloaded),
+                human(total_size)
+            ),
+        );
+        let base = downloaded;
+        {
+            let mut last = Instant::now() - Duration::from_secs(1);
+            let mut progress = |done: u64, total: u64| {
+                if last.elapsed() >= Duration::from_millis(300) || done == total {
+                    last = Instant::now();
+                    let overall = base + done;
+                    reporter.phase(
+                        overall,
+                        total_size,
+                        &format!(
+                            "Downloading {label} ({} of {})",
+                            human(overall),
+                            human(total_size)
+                        ),
+                    );
+                }
+            };
+            net::download_verified(
+                part.url,
+                policy,
+                &download,
+                part.size,
+                part.sha256,
+                &mut progress,
+                &cancelled,
+            )?;
+        }
+        downloaded += part.size;
+        reporter.phase(downloaded, total_size, "Verified SHA-256 and size");
+        if reporter.cancelled() {
+            return Err("cancelled".into());
+        }
+        let room = available_bytes(stage)
+            .map(|free| free.saturating_sub(DISK_RESERVE))
+            .unwrap_or(u64::MAX);
+        let files_before = stats.files;
+        let part_stats = archive::extract_archive(
+            &download,
+            &root,
+            part.format,
+            part.strip_components,
+            room,
+            &mut |s| {
+                reporter.phase(
+                    0,
+                    0,
+                    &format!("Extracting {label} ({} files)", files_before + s.files),
+                )
+            },
+            &cancelled,
+        )?;
+        stats.files += part_stats.files;
+        stats.dirs += part_stats.dirs;
+        stats.links += part_stats.links;
+        stats.bytes += part_stats.bytes;
+        let _ = fs::remove_file(&download);
+    }
 
     // 3. Executables must exist inside the package and be executable.
     reporter.phase(0, 0, "Checking executables");
@@ -372,7 +415,22 @@ fn install_staged(
         return Err("cancelled".into());
     }
 
-    // 5. Record what was installed, then move into place.
+    // 5. Record what was installed, then move into place. `sha256` stays the
+    // primary archive digest the database records; component digests are
+    // kept for diagnostics.
+    let archives: Vec<serde_json::Value> = artifact
+        .archives()
+        .iter()
+        .map(|part| {
+            serde_json::json!({
+                "name": part.name,
+                "url": part.url,
+                "sha256": part.sha256,
+                "size": part.size,
+                "format": part.format,
+            })
+        })
+        .collect();
     let marker = serde_json::json!({
         "id": manifest.id,
         "version": manifest.version,
@@ -380,6 +438,7 @@ fn install_staged(
         "target": artifact.target,
         "sha256": artifact.sha256,
         "url": artifact.url,
+        "archives": archives,
         "installedAt": crate::db::now_ms(),
         "files": stats.files,
     });
@@ -445,6 +504,20 @@ pub fn run_checks(
     let mut results = Vec::new();
     let bin_path = root.join("bin");
     let confinement = sandbox::Confinement::new(root, home, untrusted)?;
+    // Runtime env hints (JAVA_HOME, DOTNET_ROOT, …) apply to the checks too;
+    // {root} is the staging or final prefix. They are set before the fixed
+    // entries, so a hint can never replace PATH/HOME/TMPDIR.
+    let hinted: Vec<(String, String)> = manifest
+        .runtime
+        .env
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                value.replace("{root}", &root.display().to_string()),
+            )
+        })
+        .collect();
     for check in &manifest.runtime.checks {
         let exe = manifest
             .executable(&check.executable)
@@ -463,6 +536,7 @@ pub fn run_checks(
                 .args(&check.args)
                 .current_dir(root)
                 .env_clear()
+                .envs(hinted.iter().map(|(name, value)| (name, value)))
                 .env(
                     "PATH",
                     format!("{}:/usr/local/bin:/usr/bin:/bin", bin_path.display()),
@@ -945,6 +1019,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
+    fn runtime_env_hints_apply_to_checks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let demo = root.join("bin/demo");
+        fs::write(&demo, "#!/bin/sh\necho \"demo 1.0.0 $DEMO_HOME\"\n").unwrap();
+        fs::set_permissions(&demo, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut v = crate::packages::manifest::tests::sample();
+        v["id"] = "demo".into();
+        v["version"] = "1.0.0".into();
+        v["runtime"] = serde_json::json!({
+            "executables": [{"name": "demo", "path": "bin/demo"}],
+            "checks": [{"executable": "demo", "args": [], "expect": "demo 1.0.0"}],
+            "env": {"DEMO_HOME": "{root}"},
+            "pathDirs": ["bin"]
+        });
+        let m = crate::packages::manifest::parse(&serde_json::to_vec(&v).unwrap()).unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let checks = run_checks(&m, &root, &home, false).unwrap();
+        assert_eq!(checks[0].output, format!("demo 1.0.0 {}", root.display()));
+    }
+
+    #[test]
     fn replaced_trees_survive_a_restart_until_settled() {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path().join("packages"));
@@ -991,5 +1091,123 @@ mod tests {
         settle_replacement(&target, &again, true).unwrap();
         assert!(!again.exists());
         assert_eq!(read_marker(&target).unwrap().sha256, "old");
+    }
+
+    fn file_bytes(path: &Path) -> (String, u64) {
+        use sha2::{Digest, Sha256};
+        let bytes = fs::read(path).unwrap();
+        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64)
+    }
+
+    /// A zip artifact like Bun/Deno: bin/demo inside `demo/`, strip 1.
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
+    fn zip_artifacts_install_like_tar_gz() {
+        use crate::packages::archive::tests::{build_zip, ZipItem};
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("demo.zip");
+        build_zip(
+            &archive,
+            &[
+                ZipItem::Dir("demo/"),
+                ZipItem::Dir("demo/bin/"),
+                ZipItem::File("demo/bin/demo", &script("1.0.0"), 0o755),
+            ],
+        );
+        let (sha256, size) = file_bytes(&archive);
+        let mut artifact = crate::packages::manifest::tests::sample_artifact();
+        artifact.url = format!("file://{}", archive.display());
+        artifact.sha256 = sha256;
+        artifact.size = size;
+        artifact.format = "zip".into();
+        artifact.strip_components = 1;
+        let layout = Layout::new(dir.path().join("packages"));
+        let policy = OriginPolicy {
+            hosts: vec![],
+            allow_file: true,
+            ..Default::default()
+        };
+        let mut quiet = Quiet(Default::default());
+        let m = manifest_for("1.0.0", "demo 1.0.0");
+        let installed =
+            install_version(&layout, &m, &artifact, &policy, "zip", false, &mut quiet).unwrap();
+        assert_eq!(installed.checks[0].output, "demo 1.0.0");
+        assert!(installed.path.join("bin/demo").is_file());
+    }
+
+    /// Rust: several archives merge into one prefix before the executables are
+    /// checked (the primary archive alone would not contain `lib/`).
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
+    fn multi_archive_install_merges_components_into_one_prefix() {
+        use crate::packages::manifest::ArchivePart;
+        let dir = tempfile::tempdir().unwrap();
+        let primary_path = dir.path().join("rustc.tar.gz");
+        build(
+            &primary_path,
+            &[
+                Item::Dir("rustc-1.100.0/"),
+                Item::Dir("rustc-1.100.0/rustc/"),
+                Item::Dir("rustc-1.100.0/rustc/bin/"),
+                Item::File("rustc-1.100.0/rustc/bin/demo", &script("1.0.0"), 0o755),
+            ],
+        );
+        let secondary_path = dir.path().join("std.tar.gz");
+        build(
+            &secondary_path,
+            &[
+                Item::Dir("rust-std-1.100.0/"),
+                Item::Dir("rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/"),
+                Item::Dir("rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/lib/"),
+                Item::File(
+                    "rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/lib/std.rlib",
+                    b"rlib",
+                    0o644,
+                ),
+            ],
+        );
+        let (primary_sha, primary_size) = file_bytes(&primary_path);
+        let (secondary_sha, secondary_size) = file_bytes(&secondary_path);
+        let mut artifact = crate::packages::manifest::tests::sample_artifact();
+        artifact.url = format!("file://{}", primary_path.display());
+        artifact.sha256 = primary_sha;
+        artifact.size = primary_size;
+        artifact.strip_components = 2;
+        artifact.archives = vec![ArchivePart {
+            name: Some("rust-std".into()),
+            url: format!("file://{}", secondary_path.display()),
+            sha256: secondary_sha,
+            size: secondary_size,
+            format: "tar.gz".into(),
+            strip_components: 2,
+        }];
+        assert_eq!(artifact.archives().len(), 2);
+        let layout = Layout::new(dir.path().join("packages"));
+        let policy = OriginPolicy {
+            hosts: vec![],
+            allow_file: true,
+            ..Default::default()
+        };
+        let mut quiet = Quiet(Default::default());
+        let m = manifest_for("1.0.0", "demo 1.0.0");
+        let installed =
+            install_version(&layout, &m, &artifact, &policy, "multi", false, &mut quiet).unwrap();
+        assert!(installed.path.join("bin/demo").is_file());
+        assert!(installed.path.join("lib/std.rlib").is_file());
+        assert_eq!(installed.checks[0].output, "demo 1.0.0");
+        let marker = read_marker(&installed.path).unwrap();
+        assert_eq!(marker.sha256, artifact.sha256);
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(installed.path.join(INSTALL_MARKER)).unwrap())
+                .unwrap();
+        assert_eq!(raw["archives"].as_array().unwrap().len(), 2);
+        assert_eq!(raw["archives"][1]["name"], "rust-std");
+
+        // A component digest mismatch fails before anything is installed.
+        let mut tampered = artifact.clone();
+        tampered.archives[0].sha256 = "0".repeat(64);
+        let err =
+            install_version(&layout, &m, &tampered, &policy, "bad", false, &mut quiet).unwrap_err();
+        assert!(err.contains("SHA-256"), "{err}");
     }
 }

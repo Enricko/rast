@@ -60,6 +60,7 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
+use super::version::Version;
 use super::{archive, authoring, catalog, manifest, net, version};
 
 /// User agent for every request, identical to the Python reference.
@@ -70,6 +71,32 @@ const NODE_KEYRING: &str =
     "https://raw.githubusercontent.com/nodejs/release-keys/HEAD/gpg/pubring.kbx";
 const PBS_REPO: &str = "astral-sh/python-build-standalone";
 const PHP_JSON: &str = "https://www.php.net/releases/index.php?json&version={channel}&max=1";
+/// The signed Rust release channel manifest (TOML) for the stable channel.
+const RUST_CHANNEL_TOML: &str = "https://static.rust-lang.org/dist/channel-rust-stable.toml";
+/// The Rust release signing key (ASCII armored; pinned by fingerprint below).
+const RUST_RELEASE_KEY: &str = "https://static.rust-lang.org/rust-key.gpg.ascii";
+/// Fingerprint of the Rust release signing key (> 1.80 releases are signed
+/// with it; a rotation needs a RAST update, which is deliberate).
+const RUST_RELEASE_KEY_FINGERPRINT: &str = "108F66205EAEB0AAA8DD5E1C85AB96E6FA1BE5FE";
+/// Rust dist components installed into one standalone toolchain prefix.
+/// `(component name in the channel manifest, archive name prefix)`.
+const RUST_COMPONENTS: &[(&str, &str)] = &[
+    ("rustc", "rustc"),
+    ("rust-std", "rust-std"),
+    ("cargo", "cargo"),
+    ("rustfmt-preview", "rustfmt"),
+    ("clippy-preview", "clippy"),
+];
+/// Adoptium API: feature versions with assets.
+const ADOPTIUM_AVAILABLE: &str = "https://api.adoptium.net/v3/info/available_releases";
+/// Adoptium API: latest JDK assets of one feature version and architecture.
+const ADOPTIUM_LATEST: &str = "https://api.adoptium.net/v3/assets/latest/{feature}/hotspot?architecture={arch}&image_type=jdk&os=linux&vendor=eclipse";
+/// GitHub repositories whose stable releases provide self-contained binaries.
+const BUN_REPO: &str = "oven-sh/bun";
+const DENO_REPO: &str = "denoland/deno";
+/// .NET release metadata (the index points at each channel's releases.json).
+const DOTNET_RELEASES_INDEX: &str =
+    "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json";
 /// JSON documents fetched into memory are bounded.
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 /// Archives are streamed to disk and bounded while hashing.
@@ -313,6 +340,49 @@ struct TargetConfig {
     go: String,
     node: String,
     python: String,
+    /// Rust target triple, e.g. `x86_64-unknown-linux-gnu`.
+    #[serde(default)]
+    rust_triple: Option<String>,
+    /// Adoptium architecture name (`x64`, `aarch64`).
+    #[serde(default)]
+    java_arch: Option<String>,
+    /// Bun release architecture name (`x64`, `aarch64`).
+    #[serde(default)]
+    bun_arch: Option<String>,
+    /// Deno release architecture name (`x86_64`, `aarch64`).
+    #[serde(default)]
+    deno_arch: Option<String>,
+    /// .NET runtime identifier (`linux-x64`, `linux-arm64`).
+    #[serde(default)]
+    dotnet_rid: Option<String>,
+}
+
+impl TargetConfig {
+    fn rust_triple(&self, target: &str) -> Result<&str, String> {
+        self.rust_triple
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.rustTriple"))
+    }
+    fn java_arch(&self, target: &str) -> Result<&str, String> {
+        self.java_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.javaArch"))
+    }
+    fn bun_arch(&self, target: &str) -> Result<&str, String> {
+        self.bun_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.bunArch"))
+    }
+    fn deno_arch(&self, target: &str) -> Result<&str, String> {
+        self.deno_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.denoArch"))
+    }
+    fn dotnet_rid(&self, target: &str) -> Result<&str, String> {
+        self.dotnet_rid
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.dotnetRid"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -330,6 +400,11 @@ struct PackageConfig {
     builder: Option<String>,
     #[serde(default)]
     extensions: Option<String>,
+    /// Ask `gh attestation verify` for the release artifacts of this package.
+    /// Only enable it for a project that publishes GitHub build-provenance
+    /// attestations (a missing attestation fails the verification job).
+    #[serde(default)]
+    github_attestations: bool,
     channels: Vec<Value>,
 }
 
@@ -490,12 +565,31 @@ fn default_channel(version: &str) -> String {
         .unwrap_or_default()
 }
 
-/// The update stream: Node.js uses the major version, the others major.minor.
+/// The update stream: Node.js uses the major version, JDKs the feature
+/// version, .NET the major.minor band, and Rust/Bun/Deno the rolling stable
+/// channel; the others use the version's implicit major.minor.
 fn channel_of(package: &str, version: &str) -> Option<String> {
-    if package == "nodejs" {
-        Some(version.split('.').next().unwrap_or("").to_string())
-    } else {
-        None
+    match package {
+        "nodejs" => Some(version.split('.').next().unwrap_or("").to_string()),
+        "java" => Some(
+            version
+                .split('+')
+                .next()
+                .unwrap_or(version)
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .to_string(),
+        ),
+        "dotnet" => {
+            let mut parts = version.split('.');
+            match (parts.next(), parts.next()) {
+                (Some(major), Some(minor)) => Some(format!("{major}.{minor}")),
+                _ => None,
+            }
+        }
+        "rust" | "bun" | "deno" => Some("stable".to_string()),
+        _ => None,
     }
 }
 
@@ -780,6 +874,23 @@ fn verify_signature_files(
 
 // ------------------------------------------------------------- discovery
 
+/// One archive of a target in the plan. Rust installs several components; the
+/// other providers use only the target's primary archive.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetArchive {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(default)]
+    url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TargetInfo {
@@ -787,6 +898,9 @@ struct TargetInfo {
     url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
+    /// .NET release metadata publishes SHA-512, not SHA-256.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha512: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     size: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -795,6 +909,18 @@ struct TargetInfo {
     digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source: Option<String>,
+    /// Checksums/signature document that pins this archive (SHASUMS256.txt,
+    /// .sha256.txt, …), fetched and parsed during verification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sums_url: Option<String>,
+    /// Archive format (`tar.gz`; `zip` for Bun/Deno).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strip_components: Option<u32>,
+    /// Additional archives extracted into the same prefix (Rust components).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archives: Vec<TargetArchive>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -822,6 +948,10 @@ struct PlanItem {
     source: Option<Value>,
     #[serde(default)]
     targets: BTreeMap<String, TargetInfo>,
+    /// This package's releases publish GitHub build-provenance attestations
+    /// (from the package config); the verifier runs `gh attestation verify`.
+    #[serde(default)]
+    attestations: bool,
     #[serde(default = "default_revision")]
     revision: u32,
     #[serde(default)]
@@ -1193,6 +1323,942 @@ fn discover_php(
     Ok(items)
 }
 
+// ---------------------------------------------------- new upstream providers
+
+fn is_sha512(value: &str) -> bool {
+    value.len() == 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+/// `1.100.0 (0ef1bc386 2026-11-09)` -> `1.100.0`.
+fn rust_version(raw: &str) -> Option<String> {
+    let core = raw.split_whitespace().next()?;
+    Version::parse(core).map(|_| core.to_string())
+}
+
+fn toml_table<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Table> {
+    value.get(key)?.as_table()
+}
+
+/// Download and integrity-check the signed Rust stable channel manifest.
+///
+/// The manifest's SHA-256 is checked against the dist server's `.sha256`
+/// file; [`verify_item`] additionally checks its OpenPGP signature. Discovery
+/// only needs the cheap hash so a corrupt manifest never reaches a plan.
+fn rust_channel_manifest() -> Result<(toml::Value, String, String), String> {
+    let bytes = http_get(RUST_CHANNEL_TOML, None, None)?;
+    let sums = String::from_utf8(http_get(
+        &format!("{RUST_CHANNEL_TOML}.sha256"),
+        None,
+        None,
+    )?)
+    .map_err(|_| "Rust channel manifest .sha256 is not UTF-8".to_string())?;
+    let expected = sums
+        .split_whitespace()
+        .next()
+        .ok_or("Rust channel manifest .sha256 is empty")?;
+    let actual = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        hex::encode(hasher.finalize())
+    };
+    if actual != expected {
+        return Err(format!(
+            "Rust channel manifest SHA-256 is {actual}, the dist server publishes {expected}"
+        ));
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|_| "Rust channel manifest is not UTF-8".to_string())?;
+    let doc: toml::Value = toml::from_str(&text)
+        .map_err(|error| format!("Rust channel manifest is not valid TOML: {error}"))?;
+    Ok((doc, actual, text))
+}
+
+/// Discover the Rust stable toolchain from the signed dist channel manifest.
+/// The five components are installed into one standalone prefix: the artifact
+/// is the `rustc` archive and `archives` lists rust-std, cargo, rustfmt and
+/// clippy.
+fn discover_rust(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let channels = channel_ids(package);
+    if channels != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.rust.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let (doc, manifest_sha256, _text) = rust_channel_manifest()?;
+    rust_plan_from_channel(cfg, package, &doc, &manifest_sha256, held)
+}
+
+/// Pure part of the Rust provider: build the plan item from the parsed
+/// channel manifest (unit-tested against a recorded TOML fixture).
+fn rust_plan_from_channel(
+    cfg: &Config,
+    package: &PackageConfig,
+    doc: &toml::Value,
+    manifest_sha256: &str,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let _ = package;
+    let pkgs = toml_table(doc, "pkg").ok_or("Rust channel manifest has no [pkg] tables")?;
+    let rustc = pkgs
+        .get("rustc")
+        .ok_or("Rust channel manifest has no pkg.rustc")?;
+    let version = rustc
+        .get("version")
+        .and_then(toml::Value::as_str)
+        .and_then(rust_version)
+        .ok_or("Rust channel manifest has no rustc version")?;
+    if held.contains(&format!("rust@{version}")) {
+        return Ok(Vec::new());
+    }
+    let date = doc
+        .get("date")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let triple = target_config.rust_triple(target)?;
+        let mut parts: Vec<TargetArchive> = Vec::new();
+        let mut complete = true;
+        for (component, archive_prefix) in RUST_COMPONENTS {
+            let entry = pkgs
+                .get(*component)
+                .and_then(|pkg| pkg.get("target"))
+                .and_then(toml::Value::as_table)
+                .and_then(|targets| targets.get(triple))
+                .and_then(toml::Value::as_table);
+            let Some(entry) = entry else {
+                log(format!(
+                    "rust: component {component} has no {triple} build; {target} is not published"
+                ));
+                complete = false;
+                break;
+            };
+            if entry.get("available").and_then(toml::Value::as_bool) != Some(true) {
+                log(format!(
+                    "rust: component {component} is unavailable for {triple}; {target} is not published"
+                ));
+                complete = false;
+                break;
+            }
+            let url = entry
+                .get("url")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("rust: {component} {triple} has no url"))?;
+            let sha256 = entry
+                .get("hash")
+                .and_then(toml::Value::as_str)
+                .ok_or_else(|| format!("rust: {component} {triple} has no hash"))?;
+            let expected_prefix = format!("{archive_prefix}-{version}-");
+            let file = url
+                .rsplit('/')
+                .next()
+                .filter(|name| name.starts_with(&expected_prefix))
+                .ok_or_else(|| {
+                    format!("rust: {component} {triple} URL {url:?} is not the {version} archive")
+                })?
+                .to_string();
+            parts.push(TargetArchive {
+                name: Some((*component).to_string()),
+                url: url.to_string(),
+                sha256: Some(sha256.to_string()),
+                size: None,
+                file: Some(file),
+            });
+        }
+        if !complete {
+            continue;
+        }
+        let primary = parts.remove(0);
+        let primary_sha256 = primary
+            .sha256
+            .clone()
+            .ok_or("rust: rustc component has no hash")?;
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(primary.url),
+                sha256: Some(primary_sha256),
+                file: primary.file,
+                source: Some(RUST_CHANNEL_TOML.to_string()),
+                format: Some("tar.gz".into()),
+                strip_components: Some(2),
+                archives: parts,
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        log(format!(
+            "rust {version}: no configured target has a complete component set; not published"
+        ));
+        return Ok(Vec::new());
+    }
+    Ok(vec![PlanItem {
+        package: "rust".into(),
+        version,
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        release_date: Some(date),
+        revision: 1,
+        sums_url: Some(format!("{RUST_CHANNEL_TOML}.sha256")),
+        source: Some(json!({
+            "channelManifest": RUST_CHANNEL_TOML,
+            "channelManifestSha256": manifest_sha256,
+        })),
+        targets,
+        ..PlanItem::default()
+    }])
+}
+
+/// One JDK asset from the Adoptium API.
+#[derive(Debug, Clone)]
+struct AdoptiumAsset {
+    release_name: String,
+    release_link: String,
+    semver: String,
+    openjdk_version: String,
+    link: String,
+    name: String,
+    checksum: String,
+    size: u64,
+    checksum_link: Option<String>,
+    updated_at: Option<String>,
+}
+
+fn adoptium_asset(assets: &[Value], arch: &str) -> Result<AdoptiumAsset, String> {
+    for value in assets {
+        let Some(binary) = value.get("binary") else {
+            continue;
+        };
+        let field = |name: &str| binary.get(name).and_then(Value::as_str).unwrap_or("");
+        if field("os") != "linux"
+            || field("image_type") != "jdk"
+            || field("jvm_impl") != "hotspot"
+            || field("architecture") != arch
+            || value.get("vendor").and_then(Value::as_str) != Some("eclipse")
+        {
+            continue;
+        }
+        let Some(package) = binary.get("package") else {
+            continue;
+        };
+        let name = required_str(package, "name")?;
+        if !name.ends_with(".tar.gz") || name.contains("alpine") || name.contains("debugimage") {
+            continue;
+        }
+        let version = value
+            .get("version")
+            .ok_or("Adoptium asset has no version")?;
+        let semver = required_str(version, "semver")?.to_string();
+        let openjdk_version = required_str(version, "openjdk_version")?.to_string();
+        return Ok(AdoptiumAsset {
+            release_name: required_str(value, "release_name")?.to_string(),
+            release_link: required_str(value, "release_link")?.to_string(),
+            semver,
+            openjdk_version,
+            link: required_str(package, "link")?.to_string(),
+            name: name.to_string(),
+            checksum: required_str(package, "checksum")?.to_string(),
+            size: package
+                .get("size")
+                .and_then(Value::as_u64)
+                .ok_or("Adoptium asset has no size")?,
+            checksum_link: package
+                .get("checksum_link")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            updated_at: binary
+                .get("updated_at")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        });
+    }
+    Err(format!(
+        "Adoptium API asset list has no linux {arch} hotspot JDK tar.gz"
+    ))
+}
+
+/// The GitHub-computed digest/size of the Temurin release asset, from the
+/// repository the Adoptium API links to. This is a second, independent source
+/// for the checksum (GitHub computes it on upload).
+fn adoptium_github_asset(
+    feature: &str,
+    release_name: &str,
+    asset_name: &str,
+    token: Option<&str>,
+) -> Result<(String, u64, String), String> {
+    let tag = release_name.replace('+', "%2B");
+    let url = format!(
+        "https://api.github.com/repos/adoptium/temurin{feature}-binaries/releases/tags/{tag}"
+    );
+    let release = http_json(&url, token)?;
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("GitHub release {tag} has no assets"))?;
+    let asset = assets
+        .iter()
+        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(asset_name))
+        .ok_or_else(|| format!("GitHub release {tag} has no asset {asset_name}"))?;
+    let digest = asset
+        .get("digest")
+        .and_then(Value::as_str)
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| format!("GitHub release asset {asset_name} has no SHA-256 digest"))?;
+    let size = asset
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("GitHub release asset {asset_name} has no size"))?;
+    Ok((
+        digest.to_string(),
+        size,
+        required_str(&release, "html_url")?.to_string(),
+    ))
+}
+
+/// `25.0.5+8.0.LTS` -> `25.0.5+8` (the manifest version; build metadata keeps
+/// only the numeric build, so versions sort by the JDK patch).
+fn java_manifest_version(semver: &str) -> Result<String, String> {
+    let (core, build) = match semver.split_once('+') {
+        Some((core, build)) => (core, Some(build)),
+        None => (semver, None),
+    };
+    if Version::parse(core).is_none() {
+        return Err(format!("Adoptium semver {semver:?} has no version core"));
+    }
+    let build: String = build
+        .unwrap_or("")
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if build.is_empty() {
+        Ok(core.to_string())
+    } else {
+        Ok(format!("{core}+{build}"))
+    }
+}
+
+/// The version a JDK's `java --version` / `javac -version` prints:
+/// `25.0.5+8` -> `25.0.5`, JDK 8's `8.0.512+9` -> `1.8.0_512`.
+fn java_display_version(version: &str) -> String {
+    let core = version.split('+').next().unwrap_or(version);
+    let parts: Vec<&str> = core.split('.').collect();
+    if parts.first() == Some(&"8") {
+        format!("1.8.0_{}", parts.get(2).copied().unwrap_or("0"))
+    } else {
+        parts.iter().take(3).copied().collect::<Vec<_>>().join(".")
+    }
+}
+
+/// Discover Eclipse Temurin JDKs: one latest asset per configured feature
+/// version, from the Adoptium API, cross-checked against the GitHub release
+/// asset digest.
+/// One verified Temurin asset of one target, ready for the plan.
+#[derive(Debug, Clone)]
+struct JavaAssetPlan {
+    target: String,
+    asset: AdoptiumAsset,
+    digest: String,
+    size: u64,
+    html_url: String,
+}
+
+fn discover_java(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    let available = http_json(ADOPTIUM_AVAILABLE, None)?;
+    let available: BTreeSet<String> = available
+        .get("available_releases")
+        .and_then(Value::as_array)
+        .map(|versions| {
+            versions
+                .iter()
+                .filter_map(Value::as_u64)
+                .map(|version| version.to_string())
+                .collect()
+        })
+        .ok_or("Adoptium available_releases is not a list")?;
+    let mut items = Vec::new();
+    for channel in channel_ids(package) {
+        if !available.contains(&channel) {
+            log(format!(
+                "java: feature version {channel} is not in Adoptium available_releases; skipping"
+            ));
+            continue;
+        }
+        let mut found: Vec<JavaAssetPlan> = Vec::new();
+        let mut failure: Option<String> = None;
+        for (target, target_config) in &cfg.targets.entries {
+            let arch = target_config.java_arch(target)?;
+            let url = ADOPTIUM_LATEST
+                .replace("{feature}", &channel)
+                .replace("{arch}", arch);
+            let assets = http_json(&url, None)?;
+            let array = assets
+                .as_array()
+                .ok_or_else(|| format!("{url} did not return a JSON array"))?;
+            let asset = match adoptium_asset(array, arch) {
+                Ok(asset) => asset,
+                Err(error) => {
+                    log(format!("java {channel} {target}: {error}"));
+                    failure = Some(format!("{target}: {error}"));
+                    continue;
+                }
+            };
+            let (digest, github_size, html_url) =
+                adoptium_github_asset(&channel, &asset.release_name, &asset.name, token)?;
+            if digest != asset.checksum {
+                return Err(format!(
+                    "java {}: Adoptium API sha256 {} differs from the GitHub asset digest {digest}",
+                    asset.name, asset.checksum
+                ));
+            }
+            if github_size != asset.size {
+                return Err(format!(
+                    "java {}: Adoptium API size {} differs from the GitHub asset size {github_size}",
+                    asset.name, asset.size
+                ));
+            }
+            found.push(JavaAssetPlan {
+                target: target.clone(),
+                asset,
+                digest,
+                size: github_size,
+                html_url,
+            });
+        }
+        match java_plan_from_assets(package, &channel, &found, held)? {
+            Some(item) => items.push(item),
+            None => {
+                if let Some(failure) = failure {
+                    log(format!("java {channel}: no asset ({failure})"));
+                }
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Pure part of the Temurin provider: one plan item from the per-target
+/// assets (unit-tested against recorded Adoptium/GitHub JSON).
+fn java_plan_from_assets(
+    package: &PackageConfig,
+    channel: &str,
+    found: &[JavaAssetPlan],
+    held: &BTreeSet<String>,
+) -> Result<Option<PlanItem>, String> {
+    let _ = package;
+    let Some(first) = found.first() else {
+        return Ok(None);
+    };
+    let version = java_manifest_version(&first.asset.semver)?;
+    if held.contains(&format!("java@{version}")) {
+        return Ok(None);
+    }
+    let mut targets = BTreeMap::new();
+    for plan in found {
+        let target_version = java_manifest_version(&plan.asset.semver)?;
+        if target_version != version {
+            log(format!(
+                "java {channel} {}: upstream reports {target_version}, other targets report {version}; skipping {}",
+                plan.target, plan.target
+            ));
+            continue;
+        }
+        targets.insert(
+            plan.target.clone(),
+            TargetInfo {
+                url: Some(plan.asset.link.clone()),
+                sha256: Some(plan.asset.checksum.clone()),
+                size: Some(plan.size),
+                file: Some(plan.asset.name.clone()),
+                digest: Some(plan.digest.clone()),
+                source: Some(plan.html_url.clone()),
+                sums_url: plan.asset.checksum_link.clone(),
+                format: Some("tar.gz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "java".into(),
+        version,
+        channel: channel.to_string(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: first
+            .asset
+            .updated_at
+            .as_deref()
+            .map(|stamp| truncate_chars(stamp, 10)),
+        source: Some(json!({
+            "release": first.asset.release_link,
+            "temurinVersion": first.asset.openjdk_version,
+        })),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+/// Stable GitHub releases of one repository, newest first.
+fn github_stable_releases(repo: &str, token: Option<&str>) -> Result<Vec<Value>, String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    let data = http_json(&url, token)?;
+    let releases = data
+        .as_array()
+        .ok_or_else(|| format!("{url} did not return a JSON array"))?
+        .iter()
+        .filter(|release| {
+            !truthy(release.get("prerelease"))
+                && !truthy(release.get("draft"))
+                && release.get("tag_name").and_then(Value::as_str).is_some()
+        })
+        .cloned()
+        .collect();
+    Ok(releases)
+}
+
+/// Bun stable releases: a self-contained zip per architecture, one `bun`
+/// executable at the top-level directory.
+fn discover_bun(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    let channels = channel_ids(package);
+    if channels != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.bun.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let releases = github_stable_releases(BUN_REPO, token)?;
+    bun_plan_from_releases(cfg, package, &releases, held)
+}
+
+/// Pure part of the Bun provider, unit-tested against recorded GitHub release
+/// JSON.
+fn bun_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        // Releases older than GitHub's asset-digest feature cannot be pinned;
+        // skip them (with a note) instead of failing the whole channel.
+        match bun_plan_from_release(cfg, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("bun@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "bun: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    let _ = package;
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn bun_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let Some(version) = tag.strip_prefix("bun-v") else {
+        return Ok(None);
+    };
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or("Bun release has no assets")?;
+    let find_asset = |name: &str| {
+        assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(Value::as_str) == Some(name))
+    };
+    let Some(sums_asset) = find_asset("SHASUMS256.txt") else {
+        return Err(format!("Bun release {tag} publishes no SHASUMS256.txt"));
+    };
+    let sums_url = required_str(sums_asset, "browser_download_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.bun_arch(target)?;
+        let name = format!("bun-linux-{arch}.zip");
+        let Some(asset) = find_asset(&name) else {
+            log(format!(
+                "bun {version}: release {tag} has no {name}; not published for {target}"
+            ));
+            continue;
+        };
+        let digest = asset
+            .get("digest")
+            .and_then(Value::as_str)
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .ok_or_else(|| format!("Bun asset {name} has no SHA-256 digest"))?
+            .to_string();
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(required_str(asset, "browser_download_url")?.to_string()),
+                sha256: Some(digest.clone()),
+                size: Some(
+                    asset
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .ok_or("Bun asset has no size")?,
+                ),
+                file: Some(name),
+                digest: Some(digest),
+                source: Some(required_str(release, "html_url")?.to_string()),
+                sums_url: Some(sums_url.clone()),
+                format: Some("zip".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "bun".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release
+            .get("published_at")
+            .and_then(Value::as_str)
+            .map(|stamp| truncate_chars(stamp, 10)),
+        sums_url: Some(sums_url),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+fn deno_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match deno_plan_from_release(cfg, package, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("deno@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "deno: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    let _ = package;
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn deno_plan_from_release(
+    cfg: &Config,
+    package: &PackageConfig,
+    release: &Value,
+) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let Some(version) = tag.strip_prefix('v') else {
+        return Ok(None);
+    };
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or("Deno release has no assets")?;
+    let find_asset = |name: &str| {
+        assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(Value::as_str) == Some(name))
+    };
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.deno_arch(target)?;
+        let name = format!("deno-{arch}-unknown-linux-gnu.zip");
+        let Some(asset) = find_asset(&name) else {
+            log(format!(
+                "deno {version}: release {tag} has no {name}; not published for {target}"
+            ));
+            continue;
+        };
+        let digest = asset
+            .get("digest")
+            .and_then(Value::as_str)
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .ok_or_else(|| format!("Deno asset {name} has no SHA-256 digest"))?
+            .to_string();
+        let sums_name = format!("{name}.sha256sum");
+        let Some(sums_asset) = find_asset(&sums_name) else {
+            return Err(format!("Deno release {tag} publishes no {sums_name}"));
+        };
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(required_str(asset, "browser_download_url")?.to_string()),
+                sha256: Some(digest.clone()),
+                size: Some(
+                    asset
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .ok_or("Deno asset has no size")?,
+                ),
+                file: Some(name),
+                digest: Some(digest),
+                source: Some(required_str(release, "html_url")?.to_string()),
+                sums_url: Some(required_str(sums_asset, "browser_download_url")?.to_string()),
+                format: Some("zip".into()),
+                strip_components: Some(0),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "deno".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        attestations: package.github_attestations,
+        release_date: release
+            .get("published_at")
+            .and_then(Value::as_str)
+            .map(|stamp| truncate_chars(stamp, 10)),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+/// Deno stable releases: a zip per target, a single `deno` executable at the
+/// archive root, plus a per-asset `.sha256sum` file and GitHub build
+/// provenance attestations.
+fn discover_deno(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    let channels = channel_ids(package);
+    if channels != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.deno.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let releases = github_stable_releases(DENO_REPO, token)?;
+    deno_plan_from_releases(cfg, package, &releases, held)
+}
+
+fn discover_dotnet(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let index = http_json(DOTNET_RELEASES_INDEX, None)?;
+    let channels = index
+        .get("releases-index")
+        .and_then(Value::as_array)
+        .ok_or("the .NET releases index has no releases-index list")?;
+    let mut items = Vec::new();
+    for channel in channel_ids(package) {
+        let Some(entry) = channels
+            .iter()
+            .find(|entry| entry.get("channel-version").and_then(Value::as_str) == Some(&channel))
+        else {
+            log(format!(
+                ".NET channel {channel}: not in the releases index (EOL or removed); skipping"
+            ));
+            continue;
+        };
+        let support = entry
+            .get("support-phase")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if support == "eol" {
+            log(format!(
+                ".NET channel {channel}: end of life upstream; not published"
+            ));
+            continue;
+        }
+        let releases_url = required_str(entry, "releases.json")?;
+        let releases = http_json(releases_url, None)?;
+        if let Some(item) =
+            dotnet_plan_from_release(cfg, package, &channel, entry, &releases, held)?
+        {
+            items.push(item);
+        }
+    }
+    Ok(items)
+}
+
+/// Pure part of the .NET provider: one plan item from a channel's release
+/// metadata (unit-tested against recorded releases-index/releases JSON).
+fn dotnet_plan_from_release(
+    cfg: &Config,
+    package: &PackageConfig,
+    channel: &str,
+    entry: &Value,
+    releases: &Value,
+    held: &BTreeSet<String>,
+) -> Result<Option<PlanItem>, String> {
+    let _ = package;
+    let releases_url = required_str(entry, "releases.json")?;
+    let list = releases
+        .get("releases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{releases_url} has no releases list"))?;
+    let latest_sdk = entry
+        .get("latest-sdk")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let release = list
+        .iter()
+        .find(|release| {
+            release
+                .get("sdk")
+                .and_then(|sdk| sdk.get("version"))
+                .and_then(Value::as_str)
+                == Some(latest_sdk)
+        })
+        .or_else(|| list.first())
+        .ok_or_else(|| format!("{releases_url} lists no releases"))?;
+    let sdk = release
+        .get("sdk")
+        .ok_or("a .NET release has no sdk section")?;
+    let version = required_str(sdk, "version")?.to_string();
+    if held.contains(&format!("dotnet@{version}")) {
+        return Ok(None);
+    }
+    let runtime_version = release
+        .get("runtime")
+        .and_then(|runtime| runtime.get("version"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let support = entry
+        .get("support-phase")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let release_date = release
+        .get("release-date")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("latest-release-date").and_then(Value::as_str))
+        .map(|stamp| truncate_chars(stamp, 10));
+    let files = sdk
+        .get("files")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{releases_url} SDK release has no files"))?;
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let rid = target_config.dotnet_rid(target)?;
+        let file = files.iter().find(|file| {
+            file.get("rid").and_then(Value::as_str) == Some(rid)
+                && file
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| name.ends_with(".tar.gz"))
+        });
+        let Some(file) = file else {
+            log(format!(
+                ".NET {version}: release metadata has no {rid} SDK tar.gz; not published for {target}"
+            ));
+            continue;
+        };
+        let hash = required_str(file, "hash")?;
+        if !is_sha512(hash) {
+            return Err(format!(
+                ".NET {version} {rid}: release metadata hash is not a SHA-512 digest"
+            ));
+        }
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(required_str(file, "url")?.to_string()),
+                sha512: Some(hash.to_string()),
+                file: file.get("name").and_then(Value::as_str).map(str::to_string),
+                source: Some(releases_url.to_string()),
+                format: Some("tar.gz".into()),
+                strip_components: Some(0),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "dotnet".into(),
+        version,
+        channel: channel.to_string(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date,
+        source: Some(json!({
+            "url": releases_url,
+            "runtime": runtime_version,
+            "support": support,
+        })),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
 fn load_previous(directory: Option<&Path>) -> Result<Option<Value>, String> {
     let Some(directory) = directory else {
         return Ok(None);
@@ -1301,15 +2367,25 @@ fn cmd_discover(
     let token = gh_token();
     let prev = load_previous(Some(previous))?;
     let mut items = Vec::new();
-    items.extend(discover_python(
-        &cfg,
-        package_config(&cfg, "python")?,
-        &held,
-        token.as_deref(),
-    )?);
-    items.extend(discover_php(&cfg, package_config(&cfg, "php")?, &held)?);
-    items.extend(discover_go(&cfg, package_config(&cfg, "go")?, &held)?);
-    items.extend(discover_node(&cfg, package_config(&cfg, "nodejs")?, &held)?);
+    for (id, package) in &cfg.packages.entries {
+        let found = match id.as_str() {
+            "python" => discover_python(&cfg, package, &held, token.as_deref())?,
+            "php" => discover_php(&cfg, package, &held)?,
+            "go" => discover_go(&cfg, package, &held)?,
+            "nodejs" => discover_node(&cfg, package, &held)?,
+            "rust" => discover_rust(&cfg, package, &held)?,
+            "java" => discover_java(&cfg, package, &held, token.as_deref())?,
+            "bun" => discover_bun(&cfg, package, &held, token.as_deref())?,
+            "deno" => discover_deno(&cfg, package, &held, token.as_deref())?,
+            "dotnet" => discover_dotnet(&cfg, package, &held)?,
+            other => {
+                return Err(format!(
+                    "catalog.config.json packages.{other} has no catalog provider"
+                ))
+            }
+        };
+        items.extend(found);
+    }
 
     let prev_versions = previous_manifests(prev.as_ref());
     for item in &mut items {
@@ -1568,25 +2644,8 @@ fn run_check(
     expect: &str,
     home: &Path,
 ) -> Result<String, String> {
-    let environment = vec![
-        (
-            "PATH".to_string(),
-            format!("{}/bin:/usr/local/bin:/usr/bin:/bin", root.display()),
-        ),
-        ("HOME".to_string(), home.display().to_string()),
-        ("TMPDIR".to_string(), home.display().to_string()),
-        ("LANG".to_string(), "C.UTF-8".to_string()),
-        // RAST runs under MemoryDenyWriteExecute; check the same way.
-        ("NODE_OPTIONS".to_string(), "--jitless".to_string()),
-        (
-            "npm_config_cache".to_string(),
-            home.join(".npm").display().to_string(),
-        ),
-        (
-            "npm_config_update_notifier".to_string(),
-            "false".to_string(),
-        ),
-    ];
+    // RAST runs under MemoryDenyWriteExecute; check the same way.
+    let environment = check_environment(root, home);
     let captured = run_capture(
         &root.join(executable),
         args,
@@ -1693,13 +2752,277 @@ fn optional_executables(package: &str) -> &'static [(&'static str, &'static str)
     }
 }
 
-struct VerifiedItem {
+/// One archive as verified for one target (results file format). The first
+/// entry of [`VerifiedItem::archives`] is the artifact's primary archive.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     sha256: String,
     size: u64,
+    format: String,
+    strip_components: u32,
+}
+
+struct VerifiedItem {
+    /// Primary archive first; Rust adds its other components.
+    archives: Vec<ArchiveResult>,
     bundled: BTreeMap<String, String>,
     optional: BTreeSet<String>,
     checks: Vec<String>,
     verification: String,
+}
+
+/// One archive of a target as planned (primary first).
+struct PlannedArchive<'a> {
+    name: Option<&'a str>,
+    url: &'a str,
+    sha256: Option<&'a str>,
+    sha512: Option<&'a str>,
+    size: Option<u64>,
+    format: &'a str,
+    strip_components: u32,
+}
+
+fn planned_archives<'a>(
+    item: &PlanItem,
+    target: &str,
+    info: &'a TargetInfo,
+) -> Result<Vec<PlannedArchive<'a>>, String> {
+    let url = info.url.as_deref().ok_or_else(|| {
+        format!(
+            "{} {} {target} has no artifact URL in the plan",
+            item.package, item.version
+        )
+    })?;
+    let format = info.format.as_deref().unwrap_or("tar.gz");
+    let strip_components = info.strip_components.unwrap_or(1);
+    let mut archives = vec![PlannedArchive {
+        name: None,
+        url,
+        sha256: info.sha256.as_deref(),
+        sha512: info.sha512.as_deref(),
+        size: info.size,
+        format,
+        strip_components,
+    }];
+    for archive in &info.archives {
+        archives.push(PlannedArchive {
+            name: archive.name.as_deref(),
+            url: &archive.url,
+            sha256: archive.sha256.as_deref(),
+            sha512: None,
+            size: archive.size,
+            format,
+            strip_components,
+        });
+    }
+    Ok(archives)
+}
+
+fn sha512_of(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha512};
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut hasher = Sha512::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        if read == 0 {
+            return Ok(hex::encode(hasher.finalize()));
+        }
+        hasher.update(&buffer[..read]);
+    }
+}
+
+fn http_text(url: &str) -> Result<String, String> {
+    let bytes = http_get(url, None, None)?;
+    String::from_utf8(bytes).map_err(|_| format!("{url} is not UTF-8"))
+}
+
+/// Environment for the version checks: no inherited state, a writable home,
+/// and the JIT-free Node.js settings RAST itself runs with.
+fn check_environment(root: &Path, home: &Path) -> Vec<(String, String)> {
+    vec![
+        (
+            "PATH".to_string(),
+            format!("{}/bin:/usr/local/bin:/usr/bin:/bin", root.display()),
+        ),
+        ("HOME".to_string(), home.display().to_string()),
+        ("TMPDIR".to_string(), home.display().to_string()),
+        ("LANG".to_string(), "C.UTF-8".to_string()),
+        ("NODE_OPTIONS".to_string(), "--jitless".to_string()),
+        (
+            "npm_config_cache".to_string(),
+            home.join(".npm").display().to_string(),
+        ),
+        (
+            "npm_config_update_notifier".to_string(),
+            "false".to_string(),
+        ),
+        // .NET's first-run experience must not write outside the temp home.
+        ("DOTNET_CLI_TELEMETRY_OPTOUT".to_string(), "1".to_string()),
+        ("DOTNET_NOLOGO".to_string(), "1".to_string()),
+    ]
+}
+
+/// Decode an ASCII-armored OpenPGP block (`-----BEGIN PGP PUBLIC KEY BLOCK-----`)
+/// into the binary keyring `gpgv --keyring` expects.
+fn pgp_dearmor(text: &str, label: &str) -> Result<Vec<u8>, String> {
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    let start = text
+        .find(&begin)
+        .ok_or_else(|| format!("no {label} block"))?
+        + begin.len();
+    let rest = &text[start..];
+    let stop = rest.find(&end).ok_or_else(|| format!("no {label} end"))?;
+    let body = &rest[..stop];
+    // Armor headers ("Comment: …") are terminated by an empty line.
+    let body = match body.find("\n\n") {
+        Some(index) => &body[index + 2..],
+        None => body,
+    };
+    let encoded: String = body
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('='))
+        .collect();
+    B64.decode(encoded)
+        .map_err(|_| format!("{label} is not valid base64"))
+}
+
+/// Check the OpenPGP signature of the Rust stable channel manifest against
+/// the Rust release signing key, whose fingerprint is pinned above. This ties
+/// every component SHA-256 to a signature made with the Rust project's key
+/// (the same trust model as rustup when it verifies a channel manifest).
+fn verify_rust_manifest_signature(work: &Path) -> Result<(), String> {
+    let (doc, manifest_sha256, text) = rust_channel_manifest()?;
+    let _ = doc;
+    let manifest_path = work.join("channel-rust-stable.toml");
+    fs::write(&manifest_path, &text)
+        .map_err(|error| format!("cannot write {}: {error}", manifest_path.display()))?;
+    let sums_path = work.join("channel-rust-stable.toml.sha256");
+    fs::write(
+        &sums_path,
+        http_get(&format!("{RUST_CHANNEL_TOML}.sha256"), None, None)?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", sums_path.display()))?;
+    let signature_path = work.join("channel-rust-stable.toml.asc");
+    fs::write(
+        &signature_path,
+        http_get(&format!("{RUST_CHANNEL_TOML}.asc"), None, None)?,
+    )
+    .map_err(|error| format!("cannot write {}: {error}", signature_path.display()))?;
+    let key_path = work.join("rust-release-key.gpg");
+    if !key_path.exists() {
+        let armored = http_text(RUST_RELEASE_KEY)?;
+        fs::write(&key_path, pgp_dearmor(&armored, "PGP PUBLIC KEY BLOCK")?)
+            .map_err(|error| format!("cannot write {}: {error}", key_path.display()))?;
+        // Pin the key: a different primary key must not be trusted silently.
+        let fingerprint = run_capture(
+            Path::new("gpg"),
+            &[
+                "--show-keys".to_string(),
+                "--with-colons".to_string(),
+                key_path.display().to_string(),
+            ],
+            None,
+            None,
+            Duration::from_secs(60),
+        )?;
+        let expected = format!("fpr:::::::::{RUST_RELEASE_KEY_FINGERPRINT}:");
+        if fingerprint.exit_code != 0 || !fingerprint.stdout.lines().any(|line| line == expected) {
+            return Err(format!(
+                "the Rust release key at {RUST_RELEASE_KEY} does not have the pinned fingerprint {RUST_RELEASE_KEY_FINGERPRINT}"
+            ));
+        }
+    }
+    let captured = run_capture(
+        Path::new("gpgv"),
+        &[
+            "--keyring".to_string(),
+            key_path.display().to_string(),
+            signature_path.display().to_string(),
+            manifest_path.display().to_string(),
+        ],
+        None,
+        None,
+        Duration::from_secs(60),
+    )?;
+    if captured.exit_code != 0 {
+        return Err(format!(
+            "the Rust channel manifest signature does not verify: {}",
+            truncate_chars(captured.stderr.trim(), 300)
+        ));
+    }
+    let _ = manifest_sha256;
+    Ok(())
+}
+
+/// Version from a rustc archive name: `rustc-1.100.0-x86_64-unknown-linux-gnu.tar.gz`.
+fn rust_triple_from_file(file: &str, version: &str) -> Result<String, String> {
+    file.strip_prefix(&format!("rustc-{version}-"))
+        .and_then(|rest| rest.strip_suffix(".tar.gz"))
+        .filter(|triple| !triple.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("Rust artifact {file:?} does not name the {version} rustc archive"))
+}
+
+/// SHA-256 of every component archive for `triple`, from the signed channel
+/// manifest.
+fn rust_component_hashes(
+    doc: &toml::Value,
+    triple: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let pkgs = toml_table(doc, "pkg").ok_or("Rust channel manifest has no [pkg] tables")?;
+    let mut hashes = BTreeMap::new();
+    for (component, _) in RUST_COMPONENTS {
+        let hash = pkgs
+            .get(*component)
+            .and_then(|pkg| pkg.get("target"))
+            .and_then(toml::Value::as_table)
+            .and_then(|targets| targets.get(triple))
+            .and_then(toml::Value::as_table)
+            .and_then(|entry| entry.get("hash"))
+            .and_then(toml::Value::as_str)
+            .ok_or_else(|| {
+                format!("the Rust channel manifest has no {component} hash for {triple}")
+            })?;
+        hashes.insert((*component).to_string(), hash.to_string());
+    }
+    Ok(hashes)
+}
+
+/// `gh attestation verify <file> --repo <repo>` (GitHub build provenance).
+fn verify_attestation(archive: &Path, repo: &str) -> Result<(), String> {
+    let captured = run_capture(
+        Path::new("gh"),
+        &[
+            "attestation".to_string(),
+            "verify".to_string(),
+            archive.display().to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+        ],
+        None,
+        None,
+        Duration::from_secs(120),
+    )?;
+    if captured.exit_code != 0 {
+        let detail = if captured.stderr.trim().is_empty() {
+            captured.stdout.trim()
+        } else {
+            captured.stderr.trim()
+        };
+        return Err(format!(
+            "attestation verification failed: {}",
+            truncate_chars(detail, 300)
+        ));
+    }
+    Ok(())
 }
 
 fn verify_item(
@@ -1709,18 +3032,24 @@ fn verify_item(
     work: &Path,
     sums_cache: &mut BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<VerifiedItem, String> {
-    let archive_path = work.join("artifact.tar.gz");
-    let (expected, verification) = match item.package.as_str() {
-        "go" => (
-            info.sha256.clone().ok_or_else(|| {
-                format!(
-                    "{} {} has no sha256 in the plan",
-                    item.package, item.version
-                )
-            })?,
-            "SHA-256 published in the go.dev/dl release index; downloaded and re-hashed in CI"
-                .to_string(),
-        ),
+    let planned = planned_archives(item, target, info)?;
+    let mut expected_sha256: Vec<Option<String>> = planned
+        .iter()
+        .map(|part| part.sha256.map(str::to_string))
+        .collect();
+    let mut expected_sha512: Vec<Option<String>> = planned
+        .iter()
+        .map(|part| part.sha512.map(str::to_string))
+        .collect();
+    let mut expected_sizes: Vec<Option<u64>> = planned.iter().map(|part| part.size).collect();
+    #[allow(clippy::needless_late_init)]
+    let verification: String;
+    match item.package.as_str() {
+        "go" => {
+            verification =
+                "SHA-256 published in the go.dev/dl release index; downloaded and re-hashed in CI"
+                    .into();
+        }
         "nodejs" => {
             let sums = node_shasums(&item.version, work)?;
             let file = info.file.as_deref().ok_or_else(|| {
@@ -1730,10 +3059,8 @@ fn verify_item(
                 .get(file)
                 .cloned()
                 .ok_or_else(|| format!("{file} is not listed in SHASUMS256.txt"))?;
-            (
-                expected,
-                "SHA-256 from SHASUMS256.txt, whose signature was verified with gpgv against the nodejs/release-keys keyring".to_string(),
-            )
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from SHASUMS256.txt, whose signature was verified with gpgv against the nodejs/release-keys keyring".into();
         }
         "python" => {
             let url = item
@@ -1753,56 +3080,119 @@ fn verify_item(
                     return Err("GitHub asset digest differs from SHA256SUMS".into());
                 }
             }
-            (
-                expected,
-                "SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; GitHub build-provenance attestation verified with gh attestation verify".to_string(),
-            )
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; GitHub build-provenance attestation verified with gh attestation verify".into();
         }
-        _ => return Err("not an upstream package".into()),
-    };
-    let url = info
-        .url
-        .as_deref()
-        .ok_or_else(|| format!("{target} has no artifact URL in the plan"))?;
-    let (sha256, size) = download(url, &archive_path)?;
-    if sha256 != expected {
+        "rust" => {
+            verify_rust_manifest_signature(work)?;
+            let triple = rust_triple_from_file(
+                info.file.as_deref().ok_or_else(|| {
+                    format!("rust {} has no rustc file in the plan", item.version)
+                })?,
+                &item.version,
+            )?;
+            let (doc, _manifest_sha256, _text) = rust_channel_manifest()?;
+            let hashes = rust_component_hashes(&doc, &triple)?;
+            for (index, part) in planned.iter().enumerate() {
+                let component = part.name.unwrap_or("rustc");
+                let Some(expected) = hashes.get(component) else {
+                    return Err(format!("the channel manifest has no {component} hash"));
+                };
+                if part.sha256 != Some(expected.as_str()) {
+                    return Err(format!(
+                        "rust {component} SHA-256 in the plan does not match the signed channel manifest"
+                    ));
+                }
+                expected_sha256[index] = Some(expected.clone());
+            }
+            verification = "Every component SHA-256 comes from the stable channel manifest, whose SHA-256 matches the dist .sha256 file and whose OpenPGP signature was verified with gpgv against the pinned Rust release key".into();
+        }
+        "java" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("java {} has no sha256 in the plan", item.version))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("Adoptium API checksum differs from the GitHub asset digest".into());
+            }
+            if let Some(url) = &info.sums_url {
+                let sums = pbs_sums(url, sums_cache)?;
+                let file = info.file.as_deref().ok_or_else(|| {
+                    format!("java {} has no artifact file in the plan", item.version)
+                })?;
+                let published = sums
+                    .get(file)
+                    .ok_or_else(|| format!("{file} is not listed in the Adoptium checksum file"))?;
+                if published != &expected {
+                    return Err(
+                        "the Adoptium .sha256.txt checksum differs from the API and GitHub digest"
+                            .into(),
+                    );
+                }
+            }
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the Adoptium API equals the GitHub release asset digest and the published .sha256.txt; downloaded and re-hashed in CI; java/javac/jar/jshell version checks run on the native runner".into();
+        }
+        "bun" | "deno" => {
+            let url = info.sums_url.as_deref().ok_or_else(|| {
+                format!(
+                    "{} {} has no checksums URL in the plan",
+                    item.package, item.version
+                )
+            })?;
+            let sums = pbs_sums(url, sums_cache)?;
+            let file = info.file.as_deref().ok_or_else(|| {
+                format!(
+                    "{} {} has no artifact file in the plan",
+                    item.package, item.version
+                )
+            })?;
+            let expected = sums
+                .get(file)
+                .cloned()
+                .ok_or_else(|| format!("{file} is not listed in the published checksums"))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("GitHub asset digest differs from the published checksums".into());
+            }
+            expected_sha256[0] = Some(expected);
+            verification = if item.package == "deno" {
+                "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; GitHub build-provenance attestation verified with gh attestation verify".into()
+            } else {
+                "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
+            };
+        }
+        "dotnet" => {
+            let sha512 = info
+                .sha512
+                .clone()
+                .ok_or_else(|| format!("dotnet {} has no SHA-512 in the plan", item.version))?;
+            if !is_sha512(&sha512) {
+                return Err("dotnet SHA-512 in the plan is not a SHA-512 digest".into());
+            }
+            expected_sha512[0] = Some(sha512);
+            // The manifest pin is computed from the downloaded bytes; the
+            // release metadata's SHA-512 is what proves those bytes.
+            expected_sha256[0] = None;
+            expected_sizes[0] = None;
+            verification = ".NET release metadata SHA-512 verified against the downloaded SDK archive; the manifest pins the computed SHA-256; dotnet --version, --list-sdks and --list-runtimes run on the native runner".into();
+        }
+        other => return Err(format!("not an upstream package: {other}")),
+    }
+    if verification.len() > 300 {
         return Err(format!(
-            "SHA-256 mismatch: expected {expected}, got {sha256}"
+            "verification note for {} is longer than the manifest allows",
+            item.package
         ));
     }
-    if let Some(expected_size) = info.size {
-        if expected_size != size {
+    for (index, part) in planned.iter().enumerate() {
+        if expected_sha256[index].is_none() && expected_sha512[index].is_none() {
             return Err(format!(
-                "size mismatch: expected {expected_size}, got {size}"
+                "{} {}: no pinned SHA-256/SHA-512 for {}",
+                item.package, item.version, part.url
             ));
         }
     }
-    if item.package == "python" {
-        let captured = run_capture(
-            Path::new("gh"),
-            &[
-                "attestation".to_string(),
-                "verify".to_string(),
-                archive_path.display().to_string(),
-                "--repo".to_string(),
-                PBS_REPO.to_string(),
-            ],
-            None,
-            None,
-            Duration::from_secs(120),
-        )?;
-        if captured.exit_code != 0 {
-            let detail = if captured.stderr.trim().is_empty() {
-                captured.stdout.trim()
-            } else {
-                captured.stderr.trim()
-            };
-            return Err(format!(
-                "attestation verification failed: {}",
-                truncate_chars(detail, 300)
-            ));
-        }
-    }
+
     let root = work.join("root");
     if root.exists() {
         fs::remove_dir_all(&root)
@@ -1810,38 +3200,132 @@ fn verify_item(
     }
     fs::create_dir(&root).map_err(|error| format!("cannot create {}: {error}", root.display()))?;
     let mut progress = |_stats: &archive::ExtractStats| {};
-    archive::extract_tar_gz(
-        &archive_path,
-        &root,
-        1,
-        archive::MAX_TOTAL_BYTES,
-        &mut progress,
-        &|| false,
-    )?;
+    let mut archives = Vec::new();
+    for (index, part) in planned.iter().enumerate() {
+        let archive_path = work.join(format!("artifact-{index}.{}", part.format));
+        let (sha256, size) = download(part.url, &archive_path)?;
+        if let Some(expected) = &expected_sha256[index] {
+            if &sha256 != expected {
+                return Err(format!(
+                    "SHA-256 mismatch for {}: expected {expected}, got {sha256}",
+                    part.name.unwrap_or(target)
+                ));
+            }
+        }
+        if let Some(expected) = &expected_sha512[index] {
+            let actual = sha512_of(&archive_path)?;
+            if &actual != expected {
+                return Err(format!(
+                    "SHA-512 mismatch for {}: expected {expected}, got {actual}",
+                    part.name.unwrap_or(target)
+                ));
+            }
+        }
+        if let Some(expected_size) = expected_sizes[index] {
+            if expected_size != size {
+                return Err(format!(
+                    "size mismatch for {}: expected {expected_size}, got {size}",
+                    part.name.unwrap_or(target)
+                ));
+            }
+        }
+        if index == 0 {
+            let repo = match item.package.as_str() {
+                "python" => Some(PBS_REPO),
+                "deno" if item.attestations => Some(DENO_REPO),
+                _ => None,
+            };
+            if let Some(repo) = repo {
+                verify_attestation(&archive_path, repo)?;
+            }
+        }
+        archives.push(ArchiveResult {
+            name: part.name.map(str::to_string),
+            sha256,
+            size,
+            format: part.format.to_string(),
+            strip_components: part.strip_components,
+        });
+        archive::extract_archive(
+            &archive_path,
+            &root,
+            part.format,
+            part.strip_components,
+            archive::MAX_TOTAL_BYTES,
+            &mut progress,
+            &|| false,
+        )?;
+        let _ = fs::remove_file(&archive_path);
+    }
     let home = work.join("home");
     fs::create_dir_all(&home)
         .map_err(|error| format!("cannot create {}: {error}", home.display()))?;
     let mut bundled = BTreeMap::new();
-    if item.package == "nodejs" {
-        let npm = run_check(&root, "bin/npm", &["--version".to_string()], "", &home)?;
-        let npm = npm.trim().to_string();
-        if let Some(index_npm) = &item.index_npm {
-            if index_npm != &npm {
-                log(format!(
-                    "note: index.json says npm {index_npm}, the archive ships {npm}"
+    match item.package.as_str() {
+        "nodejs" => {
+            let npm = run_check(&root, "bin/npm", &["--version".to_string()], "", &home)?;
+            let npm = npm.trim().to_string();
+            if let Some(index_npm) = &item.index_npm {
+                if index_npm != &npm {
+                    log(format!(
+                        "note: index.json says npm {index_npm}, the archive ships {npm}"
+                    ));
+                }
+            }
+            bundled.insert("npm".to_string(), npm);
+        }
+        "python" => {
+            let pip = run_check(&root, "bin/pip3", &["--version".to_string()], "pip ", &home)?;
+            let version = pip
+                .split_whitespace()
+                .nth(1)
+                .ok_or_else(|| format!("bin/pip3 --version printed {pip:?}"))?
+                .to_string();
+            bundled.insert("pip".to_string(), version);
+        }
+        "dotnet" => {
+            let captured = run_capture(
+                &root.join("dotnet"),
+                &["--list-runtimes".to_string()],
+                Some(&home),
+                Some(&check_environment(&root, &home)),
+                Duration::from_secs(120),
+            )?;
+            let text = format!("{}{}", captured.stdout, captured.stderr);
+            if captured.exit_code != 0 {
+                return Err(format!(
+                    "dotnet --list-runtimes exited {}: {}",
+                    captured.exit_code,
+                    truncate_chars(text.trim(), 300)
                 ));
             }
+            let runtime = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Microsoft.NETCore.App "))
+                .and_then(|rest| rest.split_whitespace().next())
+                .ok_or_else(|| {
+                    format!(
+                        "dotnet --list-runtimes lists no Microsoft.NETCore.App: {}",
+                        truncate_chars(text.trim(), 200)
+                    )
+                })?
+                .to_string();
+            if let Some(expected) = item
+                .source
+                .as_ref()
+                .and_then(|source| source.get("runtime"))
+                .and_then(Value::as_str)
+                .filter(|runtime| !runtime.is_empty())
+            {
+                if expected != runtime {
+                    return Err(format!(
+                        ".NET release metadata says runtime {expected}, the SDK archive reports {runtime}"
+                    ));
+                }
+            }
+            bundled.insert("runtime".to_string(), runtime);
         }
-        bundled.insert("npm".to_string(), npm);
-    }
-    if item.package == "python" {
-        let pip = run_check(&root, "bin/pip3", &["--version".to_string()], "pip ", &home)?;
-        let version = pip
-            .split_whitespace()
-            .nth(1)
-            .ok_or_else(|| format!("bin/pip3 --version printed {pip:?}"))?
-            .to_string();
-        bundled.insert("pip".to_string(), version);
+        _ => {}
     }
     let mut optional = BTreeSet::new();
     for (name, relative) in optional_executables(&item.package) {
@@ -1871,8 +3355,7 @@ fn verify_item(
         )?);
     }
     Ok(VerifiedItem {
-        sha256,
-        size,
+        archives,
         bundled,
         optional,
         checks,
@@ -1901,9 +3384,19 @@ fn cmd_verify(plan_path: &Path, target: &str, out: &Path) -> Result<(), String> 
         result.insert("ok".into(), json!(false));
         match verify_item(item, target, info, work.path(), &mut sums_cache) {
             Ok(verified) => {
+                let primary = &verified.archives[0];
                 result.insert("ok".into(), json!(true));
-                result.insert("sha256".into(), json!(verified.sha256));
-                result.insert("size".into(), json!(verified.size));
+                result.insert("sha256".into(), json!(primary.sha256));
+                result.insert("size".into(), json!(primary.size));
+                result.insert("format".into(), json!(primary.format));
+                result.insert("stripComponents".into(), json!(primary.strip_components));
+                if verified.archives.len() > 1 {
+                    result.insert(
+                        "archives".into(),
+                        serde_json::to_value(&verified.archives[1..])
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
                 result.insert(
                     "bundled".into(),
                     serde_json::to_value(&verified.bundled).unwrap_or(Value::Null),
@@ -1924,7 +3417,6 @@ fn cmd_verify(plan_path: &Path, target: &str, out: &Path) -> Result<(), String> 
         }
         results.push(Value::Object(result));
         let _ = fs::remove_dir_all(work.path().join("root"));
-        let _ = fs::remove_file(work.path().join("artifact.tar.gz"));
     }
     write_json(out, &Value::Array(results))
 }
@@ -2067,6 +3559,8 @@ fn runtime_spec(
 ) -> Result<manifest::RuntimeSpec, String> {
     let mut executables = Vec::new();
     let mut checks = Vec::new();
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    let mut path_dirs = vec!["bin".to_string()];
     match package {
         "python" => {
             let major_minor = version.split('.').take(2).collect::<Vec<_>>().join(".");
@@ -2159,6 +3653,153 @@ fn runtime_spec(
                 label: None,
             });
         }
+        "rust" => {
+            // A standalone rust-installer toolchain (not rustup): rustc,
+            // cargo, rust-std, rustfmt and clippy share one prefix. Cargo
+            // caches stay per user, so no CARGO_HOME/RUSTUP_HOME is set.
+            for (name, path) in [
+                ("rustc", "bin/rustc"),
+                ("cargo", "bin/cargo"),
+                ("rustfmt", "bin/rustfmt"),
+                ("cargo-fmt", "bin/cargo-fmt"),
+                ("clippy-driver", "bin/clippy-driver"),
+                ("cargo-clippy", "bin/cargo-clippy"),
+            ] {
+                executables.push(manifest::Executable {
+                    name: name.into(),
+                    path: path.into(),
+                });
+            }
+            checks.push(manifest::VersionCheck {
+                executable: "rustc".into(),
+                args: vec!["--version".into()],
+                expect: version.to_string(),
+                label: None,
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "cargo".into(),
+                args: vec!["--version".into()],
+                expect: version.to_string(),
+                label: Some("cargo".into()),
+            });
+            // Cargo normally searches PATH for rustc; pin it so the managed
+            // toolchain keeps working from a shim or an absolute path too.
+            env.insert("RUSTC".into(), "{root}/bin/rustc".into());
+        }
+        "java" => {
+            let display = java_display_version(version);
+            let legacy = version
+                .split('+')
+                .next()
+                .unwrap_or(version)
+                .starts_with("8.");
+            executables.push(manifest::Executable {
+                name: "java".into(),
+                path: "bin/java".into(),
+            });
+            executables.push(manifest::Executable {
+                name: "javac".into(),
+                path: "bin/javac".into(),
+            });
+            executables.push(manifest::Executable {
+                name: "jar".into(),
+                path: "bin/jar".into(),
+            });
+            if !legacy {
+                executables.push(manifest::Executable {
+                    name: "jshell".into(),
+                    path: "bin/jshell".into(),
+                });
+            }
+            checks.push(manifest::VersionCheck {
+                executable: "java".into(),
+                // Java 8 only has the single-dash form, and prints it to
+                // stderr; the check runner reads both streams.
+                args: vec![if legacy {
+                    "-version".into()
+                } else {
+                    "--version".into()
+                }],
+                expect: display.clone(),
+                label: None,
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "javac".into(),
+                args: vec!["-version".into()],
+                expect: format!("javac {display}"),
+                label: Some("javac".into()),
+            });
+            if !legacy {
+                checks.push(manifest::VersionCheck {
+                    executable: "jar".into(),
+                    args: vec!["--version".into()],
+                    expect: format!("jar {display}"),
+                    label: Some("jar".into()),
+                });
+                checks.push(manifest::VersionCheck {
+                    executable: "jshell".into(),
+                    args: vec!["--version".into()],
+                    expect: format!("jshell {display}"),
+                    label: Some("jshell".into()),
+                });
+            }
+            env.insert("JAVA_HOME".into(), "{root}".into());
+        }
+        "bun" => {
+            executables.push(manifest::Executable {
+                name: "bun".into(),
+                path: "bun".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "bun".into(),
+                args: vec!["--version".into()],
+                expect: version.to_string(),
+                label: None,
+            });
+            // Bun's zip has no bin/ directory: the executable is the root.
+            path_dirs = vec![".".to_string()];
+        }
+        "deno" => {
+            executables.push(manifest::Executable {
+                name: "deno".into(),
+                path: "deno".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "deno".into(),
+                args: vec!["--version".into()],
+                expect: format!("deno {version}"),
+                label: None,
+            });
+            path_dirs = vec![".".to_string()];
+        }
+        "dotnet" => {
+            executables.push(manifest::Executable {
+                name: "dotnet".into(),
+                path: "dotnet".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "dotnet".into(),
+                args: vec!["--version".into()],
+                expect: version.to_string(),
+                label: None,
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "dotnet".into(),
+                args: vec!["--list-sdks".into()],
+                expect: version.to_string(),
+                label: Some("SDKs".into()),
+            });
+            if let Some(runtime) = bundled.get("runtime") {
+                checks.push(manifest::VersionCheck {
+                    executable: "dotnet".into(),
+                    args: vec!["--list-runtimes".into()],
+                    expect: format!("Microsoft.NETCore.App {runtime}"),
+                    label: Some("runtime".into()),
+                });
+            }
+            env.insert("DOTNET_ROOT".into(), "{root}".into());
+            path_dirs = vec![".".to_string()];
+        }
         other => return Err(format!("unknown package {other:?}")),
     }
     let bundled = bundled
@@ -2173,6 +3814,8 @@ fn runtime_spec(
         checks,
         bundled,
         extensions: Vec::new(),
+        env,
+        path_dirs,
     })
 }
 
@@ -2367,6 +4010,26 @@ fn build_manifest(
                 "go" => json!({
                     "notes": "Statically linked toolchain; building cgo programs needs a host C compiler."
                 }),
+                "rust" => json!({
+                    "glibc": "2.17",
+                    "notes": "Standalone rust-installer toolchain (rustc, cargo, rust-std, rustfmt, clippy); rustup is not involved. Cargo/rustup state stays in the user's home, not in this prefix."
+                }),
+                "java" => json!({
+                    "glibc": "2.17",
+                    "notes": "Eclipse Temurin JDK for glibc Linux; set JAVA_HOME to the prefix. Alpine/musl builds are not published."
+                }),
+                "bun" => json!({
+                    "glibc": "2.17",
+                    "notes": "Bun's glibc build; Alpine/musl builds are not published. BUN_INSTALL and caches stay per user."
+                }),
+                "deno" => json!({
+                    "glibc": "2.27",
+                    "notes": "Deno's glibc Linux build; DENO_DIR and caches stay per user, not in the shared prefix."
+                }),
+                "dotnet" => json!({
+                    "glibc": "2.27",
+                    "notes": ".NET SDK (includes the runtime); DOTNET_ROOT points at the prefix. NUGET_PACKAGES and DOTNET_CLI_HOME stay per user."
+                }),
                 _ => json!({}),
             };
             (url.to_string(), Value::Object(provenance), requires)
@@ -2378,19 +4041,58 @@ fn build_manifest(
         let size = result
             .size
             .ok_or_else(|| format!("{} result has no size", result.target))?;
+        let format = result
+            .format
+            .clone()
+            .unwrap_or_else(|| "tar.gz".to_string());
+        let strip_components = result.strip_components.unwrap_or(1);
+        let mut extra_archives = Vec::new();
+        if item.package != "php" {
+            let info = item.targets.get(&result.target).ok_or_else(|| {
+                format!(
+                    "{} {} has no plan target {}",
+                    item.package, item.version, result.target
+                )
+            })?;
+            if !info.archives.is_empty() {
+                if info.archives.len() != result.archives.len() {
+                    return Err(format!(
+                        "{} {} {}: the plan lists {} component archives but {} were verified",
+                        item.package,
+                        item.version,
+                        result.target,
+                        info.archives.len(),
+                        result.archives.len()
+                    ));
+                }
+                for (planned, verified) in info.archives.iter().zip(&result.archives) {
+                    extra_archives.push(json!({
+                        "name": planned.name,
+                        "url": planned.url,
+                        "sha256": verified.sha256,
+                        "size": verified.size,
+                        "format": verified.format,
+                        "stripComponents": verified.strip_components,
+                    }));
+                }
+            }
+        }
         let mut artifact = Map::new();
         artifact.insert("target".into(), json!(result.target));
         artifact.insert("url".into(), json!(url));
         artifact.insert("sha256".into(), json!(sha256));
         artifact.insert("size".into(), json!(size));
-        artifact.insert("format".into(), json!("tar.gz"));
-        artifact.insert("stripComponents".into(), json!(1));
+        artifact.insert("format".into(), json!(format));
+        artifact.insert("stripComponents".into(), json!(strip_components));
         artifact.insert("provenance".into(), provenance);
         if requires
             .as_object()
             .is_some_and(|object| !object.is_empty())
         {
             artifact.insert("requires".into(), requires);
+        }
+        if !extra_archives.is_empty() {
+            artifact.insert("archives".into(), Value::Array(extra_archives));
         }
         artifacts.push(Value::Object(artifact));
     }
@@ -2418,6 +4120,29 @@ fn build_manifest(
     }
     if item.package == "php" {
         notes.push("Extensions: see the list; php.ini is not shipped (PHP defaults apply).".into());
+    }
+    match item.package.as_str() {
+        "rust" => notes.push(
+            "Standalone rust-installer toolchain: rustup is not involved, so rust-toolchain.toml is not honored (it is a rustup feature); pin a version with RAST instead. CARGO_HOME/RUSTUP_HOME stay in each user's home, never in this read-only prefix."
+                .into(),
+        ),
+        "java" => notes.push(
+            "JAVA_HOME is the installed prefix (runtime.env); java, javac, jar and jshell are in bin/."
+                .into(),
+        ),
+        "bun" => notes.push(
+            "The bun executable is at the prefix root; BUN_INSTALL and caches must stay in each user's home."
+                .into(),
+        ),
+        "deno" => notes.push(
+            "The deno executable is at the prefix root; DENO_DIR must stay in each user's home."
+                .into(),
+        ),
+        "dotnet" => notes.push(
+            "DOTNET_ROOT is the installed prefix; the SDK includes the runtime. NUGET_PACKAGES and DOTNET_CLI_HOME must stay in each user's home."
+                .into(),
+        ),
+        _ => {}
     }
     if !notes.is_empty() {
         manifest.insert(
@@ -2979,22 +4704,25 @@ fn cmd_check(
                         continue;
                     };
                     for artifact in artifacts {
-                        let url = required_str(artifact, "url")?;
-                        if mode == DownloadMode::New && !url.starts_with(&cfg.repository) {
-                            continue;
+                        // A target can have several archives (Rust components);
+                        // every one of them is re-downloaded and re-hashed.
+                        let artifact: manifest::Artifact = serde_json::from_value(artifact.clone())
+                            .map_err(|error| format!("invalid artifact: {error}"))?;
+                        for archive in artifact.archives() {
+                            let url = archive.url;
+                            if mode == DownloadMode::New && !url.starts_with(&cfg.repository) {
+                                continue;
+                            }
+                            let final_url = head_final_url(url)?;
+                            final_host_allowed(url, &final_url, &hosts)?;
+                            let (sha256, size) = download(url, &work.path().join("a"))?;
+                            if sha256 != archive.sha256 || size != archive.size {
+                                return Err(format!(
+                                    "{url}: published bytes differ from the manifest"
+                                ));
+                            }
+                            log(format!("ok {url}"));
                         }
-                        let final_url = head_final_url(url)?;
-                        final_host_allowed(url, &final_url, &hosts)?;
-                        let (sha256, size) = download(url, &work.path().join("a"))?;
-                        let expected_sha256 = required_str(artifact, "sha256")?;
-                        let expected_size = artifact
-                            .get("size")
-                            .and_then(Value::as_u64)
-                            .ok_or_else(|| format!("{url} has no size in the manifest"))?;
-                        if sha256 != expected_sha256 || size != expected_size {
-                            return Err(format!("{url}: published bytes differ from the manifest"));
-                        }
-                        log(format!("ok {url}"));
                     }
                 }
             }
@@ -3048,6 +4776,15 @@ struct Outcome {
     verification: Option<String>,
     #[serde(default)]
     extensions: Vec<String>,
+    /// Primary archive format/strip; absent in results written before
+    /// multi-archive support (default tar.gz / strip 1).
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    strip_components: Option<u32>,
+    /// Additional component archives (Rust), in plan order.
+    #[serde(default)]
+    archives: Vec<ArchiveResult>,
     #[serde(default)]
     attestation_url: Option<String>,
     #[serde(default)]
@@ -4680,5 +6417,684 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
                 .collect::<Vec<_>>(),
             vec![("3.14.0", 2), ("3.14.0", 1), ("3.13.1", 1)]
         );
+    }
+    // ------------------------------------------------- managed runtime providers
+
+    const ADOPTIUM_AVAILABLE_FIXTURE: &str = r#"{"available_lts_releases":[8,11,17,21,25],"available_releases":[8,11,16,17,18,19,20,21,22,23,24,25,26,27],"most_recent_feature_release":27,"most_recent_feature_version":28,"most_recent_lts":25,"tip_version":28}"#;
+    const ADOPTIUM_25_X64: &str = r#"[{"binary":{"architecture":"x64","download_count":1543676,"heap_size":"normal","image_type":"jdk","jvm_impl":"hotspot","os":"linux","package":{"checksum":"68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb","checksum_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz.sha256.txt","download_count":1543676,"link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz","metadata_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz.json","name":"OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz","signature_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_x64_linux_hotspot_25.0.5_8.tar.gz.sig","size":141341188},"project":"jdk","scm_ref":"jdk-25.0.5+8_adopt","updated_at":"2026-10-22T12:28:52Z"},"release_link":"https://github.com/adoptium/temurin25-binaries/releases/tag/jdk-25.0.5%2B8","release_name":"jdk-25.0.5+8","vendor":"eclipse","version":{"build":8,"major":25,"minor":0,"openjdk_version":"25.0.5+8-LTS","optional":"LTS","security":5,"semver":"25.0.5+8.0.LTS"}}]"#;
+    const ADOPTIUM_25_ARM64: &str = r#"[{"binary":{"architecture":"aarch64","download_count":326660,"heap_size":"normal","image_type":"jdk","jvm_impl":"hotspot","os":"linux","package":{"checksum":"bb5b2ded252f21c6090cf780b0a408ad0d83bbb557e702955643557f13231880","checksum_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz.sha256.txt","download_count":326660,"link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz","metadata_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz.json","name":"OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz","signature_link":"https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.5%2B8/OpenJDK25U-jdk_aarch64_linux_hotspot_25.0.5_8.tar.gz.sig","size":140178170},"project":"jdk","scm_ref":"jdk-25.0.5+8_adopt","updated_at":"2026-10-23T08:50:58Z"},"release_link":"https://github.com/adoptium/temurin25-binaries/releases/tag/jdk-25.0.5%2B8","release_name":"jdk-25.0.5+8","vendor":"eclipse","version":{"build":8,"major":25,"minor":0,"openjdk_version":"25.0.5+8-LTS","optional":"LTS","security":5,"semver":"25.0.5+8.0.LTS"}}]"#;
+    const RUST_CHANNEL_TOML_FIXTURE: &str = r#"manifest-version = "2"
+date = "2026-11-12"
+
+[pkg.rustc]
+version = "1.100.0 (0ef1bc386 2026-11-09)"
+
+[pkg.rustc.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rustc-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+hash = "67b0e85ff4b3eee83c48b8ae1da10dd0bcd60b43d02cd0e7df78c59d19f6b960"
+
+[pkg.rustc.target.aarch64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rustc-1.100.0-aarch64-unknown-linux-gnu.tar.gz"
+hash = "7ccc960846f81e016086f1931dedadd837a3317da80e0114df68651145c0f43b"
+
+[pkg.cargo]
+version = "0.101.0 (3acc79c0c 2026-11-05)"
+
+[pkg.cargo.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/cargo-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+hash = "4e7fc3cbe98e23c88a3c6ce37f834e3ffbc91536789782c4c4a9670df6b16a49"
+
+[pkg.cargo.target.aarch64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/cargo-1.100.0-aarch64-unknown-linux-gnu.tar.gz"
+hash = "b3acccbba065da7e97c20592442f104bd9554d54bf87a323bba8a1d6e61282eb"
+
+[pkg.rust-std]
+version = "1.100.0 (0ef1bc386 2026-11-09)"
+
+[pkg.rust-std.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+hash = "61eb09d68b338e230d698716927bd4623049c9910ef4a4972e66d763d66ed9e1"
+
+[pkg.rust-std.target.aarch64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-aarch64-unknown-linux-gnu.tar.gz"
+hash = "89b01323a6611c9382a401282fb66eb80f1f3241df3e139d3df41afbd2da314b"
+
+[pkg.rustfmt-preview]
+version = "1.11.0"
+
+[pkg.rustfmt-preview.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rustfmt-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+hash = "b62ba6e046a5580c52f24a817101734b73e76ea0724fc6a21d57fba4db345ced"
+
+[pkg.rustfmt-preview.target.aarch64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/rustfmt-1.100.0-aarch64-unknown-linux-gnu.tar.gz"
+hash = "e555f81eccd5e2f741732be3f6784d073946eadbf2e00f4112dfdabc6c36c13e"
+
+[pkg.clippy-preview]
+version = "0.1.100"
+
+[pkg.clippy-preview.target.x86_64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/clippy-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+hash = "277a9abd9378561d11fb67a9eb5c08895e207d07dfd985a67197aa47e030856f"
+
+[pkg.clippy-preview.target.aarch64-unknown-linux-gnu]
+available = true
+url = "https://static.rust-lang.org/dist/2026-11-12/clippy-1.100.0-aarch64-unknown-linux-gnu.tar.gz"
+hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
+"#;
+    const BUN_RELEASE_FIXTURE: &str = r#"{"tag_name":"bun-v1.4.4","prerelease":false,"draft":false,"published_at":"2026-10-22T10:11:32Z","html_url":"https://github.com/oven-sh/bun/releases/tag/bun-v1.4.4","assets":[{"name":"SHASUMS256.txt","size":3431,"digest":"sha256:86629f14fe256b487ceba5170217e13787c49d0cc0fe4bb6397ce5767d3b8f65","browser_download_url":"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/SHASUMS256.txt"},{"name":"bun-linux-aarch64.zip","size":51644673,"digest":"sha256:baa6bb36f51d6e58561e02bbea825038a9df454f673d6d776e8bbf86f8c7850e","browser_download_url":"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip"},{"name":"bun-linux-x64.zip","size":51794595,"digest":"sha256:bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c","browser_download_url":"https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-x64.zip"}]}"#;
+    const DENO_RELEASE_FIXTURE: &str = r#"{"tag_name":"v2.9.8","prerelease":false,"draft":false,"published_at":"2026-10-21T15:28:53Z","html_url":"https://github.com/denoland/deno/releases/tag/v2.9.8","assets":[{"name":"deno-aarch64-unknown-linux-gnu.zip","size":40120596,"digest":"sha256:d49596c20b9788cf8f5d8ddf644103d4bde56ed239753f0bdb92ba9361d51905","browser_download_url":"https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip"},{"name":"deno-aarch64-unknown-linux-gnu.zip.sha256sum","size":101,"digest":"sha256:8eb865b23b330c730e109461eb3c1e185049ace2cd20a2002e7be1c023e284d0","browser_download_url":"https://github.com/denoland/deno/releases/download/v2.9.8/deno-aarch64-unknown-linux-gnu.zip.sha256sum"},{"name":"deno-x86_64-unknown-linux-gnu.zip","size":41963064,"digest":"sha256:e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609","browser_download_url":"https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip"},{"name":"deno-x86_64-unknown-linux-gnu.zip.sha256sum","size":100,"digest":"sha256:f41fbb4278955d03b735c37f957470a1432bdae643d673866e913eea6e4a7855","browser_download_url":"https://github.com/denoland/deno/releases/download/v2.9.8/deno-x86_64-unknown-linux-gnu.zip.sha256sum"}]}"#;
+    const DOTNET_INDEX_ENTRY_FIXTURE: &str = r#"{"channel-version":"10.0","latest-release":"10.0.15","latest-release-date":"2026-11-10","latest-sdk":"10.0.404","latest-runtime":"10.0.15","support-phase":"active","release-type":"lts","releases.json":"https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json","eol-date":"2028-11-14"}"#;
+    const DOTNET_RELEASES_FIXTURE: &str = r#"{"channel-version":"10.0","latest-sdk":"10.0.404","releases":[{"release-date":"2026-11-10","release-version":"10.0.15","runtime":{"version":"10.0.15"},"sdk":{"version":"10.0.404","files":[{"name":"dotnet-sdk-linux-arm64.tar.gz","rid":"linux-arm64","hash":"3533a3869da219cac45c567aadac3d8e96cdf1c6a04fe1c1d5fdeefea5d45af8424488f0144730d11b4a751f7ad546fb11e4c2b2725cd8401efee726711f8f11","url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-arm64.tar.gz"},{"name":"dotnet-sdk-linux-x64.tar.gz","rid":"linux-x64","hash":"577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50","url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz"}]}}]}"#;
+
+    fn providers_config() -> Config {
+        serde_json::from_str(r#"{"name": "RAST official catalog", "publisher": {"id": "rast", "name": "RAST", "url": "https://github.com/Enricko/rast-packages"}, "repository": "https://github.com/Enricko/rast-packages", "keyId": "rast-official-2026-11", "publicKey": "keys/rast-official-2026-11.pub.pem", "minRastVersion": "0.5.0", "expiresDays": 30, "refreshBeforeDays": 10, "allowedHosts": ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "static.rust-lang.org", "builds.dotnet.microsoft.com"], "targets": {"linux-x86_64": {"runner": "ubuntu-24.04", "go": "amd64", "node": "x64", "python": "x86_64", "rustTriple": "x86_64-unknown-linux-gnu", "javaArch": "x64", "bunArch": "x64", "denoArch": "x86_64", "dotnetRid": "linux-x64"}, "linux-aarch64": {"runner": "ubuntu-24.04-arm", "go": "arm64", "node": "arm64", "python": "aarch64", "rustTriple": "aarch64-unknown-linux-gnu", "javaArch": "aarch64", "bunArch": "aarch64", "denoArch": "aarch64", "dotnetRid": "linux-arm64"}}, "withheld": [], "revisions": {}, "packages": {"rust": {"name": "Rust", "description": "Rust toolchain", "homepage": "https://www.rust-lang.org", "license": "MIT OR Apache-2.0", "keepPatches": 1, "channels": [{"id": "stable", "label": "Rust stable", "status": "stable"}]}, "java": {"name": "Eclipse Temurin JDK", "description": "Temurin JDK", "homepage": "https://adoptium.net", "license": "GPL-2.0 WITH Classpath-exception-2.0", "keepPatches": 1, "channels": [{"id": "25", "label": "Temurin 25", "status": "LTS"}]}, "bun": {"name": "Bun", "description": "Bun runtime", "homepage": "https://bun.com", "license": "MIT", "keepPatches": 2, "channels": [{"id": "stable", "label": "Bun stable", "status": "stable"}]}, "deno": {"name": "Deno", "description": "Deno runtime", "homepage": "https://deno.com", "license": "MIT", "keepPatches": 2, "githubAttestations": true, "channels": [{"id": "stable", "label": "Deno stable", "status": "stable"}]}, "dotnet": {"name": ".NET SDK", "description": ".NET SDK and runtime", "homepage": "https://dotnet.microsoft.com", "license": "MIT", "keepPatches": 1, "channels": [{"id": "10.0", "label": ".NET 10", "status": "LTS"}]}}}"#).unwrap()
+    }
+
+    fn rust_doc() -> toml::Value {
+        toml::from_str(RUST_CHANNEL_TOML_FIXTURE).unwrap()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ok_outcome(
+        package: &str,
+        version: &str,
+        target: &str,
+        sha256: &str,
+        size: u64,
+        format: &str,
+        strip: u32,
+        archives: Vec<ArchiveResult>,
+    ) -> Outcome {
+        Outcome {
+            package: package.into(),
+            version: version.into(),
+            target: target.into(),
+            ok: true,
+            sha256: Some(sha256.into()),
+            size: Some(size),
+            format: Some(format.into()),
+            strip_components: Some(strip),
+            archives,
+            verification: Some("verification recorded by the workflow".into()),
+            ..Outcome::default()
+        }
+    }
+
+    fn host_for(target: &str) -> crate::packages::host::HostInfo {
+        crate::packages::host::HostInfo {
+            os: "linux".into(),
+            arch: target.trim_start_matches("linux-").into(),
+            target: target.into(),
+            libc: "glibc".into(),
+            glibc_version: Some("2.39".into()),
+            kernel: None,
+            rast_version: "0.14.0".into(),
+        }
+    }
+
+    #[test]
+    fn rust_discovery_builds_a_multi_component_toolchain() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "rust").unwrap();
+        let doc = rust_doc();
+        let items =
+            rust_plan_from_channel(&cfg, package, &doc, &"f".repeat(64), &BTreeSet::new()).unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.version, "1.100.0");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.kind, "upstream");
+        assert_eq!(item.release_date.as_deref(), Some("2026-11-12"));
+        assert_eq!(item.targets.len(), 2, "both tier-1 Linux targets");
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(
+            x86.url.as_deref().unwrap(),
+            "https://static.rust-lang.org/dist/2026-11-12/rustc-1.100.0-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(x86.format.as_deref(), Some("tar.gz"));
+        assert_eq!(x86.strip_components, Some(2));
+        assert_eq!(
+            x86.archives
+                .iter()
+                .map(|archive| archive.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["rust-std", "cargo", "rustfmt-preview", "clippy-preview"]
+        );
+        assert_eq!(
+            x86.archives[0].sha256.as_deref(),
+            Some("61eb09d68b338e230d698716927bd4623049c9910ef4a4972e66d763d66ed9e1")
+        );
+        assert_eq!(
+            item.sums_url.as_deref(),
+            Some("https://static.rust-lang.org/dist/channel-rust-stable.toml.sha256")
+        );
+
+        // withheld versions are skipped
+        let held = BTreeSet::from(["rust@1.100.0".to_string()]);
+        assert!(rust_plan_from_channel(&cfg, package, &doc, "f", &held)
+            .unwrap()
+            .is_empty());
+
+        // A component missing for one target only drops that target.
+        let mut incomplete = doc.clone();
+        let clippy = incomplete
+            .get_mut("pkg")
+            .and_then(|pkgs| pkgs.get_mut("clippy-preview"))
+            .and_then(|pkg| pkg.get_mut("target"))
+            .and_then(toml::Value::as_table_mut)
+            .unwrap();
+        clippy.remove("aarch64-unknown-linux-gnu");
+        let items =
+            rust_plan_from_channel(&cfg, package, &incomplete, "f", &BTreeSet::new()).unwrap();
+        assert_eq!(items[0].targets.len(), 1);
+        assert!(items[0].targets.contains_key("linux-x86_64"));
+        assert!(!items[0].targets.contains_key("linux-aarch64"));
+    }
+
+    #[test]
+    fn rust_component_metadata_is_cross_checked() {
+        let doc = rust_doc();
+        assert_eq!(
+            rust_version("1.100.0 (0ef1bc386 2026-11-09)").as_deref(),
+            Some("1.100.0")
+        );
+        assert!(rust_version("not a version").is_none());
+        let hashes = rust_component_hashes(&doc, "x86_64-unknown-linux-gnu").unwrap();
+        assert_eq!(hashes.len(), 5);
+        assert_eq!(
+            hashes["clippy-preview"],
+            "277a9abd9378561d11fb67a9eb5c08895e207d07dfd985a67197aa47e030856f"
+        );
+        assert_eq!(
+            rust_triple_from_file("rustc-1.100.0-x86_64-unknown-linux-gnu.tar.gz", "1.100.0")
+                .unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert!(
+            rust_triple_from_file("cargo-1.100.0-x86_64-unknown-linux-gnu.tar.gz", "1.100.0")
+                .is_err()
+        );
+        assert!(rust_component_hashes(&doc, "x86_64-pc-windows-msvc").is_err());
+    }
+
+    fn rust_plan() -> (Config, PlanItem) {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "rust").unwrap().clone();
+        let doc = rust_doc();
+        let items = rust_plan_from_channel(&cfg, &package, &doc, &"f".repeat(64), &BTreeSet::new())
+            .unwrap();
+        (cfg, items.into_iter().next().unwrap())
+    }
+
+    fn outcomes_for(item: &PlanItem) -> Vec<Outcome> {
+        item.targets
+            .iter()
+            .map(|(target, info)| {
+                let archives = info
+                    .archives
+                    .iter()
+                    .map(|archive| ArchiveResult {
+                        name: archive.name.clone(),
+                        sha256: archive.sha256.clone().unwrap(),
+                        size: 1000,
+                        format: "tar.gz".into(),
+                        strip_components: info.strip_components.unwrap_or(1),
+                    })
+                    .collect();
+                // .NET publishes SHA-512 metadata; the manifest pin is the
+                // SHA-256 of the downloaded bytes (simulated here).
+                let pinned = info
+                    .sha256
+                    .clone()
+                    .filter(|sha| sha.len() == 64)
+                    .unwrap_or_else(|| "a".repeat(64));
+                ok_outcome(
+                    &item.package,
+                    &item.version,
+                    target,
+                    &pinned,
+                    4096,
+                    info.format.as_deref().unwrap_or("tar.gz"),
+                    info.strip_components.unwrap_or(1),
+                    archives,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rust_manifest_merges_components_and_documents_coexistence() {
+        let (cfg, item) = rust_plan();
+        let (manifest, detail) = build_manifest(&cfg, &item, &outcomes_for(&item), None).unwrap();
+        assert_eq!(detail, "");
+        let manifest = manifest.expect("a verified target must produce a manifest");
+        let artifact = manifest["artifacts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|artifact| artifact["target"] == "linux-x86_64")
+            .unwrap();
+        assert_eq!(artifact["format"], "tar.gz");
+        assert_eq!(artifact["stripComponents"], 2);
+        assert_eq!(artifact["archives"].as_array().unwrap().len(), 4);
+        assert_eq!(artifact["archives"][0]["name"], "rust-std");
+        assert_eq!(artifact["archives"][0]["stripComponents"], 2);
+        assert_eq!(artifact["requires"]["glibc"], "2.17");
+        assert_eq!(manifest["channel"], "stable");
+        assert_eq!(manifest["runtime"]["pathDirs"][0], "bin");
+        assert_eq!(manifest["runtime"]["env"]["RUSTC"], "{root}/bin/rustc");
+        assert!(
+            manifest["runtime"]["env"].get("CARGO_HOME").is_none(),
+            "CARGO_HOME must stay per user"
+        );
+        let notes = manifest["notes"].as_str().unwrap();
+        assert!(notes.contains("rustup is not involved"), "{notes}");
+        assert!(notes.contains("rust-toolchain.toml"), "{notes}");
+        assert!(notes.contains("CARGO_HOME"), "{notes}");
+        // The generated manifest must be valid for RAST itself.
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(parsed.version, "1.100.0");
+        assert_eq!(parsed.artifacts[0].archives().len(), 5);
+        assert_eq!(parsed.artifacts[0].total_size(), 4096 + 4 * 1000);
+
+        // A result with fewer verified components than the plan is refused.
+        let mut outcomes = outcomes_for(&item);
+        outcomes[0].archives.pop();
+        let err = build_manifest(&cfg, &item, &outcomes, None).unwrap_err();
+        assert!(err.contains("component archives"), "{err}");
+    }
+
+    #[test]
+    fn java_versions_are_normalised_per_feature_version() {
+        assert_eq!(java_manifest_version("25.0.5+8.0.LTS").unwrap(), "25.0.5+8");
+        assert_eq!(
+            java_manifest_version("21.0.13+9.0.LTS").unwrap(),
+            "21.0.13+9"
+        );
+        assert_eq!(java_manifest_version("8.0.512+9").unwrap(), "8.0.512+9");
+        assert_eq!(java_manifest_version("27.0.1+0").unwrap(), "27.0.1+0");
+        assert!(java_manifest_version("LTS").is_err());
+        assert_eq!(java_display_version("25.0.5+8"), "25.0.5");
+        assert_eq!(java_display_version("8.0.512+9"), "1.8.0_512");
+        assert_eq!(java_display_version("21.0.13+9"), "21.0.13");
+
+        // JDK 8 has no jshell and speaks the legacy single-dash version flag.
+        let legacy = runtime_spec("java", "8.0.512+9", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert!(legacy.executables.iter().all(|exe| exe.name != "jshell"));
+        assert_eq!(legacy.checks[0].args, vec!["-version".to_string()]);
+        assert_eq!(legacy.checks[0].expect, "1.8.0_512");
+        assert_eq!(legacy.env["JAVA_HOME"], "{root}");
+
+        let modern = runtime_spec("java", "25.0.5+8", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(
+            modern
+                .executables
+                .iter()
+                .map(|exe| exe.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["java", "javac", "jar", "jshell"]
+        );
+        assert_eq!(modern.checks.len(), 4);
+        assert_eq!(modern.checks[0].args, vec!["--version".to_string()]);
+        assert_eq!(modern.checks[1].expect, "javac 25.0.5");
+        assert_eq!(modern.checks[2].expect, "jar 25.0.5");
+        assert_eq!(modern.checks[3].expect, "jshell 25.0.5");
+    }
+
+    fn adoptium_plan(fixture: &str, arch: &str, target: &str) -> JavaAssetPlan {
+        let assets: Value = serde_json::from_str(fixture).unwrap();
+        let asset = adoptium_asset(assets.as_array().unwrap(), arch).unwrap();
+        JavaAssetPlan {
+            target: target.into(),
+            digest: asset.checksum.clone(),
+            size: asset.size,
+            html_url: asset.release_link.clone(),
+            asset,
+        }
+    }
+
+    #[test]
+    fn java_discovery_uses_adoptium_assets_and_github_digests() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "java").unwrap().clone();
+        let found = vec![
+            adoptium_plan(ADOPTIUM_25_X64, "x64", "linux-x86_64"),
+            adoptium_plan(ADOPTIUM_25_ARM64, "aarch64", "linux-aarch64"),
+        ];
+        assert_eq!(
+            found[0].asset.checksum,
+            "68982529869257d0ee6b824ec5aa270ff8b118bb438670da0b97ebdab178d7fb"
+        );
+        assert_eq!(found[0].asset.release_name, "jdk-25.0.5+8");
+        let item = java_plan_from_assets(&package, "25", &found, &BTreeSet::new())
+            .unwrap()
+            .expect("both targets have assets");
+        assert_eq!(item.version, "25.0.5+8");
+        assert_eq!(item.channel, "25");
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.gz"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert!(x86.sums_url.as_deref().unwrap().ends_with(".sha256.txt"));
+        assert_eq!(
+            item.source.as_ref().unwrap()["temurinVersion"],
+            "25.0.5+8-LTS"
+        );
+
+        // Different upstream versions per target: only the matching target.
+        let mut mismatched = found.clone();
+        mismatched[1].asset.semver = "25.0.6+1.0.LTS".into();
+        let item = java_plan_from_assets(&package, "25", &mismatched, &BTreeSet::new())
+            .unwrap()
+            .unwrap();
+        assert_eq!(item.targets.len(), 1);
+        assert!(item.targets.contains_key("linux-x86_64"));
+
+        // withheld
+        let held = BTreeSet::from(["java@25.0.5+8".to_string()]);
+        assert!(java_plan_from_assets(&package, "25", &found, &held)
+            .unwrap()
+            .is_none());
+
+        let (manifest, _) = build_manifest(&cfg, &item, &outcomes_for(&item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["runtime"]["env"]["JAVA_HOME"], "{root}");
+        assert_eq!(manifest["runtime"]["pathDirs"][0], "bin");
+        assert_eq!(manifest["artifacts"][0]["requires"]["glibc"], "2.17");
+        assert!(manifest["notes"].as_str().unwrap().contains("JAVA_HOME"));
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn adoptium_assets_must_match_arch_and_os() {
+        let assets: Value = serde_json::from_str(ADOPTIUM_25_X64).unwrap();
+        assert!(adoptium_asset(assets.as_array().unwrap(), "aarch64").is_err());
+        let available: Value = serde_json::from_str(ADOPTIUM_AVAILABLE_FIXTURE).unwrap();
+        let versions: Vec<u64> = available["available_releases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_u64)
+            .collect();
+        assert!(versions.contains(&8) && versions.contains(&25) && versions.contains(&27));
+        assert_eq!(available["most_recent_lts"], 25);
+    }
+
+    fn release_fixture(raw: &str) -> Value {
+        serde_json::from_str(raw).unwrap()
+    }
+
+    #[test]
+    fn bun_discovery_uses_github_releases_and_shasums() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "bun").unwrap().clone();
+        let items = bun_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(BUN_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.version, "1.4.4");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("zip"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("bf8ccbfb2b0b80159e0f9a6d15c55317add8077534dbc6130a3edb52fccb395c")
+        );
+        assert!(item
+            .sums_url
+            .as_deref()
+            .unwrap()
+            .ends_with("/SHASUMS256.txt"));
+        let spec = runtime_spec("bun", "1.4.4", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "bun");
+        assert_eq!(spec.path_dirs, vec![".".to_string()]);
+        assert_eq!(spec.checks[0].expect, "1.4.4");
+
+        // Pre-release builds are not published.
+        let mut prerelease = release_fixture(BUN_RELEASE_FIXTURE);
+        prerelease["prerelease"] = Value::Bool(true);
+        assert!(
+            bun_plan_from_releases(&cfg, &package, &[prerelease], &BTreeSet::new())
+                .unwrap()
+                .is_empty()
+        );
+
+        // A release without the arm64 asset only publishes x86_64, and a
+        // host without a build gets the explicit compatibility reason.
+        let mut partial = release_fixture(BUN_RELEASE_FIXTURE);
+        partial["assets"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|asset| asset["name"] != "bun-linux-aarch64.zip");
+        let items = bun_plan_from_releases(&cfg, &package, &[partial], &BTreeSet::new()).unwrap();
+        assert_eq!(items[0].targets.len(), 1);
+        let (manifest, _) =
+            build_manifest(&cfg, &items[0], &outcomes_for(&items[0]), None).unwrap();
+        let manifest = manifest.expect("the x86_64 build still verifies");
+        assert_eq!(manifest["artifacts"][0]["format"], "zip");
+        assert_eq!(manifest["runtime"]["pathDirs"][0], ".");
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let reason = crate::packages::host::incompatibility(&parsed, &host_for("linux-aarch64"))
+            .expect("aarch64 is not published");
+        assert!(reason.contains("No build for this server"), "{reason}");
+        assert!(reason.contains("linux-x86_64"), "{reason}");
+        assert!(
+            crate::packages::host::incompatibility(&parsed, &host_for("linux-x86_64")).is_none()
+        );
+    }
+
+    #[test]
+    fn deno_discovery_uses_github_releases_sums_and_attestations() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "deno").unwrap().clone();
+        assert!(package.github_attestations);
+        let items = deno_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(DENO_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let item = &items[0];
+        assert_eq!(item.version, "2.9.8");
+        assert_eq!(item.channel, "stable");
+        assert!(item.attestations);
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("zip"));
+        assert_eq!(x86.strip_components, Some(0));
+        assert!(x86
+            .sums_url
+            .as_deref()
+            .unwrap()
+            .ends_with("deno-x86_64-unknown-linux-gnu.zip.sha256sum"));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609")
+        );
+        let spec = runtime_spec("deno", "2.9.8", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "deno");
+        assert_eq!(spec.path_dirs, vec![".".to_string()]);
+        assert_eq!(spec.checks[0].expect, "deno 2.9.8");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["format"], "zip");
+        assert_eq!(manifest["artifacts"][0]["requires"]["glibc"], "2.27");
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dotnet_discovery_uses_release_metadata_and_sha512() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "dotnet").unwrap().clone();
+        let entry = release_fixture(DOTNET_INDEX_ENTRY_FIXTURE);
+        let releases = release_fixture(DOTNET_RELEASES_FIXTURE);
+        let item =
+            dotnet_plan_from_release(&cfg, &package, "10.0", &entry, &releases, &BTreeSet::new())
+                .unwrap()
+                .expect("channel is active");
+        assert_eq!(item.version, "10.0.404");
+        assert_eq!(item.channel, "10.0");
+        assert_eq!(item.release_date.as_deref(), Some("2026-11-10"));
+        assert_eq!(item.source.as_ref().unwrap()["runtime"], "10.0.15");
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.gz"));
+        assert_eq!(x86.strip_components, Some(0));
+        assert_eq!(
+            x86.sha512.as_deref(),
+            Some("577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50")
+        );
+        assert!(x86.sha256.is_none(), "the metadata hash is SHA-512");
+        let bundled = BTreeMap::from([("runtime".to_string(), "10.0.15".to_string())]);
+        let spec = runtime_spec("dotnet", "10.0.404", &bundled, &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "dotnet");
+        assert_eq!(spec.env["DOTNET_ROOT"], "{root}");
+        assert_eq!(spec.path_dirs, vec![".".to_string()]);
+        assert_eq!(spec.checks.len(), 3);
+        assert_eq!(spec.checks[1].expect, "10.0.404");
+        assert_eq!(spec.checks[2].expect, "Microsoft.NETCore.App 10.0.15");
+        let (manifest, _) = build_manifest(&cfg, &item, &outcomes_for(&item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["stripComponents"], 0);
+        assert_eq!(manifest["runtime"]["env"]["DOTNET_ROOT"], "{root}");
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        // withheld
+        let held = BTreeSet::from(["dotnet@10.0.404".to_string()]);
+        assert!(
+            dotnet_plan_from_release(&cfg, &package, "10.0", &entry, &releases, &held)
+                .unwrap()
+                .is_none()
+        );
+        // End-of-life channels are filtered by discovery from support-phase,
+        // not by the pure plan builder; a shifted latest-sdk falls back to
+        // the newest listed release instead of failing.
+        let mut older = releases.clone();
+        older["releases"][0]["sdk"]["version"] = json!("10.0.999");
+        assert!(
+            dotnet_plan_from_release(&cfg, &package, "10.0", &entry, &older, &BTreeSet::new())
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn target_architecture_mappings_are_configured() {
+        let cfg = providers_config();
+        let x86 = cfg.targets.get("linux-x86_64").unwrap();
+        assert_eq!(
+            x86.rust_triple("linux-x86_64").unwrap(),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(x86.java_arch("linux-x86_64").unwrap(), "x64");
+        assert_eq!(x86.bun_arch("linux-x86_64").unwrap(), "x64");
+        assert_eq!(x86.deno_arch("linux-x86_64").unwrap(), "x86_64");
+        assert_eq!(x86.dotnet_rid("linux-x86_64").unwrap(), "linux-x64");
+        let arm = cfg.targets.get("linux-aarch64").unwrap();
+        assert_eq!(arm.java_arch("linux-aarch64").unwrap(), "aarch64");
+        assert_eq!(arm.dotnet_rid("linux-aarch64").unwrap(), "linux-arm64");
+        // An old-style target block without the new mappings still parses,
+        // but the provider reports exactly what the config is missing.
+        let legacy: TargetConfig = serde_json::from_value(json!({
+            "runner": "ubuntu-24.04", "go": "amd64", "node": "x64", "python": "x86_64"
+        }))
+        .unwrap();
+        for error in [
+            legacy.rust_triple("linux-x86_64").unwrap_err(),
+            legacy.java_arch("linux-x86_64").unwrap_err(),
+            legacy.dotnet_rid("linux-x86_64").unwrap_err(),
+        ] {
+            assert!(
+                error.contains("catalog.config.json has no targets.linux-x86_64"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_provider_channels_and_result_archives() {
+        assert_eq!(channel_of("rust", "1.100.0"), Some("stable".into()));
+        assert_eq!(channel_of("bun", "1.4.4"), Some("stable".into()));
+        assert_eq!(channel_of("deno", "2.9.8"), Some("stable".into()));
+        assert_eq!(channel_of("java", "25.0.5+8"), Some("25".into()));
+        assert_eq!(channel_of("java", "8.0.512+9"), Some("8".into()));
+        assert_eq!(channel_of("dotnet", "10.0.404"), Some("10.0".into()));
+
+        let value = json!({
+            "package": "rust",
+            "version": "1.100.0",
+            "target": "linux-x86_64",
+            "ok": true,
+            "sha256": "a".repeat(64),
+            "size": 4096,
+            "format": "tar.gz",
+            "stripComponents": 2,
+            "archives": [
+                {"name": "rust-std", "sha256": "b".repeat(64), "size": 2048,
+                 "format": "tar.gz", "stripComponents": 2}
+            ],
+            "verification": "signed channel manifest",
+            "checks": ["rustc 1.100.0"],
+        });
+        let outcome: Outcome = serde_json::from_value(value).unwrap();
+        assert_eq!(outcome.format.as_deref(), Some("tar.gz"));
+        assert_eq!(outcome.strip_components, Some(2));
+        assert_eq!(outcome.archives.len(), 1);
+        assert_eq!(outcome.archives[0].name.as_deref(), Some("rust-std"));
+        // Results written before multi-archive support still parse.
+        let old: Outcome = serde_json::from_value(json!({
+            "package": "go", "version": "1.27.1", "target": "linux-x86_64",
+            "ok": true, "sha256": "a".repeat(64), "size": 4096
+        }))
+        .unwrap();
+        assert!(old.format.is_none());
+        assert!(old.archives.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "runs a shell script")]
+    fn version_checks_read_stdout_and_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let javac = root.join("bin/javac");
+        fs::write(&javac, "#!/bin/sh\necho 'javac 25.0.5' >&2\n").unwrap();
+        fs::set_permissions(&javac, fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        // javac prints its version on stderr; the check must see it anyway.
+        run_check(
+            &root,
+            "bin/javac",
+            &["-version".to_string()],
+            "javac 25.0.5",
+            &home,
+        )
+        .unwrap();
+        assert!(run_check(
+            &root,
+            "bin/javac",
+            &["-version".to_string()],
+            "javac 1.8.0_512",
+            &home
+        )
+        .is_err());
     }
 }

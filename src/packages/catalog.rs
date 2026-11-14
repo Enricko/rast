@@ -286,11 +286,13 @@ pub fn parse(bytes: &[u8]) -> Result<Catalog, String> {
                     return Err("manifest publisher differs from the catalog publisher".into());
                 }
                 for artifact in &m.artifacts {
-                    let host = net::https_host(&artifact.url)?;
-                    if !allowed.contains(&host) {
-                        return Err(format!(
-                            "artifact host {host} is not in the catalog's allowed hosts"
-                        ));
+                    for archive in artifact.archives() {
+                        let host = net::https_host(archive.url)?;
+                        if !allowed.contains(&host) {
+                            return Err(format!(
+                                "artifact host {host} is not in the catalog's allowed hosts"
+                            ));
+                        }
                     }
                 }
                 Ok(m)

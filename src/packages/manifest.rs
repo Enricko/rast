@@ -20,7 +20,7 @@
 //!
 //! The JSON Schema for authors lives in `docs/rast-package.schema.json`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,10 @@ pub const MANIFEST_KIND: &str = "rast-package";
 pub const MANIFEST_FILE: &str = "rast-package.json";
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Archive formats the installer can extract safely.
+pub const ARCHIVE_FORMATS: &[&str] = &["tar.gz", "zip"];
+/// Most archives one host target may need (Rust ships five components).
+pub const MAX_ARCHIVES_PER_TARGET: usize = 8;
 /// Host targets RAST knows about (`<os>-<arch>`).
 pub const KNOWN_TARGETS: &[&str] = &["linux-x86_64", "linux-aarch64"];
 /// Package types this RAST can install.
@@ -91,6 +95,17 @@ pub struct RuntimeSpec {
     /// Bundled extensions/modules (e.g. PHP extensions), informational.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+    /// Environment hints for a shell that runs the runtime. Values may use
+    /// the `{root}` placeholder, which consumers replace with the installed
+    /// version prefix (e.g. `JAVA_HOME: "{root}"`). These are hints only: the
+    /// installer never sets them, and writable per-user caches must stay in
+    /// the user's home, not in the shared read-only prefix.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Directories (relative to the installed prefix, `"."` is the prefix
+    /// itself) a shell should prepend to `PATH`. Absent means `["bin"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -139,6 +154,65 @@ pub struct AppSpec {
     pub entry: Option<String>,
 }
 
+/// One additional archive of a host target. Rust is installed from five
+/// component archives (`rustc`, `rust-std`, `cargo`, `rustfmt`, `clippy`)
+/// extracted into the same prefix; the artifact's own `url`/`sha256`/`size`/
+/// `format`/`stripComponents` describe the first (primary) archive, and
+/// `archives` lists the others in extraction order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchivePart {
+    /// Optional component name (`rust-std`), informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub url: String,
+    pub sha256: String,
+    pub size: u64,
+    pub format: String,
+    #[serde(default)]
+    pub strip_components: u32,
+}
+
+impl Artifact {
+    /// Every archive of this target, the primary one first.
+    pub fn archives(&self) -> Vec<ArchiveRef<'_>> {
+        let mut all = Vec::with_capacity(1 + self.archives.len());
+        all.push(ArchiveRef {
+            name: None,
+            url: &self.url,
+            sha256: &self.sha256,
+            size: self.size,
+            format: &self.format,
+            strip_components: self.strip_components,
+        });
+        all.extend(self.archives.iter().map(|part| ArchiveRef {
+            name: part.name.as_deref(),
+            url: &part.url,
+            sha256: &part.sha256,
+            size: part.size,
+            format: &part.format,
+            strip_components: part.strip_components,
+        }));
+        all
+    }
+
+    /// Sum of the archive sizes (free-space planning, progress).
+    pub fn total_size(&self) -> u64 {
+        self.size + self.archives.iter().map(|part| part.size).sum::<u64>()
+    }
+}
+
+/// A borrowed view of one archive of an [`Artifact`].
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveRef<'a> {
+    pub name: Option<&'a str>,
+    pub url: &'a str,
+    pub sha256: &'a str,
+    pub size: u64,
+    pub format: &'a str,
+    pub strip_components: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Artifact {
@@ -146,10 +220,15 @@ pub struct Artifact {
     pub url: String,
     pub sha256: String,
     pub size: u64,
-    /// Archive format; `tar.gz` in schema version 1.
+    /// Archive format: `tar.gz` or `zip`.
     pub format: String,
     #[serde(default)]
     pub strip_components: u32,
+    /// Additional archives extracted into the same prefix after the primary
+    /// one (multi-component runtimes such as Rust). Empty for a
+    /// single-archive runtime, which keeps old manifests unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archives: Vec<ArchivePart>,
     #[serde(default)]
     pub requires: Requirements,
     pub provenance: Provenance,
@@ -477,7 +556,54 @@ fn validate_runtime(r: &RuntimeSpec) -> Result<(), String> {
     for ext in &r.extensions {
         text("extension", ext, 1, 48)?;
     }
+    if r.env.len() > 16 {
+        return Err("runtime.env may list at most 16 variables".into());
+    }
+    for (name, value) in &r.env {
+        let valid_name = !name.is_empty()
+            && name.len() <= 64
+            && name.starts_with(|c: char| c.is_ascii_uppercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+        if !valid_name {
+            return Err(format!(
+                "runtime.env name {name:?} is not an environment variable"
+            ));
+        }
+        if !is_env_template(value) {
+            return Err(format!(
+                "runtime.env.{name} must be \"{{root}}\" or \"{{root}}/<relative path>\""
+            ));
+        }
+    }
+    if r.path_dirs.len() > 8 {
+        return Err("runtime.pathDirs may list at most 8 directories".into());
+    }
+    for dir in &r.path_dirs {
+        // `.` means the prefix itself (runtimes like .NET, Bun and Deno put
+        // their command at the archive root); anything else must be a safe
+        // relative directory inside it.
+        if dir != "." && !is_safe_relative_path(dir) {
+            return Err(format!(
+                "runtime.pathDirs entry {dir:?} must be \".\" or a relative path inside the package"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// `{root}` or `{root}/<safe relative path>`: the only templates allowed in
+/// [`RuntimeSpec::env`] values.
+fn is_env_template(value: &str) -> bool {
+    if value.len() > 512 {
+        return false;
+    }
+    match value.strip_prefix("{root}") {
+        Some("") => true,
+        Some(rest) => rest.strip_prefix('/').is_some_and(is_safe_relative_path),
+        None => false,
+    }
 }
 
 fn validate_artifacts(artifacts: &[Artifact]) -> Result<(), String> {
@@ -496,26 +622,43 @@ fn validate_artifacts(artifacts: &[Artifact]) -> Result<(), String> {
         if !targets.insert(a.target.as_str()) {
             return Err(format!("target {:?} is listed twice", a.target));
         }
-        if !is_https_url(&a.url) {
-            return Err(format!("artifact URL for {} must be https://", a.target));
-        }
-        if !is_sha256(&a.sha256) {
+        if a.archives.len() > MAX_ARCHIVES_PER_TARGET - 1 {
             return Err(format!(
-                "artifact sha256 for {} must be 64 lowercase hex characters",
-                a.target
+                "artifacts for {} may list at most {} additional archives",
+                a.target,
+                MAX_ARCHIVES_PER_TARGET - 1
             ));
         }
-        if a.size == 0 || a.size > MAX_ARTIFACT_BYTES {
-            return Err(format!("artifact size for {} is out of range", a.target));
-        }
-        if a.format != "tar.gz" {
-            return Err(format!(
-                "artifact format {:?} is not supported (schema version 1: tar.gz)",
-                a.format
-            ));
-        }
-        if a.strip_components > 4 {
-            return Err("stripComponents must be 0-4".into());
+        let mut urls = BTreeSet::new();
+        for archive in a.archives() {
+            let label = match archive.name {
+                Some(name) => format!("{} ({name})", a.target),
+                None => a.target.clone(),
+            };
+            if !is_https_url(archive.url) {
+                return Err(format!("artifact archive {label} URL must be https://"));
+            }
+            if !urls.insert(archive.url) {
+                return Err(format!("artifact archive {label} lists a URL twice"));
+            }
+            if !is_sha256(archive.sha256) {
+                return Err(format!(
+                    "artifact archive {label} sha256 must be 64 lowercase hex characters"
+                ));
+            }
+            if archive.size == 0 || archive.size > MAX_ARTIFACT_BYTES {
+                return Err(format!("artifact archive {label} size is out of range"));
+            }
+            if !ARCHIVE_FORMATS.contains(&archive.format) {
+                return Err(format!(
+                    "artifact archive {label} format {:?} is not supported ({})",
+                    archive.format,
+                    ARCHIVE_FORMATS.join(", ")
+                ));
+            }
+            if archive.strip_components > 4 {
+                return Err("stripComponents must be 0-4".into());
+            }
         }
         if let Some(glibc) = &a.requires.glibc {
             if Version::parse(glibc).is_none() {
@@ -629,7 +772,7 @@ pub(crate) mod tests {
             ),
             (
                 "bad format",
-                Box::new(|v| v["artifacts"][0]["format"] = "zip".into()),
+                Box::new(|v| v["artifacts"][0]["format"] = "tar.xz".into()),
             ),
             ("bad id", Box::new(|v| v["id"] = "../lua".into())),
             ("reserved id", Box::new(|v| v["id"] = "bin".into())),
@@ -665,5 +808,138 @@ pub(crate) mod tests {
         v["type"] = "service".into();
         let err = parse_value(&v).unwrap_err();
         assert!(err.contains("not supported yet"), "{err}");
+    }
+
+    /// A zip artifact like Bun/Deno: one archive, stripComponents 0/1.
+    #[test]
+    fn zip_artifacts_are_valid() {
+        let mut v = sample();
+        v["artifacts"][0]["format"] = "zip".into();
+        v["artifacts"][0]["url"] =
+            "https://github.com/example/lua/releases/download/v5.4.8-1/lua.zip".into();
+        let m = parse_value(&v).unwrap();
+        assert_eq!(m.artifacts[0].format, "zip");
+        assert!(m.artifacts[0].archives.is_empty());
+        assert_eq!(m.artifacts[0].total_size(), 1234);
+    }
+
+    /// Rust: the primary archive (rustc) plus the other components, each with
+    /// its own URL/hash/size/strip; all five merge into the same prefix.
+    #[test]
+    fn multi_archive_artifacts_are_valid() {
+        let mut v = sample();
+        v["artifacts"][0]["stripComponents"] = serde_json::json!(2);
+        v["artifacts"][0]["archives"] = serde_json::json!([
+            {"name": "rust-std", "url": "https://static.rust-lang.org/dist/2026-11-12/rust-std-1.100.0-x86_64-unknown-linux-gnu.tar.gz",
+             "sha256": "b".repeat(64), "size": 2000, "format": "tar.gz", "stripComponents": 2},
+            {"name": "cargo", "url": "https://static.rust-lang.org/dist/2026-11-12/cargo-1.100.0-x86_64-unknown-linux-gnu.tar.gz",
+             "sha256": "c".repeat(64), "size": 3000, "format": "tar.gz", "stripComponents": 2},
+            {"name": "rustfmt", "url": "https://static.rust-lang.org/dist/2026-11-12/rustfmt-1.100.0-x86_64-unknown-linux-gnu.tar.gz",
+             "sha256": "d".repeat(64), "size": 4000, "format": "tar.gz", "stripComponents": 2},
+            {"name": "clippy", "url": "https://static.rust-lang.org/dist/2026-11-12/clippy-1.100.0-x86_64-unknown-linux-gnu.tar.gz",
+             "sha256": "e".repeat(64), "size": 5000, "format": "tar.gz", "stripComponents": 2}
+        ]);
+        let m = parse_value(&v).unwrap();
+        let artifact = &m.artifacts[0];
+        assert_eq!(artifact.archives().len(), 5);
+        assert_eq!(artifact.total_size(), 1234 + 2000 + 3000 + 4000 + 5000);
+        assert_eq!(artifact.archives()[1].name, Some("rust-std"));
+        assert_eq!(artifact.archives()[4].strip_components, 2);
+
+        // Each archive is validated on its own.
+        let cases: Vec<(&str, Mutation)> = vec![
+            (
+                "archive http url",
+                Box::new(|v| {
+                    v["artifacts"][0]["archives"][0]["url"] =
+                        "http://static.rust-lang.org/a.tar.gz".into()
+                }),
+            ),
+            (
+                "archive bad sha",
+                Box::new(|v| v["artifacts"][0]["archives"][1]["sha256"] = "nope".into()),
+            ),
+            (
+                "archive zero size",
+                Box::new(|v| v["artifacts"][0]["archives"][2]["size"] = 0.into()),
+            ),
+            (
+                "archive bad format",
+                Box::new(|v| v["artifacts"][0]["archives"][3]["format"] = "rar".into()),
+            ),
+            (
+                "archive strip too high",
+                Box::new(|v| v["artifacts"][0]["archives"][0]["stripComponents"] = 9.into()),
+            ),
+            (
+                "archive duplicate url",
+                Box::new(|v| {
+                    v["artifacts"][0]["archives"][0]["url"] = v["artifacts"][0]["url"].clone()
+                }),
+            ),
+            (
+                "too many archives",
+                Box::new(|v| {
+                    let archives = v["artifacts"][0]["archives"].as_array().unwrap();
+                    let mut many = archives.clone();
+                    for _ in 0..8 {
+                        many.push(archives[0].clone());
+                    }
+                    v["artifacts"][0]["archives"] = serde_json::Value::Array(many);
+                }),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let mut v = v.clone();
+            mutate(&mut v);
+            assert!(parse_value(&v).is_err(), "{name} accepted");
+        }
+    }
+
+    /// Manifests written before multi-component support must stay
+    /// byte-compatible: no empty `archives`/`env`/`pathDirs` keys.
+    #[test]
+    fn single_archive_manifests_serialize_unchanged() {
+        let m = parse_value(&sample()).unwrap();
+        let value = serde_json::to_value(&m).unwrap();
+        assert!(value["artifacts"][0].get("archives").is_none());
+        assert!(value["runtime"].get("env").is_none());
+        assert!(value["runtime"].get("pathDirs").is_none());
+    }
+
+    #[test]
+    fn runtime_env_and_path_dirs_are_validated() {
+        let mut v = sample();
+        v["runtime"]["env"] = serde_json::json!({
+            "JAVA_HOME": "{root}",
+            "PROBE": "{root}/lib/tools",
+        });
+        v["runtime"]["pathDirs"] = serde_json::json!(["bin"]);
+        let m = parse_value(&v).unwrap();
+        assert_eq!(m.runtime.env["JAVA_HOME"], "{root}");
+        assert_eq!(m.runtime.path_dirs, vec!["bin".to_string()]);
+
+        // `.` is the prefix itself; other entries stay inside the package.
+        v["runtime"]["pathDirs"] = serde_json::json!([".", "bin"]);
+        parse_value(&v).unwrap();
+        for bad in [
+            serde_json::json!(["../bin"]),
+            serde_json::json!(["/usr/bin"]),
+            serde_json::json!(["bin/"]),
+        ] {
+            let mut value = v.clone();
+            value["runtime"]["pathDirs"] = bad.clone();
+            assert!(parse_value(&value).is_err(), "{bad} accepted");
+        }
+        for bad_env in [
+            serde_json::json!({"lower": "{root}"}),
+            serde_json::json!({"HOME": "/home/user"}),
+            serde_json::json!({"H": "{root}/../etc"}),
+            serde_json::json!({"H": "prefix"}),
+        ] {
+            let mut value = v.clone();
+            value["runtime"]["env"] = bad_env.clone();
+            assert!(parse_value(&value).is_err(), "{bad_env} accepted");
+        }
     }
 }

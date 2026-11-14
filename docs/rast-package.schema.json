@@ -103,7 +103,20 @@
             }
           }
         },
-        "extensions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 48 } }
+        "extensions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 48 } },
+        "env": {
+          "description": "Environment hints for a shell that uses the runtime; values may use the {root} placeholder for the installed prefix. The installer never sets these.",
+          "type": "object",
+          "maxProperties": 16,
+          "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]{0,63}$" },
+          "additionalProperties": { "type": "string", "maxLength": 512, "pattern": "^\\{root\\}(/[^\\s]+)?$" }
+        },
+        "pathDirs": {
+          "description": "Directories a shell should prepend to PATH, relative to the installed prefix; '.' is the prefix itself (Bun/Deno/.NET put their command at the archive root). Absent means [\"bin\"].",
+          "type": "array",
+          "maxItems": 8,
+          "items": { "anyOf": [{ "const": "." }, { "$ref": "#/$defs/relativePath" }] }
+        }
       }
     },
     "artifacts": {
@@ -119,8 +132,26 @@
           "url": { "$ref": "#/$defs/httpsUrl" },
           "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
           "size": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
-          "format": { "const": "tar.gz" },
+          "format": { "enum": ["tar.gz", "zip"] },
           "stripComponents": { "type": "integer", "minimum": 0, "maximum": 4 },
+          "archives": {
+            "description": "Additional archives extracted into the same prefix after the primary archive (multi-component runtimes such as Rust: rust-std, cargo, rustfmt, clippy).",
+            "type": "array",
+            "maxItems": 7,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url", "sha256", "size", "format"],
+              "properties": {
+                "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+                "url": { "$ref": "#/$defs/httpsUrl" },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "size": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+                "format": { "enum": ["tar.gz", "zip"] },
+                "stripComponents": { "type": "integer", "minimum": 0, "maximum": 4 }
+              }
+            }
+          },
           "requires": {
             "type": "object",
             "additionalProperties": false,

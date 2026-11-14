@@ -210,6 +210,7 @@ pub fn build_manifest(
                 .len(),
             format: "tar.gz".into(),
             strip_components: 1,
+            archives: Vec::new(),
             requires: Default::default(),
             provenance,
         });
@@ -231,29 +232,31 @@ pub fn validate_file(manifest_path: &Path, dist: Option<&Path>) -> Result<Manife
     let manifest = manifest::parse(&bytes)?;
     if let Some(dist) = dist {
         for artifact in &manifest.artifacts {
-            let name = artifact
-                .url
-                .rsplit('/')
-                .next()
-                .filter(|name| !name.is_empty())
-                .ok_or_else(|| format!("artifact {} has no file name", artifact.target))?;
-            let path = dist.join(name);
-            let size = fs::metadata(&path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?
-                .len();
-            if size != artifact.size {
-                return Err(format!(
-                    "{} is {size} bytes but the manifest declares {}",
-                    path.display(),
-                    artifact.size
-                ));
-            }
-            let sha = sha256_file(&path)?;
-            if sha != artifact.sha256 {
-                return Err(format!(
-                    "{} does not match the manifest SHA-256",
-                    path.display()
-                ));
+            for archive in artifact.archives() {
+                let name = archive
+                    .url
+                    .rsplit('/')
+                    .next()
+                    .filter(|name| !name.is_empty())
+                    .ok_or_else(|| format!("artifact {} has no file name", artifact.target))?;
+                let path = dist.join(name);
+                let size = fs::metadata(&path)
+                    .map_err(|e| format!("cannot read {}: {e}", path.display()))?
+                    .len();
+                if size != archive.size {
+                    return Err(format!(
+                        "{} is {size} bytes but the manifest declares {}",
+                        path.display(),
+                        archive.size
+                    ));
+                }
+                let sha = sha256_file(&path)?;
+                if sha != archive.sha256 {
+                    return Err(format!(
+                        "{} does not match the manifest SHA-256",
+                        path.display()
+                    ));
+                }
             }
         }
     }
