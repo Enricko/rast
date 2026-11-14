@@ -103,7 +103,7 @@ rast-native.service (root: `rast native-helper`)
   node into a RAST window body (no per-window pixel copy and no second
   connection), forwards geometry (`window-configure`), focus, close
   (`window-close` = the app's normal close request), minimize (X11
-  iconify via `window-unmap`/`map`), maximize, clipboard and keyboard. Transient
+  minimize/restore as a focus-safe hide/show), maximize, clipboard and keyboard. Transient
   windows (dialogs/popups) are attached to their parent RAST window and do not
   get their own taskbar entry. Chrome's extra windows are independent RAST
   windows.

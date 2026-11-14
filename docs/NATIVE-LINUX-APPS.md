@@ -217,8 +217,13 @@ Consequences:
   own unsaved-changes dialog appears inside the session as a dialog window.
   Terminating an app without that prompt is a separate force-quit action (see
   [lifecycle](#lifecycle-and-quitting)).
-* Minimize sends an X11 window-unmap so the application stops rendering a
-  window nobody can see; restore maps it again.
+* Minimize hides the RAST window and the adopted surface; restore shows it
+  again. The remote X11 window deliberately stays mapped: Xpra's
+  `window-unmap`/`window-map` pair saves rendering work for hidden windows but
+  loses the X input focus, so a restored application ignored keyboard input
+  until it was clicked or the viewer reconnected. Correct input routing wins;
+  minimized applications keep running and painting in the background (use
+  **End application** to stop one).
 * A maximize the application performs itself is mirrored on the RAST window
   (and the reverse direction is not forced onto X11 to avoid feedback loops).
 * Window titles and other application-supplied metadata are escaped before the
@@ -254,7 +259,10 @@ control of its own shortcuts:
   and the RAST shell.
 * When the user is operating RAST controls (taskbar, start menu, dialogs, the
   session window itself), keyboard input stays with the RAST shell so those
-  controls remain usable while a native window is focused.
+  controls remain usable while a native window is focused. Clicking anywhere
+  inside the application's surface moves focus back to the native window, so
+  typing works after clicking a title-bar control or after minimizing and
+  restoring the window.
 
 There is no mode in which *all* browser shortcuts are intercepted; do not
 configure an app expecting to disable tab management or the browser UI.

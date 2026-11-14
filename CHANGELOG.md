@@ -108,6 +108,23 @@ during the upgrade.
   moves, fine-grid layouts, widget sizing, package app-type support and the
   package authoring CLI.
 
+### Fixed
+
+- **Keyboard input survives minimize/restore and title-bar clicks.** Native
+  windows keep keyboard focus after being minimized and restored, and clicking
+  the application surface moves DOM focus off RAST's title-bar/taskbar
+  controls so typing and app shortcuts reach the app. Minimize now hides the
+  RAST window instead of issuing Xpra `window-unmap`/`window-map`; the X11
+  focus loss that pair caused made a restored app ignore keys until the viewer
+  reconnected.
+- **No more `getMouse` console error during pointer release.** The RAST bridge
+  only forwards a release to Xpra when it has recorded a real adopted pointer
+  event, so a focus loss before any app interaction can no longer throw
+  `Cannot read properties of undefined (reading 'clientX')` inside the viewer.
+- **Window-manager integration keeps both APIs** from the features ported into
+  this release (saved window geometry/state and native transient
+  dialogs/owner/taskbar flags) when reopening apps after a reload.
+
 ## [0.13.2] - 2026-11-13
 
 ### Fixed

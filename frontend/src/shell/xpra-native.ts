@@ -797,6 +797,16 @@ export class NativeLinuxHost {
   ): void {
     ctx.contentEl.classList.add("linux-native-window");
     if (frame.popup) ctx.contentEl.classList.add("is-popup");
+    // Pointer focus for the adopted surface: clicking the application must
+    // move DOM focus off any previously used RAST control (title-bar buttons,
+    // taskbar, ...) so keyboard events keep reaching the native window.
+    ctx.contentEl.tabIndex = -1;
+    const focusContent = (): void => {
+      if (frame.closing) return;
+      ctx.contentEl.focus({ preventScroll: true });
+    };
+    ctx.contentEl.addEventListener("pointerdown", focusContent, true);
+    ctx.onDispose(() => ctx.contentEl.removeEventListener("pointerdown", focusContent, true));
     ctx.onResize(() => this.scheduleRemoteResize(frame, ctx.contentEl));
     ctx.onDispose(() => this.onFrameDisposed(frame));
     const shim = this.shim;

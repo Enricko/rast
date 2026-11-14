@@ -690,6 +690,10 @@
     };
     var release = function () {
       var client = state.client;
+      // No adopted pointer event was recorded yet: Xpra's release_buttons
+      // would call getMouse(undefined) and throw inside the viewer. There is
+      // no remote button to release in that case.
+      if (!win.__rastLastPointerEvent) return;
       if (client && typeof client.release_buttons === "function") client.release_buttons(win.__rastLastPointerEvent, win);
     };
     canvas.addEventListener("pointerdown", down);
@@ -865,45 +869,18 @@
     var next = !!minimized;
     try {
       if (!!win.minimized === next) return true;
+      // Hide/show only. An X11 window-unmap/window-map pair (Xpra's own
+      // toggle_minimized does this) stops the application from painting while
+      // hidden, but it also loses the X input focus: after a restore the app
+      // kept painting yet ignored keyboard input until it was clicked or the
+      // viewer reconnected. Correct focus is more important than the saved
+      // frames, so the remote window stays mapped and only the RAST window and
+      // the adopted DOM node are hidden. See NATIVE-LINUX-APPS.md.
       win.set_minimized(next);
-      if (next) {
-        // Mirror Xpra's own `toggle_minimized()`: tell the X server the
-        // window is iconified. Without this the application keeps rendering
-        // (and keeps painting frames that nobody can see), which wastes CPU
-        // for a window the person minimized.
-        try {
-          client.send([ROOT.PACKET_TYPES.unmap_window, win.wid, true]);
-        } catch (e) {
-          /* ignore */
-        }
-        if (client.focused_wid === win.wid) {
-          try {
-            client.auto_focus();
-          } catch (e) {
-            /* ignore */
-          }
-        }
-      } else {
-        var geometry = win.get_internal_geometry();
-        if (!win.__rastContentEl) geometry = { x: win.x, y: win.y, w: win.w, h: win.h };
-        client.send([
-          ROOT.PACKET_TYPES.map_window,
-          win.wid,
-          geometry.x || 0,
-          geometry.y || 0,
-          geometry.w || win.w,
-          geometry.h || win.h,
-          win.client_properties,
-        ]);
-        try {
-          client.focused_wid = 0;
-          client.set_focus(win);
-        } catch (e) {
-          /* ignore */
-        }
+      if (!next) {
+        focusFrame(win);
         scheduleRefresh(wid);
       }
-      if (!next) focusFrame(win);
       scheduleNotify();
       return true;
     } catch (error) {
