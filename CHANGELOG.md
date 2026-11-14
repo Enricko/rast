@@ -124,6 +124,15 @@ during the upgrade.
 - **Window-manager integration keeps both APIs** from the features ported into
   this release (saved window geometry/state and native transient
   dialogs/owner/taskbar flags) when reopening apps after a reload.
+- **Native display-port protection survives a helper restart.**
+  `rast-native.service` reconciles the nftables `xpra_ports` set with the live
+  sessions on startup, but the reconciliation called the gated `allow_port()`
+  helper while the rule was still not marked active. It therefore silently
+  emptied the set, leaving the Xpra ports of sessions that survived a helper
+  restart reachable by every local account (the display port has no
+  application-level authentication of its own; the nftables rule is what
+  restricts it to the RAST service account). Reconciliation now adds the
+  discovered ports directly, and a unit test pins the ordering.
 - **No stray loading ring on native windows.** Xpra's per-window connection
   spinner (`.spinneroverlay`) was left in the adopted window's DOM. Without
   the viewer document's stylesheet it was laid out as an in-flow strip, and

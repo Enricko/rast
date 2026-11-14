@@ -201,11 +201,19 @@ fn port_from_cmdline(cmdline: &[u8]) -> Option<u16> {
     None
 }
 
-/// Add one session port to the restricted set.
-pub(crate) async fn allow_port(port: u16) -> Result<(), NativeError> {
-    if !enforced() {
-        return Ok(());
-    }
+/// Whether a port must be added to the set.
+///
+/// Normal adds are gated on the rule being marked active (tests and
+/// unprivileged runs must not touch nftables). The startup reconciliation is
+/// the exception: it runs while `init` is still finishing, before `ACTIVE` is
+/// set, and it must restore the ports of sessions that survived a helper
+/// restart. Keeping the decision in one place keeps that ordering testable.
+fn should_add_port(restoring: bool) -> bool {
+    restoring || enforced()
+}
+
+/// Add one session port to the restricted set, unconditionally.
+async fn add_port(port: u16) -> Result<(), NativeError> {
     let port = port.to_string();
     let result = nft(&["add", "element", "inet", TABLE, SET, "{", &port, "}"]).await?;
     if result.success {
@@ -216,6 +224,14 @@ pub(crate) async fn allow_port(port: u16) -> Result<(), NativeError> {
             super::summarize_command(&result)
         )))
     }
+}
+
+/// Add one session port to the restricted set when the rule is enforced.
+pub(crate) async fn allow_port(port: u16) -> Result<(), NativeError> {
+    if !should_add_port(false) {
+        return Ok(());
+    }
+    add_port(port).await
 }
 
 /// Remove one session port (best effort: the session is already gone).
@@ -282,7 +298,10 @@ async fn reconcile() -> Result<(), NativeError> {
     let _ = nft(&["flush", "set", "inet", TABLE, SET]).await;
     for unit in units {
         if let Some(port) = session_port(&unit).await {
-            if let Err(error) = allow_port(port).await {
+            if !should_add_port(true) {
+                continue;
+            }
+            if let Err(error) = add_port(port).await {
                 tracing::warn!(
                     unit,
                     port,
@@ -333,5 +352,23 @@ mod tests {
             None
         );
         assert_eq!(port_from_cmdline(b"--bind-tcp=]::1]:14500\0"), None);
+    }
+
+    /// Regression: `init()` reconciles the set while `ACTIVE` is still false.
+    /// Reusing the gated `allow_port()` there silently emptied the set on every
+    /// helper restart, leaving the Xpra ports of sessions that survived the
+    /// restart reachable by other local accounts.
+    #[test]
+    fn startup_reconciliation_restores_ports_before_the_rule_is_active() {
+        ACTIVE.store(false, Ordering::Relaxed);
+        assert!(!enforced());
+        assert!(
+            !should_add_port(false),
+            "normal adds stay gated until init has validated the rule"
+        );
+        assert!(
+            should_add_port(true),
+            "startup reconciliation must restore discovered ports"
+        );
     }
 }
