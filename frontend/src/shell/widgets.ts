@@ -461,6 +461,8 @@ export interface WidgetLayer {
   openCatalog(): void;
   /** Current widget rectangles in desktop coordinates (for icon collision). */
   occupiedRects(): Rect[];
+  /** Current widget rectangles with ids (desktop selection). */
+  rectEntries(): Array<{ id: WidgetId; rect: Rect }>;
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
   dispose(): void;
@@ -1068,6 +1070,12 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     return [...cards.values()].filter((card) => card.el.isConnected).map(rectOf);
   }
 
+  function rectEntries(): Array<{ id: WidgetId; rect: Rect }> {
+    return [...cards.entries()]
+      .filter(([, card]) => card.el.isConnected)
+      .map(([id, card]) => ({ id, rect: rectOf(card) }));
+  }
+
   function sync(widgets: DesktopWidget[]): void {
     if (disposed) return;
     // A drag in progress owns its card; its drop saves the final layout.
@@ -1183,5 +1191,5 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     cards.clear();
   }
 
-  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, dispose };
+  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, rectEntries, dispose };
 }

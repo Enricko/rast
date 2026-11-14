@@ -58,6 +58,10 @@ export interface DesktopIconsOptions {
 }
 
 export interface DesktopIcons {
+  /** Current on-screen shortcut rectangles keyed by app id (desktop coords). */
+  rects(): Map<string, Rect>;
+  /** Outline the given shortcuts as part of a multi-selection. */
+  setSelected(ids: ReadonlySet<string>): void;
   /** Show the current apps and saved layout (cheap when nothing changed). */
   refresh(): void;
   has(appId: string): boolean;
@@ -686,6 +690,10 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   render(true);
 
   return {
+    rects: () => new Map(displayRects),
+    setSelected: (ids) => {
+      for (const [id, button] of buttons) button.classList.toggle("is-multi-selected", ids.has(id));
+    },
     refresh: () => render(),
     has: (appId) => shown.some((icon) => icon.id === appId),
     add: (appId, at) => add(appId, at ?? null),

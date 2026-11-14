@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.35] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Added
+
+- Desktop marquee multi-selection: drag a rectangle from empty desktop space in
+  any direction to select shortcuts and widgets, Ctrl/Cmd-click toggles,
+  Shift adds, Ctrl/Cmd+A selects when the desktop has focus, Escape cancels or
+  clears, and empty clicks clear. Shared selection geometry/auto-scroll helpers
+  and tests were added for re-use by File Station.
+
 ## [0.11.34] - 2026-11-14
 
 No database migration (schema stays v12).

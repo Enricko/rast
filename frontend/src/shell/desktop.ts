@@ -39,6 +39,7 @@ import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
 import { createWidgetLayer, type WidgetLayer } from "./widgets";
+import { boxesIntersect, marqueeBox, type Box } from "./selection";
 
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
@@ -141,6 +142,160 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   });
   widgetLayerApi = widgets;
   disposers.push(() => widgets.dispose());
+
+  // ------------------------------------------------ desktop multi-selection
+  const marqueeEl = h("div", { class: "desktop-marquee", ariaHidden: true, hidden: true });
+  desktop.appendChild(marqueeEl);
+  disposers.push(() => marqueeEl.remove());
+  const selectedKeys = new Set<string>();
+  let marquee: { startX: number; startY: number; additive: boolean; active: boolean } | null = null;
+
+  function shortcutRects(): Map<string, Box> {
+    const mapped = new Map<string, Box>();
+    for (const [id, rect] of desktopIcons.rects()) mapped.set(`icon:${id}`, rect);
+    for (const entry of widgets.rectEntries()) mapped.set(`widget:${entry.id}`, entry.rect);
+    return mapped;
+  }
+
+  function renderSelection(): void {
+    const iconIds = new Set<string>();
+    for (const key of selectedKeys) if (key.startsWith("icon:")) iconIds.add(key.slice(5));
+    desktopIcons.setSelected(iconIds);
+    for (const entry of widgets.rectEntries()) {
+      const element = widgetLayer.querySelector<HTMLElement>(`.desktop-widget[data-widget="${entry.id}"]`);
+      element?.classList.toggle("is-multi-selected", selectedKeys.has(`widget:${entry.id}`));
+    }
+  }
+
+  function clearSelection(): void {
+    selectedKeys.clear();
+    renderSelection();
+  }
+
+  function selectItem(key: string, event: PointerEvent | MouseEvent): void {
+    const toggle = event.ctrlKey || event.metaKey;
+    const add = event.shiftKey;
+    if (toggle) {
+      if (selectedKeys.has(key)) selectedKeys.delete(key);
+      else selectedKeys.add(key);
+    } else if (add) {
+      selectedKeys.add(key);
+    } else {
+      selectedKeys.clear();
+      selectedKeys.add(key);
+    }
+    renderSelection();
+  }
+
+  function startsMarquee(target: EventTarget | null): boolean {
+    if (!(target instanceof Element)) return true;
+    if (target.closest(".window, .taskbar, .menu-panel, .context-menu, .modal-backdrop, button, input, select, textarea, .widget-resize, .desktop-icon, .desktop-widget")) return false;
+    return Boolean(target.closest(".desktop, .desktop-icons, .widget-layer")) || target === desktop;
+  }
+
+  function onDesktopPointerDown(event: PointerEvent): void {
+    if (event.button !== 0 || disposed) return;
+    const target = event.target as Element;
+    const iconEl = target.closest<HTMLElement>(".desktop-icon[data-app]");
+    const widgetEl = target.closest<HTMLElement>(".desktop-widget[data-widget]");
+    if (iconEl?.dataset.app) {
+      selectItem(`icon:${iconEl.dataset.app}`, event);
+      return;
+    }
+    if (widgetEl?.dataset.widget) {
+      selectItem(`widget:${widgetEl.dataset.widget}`, event);
+      return;
+    }
+    if (!startsMarquee(event.target)) return;
+    if (!event.ctrlKey && !event.metaKey && !event.shiftKey) clearSelection();
+    const rect = desktop.getBoundingClientRect();
+    marquee = {
+      startX: event.clientX - rect.left,
+      startY: event.clientY - rect.top,
+      additive: event.shiftKey,
+      active: false,
+    };
+    event.preventDefault();
+  }
+
+  function onDesktopPointerMove(event: PointerEvent): void {
+    if (!marquee || disposed) return;
+    const rect = desktop.getBoundingClientRect();
+    const currentX = event.clientX - rect.left;
+    const currentY = event.clientY - rect.top;
+    if (!marquee.active) {
+      if (Math.hypot(currentX - marquee.startX, currentY - marquee.startY) < 4) return;
+      marquee.active = true;
+      marqueeEl.hidden = false;
+      const root = document.documentElement;
+      root.classList.add("is-selecting");
+    }
+    const box = marqueeBox(marquee.startX, marquee.startY, currentX, currentY);
+    marqueeEl.style.left = `${box.x}px`;
+    marqueeEl.style.top = `${box.y}px`;
+    marqueeEl.style.width = `${box.w}px`;
+    marqueeEl.style.height = `${box.h}px`;
+    const hits: string[] = [];
+    for (const [key, item] of shortcutRects()) {
+      if (boxesIntersect(box, item)) hits.push(key);
+    }
+    selectedKeys.clear();
+    if (marquee.additive) {
+      // Shift adds to the selection that existed before this gesture.
+      for (const key of previousSelection) selectedKeys.add(key);
+    }
+    for (const key of hits) selectedKeys.add(key);
+    renderSelection();
+  }
+
+  function finishMarquee(): void {
+    if (!marquee) return;
+    marquee = null;
+    marqueeEl.hidden = true;
+    document.documentElement.classList.remove("is-selecting");
+  }
+
+  let previousSelection = new Set<string>();
+  const onSelectionPointerDown = (event: PointerEvent): void => {
+    previousSelection = new Set(selectedKeys);
+    onDesktopPointerDown(event);
+  };
+  desktop.addEventListener("pointerdown", onSelectionPointerDown);
+  window.addEventListener("pointermove", onDesktopPointerMove);
+  window.addEventListener("pointerup", finishMarquee);
+  window.addEventListener("pointercancel", finishMarquee);
+  const onSelectionKey = (event: KeyboardEvent): void => {
+    if (disposed) return;
+    const active = document.activeElement;
+    const desktopFocused =
+      active === null ||
+      active === document.body ||
+      active === desktop ||
+      (desktop.contains(active) && !(active instanceof Element && active.closest(".window")));
+    if ((event.ctrlKey || event.metaKey) && (event.key === "a" || event.key === "A") && desktopFocused) {
+      event.preventDefault();
+      selectedKeys.clear();
+      for (const key of shortcutRects().keys()) selectedKeys.add(key);
+      renderSelection();
+      return;
+    }
+    if (event.key === "Escape") {
+      if (marquee) finishMarquee();
+      if (desktopFocused && selectedKeys.size > 0) {
+        event.preventDefault();
+        clearSelection();
+      }
+    }
+  };
+  document.addEventListener("keydown", onSelectionKey);
+  disposers.push(() => {
+    desktop.removeEventListener("pointerdown", onSelectionPointerDown);
+    window.removeEventListener("pointermove", onDesktopPointerMove);
+    window.removeEventListener("pointerup", finishMarquee);
+    window.removeEventListener("pointercancel", finishMarquee);
+    document.removeEventListener("keydown", onSelectionKey);
+  });
+  widgetLayerApi = widgets;
   /** Show the pins being saved, else the account's saved pins. */
   function showSavedPins(): void {
     if (!appearance.isKnown) return;

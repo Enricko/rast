@@ -4114,3 +4114,29 @@ kbd {
   border-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
+
+/* Desktop marquee multi-selection. */
+.desktop-marquee {
+  position: absolute;
+  z-index: 4;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+html.is-selecting,
+html.is-selecting * {
+  user-select: none !important;
+  cursor: crosshair;
+}
+
+.desktop-icon.is-multi-selected {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  border-color: var(--accent);
+}
+
+.desktop-widget.is-multi-selected {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
