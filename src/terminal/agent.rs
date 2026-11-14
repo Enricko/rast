@@ -164,7 +164,7 @@ fn open_pty() -> io::Result<Pty> {
         if libc::grantpt(master_fd) != 0 || libc::unlockpt(master_fd) != 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut buffer = [0i8; 256];
+        let mut buffer = [0 as libc::c_char; 256];
         if libc::ptsname_r(master_fd, buffer.as_mut_ptr(), buffer.len()) != 0 {
             return Err(io::Error::last_os_error());
         }
