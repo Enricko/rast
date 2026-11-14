@@ -38,7 +38,7 @@ import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } fr
 import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
-import { createWidgetLayer } from "./widgets";
+import { createWidgetLayer, type WidgetLayer } from "./widgets";
 
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
@@ -99,6 +99,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   const appearanceSync = getAppearanceSync(deps.api, deps.events);
   // Desktop icons (arranged per account): created before the appearance
   // subscription below, which refreshes them.
+  let widgetLayerApi: WidgetLayer | null = null;
   const desktopIcons = createDesktopIcons({
     layer: iconLayer,
     desktop,
@@ -108,6 +109,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     openApp: (appId) => openApp(appId),
     menuItems: iconContextItems,
     dropOnTaskbar: (appId) => pinApp(appId),
+    blockedRects: () => widgetLayerApi?.occupiedRects() ?? [],
   });
   disposers.push(() => desktopIcons.dispose());
   const widgets = createWidgetLayer({
@@ -118,6 +120,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     toast,
     isMonitorAllowed: () => isAppAllowed("monitor", store.get().permissions, store.isAdmin()),
     openMonitor: () => openApp("monitor"),
+    onGeometryChange: () => desktopIcons.refresh(),
     obstacles: () => {
       // App icons in widget-layer coordinates, plus the desktop grid cell.
       const style = getComputedStyle(iconLayer);
@@ -136,6 +139,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       return { rects, cellW, cellH };
     },
   });
+  widgetLayerApi = widgets;
   disposers.push(() => widgets.dispose());
   /** Show the pins being saved, else the account's saved pins. */
   function showSavedPins(): void {

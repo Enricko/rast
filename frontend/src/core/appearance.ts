@@ -68,11 +68,18 @@ export const WIDGET_IDS: ReadonlyArray<WidgetId> = ["health", "cpu-memory", "sto
  */
 export interface DesktopWidget {
   id: WidgetId;
+  /** Legacy fractional placement (kept for older servers/layouts). */
   x: number;
   y: number;
-  /** Saved size as fractions of the usable desktop (optional, older layouts). */
+  /** Legacy fractional size (kept for older servers/layouts). */
   w?: number;
   h?: number;
+  /** Schema version 2: fixed CSS-pixel grid placements (viewport independent). */
+  gridVersion?: 2;
+  pxX?: number;
+  pxY?: number;
+  pxW?: number;
+  pxH?: number;
 }
 
 /** An app placed on the desktop and its grid cell (column, row from the top left). */
@@ -347,6 +354,24 @@ export function normalizeWidgets(input: unknown): DesktopWidget[] {
     const h = Number((item as DesktopWidget).h);
     if (Number.isFinite(w) && w > 0) widget.w = Math.round(Math.max(0.05, Math.min(1, w)) * 10_000) / 10_000;
     if (Number.isFinite(h) && h > 0) widget.h = Math.round(Math.max(0.05, Math.min(1, h)) * 10_000) / 10_000;
+    const gridVersion = Number((item as DesktopWidget).gridVersion);
+    const pxX = Number((item as DesktopWidget).pxX);
+    const pxY = Number((item as DesktopWidget).pxY);
+    const pxW = Number((item as DesktopWidget).pxW);
+    const pxH = Number((item as DesktopWidget).pxH);
+    const px = (value: number, min: number, max: number): number | undefined =>
+      Number.isFinite(value) ? Math.round(Math.max(min, Math.min(max, value))) : undefined;
+    const keptX = px(pxX, 0, 100_000);
+    const keptY = px(pxY, 0, 100_000);
+    const keptW = px(pxW, 32, 10_000);
+    const keptH = px(pxH, 32, 10_000);
+    if (gridVersion === 2 && keptX !== undefined && keptY !== undefined && keptW !== undefined && keptH !== undefined) {
+      widget.gridVersion = 2;
+      widget.pxX = keptX;
+      widget.pxY = keptY;
+      widget.pxW = keptW;
+      widget.pxH = keptH;
+    }
     out.push(widget);
   }
   return out.slice(0, WIDGET_IDS.length);

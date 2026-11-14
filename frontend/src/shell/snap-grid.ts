@@ -117,37 +117,43 @@ export interface WidgetSize {
 }
 
 /**
- * The default right-side widget group: uniform sizes, 16px gaps, right
- * aligned, in two columns when the width allows (one otherwise). Order goes
- * down each column.
+ * The default right-side widget group: each widget keeps its own preferred
+ * size, with 16px gaps, right aligned, in two columns when both fit (one
+ * otherwise). Order goes down the left column, then the right one. Widgets
+ * never adopt the largest widget's dimensions.
  */
 export function defaultWidgetGroup(sizes: WidgetSize[], bounds: Bounds, gap = WIDGET_GAP): Rect[] {
   if (sizes.length === 0 || bounds.w <= 0 || bounds.h <= 0) return [];
-  const width = Math.min(
-    Math.max(...sizes.map((size) => size.w)),
-    Math.max(0, bounds.w),
-  );
-  const height = Math.min(
-    Math.max(...sizes.map((size) => size.h)),
-    Math.max(0, bounds.h),
-  );
-  const rowsThatFit = Math.max(1, Math.floor((bounds.h + gap) / (height + gap)));
-  const columns = bounds.w >= width * 2 + gap ? 2 : 1;
-  const perColumn = columns === 2 ? Math.ceil(sizes.length / 2) : sizes.length;
-  const result: Rect[] = [];
-  let index = 0;
-  for (let column = columns - 1; column >= 0 && index < sizes.length; column -= 1) {
-    const count = Math.min(columns === 2 ? perColumn : sizes.length, sizes.length - index);
-    const x = bounds.x + bounds.w - width - (columns - 1 - column) * (width + gap);
+  const clampSize = (size: WidgetSize): WidgetSize => ({
+    w: Math.min(size.w, bounds.w),
+    h: Math.min(size.h, bounds.h),
+  });
+  const items = sizes.map(clampSize);
+  const placeColumn = (column: WidgetSize[], x: number, columnWidth: number): Rect[] => {
+    const rects: Rect[] = [];
     let y = bounds.y;
-    for (let row = 0; row < count && index < sizes.length; row += 1) {
-      if (row >= rowsThatFit) break;
-      result.push({ x, y, w: width, h: height });
-      y += height + gap;
-      index += 1;
+    for (const item of column) {
+      rects.push({ x: x + columnWidth - item.w, y, w: item.w, h: item.h });
+      y += item.h + gap;
     }
-  }
-  return result;
+    return rects;
+  };
+  const singleWidth = Math.min(bounds.w, Math.max(...items.map((item) => item.w)));
+  const single = (): Rect[] => {
+    const x = bounds.x + bounds.w - singleWidth;
+    return placeColumn(items, x, singleWidth);
+  };
+  if (items.length === 1) return single();
+  const split = Math.ceil(items.length / 2);
+  const leftItems = items.slice(0, split);
+  const rightItems = items.slice(split);
+  const leftWidth = Math.max(...leftItems.map((item) => item.w));
+  const rightWidth = Math.max(...rightItems.map((item) => item.w));
+  const total = leftWidth + gap + rightWidth;
+  if (total > bounds.w || rightItems.length === 0) return single();
+  const leftX = bounds.x + bounds.w - total;
+  const rightX = leftX + leftWidth + gap;
+  return [...placeColumn(leftItems, leftX, leftWidth), ...placeColumn(rightItems, rightX, rightWidth)];
 }
 
 export function rectsOverlapAny(rect: Rect, others: Rect[]): boolean {

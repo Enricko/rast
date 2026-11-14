@@ -53,6 +53,8 @@ export interface DesktopIconsOptions {
   menuItems(app: AppDefinition): ContextMenuEntry[];
   /** An icon was dropped on the taskbar. */
   dropOnTaskbar(appId: string): void;
+  /** Rectangles (same layer coordinates) occupied by desktop widgets. */
+  blockedRects?: () => Array<{ x: number; y: number; w: number; h: number }>;
 }
 
 export interface DesktopIcons {
@@ -122,6 +124,55 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     cell = { w: cellW, h: cellH };
   }
 
+  const cellKey = (cell: Cell): string => `${cell.col},${cell.row}`;
+
+  /** Cells occupied by widgets; icons must not be placed on them. */
+  function blockedCells(): Set<string> {
+    const blocked = new Set<string>();
+    const rects = options.blockedRects?.() ?? [];
+    if (rects.length === 0) return blocked;
+    const overlaps = (a: { x: number; y: number; w: number; h: number }, b: typeof a): boolean =>
+      a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    for (let col = 0; col < grid.cols; col += 1) {
+      for (let row = 0; row < grid.rows; row += 1) {
+        const rect = { x: col * cell.w, y: row * cell.h, w: cell.w, h: cell.h };
+        if (rects.some((widget) => overlaps(widget, rect))) blocked.add(`${col},${row}`);
+      }
+    }
+    return blocked;
+  }
+
+  /** Nearest cell that is neither occupied nor blocked; null when full. */
+  function nearestAllowedCell(blocked: Set<string>, occupied: Set<string>, from: Cell): Cell | null {
+    let best: Cell | null = null;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let col = 0; col < grid.cols; col += 1) {
+      for (let row = 0; row < grid.rows; row += 1) {
+        if (blocked.has(`${col},${row}`) || occupied.has(`${col},${row}`)) continue;
+        const distance = (col - from.col) ** 2 + (row - from.row) ** 2;
+        if (distance < bestDistance) {
+          best = { col, row };
+          bestDistance = distance;
+        }
+      }
+    }
+    return best;
+  }
+
+  function avoidBlocked(cells: DesktopIcon[]): DesktopIcon[] {
+    const blocked = blockedCells();
+    if (blocked.size === 0) return cells;
+    const occupied = new Set(cells.map(cellKey));
+    return cells.map((icon) => {
+      if (!blocked.has(cellKey(icon))) return icon;
+      const free = nearestAllowedCell(blocked, occupied, icon);
+      if (!free) return icon;
+      occupied.delete(cellKey(icon));
+      occupied.add(cellKey(free));
+      return { ...icon, ...free };
+    });
+  }
+
   function position(el: HTMLElement, at: Cell): void {
     // Positioned on the shared 8px grid (cell sizes are multiples of the grid).
     el.style.left = `${Math.round(at.col * cell.w)}px`;
@@ -173,12 +224,14 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     if (disposed || arranging) return;
     measure();
     const apps = options.visibleApps();
-    shown = displayLayout(
-      savedLayout(),
-      apps.map((app) => app.id),
-      grid,
-      order,
-      shown,
+    shown = avoidBlocked(
+      displayLayout(
+        savedLayout(),
+        apps.map((app) => app.id),
+        grid,
+        order,
+        shown,
+      ),
     );
     const nextSignature = JSON.stringify([shown, grid, cell]);
     if (!force && nextSignature === signature) return;

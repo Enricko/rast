@@ -1,6 +1,6 @@
 [package]
 name = "rast"
-version = "0.11.31"
+version = "0.11.32"
 edition = "2021"
 rust-version = "1.94"
 description = "RAST — Resource Administration & Storage Toolkit"

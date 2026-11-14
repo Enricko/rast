@@ -142,11 +142,24 @@ pub struct WidgetDto {
     pub id: String,
     pub x: f64,
     pub y: f64,
-    /// Optional saved size, as fractions of the usable desktop width/height.
+    /// Legacy fractional size (older clients).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub w: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub h: Option<f64>,
+    /// Schema version 2: preferred size/placement as fixed CSS pixels on the
+    /// 8px grid. Viewport independent; legacy fractions above are still kept
+    /// for older clients and migrated once by the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_y: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_h: Option<f64>,
 }
 
 /// An app placed on the desktop: its grid cell (column, row from the top
@@ -431,6 +444,26 @@ pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
                 return Err(bad_request("widget size must be between 0.05 and 1"));
             }
         }
+        if let Some(version) = widget.grid_version {
+            if version != 2 {
+                return Err(bad_request("unsupported widget layout version"));
+            }
+            for value in [widget.px_x, widget.px_y].into_iter().flatten() {
+                if !value.is_finite() || !(0.0..=100_000.0).contains(&value) {
+                    return Err(bad_request("widget pixel position is out of range"));
+                }
+            }
+            for value in [widget.px_w, widget.px_h].into_iter().flatten() {
+                if !value.is_finite() || !(32.0..=10_000.0).contains(&value) {
+                    return Err(bad_request("widget pixel size is out of range"));
+                }
+            }
+        } else if [widget.px_x, widget.px_y, widget.px_w, widget.px_h]
+            .into_iter()
+            .any(|value| value.is_some())
+        {
+            return Err(bad_request("pixel widget fields require gridVersion 2"));
+        }
         seen.push(id.clone());
         out.push(WidgetDto {
             id,
@@ -438,6 +471,11 @@ pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
             y: round_fraction(widget.y),
             w: widget.w.map(round_fraction),
             h: widget.h.map(round_fraction),
+            grid_version: widget.grid_version,
+            px_x: widget.px_x.map(|value| value.round()),
+            px_y: widget.px_y.map(|value| value.round()),
+            px_w: widget.px_w.map(|value| value.round()),
+            px_h: widget.px_h.map(|value| value.round()),
         });
     }
     Ok(out)
@@ -1764,7 +1802,37 @@ pub(crate) mod tests {
             y,
             w: None,
             h: None,
+            grid_version: None,
+            px_x: None,
+            px_y: None,
+            px_w: None,
+            px_h: None,
         }
+    }
+
+    #[test]
+    fn widget_pixel_layouts_are_validated() {
+        let mut pixel = widget("health", 0.1, 0.2);
+        pixel.grid_version = Some(2);
+        pixel.px_x = Some(16.0);
+        pixel.px_y = Some(24.0);
+        pixel.px_w = Some(232.0);
+        pixel.px_h = Some(312.0);
+        assert!(validate_widgets(vec![pixel.clone()]).is_ok());
+        let invalid_version = widget("health", 0.1, 0.2);
+        let mut bad = invalid_version;
+        bad.grid_version = Some(3);
+        assert!(validate_widgets(vec![bad]).is_err());
+        let mut no_version = widget("cpu-memory", 0.1, 0.2);
+        no_version.px_x = Some(16.0);
+        assert!(validate_widgets(vec![no_version]).is_err());
+        let mut tiny = widget("storage", 0.1, 0.2);
+        tiny.grid_version = Some(2);
+        tiny.px_x = Some(16.0);
+        tiny.px_y = Some(16.0);
+        tiny.px_w = Some(4.0);
+        tiny.px_h = Some(232.0);
+        assert!(validate_widgets(vec![tiny]).is_err());
     }
 
     #[test]

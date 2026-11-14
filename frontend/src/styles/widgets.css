@@ -259,7 +259,9 @@
 
 .widget-metric .sparkline {
   width: 100%;
-  height: auto;
+  /* Fixed chart height: widening a widget must not stretch the graph. */
+  height: 36px;
+  max-height: 40px;
   display: block;
 }
 
@@ -490,4 +492,15 @@
     linear-gradient(to bottom, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 1px);
   background-size: 8px 8px;
   opacity: 0.55;
+}
+
+/* Temporary presentation when the viewport is smaller than the preferred
+   widget size: content is clipped, saved dimensions are untouched. */
+.desktop-widget.is-compact .widget-body {
+  overflow: hidden;
+}
+
+.desktop-widget.is-overflow {
+  outline: 2px solid var(--warning-border, var(--border-strong));
+  outline-offset: 1px;
 }

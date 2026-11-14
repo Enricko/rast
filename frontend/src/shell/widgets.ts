@@ -34,6 +34,7 @@ import {
   fitRect,
   nearestFreeRect,
   rectsIntersect,
+  snap,
   snapUp,
   type Bounds,
   type Rect,
@@ -448,6 +449,8 @@ export interface WidgetLayerOptions {
   openMonitor: () => void;
   /** Desktop app-icon rectangles + the desktop grid cell size. */
   obstacles?: () => { rects: Array<{ x: number; y: number; w: number; h: number }>; cellW: number; cellH: number };
+  /** Called when widget geometry changes (icons avoid the widgets). */
+  onGeometryChange?: () => void;
 }
 
 export interface WidgetLayer {
@@ -456,6 +459,8 @@ export interface WidgetLayer {
   /** Show the layout being saved, else the account's saved (or default) layout. */
   showSaved(): void;
   openCatalog(): void;
+  /** Current widget rectangles in desktop coordinates (for icon collision). */
+  occupiedRects(): Rect[];
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
   dispose(): void;
@@ -503,19 +508,102 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const onWindowResize = (): void => positionAll();
   if (!resizeObserver) window.addEventListener("resize", onWindowResize);
 
-  const DEFAULT_WIDGET_WIDTH = 208;
-  const DEFAULT_WIDGET_HEIGHT = 328;
+  /** Readable, content-aware preferred sizes (multiples of the 8px grid). */
+  const WIDGET_SIZES: Record<WidgetId, { w: number; h: number; minW: number; minH: number }> = {
+    health: { w: 232, h: 312, minW: 208, minH: 280 },
+    "cpu-memory": { w: 232, h: 256, minW: 208, minH: 224 },
+    storage: { w: 224, h: 232, minW: 200, minH: 208 },
+    network: { w: 224, h: 232, minW: 200, minH: 208 },
+  };
   const MIN_WIDGET_WIDTH = 200;
   const MIN_WIDGET_HEIGHT = 200;
-  let repairTimer: number | undefined;
+  let migrationQueued = false;
+  let overflowWarned = false;
 
   const bounds = (): Bounds => ({ x: 0, y: 0, w: layer.clientWidth, h: layer.clientHeight });
   const iconObstacles = (): Rect[] => options.obstacles?.().rects ?? [];
+  const clampPx = (value: number, min: number, max: number): number =>
+    Math.round(Math.max(min, Math.min(max, value)));
 
-  function widgetSize(widget: DesktopWidget, area: Bounds): { w: number; h: number } {
-    const w = widget.w ? Math.max(MIN_WIDGET_WIDTH, snapUp(widget.w * area.w)) : DEFAULT_WIDGET_WIDTH;
-    const h = widget.h ? Math.max(MIN_WIDGET_HEIGHT, snapUp(widget.h * area.h)) : DEFAULT_WIDGET_HEIGHT;
-    return { w: Math.min(w, Math.max(GRID, area.w)), h: Math.min(h, Math.max(GRID, area.h)) };
+  /** The widget's preferred size in fixed CSS pixels (never viewport-scaled). */
+  function preferredSize(widget: DesktopWidget): { w: number; h: number } {
+    const spec = WIDGET_SIZES[widget.id];
+    if (
+      widget.gridVersion === 2 &&
+      typeof widget.pxW === "number" &&
+      typeof widget.pxH === "number"
+    ) {
+      return {
+        w: clampPx(snapUp(widget.pxW), spec.minW, 4000),
+        h: clampPx(snapUp(widget.pxH), spec.minH, 4000),
+      };
+    }
+    return { w: spec.w, h: spec.h };
+  }
+
+  /** On-screen size: the preference, compacted only when the viewport is too small. */
+  function displaySize(preferred: { w: number; h: number }, area: Bounds): { w: number; h: number } {
+    return {
+      w: Math.max(Math.min(GRID, area.w), Math.min(preferred.w, area.w)),
+      h: Math.max(Math.min(GRID, area.h), Math.min(preferred.h, area.h)),
+    };
+  }
+
+  /** Preferred top-left in fixed pixels (legacy fractions are only for migration). */
+  function preferredPosition(widget: DesktopWidget, area: Bounds): { x: number; y: number } {
+    if (
+      widget.gridVersion === 2 &&
+      typeof widget.pxX === "number" &&
+      typeof widget.pxY === "number"
+    ) {
+      return { x: snap(widget.pxX), y: snap(widget.pxY) };
+    }
+    const size = preferredSize(widget);
+    const freeW = Math.max(0, area.w - size.w);
+    const freeH = Math.max(0, area.h - size.h);
+    return {
+      x: snap(area.x + Math.max(0, Math.min(1, widget.x)) * freeW),
+      y: snap(area.y + Math.max(0, Math.min(1, widget.y)) * freeH),
+    };
+  }
+
+  /** Fractions for older clients; the pixel fields are authoritative. */
+  function legacyFractions(rect: Rect): { x: number; y: number; w: number; h: number } {
+    const area = bounds();
+    const freeW = Math.max(0, area.w - rect.w);
+    const freeH = Math.max(0, area.h - rect.h);
+    const round = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
+    return {
+      x: round(freeW > 0 ? (rect.x - area.x) / freeW : 0),
+      y: round(freeH > 0 ? (rect.y - area.y) / freeH : 0),
+      w: round(area.w > 0 ? rect.w / area.w : 0),
+      h: round(area.h > 0 ? rect.h / area.h : 0),
+    };
+  }
+
+  /** One-time, versioned migration of legacy fractional widgets to pixels. */
+  function migrateLegacyWidgets(): void {
+    if (!appearance.isKnown || layout.every((widget) => widget.gridVersion === 2)) return;
+    const area = bounds();
+    layout = layout.map((widget) => {
+      if (widget.gridVersion === 2) return widget;
+      const size = preferredSize(widget);
+      const position = preferredPosition(widget, area);
+      return {
+        ...widget,
+        gridVersion: 2,
+        pxX: position.x,
+        pxY: position.y,
+        pxW: size.w,
+        pxH: size.h,
+      };
+    });
+    if (migrationQueued) return;
+    migrationQueued = true;
+    window.setTimeout(() => {
+      migrationQueued = false;
+      if (!disposed && appearance.isKnown) void appearance.saveWidgets(layout);
+    }, 400);
   }
 
   function applyRect(card: Card, rect: Rect): void {
@@ -538,95 +626,75 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     return out;
   }
 
-
-
-  /** Position every card: 8px grid, inside the usable area, clear of icons and
-      the other widgets. Invalid saved layouts are repaired and persisted. */
+  /**
+   * Responsive placement pass. It never changes the saved preferences: the
+   * preferred size/position are fixed pixels, and a smaller viewport only
+   * produces a temporary compact/repositioned rect.
+   */
   function positionAll(): void {
     if (disposed) return;
+    migrateLegacyWidgets();
     const area = bounds();
     const icons = iconObstacles();
-    const sizes = layout.map((widget) => widgetSize(widget, area));
-    layout.forEach((widget, index) => {
-      const card = cards.get(widget.id);
-      if (!card) return;
-      const size = sizes[index]!;
-      card.el.style.width = `${size.w}px`;
-      card.el.style.height = `${size.h}px`;
-    });
     const useDefaultGroup = !appearance.isKnown || !appearance.value.widgetsCustomized;
     if (useDefaultGroup) {
-      const group = defaultWidgetGroup(sizes, area, WIDGET_GAP);
+      const preferred = layout.map((widget) => preferredSize(widget));
+      const group = defaultWidgetGroup(preferred, area, WIDGET_GAP);
       layout.forEach((widget, index) => {
         const card = cards.get(widget.id);
         if (!card) return;
+        const pref = preferred[index]!;
         const target = group[index] ?? fitRect(
-          { x: area.x, y: area.y, w: sizes[index]!.w, h: sizes[index]!.h },
+          { x: area.x, y: area.y, w: pref.w, h: pref.h },
           area,
-          MIN_WIDGET_WIDTH,
-          MIN_WIDGET_HEIGHT,
+          Math.min(pref.w, area.w),
+          Math.min(pref.h, area.h),
         );
+        const compact = target.w < pref.w || target.h < pref.h;
+        card.el.classList.toggle("is-compact", compact);
         applyRect(card, target);
       });
       return;
     }
-    let changed = false;
     const placed: Rect[] = [...icons];
-    layout.forEach((widget, index) => {
+    let overflow = false;
+    layout.forEach((widget) => {
       const card = cards.get(widget.id);
       if (!card) return;
-      const size = sizes[index]!;
-      const freeW = Math.max(0, area.w - size.w);
-      const freeH = Math.max(0, area.h - size.h);
-      const desired = fitRect(
-        { x: area.x + widget.x * freeW, y: area.y + widget.y * freeH, w: size.w, h: size.h },
+      const pref = preferredSize(widget);
+      const size = displaySize(pref, area);
+      const position = preferredPosition(widget, area);
+      let target = fitRect(
+        { x: position.x, y: position.y, w: size.w, h: size.h },
         area,
-        MIN_WIDGET_WIDTH,
-        MIN_WIDGET_HEIGHT,
+        size.w,
+        size.h,
       );
-      let target = desired;
       if (placed.some((other) => rectsIntersect(other, target))) {
-        target = nearestFreeRect(desired, size, area, placed) ?? desired;
-        changed = true;
+        const free = nearestFreeRect(target, size, area, placed);
+        if (free) {
+          target = free;
+        } else {
+          overflow = true;
+        }
       }
+      const compact = size.w < pref.w || size.h < pref.h;
+      card.el.classList.toggle("is-compact", compact);
+      card.el.classList.toggle("is-overflow", overflow);
       applyRect(card, target);
       placed.push(target);
-      const x = freeW > 0 ? (target.x - area.x) / freeW : 0;
-      const y = freeH > 0 ? (target.y - area.y) / freeH : 0;
-      const w = area.w > 0 ? target.w / area.w : 0;
-      const h = area.h > 0 ? target.h / area.h : 0;
-      if (
-        Math.abs(x - widget.x) > 0.002 ||
-        Math.abs(y - widget.y) > 0.002 ||
-        Math.abs(w - (widget.w ?? w)) > 0.002 ||
-        Math.abs(h - (widget.h ?? h)) > 0.002
-      ) {
-        layout[index] = { ...widget, x, y, w, h };
-        changed = true;
-      }
     });
-    if (changed) {
-      window.clearTimeout(repairTimer);
-      repairTimer = window.setTimeout(() => {
-        if (!disposed && appearance.isKnown) void appearance.saveWidgets(layout);
-      }, 350);
+    if (overflow && !overflowWarned) {
+      overflowWarned = true;
+      toast.warning(
+        "There is not enough desktop space for every widget at its saved size. Move or resize them, or use a larger window.",
+      );
     }
-  }
-
-  function fractionsFor(rect: Rect): { x: number; y: number; w: number; h: number } {
-    const area = bounds();
-    const freeW = Math.max(0, area.w - rect.w);
-    const freeH = Math.max(0, area.h - rect.h);
-    const round = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
-    return {
-      x: round(freeW > 0 ? (rect.x - area.x) / freeW : 0),
-      y: round(freeH > 0 ? (rect.y - area.y) / freeH : 0),
-      w: round(area.w > 0 ? rect.w / area.w : 0),
-      h: round(area.h > 0 ? rect.h / area.h : 0),
-    };
+    options.onGeometryChange?.();
   }
 
   function persist(): void {
+    options.onGeometryChange?.();
     void appearance.saveWidgets(layout).then((ok) => {
       if (ok || disposed) return;
       toast.warning("Could not save the widget layout to your account. Showing the saved layout.");
@@ -809,8 +877,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
           ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
           : target;
         applyRect(card, final);
-        const fractions = fractionsFor(final);
-        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+        layout = layout.map((widget) => {
+          if (widget.id !== card.id) return widget;
+          const preferred = preferredSize(widget);
+          return {
+            ...widget,
+            ...legacyFractions({ ...final, w: preferred.w, h: preferred.h }),
+            gridVersion: 2,
+            pxX: snap(final.x),
+            pxY: snap(final.y),
+            pxW: preferred.w,
+            pxH: preferred.h,
+          };
+        });
         persist();
       };
       card.el.addEventListener("pointermove", move);
@@ -831,6 +910,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const startPointerY = event.clientY - layerRect.top;
       const startRect = rectOf(card);
       const area = bounds();
+      const spec = WIDGET_SIZES[card.id];
       handle.setPointerCapture(event.pointerId);
       showGrid();
       let target = startRect;
@@ -841,12 +921,12 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
           {
             x: startRect.x,
             y: startRect.y,
-            w: Math.max(MIN_WIDGET_WIDTH, snapUp(startRect.w + dx)),
-            h: Math.max(MIN_WIDGET_HEIGHT, snapUp(startRect.h + dy)),
+            w: Math.max(spec.minW, snapUp(startRect.w + dx)),
+            h: Math.max(spec.minH, snapUp(startRect.h + dy)),
           },
           area,
-          MIN_WIDGET_WIDTH,
-          MIN_WIDGET_HEIGHT,
+          spec.minW,
+          spec.minH,
         );
         applyRect(card, target);
         dropPreview.hidden = false;
@@ -869,8 +949,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
           ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
           : target;
         applyRect(card, final);
-        const fractions = fractionsFor(final);
-        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+        layout = layout.map((widget) =>
+          widget.id === card.id
+            ? {
+                ...widget,
+                ...legacyFractions(final),
+                gridVersion: 2,
+                pxX: snap(final.x),
+                pxY: snap(final.y),
+                pxW: snap(final.w),
+                pxH: snap(final.h),
+              }
+            : widget,
+        );
         persist();
       };
       handle.addEventListener("pointermove", move);
@@ -910,8 +1001,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
         ? nearestFreeRect(desired, { w: desired.w, h: desired.h }, area, obstacles) ?? desired
         : desired;
       applyRect(card, target);
-      const fractions = fractionsFor(target);
-      layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+      layout = layout.map((widget) => {
+        if (widget.id !== card.id) return widget;
+        const preferred = preferredSize(widget);
+        return {
+          ...widget,
+          ...legacyFractions({ ...target, w: preferred.w, h: preferred.h }),
+          gridVersion: 2,
+          pxX: snap(target.x),
+          pxY: snap(target.y),
+          pxW: preferred.w,
+          pxH: preferred.h,
+        };
+      });
       window.clearTimeout(keySaveTimer);
       keySaveTimer = window.setTimeout(() => persist(), 500);
     });
@@ -962,6 +1064,10 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   }
 
   // ---------------------------------------------------------------- sync
+  function occupiedRects(): Rect[] {
+    return [...cards.values()].filter((card) => card.el.isConnected).map(rectOf);
+  }
+
   function sync(widgets: DesktopWidget[]): void {
     if (disposed) return;
     // A drag in progress owns its card; its drop saves the final layout.
@@ -1077,5 +1183,5 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     cards.clear();
   }
 
-  return { sync, showSaved, openCatalog, permissionsChanged, dispose };
+  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, dispose };
 }

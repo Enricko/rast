@@ -24,6 +24,22 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.32] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Desktop widgets store **fixed CSS-pixel preferred sizes and positions**
+  (`gridVersion: 2`) instead of viewport-proportional fractions. Resizing the
+  browser or using a larger monitor now provides more grid space, it no longer
+  enlarges widgets, charts, text or gaps. Legacy fractional layouts are
+  migrated once to conservative per-widget defaults; the pixel fields are
+  authoritative afterwards. Widget sizes only change through an explicit
+  resize. Content-aware defaults/minima per widget, a fixed sparkline height,
+  compact presentation when the viewport is smaller, and app-icon collision
+  with widgets are included.
+
 ## [0.11.31] - 2026-11-14
 
 No database migration (schema stays v12).

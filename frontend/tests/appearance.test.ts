@@ -16,6 +16,7 @@ import {
   normalizeAppearance,
   normalizeDesktopIcons,
   normalizeTaskbarPins,
+  normalizeWidgets,
   type Appearance,
 } from "../src/core/appearance";
 import type { ApiClient } from "../src/core/api";
@@ -327,4 +328,22 @@ test("desktop icons: null is the default layout, saves send only the layout, res
   reset.resolve({ ...saved(), desktopIcons: null });
   assert.equal(await resetting, true);
   assert.equal(service.value.desktopIcons, null);
+});
+
+test("widget pixel layout v2 round-trips and legacy fractions stay valid", () => {
+  const pixel = normalizeWidgets([
+    { id: "health", x: 0.1, y: 0.2, w: 0.2, h: 0.3, gridVersion: 2, pxX: 16, pxY: 24, pxW: 232, pxH: 312 },
+  ]);
+  assert.deepEqual(pixel, [
+    { id: "health", x: 0.1, y: 0.2, w: 0.2, h: 0.3, gridVersion: 2, pxX: 16, pxY: 24, pxW: 232, pxH: 312 },
+  ]);
+  const legacy = normalizeWidgets([{ id: "cpu-memory", x: 0.2, y: 0.3 }]);
+  assert.equal(legacy[0]?.gridVersion, undefined);
+  assert.equal(legacy[0]?.pxW, undefined);
+  // Incomplete/invalid pixel fields are dropped (the caller migrates them).
+  const invalid = normalizeWidgets([
+    { id: "storage", x: 0.3, y: 0.4, gridVersion: 3, pxX: 1, pxY: 1, pxW: 1, pxH: 1 },
+    { id: "network", x: 0.5, y: 0.6, gridVersion: 2, pxX: 8, pxY: 8 },
+  ]);
+  assert.ok(invalid.every((widget) => widget.gridVersion === undefined));
 });

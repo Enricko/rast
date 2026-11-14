@@ -73,3 +73,22 @@ test("default widget group is right aligned with 16px gaps, two columns when pos
   const single = defaultWidgetGroup(sizes, narrow);
   assert.ok(single.every((rect) => rect.x === narrow.x + narrow.w - 208));
 });
+
+test("default widget group keeps each widget's own preferred size", () => {
+  const bounds = usableBounds(1600, 900, 58);
+  const sizes = [
+    { w: 232, h: 312 },
+    { w: 232, h: 256 },
+    { w: 224, h: 232 },
+    { w: 224, h: 232 },
+  ];
+  const rects = defaultWidgetGroup(sizes, bounds);
+  const heights = rects.map((rect) => rect.h);
+  assert.deepEqual(heights, [312, 256, 232, 232]);
+  assert.equal(rects[0].w, 232);
+  assert.equal(rects[2].w, 224);
+  // Smaller viewport: no widget adopts the tallest height.
+  const narrow = usableBounds(500, 900, 58);
+  const single = defaultWidgetGroup(sizes, narrow);
+  assert.deepEqual(single.map((rect) => rect.h), [312, 256, 232, 232]);
+});
