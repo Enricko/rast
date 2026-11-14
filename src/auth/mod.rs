@@ -301,6 +301,18 @@ mod tests {
             packages_github_token: None,
             packages_shell_path: false,
             packages_system_wide: false,
+            native_enabled: false,
+            native_helper_socket: "/run/rast/native.sock".into(),
+            linux_xpra_bin: "/usr/bin/xpra".into(),
+            linux_uid_base: crate::config::DEFAULT_LINUX_UID_BASE,
+            linux_idle_minutes: crate::config::DEFAULT_LINUX_IDLE_MINUTES,
+            linux_session_memory_mb: crate::config::DEFAULT_LINUX_SESSION_MEMORY_MB,
+            linux_session_cpus: 2,
+            linux_session_tasks: 2048,
+            linux_app_memory_mb: crate::config::DEFAULT_LINUX_APP_MEMORY_MB,
+            linux_app_cpus: crate::config::DEFAULT_LINUX_APP_CPUS,
+            linux_app_tasks: crate::config::DEFAULT_LINUX_APP_TASKS,
+            linux_admission_reserve_mb: crate::config::DEFAULT_LINUX_ADMISSION_RESERVE_MB,
             loaded_from: None,
         }
     }

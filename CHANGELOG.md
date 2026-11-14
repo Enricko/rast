@@ -11,7 +11,257 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+
+- **A clear "Install Linux App" workflow in App Center.** Administrators get a
+  prominent primary button (and matching empty-state tile) that opens one
+  responsive dialog with *Upload package* and *Install from URL* sources.
+  Supported formats are stated in plain language (`.deb` and portable archives;
+  AppImage is explicitly not offered until validated). Before installing, the
+  dialog shows the server preview: detected name/version, format and source,
+  host distribution/architecture and compatibility, dependency and package
+  changes, whether the host package is already installed (the action becomes
+  "Add existing installation to RAST"), an existing RAST entry, how many saved
+  per-user profiles will be preserved, warnings (including Chromium's
+  `--password-store=basic` headless-keyring note) and who can use the app (all
+  RAST users or administrators only, stored as the app's visibility).
+  Installation shows real stages (Uploading → Validating → Installing →
+  Registering → Ready), survives closing the dialog/App Center (the job
+  continues and progress is reattached when App Center reopens), rejects
+  duplicate submissions, only reports Ready after the app row and launcher are
+  verified, and offers Try again with the original source on failure. The ready
+  view opens the app and points at the existing desktop-shortcut behaviour.
+  Uninstall/reinstall keeps per-user profiles unless data deletion is chosen.
+
+- **Native app prerequisites are checked up front.** Xpra 6.5+ is required
+  (validated against 6.5.5 with HTML5 client version 21); the installer
+  detects an older Xpra and disables native apps instead of failing at launch,
+  and `rast doctor` / `rast native-helper --check` report the detected version.
+  The installer also installs the `nftables` package used by the display-port
+  firewall below.
+- **Chromium apps explain their password storage.** The install preview warns
+  that Chromium-family apps run with `--password-store=basic` because a
+  headless session has no unlocked OS keyring; saved site credentials live in
+  the per-person profile (0700) and are not protected by keyring encryption.
+
+### Fixed
+
+- **Windows can be resized again.** The resize grab strips were positioned
+  outside the window but clipped by the window box's `overflow: hidden`, so the
+  bottom-right handle was unreachable when another window covered the corner
+  (and keyboard focus handling could swallow Ctrl+N while a native window was
+  focused). The window clips its content instead, and the adopted remote window
+  follows the RAST resize.
+- **Reopening an app right after closing it starts it again.** A launch that
+  arrived while the previous process had exited but the 5 s sweeper had not
+  noticed yet returned the dead in-memory run; launch now verifies the systemd
+  unit first and marks stale runs exited.
+- **A minimized native window is iconified in X11.** Minimizing now sends
+  `window-unmap` (and restore sends `window-map`) instead of only hiding the
+  canvas, so the application stops rendering an invisible window and reports
+  the iconic state.
+- **Remote window titles are escaped before the pinned Xpra HTML5 client
+  renders them** (`jQuery .html(title)` sink), and the RAST desktop renders the
+  raw title through text nodes only. A native app or a web page visited in a
+  native browser can no longer execute script in RAST's origin through its
+  window title.
+
+### Security
+
+- **Loopback display ports are restricted to the RAST service account.**
+  Xpra's HTML5 transport listens on `127.0.0.1` with Xpra-level authentication
+  disabled, and loopback is not a uid boundary. At startup the privileged
+  helper now installs one owned nftables rule (table `inet rast_native`, set
+  `xpra_ports`) that rejects connections to the session ports from every uid
+  except the RAST server, adds each port before a session is usable, removes it
+  when the session stops, and reconciles the set with the live sessions when
+  the helper restarts. This is defence in depth behind the authenticated proxy.
+  Requires the `nftables` package; `rast doctor` and `rast native-helper
+  --check` warn when it is missing.
+- **Live display streams revalidate the RAST login session.** A native display
+  WebSocket now re-checks the login session, expiry, revocation and account
+  state every 5 s and closes when the session is no longer valid, so signing
+  out, an administrator revoking the browser sessions or deactivating the
+  account ends the live display within seconds. Deactivating an account also
+  stops its native session; revoking only the browser sessions keeps the
+  person's applications running under the retention policy.
+
+## [0.13.3] - 2026-11-14
+
+Native Linux apps are restored on top of the newer `main` line (the previous
+0.11.x release had the App Center install entry temporarily disabled). Schema
+v13: the native migration is renumbered after the main line's package app-type
+migration; existing databases from either line are reconciled with a backup
+during the upgrade.
+
+### Added
+
+- **Install Linux App workflow in App Center** (restored from 0.13.2 and
+  re-integrated): administrator-only primary button, Upload package / Install
+  from URL dialog, server preview (app/version/format/source, host
+  compatibility, package changes, existing host package or RAST entry, saved
+  per-user profiles, warnings, availability), real install stages with job
+  persistence, duplicate-submission prevention, verified Ready state and
+  profile-preserving uninstall/reinstall. See the 0.13.2 notes below for the
+  full behaviour.
+- The newer main-line features from 0.11.5–0.11.37 are kept: desktop
+  multi-selection/group dragging, File Station marquee selection and bulk
+  moves, fine-grid layouts, widget sizing, package app-type support and the
+  package authoring CLI.
+
+## [0.13.2] - 2026-11-13
+
+### Fixed
+
+- **Mouse clicks near a window edge are no longer swallowed.** The window
+  resize grab strips now sit outside the window instead of covering the last
+  few pixels of the application, so controls at the right edge (Chrome's menu
+  and profile buttons) receive clicks. Dragging a tab out of a window still
+  releases the remote button when the pointer moves over the desktop.
+- **Sound works on sessions created before native audio existed.** A running
+  Xpra session keeps its original command line across RAST restarts, so an
+  older session stayed silent after the upgrade. On startup RAST now recognises
+  such sessions from their process arguments, ends that stale session once and
+  starts a fresh audio-enabled one on the next app launch. Apps running in the
+  old session are stopped, as with any service upgrade that changes session
+  flags.
+- **Video playback is smoother.** The reference deployment raises the native
+  session to 6 CPUs / 6144 MiB and each application to 4 CPUs / 3072 MiB
+  (`linux_session_*`, `linux_app_*`); the previous 2-CPU app cap throttled
+  software video decoding and made YouTube playback stutter.
+
+## [0.13.1] - 2026-11-13
+
+First published native-app release since 0.11.4; includes all 0.12.0 and 0.13.0
+changes below. Schema v12: back up the database and app profiles before upgrading.
+Rolling back to 0.11.4 requires its matching pre-upgrade database backup.
+
+### Added
+
+- Native Linux desktop apps share one isolated Xpra session per RAST account,
+  rather than a Docker desktop per app. Top-level app windows, additional Chrome
+  windows and dialogs integrate into the RAST desktop. App Center supports native
+  package installation, preview, updates and guided legacy-profile migration;
+  existing Docker apps are not automatically migrated.
+- Playback-only audio forwarding from a private per-user virtual speaker to the
+  browser. No host audio device, host microphone or browser microphone is used.
+  Xpra audio/GStreamer/PulseAudio packages are required; the installer checks an
+  additive package plan before installing dependencies. Click the native window
+  to allow sound under browser autoplay policies.
+
+### Fixed
+
+- Pointer motion, clicks and drags use the same remote-window coordinates,
+  including moved and scaled windows. Preserve button release outside a canvas
+  when dragging a Chrome tab into another window.
+- Repeated session snapshots no longer raise Chrome over other apps. Focusing an
+  already focused RAST window no longer recursively notifies window subscribers.
+- Adopted canvas repaint uses the visible desktop's animation clock rather than
+  the hidden viewer's clock, avoiding background-frame throttling.
+- Cold-launch recovery, private Chromium D-Bus sessions and initial frame refresh
+  from the unpublished 0.13.0 deployment are included.
+
+### Upgrade notes
+
+- Install Xpra 6.5+ with its HTML5/X11/audio components for native apps. Without
+  Xpra, legacy Docker apps remain available. Chromium's sandbox stays enabled.
+- Use the release installer for upgrades from 0.11.4 so native helper units,
+  permissions and audio dependencies are installed. Refresh open desktop tabs to
+  load the updated input/audio bridge. Existing graphical sessions keep their
+  startup options until ended and opened again; save work before ending a
+  session to enable audio.
+- Linux CI and release builds cover x86_64 and aarch64; macOS CI is temporarily
+  disabled. This release does not provide a macOS server binary.
+
+## [0.13.0] - 2026-11-13
+
+Schema v12 (`migrations/0012_native_linux_apps.sql`). The new native backend is
+the default for newly installed desktop apps when Xpra is installed; existing
+Docker-backed apps keep working and can be migrated from App Center.
+
+### Added
+
+- **Linux apps run natively.** Newly installed desktop applications (`.deb`,
+  AppImage, portable archive) no longer run inside a per-app Docker image and
+  streamed desktop; they are installed on the server and started as native
+  processes under the person's own unprivileged Linux identity. Each RAST user
+  gets one lazily started Xpra seamless session shared by all their
+  applications, and every native top-level window (including extra Chrome
+  windows and dialogs) is a RAST-managed window with its own taskbar entry,
+  title, focus, resize, minimize and close behaviour. Cold launch is much
+  faster and memory no longer duplicates a streamed desktop per application.
+  Includes: an installation preview for `.deb` packages (package identity,
+  version, architecture, dependency transaction with removals/conflicts),
+  Update from file/URL for existing apps, staged portable updates with a
+  recoverable previous version, safe archive validation (no path traversal,
+  links, special files or excessive expansion), AppImage extraction, package
+  ownership tracking so uninstall respects shared/independently installed
+  software, systemd/cgroup resource limits per session and per application,
+  memory-pressure-based admission, ACL-based access to the person's RAST home,
+  and a guided Docker->native migration of existing apps that keeps the app id,
+  shortcuts and profiles and retains the old data until cleanup.
+- Privileged native helper service (`rast-native.service`) and
+  `rast-linux.slice`; `rast doctor` checks Xpra, the helper socket, the slice
+  and the uid range.
+- New configuration keys `native_enabled`, `native_helper_socket`,
+  `linux_xpra_bin`, `linux_uid_base`, `linux_idle_minutes`,
+  `linux_session_memory_mb/cpus/tasks`, `linux_app_memory_mb/cpus/tasks` and
+  `linux_admission_reserve_mb` (see docs/CONFIGURATION.md).
+
+### Fixed
+
+- Native windows now reliably appear after a launch initiated from the desktop
+  UI (the user-visible "Google Chrome did not open in time" case): the shell
+  re-reads the shim window snapshot once per second (a session created by the
+  launch could publish its state before the shell attached its listeners),
+  reloads only the embedded viewer once if a launched app still has no window
+  after eight seconds (the viewer could connect before the Xpra web server was
+  ready), pulls the first frame right after adopting a window (no more
+  momentarily black bodies), and the first-launch window timeout is 240 s
+  instead of 30 s. Chromium/Electron apps run through `dbus-run-session`, so
+  they no longer stall for minutes retrying D-Bus calls during a cold start.
+- CI: the macOS job is disabled for now (the native Linux back-end and its
+  tests are Linux-only) and two native unit tests no longer depend on the CI
+  runner's binaries (`/usr/bin/xpra` is provided by the test fixture;
+  `/usr/bin/firefox` on Ubuntu runners is a snap wrapper).
+- Migration of a Docker app to the native backend works on a real host: the
+  Docker worker may write legacy volume exports under
+  `<data_dir>/linux-apps/migrations` (its sandbox previously returned EROFS),
+  legacy data is imported into the identity-owned profile by the privileged
+  helper (`profile_install`, with a server-writable staging tree), and the
+  adopted app gets the configured native memory/CPU limits instead of the old
+  Docker values (which made the first launch fail validation).
+- The first painting of a native window now always fills its RAST window; a
+  freshly started browser window that initially matched the Xpra virtual screen
+  could keep its old scale and show only in the top-left corner until resized.
+- `rast doctor` no longer warns that an unprivileged run "must be root": the
+  root requirement belongs to `rast-native.service`, whose state is checked
+  separately.
+- Native Chromium launches no longer hang or delegate to a dead instance when a
+  previous browser process left `Singleton*` files in its profile: the
+  privileged helper removes those stale files (narrowly scoped to the person's
+  profile, only Chromium/Electron singleton names) before starting a browser,
+  and the launcher adds only the ordinary first-run flags. The Chromium sandbox
+  stays enabled; `--no-sandbox` is never used.
+- Native apps receive the X11 auth file the running Xvfb actually uses (it may
+  be `$HOME/.Xauthority` or Xpra's runtime fallback), discovered by the helper
+  from the session process tree, and the session manager recreates a session
+  whose identity home had to be repaired instead of leaving stale windows.
+- `rast-native.service` and the installer now enforce the canonical native
+  directory modes (`linux-apps` 0751, `apps` 0755, `staging` 0750,
+  `profiles`/`linux-users` 0711, per-user homes 0700) and repair a data
+  directory that lacks the traverse bit, so app processes can chdir into their
+  profiles on a fresh host.
+
+### Changed
+
+- The legacy Docker backend remains for apps installed before this release
+  (`backend = "docker"`) and can be enabled for new installs with
+  `native_enabled = false`; legacy apps work unchanged until an administrator
+  migrates them.
+- The unconditional 4 GiB free-memory requirement for starting a Linux app was
+  replaced by memory-pressure-based admission with a configurable reserve.
+- Chromium sandbox: native Chrome/Chromium launches keep the browser sandbox
+  enabled and run without root; the legacy image's `--no-sandbox` is gone.
 
 ### Planned
 
@@ -1461,7 +1711,6 @@ server required.
   `>=0.39.0` is blocked by `sqlx 0.9.0`'s dependency constraint and needs an
   upstream update. CI ignores exactly this advisory (any other advisory fails
   the build) and the exposure/limits are documented in
-  [SECURITY.md](SECURITY.md#known-dependency-advisory-01).
+  [SECURITY.md](SECURITY.md#known-dependency-advisory-010).
 - Frontend build requires Node.js >= 22 and npm (build-time only); the
   installed server needs neither.
-

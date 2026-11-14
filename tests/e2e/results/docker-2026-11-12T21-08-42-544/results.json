@@ -1,0 +1,31 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8731",
+  "startedAt": "2026-11-12T21:08:43.921Z",
+  "finishedAt": "2026-11-12T21:08:46.290Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "docker",
+      "status": "pass",
+      "startedAt": "2026-11-12T21:08:43.921Z",
+      "durationMs": 2318,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.12.0 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "error": null
+    }
+  ]
+}

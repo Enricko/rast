@@ -1,5 +1,9 @@
 # RAST: start the app. When it closes, the container stops (svc-rast-exit).
 # The window bar appears only while the app has more than one window.
+#
+# A compositor keeps every window's own contents available to the per-window
+# streams: a covered window would otherwise capture black where it is covered.
+xcompmgr -a >/dev/null 2>&1 &
 /rast/windows &
 /rast/launch
 touch /tmp/.rast-app-exited

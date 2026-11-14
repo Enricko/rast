@@ -1,0 +1,358 @@
+#!/lsiopy/bin/python3
+"""RAST: window control service for per-window streaming.
+
+The app's windows are streamed one by one, so the RAST server needs to know
+which windows exist and needs a way to start (and stop) a VNC server for one
+window. This service runs inside the app container; the RAST server reaches it
+through a port published on the host's loopback only.
+
+Endpoints:
+  GET    /health            -> {"ok": true}
+  GET    /windows           -> {"windows": [Window, ...]}
+  POST   /vnc/<window>      -> {"port": <container port>, "slot": n}  (idempotent)
+  DELETE /vnc/<window>      -> {"ok": true}
+  POST   /close/<window>    -> {"ok": true}
+
+Window: {id, title, x, y, width, height, state: normal|maximized|minimized,
+         type, transient, streaming}
+
+The window ids are hex X11 ids ("0x1200002"), the same ids x11vnc takes.
+"""
+
+import base64
+import json
+import os
+import secrets
+import socket
+import subprocess
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from selkies.Xlib import X, display as xdisplay
+
+CONTROL_PORT = int(os.environ.get("RAST_CONTROL_PORT") or 3021)
+# The RAST server authenticates with the app's per-start password (the same
+# Basic credentials the app page uses); nothing else may use this service.
+PASSWORD = os.environ.get("PASSWORD") or ""
+AUTHORIZATION = "Basic " + base64.b64encode(f"rast:{PASSWORD}".encode()).decode()
+VNC_PORTS = [
+    int(port)
+    for port in (os.environ.get("RAST_VNC_PORTS") or "5910,5911,5912,5913").split(",")
+    if port.strip()
+]
+DISPLAY_NAME = os.environ.get("DISPLAY") or ":1"
+
+_lock = threading.RLock()
+# window id (hex string) -> {"slot", "port", "password", "password_file", "proc"}
+_streams = {}
+
+
+# --------------------------------------------------------------------- X11
+
+
+def _atom_names(display, window, name):
+    names = []
+    try:
+        atoms = window.get_full_property(display.intern_atom(name), X.AnyPropertyType)
+        for atom in list(atoms.value) if atoms else []:
+            try:
+                names.append(display.get_atom_name(atom))
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return names
+
+
+def _title(display, window):
+    try:
+        value = window.get_full_property(
+            display.intern_atom("_NET_WM_NAME"), display.intern_atom("UTF8_STRING")
+        )
+        if value and value.value:
+            title = value.value.decode("utf-8", "replace")
+            if title:
+                return title
+    except Exception:
+        pass
+    try:
+        return window.get_wm_name() or ""
+    except Exception:
+        return ""
+
+
+def _window_type(display, window):
+    names = _atom_names(display, window, "_NET_WM_WINDOW_TYPE")
+    for name in names:
+        return name.removeprefix("_NET_WM_WINDOW_TYPE_").lower()
+    return "normal"
+
+
+def _state(display, window):
+    names = _atom_names(display, window, "_NET_WM_STATE")
+    if "_NET_WM_STATE_HIDDEN" in names:
+        return "minimized"
+    if (
+        "_NET_WM_STATE_MAXIMIZED_VERT" in names
+        and "_NET_WM_STATE_MAXIMIZED_HORZ" in names
+    ):
+        return "maximized"
+    return "normal"
+
+
+def _absolute_position(display, window):
+    """Top-left corner of `window` in root coordinates (walk the frame tree)."""
+    root = display.screen().root
+    x = y = 0
+    current = window
+    while current.id != root.id:
+        geometry = current.get_geometry()
+        x += geometry.x
+        y += geometry.y
+        tree = current.query_tree()
+        if tree is None or tree.parent is None or tree.parent.id == 0:
+            break
+        current = tree.parent
+    return x, y
+
+
+def _windows():
+    display = xdisplay.Display(DISPLAY_NAME)
+    try:
+        root = display.screen().root
+        clients = root.get_full_property(
+            display.intern_atom("_NET_CLIENT_LIST"), X.AnyPropertyType
+        )
+        windows = []
+        for wid in list(clients.value) if clients else []:
+            window = display.create_resource_object("window", wid)
+            try:
+                if window.get_attributes().map_state != X.IsViewable:
+                    if _state(display, window) != "minimized":
+                        continue
+                geometry = window.get_geometry()
+                absolute_x, absolute_y = _absolute_position(display, window)
+                transient = window.get_full_property(
+                    display.intern_atom("WM_TRANSIENT_FOR"), X.AnyPropertyType
+                )
+                wid_hex = hex(wid)
+                with _lock:
+                    streaming = (
+                        wid_hex in _streams
+                        and _streams[wid_hex]["proc"].poll() is None
+                    )
+                windows.append(
+                    {
+                        "id": wid_hex,
+                        "title": _title(display, window),
+                        "x": absolute_x,
+                        "y": absolute_y,
+                        "width": geometry.width,
+                        "height": geometry.height,
+                        "state": _state(display, window),
+                        "type": _window_type(display, window),
+                        "transient": bool(transient and transient.value),
+                        "streaming": streaming,
+                    }
+                )
+            except Exception:
+                continue
+        return windows
+    finally:
+        try:
+            display.close()
+        except Exception:
+            pass
+
+
+# -------------------------------------------------------------------- VNC
+
+
+def _port_open(port, timeout=0.25):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _reap():
+    with _lock:
+        for wid_hex, record in list(_streams.items()):
+            if record["proc"].poll() is not None:
+                del _streams[wid_hex]
+                try:
+                    os.unlink(record["password_file"])
+                except OSError:
+                    pass
+
+
+def _start_stream(wid_hex):
+    with _lock:
+        _reap()
+        record = _streams.get(wid_hex)
+        if record and record["proc"].poll() is None:
+            return {
+                "port": record["port"],
+                "slot": record["slot"],
+                "password": record["password"],
+            }
+        used = {entry["slot"] for entry in _streams.values()}
+        free = [slot for slot in range(len(VNC_PORTS)) if slot not in used]
+        if not free:
+            raise RuntimeError("no free window stream")
+        slot = free[0]
+        port = VNC_PORTS[slot]
+        password = secrets.token_urlsafe(12)
+        password_file = f"/tmp/rast-vnc-{slot}.passwd"
+        subprocess.run(
+            ["x11vnc", "-storepasswd", password, password_file],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        proc = subprocess.Popen(
+            [
+                "x11vnc",
+                "-display",
+                DISPLAY_NAME,
+                "-id",
+                wid_hex,
+                "-rfbport",
+                str(port),
+                "-rfbauth",
+                password_file,
+                "-forever",
+                "-shared",
+                "-quiet",
+                "-noxdamage",
+                "-noipv6",
+                "-wait",
+                "30",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _streams[wid_hex] = {
+            "slot": slot,
+            "port": port,
+            "password": password,
+            "password_file": password_file,
+            "proc": proc,
+        }
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        if _port_open(port):
+            return {"port": port, "slot": slot, "password": password}
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    with _lock:
+        _streams.pop(wid_hex, None)
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    raise RuntimeError("the window stream did not start")
+
+
+def _stop_stream(wid_hex):
+    with _lock:
+        record = _streams.pop(wid_hex, None)
+    if record:
+        try:
+            record["proc"].terminate()
+        except Exception:
+            pass
+        try:
+            os.unlink(record["password_file"])
+        except OSError:
+            pass
+    return {"ok": True}
+
+
+def _close_window(wid_hex):
+    result = subprocess.run(
+        ["xdotool", "windowclose", wid_hex],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+    if result.returncode != 0:
+        raise RuntimeError("the window could not be closed")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------- HTTP
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "rast-control"
+
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        pass
+
+    def _send(self, status, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle(self, method):
+        if self.headers.get("Authorization", "") != AUTHORIZATION:
+            return self._send(401, {"error": "unauthorized"})
+        path = self.path.split("?", 1)[0].strip("/")
+        parts = path.split("/") if path else []
+        try:
+            if method == "GET" and parts == ["health"]:
+                return self._send(200, {"ok": True})
+            if method == "GET" and parts == ["windows"]:
+                return self._send(200, {"windows": _windows()})
+            if len(parts) == 2 and parts[0] == "vnc":
+                if method == "POST":
+                    return self._send(200, _start_stream(parts[1]))
+                if method == "DELETE":
+                    return self._send(200, _stop_stream(parts[1]))
+            if method == "POST" and len(parts) == 2 and parts[0] == "close":
+                return self._send(200, _close_window(parts[1]))
+            return self._send(404, {"error": "unknown endpoint"})
+        except Exception as error:  # keep the service answering
+            return self._send(500, {"error": str(error)})
+
+    def do_GET(self):  # noqa: N802 - stdlib name
+        self._handle("GET")
+
+    def do_POST(self):  # noqa: N802 - stdlib name
+        self._handle("POST")
+
+    def do_DELETE(self):  # noqa: N802 - stdlib name
+        self._handle("DELETE")
+
+
+def _cleanup_leftovers():
+    """A restarted service must not leave old streams (and their ports) behind."""
+    subprocess.run(
+        ["pkill", "-f", "x11vnc -display"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    for slot in range(len(VNC_PORTS)):
+        try:
+            os.unlink(f"/tmp/rast-vnc-{slot}.passwd")
+        except OSError:
+            pass
+
+
+def main():
+    _cleanup_leftovers()
+    server = ThreadingHTTPServer(("0.0.0.0", CONTROL_PORT), Handler)
+    server.daemon_threads = True
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

@@ -172,9 +172,13 @@ class PackageCenterApp {
     });
     this.linuxButton = h(
       "button",
-      { class: "btn btn-ghost btn-sm", type: "button", title: "Install a .deb package, an AppImage or a .tar.gz archive" },
+      {
+        class: "btn btn-primary btn-sm pkg-install-button",
+        type: "button",
+        title: "Install a Linux application on this server",
+      },
       iconSvg("plus", 14),
-      h("span", { class: "pkg-btn-label" }, "Add app"),
+      h("span", { class: "pkg-btn-label" }, "Install Linux App"),
     );
     this.linuxButton.addEventListener("click", () => this.linux.openAdd());
     const toolbar = h(
@@ -185,14 +189,13 @@ class PackageCenterApp {
       this.search,
       this.githubButton,
       this.settingsButton,
+      this.linuxButton,
       this.live.el,
     );
     this.sidebar = h("nav", { class: "app-sidebar pkg-sidebar", ariaLabel: "Package views" });
     this.main = h("div", { class: "app-main pkg-main" });
     ctx.root.classList.add("packages-app");
     ctx.root.append(toolbar, this.notice.el, h("div", { class: "app-split pkg-split" }, this.sidebar, this.main));
-    // "Add app" is hidden for now; drag-and-drop installation is disabled
-    // with it so the feature cannot be reached accidentally.
 
     this.subscribe();
     // Keep relative times and the stale indicator honest without a reload.
@@ -288,7 +291,7 @@ class PackageCenterApp {
     }
     this.checkButton.classList.toggle("hidden", this.readOnly);
     this.githubButton.classList.toggle("hidden", this.readOnly);
-    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.enabled);
+    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.available);
     for (const el of [this.settingsButton, this.backButton, this.search]) el.classList.remove("hidden");
     if (wasDenied) void this.reload();
   }
@@ -296,6 +299,11 @@ class PackageCenterApp {
   // ---------------------------------------------------------------- realtime
 
   private subscribe(): void {
+    // Linux app rows appear and change status during install/update jobs; keep
+    // the list (and the reattached job progress) current without a manual reload.
+    this.lc.add(
+      this.realtime.on<{ id?: string }>("linuxapps.changed", () => void this.linux.reload()),
+    );
     this.lc.add(
       this.realtime.on<PackageEvent>("package.changed", (data) => {
         if (data?.jobId && data.packageId) {
@@ -638,9 +646,17 @@ class PackageCenterApp {
     if (this.linuxGrid && this.linuxSection) {
       clear(this.linuxGrid);
       for (const app of linuxApps) this.linuxGrid.appendChild(this.linux.tile(app));
-      // Adding Linux apps ("Add app") is hidden for now: installed apps stay
-      // listed and can be opened/updated, but no install entry is offered.
-      this.linuxSection.hidden = linuxApps.length === 0;
+      // An empty All Packages list offers the install as a tile.
+      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.available;
+      if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
+      this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
+      // Docker -> native migration notice: only when the server supports native apps.
+      this.linuxSection.querySelector(".native-migration-notice")?.remove();
+      const migrationNotice = this.linux.migrationNotice();
+      if (migrationNotice && !this.linuxSection.hidden) {
+        migrationNotice.classList.add("native-migration-notice");
+        this.linuxSection.insertBefore(migrationNotice, this.linuxGrid);
+      }
     }
     // App-type packages are shown in the Apps section above, not as runtimes.
     const runtimePackages = (this.overview?.packages ?? []).filter(

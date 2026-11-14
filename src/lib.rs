@@ -18,6 +18,7 @@ pub mod events;
 pub mod jobs;
 pub mod linux_apps;
 pub mod monitor;
+pub mod native;
 pub mod packages;
 pub mod realtime;
 pub mod secrets;

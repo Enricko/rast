@@ -34,6 +34,13 @@ const DOWNLOAD_BASE: &str = "https://github.com/Enricko/rast/releases/download";
 const SERVICE: &str = "rast.service";
 /// The Docker helper runs the same binary; it must be restarted with it.
 const WORKER_SERVICE: &str = "rast-worker.service";
+/// The privileged native helper runs the same binary too; a helper left on the
+/// previous binary rejects operations added by an update.
+const NATIVE_SERVICE: &str = "rast-native.service";
+const NATIVE_UNIT: &str = "/etc/systemd/system/rast-native.service";
+const NATIVE_TMPFILES: &str = "/etc/tmpfiles.d/rast-native.conf";
+/// The configuration path the release installer manages.
+const INSTALLER_CONFIG: &str = "/etc/rast/rast.toml";
 pub const BIN_PATH: &str = "/usr/local/bin/rast";
 
 pub async fn run(
@@ -128,6 +135,32 @@ pub async fn run(
         );
     }
 
+    // Releases after 0.11.4 add the native backend: its systemd unit, tmpfiles
+    // and directories are installed by the installer, not by the binary. An
+    // update must not leave an enabled backend without its helper, so missing
+    // assets are installed with the release's own installer before the new
+    // binary is started.
+    let installer = plan_asset_refresh(&cfg, &work, &version, &sums)?;
+    if installer.is_some() && !installer_downloader_available() {
+        return Err(format!(
+            "the native backend is enabled but `{NATIVE_UNIT}` is missing and the release \
+             installer needs curl or wget to install the missing assets. Install the update \
+             manually with: sh install.sh --version {version}"
+        )
+        .into());
+    }
+    let asset_base = match (installer.as_deref(), local_release_supported()) {
+        (Some(_), true) => Some(stage_local_release(
+            &work,
+            &version,
+            arch,
+            &binary_path,
+            &sums,
+            installer.as_deref().unwrap(),
+        )?),
+        _ => None,
+    };
+
     // ---- database backup before any migration ------------------------------
     let backup_meta = backup_before_update(&cfg).await?;
     println!("database backup: {}", backup_meta["path"]);
@@ -151,14 +184,48 @@ pub async fn run(
     fs::rename(&staged, BIN_PATH)?;
     println!("binary replaced with {version}");
 
+    let mut installed_cfg = cfg.clone();
+    if let Some(installer) = installer.as_deref() {
+        let base = asset_base.as_deref();
+        if let Err(error) = run_release_installer(installer, base, &version).await {
+            // Do not leave the machine on a binary whose native backend has no
+            // helper: restore the previous binary and let the operator run the
+            // installer explicitly.
+            rollback(&rollback_path)?;
+            restart_worker().await;
+            restart_native_helper(&cfg).await;
+            return Err(format!(
+                "{error}
+The previous binary was restored. Install this release with the installer to
+add the missing native service assets, then run `rast update` again."
+            )
+            .into());
+        }
+        // The installer may have recorded a different effective backend (for
+        // example it disables native when Xpra is unavailable).
+        installed_cfg = Config::load(None).unwrap_or(cfg.clone());
+    }
+
     println!("restarting {SERVICE}…");
     let restarted = run_cmd("systemctl", &["restart", SERVICE]).await?;
     if !restarted {
         rollback(&rollback_path)?;
         restart_worker().await;
+        restart_native_helper(&cfg).await;
         return Err("service failed to restart after update; previous binary restored".into());
     }
     restart_worker().await;
+    restart_native_helper(&installed_cfg).await;
+
+    // Never report a green update while an enabled backend has no helper.
+    if installed_cfg.native_enabled && !Path::new(NATIVE_UNIT).exists() {
+        return Err(format!(
+            "RAST {version} is installed and the web server is healthy, but native Linux apps \
+             are enabled in the configuration and {NATIVE_UNIT} is missing. The native backend \
+             will not work until the release installer is run: sh install.sh --version {version}"
+        )
+        .into());
+    }
 
     // Health check (bounded retries).
     let healthy = wait_for_health(Duration::from_secs(20)).await;
@@ -167,6 +234,7 @@ pub async fn run(
         rollback(&rollback_path)?;
         let _ = run_cmd("systemctl", &["restart", SERVICE]).await;
         restart_worker().await;
+        restart_native_helper(&cfg).await;
         return Err("health check failed after update; rolled back".into());
     }
 
@@ -353,6 +421,200 @@ fn download_file(url: &str, target: &Path) -> Result<String, Box<dyn std::error:
     Ok(hex::encode(Sha256::digest(&bytes)))
 }
 
+/// Are the native backend's service assets (installed by the installer, not
+/// by the binary) missing while the configuration enables the backend?
+fn assets_missing(native_enabled: bool, unit: &Path, tmpfiles: &Path, layout: &Path) -> bool {
+    native_enabled && (!unit.is_file() || !tmpfiles.is_file() || !layout.is_dir())
+}
+
+fn native_assets_missing(cfg: &Config) -> bool {
+    assets_missing(
+        cfg.native_enabled,
+        Path::new(NATIVE_UNIT),
+        Path::new(NATIVE_TMPFILES),
+        &cfg.linux_apps_dir(),
+    )
+}
+
+fn local_release_path(base: &Path, version: &str) -> PathBuf {
+    base.join(format!("v{version}"))
+}
+
+/// Can the release installer reach a download URL (it uses curl or wget)?
+fn installer_downloader_available() -> bool {
+    ["curl", "wget"].iter().any(|program| {
+        std::process::Command::new(program)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    })
+}
+
+/// Can a local `file://` release base be used (curl supports it, wget does not)?
+fn local_release_supported() -> bool {
+    std::process::Command::new("curl")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Download the release installer and verify it against the release
+/// checksums. Returns `None` when no asset refresh is needed.
+fn plan_asset_refresh(
+    cfg: &Config,
+    work: &Path,
+    version: &str,
+    sums: &str,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    if !native_assets_missing(cfg) {
+        return Ok(None);
+    }
+    if !Path::new(INSTALLER_CONFIG).is_file() {
+        return Err(format!(
+            "native Linux apps are enabled but their service assets are missing and \
+             {INSTALLER_CONFIG} does not exist, so the release installer cannot be invoked \
+             automatically. Run the release installer manually, then `rast update` again."
+        )
+        .into());
+    }
+    if let Some(path) = cfg.loaded_from.as_deref() {
+        if path != Path::new(INSTALLER_CONFIG) {
+            return Err(format!(
+                "native Linux apps are enabled but their service assets are missing, and RAST \
+                 uses a custom configuration file ({}). Run the release installer manually, \
+                 then `rast update` again.",
+                path.display()
+            )
+            .into());
+        }
+    }
+    let tag = format!("v{version}");
+    let url = format!("{DOWNLOAD_BASE}/{tag}/install.sh");
+    println!("downloading install.sh (native service assets are missing)…");
+    let installer = work.join("release-install.sh");
+    let actual = download_file(&url, &installer)?;
+    let expected = find_checksum(sums, "install.sh")
+        .ok_or("the release SHA256SUMS file has no entry for install.sh")?;
+    if !actual.eq_ignore_ascii_case(&expected) {
+        return Err(format!(
+            "checksum mismatch for install.sh: expected {expected}, got {actual}; refusing to \
+             install the native service assets"
+        )
+        .into());
+    }
+    println!("checksum verified: install.sh");
+    Ok(Some(installer))
+}
+
+/// Stage the already-downloaded release files as a local `file://` release so
+/// the installer re-verifies and installs exactly this release without a
+/// second network download.
+fn stage_local_release(
+    work: &Path,
+    version: &str,
+    arch: &str,
+    binary: &Path,
+    sums: &str,
+    installer: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let base = work.join("local-release");
+    let dir = local_release_path(&base, version);
+    fs::create_dir_all(&dir)?;
+    fs::copy(binary, dir.join(format!("rast-linux-{arch}")))?;
+    fs::write(dir.join("SHA256SUMS"), sums)?;
+    fs::copy(installer, dir.join("install.sh"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir.join("install.sh"), fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(base)
+}
+
+/// Run the release installer in `--no-start` mode so it installs/refreshes the
+/// systemd units, tmpfiles and directories (the "embedded unit install"), then
+/// let the caller restart the services on the new binary.
+async fn run_release_installer(
+    installer: &Path,
+    base: Option<&Path>,
+    version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("installing the release's native service assets (no service restart)…");
+    let mut command = tokio::process::Command::new("sh");
+    command
+        .arg(installer)
+        .arg("--version")
+        .arg(version)
+        .arg("--no-start")
+        .env("RAST_VERSION", version)
+        .env("RAST_NO_START", "1");
+    if let Some(base) = base {
+        command.env(
+            "RAST_RELEASE_BASE_URL",
+            format!("file://{}", base.display()),
+        );
+    }
+    let output = command.output().await?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for line in stdout
+            .lines()
+            .chain(stderr.lines())
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            eprintln!("  {line}");
+        }
+        return Err(format!(
+            "the release installer could not install the missing native service assets              (exit {}); install this release manually with: sh install.sh --version {version}",
+            output.status
+        )
+        .into());
+    }
+    println!("native service assets installed");
+    Ok(())
+}
+
+/// Restart the privileged native helper so it runs the updated binary, and
+/// refresh the native runtime directories from the installed tmpfiles asset.
+/// Best effort like [`restart_worker`]: an old helper is reported by
+/// `rast doctor`, and a helper that is not installed is left alone.
+async fn restart_native_helper(cfg: &Config) {
+    if Path::new(NATIVE_TMPFILES).exists() {
+        match run_cmd("systemd-tmpfiles", &["--create", NATIVE_TMPFILES]).await {
+            Ok(true) => println!("refreshed the native runtime directories"),
+            _ => eprintln!(
+                "note: could not refresh {NATIVE_TMPFILES}; run: systemd-tmpfiles --create                  {NATIVE_TMPFILES}"
+            ),
+        }
+    }
+    if !Path::new(NATIVE_UNIT).exists() {
+        if cfg.native_enabled {
+            eprintln!(
+                "note: {NATIVE_UNIT} is missing, so native Linux apps cannot start; run the \
+                 release installer to add the native service assets"
+            );
+        }
+        return;
+    }
+    match run_cmd("systemctl", &["try-restart", NATIVE_SERVICE]).await {
+        Ok(true) => println!("restarted {NATIVE_SERVICE} (if it was running)"),
+        Ok(false) | Err(_) => eprintln!(
+            "note: could not restart {NATIVE_SERVICE}; run `systemctl restart {NATIVE_SERVICE}`"
+        ),
+    }
+}
+
 /// Restart the Docker helper if it is running, so it uses the binary now in
 /// place (a helper left on the old binary refuses actions added since). Not
 /// fatal: the server is already up, and `rast doctor` reports a stale helper.
@@ -485,6 +747,45 @@ mod tests {
             Some("1111111111111111111111111111111111111111111111111111111111111111")
         );
         assert!(find_checksum(sums, "missing").is_none());
+    }
+
+    #[test]
+    fn native_assets_are_needed_only_when_enabled_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join("rast-native.service");
+        let tmpfiles = dir.path().join("rast-native.conf");
+        let layout = dir.path().join("linux-apps");
+        // A disabled backend never needs assets, even when the files are absent.
+        assert!(!assets_missing(false, &unit, &tmpfiles, &layout));
+        // An enabled backend without its unit/tmpfiles/layout needs them.
+        assert!(assets_missing(true, &unit, &tmpfiles, &layout));
+        std::fs::write(&unit, b"unit").unwrap();
+        std::fs::write(&tmpfiles, b"tmpfiles").unwrap();
+        assert!(assets_missing(true, &unit, &tmpfiles, &layout));
+        std::fs::create_dir(&layout).unwrap();
+        assert!(!assets_missing(true, &unit, &tmpfiles, &layout));
+    }
+
+    #[test]
+    fn local_release_layout_matches_installer_expectations() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let binary = work.join("rast-linux-x86_64.download");
+        std::fs::write(&binary, b"binary bytes").unwrap();
+        let installer = work.join("release-install.sh");
+        std::fs::write(&installer, b"#!/bin/sh\n").unwrap();
+        let sums = "aa  rast-linux-x86_64\nbb  install.sh\n";
+        let base = stage_local_release(&work, "9.9.9", "x86_64", &binary, sums, &installer)
+            .expect("stage local release");
+        let dir = local_release_path(&base, "9.9.9");
+        assert!(dir.join("rast-linux-x86_64").is_file());
+        assert!(dir.join("install.sh").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("SHA256SUMS")).unwrap(),
+            sums
+        );
+        assert_eq!(local_release_path(&base, "1.2.3"), base.join("v1.2.3"));
     }
 
     #[test]

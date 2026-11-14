@@ -123,8 +123,10 @@ jobs:
             echo "Both binaries were smoke-tested on their native build runners"
             echo "(GitHub-hosted x86_64 and arm64): the server started with a temporary"
             echo "config, answered \`/healthz\`, accepted CLI administrator creation and a"
-            echo "JSON API login. The installer itself is exercised on Ubuntu 24.04 in a"
-            echo "disposable systemd container."
+            echo "JSON API login. This workflow does not exercise native Xpra window/input"
+            echo "or audio playback. The separate disposable-systemd installer harness"
+            echo "can be run with scripts/test-installer-clean.sh; its results are not"
+            echo "implied by a successful release build."
             echo
             echo "## Provenance"
             echo

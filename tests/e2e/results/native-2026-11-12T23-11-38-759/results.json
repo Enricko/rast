@@ -1,0 +1,65 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T23:11:40.044Z",
+  "finishedAt": "2026-11-12T23:14:45.283Z",
+  "scenarios": [
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T23:11:40.044Z",
+      "durationMs": 130273,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "initial Chrome windows: [\"Starting Google Chrome…\"]"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: timed out waiting for a mirrored Chrome window; windows now: []\n    at Module.waitForWindows (file:///home/lufria/RAST/tests/e2e/lib/browser.mjs:186:13)\n    at async openChromeWindowFromInside (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:22:19)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:49:7)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:233:7)"
+    },
+    {
+      "id": "i",
+      "title": "Idle cleanup stops the session after use",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T23:13:50.318Z",
+      "durationMs": 54912,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job 3dbf48a2-bac7-4e64-bfc9-5cd40e78e5d7",
+        "[install RAST Test App (portable)] job 3dbf48a2-bac7-4e64-bfc9-5cd40e78e5d7: done Installed",
+        "native profile ancestor permissions fixed (0711)",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native profile ancestor permissions fixed (0711)",
+        "session before cleanup: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"bc2cdaae84fed7cd\",\"startedAt\":1794525109439,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"6651a22abeb6d236\",\"startedAt\":1794525232484,\"status\":",
+        "other active runs in the session: [\"chrome\"]",
+        "windows closed; waiting for the backend to clean up",
+        "session cleaned up after 51.2 s (grace 120s)",
+        "shared session still has other apps running: false",
+        "session unit after cleanup: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"1686759\",\"Result\":\"success\",\"MemoryCurrent\":\"215785472\",\"CPUUsageNSec\":\"2352568000\",\"TasksCurrent\":\"9\"}",
+        "app units after cleanup: 0"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/i/after-idle-cleanup.png"
+      ],
+      "metrics": {
+        "cleanupMs": {
+          "value": 51234,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/i/after-idle-cleanup.png"
+      ],
+      "error": null
+    }
+  ]
+}

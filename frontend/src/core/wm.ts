@@ -26,6 +26,10 @@ export interface WindowInfo {
   focused: boolean;
   /** Current geometry inside the desktop layer. */
   rect: WindowRect;
+  /** The window this transient dialog belongs to (if any). */
+  ownerId: string | null;
+  /** False for transient dialogs: they get no taskbar entry. */
+  taskbar: boolean;
 }
 
 export interface WindowHandle {
@@ -41,6 +45,10 @@ export interface WindowHandle {
   isMinimized(): boolean;
   isMaximized(): boolean;
   isClosed(): boolean;
+  /** Current geometry inside the desktop layer (a copy). */
+  getRect(): WindowRect;
+  /** Move the window to a desktop position (used to keep dialogs with their owner). */
+  moveTo(x: number, y: number): void;
   onResize(callback: () => void): () => void;
 }
 
@@ -57,6 +65,8 @@ interface WindowRecord {
   maximized: boolean;
   tiled: "left" | "right" | null;
   prevRect: WindowRect | null;
+  ownerId: string | null;
+  taskbar: boolean;
   resizeCallbacks: Set<() => void>;
   closeCallbacks: Set<() => void>;
   cleanup: Array<() => void>;
@@ -85,6 +95,7 @@ export class WindowManager {
   private readonly mobileHandler: () => void;
   private readonly resizeHandler: () => void;
   private resizeFrame: number | undefined;
+  private readonly changeListeners = new Set<(windows: WindowInfo[]) => void>();
   private cascade = 0;
   private snapPreview: HTMLElement | null = null;
   private snapZone: "left" | "right" | "top" | null = null;
@@ -134,6 +145,12 @@ export class WindowManager {
       rect?: WindowRect;
       maximized?: boolean;
       minimized?: boolean;
+      /** Transient dialog: attach to this window, always above it, no taskbar entry. */
+      ownerId?: string;
+      /** Override the taskbar visibility (transient dialogs default to false). */
+      taskbar?: boolean;
+      /** Initial geometry (e.g. a dialog placed next to its owner). */
+      initialRect?: WindowRect;
     } = {},
   ): WindowHandle {
     if (options.singleton) {
@@ -197,13 +214,25 @@ export class WindowManager {
       maximized: false,
       tiled: null,
       prevRect: null,
+      ownerId: options.ownerId ?? null,
+      taskbar: options.taskbar ?? !(options.ownerId != null),
       resizeCallbacks: new Set(),
       closeCallbacks: new Set(),
       cleanup: [],
     };
     this.records.set(id, record);
     this.host.appendChild(el);
-    if (options.rect) {
+    if (options.initialRect) {
+      // Transient surfaces carry their own geometry (already computed from
+      // the owner's content area); clamp it to the current viewport.
+      const bounds = this.bounds();
+      const rect = options.initialRect;
+      const w = Math.min(rect.w, Math.max(MIN_SIZE.w, bounds.w - 16));
+      const h = Math.min(rect.h, Math.max(MIN_SIZE.h, bounds.h - 16));
+      const x = Math.min(Math.max(8, rect.x), Math.max(8, bounds.w - w - 8));
+      const y = Math.min(Math.max(8, rect.y), Math.max(8, bounds.h - h - 8));
+      this.setRect(record, { x, y, w, h });
+    } else if (options.rect) {
       const bounds = this.bounds();
       const rect = options.rect;
       const w = Math.min(rect.w, Math.max(MIN_SIZE.w, bounds.w - 16));
@@ -351,6 +380,13 @@ export class WindowManager {
       isClosed() {
         return !manager.records.has(record.id);
       },
+      getRect() {
+        return manager.rectOf(record);
+      },
+      moveTo(x: number, y: number) {
+        const rect = manager.rectOf(record);
+        manager.setRect(record, { x, y, w: rect.w, h: rect.h });
+      },
       onResize(cb: () => void) {
         record.resizeCallbacks.add(cb);
         return () => record.resizeCallbacks.delete(cb);
@@ -365,6 +401,12 @@ export class WindowManager {
     return undefined;
   }
 
+  /** Current geometry of an open window (or null when it is gone). */
+  rectOfId(id: string): WindowRect | null {
+    const record = this.records.get(id);
+    return record ? this.rectOf(record) : null;
+  }
+
   findWindow(appId: string): WindowHandle | null {
     const record = this.findByApp(appId);
     return record ? this.handle(record) : null;
@@ -377,7 +419,7 @@ export class WindowManager {
 
   focus(id: string): void {
     const record = this.records.get(id);
-    if (!record) return;
+    if (!record || this.focusedId === id) return;
     this.focusedId = id;
     this.zCounter += 1;
     record.el.style.zIndex = String(this.zCounter);
@@ -461,6 +503,10 @@ export class WindowManager {
   close(id: string): void {
     const record = this.records.get(id);
     if (!record) return;
+    // Transient dialogs belong to their owner: closing the owner closes them.
+    for (const other of Array.from(this.records.values())) {
+      if (other.ownerId === id) this.close(other.id);
+    }
     for (const cb of record.closeCallbacks) {
       try {
         cb();
@@ -510,6 +556,8 @@ export class WindowManager {
       tiled: record.tiled,
       focused: this.focusedId === record.id,
       rect: this.rectOf(record),
+      ownerId: record.ownerId,
+      taskbar: record.taskbar,
     }));
   }
 
@@ -817,7 +865,24 @@ export class WindowManager {
     };
   }
 
+  /**
+   * Subscribe to window list changes (open/close/focus/minimize/maximize/move).
+   * Used by the native Linux session to mirror RAST state to the X server.
+   */
+  subscribe(callback: (windows: WindowInfo[]) => void): () => void {
+    this.changeListeners.add(callback);
+    return () => this.changeListeners.delete(callback);
+  }
+
   private emitChange(): void {
-    this.options.onChange?.(this.list());
+    const windows = this.list();
+    this.options.onChange?.(windows);
+    for (const listener of [...this.changeListeners]) {
+      try {
+        listener(windows);
+      } catch (error) {
+        console.error("window change listener failed", error);
+      }
+    }
   }
 }

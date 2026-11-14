@@ -1,0 +1,243 @@
+{
+  "mode": "docker",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T21:27:56.127Z",
+  "finishedAt": "2026-11-12T21:29:51.267Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "docker",
+      "status": "pass",
+      "startedAt": "2026-11-12T21:27:56.127Z",
+      "durationMs": 3250,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.12.0 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/docker/s0/app-center.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:27:59.377Z",
+      "durationMs": 13881,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job 988d2a2f-7f28-4b2f-843e-5d275a92eee3 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 988d2a2f-7f28-4b2f-843e-5d275a92eee3 failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/a-install-deb.mjs:22:35)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "b",
+      "title": "Admin installs a portable archive and launches it",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:13.258Z",
+      "durationMs": 1517,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job 16b97ef0-f430-4a92-a7d0-0fb87d2a6bff for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 16b97ef0-f430-4a92-a7d0-0fb87d2a6bff failed: cannot prepare the staging folder: Permission denied (os error 13)\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensurePortableApp (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:78:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/b-portable-archive.mjs:17:18)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "c",
+      "title": "Same user opens Chrome and another GUI app (shared session)",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:14.775Z",
+      "durationMs": 1514,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job 378fc82a-844e-4276-90f3-1b512727fbea for app undefined",
+        "[install google-chrome-stable] install job f4bf9f95-dd72-4322-86ee-9016424dd722 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 378fc82a-844e-4276-90f3-1b512727fbea failed: cannot prepare the staging folder: Permission denied (os error 13)\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensurePortableApp (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:78:33)\n    at async Promise.all (index 1)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/c-shared-session.mjs:24:50)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:16.290Z",
+      "durationMs": 13756,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job c53ed289-c81e-4378-a635-81b7003e67d4 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job c53ed289-c81e-4378-a635-81b7003e67d4 failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/d-chrome-windows.mjs:33:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "e",
+      "title": "Two users use Chrome concurrently with separate data",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:30.046Z",
+      "durationMs": 13789,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job d79ae241-8b95-4e12-a0e2-b785930f724c for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job d79ae241-8b95-4e12-a0e2-b785930f724c failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/e-two-users.mjs:27:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "f",
+      "title": "Concurrent launch requests reuse the intended session",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:43.835Z",
+      "durationMs": 12284,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job 50d3c503-4164-42bc-8712-f5ad12b2d10c for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 50d3c503-4164-42bc-8712-f5ad12b2d10c failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/f-concurrent-launch.mjs:22:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "g",
+      "title": "Browser refresh reconnects without duplicating processes",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:28:56.119Z",
+      "durationMs": 12275,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job b52558a1-c369-4601-b6a7-5217d1898a36 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job b52558a1-c369-4601-b6a7-5217d1898a36 failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/g-refresh-reconnect.mjs:21:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "h",
+      "title": "Closing one app preserves the other apps",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:08.394Z",
+      "durationMs": 1517,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install RAST Test App (portable)] install job d8aaefc5-5bcd-4580-881d-cb163eae1615 for app undefined",
+        "[install google-chrome-stable] install job e1036169-1f93-4486-a31b-f592f85fdb49 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job d8aaefc5-5bcd-4580-881d-cb163eae1615 failed: cannot prepare the staging folder: Permission denied (os error 13)\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensurePortableApp (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:78:33)\n    at async Promise.all (index 1)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/h-close-preserves.mjs:24:50)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "i",
+      "title": "Idle cleanup stops the session after use",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:09.911Z",
+      "durationMs": 1514,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job debdbcdf-8965-4558-85d4-6d3d0ec870d5 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job debdbcdf-8965-4558-85d4-6d3d0ec870d5 failed: cannot prepare the staging folder: Permission denied (os error 13)\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensurePortableApp (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:78:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/i-idle-cleanup.mjs:26:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "j",
+      "title": "Service restart recovery",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:11.425Z",
+      "durationMs": 1514,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job 800f3853-48f7-4af7-8193-a089f761cc15 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 800f3853-48f7-4af7-8193-a089f761cc15 failed: cannot prepare the staging folder: Permission denied (os error 13)\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensurePortableApp (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:78:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/j-restart-recovery.mjs:51:21)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "k",
+      "title": "Failed install and update leave recoverable state",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:12.939Z",
+      "durationMs": 13758,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job 7439b554-394d-4844-b876-ef375de52a67 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job 7439b554-394d-4844-b876-ef375de52a67 failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/k-failed-installs.mjs:75:29)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "l",
+      "title": "Uninstall respects shared dependencies and user data choice",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:26.697Z",
+      "durationMs": 12283,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job d5aea258-88bc-44f1-a31a-bff9ec302582 for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job d5aea258-88bc-44f1-a31a-bff9ec302582 failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/l-uninstall.mjs:30:29)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    },
+    {
+      "id": "m",
+      "title": "Docker app data migrates or reports a precise compatibility failure",
+      "mode": "docker",
+      "status": "fail",
+      "startedAt": "2026-11-12T21:29:38.981Z",
+      "durationMs": 12249,
+      "details": [
+        "[install google-chrome-stable] uploading /tmp/chrome.deb",
+        "[install google-chrome-stable] install job b0440d66-ad73-4f8e-ad36-a1c46b5a79ae for app undefined"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "Error: job b0440d66-ad73-4f8e-ad36-a1c46b5a79ae failed: package path must be inside /tmp/rast-native-e2e/data/linux-apps\n    at RastApi.waitJob (file:///home/lufria/RAST/tests/e2e/lib/rast-api.mjs:293:23)\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)\n    at async installFromFile (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:55:15)\n    at async ensureChrome (file:///home/lufria/RAST/tests/e2e/scenarios/_helpers.mjs:66:33)\n    at async Object.run (file:///home/lufria/RAST/tests/e2e/scenarios/m-migration.mjs:35:29)\n    at async main (file:///home/lufria/RAST/tests/e2e/run.mjs:207:7)"
+    }
+  ]
+}

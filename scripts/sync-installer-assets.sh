@@ -27,6 +27,9 @@ SPECS=(
     "deploy/rast.toml.example|write_config_template|RAST_EMBED_CONFIG_TEMPLATE"
     "deploy/rast.service|write_unit_rast_service|RAST_EMBED_RAST_SERVICE"
     "deploy/rast-worker.service|write_unit_rast_worker|RAST_EMBED_RAST_WORKER"
+    "deploy/rast-native.service|write_unit_rast_native|RAST_EMBED_RAST_NATIVE"
+    "deploy/rast-linux.slice|write_unit_rast_linux_slice|RAST_EMBED_RAST_LINUX_SLICE"
+    "deploy/rast-native.tmpfiles.conf|write_native_tmpfiles|RAST_EMBED_RAST_NATIVE_TMPFILES"
 )
 
 MODE="write"

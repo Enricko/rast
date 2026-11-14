@@ -1,0 +1,27 @@
+[Unit]
+Description=RAST native Linux apps (Xpra sessions and per-application cgroups)
+Documentation=https://github.com/Enricko/rast/blob/main/docs/ARCHITECTURE.md
+Documentation=https://github.com/Enricko/rast/blob/main/docs/INSTALL.md
+
+[Slice]
+# Aggregate accounting for every native RAST unit. The per-user session and
+# per-application limits are NOT configured here: `rast native-helper` sets
+# MemoryMax=, CPUQuota= and TasksMax= on every transient unit it starts, so one
+# person's session cannot starve the server and one app cannot starve the
+# session. This slice is the cgroup parent those units live in; it is also the
+# place for optional aggregate guardrails.
+CPUAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes
+# Upper bound for all native processes together. Generous by default; override
+# with a drop-in, e.g. /etc/systemd/system/rast-linux.slice.d/20-limits.conf:
+#   [Slice]
+#   MemoryHigh=75%
+#   MemoryMax=90%
+#   CPUQuota=800%
+TasksMax=8192
+
+# Optional aggregate memory/CPU guardrails (uncomment and tune):
+#MemoryHigh=75%
+#MemoryMax=90%
+#CPUQuota=800%

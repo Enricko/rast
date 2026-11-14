@@ -126,6 +126,41 @@ log_level = "info"
 docker_enabled = false
 
 # ---------------------------------------------------------------------------
+# Native Linux apps (Xpra)
+# ---------------------------------------------------------------------------
+# Newly installed desktop apps run natively on the server, one shared Xpra
+# seamless session per RAST user (see docs/INSTALL.md "Native Linux apps
+# (Xpra)"). Needs rast-native.service (root), rast-linux.slice and Xpra.
+# Set to false to keep installing legacy Docker-backed apps instead.
+# env: RAST_NATIVE_ENABLED
+native_enabled = true
+# env: RAST_NATIVE_HELPER_SOCKET
+native_helper_socket = "/run/rast/native.sock"
+# env: RAST_LINUX_XPRA_BIN
+linux_xpra_bin = "/usr/bin/xpra"
+# First uid of the per-user Linux identities: uid = linux_uid_base + user id.
+# Must not overlap local accounts or systemd's dynamic uid range.
+# env: RAST_LINUX_UID_BASE
+linux_uid_base = 200000
+# How long a person's session stays alive after its last app exits
+# (0 = stop at once). A page reload reconnects within this window.
+# env: RAST_LINUX_IDLE_MINUTES
+linux_idle_minutes = 15
+# cgroup limits: one person's graphical session ...
+# env: RAST_LINUX_SESSION_MEMORY_MB / _CPUS / _TASKS
+linux_session_memory_mb = 4096
+# linux_session_cpus defaults to a quarter of the server's CPUs (2-8)
+linux_session_tasks = 2048
+# ... and one native application.
+# env: RAST_LINUX_APP_MEMORY_MB / _CPUS / _TASKS
+linux_app_memory_mb = 2048
+linux_app_cpus = 2
+linux_app_tasks = 1024
+# Free memory kept in reserve when a new application is admitted.
+# env: RAST_LINUX_ADMISSION_RESERVE_MB
+linux_admission_reserve_mb = 1024
+
+# ---------------------------------------------------------------------------
 # App Center
 # ---------------------------------------------------------------------------
 

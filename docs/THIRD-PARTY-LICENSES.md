@@ -4,7 +4,7 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 327 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 331 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
 
@@ -19,11 +19,11 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 
 | License expression | Packages |
 | --- | ---: |
-| MIT OR Apache-2.0 | 184 |
+| MIT OR Apache-2.0 | 185 |
 | MIT | 51 |
 | Apache-2.0 OR MIT | 23 |
 | Unicode-3.0 | 18 |
-| MIT/Apache-2.0 | 8 |
+| MIT/Apache-2.0 | 10 |
 | Zlib OR Apache-2.0 OR MIT | 6 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 5 |
 | Unlicense OR MIT | 5 |
@@ -45,6 +45,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | CDLA-Permissive-2.0 | 1 |
 | MIT AND BSD-3-Clause | 1 |
 | MIT OR Zlib OR Apache-2.0 | 1 |
+| bzip2-1.0.6 | 1 |
 
 ## Packages
 
@@ -82,6 +83,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 | <https://github.com/fitzgen/bumpalo> |
 | `byteorder` | 1.5.0 | Unlicense OR MIT | <https://github.com/BurntSushi/byteorder> |
 | `bytes` | 1.12.1 | MIT | <https://github.com/tokio-rs/bytes> |
+| `bzip2` | 0.6.1 | MIT OR Apache-2.0 | <https://github.com/trifectatechfoundation/bzip2-rs> |
 | `cc` | 1.11.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cc-rs> |
 | `cfg-if` | 1.0.5 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cfg-if> |
 | `chacha20` | 0.10.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/stream-ciphers> |
@@ -180,12 +182,14 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `kqueue` | 1.2.1 | MIT | <https://crates.io/crates/kqueue/1.2.1> |
 | `kqueue-sys` | 1.1.2 | MIT | <https://crates.io/crates/kqueue-sys/1.1.2> |
 | `lazy_static` | 1.5.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang-nursery/lazy-static.rs> |
+| `libbz2-rs-sys` | 0.2.6 | bzip2-1.0.6 | <https://github.com/trifectatechfoundation/libbzip2-rs> |
 | `libc` | 0.2.191 | MIT OR Apache-2.0 | <https://github.com/rust-lang/libc> |
 | `libsqlite3-sys` | 0.37.0 | MIT | <https://github.com/rusqlite/rusqlite> |
 | `linux-raw-sys` | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | <https://github.com/sunfishcode/linux-raw-sys> |
 | `litemap` | 0.8.3 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `lock_api` | 0.4.14 | MIT OR Apache-2.0 | <https://github.com/Amanieu/parking_lot> |
 | `log` | 0.4.35 | MIT OR Apache-2.0 | <https://github.com/rust-lang/log> |
+| `lzma-sys` | 0.1.20 | MIT/Apache-2.0 | <https://github.com/alexcrichton/xz2-rs> |
 | `matchers` | 0.2.0 | MIT | <https://github.com/hawkw/matchers> |
 | `matchit` | 0.8.4 | MIT AND BSD-3-Clause | <https://github.com/ibraheemdev/matchit> |
 | `md-5` | 0.11.0 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
@@ -365,6 +369,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `wit-bindgen` | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | <https://github.com/bytecodealliance/wit-bindgen> |
 | `writeable` | 0.6.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `xattr` | 1.7.0 | MIT OR Apache-2.0 | <https://github.com/Stebalien/xattr> |
+| `xz2` | 0.1.7 | MIT/Apache-2.0 | <https://github.com/alexcrichton/xz2-rs> |
 | `yoke` | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `yoke-derive` | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerocopy` | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | <https://github.com/google/zerocopy> |
@@ -377,3 +382,19 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `zerovec-derive` | 0.11.7 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zlib-rs` | 0.6.8 | Zlib | <https://github.com/trifectatechfoundation/zlib-rs> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
+
+
+## External programs invoked at runtime
+
+These programs are **not** linked into or distributed with RAST. They are installed by the operator (or by their distribution) and RAST invokes them as separate processes; their own license terms and copyright notices apply and their source/license files remain in their distribution packages.
+
+| Program | Role | Version requirement | License |
+| --- | --- | --- | --- |
+| Xpra server (`xpra`) | Seamless graphical session per RAST user; HTML5 transport, window and audio forwarding. Invoked as an external program by the native helper. | 6.5+ (validated with 6.5.5) | GPL-2.0-or-later |
+| Xpra HTML5 client (`xpra-html5`, served from `/usr/share/xpra/www`) | Browser client loaded inside the authenticated same-origin session page and adapted by RAST's shim. Served by the installed Xpra package, not embedded in the RAST binary. | shipped with the pinned Xpra (HTML5 client v21 with 6.5.5) | MPL-2.0 |
+| Xvfb | Virtual X server started by Xpra for the seamless session | distribution version | GPL-2.0-or-later / MIT-style X11 terms as packaged |
+| nftables (`nft`) | Display-port firewall rule restricting the loopback Xpra port to the RAST service uid | distribution version | GPL-2.0-or-later |
+| PulseAudio + GStreamer plugins | Playback-only audio transport for a native session when enabled | distribution version | LGPL-2.1-or-later / GPL-2.0-or-later as packaged |
+| Applications installed by an administrator | The actual desktop applications started for people | as packaged | determined by each package; RAST does not relicense or redistribute them |
+
+Installing or upgrading Xpra, Xvfb, nftables, PulseAudio/GStreamer or a native application does not change RAST's MIT license, and RAST does not claim authorship of those programs. Operators who redistribute a server image containing them are responsible for including the corresponding notices and source offers required by those licenses.

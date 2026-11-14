@@ -30,8 +30,8 @@ use super::{docker_command, read_capped, run_docker, CommandOutput, WorkerError,
 use crate::docker::{
     linux::{
         container_name, image_ref, package_path, validate_package_name, BuildSource, LinuxAction,
-        LinuxFormat, RunSpec, APP_LABEL, CONTAINER_PORT, IMAGE_REPOSITORY, MANAGED_LABEL,
-        MAX_PACKAGE_BYTES, URL_PREFIX, USER_LABEL,
+        LinuxFormat, RunSpec, APP_LABEL, CONTAINER_PORT, CONTROL_PORT, IMAGE_REPOSITORY,
+        MANAGED_LABEL, MAX_PACKAGE_BYTES, URL_PREFIX, USER_LABEL, VNC_PORTS,
     },
     protocol::{truncate_message, validate_container_id},
 };
@@ -44,6 +44,10 @@ const WINDOWS_SCRIPT: &str = include_str!("linux_assets/windows");
 const WINDOW_BAR_CONFIG: &str = include_str!("linux_assets/tint2rc");
 const INIT_SCRIPT: &str = include_str!("linux_assets/init-rast");
 const EXIT_SERVICE: &str = include_str!("linux_assets/svc-rast-exit.run");
+/// Lists the app's windows and starts a VNC stream per window (per-window
+/// streaming for the RAST desktop).
+const CONTROL_SCRIPT: &str = include_str!("linux_assets/control");
+const CONTROL_SERVICE: &str = include_str!("linux_assets/control.run");
 
 /// Repository of the shared base image; the tag is a hash of its contents.
 const BASE_REPOSITORY: &str = "rast-linux-base";
@@ -106,15 +110,26 @@ fn base_entries() -> Vec<TarEntry> {
         TarEntry::bytes("rast/tint2rc", 0o644, WINDOW_BAR_CONFIG),
         TarEntry::dir("custom-cont-init.d"),
         TarEntry::bytes("custom-cont-init.d/50-rast", 0o755, INIT_SCRIPT),
+        TarEntry::bytes("rast/control", 0o755, CONTROL_SCRIPT),
         TarEntry::dir("s6"),
         TarEntry::dir("s6/svc-rast-exit"),
         TarEntry::bytes("s6/svc-rast-exit/type", 0o644, "longrun\n"),
         TarEntry::bytes("s6/svc-rast-exit/run", 0o755, EXIT_SERVICE),
         TarEntry::dir("s6/svc-rast-exit/dependencies.d"),
         TarEntry::bytes("s6/svc-rast-exit/dependencies.d/init-services", 0o644, ""),
+        TarEntry::dir("s6/svc-rast-control"),
+        TarEntry::bytes("s6/svc-rast-control/type", 0o644, "longrun\n"),
+        TarEntry::bytes("s6/svc-rast-control/run", 0o755, CONTROL_SERVICE),
+        TarEntry::dir("s6/svc-rast-control/dependencies.d"),
+        TarEntry::bytes(
+            "s6/svc-rast-control/dependencies.d/init-services",
+            0o644,
+            "",
+        ),
         TarEntry::dir("s6/user"),
         TarEntry::dir("s6/user/contents.d"),
         TarEntry::bytes("s6/user/contents.d/svc-rast-exit", 0o644, ""),
+        TarEntry::bytes("s6/user/contents.d/svc-rast-control", 0o644, ""),
     ]
 }
 
@@ -162,7 +177,241 @@ pub(super) async fn dispatch(
             build,
             package,
         } => check_apt(options, &app, build, &package).await,
+        LinuxAction::VolumeList { app } => volume_list(options, &app).await,
+        LinuxAction::VolumeExport { app, user_id, dest } => {
+            volume_export(options, &app, user_id, &dest).await
+        }
+        LinuxAction::VolumeRemove { app, user_id } => volume_remove(options, &app, user_id).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy Docker -> native migration
+// ---------------------------------------------------------------------------
+
+/// The number of volumes returned by one list operation.
+const MAX_EXPORTED_VOLUMES: usize = 500;
+/// The maximum number of filesystem entries counted after an export.
+const MAX_EXPORT_ENTRIES: u64 = 1_000_000;
+
+/// `docker volume ls` for the per-person data volumes of one legacy app.
+async fn volume_list(options: &WorkerOptions, app: &str) -> Result<Value, WorkerError> {
+    let args = vec![
+        OsString::from("volume"),
+        "ls".into(),
+        "--quiet".into(),
+        "--filter".into(),
+        format!("label={MANAGED_LABEL}=linux-app").into(),
+        "--filter".into(),
+        format!("label={APP_LABEL}={app}").into(),
+    ];
+    let output = run_docker(options, args, None, options.quick_timeout, 256 * 1024).await?;
+    super::ensure_success("docker volume ls", &output)?;
+    let mut volumes = Vec::new();
+    for line in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        if volumes.len() >= MAX_EXPORTED_VOLUMES {
+            break;
+        }
+        if crate::docker::protocol::validate_volume_name(line).is_err() {
+            continue;
+        }
+        let Some(user_id) = volume_user(options, app, line).await? else {
+            continue;
+        };
+        volumes.push(json!({"name": line, "userId": user_id}));
+    }
+    Ok(json!({"volumes": volumes}))
+}
+
+/// The `rast.linux.user` label of a volume, after checking that it is one of
+/// this app's managed data volumes; `None` when it is not.
+async fn volume_user(
+    options: &WorkerOptions,
+    app: &str,
+    volume: &str,
+) -> Result<Option<i64>, WorkerError> {
+    let args = vec![
+        OsString::from("volume"),
+        "inspect".into(),
+        "--format".into(),
+        format!(
+            "{{{{index .Labels \"{MANAGED_LABEL}\"}}}}|{{{{index .Labels \"{APP_LABEL}\"}}}}|{{{{index .Labels \"{USER_LABEL}\"}}}}"
+        )
+        .into(),
+        "--".into(),
+        volume.into(),
+    ];
+    let output = run_docker(options, args, None, options.quick_timeout, 4096).await?;
+    if !output.success {
+        return Ok(None);
+    }
+    let text = output.stdout.trim();
+    let mut parts = text.split('|');
+    let managed = parts.next().unwrap_or_default();
+    let label_app = parts.next().unwrap_or_default();
+    let user = parts.next().unwrap_or_default();
+    if managed != "linux-app" || label_app != app {
+        return Ok(None);
+    }
+    Ok(user.parse::<i64>().ok().filter(|id| *id >= 1))
+}
+
+/// Ensure `dest` is a fresh, empty directory directly inside the Linux app
+/// data directory (the only place migration exports may be written).
+fn export_dir(options: &WorkerOptions, dest: &str) -> Result<PathBuf, WorkerError> {
+    let root = std::fs::canonicalize(&options.linux_apps_dir)
+        .map_err(|_| WorkerError::unavailable("the Linux app data directory is not available"))?;
+    let path = PathBuf::from(dest);
+    std::fs::create_dir_all(&path).map_err(|error| {
+        WorkerError::command_failed(format!("cannot create the export directory: {error}"))
+    })?;
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|_| WorkerError::forbidden("the export path is not usable"))?;
+    if !canonical.starts_with(&root) || canonical == root {
+        return Err(WorkerError::forbidden(
+            "the export destination must be inside the Linux app data directory",
+        ));
+    }
+    let mut entries = std::fs::read_dir(&canonical).map_err(|error| {
+        WorkerError::command_failed(format!("cannot read the export directory: {error}"))
+    })?;
+    if entries.next().is_some() {
+        return Err(WorkerError::forbidden(
+            "the export destination must be empty",
+        ));
+    }
+    Ok(canonical)
+}
+
+/// Copy one person's legacy Docker data volume into `dest` (read-only on the
+/// volume), using a throwaway container from the app's image: `docker cp`
+/// reads the container's filesystem view, which includes mounted volumes.
+async fn volume_export(
+    options: &WorkerOptions,
+    app: &str,
+    user_id: i64,
+    dest: &str,
+) -> Result<Value, WorkerError> {
+    let volume = container_name(app, user_id);
+    if volume_user(options, app, &volume).await?.is_none() {
+        return Err(WorkerError::not_found(
+            "this person has no saved settings for the app",
+        ));
+    }
+    let image = app_images(options, app).await?.pop().ok_or_else(|| {
+        WorkerError::not_found("this app's image is missing; migrate needs the last build")
+    })?;
+    let dest = export_dir(options, dest)?;
+    let container = format!("rast-migrate-{}", volume.trim_start_matches("rast-linux-"));
+    // A leftover from an interrupted migration is ours (same labels).
+    let _ = remove_migration_container(options, &container).await;
+    let mut create = vec![
+        OsString::from("create"),
+        "--name".into(),
+        container.clone().into(),
+        "--label".into(),
+        format!("{MANAGED_LABEL}=linux-app").into(),
+        "--label".into(),
+        format!("{APP_LABEL}={app}").into(),
+        "--label".into(),
+        format!("{USER_LABEL}={user_id}").into(),
+        "--volume".into(),
+        format!("{volume}:/config").into(),
+        "--".into(),
+        image.into(),
+    ];
+    let output = run_docker(
+        options,
+        std::mem::take(&mut create),
+        None,
+        options.compose_timeout,
+        64 * 1024,
+    )
+    .await?;
+    super::ensure_success("docker create", &output)?;
+    let copied = async {
+        let mut args: Vec<OsString> = vec!["cp".into(), format!("{container}:/config/.").into()];
+        args.push(dest.as_os_str().to_os_string());
+        let output = run_docker(options, args, None, options.compose_timeout, 64 * 1024).await?;
+        super::ensure_success("docker cp", &output)
+    }
+    .await;
+    let _ = remove_migration_container(options, &container).await;
+    copied?;
+    let (files, bytes) = directory_size(&dest);
+    Ok(json!({
+        "volume": volume,
+        "dest": dest.display().to_string(),
+        "files": files,
+        "bytes": bytes,
+    }))
+}
+
+async fn remove_migration_container(
+    options: &WorkerOptions,
+    container: &str,
+) -> Result<bool, WorkerError> {
+    let args = vec![
+        OsString::from("rm"),
+        "-f".into(),
+        "--".into(),
+        container.into(),
+    ];
+    let output = run_docker(options, args, None, options.quick_timeout, 4096).await?;
+    Ok(output.success)
+}
+
+/// Files and bytes under `root` (bounded; symlinks are counted, not followed).
+fn directory_size(root: &Path) -> (u64, u64) {
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for entry in walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .max_depth(64)
+        .into_iter()
+        .flatten()
+    {
+        if files >= MAX_EXPORT_ENTRIES {
+            break;
+        }
+        if entry.file_type().is_file() {
+            files += 1;
+            if let Ok(meta) = entry.metadata() {
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    (files, bytes)
+}
+
+/// Remove one person's legacy data volume, after checking it really is a
+/// managed volume of this app. Used only by the deliberate post-migration
+/// cleanup action.
+async fn volume_remove(
+    options: &WorkerOptions,
+    app: &str,
+    user_id: i64,
+) -> Result<Value, WorkerError> {
+    let volume = container_name(app, user_id);
+    if volume_user(options, app, &volume).await?.is_none() {
+        return Err(WorkerError::not_found(
+            "this person has no saved settings for the app",
+        ));
+    }
+    let args = vec![
+        OsString::from("volume"),
+        "rm".into(),
+        "--".into(),
+        volume.clone().into(),
+    ];
+    let output = run_docker(options, args, None, options.compose_timeout, 64 * 1024).await?;
+    super::ensure_success("docker volume rm", &output)?;
+    Ok(json!({"removed": true, "volume": volume}))
 }
 
 // ---------------------------------------------------------------------------
@@ -725,6 +974,11 @@ pub(crate) fn run_args(
         "--publish",
         format!("127.0.0.1::{CONTAINER_PORT}"),
     );
+    // The window control service and one VNC server per app window.
+    push_pair(&mut args, "--publish", format!("127.0.0.1::{CONTROL_PORT}"));
+    for port in VNC_PORTS {
+        push_pair(&mut args, "--publish", format!("127.0.0.1::{port}"));
+    }
     let mut env = vec![
         format!("PUID={uid}"),
         format!("PGID={gid}"),
@@ -742,6 +996,11 @@ pub(crate) fn run_args(
         "NO_GAMEPAD=true".to_string(),
         "NO_WEBCAM=true".to_string(),
         "SELKIES_UI_SHOW_SIDEBAR=false|locked".to_string(),
+        format!("RAST_CONTROL_PORT={CONTROL_PORT}"),
+        format!(
+            "RAST_VNC_PORTS={}",
+            VNC_PORTS.map(|p| p.to_string()).join(",")
+        ),
     ];
     if let Some(tz) = tz {
         env.push(format!("TZ={tz}"));
@@ -788,8 +1047,25 @@ async fn run_app(options: &WorkerOptions, spec: &RunSpec) -> Result<Value, Worke
         .unwrap_or_default()
         .to_string();
     validate_container_id(&id).map_err(WorkerError::command_failed)?;
-    let port = published_port(options, &id).await?;
-    Ok(json!({"container": name, "containerId": id, "port": port, "image": image}))
+    let port = published_port(options, &id, CONTAINER_PORT).await?;
+    // Per-window streaming: the window control service and one VNC server per
+    // app window. Older images do not listen on them; the server notices.
+    let control_port = published_port(options, &id, CONTROL_PORT).await.ok();
+    let mut vnc_ports = Vec::with_capacity(VNC_PORTS.len());
+    for container_port in VNC_PORTS {
+        match published_port(options, &id, container_port).await {
+            Ok(host_port) => vnc_ports.push(host_port),
+            Err(_) => break,
+        }
+    }
+    Ok(json!({
+        "container": name,
+        "containerId": id,
+        "port": port,
+        "controlPort": control_port,
+        "vncPorts": vnc_ports,
+        "image": image,
+    }))
 }
 
 async fn ensure_volume(options: &WorkerOptions, spec: &RunSpec) -> Result<(), WorkerError> {
@@ -810,11 +1086,15 @@ async fn ensure_volume(options: &WorkerOptions, spec: &RunSpec) -> Result<(), Wo
     super::ensure_success("volume create", &output)
 }
 
-async fn published_port(options: &WorkerOptions, id: &str) -> Result<u16, WorkerError> {
+async fn published_port(
+    options: &WorkerOptions,
+    id: &str,
+    container_port: u16,
+) -> Result<u16, WorkerError> {
     let args = vec![
         OsString::from("port"),
         id.into(),
-        format!("{CONTAINER_PORT}/tcp").into(),
+        format!("{container_port}/tcp").into(),
     ];
     let output = run_docker(options, args, None, options.quick_timeout, 4096).await?;
     super::ensure_success("docker port", &output)?;

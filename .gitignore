@@ -26,3 +26,13 @@
 /frontend/node_modules/
 /frontend/dist/
 npm-debug.log*
+
+# Local verification artifacts (harnesses and results are committed; large
+# screenshots and installed npm packages are not).
+scripts/xpra-poc/node_modules/
+scripts/xpra-poc/screenshots/
+scripts/xpra-poc/screenshots-real/
+scripts/xpra-poc/*.log
+tests/e2e/node_modules/
+tests/e2e/screenshots/
+tests/e2e/results/latest/

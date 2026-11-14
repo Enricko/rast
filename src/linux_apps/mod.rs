@@ -20,6 +20,10 @@
 //! * copies do not survive a restart of RAST (their addresses and passwords
 //!   live only in memory), so leftovers are stopped at start-up.
 
+pub mod native_apps;
+pub mod native_archive;
+pub mod native_proxy;
+pub mod native_session;
 pub mod proxy;
 mod updates;
 
@@ -37,6 +41,9 @@ use rand::RngCore;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use self::native_apps::{NativeApps, StagedFile};
+use self::native_session::{LaunchRequest as NativeLaunchRequest, NativeSessions};
 
 use crate::{
     audit::{self, AuditLog},
@@ -78,6 +85,18 @@ const SWEEP_EVERY: Duration = Duration::from_secs(10);
 const RECONCILE_EVERY: u32 = 3;
 /// Update sources are asked at most this often (an administrator can ask
 /// at any time).
+/// Ordinary flags for native Chromium apps (the sandbox is never disabled).
+/// `--hide-crash-restore-bubble` matters: after a session restart Chromium
+/// otherwise draws a "Restore pages?" bubble over the top-right of the window,
+/// which looks like an invisible border and swallows clicks on the profile and
+/// menu buttons underneath it.
+const CHROMIUM_LAUNCH_FLAGS: [&str; 4] = [
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--password-store=basic",
+    "--hide-crash-restore-bubble",
+];
+
 const CHECK_INTERVAL_MS: i64 = 24 * 60 * 60 * 1000;
 const CHECK_TICK: Duration = Duration::from_secs(60 * 60);
 /// Default memory limit of a new app, in MiB.
@@ -145,6 +164,15 @@ enum Status {
 struct SessionState {
     status: Status,
     port: Option<u16>,
+    /// Host port of the container's window control service, when the image
+    /// has one (per-window streaming).
+    control_port: Option<u16>,
+    /// Host ports of the per-window VNC servers, by slot.
+    vnc_ports: Vec<u16>,
+    /// Window id -> stream (host port and its VNC password).
+    window_streams: HashMap<String, WindowStream>,
+    /// The image streams each app window separately (per-window streaming).
+    separate_windows: bool,
     viewers: usize,
     last_input: Instant,
     empty_since: Option<Instant>,
@@ -166,6 +194,41 @@ impl Session {
             (Status::Starting | Status::Ready, Some(port)) => Some((port, &self.authorization)),
             _ => None,
         }
+    }
+
+    /// The app's window control service, when the image provides one.
+    pub fn control_port(&self) -> Option<u16> {
+        self.lock().control_port
+    }
+
+    /// The VNC stream of one of the app's windows.
+    fn window_stream(&self, window: &str) -> Option<WindowStream> {
+        self.lock().window_streams.get(window).cloned()
+    }
+
+    /// The app page's Basic credentials, also used for the window service.
+    fn authorization(&self) -> String {
+        self.authorization.clone()
+    }
+
+    /// Host port of a VNC server slot the window control service reported.
+    pub fn vnc_host_port(&self, slot: usize) -> Option<u16> {
+        self.lock().vnc_ports.get(slot).copied()
+    }
+
+    pub fn remember_window_stream(&self, window: &str, port: u16, password: String) {
+        self.lock()
+            .window_streams
+            .insert(window.to_string(), WindowStream { port, password });
+    }
+
+    pub fn forget_window_stream(&self, window: &str) {
+        self.lock().window_streams.remove(window);
+    }
+
+    /// The secret part of the app's address.
+    pub(crate) fn key(&self) -> &str {
+        &self.key
     }
 
     pub fn viewer_joined(&self) {
@@ -206,6 +269,8 @@ impl Session {
             "error": state.error,
             "startedAt": state.started_at_ms,
             "viewers": state.viewers,
+            // The image can stream each app window on its own.
+            "separateWindows": state.separate_windows,
         })
     }
 }
@@ -238,14 +303,34 @@ struct AppRow {
     size_bytes: Option<i64>,
     /// `users` or `admins`; see [`Visibility`].
     visibility: String,
+    /// `docker` (legacy images; kept until migrated) or `native` (host
+    /// execution in the person's shared graphical session).
+    backend: String,
+    install_path: Option<String>,
+    previous_path: Option<String>,
+    launcher: Option<String>,
+    architecture: Option<String>,
+    package_version: Option<String>,
+    package_preexisting: Option<i64>,
+    dependencies: Option<String>,
+    packages_added: Option<String>,
+    compatibility: Option<String>,
+    install_source: Option<String>,
+    migration_state: Option<String>,
+    migration_error: Option<String>,
+    migration_backup: Option<String>,
+    migrated_at: Option<i64>,
+    docker_volume: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
 
 const APP_COLUMNS: &str = "id, name, format, file_name, version, package, description, command, \
     launch_guess, icon_type, build, status, error, job_id, update_kind, update_ref, file_sha1, \
-    latest_version, checked_at, check_error, memory_mb, cpus, size_bytes, visibility, created_at, \
-    updated_at";
+    latest_version, checked_at, check_error, memory_mb, cpus, size_bytes, visibility, backend, \
+    install_path, previous_path, launcher, architecture, package_version, package_preexisting, \
+    dependencies, packages_added, compatibility, install_source, migration_state, \
+    migration_error, migration_backup, migrated_at, docker_volume, created_at, updated_at";
 
 impl AppRow {
     fn format(&self) -> LinuxFormat {
@@ -262,8 +347,49 @@ impl AppRow {
     fn visible_to(&self, user: &AuthUser) -> bool {
         user.is_admin()
             || (self.visibility() == Visibility::Users
-                && self.build > 0
+                // Docker builds count with `build`; native apps are ready
+                // without a build number.
+                && (self.build > 0 || self.is_native())
                 && matches!(self.status.as_str(), "ready" | "updating"))
+    }
+
+    /// The execution backend: `native`, or `docker` for legacy apps.
+    fn is_native(&self) -> bool {
+        self.backend == "native"
+    }
+
+    /// A JSON value from one of the optional JSON columns.
+    fn json_column(value: &Option<String>) -> Value {
+        value
+            .as_deref()
+            .and_then(|text| serde_json::from_str(text).ok())
+            .unwrap_or(Value::Null)
+    }
+
+    /// Native install/migration details the App Center shows.
+    fn native_json(&self) -> Value {
+        if !self.is_native() {
+            return Value::Null;
+        }
+        json!({
+            "installPath": self.install_path,
+            "previousPath": self.previous_path,
+            "launcher": Self::json_column(&self.launcher),
+            "architecture": self.architecture,
+            "packageVersion": self.package_version,
+            "preexistingPackage": self.package_preexisting.map(|v| v != 0),
+            "dependencies": Self::json_column(&self.dependencies),
+            "packagesAdded": Self::json_column(&self.packages_added),
+            "compatibility": Self::json_column(&self.compatibility),
+            "installSource": self.install_source,
+            "migration": {
+                "state": self.migration_state,
+                "error": self.migration_error,
+                "backup": self.migration_backup,
+                "migratedAt": self.migrated_at,
+                "dockerVolume": self.docker_volume,
+            },
+        })
     }
 
     fn update_available(&self) -> bool {
@@ -285,6 +411,8 @@ impl AppRow {
             "desktopId": format!("linux:{}", self.id),
             "name": self.name,
             "format": self.format,
+            "backend": self.backend,
+            "native": self.native_json(),
             "fileName": self.file_name,
             "version": self.version,
             "package": self.package,
@@ -322,8 +450,14 @@ pub struct LinuxApps {
     docker: Arc<DockerManager>,
     events: EventBus,
     jobs: Arc<JobManager>,
-    /// Running copies by their secret key.
+    /// Running copies by their secret key (legacy Docker backend).
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Native backend: one shared graphical session per person.
+    native: Arc<NativeSessions>,
+    /// Native backend: install/update/uninstall/migration of host apps.
+    native_apps: Arc<NativeApps>,
+    /// Whether native execution is enabled (the default on Linux).
+    native_enabled: bool,
 }
 
 impl LinuxApps {
@@ -333,7 +467,10 @@ impl LinuxApps {
         docker: Arc<DockerManager>,
         events: EventBus,
         jobs: Arc<JobManager>,
+        native: Arc<NativeSessions>,
+        native_apps: Arc<NativeApps>,
     ) -> Arc<Self> {
+        let native_enabled = config.native_enabled && SUPPORTED;
         Arc::new(Self {
             config,
             db,
@@ -341,6 +478,9 @@ impl LinuxApps {
             events,
             jobs,
             sessions: Mutex::new(HashMap::new()),
+            native,
+            native_apps,
+            native_enabled,
         })
     }
 
@@ -360,6 +500,9 @@ impl LinuxApps {
         )
         .execute(&self.db)
         .await;
+        if self.native_enabled {
+            self.native.start().await;
+        }
         if !self.config.docker_enabled {
             return;
         }
@@ -409,6 +552,518 @@ impl LinuxApps {
     }
 
     // -----------------------------------------------------------------------
+    // Native backend (host execution, one shared graphical session per person)
+    // -----------------------------------------------------------------------
+
+    /// Is the native backend configured and available on this server?
+    pub fn native_available(&self) -> bool {
+        self.native_enabled
+    }
+
+    /// The manager of the person's shared graphical session.
+    pub fn native_sessions(&self) -> &Arc<NativeSessions> {
+        &self.native
+    }
+
+    /// Inspect an uploaded or downloaded package without changing anything.
+    pub async fn native_preview(
+        &self,
+        actor: &AuthUser,
+        storage: &Storage,
+        path: Option<&str>,
+        url: Option<&str>,
+    ) -> AppResult<Value> {
+        self.ensure_native()?;
+        actor.require_admin()?;
+        let (source, file_name, format) = self.native_source(actor, storage, path, url).await?;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stage = self.stage_native_source(source, file_name, cancel).await?;
+        let result = self.native_apps.preview(&stage.staged, format).await;
+        stage.cleanup();
+        Ok(json!({"preview": result?}))
+    }
+
+    /// Resolve a preview/install source into a local file or download URL.
+    async fn native_source(
+        &self,
+        user: &AuthUser,
+        storage: &Storage,
+        path: Option<&str>,
+        url: Option<&str>,
+    ) -> AppResult<(NativeSource, String, LinuxFormat)> {
+        match (path, url) {
+            (Some(path), None) => {
+                let path = path.trim();
+                let resolved = storage.resolve(&self.db, user, path, Access::Read).await?;
+                let file_name = resolved
+                    .physical
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let (file_name, format) = self.native_file_kind(&file_name)?;
+                let meta = std::fs::symlink_metadata(&resolved.physical)
+                    .map_err(|_| AppError::NotFound("path not found"))?;
+                if !meta.is_file() {
+                    return Err(AppError::bad_request("choose a file, not a folder"));
+                }
+                if meta.len() == 0 || meta.len() > wire::MAX_PACKAGE_BYTES {
+                    return Err(AppError::bad_request(
+                        "the file is empty or larger than 8 GB",
+                    ));
+                }
+                Ok((NativeSource::File(resolved.physical), file_name, format))
+            }
+            (None, Some(url)) => {
+                let url = url.trim();
+                if url.len() > 2048 {
+                    return Err(AppError::bad_request("the link is too long"));
+                }
+                crate::packages::net::https_host(url)
+                    .map_err(|_| AppError::bad_request("Enter a link that starts with https://"))?;
+                let file_name = file_name_from_url(url).ok_or_else(|| {
+                    AppError::bad_request(
+                        "The link must end in the file's name: .deb, .AppImage or .tar.gz.",
+                    )
+                })?;
+                let format = self.native_file_kind(&file_name)?.1;
+                let checked = url.to_string();
+                tokio::task::spawn_blocking(move || {
+                    crate::packages::net::OriginPolicy::any_public().allows(&checked)
+                })
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))?
+                .map_err(AppError::bad_request)?;
+                Ok((NativeSource::Url(url.to_string()), file_name, format))
+            }
+            _ => Err(AppError::bad_request("send either `path` or `url`")),
+        }
+    }
+
+    /// The original file name and format of a Linux app package.
+    fn native_file_kind(&self, file_name: &str) -> AppResult<(String, LinuxFormat)> {
+        let name = file_name.trim();
+        if name.is_empty() {
+            return Err(AppError::bad_request("choose a file"));
+        }
+        let format = LinuxFormat::from_file_name(name).ok_or_else(|| {
+            AppError::bad_request("Choose a .deb package, an .AppImage or a .tar.gz archive.")
+        })?;
+        Ok((name.to_string(), format))
+    }
+
+    /// Copy or download a package into the native staging area.
+    async fn stage_native_source(
+        &self,
+        source: NativeSource,
+        file_name: String,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> AppResult<NativeStage> {
+        match source {
+            NativeSource::File(path) => {
+                // The helper only accepts .deb files under the RAST data
+                // directory, so every source is copied into managed staging.
+                let (staged, dir) = self
+                    .native_apps
+                    .copy_into_staging(&path, &file_name)
+                    .await?;
+                Ok(NativeStage {
+                    staged,
+                    temp: Some(dir),
+                })
+            }
+            NativeSource::Url(url) => {
+                let temp = self
+                    .config
+                    .linux_staging_dir()
+                    .join(format!("download-{}", uuid::Uuid::new_v4()));
+                let staging = temp.clone();
+                let url_for_download = url.clone();
+                let downloaded = tokio::task::spawn_blocking(move || {
+                    download_file(&url_for_download, &staging, &cancel)
+                })
+                .await
+                .map_err(|e| AppError::internal(e.to_string()))
+                .and_then(|result| result);
+                if let Err(error) = downloaded {
+                    let _ = std::fs::remove_dir_all(&temp);
+                    return Err(error);
+                }
+                // Copy into managed staging before the download dir goes away.
+                let copied = self
+                    .native_apps
+                    .copy_into_staging(&temp.join("package"), &file_name)
+                    .await;
+                let _ = std::fs::remove_dir_all(&temp);
+                let (staged, dir) = copied?;
+                Ok(NativeStage {
+                    staged,
+                    temp: Some(dir),
+                })
+            }
+        }
+    }
+
+    /// Install a native package (job body). The service owns the app row.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_native_install(
+        self: Arc<Self>,
+        ctx: JobContext,
+        actor: AuthUser,
+        source: NativeSource,
+        file_name: String,
+        format: LinuxFormat,
+        source_label: &'static str,
+        launcher: Option<Value>,
+        visibility: Visibility,
+    ) -> AppResult<Value> {
+        // Copying/downloading and hashing the upload is the validation stage;
+        // NativeApps::install continues with the remaining install stages.
+        ctx.progress(0, 5, "Validating the package").await;
+        let cancel = ctx.cancel_flag();
+        let stage = self
+            .stage_native_source(source, file_name.clone(), cancel)
+            .await?;
+        let outcome = self
+            .native_apps
+            .install(
+                actor.id,
+                &stage.staged,
+                format,
+                source_label,
+                visibility,
+                &ctx,
+                launcher.as_ref(),
+            )
+            .await;
+        match outcome {
+            Ok(app) => {
+                let id = app
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                ctx.progress(5, 5, "Ready").await;
+                stage.cleanup();
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.install")
+                        .actor(&actor)
+                        .object("linux-app", &id)
+                        .detail(format!("native, {source_label}"))
+                        .success(),
+                )
+                .await;
+                self.announce(&id);
+                Ok(app)
+            }
+            Err(error) => {
+                stage.cleanup();
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.install")
+                        .actor(&actor)
+                        .object("linux-app", file_name.as_str())
+                        .detail(error.to_string())
+                        .failure(),
+                )
+                .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// One of the person's own native sessions, if it is running.
+    pub async fn native_session_json(&self, user: &AuthUser) -> AppResult<Option<Value>> {
+        if !self.native_enabled {
+            return Ok(None);
+        }
+        self.native.session_json(user).await
+    }
+
+    /// Launch an app into the person's shared native session (lazily started).
+    pub async fn native_launch(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
+        self.ensure_native()?;
+        let row = self.row(id).await?;
+        if !row.visible_to(user) {
+            return Err(AppError::NotFound("Linux app not found"));
+        }
+        if !row.is_native() {
+            return Err(AppError::conflict(
+                "This app still runs on the legacy Docker backend; migrate it first.",
+            ));
+        }
+        if !is_openable_status(&row.status) {
+            return Err(AppError::conflict(
+                "Wait until the app finishes installing or updating.",
+            ));
+        }
+        let request = self.native_launch_request(&row)?;
+        let (run, session) = self.native.launch(user, request).await?;
+        Ok(json!({"run": run, "session": session}))
+    }
+
+    /// Stop the person's whole native session (all their running apps).
+    pub async fn native_close_session(self: &Arc<Self>, user: &AuthUser) -> AppResult<Value> {
+        self.ensure_native()?;
+        if self.native.session_json(user).await?.is_none() {
+            return Err(AppError::NotFound("No graphical session is running"));
+        }
+        self.native.close_session(user).await
+    }
+
+    /// Terminate one app running in the person's native session.
+    pub async fn native_close_run(
+        self: &Arc<Self>,
+        user: &AuthUser,
+        run_id: &str,
+    ) -> AppResult<Value> {
+        self.ensure_native()?;
+        self.native.close_app(user, run_id).await
+    }
+
+    /// Build the launch request for a native app from its record.
+    fn native_launch_request(&self, row: &AppRow) -> AppResult<NativeLaunchRequest> {
+        let launcher = AppRow::json_column(&row.launcher);
+        let command = launcher
+            .get("argv")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .filter(|argv| !argv.is_empty())
+            .or_else(|| {
+                row.command
+                    .as_deref()
+                    .and_then(|text| serde_json::from_str::<Vec<String>>(text).ok())
+                    .filter(|argv| !argv.is_empty())
+            })
+            .ok_or_else(|| {
+                AppError::conflict(
+                    "This app has no recorded launcher; reinstall it to fix its launch command.",
+                )
+            })?;
+        let cwd = launcher
+            .get("workingDir")
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        let chromium = launcher
+            .get("chromium")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut command = command;
+        if chromium {
+            for flag in CHROMIUM_LAUNCH_FLAGS {
+                if !command.iter().any(|argument| argument == flag) {
+                    command.push(flag.to_string());
+                }
+            }
+            // Without a session bus Chromium retries D-Bus calls with long
+            // timeouts at startup (minutes on a large migrated profile).
+            // dbus-run-session gives the app a private, working session bus.
+            let dbus_session = Path::new("/usr/bin/dbus-run-session");
+            if dbus_session.is_file() {
+                let mut wrapped = vec![dbus_session.display().to_string(), "--".to_string()];
+                wrapped.append(&mut command);
+                command = wrapped;
+            }
+        }
+        Ok(NativeLaunchRequest {
+            app_id: row.id.clone(),
+            app_name: row.name.clone(),
+            command,
+            env: Vec::new(),
+            cwd,
+            memory_mb: u32::try_from(row.memory_mb).unwrap_or(self.config.linux_app_memory_mb),
+            cpus: u32::try_from(row.cpus).unwrap_or(self.config.linux_app_cpus),
+            tasks: self.config.linux_app_tasks,
+            chromium,
+        })
+    }
+
+    /// Return an actionable error when the native backend is disabled.
+    fn ensure_native(&self) -> AppResult<()> {
+        if self.native_enabled {
+            Ok(())
+        } else {
+            Err(native_unavailable())
+        }
+    }
+
+    /// Migrate one legacy Docker-backed app to native execution.
+    pub async fn native_migrate(
+        self: &Arc<Self>,
+        actor: &AuthUser,
+        id: &str,
+        path: Option<&str>,
+        url: Option<&str>,
+        storage: std::sync::Arc<Storage>,
+    ) -> AppResult<Value> {
+        self.ensure_native()?;
+        actor.require_admin()?;
+        let row = self.row(id).await?;
+        if row.is_native() {
+            return Err(AppError::conflict("This app already runs natively."));
+        }
+        if !matches!(row.status.as_str(), "ready" | "updating") {
+            return Err(AppError::conflict(
+                "Wait until the app finishes installing or updating.",
+            ));
+        }
+        if !self.config.docker_enabled {
+            return Err(AppError::unavailable(
+                "The Docker backend is not enabled on this server, so there is nothing to migrate.",
+            ));
+        }
+        // Resolve an optional replacement package. A File Station file is
+        // staged now (fast); an HTTPS link is downloaded inside the job so the
+        // API answers immediately.
+        let replacement = match (path, url) {
+            (Some(path), None) => {
+                let (source, file_name, format) = self
+                    .native_source(actor, &storage, Some(path), None)
+                    .await?;
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stage = self.stage_native_source(source, file_name, cancel).await?;
+                MigrationInput::Staged(stage, format)
+            }
+            (None, Some(url)) => {
+                let (source, file_name, format) = self.native_url_source(url).await?;
+                MigrationInput::Download(source, file_name, format)
+            }
+            (None, None) => MigrationInput::None,
+            _ => return Err(AppError::bad_request("send either `path` or `url`")),
+        };
+        let this = self.clone();
+        let job_actor = actor.clone();
+        let app_id = id.to_string();
+        let name = row.name.clone();
+        let spec = JobSpec::new("linuxapps.migrate", move |ctx| async move {
+            this.run_native_migrate(ctx, job_actor, app_id, replacement)
+                .await
+        })
+        .actor(actor)
+        .message(format!("Migrating {name} to native execution"));
+        let job_id = self.jobs.submit(spec).await?;
+        Ok(json!({"jobId": job_id}))
+    }
+
+    async fn run_native_migrate(
+        self: Arc<Self>,
+        ctx: JobContext,
+        actor: AuthUser,
+        app_id: String,
+        replacement: MigrationInput,
+    ) -> AppResult<Value> {
+        let (holder, format) = match replacement {
+            MigrationInput::Staged(stage, format) => (Some(stage), Some(format)),
+            MigrationInput::Download(source, file_name, format) => {
+                ctx.progress(0, 3, "Downloading the replacement package")
+                    .await;
+                let stage = self
+                    .stage_native_source(source, file_name, ctx.cancel_flag())
+                    .await?;
+                (Some(stage), Some(format))
+            }
+            MigrationInput::None => (None, None),
+        };
+        let staged_file = holder.as_ref().map(|stage| stage.staged.clone());
+        let outcome = self
+            .native_apps
+            .migrate_legacy(actor.id, &app_id, staged_file.as_ref(), format, &ctx)
+            .await;
+        if let Some(holder) = holder {
+            holder.cleanup();
+        }
+        match outcome {
+            Ok(app) => {
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.migrate")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail("docker to native")
+                        .success(),
+                )
+                .await;
+                self.announce(&app_id);
+                Ok(app)
+            }
+            Err(error) => {
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.migrate")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail(error.to_string())
+                        .failure(),
+                )
+                .await;
+                self.announce(&app_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Roll a migrated app back to the Docker backend (its data was kept).
+    pub async fn native_rollback(self: &Arc<Self>, actor: &AuthUser, id: &str) -> AppResult<Value> {
+        self.ensure_native()?;
+        actor.require_admin()?;
+        let app = self.native_apps.rollback_migration(actor.id, id).await?;
+        audit::record_with_events(
+            &self.db,
+            &self.events,
+            AuditLog::new("linuxapp.rollback")
+                .actor(actor)
+                .object("linux-app", id)
+                .detail("native back to docker")
+                .success(),
+        )
+        .await;
+        self.announce(id);
+        Ok(app)
+    }
+
+    /// Deliberate post-migration cleanup of retained legacy data.
+    pub async fn native_cleanup(
+        self: &Arc<Self>,
+        actor: &AuthUser,
+        id: &str,
+        remove_backup: bool,
+    ) -> AppResult<Value> {
+        self.ensure_native()?;
+        actor.require_admin()?;
+        let app = self
+            .native_apps
+            .cleanup_migration(actor.id, id, remove_backup)
+            .await?;
+        audit::record_with_events(
+            &self.db,
+            &self.events,
+            AuditLog::new("linuxapp.cleanup")
+                .actor(actor)
+                .object("linux-app", id)
+                .detail(if remove_backup {
+                    "retained docker data removed"
+                } else {
+                    "migration backup kept"
+                })
+                .success(),
+        )
+        .await;
+        self.announce(id);
+        Ok(app)
+    }
+
+    // -----------------------------------------------------------------------
     // Records
     // -----------------------------------------------------------------------
 
@@ -429,6 +1084,11 @@ impl LinuxApps {
                 *counts.entry(session.app_id.clone()).or_insert(0) += 1;
             }
         }
+        if self.native_enabled {
+            for (app_id, running) in self.native.running_counts() {
+                *counts.entry(app_id).or_insert(0) += running;
+            }
+        }
         counts
     }
 
@@ -440,7 +1100,7 @@ impl LinuxApps {
         } else {
             format!(
                 "SELECT {APP_COLUMNS} FROM linux_apps \
-                 WHERE visibility = 'users' AND build > 0 \
+                 WHERE visibility = 'users' AND (build > 0 OR backend = 'native') \
                    AND status IN ('ready', 'updating') \
                  ORDER BY name COLLATE NOCASE, id"
             )
@@ -609,6 +1269,39 @@ impl LinuxApps {
         storage: &Storage,
         path: &str,
     ) -> AppResult<Value> {
+        self.install_with(user, storage, path, None, Visibility::Users)
+            .await
+    }
+
+    /// Install with an explicit launcher choice and visibility.
+    ///
+    /// `visibility` is who may see the new app; every install starts out
+    /// visible to all signed-in users unless the administrator restricts it.
+    pub async fn install_with(
+        self: &Arc<Self>,
+        user: &AuthUser,
+        storage: &Storage,
+        path: &str,
+        launcher: Option<Value>,
+        visibility: Visibility,
+    ) -> AppResult<Value> {
+        if self.native_enabled {
+            self.ensure_native()?;
+            let (source, file_name, format) =
+                self.native_source(user, storage, Some(path), None).await?;
+            self.ensure_no_running_install(&file_name).await?;
+            return self
+                .begin_native_install(
+                    user.clone(),
+                    source,
+                    file_name,
+                    format,
+                    "file",
+                    launcher,
+                    visibility,
+                )
+                .await;
+        }
         self.ensure_available().await?;
         crate::api::validate_logical_path(path)?;
         let resolved = storage.resolve(&self.db, user, path, Access::Read).await?;
@@ -637,12 +1330,42 @@ impl LinuxApps {
             file_name,
             format,
             PackageSource::File(resolved.physical),
+            visibility,
         )
         .await
     }
 
     /// Install the app file behind an `https://` link (downloaded by the server).
     pub async fn install_url(self: &Arc<Self>, user: &AuthUser, url: &str) -> AppResult<Value> {
+        self.install_url_with(user, url, None, Visibility::Users)
+            .await
+    }
+
+    /// Install from an `https://` link with an explicit launcher choice and
+    /// visibility.
+    pub async fn install_url_with(
+        self: &Arc<Self>,
+        user: &AuthUser,
+        url: &str,
+        launcher: Option<Value>,
+        visibility: Visibility,
+    ) -> AppResult<Value> {
+        if self.native_enabled {
+            self.ensure_native()?;
+            let (source, file_name, format) = self.native_url_source(url).await?;
+            self.ensure_no_running_install(&file_name).await?;
+            return self
+                .begin_native_install(
+                    user.clone(),
+                    source,
+                    file_name,
+                    format,
+                    "url",
+                    launcher,
+                    visibility,
+                )
+                .await;
+        }
         self.ensure_available().await?;
         if url.len() > 2048 {
             return Err(AppError::bad_request("the link is too long"));
@@ -667,8 +1390,86 @@ impl LinuxApps {
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
         .map_err(AppError::bad_request)?;
-        self.begin_install(user, file_name, format, PackageSource::Url(url.to_string()))
+        self.begin_install(
+            user,
+            file_name,
+            format,
+            PackageSource::Url(url.to_string()),
+            visibility,
+        )
+        .await
+    }
+
+    /// Validate an `https://` link and derive its file name and format.
+    ///
+    /// The origin policy check resolves the URL's host, so it runs on the
+    /// blocking pool instead of the async runtime.
+    async fn native_url_source(&self, url: &str) -> AppResult<(NativeSource, String, LinuxFormat)> {
+        let url = url.trim();
+        if url.len() > 2048 {
+            return Err(AppError::bad_request("the link is too long"));
+        }
+        crate::packages::net::https_host(url)
+            .map_err(|_| AppError::bad_request("Enter a link that starts with https://"))?;
+        let file_name = file_name_from_url(url).ok_or_else(|| {
+            AppError::bad_request(
+                "The link must end in the file's name: .deb, .AppImage or .tar.gz.",
+            )
+        })?;
+        let format = self.native_file_kind(&file_name)?.1;
+        let checked = url.to_string();
+        tokio::task::spawn_blocking(move || {
+            crate::packages::net::OriginPolicy::any_public().allows(&checked)
+        })
+        .await
+        .map_err(|error| AppError::internal(error.to_string()))?
+        .map_err(AppError::bad_request)?;
+        Ok((NativeSource::Url(url.to_string()), file_name, format))
+    }
+
+    /// Refuse a duplicate submission while the same app is still installing.
+    ///
+    /// Reinstalls and updates of a finished app are unaffected: only a row that
+    /// is still in the `installing` state blocks a second job.
+    async fn ensure_no_running_install(&self, file_name: &str) -> AppResult<()> {
+        if self.native_apps.installing_duplicate(file_name).await? {
+            return Err(AppError::conflict("This app is already being installed"));
+        }
+        Ok(())
+    }
+
+    /// Start a native install job; the NativeApps service owns the app row.
+    #[allow(clippy::too_many_arguments)]
+    async fn begin_native_install(
+        self: &Arc<Self>,
+        user: AuthUser,
+        source: NativeSource,
+        file_name: String,
+        format: LinuxFormat,
+        source_label: &'static str,
+        launcher: Option<Value>,
+        visibility: Visibility,
+    ) -> AppResult<Value> {
+        let this = self.clone();
+        let actor = user.clone();
+        let job_file_name = file_name.clone();
+        let spec = JobSpec::new("linuxapps.install", move |ctx| async move {
+            this.run_native_install(
+                ctx,
+                actor,
+                source,
+                job_file_name,
+                format,
+                source_label,
+                launcher,
+                visibility,
+            )
             .await
+        })
+        .actor(&user)
+        .message(format!("Installing {file_name}"));
+        let job_id = self.jobs.submit(spec).await?;
+        Ok(json!({"jobId": job_id, "installing": true}))
     }
 
     async fn begin_install(
@@ -677,20 +1478,22 @@ impl LinuxApps {
         file_name: String,
         format: LinuxFormat,
         source: PackageSource,
+        visibility: Visibility,
     ) -> AppResult<Value> {
         let id = self.new_id(&file_name).await?;
         let now = db::now_ms();
         let cpus = default_cpus();
         sqlx::query(
-            "INSERT INTO linux_apps (id, name, format, file_name, version, status, memory_mb, cpus,
-                 created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'installing', ?, ?, ?, ?, ?)",
+            "INSERT INTO linux_apps (id, name, format, file_name, version, status, visibility,
+                 memory_mb, cpus, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'installing', ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(display_name_from_file(&file_name))
         .bind(format.as_str())
         .bind(&file_name)
         .bind(version_from_file(&file_name))
+        .bind(visibility.as_str())
         .bind(DEFAULT_MEMORY_MB as i64)
         .bind(cpus as i64)
         .bind(user.id)
@@ -903,6 +1706,12 @@ impl LinuxApps {
         if row.status != "ready" {
             return Err(AppError::conflict("wait until the app is installed"));
         }
+        if row.is_native() {
+            self.ensure_native()?;
+            self.native_apps.check(id).await?;
+            self.announce(id);
+            return self.any_json(id).await;
+        }
         self.check(&row).await;
         self.any_json(id).await
     }
@@ -965,7 +1774,7 @@ impl LinuxApps {
         let due = db::now_ms() - CHECK_INTERVAL_MS;
         let rows = sqlx::query_as::<_, AppRow>(sqlx::AssertSqlSafe(format!(
             "SELECT {APP_COLUMNS} FROM linux_apps
-             WHERE status = 'ready' AND update_kind IS NOT NULL
+             WHERE status = 'ready' AND backend = 'docker' AND update_kind IS NOT NULL
                AND (checked_at IS NULL OR checked_at < ?)"
         )))
         .bind(due)
@@ -979,13 +1788,69 @@ impl LinuxApps {
 
     /// Install the newest version from the app's official source.
     pub async fn update(self: &Arc<Self>, user: &AuthUser, id: &str) -> AppResult<Value> {
-        self.ensure_available().await?;
+        self.update_with_source(user, id, None, None, None).await
+    }
+
+    /// Update from the official source, or from an uploaded file / HTTPS link.
+    pub async fn update_with_source(
+        self: &Arc<Self>,
+        user: &AuthUser,
+        id: &str,
+        path: Option<&str>,
+        url: Option<&str>,
+        storage: Option<&Storage>,
+    ) -> AppResult<Value> {
         let row = self.row(id).await?;
         if row.status != "ready" {
             return Err(AppError::conflict(
                 "wait until the current install or update finishes",
             ));
         }
+        if row.is_native() {
+            self.ensure_native()?;
+            return match (path, url, storage) {
+                (Some(path), None, Some(storage)) => {
+                    let (source, file_name, format) =
+                        self.native_source(user, storage, Some(path), None).await?;
+                    self.begin_native_update(
+                        user.clone(),
+                        id.to_string(),
+                        source,
+                        file_name,
+                        format,
+                        "file",
+                    )
+                    .await
+                }
+                (None, Some(url), _) => {
+                    let (source, file_name, format) = self.native_url_source(url).await?;
+                    self.begin_native_update(
+                        user.clone(),
+                        id.to_string(),
+                        source,
+                        file_name,
+                        format,
+                        "url",
+                    )
+                    .await
+                }
+                (None, None, _) => {
+                    let this = self.clone();
+                    let actor = user.clone();
+                    let app_id = id.to_string();
+                    let name = row.name.clone();
+                    let spec = JobSpec::new("linuxapps.update", move |ctx| async move {
+                        this.run_native_update_upstream(ctx, actor, app_id).await
+                    })
+                    .actor(user)
+                    .message(format!("Updating {name}"));
+                    let job_id = self.jobs.submit(spec).await?;
+                    Ok(json!({"jobId": job_id}))
+                }
+                _ => Err(AppError::bad_request("send either `path` or `url`")),
+            };
+        }
+        self.ensure_available().await?;
         if row.update_kind.is_none() {
             return Err(AppError::bad_request(
                 "this app has no known update source; install the new version from its file",
@@ -1011,6 +1876,130 @@ impl LinuxApps {
             .await;
         self.announce(id);
         Ok(json!({"jobId": job_id}))
+    }
+
+    /// Start a native update job from a staged file/link.
+    async fn begin_native_update(
+        self: &Arc<Self>,
+        user: AuthUser,
+        app_id: String,
+        source: NativeSource,
+        file_name: String,
+        format: LinuxFormat,
+        source_label: &'static str,
+    ) -> AppResult<Value> {
+        let this = self.clone();
+        let actor = user.clone();
+        let label = source_label;
+        let spec = JobSpec::new("linuxapps.update", move |ctx| async move {
+            this.run_native_update_source(ctx, actor, app_id, source, file_name, format, label)
+                .await
+        })
+        .actor(&user)
+        .message("Updating a native Linux app");
+        let job_id = self.jobs.submit(spec).await?;
+        Ok(json!({"jobId": job_id}))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_native_update_source(
+        self: Arc<Self>,
+        ctx: JobContext,
+        actor: AuthUser,
+        app_id: String,
+        source: NativeSource,
+        file_name: String,
+        format: LinuxFormat,
+        source_label: &'static str,
+    ) -> AppResult<Value> {
+        ctx.progress(0, 3, "Preparing the update").await;
+        let cancel = ctx.cancel_flag();
+        let stage = self.stage_native_source(source, file_name, cancel).await?;
+        ctx.progress(1, 3, "Inspecting the new version").await;
+        let outcome = self
+            .native_apps
+            .update_from(
+                actor.id,
+                &app_id,
+                &stage.staged,
+                format,
+                source_label,
+                &ctx,
+                None,
+            )
+            .await;
+        stage.cleanup();
+        match outcome {
+            Ok(app) => {
+                ctx.progress(3, 3, "Updated").await;
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.update")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail(format!("native, {source_label}"))
+                        .success(),
+                )
+                .await;
+                self.announce(&app_id);
+                Ok(app)
+            }
+            Err(error) => {
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.update")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail(error.to_string())
+                        .failure(),
+                )
+                .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn run_native_update_upstream(
+        self: Arc<Self>,
+        ctx: JobContext,
+        actor: AuthUser,
+        app_id: String,
+    ) -> AppResult<Value> {
+        let outcome = self
+            .native_apps
+            .update_from_upstream(actor.id, &app_id, &ctx)
+            .await;
+        match outcome {
+            Ok(app) => {
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.update")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail("native, official source")
+                        .success(),
+                )
+                .await;
+                self.announce(&app_id);
+                Ok(app)
+            }
+            Err(error) => {
+                audit::record_with_events(
+                    &self.db,
+                    &self.events,
+                    AuditLog::new("linuxapp.update")
+                        .actor(&actor)
+                        .object("linux-app", &app_id)
+                        .detail(error.to_string())
+                        .failure(),
+                )
+                .await;
+                Err(error)
+            }
+        }
     }
 
     async fn run_update(
@@ -1140,6 +2129,29 @@ impl LinuxApps {
                 "wait until the install or update finishes",
             ));
         }
+        if row.is_native() {
+            self.ensure_native()?;
+            // Stop every run first so no process keeps a removed launcher.
+            self.native.stop_app_runs(id).await;
+            let removed = self.native_apps.uninstall(user.id, id, remove_data).await?;
+            let _ = std::fs::remove_dir_all(self.staging_dir(id));
+            audit::record_with_events(
+                &self.db,
+                &self.events,
+                AuditLog::new("linuxapp.uninstall")
+                    .actor(user)
+                    .object("linux-app", id)
+                    .detail(if remove_data {
+                        "native, with app data"
+                    } else {
+                        "native, app data kept"
+                    })
+                    .success(),
+            )
+            .await;
+            self.announce(id);
+            return Ok(json!({"ok": true, "removed": removed}));
+        }
         let sessions: Vec<Arc<Session>> = self
             .sessions()
             .values()
@@ -1199,8 +2211,37 @@ impl LinuxApps {
             .ok_or(AppError::NotFound("this app is not running"))
     }
 
-    pub fn session(&self, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+    pub async fn session(&self, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+        if session_id == "native" {
+            return self
+                .native_session_json(user)
+                .await?
+                .ok_or(AppError::NotFound("this app is not running"));
+        }
         Ok(self.find_by_id(user, session_id)?.json())
+    }
+
+    /// Stop every running copy of an account that was just deactivated or
+    /// revoked (its apps stay on disk; only the processes/sessions end).
+    pub async fn stop_user_sessions(&self, user_id: i64) {
+        let sessions: Vec<Arc<Session>> = self
+            .sessions()
+            .values()
+            .filter(|session| session.user_id == user_id && session.lock().status != Status::Ended)
+            .cloned()
+            .collect();
+        for session in sessions {
+            self.end(&session, "removed", None);
+        }
+        if self.native_enabled {
+            if let Err(error) = self.native.close_for_user(user_id).await {
+                tracing::warn!(
+                    user_id,
+                    error = %error,
+                    "could not stop the native session of a deactivated account"
+                );
+            }
+        }
     }
 
     pub fn my_sessions(&self, user: &AuthUser) -> Vec<Value> {
@@ -1217,7 +2258,15 @@ impl LinuxApps {
         if !row.visible_to(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }
-        if row.build < 1 || !matches!(row.status.as_str(), "ready" | "updating") {
+        // Native apps launch into the person's shared session and return that
+        // session (the run detail is available from `/launch`).
+        if row.is_native() {
+            let launched = self.native_launch(user, id).await?;
+            return Ok(launched.get("session").cloned().unwrap_or(Value::Null));
+        }
+        if (row.build < 1 && !row.is_native())
+            || !matches!(row.status.as_str(), "ready" | "updating")
+        {
             return Err(AppError::conflict("this app is not installed yet"));
         }
         if let Some(existing) = self
@@ -1255,6 +2304,10 @@ impl LinuxApps {
             state: Mutex::new(SessionState {
                 status: Status::Starting,
                 port: None,
+                control_port: None,
+                vnc_ports: Vec::new(),
+                window_streams: HashMap::new(),
+                separate_windows: false,
                 viewers: 0,
                 last_input: now,
                 empty_since: None,
@@ -1297,7 +2350,7 @@ impl LinuxApps {
             .call(WorkerRequest::new(WorkerOp::LinuxRun).linux(args))
             .await;
         let port = match started {
-            Ok(data) => data
+            Ok(ref data) => data
                 .get("port")
                 .and_then(Value::as_u64)
                 .and_then(|p| u16::try_from(p).ok()),
@@ -1305,6 +2358,27 @@ impl LinuxApps {
                 self.end(&session, "error", Some(docker_message(&error)));
                 return;
             }
+        };
+        let (control_port, vnc_ports) = match &started {
+            Ok(data) => {
+                let control = data
+                    .get("controlPort")
+                    .and_then(Value::as_u64)
+                    .and_then(|port| u16::try_from(port).ok());
+                let vnc = data
+                    .get("vncPorts")
+                    .and_then(Value::as_array)
+                    .map(|ports| {
+                        ports
+                            .iter()
+                            .filter_map(|port| port.as_u64())
+                            .filter_map(|port| u16::try_from(port).ok())
+                            .collect::<Vec<u16>>()
+                    })
+                    .unwrap_or_default();
+                (control, vnc)
+            }
+            Err(_) => (None, Vec::new()),
         };
         let Some(port) = port else {
             self.end(
@@ -1317,6 +2391,8 @@ impl LinuxApps {
         let ended = {
             let mut state = session.lock();
             state.port = Some(port);
+            state.control_port = control_port;
+            state.vnc_ports = vnc_ports;
             state.status == Status::Ended
         };
         if ended {
@@ -1342,11 +2418,24 @@ impl LinuxApps {
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+        // Old images have the ports but no window service: ask it.
+        let separate_windows = match control_port {
+            Some(control) => matches!(
+                tokio::time::timeout(
+                    Duration::from_secs(2),
+                    control_request(control, &session.authorization(), "GET", "/health"),
+                )
+                .await,
+                Ok(Ok(_))
+            ),
+            None => false,
+        };
         {
             let mut state = session.lock();
             if state.status != Status::Starting {
                 return;
             }
+            state.separate_windows = separate_windows;
             state.status = Status::Ready;
             state.last_input = Instant::now();
             if state.viewers == 0 {
@@ -1363,10 +2452,133 @@ impl LinuxApps {
     }
 
     /// Close one of the person's copies now.
-    pub fn close(self: &Arc<Self>, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+    pub async fn close(self: &Arc<Self>, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+        if session_id == "native" {
+            return self.native_close_session(user).await;
+        }
         let session = self.find_by_id(user, session_id)?;
         self.end(&session, "closed", None);
         Ok(json!({"ok": true}))
+    }
+
+    /// One of the person's native sessions by its secret URL key (the native
+    /// proxy authorizes the request itself before using this).
+    pub fn find_native_session(
+        &self,
+        key: &str,
+    ) -> Option<Arc<self::native_session::NativeSession>> {
+        self.native.find_session(key)
+    }
+
+    // -----------------------------------------------------------------------
+    // Separate windows (per-window streaming)
+    // -----------------------------------------------------------------------
+
+    /// The app's windows, as the container's window control service sees them.
+    pub async fn windows(&self, user: &AuthUser, session_id: &str) -> AppResult<Value> {
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        control_request(port, &session.authorization(), "GET", "/windows").await
+    }
+
+    /// The VNC stream of `window`, starting it if needed.
+    pub(crate) async fn window_stream_port(
+        &self,
+        session: &Arc<Session>,
+        window: &str,
+    ) -> AppResult<WindowStream> {
+        if let Some(stream) = session.window_stream(window) {
+            return Ok(stream);
+        }
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let control = session.control_port().ok_or_else(no_window_service)?;
+        let started = control_request(
+            control,
+            &session.authorization(),
+            "POST",
+            &format!("/vnc/{window}"),
+        )
+        .await?;
+        let slot = started
+            .get("slot")
+            .and_then(Value::as_u64)
+            .and_then(|slot| usize::try_from(slot).ok())
+            .ok_or_else(|| AppError::unavailable("the window stream did not report its slot"))?;
+        let port = session
+            .vnc_host_port(slot)
+            .ok_or_else(|| AppError::unavailable("no VNC port is published for this slot"))?;
+        let password = started
+            .get("password")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let stream = WindowStream { port, password };
+        session.remember_window_stream(window, port, stream.password.clone());
+        Ok(stream)
+    }
+
+    /// Start (or find) the VNC stream of one of the app's windows and return
+    /// the address a viewer connects to.
+    pub async fn start_window_stream(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let stream = self.window_stream_port(&session, window).await?;
+        Ok(stream_address(&session, window, &stream))
+    }
+
+    /// Close one of the app's windows the way its own close button would.
+    pub async fn close_window(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        let result = control_request(
+            port,
+            &session.authorization(),
+            "POST",
+            &format!("/close/{window}"),
+        )
+        .await?;
+        session.forget_window_stream(window);
+        Ok(result)
+    }
+
+    /// Stop the VNC stream of a window (its RAST window was closed).
+    pub async fn stop_window_stream(
+        &self,
+        user: &AuthUser,
+        session_id: &str,
+        window: &str,
+    ) -> AppResult<Value> {
+        if !validate_window_id(window) {
+            return Err(AppError::bad_request("invalid window id"));
+        }
+        let session = self.find_by_id(user, session_id)?;
+        let port = session.control_port().ok_or_else(no_window_service)?;
+        let result = control_request(
+            port,
+            &session.authorization(),
+            "DELETE",
+            &format!("/vnc/{window}"),
+        )
+        .await;
+        session.forget_window_stream(window);
+        result
     }
 
     /// Mark a copy ended, forget its address and stop its container in the
@@ -1570,6 +2782,84 @@ fn containers_of(list: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// One running window stream: where the VNC server listens and the password
+/// the viewer needs (the stream is not open to other containers).
+#[derive(Debug, Clone)]
+pub(crate) struct WindowStream {
+    port: u16,
+    password: String,
+}
+
+/// `/close`, `/vnc` and the RAST windows address one X11 window by its id.
+pub fn validate_window_id(window: &str) -> bool {
+    window.strip_prefix("0x").is_some_and(|hex| {
+        !hex.is_empty() && hex.len() <= 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
+    })
+}
+
+/// Images built before per-window streaming have no window service.
+fn no_window_service() -> AppError {
+    AppError::unavailable("this app's image does not support separate windows; use Reinstall on it")
+}
+
+/// The address a noVNC viewer connects to for one of the app's windows.
+fn stream_address(session: &Session, window: &str, stream: &WindowStream) -> Value {
+    json!({
+        "url": format!("{}{}/vnc/{window}/", wire::URL_PREFIX, session.key()),
+        "password": stream.password,
+    })
+}
+
+/// One JSON request to the app container's window control service.
+async fn control_request(
+    port: u16,
+    authorization: &str,
+    method: &str,
+    path: &str,
+) -> Result<Value, AppError> {
+    let no_service = || AppError::unavailable("the app's window service is not answering");
+    let mut stream = match tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => return Err(no_service()),
+    };
+    let head = format!(
+        "{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAuthorization: {authorization}\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(head.as_bytes()).await.is_err() {
+        return Err(no_service());
+    }
+    let mut response = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await {
+        Ok(Ok(_)) => {}
+        _ => return Err(no_service()),
+    }
+    let Some(split) = response.windows(4).position(|bytes| bytes == b"\r\n\r\n") else {
+        return Err(no_service());
+    };
+    let (head_bytes, body) = response.split_at(split + 4);
+    let head_text = String::from_utf8_lossy(head_bytes);
+    let status: u16 = head_text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let value: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    if !(200..300).contains(&status) {
+        let message = value
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("the window service refused the request");
+        return Err(AppError::unavailable(message.to_string()));
+    }
+    Ok(value)
+}
+
 /// Is one person's copy of `app` in the worker's running list?
 fn container_running(list: &Value, app: &str, user_id: i64) -> bool {
     containers_of(list).iter().any(|container| {
@@ -1600,6 +2890,45 @@ async fn probe(port: u16, key: &str, authorization: &str) -> bool {
         .ok()
         .flatten()
         .unwrap_or(false)
+}
+
+/// Where a native package comes from before it is staged.
+enum NativeSource {
+    File(PathBuf),
+    Url(String),
+}
+
+/// Replacement package supplied for a migration.
+enum MigrationInput {
+    None,
+    Staged(NativeStage, LinuxFormat),
+    Download(NativeSource, String, LinuxFormat),
+}
+
+/// A staged native package and the temporary directory to clean up.
+struct NativeStage {
+    staged: StagedFile,
+    temp: Option<PathBuf>,
+}
+
+impl NativeStage {
+    fn cleanup(self) {
+        if let Some(dir) = self.temp {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Can an app with this status be opened?
+fn is_openable_status(status: &str) -> bool {
+    matches!(status, "ready" | "updating")
+}
+
+/// The native backend is not configured on this server.
+fn native_unavailable() -> AppError {
+    AppError::unavailable(
+        "native Linux apps are not available on this server; install the native helper          (see docs/INSTALL.md, \"Native Linux apps (Xpra)\") or set native_enabled = true",
+    )
 }
 
 fn build_error(error: DockerError) -> AppError {
@@ -1873,6 +3202,79 @@ fn gib(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chromium_flags_keep_the_sandbox_and_hide_the_restore_bubble() {
+        assert!(CHROMIUM_LAUNCH_FLAGS.contains(&"--hide-crash-restore-bubble"));
+        assert!(CHROMIUM_LAUNCH_FLAGS.contains(&"--no-first-run"));
+        assert!(!CHROMIUM_LAUNCH_FLAGS
+            .iter()
+            .any(|flag| flag.contains("no-sandbox")));
+    }
+
+    #[tokio::test]
+    async fn window_service_requests_are_read() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let read = socket.read(&mut buffer).await.expect("read");
+            let request = String::from_utf8_lossy(&buffer[..read]);
+            assert!(request.starts_with("GET /windows "), "{request}");
+            assert!(
+                request
+                    .lines()
+                    .any(|line| line == "Authorization: Basic abc"),
+                "{request}"
+            );
+            socket
+                .write_all(b"HTTP/1.0 200 OK\r\n\r\n{\"windows\":[{\"id\":\"0x1\"}]}")
+                .await
+                .expect("write");
+        });
+        let value = control_request(port, "Basic abc", "GET", "/windows")
+            .await
+            .expect("json");
+        assert_eq!(value["windows"][0]["id"], "0x1");
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn window_service_errors_are_reported() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buffer = [0u8; 1024];
+            let _ = socket.read(&mut buffer).await;
+            socket
+                .write_all(b"HTTP/1.0 500 Internal Server Error\r\n\r\n{\"error\":\"no free window stream\"}")
+                .await
+                .expect("write");
+        });
+        let error = control_request(port, "Basic abc", "POST", "/vnc/0x1")
+            .await
+            .expect_err("must fail");
+        assert!(
+            error.to_string().contains("no free window stream"),
+            "{error}"
+        );
+        server.await.expect("server");
+    }
+
+    #[test]
+    fn window_ids_are_hex() {
+        assert!(validate_window_id("0x1200002"));
+        assert!(validate_window_id("0x1a"));
+        for bad in ["", "0x", "1200002", "0xzz", "0x1234567890abcdef0", "0x1/2"] {
+            assert!(!validate_window_id(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn visibility_round_trips() {

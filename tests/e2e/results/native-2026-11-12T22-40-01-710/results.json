@@ -1,0 +1,52 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:40:03.063Z",
+  "finishedAt": "2026-11-12T22:40:06.331Z",
+  "scenarios": [
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-12T22:40:03.063Z",
+      "durationMs": 3200,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"native\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native session prepared: display 100",
+        "first RAST window after 0.4 s: [{\"id\":\"win-1\",\"appId\":\"linuxnative-starting:chrome\",\"title\":\"Starting Google Chrome…\",\"focused\":true,\"minimized\":false,\"maximized\":false,\"rect\":{\"x\":11,\"y\":18,\"width\":414,\"height\":217}}]",
+        "session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"18fa7122675ab260\",\"startedAt\":1794523196771,\"status\":\"exited\"},{\"appId\":\"xterm\",\"error\":null,\"name\":\"XTerm\",\"runId\":\"ae9404fd50e27d54\",\"startedAt\":1794523197260,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"4d4a8c3545ec69e2\",\"startedAt\":1794523204619,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"210d3fcc00a3ba6b\",\"startedAt\":1794523205389,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":nul",
+        "Linux identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-e2e/data/linux-users/2\"}",
+        "session unit rast-xpra-u2: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"1544503\",\"Result\":\"success\",\"MemoryCurrent\":\"213176320\",\"CPUUsageNSec\":\"1435287000\",\"TasksCurrent\":\"8\"}",
+        "embedded app frame(s): 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        },
+        "firstWindowMs": {
+          "value": 427,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "error": null
+    }
+  ]
+}

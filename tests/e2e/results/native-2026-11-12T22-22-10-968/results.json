@@ -1,0 +1,34 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8732",
+  "startedAt": "2026-11-12T22:22:12.417Z",
+  "finishedAt": "2026-11-12T22:22:12.453Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:22:12.417Z",
+      "durationMs": 3,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "native",
+      "status": "fail",
+      "startedAt": "2026-11-12T22:22:12.420Z",
+      "durationMs": 2,
+      "details": [],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": "TypeError: fetch failed"
+    }
+  ]
+}

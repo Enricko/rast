@@ -1,0 +1,95 @@
+{
+  "startedAt": "2026-11-12T21:25:42.081Z",
+  "steps": [],
+  "assertions": [
+    {
+      "name": "the real RAST desktop boots against the native API contract",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "one shared client creates one RAST window per remote Xpra window",
+      "ok": true,
+      "detail": "1 windows: xterm"
+    },
+    {
+      "name": "each top-level window has a taskbar entry",
+      "ok": true,
+      "detail": "File Station | Resource Monitor | Control Panel | xterm"
+    },
+    {
+      "name": "native app launches from the RAST launcher",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "keyboard forwarding works in the real desktop (remote xterm ran the command)",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "RAST resize reaches the X server window",
+      "ok": true,
+      "detail": "722 -> 902"
+    },
+    {
+      "name": "minimize iconifies the remote window (X11 unmap)",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "restore from the taskbar maps the remote window again",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "maximize resizes the remote window to the work area",
+      "ok": true,
+      "detail": "1438x802"
+    },
+    {
+      "name": "closing a RAST window closes only that remote window",
+      "ok": true,
+      "detail": "2 -> 1"
+    },
+    {
+      "name": "refresh reconnects and restores every window (no duplicated apps)",
+      "ok": true,
+      "detail": "windows 1 -> 1, xterms 4 -> 4"
+    },
+    {
+      "name": "narrow (390x844) layout keeps native windows usable",
+      "ok": true,
+      "detail": "{\"windows\":[{\"width\":390,\"height\":788}],\"viewport\":[390,844]}"
+    },
+    {
+      "name": "App Center shows the Docker -> native migration notice",
+      "ok": true,
+      "detail": "Linux apps can run natively · 1 app still runs in a Docker container. Migrate to a native install for faster starts, less memory and real desktop windows."
+    },
+    {
+      "name": "App Center shows the native install details (badge, path, launcher, dependencies)",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "install preview presents package transaction + compatibility before installing",
+      "ok": true,
+      "detail": "google-chrome-stable, package changes, compatible, architecture, to install"
+    }
+  ],
+  "url": "http://127.0.0.1:14593/",
+  "console": [
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "info: [RAST native shim] loaded v1.0.0 (session key 0123456789abcdef0123456789abcdef)",
+    "info: [RAST native shim] captured XpraClient, version 1.0.0",
+    "log: title= RAST-POC",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "error: Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "info: [RAST native shim] loaded v1.0.0 (session key 0123456789abcdef0123456789abcdef)",
+    "info: [RAST native shim] captured XpraClient, version 1.0.0"
+  ],
+  "finishedAt": "2026-11-12T21:26:35.558Z",
+  "failures": []
+}

@@ -35,6 +35,24 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub const DEFAULT_DB_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_QUOTA_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const DEFAULT_JOB_CONCURRENCY: usize = 2;
+pub const DEFAULT_NATIVE_HELPER_SOCKET: &str = "/run/rast/native.sock";
+pub const DEFAULT_LINUX_XPRA_BIN: &str = "/usr/bin/xpra";
+pub const DEFAULT_LINUX_UID_BASE: u32 = 200000;
+pub const DEFAULT_LINUX_IDLE_MINUTES: u64 = 15;
+pub const DEFAULT_LINUX_SESSION_MEMORY_MB: u32 = 4096;
+pub const DEFAULT_LINUX_APP_MEMORY_MB: u32 = 2048;
+pub const DEFAULT_LINUX_APP_CPUS: u32 = 2;
+pub const DEFAULT_LINUX_APP_TASKS: u32 = 1024;
+pub const DEFAULT_LINUX_ADMISSION_RESERVE_MB: u32 = 1024;
+
+/// Default CPU limit of one user's graphical session: a quarter of the
+/// server's CPUs, at least two and at most eight.
+fn default_linux_cpus() -> u32 {
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
+    (available / 4).clamp(2, 8)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -92,6 +110,35 @@ pub struct FileConfig {
     /// Also link the defaults into /usr/local/bin so sudo, services and
     /// scripts run them (needs `packages_shell_path`; root-run link step).
     pub packages_system_wide: Option<bool>,
+
+    // ---- Native Linux apps (Xpra) --------------------------------------
+    /// Native Linux app execution (default: on; Docker stays available for
+    /// apps that have not been migrated yet).
+    pub native_enabled: Option<bool>,
+    /// Unix socket of the privileged native helper (`rast native-helper`).
+    pub native_helper_socket: Option<PathBuf>,
+    /// Xpra server binary used for per-user graphical sessions.
+    pub linux_xpra_bin: Option<PathBuf>,
+    /// First uid assigned to a RAST user's unprivileged Linux identity.
+    pub linux_uid_base: Option<u32>,
+    /// Extra idle minutes before a user's graphical session is stopped after
+    /// its last application exited (an empty, viewer-less session is always
+    /// reclaimed after a short reload grace; 0 stops it right after that).
+    pub linux_idle_minutes: Option<u64>,
+    /// Memory limit of one user's graphical session (MiB).
+    pub linux_session_memory_mb: Option<u32>,
+    /// CPU limit of one user's graphical session (in CPUs).
+    pub linux_session_cpus: Option<u32>,
+    /// Process (task) limit of one user's graphical session.
+    pub linux_session_tasks: Option<u32>,
+    /// Default memory limit of one native application (MiB).
+    pub linux_app_memory_mb: Option<u32>,
+    /// Default CPU limit of one native application (in CPUs).
+    pub linux_app_cpus: Option<u32>,
+    /// Default process (task) limit of one native application.
+    pub linux_app_tasks: Option<u32>,
+    /// Free memory kept in reserve when admitting a new native application.
+    pub linux_admission_reserve_mb: Option<u32>,
 }
 
 /// Fully resolved configuration.
@@ -120,6 +167,19 @@ pub struct Config {
     pub packages_github_token: Option<String>,
     pub packages_shell_path: bool,
     pub packages_system_wide: bool,
+    /// Native Linux app execution through the privileged helper.
+    pub native_enabled: bool,
+    pub native_helper_socket: PathBuf,
+    pub linux_xpra_bin: PathBuf,
+    pub linux_uid_base: u32,
+    pub linux_idle_minutes: u64,
+    pub linux_session_memory_mb: u32,
+    pub linux_session_cpus: u32,
+    pub linux_session_tasks: u32,
+    pub linux_app_memory_mb: u32,
+    pub linux_app_cpus: u32,
+    pub linux_app_tasks: u32,
+    pub linux_admission_reserve_mb: u32,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
 }
@@ -360,6 +420,102 @@ impl Config {
             ));
         }
 
+        // ---- Native Linux apps -----------------------------------------
+        let linux_xpra_bin = get_str(
+            file.linux_xpra_bin.map(|p| p.display().to_string()),
+            "RAST_LINUX_XPRA_BIN",
+        )
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LINUX_XPRA_BIN));
+        // Native execution is the default when Xpra is installed; forcing it
+        // on/off is an operator choice. Without Xpra the Docker backend stays
+        // the default so app installs keep working.
+        let native_enabled = parse_env_bool(&env, "RAST_NATIVE_ENABLED", file.native_enabled)?
+            .unwrap_or_else(|| {
+                cfg!(target_os = "linux") && std::path::Path::new(&linux_xpra_bin).exists()
+            });
+        let native_helper_socket = get_str(
+            file.native_helper_socket.map(|p| p.display().to_string()),
+            "RAST_NATIVE_HELPER_SOCKET",
+        )
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_NATIVE_HELPER_SOCKET));
+        let linux_uid_base = parse_env_num(&env, "RAST_LINUX_UID_BASE", file.linux_uid_base)?
+            .unwrap_or(DEFAULT_LINUX_UID_BASE);
+        if !(1000..=2_000_000_000).contains(&linux_uid_base) {
+            return Err(ConfigError::Invalid(
+                "linux_uid_base must be between 1000 and 2000000000".into(),
+            ));
+        }
+        let linux_idle_minutes =
+            parse_env_num(&env, "RAST_LINUX_IDLE_MINUTES", file.linux_idle_minutes)?
+                .unwrap_or(DEFAULT_LINUX_IDLE_MINUTES);
+        if linux_idle_minutes > 7 * 24 * 60 {
+            return Err(ConfigError::Invalid(
+                "linux_idle_minutes must be between 0 and 10080".into(),
+            ));
+        }
+        let linux_session_memory_mb = parse_env_num(
+            &env,
+            "RAST_LINUX_SESSION_MEMORY_MB",
+            file.linux_session_memory_mb,
+        )?
+        .unwrap_or(DEFAULT_LINUX_SESSION_MEMORY_MB);
+        if !(512..=262144).contains(&linux_session_memory_mb) {
+            return Err(ConfigError::Invalid(
+                "linux_session_memory_mb must be between 512 and 262144".into(),
+            ));
+        }
+        let linux_session_cpus =
+            parse_env_num(&env, "RAST_LINUX_SESSION_CPUS", file.linux_session_cpus)?
+                .unwrap_or_else(default_linux_cpus);
+        if !(1..=256).contains(&linux_session_cpus) {
+            return Err(ConfigError::Invalid(
+                "linux_session_cpus must be between 1 and 256".into(),
+            ));
+        }
+        let linux_session_tasks =
+            parse_env_num(&env, "RAST_LINUX_SESSION_TASKS", file.linux_session_tasks)?
+                .unwrap_or(2048);
+        if !(64..=131072).contains(&linux_session_tasks) {
+            return Err(ConfigError::Invalid(
+                "linux_session_tasks must be between 64 and 131072".into(),
+            ));
+        }
+        let linux_app_memory_mb =
+            parse_env_num(&env, "RAST_LINUX_APP_MEMORY_MB", file.linux_app_memory_mb)?
+                .unwrap_or(DEFAULT_LINUX_APP_MEMORY_MB);
+        if !(128..=262144).contains(&linux_app_memory_mb) {
+            return Err(ConfigError::Invalid(
+                "linux_app_memory_mb must be between 128 and 262144".into(),
+            ));
+        }
+        let linux_app_cpus = parse_env_num(&env, "RAST_LINUX_APP_CPUS", file.linux_app_cpus)?
+            .unwrap_or(DEFAULT_LINUX_APP_CPUS);
+        if !(1..=256).contains(&linux_app_cpus) {
+            return Err(ConfigError::Invalid(
+                "linux_app_cpus must be between 1 and 256".into(),
+            ));
+        }
+        let linux_app_tasks = parse_env_num(&env, "RAST_LINUX_APP_TASKS", file.linux_app_tasks)?
+            .unwrap_or(DEFAULT_LINUX_APP_TASKS);
+        if !(16..=131072).contains(&linux_app_tasks) {
+            return Err(ConfigError::Invalid(
+                "linux_app_tasks must be between 16 and 131072".into(),
+            ));
+        }
+        let linux_admission_reserve_mb = parse_env_num(
+            &env,
+            "RAST_LINUX_ADMISSION_RESERVE_MB",
+            file.linux_admission_reserve_mb,
+        )?
+        .unwrap_or(DEFAULT_LINUX_ADMISSION_RESERVE_MB);
+        if !(0..=1_048_576).contains(&linux_admission_reserve_mb) {
+            return Err(ConfigError::Invalid(
+                "linux_admission_reserve_mb must be between 0 and 1048576".into(),
+            ));
+        }
+
         Ok(Self {
             bind,
             public_url,
@@ -384,6 +540,18 @@ impl Config {
             packages_github_token,
             packages_shell_path,
             packages_system_wide,
+            native_enabled,
+            native_helper_socket,
+            linux_xpra_bin,
+            linux_uid_base,
+            linux_idle_minutes,
+            linux_session_memory_mb,
+            linux_session_cpus,
+            linux_session_tasks,
+            linux_app_memory_mb,
+            linux_app_cpus,
+            linux_app_tasks,
+            linux_admission_reserve_mb,
             loaded_from,
         })
     }
@@ -401,9 +569,30 @@ impl Config {
     pub fn packages_dir(&self) -> PathBuf {
         self.data_dir.join("packages")
     }
-    /// Linux app uploads waiting to be built: `<data_dir>/linux-apps`.
+    /// Linux app storage: `<data_dir>/linux-apps` (staging, managed installs,
+    /// per-user profiles, migration backups).
     pub fn linux_apps_dir(&self) -> PathBuf {
         self.data_dir.join("linux-apps")
+    }
+    /// Managed native application directories.
+    pub fn linux_app_install_dir(&self) -> PathBuf {
+        self.linux_apps_dir().join("apps")
+    }
+    /// Per-user application profiles (settings, sign-ins).
+    pub fn linux_profiles_dir(&self) -> PathBuf {
+        self.linux_apps_dir().join("profiles")
+    }
+    /// Unprivileged Linux identities' homes.
+    pub fn linux_users_dir(&self) -> PathBuf {
+        self.data_dir.join("linux-users")
+    }
+    /// Uploads and staging area for native installs.
+    pub fn linux_staging_dir(&self) -> PathBuf {
+        self.linux_apps_dir().join("staging")
+    }
+    /// Docker -> native migration backups.
+    pub fn linux_migration_dir(&self) -> PathBuf {
+        self.linux_apps_dir().join("migrations")
     }
     pub fn secret_path(&self) -> PathBuf {
         self.data_dir.join("secret.key")
@@ -439,7 +628,14 @@ impl Config {
         // Center shell PATH, others keep the traverse bit (no listing, no
         // reading): resetting it would hide every installed runtime from
         // other users until the next `rast packages path sync`.
-        let traverse = if self.packages_shell_path { 0o001 } else { 0 };
+        // App identities must be able to traverse the data directory to reach
+        // their managed trees (linux-apps/linux-users), exactly like package
+        // runtimes need it with packages_shell_path.
+        let traverse = if self.packages_shell_path || self.native_enabled {
+            0o001
+        } else {
+            0
+        };
         let _ = std::fs::set_permissions(
             &self.data_dir,
             std::fs::Permissions::from_mode(0o750 | traverse),
@@ -639,6 +835,9 @@ mod tests {
     fn ensure_dirs_keeps_the_traverse_bit_for_the_package_shell_path() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
+        // Pin the native backend off: on a host with Xpra installed the
+        // native-enabled default would add the same traverse bit and make this
+        // test depend on the machine.
         let config = |shell: bool, system_wide: bool| {
             Config::from_parts(
                 None,
@@ -647,6 +846,7 @@ mod tests {
                     storage_dir: Some(dir.path().join("storage")),
                     packages_shell_path: Some(shell),
                     packages_system_wide: Some(system_wide),
+                    native_enabled: Some(false),
                     ..Default::default()
                 },
                 no_env,
@@ -675,6 +875,32 @@ mod tests {
             .iter()
             .any(|w| w.contains("packages_system_wide")));
         assert!(!config(true, false).packages_links_enabled());
+    }
+
+    #[test]
+    fn ensure_dirs_adds_the_traverse_bit_when_native_apps_are_enabled() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::from_parts(
+            None,
+            FileConfig {
+                data_dir: Some(dir.path().join("data")),
+                storage_dir: Some(dir.path().join("storage")),
+                packages_shell_path: Some(false),
+                native_enabled: Some(true),
+                ..Default::default()
+            },
+            no_env,
+        )
+        .unwrap();
+        cfg.ensure_dirs().unwrap();
+        // App identities must traverse the data directory to reach profiles.
+        let mode = std::fs::metadata(dir.path().join("data"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o751);
     }
 
     #[test]
