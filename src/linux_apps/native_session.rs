@@ -474,9 +474,13 @@ impl NativeSessions {
             return Err(AppError::bad_request("this app has no launch command"));
         }
         validate_app_id(&request.app_id)?;
-        // Fast path: the app already runs for this person.
+        // Fast path: the app already runs for this person (verified against
+        // the live systemd unit, not only the in-memory record).
         if let Some((run, session)) = self.existing_run(user.id, &request.app_id) {
-            return Ok((run, session));
+            if self.run_unit_active(&run).await {
+                return Ok((run.json(), session));
+            }
+            self.mark_run_exited(user.id, &run).await;
         }
         // Memory admission happens before anything is created or started: the
         // new app must fit next to the reserve.
@@ -496,7 +500,10 @@ impl NativeSessions {
         let user_lock = self.user_lock(user.id);
         let _guard = user_lock.lock().await;
         if let Some((run, session)) = self.existing_run(user.id, &request.app_id) {
-            return Ok((run, session));
+            if self.run_unit_active(&run).await {
+                return Ok((run.json(), session));
+            }
+            self.mark_run_exited(user.id, &run).await;
         }
         // The session may have ended while we waited for the lock.
         let session = self
@@ -743,7 +750,7 @@ impl NativeSessions {
     }
 
     /// The existing run of `app_id` for `user_id`, if it is still active.
-    fn existing_run(&self, user_id: i64, app_id: &str) -> Option<(Value, Value)> {
+    fn existing_run(&self, user_id: i64, app_id: &str) -> Option<(NativeRun, Value)> {
         let session = self.session_of_user(user_id)?;
         // Never call `session.json()` while holding the state lock (it locks
         // again); take the run out first.
@@ -758,7 +765,44 @@ impl NativeSessions {
                 .find(|run| run.app_id == app_id && run.status.is_active())?
                 .clone()
         };
-        Some((run.json(), session.json()))
+        Some((run, session.json()))
+    }
+
+    /// Is the run's systemd unit still active? A run can outlive its process
+    /// for a few seconds (sweep interval); reopening the app in that window
+    /// must start a new process instead of returning a dead run.
+    async fn run_unit_active(&self, run: &NativeRun) -> bool {
+        match self
+            .helper
+            .call("unit_status", json!({"unit": run.unit}))
+            .await
+        {
+            Ok(value) => value
+                .get("active")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    /// Mark a run whose process is gone as exited before starting a new one.
+    async fn mark_run_exited(&self, user_id: i64, run: &NativeRun) {
+        let Some(session) = self.session_of_user(user_id) else {
+            return;
+        };
+        let updated = {
+            let mut state = session.lock();
+            let Some(entry) = state.apps.iter_mut().find(|entry| entry.id == run.id) else {
+                return;
+            };
+            if entry.status.is_active() {
+                entry.status = RunStatus::Exited;
+                entry.ended_at = Some(db::now_ms());
+            }
+            entry.clone()
+        };
+        self.store_run(&updated).await;
+        self.publish_session(&session);
     }
 
     fn publish_session(&self, session: &NativeSession) {
@@ -3017,6 +3061,35 @@ mod tests {
         assert_eq!(first["runId"], second["runId"]);
         assert_eq!(*helper.app_starts.lock().unwrap(), 1);
         assert_eq!(sessions.running_counts().get("code").copied(), Some(1));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_run_does_not_swallow_the_next_launch() {
+        // Closing an app and immediately reopening it used to return the
+        // in-memory run for a few seconds (until the sweeper noticed the unit
+        // had stopped), so the new launch started no process and the person
+        // saw no window. Launch must verify the systemd unit.
+        let (_dir, helper, sessions, _cfg) = manager().await;
+        let user = test_user(1);
+        let (first, _) = sessions
+            .launch(&user, launch_request("code"))
+            .await
+            .unwrap();
+        let unit = helper
+            .calls()
+            .iter()
+            .find(|(name, _)| name == "app_start")
+            .and_then(|(_, params)| params["unit"].as_str().map(str::to_string))
+            .expect("app unit");
+        assert!(helper.unit_active(&unit));
+        // Simulate the process exiting between sweeps.
+        helper.set_unit(&unit, false);
+        let (second, _) = sessions
+            .launch(&user, launch_request("code"))
+            .await
+            .unwrap();
+        assert_ne!(first["runId"], second["runId"]);
+        assert_eq!(*helper.app_starts.lock().unwrap(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

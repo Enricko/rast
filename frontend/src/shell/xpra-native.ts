@@ -657,12 +657,29 @@ export class NativeLinuxHost {
     return [...this.frames.values()].filter((frame) => frame.slug === slug && !frame.closing);
   }
 
+  /**
+   * Offset of the window's content area inside its frame. RAST draws its own
+   * title bar above the adopted remote window, so transient surfaces placed
+   * from remote coordinates must add this offset or they float one title bar
+   * too high.
+   */
+  private contentOrigin(handle: WindowHandle): { x: number; y: number } {
+    const content = handle.contentEl;
+    const root = content.parentElement;
+    if (!root) return { x: 0, y: 0 };
+    const contentRect = content.getBoundingClientRect();
+    const rootRect = root.getBoundingClientRect();
+    return {
+      x: Math.round(contentRect.x - rootRect.x),
+      y: Math.round(contentRect.y - rootRect.y),
+    };
+  }
+
   private createFrame(info: NativeShimWindow, parent: FrameState | null): void {
     const slug = this.resolveSlug(info);
     const app = linuxAppById(slug);
     const title = info.title?.trim() || app?.name || "Window";
     const popup = isPopupWindow(info);
-    const dialog = Boolean(parent) && !popup;
     const appId = nativeWindowAppId(slug, info.wid);
     const width = clamp(info.width, MIN_W, Math.min(MAX_W, globalThis.innerWidth - 8));
     const height = clamp(info.height, MIN_H, Math.min(MAX_H, globalThis.innerHeight - 8));
@@ -672,27 +689,32 @@ export class NativeLinuxHost {
     let dialogOffset = { x: 0, y: 0 };
     if (parent?.handle) {
       const parentRect = parent.handle.getRect();
+      const origin = this.contentOrigin(parent.handle);
       if (popup) {
         dialogOffset = {
           x: info.x - parent.remoteX,
           y: info.y - parent.remoteY,
         };
         initialRect = {
-          x: Math.max(0, parentRect.x + dialogOffset.x),
-          y: Math.max(0, parentRect.y + dialogOffset.y),
+          x: Math.max(0, parentRect.x + origin.x + dialogOffset.x),
+          y: Math.max(0, parentRect.y + origin.y + dialogOffset.y),
           w: width,
           h: height,
         };
       } else {
         dialogOffset = { x: 40, y: 40 };
         initialRect = {
-          x: Math.min(Math.max(8, parentRect.x + 40), Math.max(8, area - width - 8)),
-          y: Math.min(Math.max(8, parentRect.y + 40), Math.max(8, globalThis.innerHeight - height - 8)),
+          x: Math.min(Math.max(8, parentRect.x + origin.x + 40), Math.max(8, area - width - 8)),
+          y: Math.min(Math.max(8, parentRect.y + origin.y + 40), Math.max(8, globalThis.innerHeight - height - 8)),
           w: width,
           h: height,
         };
       }
     }
+
+    // Transient surfaces (dialogs, menus, tooltips) never get their own
+    // taskbar entry, even if their parent window is not known (yet).
+    const transient = popup || Boolean(info.transientFor) || Boolean(parent);
 
     const frame: FrameState = {
       wid: info.wid,
@@ -738,7 +760,7 @@ export class NativeLinuxHost {
         undefined,
         (ctx) => this.mountFrame(frame, ctx),
         {
-          taskbar: !dialog && !popup,
+          taskbar: !transient,
           ownerId: parent?.handle?.id,
           ...(initialRect ? { initialRect } : {}),
         },
@@ -839,6 +861,15 @@ export class NativeLinuxHost {
       this.deps.wm.toggleMinimize(handle.id);
     }
     frame.last.minimized = window.minimized;
+    // An application that maximized itself (a video player, a GTK maximize)
+    // should not leave a small RAST frame stretched around a maximized canvas.
+    if (window.maximized && !frame.last.maximized && !handle.isMaximized() && !frame.closing) {
+      this.deps.wm.toggleMaximize(handle.id);
+    } else if (!window.maximized && frame.last.maximized && handle.isMaximized() && !frame.closing) {
+      // Only follow a remote un-maximize when the remote window itself changed
+      // state; a RAST-side maximize does not change the X11 state.
+      this.deps.wm.toggleMaximize(handle.id);
+    }
     frame.last.maximized = window.maximized;
   }
 
@@ -896,8 +927,9 @@ export class NativeLinuxHost {
         this.deps.wm.toggleMinimize(frame.handle.id);
       }
       if (ownerInfo.minimized || frame.autoMinimized) continue;
-      const dx = ownerInfo.rect.x + frame.dialogOffset.x;
-      const dy = ownerInfo.rect.y + frame.dialogOffset.y;
+      const origin = this.contentOrigin(owner.handle);
+      const dx = ownerInfo.rect.x + origin.x + frame.dialogOffset.x;
+      const dy = ownerInfo.rect.y + origin.y + frame.dialogOffset.y;
       const rect = frame.handle.getRect();
       if (Math.abs(rect.x - dx) > 1 || Math.abs(rect.y - dy) > 1) {
         frame.handle.moveTo(Math.max(0, dx), Math.max(0, dy));
@@ -932,6 +964,7 @@ export class NativeLinuxHost {
     window.clearTimeout(frame.closeTimer);
     const handle = frame.handle;
     this.frames.delete(frame.wid);
+    if (this.focusedWid === frame.wid) this.focusedWid = null;
     if (handle && !handle.isClosed()) handle.close();
   }
 
@@ -944,6 +977,7 @@ export class NativeLinuxHost {
       return;
     }
     this.frames.delete(frame.wid);
+    if (this.focusedWid === frame.wid) this.focusedWid = null;
     if (handle && !handle.isClosed()) {
       frame.remoteGone = true;
       handle.close();
@@ -958,6 +992,7 @@ export class NativeLinuxHost {
       window.clearTimeout(frame.resizeTimer);
       frame.remoteGone = true;
       this.frames.delete(frame.wid);
+      if (this.focusedWid === frame.wid) this.focusedWid = null;
       if (frame.handle && !frame.handle.isClosed()) frame.handle.close();
     }
     for (const slug of [...this.starting.keys()]) this.closeStarting(slug);
@@ -1171,8 +1206,21 @@ export class NativeLinuxHost {
     const wid = this.focusedWid;
     if (!wid) return;
     if (document.querySelector(".modal-backdrop")) return;
+    // Keyboard stays with the RAST shell whenever the user is operating shell
+    // controls (taskbar, start menu, dialogs, buttons): those must remain
+    // usable with Space/Enter/arrow keys even while a native window is focused.
     const target = event.target;
-    if (target instanceof HTMLElement) {
+    if (target instanceof Element) {
+      if (
+        target.closest(
+          "input, textarea, select, [contenteditable='true'], [contenteditable=''], button, " +
+            "[role='menu'], [role='menuitem'], [role='tab'], " +
+            ".taskbar, .start-menu, .context-menu, .panel, .tray, .modal, .auth",
+        )
+      ) {
+        return;
+      }
+    } else if (target instanceof HTMLElement) {
       if (target.isContentEditable) return;
       const tag = target.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;

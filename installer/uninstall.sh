@@ -358,6 +358,10 @@ if [ -d "$NATIVE_DROPIN_DIR" ] && [ "$DRY_RUN" -eq 0 ]; then
     run rmdir "$NATIVE_DROPIN_DIR" 2>/dev/null || true
 fi
 remove_file "$NATIVE_TMPFILES"
+# The native helper's display-port firewall table is owned by RAST.
+if command -v nft >/dev/null 2>&1; then
+    run nft delete table inet rast_native >/dev/null 2>&1 || true
+fi
 
 remove_file "$RUNTIME_DIR/worker.sock"
 remove_file "$RUNTIME_DIR/native.sock"

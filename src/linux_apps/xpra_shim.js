@@ -29,7 +29,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.1.0";
+  var VERSION = "1.2.0";
   var ROOT = window;
 
   /* ------------------------------------------------------------------ state */
@@ -321,7 +321,7 @@
     }
     return {
       wid: String(win.wid),
-      title: win.title || metadata.title || "Window",
+      title: rawWindowTitles[String(win.wid)] || win.title || metadata.title || "Window",
       x: Math.round(win.x || 0),
       y: Math.round(win.y || 0),
       width: Math.max(1, Math.round(win.w || 1)),
@@ -493,6 +493,81 @@
     }
   }
 
+  /**
+   * Wrap a client packet handler so `before` can sanitize its arguments before
+   * the pinned Xpra HTML5 client sees them. The client renders remote window
+   * titles with jQuery `.html()` (xpra-html5 v21, Window.js), so application
+   * metadata is untrusted HTML from the app's point of view: it is escaped
+   * before rendering. The raw title is kept for the RAST desktop, which uses
+   * text nodes only.
+   */
+  function patchBefore(client, name, before) {
+    var original = client[name];
+    if (typeof original !== "function" || original.__rastBefore) return;
+    var wrapped = function () {
+      try {
+        before(arguments);
+      } catch (e) {
+        /* never let sanitizing break the client */
+      }
+      return original.apply(this, arguments);
+    };
+    wrapped.__rastBefore = true;
+    try {
+      client[name] = wrapped;
+    } catch (e) {
+      warn("could not patch", name, e);
+      return;
+    }
+    var handlers = client.packet_handlers;
+    if (handlers && typeof handlers === "object") {
+      for (var key in handlers) {
+        if (handlers[key] === original) handlers[key] = wrapped;
+      }
+    }
+  }
+
+  /* Remote window titles reach the Xpra client's own DOM through `.html()`;
+   * they are untrusted text from the application (a web page title, a file
+   * name, a credential prompt). Escape them before the client renders them and
+   * keep the original string for the RAST window manager. */
+  var rawWindowTitles = Object.create(null);
+
+  function escapeTitleHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function sanitizeTitleMetadata(wid, metadata) {
+    if (!metadata || typeof metadata !== "object" || metadata.title == null) return;
+    var raw = String(metadata.title);
+    if (wid != null) rawWindowTitles[String(wid)] = raw;
+    metadata.title = escapeTitleHtml(raw);
+  }
+
+  function sanitizeWindowPackets(client) {
+    patchBefore(client, "_process_window_metadata", function (args) {
+      var packet = args[0];
+      if (!packet || packet.length < 3) return;
+      sanitizeTitleMetadata(packet[1], packet[2]);
+    });
+    var newWindow = function (args) {
+      var packet = args[0];
+      if (!packet || packet.length < 7) return;
+      sanitizeTitleMetadata(packet[1], packet[6]);
+    };
+    patchBefore(client, "_process_new_window", newWindow);
+    patchBefore(client, "_process_new_override_redirect", newWindow);
+    patchBefore(client, "_process_lost_window", function (args) {
+      var packet = args[0];
+      if (packet && packet.length > 1) delete rawWindowTitles[String(packet[1])];
+    });
+  }
+
   function patchClient(client) {
     if (!client) return;
     var handlers = [
@@ -523,6 +598,7 @@
       }
     });
     patchGetMouse(client);
+    sanitizeWindowPackets(client);
     /* Some builds assign handlers directly on the instance; make sure the
      * packet table references our wrappers even if it was built earlier. */
     try {
@@ -791,6 +867,15 @@
       if (!!win.minimized === next) return true;
       win.set_minimized(next);
       if (next) {
+        // Mirror Xpra's own `toggle_minimized()`: tell the X server the
+        // window is iconified. Without this the application keeps rendering
+        // (and keeps painting frames that nobody can see), which wastes CPU
+        // for a window the person minimized.
+        try {
+          client.send([ROOT.PACKET_TYPES.unmap_window, win.wid, true]);
+        } catch (e) {
+          /* ignore */
+        }
         if (client.focused_wid === win.wid) {
           try {
             client.auto_focus();

@@ -1,0 +1,475 @@
+{
+  "mode": "native",
+  "baseUrl": "http://127.0.0.1:8742",
+  "startedAt": "2026-11-14T09:41:15.519Z",
+  "finishedAt": "2026-11-14T09:46:18.907Z",
+  "scenarios": [
+    {
+      "id": "s0",
+      "title": "Smoke: API health, browser login and desktop shell",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:15.519Z",
+      "durationMs": 2306,
+      "details": [
+        "logged in through the form as admin (windows: 0)",
+        "App Center opened",
+        "bootstrap: RAST 0.13.2 (authenticated=false)"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/desktop-after-login.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/s0/app-center.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "a",
+      "title": "Admin installs a compatible .deb and launches it",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:17.825Z",
+      "durationMs": 11788,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "native profile ancestor permissions fixed (0711)",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "app after install: {\"id\":\"chrome\",\"name\":\"Google Chrome\",\"status\":\"ready\",\"backend\":\"native\",\"visibility\":\"users\",\"version\":\"157.0.8103.78-1\"}",
+        "app is visible to a non-admin (status ready)",
+        "App Center lists Google Chrome",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native session prepared: display 100",
+        "first RAST window after 0.3 s: [{\"id\":\"win-1\",\"appId\":\"linuxnative-starting:chrome\",\"title\":\"Starting Google Chrome…\",\"focused\":true,\"minimized\":false,\"maximized\":false,\"rect\":{\"x\":11,\"y\":18,\"width\":414,\"height\":217}}]",
+        "session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794649278984,\"status\":\"ready\",\"url\":\"/linux-apps/session/b6a8749ed6519611d0a8e6ea22ca1f3e/\",\"viewers\":1,\"_launched\":{\"run\":{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"},\"session\":{\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"er",
+        "Linux identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-lead/data/linux-users/2\"}",
+        "session unit rast-xpra-u2: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"2350197\",\"Result\":\"success\",\"MemoryCurrent\":\"191164416\",\"CPUUsageNSec\":\"1690669000\",\"TasksCurrent\":\"8\"}",
+        "embedded app frame(s): 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "metrics": {
+        "installMs": {
+          "value": 0,
+          "unit": "ms"
+        },
+        "firstWindowMs": {
+          "value": 300,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-center-lists-app.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-window-opened.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/a/app-usable.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "b",
+      "title": "Admin installs a portable archive and launches it",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:29.613Z",
+      "durationMs": 3429,
+      "details": [
+        "[install RAST Test App (portable)] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install RAST Test App (portable)] install job 5d4abf68-4595-47d1-bc36-90abbd16fb3d",
+        "[install RAST Test App (portable)] job 5d4abf68-4595-47d1-bc36-90abbd16fb3d: done Installed",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "window title(s): New Tab - Google Chrome, RAST Test App",
+        "session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794649278984,\"status\":\"ready\",\"url\":\"/linux-apps/session/b6a8749ed6519611d0a8e6ea22ca1f3e/\",\"view",
+        "clicked New Window at 161,197",
+        "windows after New Window: [\"New Tab - Google Chrome\",\"RAST Test App\",\"RAST Test App #2\"]",
+        "taskbar entries: [{\"label\":\"File Station\",\"appId\":null,\"active\":false,\"minimized\":false,\"pinned\":true},{\"label\":\"Resource Monitor\",\"appId\":null,\"active\":false,\"minimized\":false,\"pinned\":true},{\"label\":\"Control Panel\",\"appId\":null,\"active\":false,\"minimized\":false,\"pinned\":true},{\"label\":\"New Tab - Google Chrome\",\"appId\":null,\"active\":false,\"minimized\":false,\"pinned\":false},{\"label\":\"RAST Test App\",\"appId\":null,\"active\":false,\"minimized\":false,\"pinned\":false},{\"label\":\"RAST Test App #2\",\"appId\":null,\"active\":true,\"minimized\":false,\"pinned\":false}]"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-window.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-second-window.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-two-windows.png"
+      ],
+      "metrics": {
+        "firstWindowMs": {
+          "value": 383,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-window.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-second-window.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/b/portable-app-two-windows.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "c",
+      "title": "Same user opens Chrome and another GUI app (shared session)",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:33.042Z",
+      "durationMs": 2154,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native launch ready on attempt 1: run ?, display 100",
+        "windows: [{\"title\":\"New Tab - Google Chrome\",\"appId\":\"linux:chrome:6291459\"},{\"title\":\"RAST Test App\",\"appId\":\"linux:rast-test-app:16777219\"},{\"title\":\"RAST Test App #2\",\"appId\":\"linux:rast-test-app:16778102\"}]",
+        "both apps open at once (1 + 2 windows)",
+        "chrome session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt",
+        "portable session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt",
+        "identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-lead/data/linux-users/2\"}",
+        "session unit: {\"ActiveState\":\"active\",\"SubState\":\"running\",\"MainPID\":\"2350197\",\"Result\":\"success\",\"MemoryCurrent\":\"249339904\",\"CPUUsageNSec\":\"3660181000\",\"TasksCurrent\":\"24\"}",
+        "native session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"running\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"}],\"display\":100,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794649278984,\"status\":\"ready\",\"url\":\"/linux-apps/session/b6a8749ed6519611d0a8e6ea22ca1f3e/\",\"viewers\":1}",
+        "runs reported by the session API: 2 (both apps are in the one session)",
+        "native app units: [\"rast-app-u210002-chrome-24.service\",\"rast-app-u210002-rast-test-app-0.service\"]",
+        "app processes: [{\"pid\":2351639,\"cmd\":\"/tmp/rast-native-lead/data/linux-apps/apps/rast-test-app/1.0/rast-test-app\"},{\"pid\":2351975,\"cmd\":\"sudo pgrep -af ^/usr/bin/google-chrome|rast-test-app\"}]",
+        "closing the Chrome window kept the other app's window"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/two-apps-one-user.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/after-closing-chrome.png"
+      ],
+      "metrics": {
+        "sessionMemoryBytes": {
+          "value": 249339904,
+          "unit": "bytes"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/two-apps-one-user.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/c/after-closing-chrome.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "d",
+      "title": "Three Chrome windows: taskbar entries, focus, resize, close",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:35.196Z",
+      "durationMs": 9175,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "initial Chrome windows: [\"Starting Google Chrome…\",\"New Tab - Google Chrome\"]",
+        "Chrome windows after Ctrl+N x2: [\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
+        "Chrome taskbar labels: [\"New Tab - Google Chrome\",\"New Tab - Google Chrome\",\"New Tab - Google Chrome\"]",
+        "focused after Chrome taskbar entry #1: New Tab - Google Chrome",
+        "focused after Chrome taskbar entry #2: New Tab - Google Chrome",
+        "focused after Chrome taskbar entry #3: New Tab - Google Chrome",
+        "resize: {\"x\":138,\"y\":138,\"width\":1310,\"height\":220} -> {\"x\":138,\"y\":138,\"width\":1170,\"height\":228}",
+        "remote window geometry: before 1308x178 -> after 1168x186 (RAST rect 1170x228)",
+        "session while the windows are open: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"575b6d4d6a4bb97a\",\"startedA",
+        "all Chrome windows closed from the desktop"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows resized and focused.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/after-closing-all-chrome-windows.png"
+      ],
+      "metrics": {
+        "chromeWindowCount": {
+          "value": 3,
+          "unit": ""
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/three-chrome-windows resized and focused.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/d/after-closing-all-chrome-windows.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "e",
+      "title": "Two users use Chrome concurrently with separate data",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:44.371Z",
+      "durationMs": 12307,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native launch ready on attempt 1: run ?, display 101",
+        "alice windows: New Tab - Google Chrome",
+        "bob windows: Starting Google Chrome…",
+        "alice session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"575b6d4d6a4bb97a\",\"startedA",
+        "bob session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"f5c55edc8de765ec\",\"startedAt\":1794649313983,\"status\":\"running\"}],\"display\":101,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794649304882,\"status\":\"ready\",\"url\":\"/linux-apps/session/41193e300e1eb9a6cad8ba4d102ce642/\",\"viewers\":1,\"_launched\":{\"run\":{\"appId\"",
+        "alice identity: {\"username\":\"rast-u2\",\"userId\":2,\"uid\":210002,\"gid\":210002,\"home\":\"/tmp/rast-native-lead/data/linux-users/2\"}",
+        "bob identity: {\"username\":\"rast-u3\",\"userId\":3,\"uid\":210003,\"gid\":210003,\"home\":\"/tmp/rast-native-lead/data/linux-users/3\"}",
+        "alice unit rast-xpra-u2: running",
+        "bob unit rast-xpra-u3: running",
+        "displays: alice :100, bob :101",
+        "alice home /tmp/rast-native-lead/data/linux-users/2 entries: 5",
+        "bob home /tmp/rast-native-lead/data/linux-users/3 entries: 5",
+        "alice closing her window did not affect bob"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/e/alice-chrome.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/e/bob-chrome.png"
+      ],
+      "metrics": {
+        "twoUserOpenMs": {
+          "value": 9554,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/e/alice-chrome.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/e/bob-chrome.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "f",
+      "title": "Concurrent launch requests reuse the intended session",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:56.678Z",
+      "durationMs": 2022,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "concurrent requests: 8 ok, 0 rejected",
+        "native session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"running\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"575b6d4d6a4bb97a\",\"startedAt\":1794649295579,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"f (listApps sessions: 0)",
+        "all concurrent launches resolve to one session: display:100",
+        "native runs for the app: [{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"575b6d4d6a4bb97a\",\"startedAt\":1794649295579,\"status\":\"exited\"},{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"fa633a47fdb865f8\",\"startedAt\":1794649304893,\"status\":\"exited\"},{\"appId\":\"chrome\",\"er",
+        "native app units: [\"rast-app-u210002-chrome-27.service\",\"rast-app-u210002-rast-test-app-0.service\",\"rast-app-u210003-chrome-5.service\"]",
+        "native launch ready on attempt 1: run ?, display 100",
+        "RAST windows after opening: 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/f/concurrent-launch-one-window.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/f/concurrent-launch-one-window.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "g",
+      "title": "Browser refresh reconnects without duplicating processes",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:41:58.701Z",
+      "durationMs": 3670,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "session before refresh: display:100",
+        "Chrome processes before refresh: 26",
+        "app units before refresh: [\"rast-app-u210002-chrome-27.service\",\"rast-app-u210002-rast-test-app-0.service\",\"rast-app-u210003-chrome-5.service\"]",
+        "page reloaded",
+        "session after refresh: display:100",
+        "Chrome processes after refresh: 26",
+        "app units after refresh: [\"rast-app-u210002-chrome-27.service\",\"rast-app-u210002-rast-test-app-0.service\",\"rast-app-u210003-chrome-5.service\"]",
+        "RAST windows after refresh: 1"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/before-refresh.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/after-refresh.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/before-refresh.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/g/after-refresh.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "h",
+      "title": "Closing one app preserves the other apps",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:42:02.371Z",
+      "durationMs": 7631,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "native launch ready on attempt 1: run ?, display 100",
+        "chrome session: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"",
+        "Chrome windows closed",
+        "chrome session stopped: {\"gone\":true,\"session\":{\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1",
+        "fixture app session still running",
+        "remaining app pixels changed while typing: true (n/a ms)",
+        "before screenshot: /home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-after-typing.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-before-typing.png",
+        "/home/lufria/RAST/tests/e2e/screenshots/native/h/remaining-app-after-typing.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "i",
+      "title": "Idle cleanup stops the session after use",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:42:10.002Z",
+      "durationMs": 188610,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 100",
+        "session before cleanup: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"chrome\",\"error\":null,\"name\":\"Google Chrome\",\"runId\":\"d8a345c6e63862bf\",\"startedAt\":1794649288078,\"status\":\"exited\"},{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"48ff4f8bddb5b3a9\",\"startedAt\":1794649291901,\"status\":\"",
+        "other active runs in the session: []",
+        "windows closed and browser tab closed; waiting for the backend to clean up",
+        "backend cleanup after 187.3 s (grace 120s, ended=true, shared=false)",
+        "session unit after cleanup: {\"ActiveState\":\"inactive\",\"SubState\":\"dead\",\"MainPID\":\"0\",\"Result\":\"success\",\"MemoryCurrent\":\"[not set]\",\"CPUUsageNSec\":\"[not set]\",\"TasksCurrent\":\"[not set]\"}",
+        "app units after cleanup: 0 active for uid 210002 / 1 active host-wide / 1 listed"
+      ],
+      "evidence": [],
+      "metrics": {
+        "cleanupMs": {
+          "value": 187318,
+          "unit": "ms"
+        }
+      },
+      "screenshots": [],
+      "error": null
+    },
+    {
+      "id": "j",
+      "title": "Service restart recovery",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:45:18.613Z",
+      "durationMs": 12900,
+      "details": [
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 102",
+        "session before restart: display:102",
+        "session unit before restart: active/running",
+        "restarting the dev server: /home/lufria/RAST/scripts/e2e/dev-instance.sh restart-server (127.0.0.1:8742)",
+        "restart output: \u001b[1;34m[e2e]\u001b[0m granting rast traverse access to frontend assets (ACL) | \u001b[1;34m[e2e]\u001b[0m starting RAST server on http://127.0.0.1:8742 (data: /tmp/rast-native-lead/data) | \u001b[1;34m[e2e]\u001b[0m server healthy (pid 2364960)",
+        "server healthy again after 0.0 s",
+        "session survived the restart (user alice)",
+        "native session after restart: {\"appId\":null,\"appName\":\"Desktop session\",\"apps\":[{\"appId\":\"rast-test-app\",\"error\":null,\"name\":\"RAST Test App\",\"runId\":\"c4bc27077a17fe50\",\"startedAt\":1794649528031,\"status\":\"running\"}],\"display\":102,\"error\":null,\"id\":\"native\",\"reason\":null,\"separateWindows\":true,\"startedAt\":1794649518921,\"status\":\"ready\",\"url\":\"/linux-apps/session/ccee31e9c8d5e81553b1b89a020f455f/\",\"viewers\":0}",
+        "session unit after restart: active/running",
+        "launch after restart returned run null",
+        "browser reconnected after the restart"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/j/after-service-restart.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/j/after-service-restart.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "k",
+      "title": "Failed install and update leave recoverable state",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:45:31.513Z",
+      "durationMs": 6736,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "invalid-corrupt.deb: install started ({\"installing\":true,\"jobId\":\"4430d82a-070d-4a6e-a420-d0a6807cff2f\"})",
+        "failure state for invalid-corrupt.deb: {\"fileName\":\"invalid-corrupt.deb\",\"jobStatus\":\"failed\",\"jobError\":\"cannot read the package metadata: dpkg-deb: error: '/tmp/rast-native-lead/data/linux-apps/staging/stage-4874fbda49d14050b6344ac51567e619/invalid-corrupt.deb' is not a Debian format archive\",\"app\":{\"id\":\"invalid-corrupt\",\"status\":\"failed\",\"error\":\"cannot read the package metadata: dpkg-deb: error: '/tmp/rast-native-lead/data/linux-apps/staging/stage-4874fbda49d14050b6344ac51567e619/invalid-corrupt.deb' is not a Debian format archive\"}}",
+        "invalid-corrupt.deb: open on the failed app -> 409",
+        "invalid-corrupt.deb: failed app deleted cleanly",
+        "wrong-arch.deb: install started ({\"installing\":true,\"jobId\":\"50ff90a1-95b1-4d6b-9cfc-d7a2fd1a30ca\"})",
+        "failure state for wrong-arch.deb: {\"fileName\":\"wrong-arch.deb\",\"jobStatus\":\"failed\",\"jobError\":\"This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).\",\"app\":{\"id\":\"wrong-arch\",\"status\":\"failed\",\"error\":\"This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).\"}}",
+        "wrong-arch.deb: open on the failed app -> 409",
+        "wrong-arch.deb: failed app deleted cleanly",
+        "wrong-arch error: This package cannot be installed on this server: package architecture arm64 does not match the host (amd64).",
+        "invalid-archive.tar.gz: install started ({\"installing\":true,\"jobId\":\"ea53aed7-cbb7-4f2b-a905-0dee3c6383dd\"})",
+        "failure state for invalid-archive.tar.gz: {\"fileName\":\"invalid-archive.tar.gz\",\"jobStatus\":\"failed\",\"jobError\":\"the archive is corrupt: invalid gzip header\",\"app\":{\"id\":\"invalid-archive\",\"status\":\"failed\",\"error\":\"the archive is corrupt: invalid gzip header\"}}",
+        "invalid-archive.tar.gz: open on the failed app -> 409",
+        "invalid-archive.tar.gz: failed app deleted cleanly",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "update with an invalid file accepted for job 6cd28491-70cb-4297-a291-f0a9f1e27578",
+        "app after failed update: status ready, version 1.0",
+        "failed update reported: job 6cd28491-70cb-4297-a291-f0a9f1e27578 failed: This app was installed as a tarball; choose a tarball file.",
+        "existing apps remain ready",
+        "Chrome still opens after the failures (1 window(s))"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/k/healthy-app-after-failures.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/k/healthy-app-after-failures.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "l",
+      "title": "Uninstall respects shared dependencies and user data choice",
+      "mode": "native",
+      "status": "pass",
+      "startedAt": "2026-11-14T09:45:38.249Z",
+      "durationMs": 40585,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "[install RAST Test App (portable)] already installed: rast-test-app",
+        "Portable app rast-test-app (ready, backend native, build undefined)",
+        "native launch ready on attempt 1: run ?, display 102",
+        "alice app data root: /tmp/rast-native-lead/data/linux-users/2/RAST",
+        "app uninstalled with removeData=false",
+        "profile dir kept: (not present, created lazily)",
+        "[install fixture reinstall] uploading /home/lufria/RAST/tests/e2e/fixtures/rast-test-app-1.0.tar.gz",
+        "[install fixture reinstall] install job 2dae5031-4f30-47a3-b810-62b1e2b0f137",
+        "[install fixture reinstall] job 2dae5031-4f30-47a3-b810-62b1e2b0f137: done Installed",
+        "fixture reinstalled: rast-test-app (ready)",
+        "native launch ready on attempt 1: run ?, display 102",
+        "dpkg libgtk-3-0t64: {\"status\":\"install ok installed\",\"version\":\"3.24.52-0ubuntu1\",\"installed\":true}",
+        "dpkg libx11-6: {\"status\":\"install ok installed\",\"version\":\"2:1.8.13-1ubuntu0.1\",\"installed\":true}",
+        "native-helper --check exit 1",
+        "Chrome still opens after uninstalling the fixture app"
+      ],
+      "evidence": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/l/after-uninstall.png"
+      ],
+      "metrics": {},
+      "screenshots": [
+        "/home/lufria/RAST/tests/e2e/screenshots/native/l/after-uninstall.png"
+      ],
+      "error": null
+    },
+    {
+      "id": "m",
+      "title": "Docker app data migrates or reports a precise compatibility failure",
+      "mode": "native",
+      "status": "skip",
+      "startedAt": "2026-11-14T09:46:18.834Z",
+      "durationMs": 11,
+      "details": [
+        "[install google-chrome-stable] already installed: chrome",
+        "Chrome app chrome (ready, backend native, build undefined)",
+        "skipped: the app backend is 'native', expected a docker-backed app to migrate"
+      ],
+      "evidence": [],
+      "metrics": {},
+      "screenshots": [],
+      "error": null
+    }
+  ]
+}

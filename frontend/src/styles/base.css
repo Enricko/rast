@@ -418,7 +418,10 @@ pre {
   background: var(--surface);
   backdrop-filter: blur(26px) saturate(1.2);
   box-shadow: var(--shadow-window);
-  overflow: hidden;
+  /* Visible so the resize grab strips can sit *outside* the window (a hidden
+     overflow clipped them: the bottom-right handle was unreachable under the
+     next window). Window content clips itself in `.win-body`. */
+  overflow: visible;
   opacity: 0;
   transform: translateY(8px) scale(0.985);
   transition: opacity 0.16s ease, transform 0.16s ease;
@@ -455,6 +458,7 @@ pre {
 
 .win-titlebar {
   height: var(--titlebar-h);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -516,6 +520,7 @@ pre {
   container: win / inline-size;
   flex: 1;
   overflow: auto;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   position: relative;
   display: flex;
   flex-direction: column;

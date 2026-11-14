@@ -263,6 +263,11 @@ pub async fn update_user(
         body.must_change_password,
     )
     .await?;
+    // Deactivating an account must not leave its graphical sessions or native
+    // applications running: there is no way back for that identity.
+    if !updated.active {
+        state.linux_apps.stop_user_sessions(id).await;
+    }
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "updated"}),

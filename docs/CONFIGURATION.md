@@ -57,9 +57,9 @@ applied by `src/config.rs`.
 | `db_max_connections` | integer | `8` | 1–64 | `RAST_DB_MAX_CONNECTIONS` |
 | `worker_socket` | path | `"/run/rast/worker.sock"` | Unix socket path of the worker | `RAST_WORKER_SOCKET` |
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
-| `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service` and Xpra; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
+| `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
 | `native_helper_socket` | path | `"/run/rast/native.sock"` | Unix socket of the privileged native helper | `RAST_NATIVE_HELPER_SOCKET` |
-| `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions | `RAST_LINUX_XPRA_BIN` |
+| `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions; **Xpra 6.5+ is required** and the version is checked by `rast doctor`, `rast native-helper --check` and the installer | `RAST_LINUX_XPRA_BIN` |
 | `linux_uid_base` | integer | `200000` | First uid of the unprivileged Linux identities; a RAST user `id` gets `linux_uid_base + id`. Must not overlap existing accounts | `RAST_LINUX_UID_BASE` |
 | `linux_idle_minutes` | integer | `15` | 0–10080; extra minutes a person's graphical session keeps running after its last application exits (a short reload grace always applies first; `0` = reclaim right after the grace). Never reclaims while an app runs or a viewer is attached | `RAST_LINUX_IDLE_MINUTES` |
 | `linux_session_memory_mb` | integer | `4096` | 512–262144; cgroup memory limit of one person's graphical session | `RAST_LINUX_SESSION_MEMORY_MB` |
@@ -152,13 +152,17 @@ Additional variables that are **not** configuration-file keys:
   worker unit enabled and the `rast-worker` user in the `docker` group.
 * **Native Linux apps** are the default execution backend for newly installed
   desktop applications. They need the privileged helper unit
-  (`rast-native.service`, root), Xpra and a systemd slice; the web server only
-  talks to the helper's Unix socket. `native_enabled = false` keeps the legacy
-  Docker backend (apps installed that way keep working until they are
-  migrated). The per-user limits are enforced with transient systemd units, so
-  `MemoryMax`/`CPUQuota`/`TasksMax` show up in `systemctl status
-  rast-app-*` and `/sys/fs/cgroup/...`. `linux_uid_base` must not overlap
-  systemd's dynamic uid range or existing local accounts.
+  (`rast-native.service`, root), Xpra 6.5+ and a systemd slice; the web server
+  only talks to the helper's Unix socket. The helper also installs an owned
+  nftables rule (table `inet rast_native`) restricting the loopback Xpra
+  display ports to the `rast` service account, so the `nftables` package is
+  required for that defence in depth (`rast doctor` warns when it is missing).
+  `native_enabled = false` keeps the legacy Docker backend (apps installed that
+  way keep working until they are migrated). The per-user limits are enforced
+  with transient systemd units, so `MemoryMax`/`CPUQuota`/`TasksMax` show up in
+  `systemctl status rast-app-*` and `/sys/fs/cgroup/...`. `linux_uid_base` must
+  not overlap systemd's dynamic uid range or existing local accounts. Session
+  and window behaviour is documented in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 ## Examples
 

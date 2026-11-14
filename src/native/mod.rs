@@ -28,6 +28,7 @@
 pub(crate) mod audio;
 pub mod client;
 pub mod daemon;
+pub(crate) mod firewall;
 pub mod identity;
 pub mod protocol;
 
@@ -329,6 +330,33 @@ impl NativeOptions {
                  apt repository — see docs/INSTALL.md, section 'Native Linux apps (Xpra)'",
                 self.xpra_bin.display()
             ));
+        } else {
+            // Native apps target Xpra 6.5+; an older distribution package
+            // fails in obscure ways at launch time, so check it up front.
+            let output = std::process::Command::new(&self.xpra_bin)
+                .arg("--version")
+                .output();
+            let text = output
+                .ok()
+                .map(|output| {
+                    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+                    text.push_str(&String::from_utf8_lossy(&output.stderr));
+                    text
+                })
+                .unwrap_or_default();
+            match parse_xpra_version(&text) {
+                Some((major, minor)) if !xpra_version_supported(&text) => errors.push(format!(
+                    "Xpra {major}.{minor} is too old: RAST requires Xpra {MIN_XPRA_MAJOR}.\
+                     {MIN_XPRA_MINOR}+ (validated with 6.5.x). Install it from the xpra.org apt \
+                     repository — see docs/INSTALL.md, section 'Native Linux apps (Xpra)'"
+                )),
+                Some(_) => {}
+                None => warnings.push(format!(
+                    "could not determine the Xpra version ({} --version); RAST requires Xpra \
+                     {MIN_XPRA_MAJOR}.{MIN_XPRA_MINOR}+",
+                    self.xpra_bin.display()
+                )),
+            }
         }
         for binary in ["/usr/bin/pulseaudio", "/usr/bin/pactl"] {
             if !is_executable(Path::new(binary)) {
@@ -343,6 +371,15 @@ impl NativeOptions {
             warnings.push(
                 "setfacl is not installed; native apps cannot be granted access to RAST home \
                  folders with path_acl (install the 'acl' package)"
+                    .to_string(),
+            );
+        }
+        if firewall::nft_binary().is_none() {
+            warnings.push(
+                "nftables (the 'nft' command) is not installed: the Xpra display ports are bound \
+                 to loopback but other local accounts could connect to them. Install the \
+                 'nftables' package so the helper can restrict the ports to the RAST service \
+                 account"
                     .to_string(),
             );
         }
@@ -463,6 +500,45 @@ pub fn resolve_user_uid(name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Minimum Xpra release the native backend supports (validated against 6.5.x,
+/// HTML5 client version 21). Older releases lack the seamless window packets,
+/// HTML5 client or audio transport RAST depends on.
+pub const MIN_XPRA_MAJOR: u32 = 6;
+pub const MIN_XPRA_MINOR: u32 = 5;
+
+/// Parse `x.y` out of `xpra --version` output (e.g. `Xpra v6.5.5-r0`).
+pub(crate) fn parse_xpra_version(text: &str) -> Option<(u32, u32)> {
+    let mut digits = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+        } else if ch == '.' && !digits.is_empty() {
+            let major = digits.parse::<u32>().ok()?;
+            let rest: String = text
+                .chars()
+                .skip_while(|candidate| *candidate != '.')
+                .skip(1)
+                .take_while(|candidate| candidate.is_ascii_digit())
+                .collect();
+            let minor = rest.parse::<u32>().ok()?;
+            return Some((major, minor));
+        } else {
+            digits.clear();
+        }
+    }
+    None
+}
+
+/// Is this Xpra version supported by the native backend?
+pub(crate) fn xpra_version_supported(text: &str) -> bool {
+    match parse_xpra_version(text) {
+        Some((major, minor)) => {
+            major > MIN_XPRA_MAJOR || (major == MIN_XPRA_MAJOR && minor >= MIN_XPRA_MINOR)
+        }
+        None => false,
+    }
 }
 
 /// Ensure the managed directory tree exists with the documented ownership.
@@ -906,9 +982,20 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
     ));
     if is_executable(&options.xpra_bin) {
         match xpra_version(&options.xpra_bin).await {
-            Some(version) => report
-                .lines
-                .push(format!("        xpra version: {version}")),
+            Some(version) => {
+                report
+                    .lines
+                    .push(format!("        xpra version: {version}"));
+                if !xpra_version_supported(&version) {
+                    warn(
+                        &mut report,
+                        format!(
+                            "Xpra is older than the supported {MIN_XPRA_MAJOR}.{MIN_XPRA_MINOR}+ \
+                             release; install it from the xpra.org apt repository"
+                        ),
+                    );
+                }
+            }
             None => report
                 .lines
                 .push("        xpra version: unknown".to_string()),
@@ -922,6 +1009,38 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
                 options.xpra_bin.display()
             ),
         );
+    }
+
+    let firewall_uid = options.allowed_peer_uid.or(options.rast_uid);
+    match (firewall::nft_binary(), firewall_uid) {
+        (Some(binary), Some(uid)) => report.lines.push(format!(
+            "        display firewall: nftables ({}) restricts Xpra display ports to the RAST \
+             service uid {uid}",
+            binary.display()
+        )),
+        (Some(binary), None) => {
+            report.lines.push(format!(
+                "        display firewall: nftables ({}) available; no RAST service uid resolved",
+                binary.display()
+            ));
+            warn(
+                &mut report,
+                "cannot restrict Xpra display ports: the 'rast' service account uid was not \
+                 resolved; check that the rast user and group exist"
+                    .to_string(),
+            );
+        }
+        (None, _) => {
+            report.lines.push(
+                "        display firewall: NOT enforced (nftables is not installed)".to_string(),
+            );
+            warn(
+                &mut report,
+                "nftables is not installed: Xpra display ports are reachable by other local \
+                 accounts. Install the nftables package."
+                    .to_string(),
+            );
+        }
     }
 
     let helper_state = std::process::Command::new("systemctl")
@@ -1261,6 +1380,19 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code, "timeout");
+    }
+
+    #[test]
+    fn xpra_versions_are_parsed_and_gated() {
+        assert_eq!(parse_xpra_version("Xpra v6.5.5-r0"), Some((6, 5)));
+        assert_eq!(parse_xpra_version("xpra 6.4.3"), Some((6, 4)));
+        assert_eq!(parse_xpra_version("Xpra v7.0.1"), Some((7, 0)));
+        assert_eq!(parse_xpra_version("no version here"), None);
+        assert!(xpra_version_supported("Xpra v6.5.5-r0"));
+        assert!(xpra_version_supported("Xpra v7.0"));
+        assert!(!xpra_version_supported("Xpra v6.4.9"));
+        assert!(!xpra_version_supported("Xpra v5.0.8"));
+        assert!(!xpra_version_supported("unknown"));
     }
 
     #[tokio::test]

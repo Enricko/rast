@@ -72,6 +72,7 @@ resource limits apply. For configuration keys see
                            │
                            ▼
               Xpra seamless session (loopback TCP)  ←  native apps (Chrome, …)
+              (display ports restricted to the RAST uid by an nftables rule)
                            ▲
                            │  HTTP + WebSocket, same-origin and per-user
                            │  authorized, proxied at /linux-apps/session/<key>/
@@ -111,9 +112,17 @@ The web server bridges each session to a WebSocket (see `docs/API.md`).
 | --- | --- | --- | --- |
 | `rast.service` | `/usr/local/bin/rast serve` | `rast:rast` | HTTP API, embedded UI, SQLite, file storage, background jobs, backup scheduling, SSE event stream |
 | `rast-worker.service` | `/usr/local/bin/rast worker` | `rast-worker`, primary group `rast`, supplementary group `docker` | Privileged Docker operations for the Applications app and for legacy Docker-backed Linux apps |
-| `rast-native.service` | `/usr/local/bin/rast native-helper` | `root` | Privileged native helper: per-user Linux identities, transient systemd units (session + applications, cgroup limits), admin-approved APT transactions, managed profile paths |
+| `rast-native.service` | `/usr/local/bin/rast native-helper` | `root` | Privileged native helper: per-user Linux identities, transient systemd units (session + applications, cgroup limits), admin-approved APT transactions, managed profile paths, and the owned nftables rule that restricts the loopback Xpra display ports to the `rast` uid |
 | `rast-xpra-u<id>` (transient) | `/usr/bin/xpra start :<display> …` | `rast-u<uid>` (unprivileged identity) | One Xpra seamless graphical session per RAST user, lazily started |
 | `rast-app-u<uid>-<app>-<n>` (transient) | the app's launcher argv | `rast-u<uid>` | One native application process group inside that person's session |
+
+The transient units are independent systemd units, not children of
+`rast-native.service`: stopping or restarting the helper leaves running
+sessions and applications alive, and stopping `rast-linux.slice` (or the
+individual units) ends them. On start the helper reconciles the nftables
+display-port set against the live `rast-xpra-*` units and the web server adopts
+the running sessions from the database. The user/operator guide is
+[NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 The units are installed from [`deploy/`](../deploy):
 [`rast.service`](../deploy/rast.service),
@@ -121,8 +130,8 @@ The units are installed from [`deploy/`](../deploy):
 [`rast-native.service`](../deploy/rast-native.service) and
 [`rast-linux.slice`](../deploy/rast-linux.slice). The worker is optional and
 only installed when Docker is present (or requested explicitly); the native
-helper is optional and only installed when Xpra is present (or requested with
-`RAST_NATIVE=1`).
+helper is optional and only installed when a supported Xpra (6.5+) is present
+(or requested with `RAST_NATIVE=1`).
 
 `rast.service` is the only unit with `[Install] WantedBy=multi-user.target` in
 the default profile; the worker has `Wants=docker.service` (not `Requires`) so
@@ -145,10 +154,10 @@ keeps it inactive in that case.
 | `src/monitor/` | One process-wide resource sampler (CPU, memory, disks, network, containers) |
 | `src/docker/` | Worker-socket client, compose validation, deployment metadata |
 | `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions; `linux.rs` also builds the legacy app images and exports legacy data volumes for migration |
-| `src/native/` | Privileged native helper: JSON-lines protocol with strict validation (`protocol.rs`), client for the web server (`client.rs`), root daemon (`daemon.rs`), per-user Linux identities (`identity.rs`) |
+| `src/native/` | Privileged native helper: JSON-lines protocol with strict validation (`protocol.rs`), client for the web server (`client.rs`), root daemon (`daemon.rs`), per-user Linux identities (`identity.rs`), Xpra 6.5+ version checking, and the display-port firewall (`firewall.rs`: owned nftables table/set restricting the loopback Xpra ports to the RAST uid) |
 | `src/linux_apps/native_session.rs` | Per-user shared Xpra session manager: lazy start, application launch, idle/session lifecycle, restart recovery, systemd cgroup limits |
-| `src/linux_apps/native_proxy.rs` | Same-origin HTTP + WebSocket proxy for `/linux-apps/session/<key>/`, per-user authorization, shim injection |
-| `src/linux_apps/native_apps.rs` | Native installation, update, uninstall and Docker→native migration service (APT, portable archives, AppImage, compatibility preview, profiles) |
+| `src/linux_apps/native_proxy.rs` | Same-origin HTTP + WebSocket proxy for `/linux-apps/session/<key>/`, per-user authorization, live 5 s login-session revalidation of display streams, shim injection |
+| `src/linux_apps/native_apps.rs` | Native installation, update, uninstall and Docker→native migration service (APT, portable archives, AppImage, compatibility preview, profiles, Chromium `--password-store=basic` warning) |
 | `src/linux_apps/native_archive.rs` | Path-safe archive extraction, desktop-entry parsing, launcher/icon detection for portable applications |
 | `src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
 | `src/packages/` | App Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
@@ -398,7 +407,7 @@ release notes (see [OPERATIONS.md](OPERATIONS.md#updates)).
 | RAST ↔ filesystem | Per-user roots resolved and canonicalised under `storage_dir`; traversal and symlink escapes rejected on every operation |
 | RAST ↔ data dir | Contains the SQLite DB and master key; 0750 `rast:rast`, master key 0600 |
 | RAST ↔ package sources | Official catalog accepted only with a valid Ed25519 signature from a trusted key and a sequence not lower than the last accepted one; artifacts downloaded over HTTPS from the catalog's allowed hosts (redirects re-checked), size and SHA-256 verified before extraction; extraction refuses absolute paths, `..`, devices and links leaving the version directory; extension records over 64 KiB and archives that would leave less than 512 MiB free are refused. Declared version checks execute the package's own files as the `rast` user, without a shell, in a sandbox: own process group (killed on timeout and after exit; `setsid`/`setpgid` denied), seccomp (no sockets, io_uring or ptrace), Landlock (read/execute only in the package and system library directories, write only to a scratch home, TCP denied), no core dumps, 64 MiB file limit, output to files. GitHub imports are third-party code: Landlock is mandatory for them, they are pinned to the inspected release and digests, bound to one repository and publisher (re-checked at install time and in the same transaction that records the install), and can never take an official package id or command name. Expired catalogs drive no installs |
-| Browser ↔ Linux apps | Managing apps is administrator-only; every signed-in user only reaches their own runs. **Native backend:** each RAST user maps to a distinct unprivileged host identity; one Xpra session per user; the Xpra port is bound to `127.0.0.1` with Xpra authentication disabled and is never exposed; RAST proxies HTTP+WebSocket under `/linux-apps/session/<128-bit key>/` and checks the RAST session cookie on every request (another user's key → 403, expired session → 401, same-origin `Origin` required for WebSockets), injecting its window-integration shim into same-origin pages. Applications inside one person's session share a trust boundary; filesystem isolation between users rests on distinct uids, 0700 profiles and no cross-user access (the person's RAST home is shared with *their* identity through an ACL). Chromium runs unprivileged with its sandbox enabled. The privileged helper is the only root component: socket 0660 root:rast, peer-uid allowlist, strict per-op validation, no shell, arguments/commands from validated fields only, bounded timeouts, APT transactions serialized and admin-authorized. Session keys and credentials are never logged. **Legacy Docker backend:** each person's copy is a container with its own settings volume and only their RAST home mounted; no privileged mode, `no-new-privileges`, capabilities dropped, memory/CPU/PID limits, loopback-only port; the frame is served under `/linux-apps/<128-bit key>/` with a sandbox CSP |
+| Browser ↔ Linux apps | Managing apps is administrator-only; every signed-in user only reaches their own runs. **Native backend:** each RAST user maps to a distinct unprivileged host identity; one Xpra session per user; the Xpra port is bound to `127.0.0.1` with Xpra authentication disabled and is never exposed, and an nftables rule (table `inet rast_native`) rejects connections to the session display ports from every uid except the `rast` service account; RAST proxies HTTP+WebSocket under `/linux-apps/session/<128-bit key>/` and checks the RAST session cookie on every request (another user's key → 403, expired session → 401, same-origin `Origin` required for WebSockets), revalidates a live display stream's login session every 5 s (closing it on logout/revocation/expiry/deactivation) and injects its window-integration shim into same-origin pages. Deactivating an account stops its native session. Applications inside one person's session share a trust boundary; per-user separation is not a hostile-app sandbox and host root remains privileged. Filesystem isolation between users rests on distinct uids, 0700 profiles and no cross-user access; the person's RAST home is exposed read-only to *their* identity through a recursive `rx` ACL, and shared folders are not mapped into app profiles. Chromium-family apps use `--password-store=basic` because a headless session has no unlocked OS keyring (credentials live in the 0700 profile). Chromium runs unprivileged with its sandbox enabled. The privileged helper is the only root component: socket 0660 root:rast, peer-uid allowlist, strict per-op validation, no shell, arguments/commands from validated fields only, bounded timeouts, APT transactions serialized and admin-authorized, Xpra 6.5+ enforced. Xpra is an external program (GPL-2.0-or-later server, MPL-2.0 HTML5 client from the installed package), not linked into or distributed with RAST; session keys and credentials are never logged. **Legacy Docker backend:** each person's copy is a container with its own settings volume and only their RAST home mounted; no privileged mode, `no-new-privileges`, capabilities dropped, memory/CPU/PID limits, loopback-only port; the frame is served under `/linux-apps/<128-bit key>/` with a sandbox CSP |
 | Secrets at rest | Master key file, encrypted app secrets (AES-256-GCM), session tokens hashed at rest |
 | systemd sandbox | `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, empty capability sets, syscall blacklist, `NoNewPrivileges`, memory caps (see units) |
 
@@ -440,6 +449,9 @@ host with `/api/system/info`, `rast status --json` and `df -h`.
 | --- | --- | --- |
 | Process crash / power loss | SQLite WAL replays on next start; interrupted jobs are marked stale and recovered at startup | `systemctl start rast.service`; check `journalctl -u rast.service` |
 | Worker down / misconfigured | Docker features return "unavailable"; the rest of the app keeps working | `systemctl status rast-worker`; check `/var/run/docker.sock` and `docker` group membership |
+| Native helper down / restarted | Running native sessions and applications keep running (independent transient units); the display streams keep working through the proxy. Launch/close/install fail until the helper answers again | `systemctl status rast-native`; on start the helper reconciles the nftables display-port set and the server adopts the running units |
+| `nftables` missing | Native sessions still run, but the loopback Xpra display ports are reachable by other local accounts (behind the authenticated proxy only) | `apt-get install nftables`, restart `rast-native.service`, re-run `rast doctor` |
+| Native session wedged | Display tolerates crashes; the session unit stays active | `systemctl stop rast-linux.slice` (ends every native session) or stop the single `rast-xpra-*` unit; launch again |
 | Disk full | Uploads fail with an explicit error; SQLite writes fail loudly | free space, then `rast doctor` |
 | Corrupt config | Service refuses to start with the parse error in the journal | fix `/etc/rast/rast.toml`, `systemctl restart rast` |
 | Proxy misconfiguration | 502/504 to the browser; `/healthz` still works from the host | fix proxy; see [INSTALL.md](INSTALL.md#reverse-proxy-and-tls) |

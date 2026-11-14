@@ -436,20 +436,23 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 Native Linux desktop apps (App Center → Add app) run directly on the server
 instead of inside a Docker image: each RAST user gets one unprivileged Linux
 identity and one lazily started Xpra seamless graphical session that all their
-applications share. Only the RAST reverse proxy can reach a session; the Xpra
-port is bound to loopback and is never exposed. This is the default backend for
-newly installed desktop apps.
+applications share. Only the RAST reverse proxy can reach a session: the Xpra
+port is bound to loopback, an nftables rule restricts the display ports to the
+`rast` service account, and the port is never exposed. This is the default
+backend for newly installed desktop apps. Behaviour, window integration and
+limitations are described in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 Requirements:
 
 | Component | Why |
 | --- | --- |
-| Xpra server + HTML5 client (`xpra`, `xpra-html5`, `xpra-codecs`) | Graphical session, window transport and browser client |
+| Xpra server + HTML5 client (`xpra`, `xpra-html5`, `xpra-codecs`), **6.5+** | Graphical session, window transport and browser client. The installer, `rast doctor` and `rast native-helper --check` detect and reject older versions; the implementation is validated against Xpra 6.5.5 with HTML5 client version 21 |
 | Xvfb | Virtual display for the seamless session (started by Xpra) |
 | Xpra audio (`xpra-audio-server` on modular packages), `pulseaudio`, `pulseaudio-utils`, `python3-gst-1.0`, `gstreamer1.0-pulseaudio`, `gstreamer1.0-plugins-good` | Playback-only output from the account's private virtual speaker to the browser |
+| `nftables` (`nft` command) | Lets the helper restrict the loopback Xpra display ports to the `rast` service account. Without it the native backend still runs, but `rast doctor` and `rast native-helper --check` warn that other local accounts could reach a session's display port |
 | `rast-native.service` (root) | Creates per-user identities, starts transient systemd units and runs allowed APT transactions |
 | `rast-linux.slice` | cgroup accounting and defaults for all native sessions |
-| ACL support (`acl` package, ext4/xfs with ACLs) | Lets a person's app identity open their own RAST home folder |
+| ACL support (`acl` package, ext4/xfs with ACLs) | Lets a person's app identity read their own RAST home folder |
 | `setfacl`, `getent`, `useradd`, `apt-get`, `dpkg-deb` | Used by the helper |
 
 The official Xpra packages are newer than most distribution packages and are
@@ -464,11 +467,13 @@ echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ resolute main
 sudo apt-get update
 sudo apt-get install -y xpra xpra-html5 xpra-codecs xpra-x11 xvfb \
   xpra-audio-server pulseaudio pulseaudio-utils python3-gst-1.0 \
-  gstreamer1.0-pulseaudio gstreamer1.0-plugins-good acl dbus
+  gstreamer1.0-pulseaudio gstreamer1.0-plugins-good acl dbus nftables
 ```
 
-The installer enables native apps automatically when `xpra` is present
-(`RAST_NATIVE=auto`); force it with `RAST_NATIVE=1` or disable it with
+The installer enables native apps automatically when a supported Xpra is
+present (`RAST_NATIVE=auto`); an older Xpra disables native execution with an
+actionable warning. Force it with `RAST_NATIVE=1` (which fails with
+instructions when Xpra is missing or older than 6.5) or disable it with
 `RAST_NATIVE=0`. Manual native setup after a plain install:
 
 ```bash
@@ -489,16 +494,37 @@ sudo systemctl enable --now rast-native
 sudo -u rast rast doctor
 ```
 
-`rast doctor` reports the Xpra binary and version, the helper socket, the
-slice, the `/tmp/.X11-unix` permissions and the configured uid range.
+`rast doctor` reports the Xpra binary and version (with a warning below 6.5),
+the display-port firewall (nftables and the uid the ports are restricted to),
+the helper socket, the slice, the `/tmp/.X11-unix` permissions and the
+configured uid range. `rast native-helper --check` performs the same checks
+from the root helper's point of view.
 
 Notes:
 
 * Audio uses a private null sink and authenticated Unix socket inside each
-  account's 0700 runtime directory, not a host audio device. Microphone forwarding
-  is disabled. A click in the native app allows browser playback; browsers may
-  block sound before a user gesture. After upgrading an older audio-disabled
-  session, save work and use App Center → End session, then launch again.
+  account's 0700 runtime directory, not a host audio device. Microphone
+  forwarding is disabled. A click in the native app allows browser playback;
+  browsers may block sound before a user gesture. Sessions created by a release
+  that had no playback audio (before 0.13.1) are detected at startup, ended once
+  and recreated with audio on the next launch — running apps in the stale
+  session are stopped, so save work before upgrading.
+* **Credentials and the keyring:** a headless session has no unlocked OS
+  keyring, so Chromium-family apps always run with Chromium's
+  `--password-store=basic`. Passwords and cookies saved by the app live in the
+  per-person 0700 profile and are protected by the Linux identity permissions,
+  not by keyring encryption; the install preview shows a warning. Install only
+  apps whose credential handling you trust, and do not save credentials you
+  would not keep in that profile. RAST sign-in and the app's own sign-ins are
+  separate.
+* **Files:** the person's RAST home is linked into their app profile and
+  granted a recursive read + traverse (`rx`) ACL — native apps can read it but
+  are **not** granted write access, and files an app writes stay in its
+  profile/session rather than appearing in File Station. Shared folders are
+  **not** mapped into native app profiles; to use a shared file, copy it
+  through File Station into the person's RAST home first. File Station access
+  checks do not constrain a native program once it can read a file. This is a
+  current limitation, not a sandbox guarantee.
 * Per-user limits are configured with `linux_session_*` and `linux_app_*` (see
   [CONFIGURATION.md](CONFIGURATION.md)); they are enforced with systemd
   transient units (`rast-xpra-u<id>`, `rast-app-u<id>-…`) inside
@@ -509,11 +535,15 @@ Notes:
   them.
 * `.deb`, AppImage and portable archive uploads work as before (file, drag and
   drop, File Station, direct HTTPS URL); source archives are rejected with an
-  explanation.
+  explanation. A `.deb` must match the host architecture (the preview shows the
+  package architecture and refuses an incompatible one).
 * App data lives in `<data_dir>/linux-apps/profiles/<app>/<user>` and is not
-  reachable by other users; the person's RAST home is shared read/write with
-  that app through an ACL. Legacy Docker-backed apps keep their per-user volume
-  until an administrator migrates them and explicitly cleans up.
+  reachable by other users; the person's RAST home is exposed read-only with an
+  ACL. Legacy Docker-backed apps keep their per-user volume until an
+  administrator migrates them and explicitly cleans up.
+* Clipboard, keyboard shortcuts, high-DPI displays and the session lifecycle
+  (tab close vs. sign-out vs. force quit) are described in
+  [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 ## Manual installation (no installer)
 

@@ -515,7 +515,10 @@ install_native_audio_deps() {
         warn "gstreamer1.0-pulseaudio, python3-gst-1.0, gstreamer1.0-plugins-good)"
         return 0
     fi
-    _audio_packages="pulseaudio pulseaudio-utils gstreamer1.0-pulseaudio python3-gst-1.0 gstreamer1.0-plugins-good"
+    # Audio runtime plus nftables: the helper restricts the loopback Xpra
+    # display ports to the RAST service uid with one nftables rule, so other
+    # local accounts cannot reach a person's graphical session.
+    _audio_packages="pulseaudio pulseaudio-utils gstreamer1.0-pulseaudio python3-gst-1.0 gstreamer1.0-plugins-good nftables"
     if [ "$XPRA_AUDIO_PKG_AVAILABLE" -eq 1 ]; then
         _audio_packages="$_audio_packages xpra-audio-server"
     else
@@ -1677,6 +1680,24 @@ elif command -v xpra >/dev/null 2>&1; then
     XPRA_BIN=$(command -v xpra)
     XPRA_FOUND=1
 fi
+# Native sessions need Xpra 6.5+: the HTML5 client, seamless-window packet
+# handling and audio transport used by RAST were validated against 6.5.x.
+# Older distribution packages are rejected instead of failing at launch time.
+XPRA_SUPPORTED=0
+XPRA_VERSION_LINE=""
+if [ -n "$XPRA_BIN" ] && [ -x "$XPRA_BIN" ]; then
+    XPRA_VERSION_LINE=$("$XPRA_BIN" --version 2>&1 | head -n 1 || true)
+    _xpra_ver=$(printf '%s\n' "$XPRA_VERSION_LINE" | sed -n 's/.*v\{0,1\}\([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p' | head -n 1)
+    if [ -n "$_xpra_ver" ]; then
+        _xpra_major=${_xpra_ver%% *}
+        _xpra_minor=${_xpra_ver##* }
+        if [ "$_xpra_major" -gt 6 ] ||
+            { [ "$_xpra_major" -eq 6 ] && [ "$_xpra_minor" -ge 5 ]; }; then
+            XPRA_SUPPORTED=1
+        fi
+    fi
+fi
+
 # Official xpra.org packages are modular; distributions ship one xpra package.
 # This decides whether the native audio server package can be requested.
 XPRA_PACKAGING=unknown
@@ -1727,7 +1748,13 @@ XPRA_HINT
 
 case "$NATIVE_CHOICE" in
     auto)
-        if [ -n "$XPRA_BIN" ]; then
+        if [ -n "$XPRA_BIN" ] && [ "$XPRA_SUPPORTED" -ne 1 ]; then
+            NATIVE_ENABLED=0
+            warn "native Linux apps disabled: detected ${XPRA_VERSION_LINE:-an unknown Xpra version} at"
+            warn "$XPRA_BIN, but RAST requires Xpra 6.5 or newer. Install Xpra from the xpra.org"
+            warn "apt repository — see docs/INSTALL.md, section 'Native Linux apps (Xpra)'."
+            warn "Docker-backed Linux apps keep working."
+        elif [ -n "$XPRA_BIN" ]; then
             NATIVE_ENABLED=1
         else
             NATIVE_ENABLED=0
@@ -1750,7 +1777,22 @@ case "$NATIVE_CHOICE" in
                 exit 1
             fi
         fi
-        NATIVE_ENABLED=1
+        if [ "$XPRA_SUPPORTED" -ne 1 ]; then
+            if [ "$NATIVE_FROM_CONFIG" -eq 1 ]; then
+                warn "native_enabled = true is preserved from $CONFIG_FILE, but the detected Xpra"
+                warn "(${XPRA_VERSION_LINE:-unknown version}) is older than the required 6.5."
+                warn "Native sessions may fail; install Xpra 6.5+ from xpra.org, then:"
+                warn "  systemctl restart rast-native.service"
+                NATIVE_ENABLED=1
+            else
+                printf '[rast] ERROR: native apps need Xpra 6.5+; detected %s\n' \
+                    "${XPRA_VERSION_LINE:-an unknown version}" >&2
+                install_xpra_hint
+                exit 1
+            fi
+        else
+            NATIVE_ENABLED=1
+        fi
         ;;
     0) NATIVE_ENABLED=0 ;;
 esac
@@ -1915,7 +1957,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     printf '  provenance:       %s\n' "$ATTESTATION_STATE"
     printf '  docker apps:      %s (worker %s)\n' "$DOCKER_STATE" "$WORKER_STATE"
     printf '  native apps:      %s\n' "$NATIVE_STATE"
-    printf '  native audio:     %s\n' "$AUDIO_SUMMARY"
+    printf '  native deps:      %s\n' "$AUDIO_SUMMARY"
     if [ "$NATIVE_ENABLED" -eq 1 ]; then
         printf '  native layout:    %s/linux-users (0711 root:rast), %s/linux-apps (0751 rast:rast)\n' \
             "$DATA_DIR" "$DATA_DIR"
@@ -2220,7 +2262,7 @@ printf '  service:       rast.service%s\n' \
     printf '  worker:        %s\n' "$WORKER_SUMMARY"
 printf '  native apps:   %s\n' "$NATIVE_SUMMARY"
 if [ "$NATIVE_ENABLED" -eq 1 ]; then
-    printf '  native audio:  %s\n' "$AUDIO_SUMMARY"
+    printf '  native deps:   %s\n' "$AUDIO_SUMMARY"
 fi
 printf '  web UI:        %s\n' "$SERVICE_URL"
 printf '\nNext steps:\n'

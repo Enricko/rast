@@ -11,7 +11,58 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Native app prerequisites are checked up front.** Xpra 6.5+ is required
+  (validated against 6.5.5 with HTML5 client version 21); the installer
+  detects an older Xpra and disables native apps instead of failing at launch,
+  and `rast doctor` / `rast native-helper --check` report the detected version.
+  The installer also installs the `nftables` package used by the display-port
+  firewall below.
+- **Chromium apps explain their password storage.** The install preview warns
+  that Chromium-family apps run with `--password-store=basic` because a
+  headless session has no unlocked OS keyring; saved site credentials live in
+  the per-person profile (0700) and are not protected by keyring encryption.
+
+### Fixed
+
+- **Windows can be resized again.** The resize grab strips were positioned
+  outside the window but clipped by the window box's `overflow: hidden`, so the
+  bottom-right handle was unreachable when another window covered the corner
+  (and keyboard focus handling could swallow Ctrl+N while a native window was
+  focused). The window clips its content instead, and the adopted remote window
+  follows the RAST resize.
+- **Reopening an app right after closing it starts it again.** A launch that
+  arrived while the previous process had exited but the 5 s sweeper had not
+  noticed yet returned the dead in-memory run; launch now verifies the systemd
+  unit first and marks stale runs exited.
+- **A minimized native window is iconified in X11.** Minimizing now sends
+  `window-unmap` (and restore sends `window-map`) instead of only hiding the
+  canvas, so the application stops rendering an invisible window and reports
+  the iconic state.
+- **Remote window titles are escaped before the pinned Xpra HTML5 client
+  renders them** (`jQuery .html(title)` sink), and the RAST desktop renders the
+  raw title through text nodes only. A native app or a web page visited in a
+  native browser can no longer execute script in RAST's origin through its
+  window title.
+
+### Security
+
+- **Loopback display ports are restricted to the RAST service account.**
+  Xpra's HTML5 transport listens on `127.0.0.1` with Xpra-level authentication
+  disabled, and loopback is not a uid boundary. At startup the privileged
+  helper now installs one owned nftables rule (table `inet rast_native`, set
+  `xpra_ports`) that rejects connections to the session ports from every uid
+  except the RAST server, adds each port before a session is usable, removes it
+  when the session stops, and reconciles the set with the live sessions when
+  the helper restarts. This is defence in depth behind the authenticated proxy.
+  Requires the `nftables` package; `rast doctor` and `rast native-helper
+  --check` warn when it is missing.
+- **Live display streams revalidate the RAST login session.** A native display
+  WebSocket now re-checks the login session, expiry, revocation and account
+  state every 5 s and closes when the session is no longer valid, so signing
+  out, an administrator revoking the browser sessions or deactivating the
+  account ends the live display within seconds. Deactivating an account also
+  stops its native session; revoking only the browser sessions keeps the
+  person's applications running under the retention policy.
 
 ## [0.13.2] - 2026-11-13
 
@@ -1214,7 +1265,7 @@ server required.
   `>=0.39.0` is blocked by `sqlx 0.9.0`'s dependency constraint and needs an
   upstream update. CI ignores exactly this advisory (any other advisory fails
   the build) and the exposure/limits are documented in
-  [SECURITY.md](SECURITY.md#known-dependency-advisory-01).
+  [SECURITY.md](SECURITY.md#known-dependency-advisory-010).
 - Frontend build requires Node.js >= 22 and npm (build-time only); the
   installed server needs neither.
 

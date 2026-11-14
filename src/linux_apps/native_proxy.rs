@@ -98,6 +98,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Frame cap for the relayed WebSocket (Xpra sends whole window updates).
 const MAX_WS_MESSAGE: usize = 64 * 1024 * 1024;
+/// How often a live display stream revalidates its RAST login session.
+const REVALIDATE_EVERY: Duration = Duration::from_secs(5);
 
 /// Handler for `/linux-apps/session/<key>/…`: the Xpra HTML5 page, its assets
 /// and its WebSocket, served through RAST with per-user authorization.
@@ -134,9 +136,9 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
     // resolved: an unauthenticated request gets 401 and never learns whether a
     // key exists; an authenticated request for an unknown key gets 404; a
     // valid account that does not own the session gets 403.
-    let user_id =
+    let (user_id, auth_session_id) =
         match authenticate(&state.db, state.config.session_ttl_hours, request.headers()).await {
-            Ok(user_id) => user_id,
+            Ok(auth) => auth,
             Err(response) => return response,
         };
     let Some(session) = state.linux_apps.find_native_session(key) else {
@@ -156,7 +158,15 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
         return closed_page();
     };
     if is_websocket(request.headers()) {
-        return websocket(request, session, port).await;
+        return websocket(
+            request,
+            session,
+            port,
+            state.clone(),
+            user_id,
+            auth_session_id,
+        )
+        .await;
     }
     // One redirect per page load tells Xpra's HTML5 client to share the
     // session instead of stealing it (two RAST windows must coexist).
@@ -276,7 +286,7 @@ async fn authenticate(
     db: &sqlx::SqlitePool,
     session_ttl_hours: i64,
     headers: &HeaderMap,
-) -> Result<i64, Response> {
+) -> Result<(i64, String), Response> {
     let Some(token) = crate::auth::cookie_value(headers, crate::auth::session::SESSION_COOKIE)
     else {
         return Err(unauthorized_page());
@@ -301,7 +311,7 @@ async fn authenticate(
             plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
         })?;
     match row {
-        Some((true,)) => Ok(record.user_id),
+        Some((true,)) => Ok((record.user_id, record.session_id)),
         _ => Err(unauthorized_page()),
     }
 }
@@ -560,8 +570,15 @@ async fn read_head(stream: &mut TcpStream) -> Option<(StatusCode, Vec<(String, S
 // WebSocket relay
 // ---------------------------------------------------------------------------
 
-async fn websocket(request: Request, session: Arc<NativeSession>, port: u16) -> Response {
-    if !upgrade_origin_allowed(request.headers(), None) {
+async fn websocket(
+    request: Request,
+    session: Arc<NativeSession>,
+    port: u16,
+    state: AppState,
+    user_id: i64,
+    auth_session_id: String,
+) -> Response {
+    if !upgrade_origin_allowed(request.headers(), state.config.public_url.as_deref()) {
         return forbidden_page();
     }
     let (mut parts, _body) = request.into_parts();
@@ -604,7 +621,7 @@ async fn websocket(request: Request, session: Arc<NativeSession>, port: u16) -> 
     };
     upgrade
         .max_message_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| relay(socket, upstream, session))
+        .on_upgrade(move |socket| relay(socket, upstream, session, state, user_id, auth_session_id))
 }
 
 /// Relay WebSocket frames both ways. Every frame from the browser counts as
@@ -614,6 +631,39 @@ async fn relay(
     client: WebSocket,
     upstream: tokio_tungstenite::WebSocketStream<TcpStream>,
     session: Arc<NativeSession>,
+    state: AppState,
+    user_id: i64,
+    auth_session_id: String,
+) {
+    let (to_app, to_client) = relay_halves(client, upstream, session.clone());
+    // Revocation must reach a *live* stream, not only the next HTTP request:
+    // re-check that the RAST session is still valid, unrevoked and unexpired
+    // and that the account is still active. A revoked account loses the
+    // display immediately; its applications keep running according to the
+    // documented retention policy.
+    let mut revalidate = tokio::time::interval(REVALIDATE_EVERY);
+    revalidate.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let revoked = async move {
+        loop {
+            revalidate.tick().await;
+            if !auth_still_valid(&state.db, user_id, &auth_session_id).await {
+                tracing::info!(user_id, "closing a display stream after session revocation");
+                return;
+            }
+        }
+    };
+    relay_until(to_app, to_client, session, revoked).await;
+}
+
+/// Split a relayed WebSocket into its two forwarding directions. The viewer is
+/// registered here; [`relay_until`] unregisters it when the stream ends.
+fn relay_halves(
+    client: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<TcpStream>,
+    session: Arc<NativeSession>,
+) -> (
+    impl std::future::Future<Output = ()>,
+    impl std::future::Future<Output = ()>,
 ) {
     session.viewer_joined();
     let (mut client_tx, mut client_rx) = client.split();
@@ -651,11 +701,53 @@ async fn relay(
         }
         let _ = client_tx.close().await;
     };
+    (to_app, to_client)
+}
+
+/// Run both relay directions until one ends or `revoked` resolves, then
+/// release the viewer slot.
+async fn relay_until<A, B, R>(to_app: A, to_client: B, session: Arc<NativeSession>, revoked: R)
+where
+    A: std::future::Future<Output = ()>,
+    B: std::future::Future<Output = ()>,
+    R: std::future::Future<Output = ()>,
+{
+    tokio::pin!(to_app, to_client, revoked);
     tokio::select! {
-        _ = to_app => {}
-        _ = to_client => {}
+        _ = &mut to_app => {}
+        _ = &mut to_client => {}
+        _ = &mut revoked => {}
     }
     session.viewer_left();
+}
+
+/// The RAST login session backing a live display stream is still valid.
+type SessionAuthRow = (i64, i64, Option<i64>, bool);
+
+async fn auth_still_valid(db: &sqlx::SqlitePool, user_id: i64, auth_session_id: &str) -> bool {
+    let row: Result<Option<SessionAuthRow>, sqlx::Error> = sqlx::query_as(
+        "SELECT s.user_id, s.expires_at, s.revoked_at, u.active
+         FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.id = ?",
+    )
+    .bind(auth_session_id)
+    .fetch_optional(db)
+    .await;
+    match row {
+        Ok(Some((session_user, expires_at, revoked_at, active))) => {
+            session_user == user_id
+                && revoked_at.is_none()
+                && expires_at > crate::db::now_ms()
+                && active
+        }
+        Ok(None) => false,
+        // A transient database error must not drop a working display; the next
+        // tick retries.
+        Err(error) => {
+            tracing::warn!(error = %error, "cannot revalidate a display stream session");
+            true
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -772,6 +864,44 @@ mod tests {
             HeaderValue::from_str(&format!("rast_session={token}")).unwrap(),
         );
         headers
+    }
+
+    #[tokio::test]
+    async fn a_live_display_stream_is_revoked_with_its_rast_session() {
+        let (_dir, db) = test_db().await;
+        let alice = crate::auth::session::create(&db, 1, 24, "127.0.0.1", "test")
+            .await
+            .unwrap();
+        assert!(auth_still_valid(&db, 1, &alice.session_id).await);
+        // A stream for another account is never valid.
+        assert!(!auth_still_valid(&db, 2, &alice.session_id).await);
+        // Explicit logout / session revocation closes the stream.
+        crate::auth::session::revoke(&db, &alice.session_id)
+            .await
+            .unwrap();
+        assert!(!auth_still_valid(&db, 1, &alice.session_id).await);
+
+        // Deactivating the account closes it too.
+        let bob = crate::auth::session::create(&db, 2, 24, "127.0.0.1", "test")
+            .await
+            .unwrap();
+        assert!(auth_still_valid(&db, 2, &bob.session_id).await);
+        sqlx::query("UPDATE users SET active = 0 WHERE id = 2")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!auth_still_valid(&db, 2, &bob.session_id).await);
+
+        // Expired sessions are rejected.
+        let carol = crate::auth::session::create(&db, 1, 24, "127.0.0.1", "test")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sessions SET expires_at = 1 WHERE id = ?")
+            .bind(&carol.session_id)
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(!auth_still_valid(&db, 1, &carol.session_id).await);
     }
 
     #[test]
@@ -971,18 +1101,16 @@ mod tests {
             .unwrap();
         // The cookie is validated first and the owner is returned; the key is
         // resolved afterwards and compared with this id by the handler.
-        assert_eq!(
-            authenticate(&db, 24, &cookie_header(&alice.token))
-                .await
-                .expect("owner"),
-            1
-        );
-        assert_eq!(
-            authenticate(&db, 24, &cookie_header(&bob.token))
-                .await
-                .expect("bob"),
-            2
-        );
+        let (owner, owner_session) = authenticate(&db, 24, &cookie_header(&alice.token))
+            .await
+            .expect("owner");
+        assert_eq!(owner, 1);
+        assert_eq!(owner_session, alice.session_id);
+        let (bob_id, bob_session) = authenticate(&db, 24, &cookie_header(&bob.token))
+            .await
+            .expect("bob");
+        assert_eq!(bob_id, 2);
+        assert_eq!(bob_session, bob.session_id);
         // No cookie / garbage cookie.
         assert_eq!(
             authenticate(&db, 24, &HeaderMap::new())
@@ -1144,7 +1272,8 @@ mod tests {
                         )
                         .await
                         .expect("upstream handshake");
-                        relay(socket, upstream, session).await;
+                        let (to_app, to_client) = relay_halves(socket, upstream, session.clone());
+                        relay_until(to_app, to_client, session, std::future::pending::<()>()).await;
                     })
                 }
             }),

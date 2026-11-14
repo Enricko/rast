@@ -9,8 +9,8 @@ behind TLS and restrict who can reach it.
 
 | Version | Supported |
 | --- | --- |
-| `0.1.x` | ✅ Current release series |
-| `< 0.1` | ❌ No public releases exist |
+| `0.13.x` | ✅ Current release series |
+| `< 0.13` | ❌ Superseded — upgrade to the current release |
 
 Security fixes are released for the current minor series. Upgrade with the
 installer or `rast update`; see [docs/OPERATIONS.md](docs/OPERATIONS.md#updates).
@@ -99,18 +99,35 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
    no shell anywhere, absolute binaries and argument vectors, per-operation
    field validation (usernames, units, displays, ports, argv[0] prefixes, env
    keys, limits, managed paths), bounded timeouts/output, serialized APT
-   transactions and an admin-only trigger set. `.deb` installation is
-   explicitly *administrator-approved privileged software installation*; the
-   application processes themselves run under unprivileged identities.
+   transactions and an admin-only trigger set. At startup it also installs one
+   owned nftables table/rule restricting the loopback Xpra display ports to the
+   RAST service uid (defence in depth behind the authenticated proxy; requires
+   the `nftables` package). `.deb` installation is explicitly
+   *administrator-approved privileged software installation*; the application
+   processes themselves run under unprivileged identities.
 8. **Native application ↔ other users.** Each RAST user maps to a distinct
    unprivileged Linux identity; profiles are 0700 per app/user, sessions bind
    to loopback with Xpra authentication disabled (RAST's authenticated
-   same-origin proxy is the only path to them), and users cannot read each
-   other's homes or connect to each other's sockets. Applications inside one
-   person's session share that person's trust boundary by design. The person's
-   RAST home is shared with *their own* identity through an ACL only. Chromium
-   runs unprivileged with its sandbox enabled (`Seccomp: 2`,
-   `NoNewPrivs: 1` on renderer processes); `--no-sandbox` is never added.
+   same-origin proxy is the only intended path, and an nftables rule restricts
+   the display ports to the `rast` service uid so other local accounts cannot
+   connect), and users cannot read each other's homes or connect to each
+   other's sockets. Every proxy request is authenticated as the session owner
+   (another user's key → 403); live display WebSockets revalidate the RAST
+   login session every 5 s and close on logout, revocation, expiry or account
+   deactivation. Deactivating an account also stops its native session;
+   revoking only browser sessions keeps its apps running under the retention
+   policy. Applications inside one person's session share that person's trust
+   boundary by design — this is *not* a hostile-application sandbox. The
+   person's RAST home is exposed to *their own* app identity through a
+   read+traverse (`rx`) ACL only; shared folders are not mapped into native app
+   profiles. Chromium-family apps run with `--password-store=basic` because a
+   headless session has no unlocked OS keyring, so their saved site
+   credentials are protected by the 0700 profile and identity permissions, not
+   by keyring encryption. Chromium runs unprivileged with its sandbox enabled
+   (`Seccomp: 2`, `NoNewPrivs: 1` on renderer processes); `--no-sandbox` is
+   never added. Xpra is an external program (GPL-2.0-or-later server, MPL-2.0
+   HTML5 client served from the installed package) and is not linked into or
+   distributed with RAST.
 
 ### Out of scope / limitations
 
@@ -124,6 +141,20 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
   maintainer scripts as root during `apt-get`; the helper bounds *which*
   operations are possible, not what the chosen package does. Treat App Center
   → Add app like `sudo apt install`.
+* Applications and windows of one account trust each other: they run as the
+  same Linux identity in the same Xpra session and share that trust boundary.
+  There is no isolation between apps of the same user; per-user separation only
+  isolates accounts from each other.
+* Credentials that a third-party app stores itself are not protected by an OS
+  keyring. Chromium-family apps use `--password-store=basic`; their saved
+  site passwords and cookies are readable by anything that can read the 0700
+  profile (host root, a process of the same identity, or a data-directory
+  backup). Do not store credentials in native apps that you would not keep in
+  that profile.
+* Files that become readable by a native app are outside File Station's access
+  checks: once a file is readable by the person's app identity (for example
+  copied into their RAST home), the application decides what to do with it.
+  Shared folders are not mapped into native app profiles.
 * Availability attacks that exhaust host resources (bounded by systemd limits,
   but there is no per-user request quota beyond file quotas).
 * Supply-chain compromise of crates/npm packages beyond what `Cargo.lock`,

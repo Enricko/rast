@@ -311,7 +311,11 @@ with the host package manager for `.deb` apps (through the privileged
 `rast-native.service` helper, which also starts the session and application
 systemd units). Per-user application profiles live in
 `<data_dir>/linux-apps/profiles/<app>/<user>` and the person's RAST home is
-shared with their app identity through an ACL. Legacy apps keep
+exposed read-only to their app identity through a recursive `rx` ACL (shared
+folders are not mapped). The helper restricts the loopback Xpra display ports
+to the `rast` service account with an owned nftables rule, and a live display
+WebSocket revalidates the RAST login session every 5 s. Behaviour and
+limitations: [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md). Legacy apps keep
 `backend:"docker"` and their existing Docker behaviour until an administrator
 migrates them; setting `native_enabled = false` keeps the Docker backend for
 new installs. Every change is audited (`linuxapp.install`, `linuxapp.update`,
@@ -327,22 +331,22 @@ policy's `applications` (Docker) rule.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, linux:{...}}, dockerEnabled, nativeEnabled}` |
-| POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. |
+| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled}` — the `limits` object is flat (no nested per-backend object) |
+| POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
 | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
 | GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |
 | PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; native apps apply it to the next application start |
 | DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: stops the app's runs, removes managed files and (for native `.deb` apps) only the packages RAST added and nothing else depends on; with `removeData` also removes every person's profile. Legacy apps remove their images/volumes as before. Files in RAST homes are never touched. 409 while installing or updating |
 | GET | `/api/linux-apps/{id}/icon` | any signed-in user: PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
-| POST | `/api/linux-apps/{id}/check` | administrator: ask the app's official source for a newer version now → `{app, update}` (checks also run daily for legacy Docker apps; native apps are checked on this explicit action and record `latestVersion`/`checkedAt`). A native `.deb` check may take up to a couple of minutes because it refreshes the package policy |
-| POST | `/api/linux-apps/{id}/update` | administrator: `{}` (official source), `{path}` or `{url}` (update from a file/link) → `{app, jobId}`; job kind `linuxapps.update`. Portable updates are staged, validated and switched atomically; the previous version stays available for rollback. Legacy apps keep running copies on the old image. 400 when the app has no update source and no file was given |
+| POST | `/api/linux-apps/{id}/check` | administrator: ask the app's official source for a newer version now → the updated `LinuxApp` (`latestVersion`, `checkedAt`, `checkError`). A native `.deb` check may take up to a couple of minutes because it refreshes the package policy |
+| POST | `/api/linux-apps/{id}/update` | administrator: no body or `{}` (official source), `{path}` or `{url}` (update from a file/link) → `{jobId}`; job kind `linuxapps.update`. Portable updates are staged, validated and switched atomically; the previous version stays available for rollback. Legacy apps keep running copies on the old image. 400 when the app has no update source and no file was given |
 | POST | `/api/linux-apps/{id}/visibility` | administrator: `{visibility:"users"|"admins"}` → `LinuxApp`. `users` (default) shows the app to every signed-in user; `admins` restricts it to administrators |
 | POST | `/api/linux-apps/{id}/open` | any signed-in user: launch into the caller's shared native session (or, for legacy apps, start their own container) → `Session` (legacy) or `NativeSession` (native). 404 when the app is not visible to them |
 | POST | `/api/linux-apps/{id}/launch` | any signed-in user: launch a native app into the caller's shared session; idempotent (an already running app returns the existing run) → `{run:Run, session:NativeSession}`. The first launch starts the session lazily |
 | GET | `/api/linux-apps/session` | any signed-in user: `{session:NativeSession\|null, limits}`; `limits` reports `idleMinutes`, `sessionMemoryMb/Cpus`, `appMemoryMb/Cpus` |
-| POST | `/api/linux-apps/session/close` | any signed-in user: stop the caller's whole native session (all their apps); 404 when none runs |
-| POST | `/api/linux-apps/session/runs/{run}/close` | any signed-in user: terminate one native application run (its whole process group); the session and all other apps keep running |
-| POST | `/api/linux-apps/{id}/migrate` | administrator: `{}` or `{path|url}` (replacement install file when the original is gone) → `{app, jobId}`; job kind `linuxapps.migrate`. Copies every person's legacy Docker settings into native profiles (the Docker data is retained), keeps the app id and switches the backend after the native install validates |
+| POST | `/api/linux-apps/session/close` | any signed-in user: stop the caller's whole native session (all their apps); 404 when none runs. There is no App Center action for this; run-level **End application** is the day-to-day force quit |
+| POST | `/api/linux-apps/session/runs/{run}/close` | any signed-in user: terminate one native application run of their own session (its whole process group); the session and all other apps keep running. Canonical path used by App Center's **End application**; the shorter `POST /api/linux-apps/session/runs/{run}` is accepted as a compatibility alias |
+| POST | `/api/linux-apps/{id}/migrate` | administrator: `{}` or `{path\|url}` (replacement install file when the original is gone) → `{jobId}`; job kind `linuxapps.migrate`. Copies every person's legacy Docker settings into native profiles (the Docker data is retained), keeps the app id and switches the backend after the native install validates |
 | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return a migrated app to the Docker backend (the retained Docker data is still there) → `LinuxApp` |
 | POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: `{removeBackup:true}` → `LinuxApp`; deliberately removes the retained legacy Docker volumes/profiles backup after native operation was verified |
 | GET | `/api/linux-apps/sessions/{sid}` | legacy apps: one of the caller's own copies → `Session`; 404 once it is gone or for someone else's copy. `sid:"native"` returns the native session |
@@ -392,19 +396,24 @@ logs and it stops working when the copy ends. Legacy responses on
 'self'` (the frame has an opaque origin).
 
 `NativeSession`: `{id:"native", status:"starting"|"ready"|"ended",
-url:"/linux-apps/session/<key>/", startedAt, viewers, separateWindows:true,
-display, reason:"closed"|"idle"|"error"|"removed"|null, error,
-apps:[Run]}`. `Run`: `{id, appId, appName, status:
-"launching"|"running"|"exited"|"failed", unit, error, startedAt}`. The native
-session URL is served **same-origin** by RAST and every request (HTML, assets,
-WebSocket) is authorized against the signed-in RAST user that owns the session;
-another user's key is refused with 403 and an expired/revoked session is
-refused with 401. The Xpra port itself is bound to `127.0.0.1` with Xpra-level
-authentication disabled and is never exposed; RAST proxies HTTP and WebSocket
-to it and injects its window-integration shim. Closing a RAST window sends the
-app's normal close request (the app's own unsaved-changes dialog appears as a
-dialog window); terminating an application is the separate `runs/{run}/close`
-action.
+url:"/linux-apps/session/<key>/", appId:null, appName:"Desktop session",
+reason:"closed"|"idle"|"error"|"removed"|null, error, startedAt, viewers,
+separateWindows:true, display, apps:[Run]}`. `Run`: `{id, appId, appName,
+status:"launching"|"running"|"exited"|"failed", unit, error, startedAt}`. The
+native session URL is served **same-origin** by RAST and every request (HTML,
+assets, WebSocket) is authorized against the signed-in RAST user that owns the
+session; another user's key is refused with 403 and an expired/revoked session
+with 401. A live display WebSocket re-checks the login session, its expiry, its
+revocation and the account state every 5 s and closes the stream when it is no
+longer valid (logout, revocation, expiry, deactivation). The Xpra port itself
+is bound to `127.0.0.1` with Xpra-level authentication disabled and is never
+exposed: an nftables rule installed by the helper rejects connections to the
+display ports from every uid except the `rast` service account, and RAST
+proxies HTTP and WebSocket to it and injects its window-integration shim.
+Closing a RAST window sends the app's normal close request (the app's own
+unsaved-changes dialog appears as a dialog window); terminating an application
+is the separate `session/runs/{run}/close` action. Window titles from the
+application are escaped before the Xpra HTML5 client renders them.
 
 ## Activity logs
 

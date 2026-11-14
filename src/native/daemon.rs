@@ -106,6 +106,12 @@ pub async fn serve(options: NativeOptions, shutdown: impl Future<Output = ()>) -
         .map_err(|error| io::Error::new(io::ErrorKind::NotFound, error.message))?;
     crate::native::ensure_managed_roots(&options, rast_gid)
         .map_err(|error| io::Error::other(error.message))?;
+    // Restrict the loopback Xpra display ports to the RAST service account
+    // before any session can start (defence in depth: the ports have no
+    // application-level authentication of their own).
+    super::firewall::init(&options)
+        .await
+        .map_err(|error| io::Error::other(error.message))?;
     // Prepare the immutable final Xpra audio config before accepting requests:
     // concurrent session starts must never read a partially rewritten file.
     super::audio::prepare_config(&options.run_dir)
@@ -1190,12 +1196,26 @@ async fn session_start(options: &NativeOptions, op: SessionStartOp) -> Result<Va
         &argv,
     );
     run_systemd_unit(options, &unit, args).await?;
+    // Only the RAST service account may connect to this session's display
+    // port. Fail closed: a session nobody can safely reach must not keep
+    // running.
+    let port = u16::try_from(op.port).map_err(|_| NativeError::invalid("port out of range"))?;
+    if let Err(error) = super::firewall::allow_port(port).await {
+        let _ = stop_unit(options, &unit).await;
+        return Err(error);
+    }
     Ok(json!({"unit": unit, "active": true}))
 }
 
 async fn session_stop(options: &NativeOptions, op: SessionStopOp) -> Result<Value, NativeError> {
     let unit = session_unit(op.user_id)?;
+    // Read the display port before stopping: the unit's process tree is the
+    // only place that knows it.
+    let port = super::firewall::session_port(&unit).await;
     stop_unit(options, &unit).await?;
+    if let Some(port) = port {
+        super::firewall::release_port(port).await;
+    }
     Ok(json!({"stopped": true}))
 }
 

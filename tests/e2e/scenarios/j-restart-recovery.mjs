@@ -25,11 +25,22 @@ import { RastApi, sleep } from "../lib/rast-api.mjs";
 const execFileAsync = promisify(execFile);
 
 async function restartDevServer(ctx) {
-  const script = `${ctx.config.instanceRoot === "/tmp/rast-e2e" ? "/home/lufria/RAST" : "/home/lufria/RAST"}/scripts/e2e/dev-instance.sh`;
-  ctx.record(`restarting the dev server: ${script} restart-server`);
+  // The dev-instance script needs the same instance selection as this run:
+  // without RAST_E2E_BIND it would health-check the default port instead of
+  // the port this instance is actually bound to.
+  const script = "/home/lufria/RAST/scripts/e2e/dev-instance.sh";
+  const bind = new URL(ctx.config.baseUrl).host;
+  const env = {
+    ...process.env,
+    RAST_E2E_ROOT: ctx.config.instanceRoot,
+    RAST_E2E_BIN: `${ctx.config.instanceRoot}/bin/rast`,
+    RAST_E2E_BIND: bind,
+  };
+  ctx.record(`restarting the dev server: ${script} restart-server (${bind})`);
   const { stdout, stderr } = await execFileAsync("bash", [script, "restart-server"], {
     timeout: 180_000,
     maxBuffer: 4 * 1024 * 1024,
+    env,
   });
   ctx.record(`restart output: ${(stdout + stderr).trim().split("\n").slice(-3).join(" | ")}`);
   const started = Date.now();

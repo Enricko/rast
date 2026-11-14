@@ -83,6 +83,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/linux-apps/session", get(native_session))
         .route("/api/linux-apps/session/close", post(close_native_session))
         .route("/api/linux-apps/session/runs/{run}", post(close_native_run))
+        // Canonical form used by the App Center "End application" action and
+        // documented in docs/API.md; the shorter path stays for compatibility.
+        .route(
+            "/api/linux-apps/session/runs/{run}/close",
+            post(close_native_run),
+        )
         .route("/api/linux-apps/{id}/launch", post(launch))
         .route("/api/linux-apps/{id}/migrate", post(migrate))
         .route(

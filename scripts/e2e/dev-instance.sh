@@ -67,7 +67,7 @@ ENV_LOCAL="$REPO_DIR/tests/e2e/.env.local"
 
 # Test accounts. Passwords are generated once, kept in $CREDS (mode 0600, not
 # in the repository) and mirrored to tests/e2e/.env.local for Playwright.
-ADMIN_USER=admin
+ADMIN_USER="admin"
 USER1=alice
 USER2=bob
 
@@ -260,6 +260,9 @@ start_as() {
   shift 3
   mkdir -p "$PID_DIR" "$LOGS"
   sudo rm -f "$pidfile"
+  # The redirection is intentionally done by the operator account: the log
+  # files stay readable without sudo and the child inherits the descriptor.
+  # shellcheck disable=SC2024
   if [ "$user" = root ]; then
     sudo bash -c 'echo $$ >"$1"; shift; exec "$@"' bash "$pidfile" "$@" >>"$logfile" 2>&1 &
   else
@@ -362,6 +365,7 @@ start_helper() {
   fi
   install_native_prerequisites
   say "checking the native helper environment"
+  # shellcheck disable=SC2024
   sudo "$BIN" --config "$CONFIG" native-helper --check >>"$HELPER_LOG" 2>&1 ||
     warn "native helper environment check reported problems (see $HELPER_LOG)"
   say "starting root native helper on $NATIVE_SOCK"
@@ -398,10 +402,31 @@ stop_one() {
   sudo rm -f "$pidfile"
 }
 
+# Native sessions are systemd transient units, not children of the helper:
+# stopping the helper leaves Xpra and app units running (deliberate — a helper
+# restart must not kill a person's work). The dev instance owns this host's
+# native units (only one native instance per host is supported), so `down`
+# stops them to make the next run reproducible.
+stop_native_units() {
+  local units
+  units=$(sudo systemctl list-units --type=service --all --no-legend --plain \
+    'rast-app-*' 'rast-xpra-*' 2>/dev/null | awk '{print $1}' || true)
+  if [ -n "${units:-}" ]; then
+    say "stopping leftover native units: $(printf '%s' "$units" | tr '\n' ' ')"
+    local unit
+    for unit in $units; do
+      sudo systemctl stop "$unit" 2>/dev/null || true
+    done
+  fi
+}
+
 stop_all() {
   stop_one server "$PID_DIR/server.pid" user
   stop_one helper "$PID_DIR/helper.pid" root
   stop_one worker "$PID_DIR/worker.pid" root
+  if [ "$(mode_of)" = native ] || [ -f "$HELPER_LOG" ]; then
+    stop_native_units
+  fi
   sudo rm -f "$WORKER_SOCK" "$NATIVE_SOCK"
 }
 
@@ -485,15 +510,19 @@ bootstrap_users() {
 # the dev instance has no tmpfiles, and the root helper's bootstrap may have
 # created some of them root-owned, so this is idempotent and repairs ownership.
 cmd_native_layout() {
-  sudo install -d -o "$SERVER_USER" -g "$SERVER_USER" -m 0750 "$DATA" "$DATA/linux-apps" 2>/dev/null || true
+  # <data> and <data>/linux-apps must stay traversable (0711, no listing) for
+  # the native identities at all times: a running application reads its HOME
+  # through them. Creating them 0750 first and widening later races a launch
+  # (Chrome sees an unreachable HOME and aborts with "Failed to get the path").
+  sudo install -d -o "$SERVER_USER" -g "$SERVER_USER" -m 0711 "$DATA" "$DATA/linux-apps" 2>/dev/null || true
   sudo install -d -o "$SERVER_USER" -g "$SERVER_USER" -m 0750 \
     "$DATA/linux-apps/staging" "$DATA/linux-apps/apps" 2>/dev/null || true
   sudo install -d -o root -g "$SERVER_USER" -m 0711 "$DATA/linux-apps/profiles" 2>/dev/null || true
   sudo install -d -o root -g "$SERVER_USER" -m 0711 "$DATA/linux-users" 2>/dev/null || true
-  # The server creates its staging subdirectories inside linux-apps.
+  # The server creates its staging directories inside linux-apps.
   sudo chown "$SERVER_USER:$SERVER_USER" "$DATA/linux-apps" 2>/dev/null || true
-  sudo chmod 0750 "$DATA/linux-apps" 2>/dev/null || true
-  say "native data layout ready ($DATA/linux-apps 0750 $SERVER_USER, staging/apps 0750, profiles/linux-users 0711 root:$SERVER_USER)"
+  sudo chmod 0711 "$DATA" "$DATA/linux-apps" 2>/dev/null || true
+  say "native data layout ready ($DATA 0711, linux-apps 0711 $SERVER_USER, staging/apps 0750, profiles/linux-users 0711 root:$SERVER_USER)"
 }
 
 # The native helper creates profiles 0700 for the identity but its ancestors

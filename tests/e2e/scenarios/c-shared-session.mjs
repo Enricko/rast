@@ -9,6 +9,7 @@ import {
   ensureChrome,
   ensurePortableApp,
   identityFor,
+  isRealAppWindow,
   openAppForUser,
   openAppViaUi,
   sessionUnitFor,
@@ -32,8 +33,11 @@ export default {
     await openAppViaUi(ctx, desktop.page, portable, { timeoutMs: 120_000, client: alice });
     const windows = await browser.windowsInfo(desktop.page);
     ctx.record(`windows: ${JSON.stringify(windows.map((window) => ({ title: window.title, appId: window.appId })))}`);
-    const chromeWindows = windows.filter((window) => String(window.appId).includes(chrome.id));
-    const portableWindows = windows.filter((window) => String(window.appId).includes(portable.id));
+    // Ignore the "Starting …" placeholders: they are replaced by the real
+    // window and would make the close step target a detached element.
+    const real = windows.filter(isRealAppWindow);
+    const chromeWindows = real.filter((window) => String(window.appId).includes(chrome.id));
+    const portableWindows = real.filter((window) => String(window.appId).includes(portable.id));
     assert(chromeWindows.length > 0, "Chrome window is missing");
     assert(portableWindows.length > 0, "second app window is missing");
     ctx.record(`both apps open at once (${chromeWindows.length} + ${portableWindows.length} windows)`);

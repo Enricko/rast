@@ -31,8 +31,16 @@ export function assertMatch(value, regex, what) {
 }
 
 /** Native mode: make the helper-created profile ancestors traversable (0711). */
+let nativePermissionsChecked = false;
+
 export async function fixNativePermissions(ctx) {
   if (ctx.mode !== "native") return;
+  // The repair only needs to happen once per process: the dev instance `up`
+  // already does it, and running it concurrently with a launch used to chmod
+  // the data-dir ancestors while Chrome was starting (the app then aborted
+  // because its HOME was briefly unreachable).
+  if (nativePermissionsChecked) return;
+  nativePermissionsChecked = true;
   const root = ctx.config.instanceRoot;
   const script = "/home/lufria/RAST/scripts/e2e/dev-instance.sh";
   const result = await ctx.host.run("bash", [script, "fix-perms"], {
@@ -265,6 +273,40 @@ export async function openAppViaUi(
   return windows;
 }
 
+/**
+ * Native only: click inside a mirrored remote window. The pointer must be
+ * offset by the RAST window's title bar and border, which `.win-body`
+ * already excludes; using the `.window` box would drop the click into the
+ * chrome above the application content.
+ */
+export async function clickInNativeWindow(page, windowId, { position } = {}) {
+  const body = page.locator(`.window[data-window-id="${windowId}"] .win-body`);
+  await body.waitFor({ state: "visible", timeout: 30_000 });
+  const box = await body.boundingBox();
+  if (!box) throw new Error(`window ${windowId} has no visible body`);
+  const x = position?.x ?? box.width / 2;
+  const y = position?.y ?? box.height / 2;
+  await page.mouse.click(box.x + x, box.y + y);
+  return { x: box.x + x, y: box.y + y, body: box };
+}
+
+/** Native only: remote Xpra window geometry as reported by the injected shim. */
+export async function nativeRemoteWindows(page) {
+  for (const frame of page.frames()) {
+    if (!frame.url().includes("/linux-apps/session/")) continue;
+    try {
+      return await frame.evaluate(() => {
+        const api = window.RASTNative;
+        if (!api) return null;
+        return (api.windows ? api.windows() : api.state?.windows) ?? null;
+      });
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export function appWindowMatches(window, app) {
   const appId = String(window.appId ?? "");
   if (appId === `linux:${app.id}` || appId.includes(app.id)) return true;
@@ -425,8 +467,8 @@ export async function closeAppWindows(page, app, { timeoutMs = 60_000, rounds = 
     const windows = await allAppWindows(page, app);
     if (windows.length === 0) return true;
     const target = windows[windows.length - 1];
-    await closeWindowViaTaskbar(page, target.id).catch((error) => {
-      page.waitForTimeout(300);
+    await closeWindowViaTaskbar(page, target.id).catch(async (error) => {
+      await page.waitForTimeout(300).catch(() => {});
       return error;
     });
     await browser

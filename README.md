@@ -18,7 +18,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **Users & Groups** | NAS-style groups with shared-folder and application rules, multi-group membership, per-user direct overrides with an Effective Access explanation, live reauthorization and audit trail. Group grants never elevate the administrator role. |
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. Optional: can be uninstalled in App Center. |
 | **App Center** | RAST's own apps (install or uninstall the optional ones) and verified Python, PHP CLI, Go and Node.js runtimes from a signed catalog, side by side with a selectable default, updates with rollback, and packages imported from GitHub releases ([handoff](docs/package-center-handoff.md)). |
-| **Linux apps** | Install desktop Linux applications from `.deb`, AppImage or portable archives (file, drag and drop, File Station or an HTTPS link) with an installation preview, and run them natively on the server: each person gets one unprivileged Linux identity and one lazily started Xpra seamless session shared by all their apps, with every top-level window (including extra Chrome windows and dialogs) managed by the RAST desktop. Legacy Docker-backed apps can be migrated in place. See [docs/INSTALL.md](docs/INSTALL.md#native-linux-apps-xpra). |
+| **Linux apps** | Install desktop Linux applications from `.deb`, AppImage or portable archives (file, drag and drop, File Station or an HTTPS link) with an installation preview, and run them natively on the server: each person gets one unprivileged Linux identity and one lazily started Xpra seamless session shared by all their apps, with every top-level window (including extra Chrome windows) managed by the RAST desktop. Dialogs and popups are attached to their parent window and never get taskbar entries. Legacy Docker-backed apps can be migrated in place. See [docs/NATIVE-LINUX-APPS.md](docs/NATIVE-LINUX-APPS.md) and [docs/INSTALL.md](docs/INSTALL.md#native-linux-apps-xpra). |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
 [![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)
@@ -26,7 +26,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.13.1 — native Linux apps, per-window desktop integration and
+> **Status:** v0.13.2 — native Linux apps, per-window desktop integration and
 > playback-only session audio (2026-11-13). APIs and data formats may still
 > change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for upgrade requirements
 > and known limitations.
@@ -135,10 +135,20 @@ Environment variables use the `RAST_` prefix (see `.env.example`).
 * Native Linux apps run under per-user unprivileged Linux identities in
   systemd cgroups; a small root helper is the only privileged component and
   performs a strict, validated operation whitelist (systemd units, admin-
-  approved APT transactions, managed paths). Xpra is invoked as an external
-  program (GPL-2.0-or-later; the HTML5 client is MPL-2.0) and is not linked
-  into or distributed with RAST — install it from <https://xpra.org>. Chromium
-  keeps its sandbox (`--no-sandbox` is never used).
+  approved APT transactions, managed paths). The session proxy authenticates
+  every request (another user's session is `403`) and live display streams
+  revalidate the RAST login session every 5 s, so logout or revocation closes
+  the display immediately. A root-installed nftables rule restricts the
+  loopback Xpra display ports to the RAST service account; the `nftables`
+  package is required and `rast doctor` reports it. Applications of one
+  account share that account's trust boundary and are not isolated from each
+  other; shared folders are not mapped into native app profiles, and the
+  person's RAST home is exposed read-only. See
+  [docs/NATIVE-LINUX-APPS.md](docs/NATIVE-LINUX-APPS.md). Xpra 6.5+ is invoked
+  as an external program (GPL-2.0-or-later server, MPL-2.0 HTML5 client) and
+  is not linked into or distributed with RAST — install it from
+  <https://xpra.org>. Chromium keeps its sandbox (`--no-sandbox` is never
+  used).
 
 See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 
@@ -147,6 +157,7 @@ See [SECURITY.md](SECURITY.md) for reporting vulnerabilities.
 * [Architecture](docs/ARCHITECTURE.md)
 * [Configuration](docs/CONFIGURATION.md)
 * [Installation](docs/INSTALL.md)
+* [Native Linux apps](docs/NATIVE-LINUX-APPS.md)
 * [Operations: backup, restore, update, rollback](docs/OPERATIONS.md)
 * [API reference](docs/API.md)
 * [Wallpapers and their licence](docs/WALLPAPERS.md)

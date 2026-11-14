@@ -64,6 +64,43 @@ pub const MAX_MIGRATION_USERS: usize = 500;
 /// Largest number of package names recorded in `packages_added`.
 pub const MAX_ADDED_PACKAGES: usize = 200;
 /// Largest number of files written while copying one migrated profile.
+/// Chromium-family applications always run with Chromium's "basic" password
+/// store: a headless Xpra session has no unlocked OS keyring (no Secret
+/// Service, no login keyring password), so letting Chromium auto-detect one
+/// would either hang on a keyring prompt or fall back silently. The choice is
+/// explicit here, surfaced in the install preview and documented in
+/// docs/INSTALL.md ("Native Linux apps"). Credentials stay inside the per-app,
+/// per-user profile (mode 0700 under that Linux identity), not in an OS
+/// keyring.
+const CHROMIUM_PASSWORD_STORE_WARNING: &str =
+    "Chromium-family apps save site passwords and cookies in Chromium's own profile store \
+     (--password-store=basic): a headless app session has no unlocked OS keyring, and RAST does \
+     not add one. The profile is protected by the person's Linux identity and 0700 permissions, \
+     not by OS-level keyring encryption. Do not store credentials you would not keep in that \
+     profile.";
+
+/// Add the explicit Chromium password-store note to a preview (top level and
+/// the compatibility warning list the App Center shows).
+fn add_chromium_password_store_warning(preview: &mut Value) {
+    let chromium = preview
+        .pointer("/app/launcher/chromium")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !chromium {
+        return;
+    }
+    for pointer in ["/warnings", "/compatibility/warnings"] {
+        if let Some(warnings) = preview.pointer_mut(pointer).and_then(Value::as_array_mut) {
+            if !warnings
+                .iter()
+                .any(|item| item.as_str() == Some(CHROMIUM_PASSWORD_STORE_WARNING))
+            {
+                warnings.push(Value::String(CHROMIUM_PASSWORD_STORE_WARNING.to_string()));
+            }
+        }
+    }
+}
+
 const MAX_PROFILE_FILES: usize = 200_000;
 /// Largest number of bytes written while copying one migrated profile.
 const MAX_PROFILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -1121,6 +1158,9 @@ impl NativeApps {
                 self.portable_preview_json(staged, format, &prepared)?
             }
         };
+        // Make the headless keyring/password-store behaviour explicit instead
+        // of letting it be an undocumented consequence of the launch flags.
+        add_chromium_password_store_warning(&mut response);
         // Detect a possible duplicate install so the App Center can offer the
         // existing app as an update target instead of installing it twice.
         let duplicate = self
@@ -4497,6 +4537,42 @@ mod tests {
     // -----------------------------------------------------------------
     // Preview
     // -----------------------------------------------------------------
+
+    #[test]
+    fn chromium_previews_explain_the_headless_password_store() {
+        let mut preview = json!({
+            "format": "deb",
+            "app": {"launcher": {"chromium": true}},
+            "compatibility": {"ok": true, "warnings": []},
+            "warnings": [],
+        });
+        add_chromium_password_store_warning(&mut preview);
+        assert!(preview["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some(CHROMIUM_PASSWORD_STORE_WARNING)));
+        assert!(preview["compatibility"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some(CHROMIUM_PASSWORD_STORE_WARNING)));
+
+        // Non-Chromium apps are unaffected, and repeated calls do not duplicate.
+        let mut plain = json!({"app": {"launcher": {"chromium": false}}, "warnings": []});
+        add_chromium_password_store_warning(&mut plain);
+        assert_eq!(plain["warnings"].as_array().unwrap().len(), 0);
+        add_chromium_password_store_warning(&mut preview);
+        assert_eq!(
+            preview["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|item| item.as_str() == Some(CHROMIUM_PASSWORD_STORE_WARNING))
+                .count(),
+            1
+        );
+    }
 
     #[tokio::test]
     async fn preview_deb_reports_the_transaction_without_creating_a_row() {
