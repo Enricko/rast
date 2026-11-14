@@ -925,6 +925,19 @@ export class AppearanceService {
    * {@link saveTheme}: one request at a time, the latest layout wins, and only
    * the final response is announced. Resolves `false` when it failed.
    */
+  /** Save widgets and shortcuts together in one appearance request. */
+  async saveDesktopLayout(widgets: DesktopWidget[], icons: DesktopIcon[] | null): Promise<boolean> {
+    if (this.userId === null) throw new StaleAppearanceError();
+    const generation = this.generation;
+    const payload = {
+      widgets: normalizeWidgets(widgets),
+      desktopIcons: normalizeDesktopIcons(icons),
+    };
+    const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
+    this.commit(generation, updated);
+    return true;
+  }
+
   saveWidgets(widgets: DesktopWidget[]): Promise<boolean> {
     // An account showing the default set has not saved a list yet: even an
     // unchanged (or empty) list must be stored to make it the account's own.

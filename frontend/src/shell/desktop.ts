@@ -39,7 +39,7 @@ import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
 import { createWidgetLayer, type WidgetLayer } from "./widgets";
-import { boxesIntersect, marqueeBox, type Box } from "./selection";
+import { boxesIntersect, clampGroupDelta, groupCollides, marqueeBox, type Box } from "./selection";
 
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
@@ -296,6 +296,183 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     document.removeEventListener("keydown", onSelectionKey);
   });
   widgetLayerApi = widgets;
+
+  // ------------------------------------------------ desktop group dragging
+  const groupPreview = h("div", { class: "desktop-group-preview", ariaHidden: true, hidden: true });
+  desktop.appendChild(groupPreview);
+  disposers.push(() => groupPreview.remove());
+  interface GroupDragState {
+    startX: number;
+    startY: number;
+    keys: string[];
+    rects: Map<string, Box>;
+    obstacles: Box[];
+    delta: { dx: number; dy: number };
+    valid: boolean;
+  }
+  let groupDrag: GroupDragState | null = null;
+
+  const elementForSelection = (key: string): HTMLElement | null => {
+    if (key.startsWith("icon:")) {
+      return desktop.querySelector<HTMLElement>(`.desktop-icon[data-app="${key.slice(5)}"]`);
+    }
+    if (key.startsWith("widget:")) {
+      return widgetLayer.querySelector<HTMLElement>(`.desktop-widget[data-widget="${key.slice(7)}"]`);
+    }
+    return null;
+  };
+
+  function setGroupTransform(delta: { dx: number; dy: number }): void {
+    if (!groupDrag) return;
+    for (const key of groupDrag.keys) {
+      const element = elementForSelection(key);
+      if (element) element.style.transform = `translate(${delta.dx}px, ${delta.dy}px)`;
+    }
+  }
+
+  function resetGroupTransform(): void {
+    if (groupDrag) {
+      for (const key of groupDrag.keys) {
+        const element = elementForSelection(key);
+        if (element) element.style.transform = "";
+      }
+    }
+    groupPreview.hidden = true;
+  }
+
+  function finishGroupDrag(apply: boolean): void {
+    const state = groupDrag;
+    if (!state) return;
+    groupDrag = null;
+    window.removeEventListener("pointermove", onGroupMove);
+    window.removeEventListener("pointerup", onGroupUp);
+    window.removeEventListener("pointercancel", onGroupCancel);
+    document.removeEventListener("keydown", onGroupKey, true);
+    document.documentElement.classList.remove("is-selecting");
+    if (!apply || !state.valid || (state.delta.dx === 0 && state.delta.dy === 0)) {
+      resetGroupTransform();
+      return;
+    }
+    void (async () => {
+      const iconMap = new Map(desktopIcons.rects());
+      const widgetMap = new Map(widgets.rectEntries().map((entry) => [entry.id, entry.rect]));
+      const nextIcons = desktopIcons.snapshot().map((icon) => {
+        const rect = iconMap.get(icon.id);
+        if (!state.keys.includes(`icon:${icon.id}`) || !rect) return icon;
+        return { ...icon, gridVersion: 2 as const, pxX: rect.x + state.delta.dx, pxY: rect.y + state.delta.dy };
+      });
+      const nextWidgets = widgets.snapshot().map((widget) => {
+        const rect = widgetMap.get(widget.id);
+        if (!state.keys.includes(`widget:${widget.id}`) || !rect) return widget;
+        return {
+          ...widget,
+          gridVersion: 2 as const,
+          pxX: rect.x + state.delta.dx,
+          pxY: rect.y + state.delta.dy,
+        };
+      });
+      try {
+        await appearance.saveDesktopLayout(nextWidgets, nextIcons);
+        resetGroupTransform();
+        renderSelection();
+      } catch (error) {
+        resetGroupTransform();
+        toast.error(`Could not move the selection: ${errorMessage(error)}`);
+      }
+    })();
+  }
+
+  function onGroupMove(event: PointerEvent): void {
+    if (!groupDrag) return;
+    const startRects = [...groupDrag.rects.values()];
+    const raw = clampGroupDelta(
+      startRects,
+      event.clientX - groupDrag.startX,
+      event.clientY - groupDrag.startY,
+      { x: 0, y: 0, w: iconLayer.clientWidth, h: iconLayer.clientHeight },
+    );
+    groupDrag.delta = raw;
+    const moved = startRects.map((rect) => ({
+      ...rect,
+      x: rect.x + raw.dx,
+      y: rect.y + raw.dy,
+    }));
+    groupDrag.valid = !groupCollides(moved, groupDrag.obstacles);
+    setGroupTransform(raw);
+    const left = Math.min(...moved.map((rect) => rect.x));
+    const top = Math.min(...moved.map((rect) => rect.y));
+    const right = Math.max(...moved.map((rect) => rect.x + rect.w));
+    const bottom = Math.max(...moved.map((rect) => rect.y + rect.h));
+    const layerOffsetX = iconLayer.offsetLeft;
+    const layerOffsetY = iconLayer.offsetTop;
+    groupPreview.style.left = `${layerOffsetX + left}px`;
+    groupPreview.style.top = `${layerOffsetY + top}px`;
+    groupPreview.style.width = `${right - left}px`;
+    groupPreview.style.height = `${bottom - top}px`;
+    groupPreview.classList.toggle("is-blocked", !groupDrag.valid);
+    groupPreview.hidden = false;
+  }
+
+  function onGroupUp(): void {
+    finishGroupDrag(true);
+  }
+
+  function onGroupCancel(): void {
+    finishGroupDrag(false);
+  }
+
+  function onGroupKey(event: KeyboardEvent): void {
+    if (event.key !== "Escape" || !groupDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    finishGroupDrag(false);
+  }
+
+  desktop.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0 || disposed || selectedKeys.size <= 1) return;
+      const target = event.target as Element;
+      if (target.closest("button, input, select, textarea, .widget-resize, .context-menu")) return;
+      const iconEl = target.closest<HTMLElement>(".desktop-icon[data-app]");
+      const widgetEl = target.closest<HTMLElement>(".desktop-widget[data-widget]");
+      const key = iconEl?.dataset.app
+        ? `icon:${iconEl.dataset.app}`
+        : widgetEl?.dataset.widget
+          ? `widget:${widgetEl.dataset.widget}`
+          : null;
+      if (!key || !selectedKeys.has(key)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      const iconRects = desktopIcons.rects();
+      const widgetRects = new Map(widgets.rectEntries().map((entry) => [entry.id, entry.rect]));
+      const rects = new Map<string, Box>();
+      for (const selected of selectedKeys) {
+        const rect = selected.startsWith("icon:")
+          ? iconRects.get(selected.slice(5))
+          : widgetRects.get(selected.slice(7) as never);
+        if (rect) rects.set(selected, { ...rect });
+      }
+      const obstacles: Box[] = [];
+      for (const [id, rect] of iconRects) if (!selectedKeys.has(`icon:${id}`)) obstacles.push(rect);
+      for (const [id, rect] of widgetRects) if (!selectedKeys.has(`widget:${id}`)) obstacles.push(rect);
+      groupDrag = {
+        startX: event.clientX,
+        startY: event.clientY,
+        keys: [...selectedKeys],
+        rects,
+        obstacles,
+        delta: { dx: 0, dy: 0 },
+        valid: true,
+      };
+      document.documentElement.classList.add("is-selecting");
+      window.addEventListener("pointermove", onGroupMove);
+      window.addEventListener("pointerup", onGroupUp);
+      window.addEventListener("pointercancel", onGroupCancel);
+      document.addEventListener("keydown", onGroupKey, true);
+    },
+    true,
+  );
   /** Show the pins being saved, else the account's saved pins. */
   function showSavedPins(): void {
     if (!appearance.isKnown) return;

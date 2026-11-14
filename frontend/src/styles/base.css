@@ -4140,3 +4140,34 @@ html.is-selecting * {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* Desktop group-drag preview and File Station marquee/bulk-drop feedback. */
+.desktop-group-preview {
+  position: absolute;
+  z-index: 4;
+  border: 2px dashed var(--accent);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+
+.desktop-group-preview.is-blocked {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.fs-marquee {
+  position: absolute;
+  z-index: 30;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+  pointer-events: none;
+}
+
+.fs-card.is-drop-target,
+.fs-table tr.is-drop-target {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}

@@ -24,6 +24,23 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.36] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Added
+
+- Desktop group dragging for the marquee selection: dragging a selected
+  shortcut or widget moves the whole mixed selection, snapped and clamped as
+  a group, collision-checked against unselected items, with a live preview;
+  Escape/cancel restores everything, and the widget + shortcut layouts are
+  saved in one appearance request.
+- File Station marquee selection in grid and list views (Shift adds,
+  Ctrl/Cmd/Shift-click retained, auto-scroll near pane edges) and dragging a
+  multi-selection onto a folder to move it (descendants deduplicated, moving a
+  folder into itself rejected, destination highlight, existing job/progress
+  UI and realtime refresh).
+
 ## [0.11.35] - 2026-11-14
 
 No database migration (schema stays v12).

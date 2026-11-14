@@ -45,3 +45,11 @@ test("auto-scroll velocity grows near the pane edges", () => {
   assert.ok(autoScrollVelocity(105, 100, 200) < 0);
   assert.ok(autoScrollVelocity(295, 100, 200) > 0);
 });
+
+test("bulk move helpers drop descendants and reject moving into itself", () => {
+  assert.deepEqual(dedupeDescendants(["/a/b/c", "/a/b", "/x"]), ["/a/b", "/x"]);
+  assert.equal(validMoveTarget(["/a/b", "/x"], "/dest"), true);
+  assert.equal(validMoveTarget(["/a/b"], "/a/b"), false);
+  assert.equal(validMoveTarget(["/a/b"], "/a/b/c"), false);
+  assert.equal(validMoveTarget(["/a/b"], "/a"), true);
+});

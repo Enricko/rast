@@ -463,6 +463,10 @@ export interface WidgetLayer {
   occupiedRects(): Rect[];
   /** Current widget rectangles with ids (desktop selection). */
   rectEntries(): Array<{ id: WidgetId; rect: Rect }>;
+  /** Preferred widget definitions with the current on-screen pixel positions. */
+  snapshot(): DesktopWidget[];
+  /** Move widgets by updating their pixel positions (no save). */
+  applyPixels(positions: Map<WidgetId, { x: number; y: number }>): void;
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
   dispose(): void;
@@ -1076,6 +1080,33 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       .map(([id, card]) => ({ id, rect: rectOf(card) }));
   }
 
+  function snapshot(): DesktopWidget[] {
+    return layout.map((widget) => {
+      const card = cards.get(widget.id);
+      const size = preferredSize(widget);
+      if (!card) return widget;
+      const rect = rectOf(card);
+      return {
+        ...widget,
+        ...legacyFractions({ ...rect, w: size.w, h: size.h }),
+        gridVersion: 2,
+        pxX: snap(rect.x),
+        pxY: snap(rect.y),
+        pxW: size.w,
+        pxH: size.h,
+      };
+    });
+  }
+
+  function applyPixels(positions: Map<WidgetId, { x: number; y: number }>): void {
+    layout = layout.map((widget) => {
+      const position = positions.get(widget.id);
+      if (!position) return widget;
+      return { ...widget, gridVersion: 2, pxX: snap(position.x), pxY: snap(position.y) };
+    });
+    positionAll();
+  }
+
   function sync(widgets: DesktopWidget[]): void {
     if (disposed) return;
     // A drag in progress owns its card; its drop saves the final layout.
@@ -1191,5 +1222,5 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     cards.clear();
   }
 
-  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, rectEntries, dispose };
+  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, rectEntries, snapshot, applyPixels, dispose };
 }

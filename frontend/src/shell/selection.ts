@@ -81,3 +81,23 @@ export function autoScrollVelocity(pointer: number, start: number, size: number,
   if (pointer > start + size - threshold) return Math.ceil((pointer - (start + size - threshold)) / 4);
   return 0;
 }
+
+/** Drop descendants when their parent folder is also selected. */
+export function dedupeDescendants(paths: readonly string[]): string[] {
+  const sorted = [...new Set(paths)].sort((a, b) => a.length - b.length);
+  const out: string[] = [];
+  for (const path of sorted) {
+    if (out.some((parent) => path.startsWith(parent.endsWith("/") ? parent : `${parent}/`))) continue;
+    out.push(path);
+  }
+  return out;
+}
+
+/** A folder cannot be moved into itself or one of its descendants. */
+export function validMoveTarget(paths: readonly string[], destDir: string): boolean {
+  const normalized = destDir.endsWith("/") ? destDir : `${destDir}/`;
+  return !paths.some((path) => {
+    const folder = path.endsWith("/") ? path : `${path}/`;
+    return normalized === folder || normalized.startsWith(folder);
+  });
+}

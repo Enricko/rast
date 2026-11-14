@@ -18,6 +18,7 @@ import { confirmDialog, contextMenu, errorMessage, promptDialog } from "../../co
 import { isLinuxPackageName } from "../linuxapp/catalog";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
+import { boxesIntersect, dedupeDescendants, validMoveTarget } from "../../shell/selection";
 import { watchJob, jobProgressFraction, jobProgressLabel, type JobUpdate } from "../../components/jobs";
 import { Pager } from "../../components/pager";
 import {
@@ -148,6 +149,8 @@ export class FileStation {
   private readonly jobBar: ProgressHandle;
   private searchTimer = 0;
   private dragDepth = 0;
+  private marqueeEl: HTMLElement;
+  private marquee: { startX: number; startY: number; base: Set<string>; active: boolean } | null = null;
   private disposed = false;
   /** Ignore realtime echoes for a short window after our own refetch. */
   private quietUntil = 0;
@@ -356,8 +359,9 @@ export class FileStation {
       maxUploadBytes: () => this.ctx.store.get().maxUploadBytes,
     });
 
+    this.marqueeEl = h("div", { class: "fs-marquee", ariaHidden: true, hidden: true });
     ctx.root.classList.add("fs-app");
-    ctx.root.append(this.toolbar, this.notice.el, this.split, this.dropOverlay, this.uploads.el, this.fileInput);
+    ctx.root.append(this.toolbar, this.notice.el, this.split, this.dropOverlay, this.uploads.el, this.fileInput, this.marqueeEl);
     this.registerInteractions();
     this.subscribeRealtime();
     this.setView(this.view, false);
@@ -406,11 +410,154 @@ export class FileStation {
       const files = event.dataTransfer?.files;
       if (files && files.length > 0) this.uploads.enqueue(files, this.path);
     });
-    // Clicking blank space clears the selection.
+    // Clicking blank space clears the selection; marquee selection starts
+    // only from empty pane space (not entries, controls or the table header).
     this.panel.addEventListener("pointerdown", (event) => {
-      if (event.target instanceof HTMLElement && event.target.closest(".fs-table, .fs-grid")) return;
-      if (this.selection.size > 0) this.clearSelection();
+      if (event.button !== 0 || this.section !== "files") return;
+      const target = event.target as HTMLElement;
+      if (target.closest(".fs-card, tr, input, button, a, .fs-table thead")) return;
+      if (!event.ctrlKey && !event.metaKey && !event.shiftKey && this.selection.size > 0) this.clearSelection();
+      const root = this.ctx.root.getBoundingClientRect();
+      this.marquee = {
+        startX: event.clientX - root.left,
+        startY: event.clientY - root.top,
+        base: new Set(this.selection),
+        active: false,
+      };
+      event.preventDefault();
     });
+    const onMarqueeMove = (event: PointerEvent): void => {
+      if (!this.marquee) return;
+      const root = this.ctx.root.getBoundingClientRect();
+      const currentX = event.clientX - root.left;
+      const currentY = event.clientY - root.top;
+      if (!this.marquee.active) {
+        if (Math.hypot(currentX - this.marquee.startX, currentY - this.marquee.startY) < 4) return;
+        this.marquee.active = true;
+        this.marqueeEl.hidden = false;
+      }
+      const box = {
+        x: Math.min(this.marquee.startX, currentX),
+        y: Math.min(this.marquee.startY, currentY),
+        w: Math.abs(currentX - this.marquee.startX),
+        h: Math.abs(currentY - this.marquee.startY),
+      };
+      this.marqueeEl.style.left = `${box.x}px`;
+      this.marqueeEl.style.top = `${box.y}px`;
+      this.marqueeEl.style.width = `${box.w}px`;
+      this.marqueeEl.style.height = `${box.h}px`;
+      const hits: string[] = [];
+      this.panel.querySelectorAll<HTMLElement>("[data-fs-path]").forEach((element) => {
+        const rect = element.getBoundingClientRect();
+        if (boxesIntersect(box, { x: rect.left - root.left, y: rect.top - root.top, w: rect.width, h: rect.height })) {
+          hits.push(element.dataset.fsPath ?? "");
+        }
+      });
+      const shift = event.shiftKey;
+      this.selection = new Set(shift ? this.marquee.base : []);
+      for (const path of hits) if (path) this.selection.add(path);
+      this.anchorPath = [...this.selection][0] ?? null;
+      this.updateSelectionUi();
+      // Auto-scroll the pane near its edges.
+      const pane = targetScrollable(this.panel);
+      if (pane) {
+        const paneRect = pane.getBoundingClientRect();
+        if (event.clientY < paneRect.top + 24) pane.scrollTop -= 24;
+        else if (event.clientY > paneRect.bottom - 24) pane.scrollTop += 24;
+      }
+    };
+    const finishMarquee = (): void => {
+      if (!this.marquee) return;
+      this.marquee = null;
+      this.marqueeEl.hidden = true;
+    };
+    const targetScrollable = (element: HTMLElement): HTMLElement | null => {
+      let node: HTMLElement | null = element;
+      while (node) {
+        if (node.scrollHeight > node.clientHeight + 4) return node;
+        node = node.parentElement;
+      }
+      return null;
+    };
+    window.addEventListener("pointermove", onMarqueeMove);
+    window.addEventListener("pointerup", finishMarquee);
+    window.addEventListener("pointercancel", finishMarquee);
+    this.lc.add(() => {
+      window.removeEventListener("pointermove", onMarqueeMove);
+      window.removeEventListener("pointerup", finishMarquee);
+      window.removeEventListener("pointercancel", finishMarquee);
+    });
+    // Selected-file drag: move the whole selection onto a folder.
+    this.panel.addEventListener("dragstart", (event) => {
+      const element = (event.target as HTMLElement).closest<HTMLElement>("[data-fs-path]");
+      const path = element?.dataset.fsPath;
+      if (!path || this.section !== "files") return;
+      if (!this.selection.has(path)) this.selectSingleFromPath(path);
+      const paths = dedupeDescendants([...this.selection]);
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("application/x-rast-files", JSON.stringify(paths));
+        event.dataTransfer.setData("text/plain", `${paths.length} item(s)`);
+      }
+    });
+    const dropTarget = (event: DragEvent): HTMLElement | null => {
+      const element = (event.target as HTMLElement)?.closest<HTMLElement>("[data-fs-path]");
+      if (!element || element.dataset.fsKind !== "dir") return null;
+      const dest = element.dataset.fsPath ?? "";
+      if (!dest || dest === this.path) return null;
+      if (this.selection.size > 0 && !validMoveTarget([...this.selection], dest)) return null;
+      return element;
+    };
+    this.panel.addEventListener("dragover", (event) => {
+      if (!event.dataTransfer?.types.includes("application/x-rast-files")) return;
+      const element = dropTarget(event);
+      this.panel.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
+      if (!element) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      element.classList.add("is-drop-target");
+    });
+    this.panel.addEventListener("dragleave", (event) => {
+      const element = (event.target as HTMLElement)?.closest<HTMLElement>("[data-fs-path]");
+      element?.classList.remove("is-drop-target");
+    });
+    this.panel.addEventListener("drop", async (event) => {
+      const raw = event.dataTransfer?.getData("application/x-rast-files");
+      if (!raw) return;
+      const element = dropTarget(event);
+      this.panel.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
+      if (!element) return;
+      event.preventDefault();
+      event.stopPropagation();
+      let paths: string[] = [];
+      try {
+        paths = dedupeDescendants((JSON.parse(raw) as string[]).filter((path) => typeof path === "string"));
+      } catch {
+        return;
+      }
+      const destDir = element.dataset.fsPath ?? "";
+      if (!destDir || paths.length === 0 || !validMoveTarget(paths, destDir)) return;
+      await this.moveEntriesTo(paths, destDir);
+    });
+  }
+
+  private selectSingleFromPath(path: string): void {
+    const entry = listingItems(this.listing).find((candidate) => candidate.path === path);
+    if (entry) this.selectSingle(entry);
+  }
+
+  private async moveEntriesTo(paths: string[], destDir: string): Promise<void> {
+    try {
+      const response = await this.ctx.api.post<JobRef>("/api/files/move", { paths, destDir });
+      this.clearSelection();
+      if (response?.jobId) await this.runJob("Move", response.jobId);
+      else {
+        this.markSelfChange();
+        await this.loadListing();
+      }
+    } catch (error) {
+      this.ctx.toast.error(`Move failed: ${friendlyFileError(error)}`);
+    }
   }
 
   // -------------------------------------------------------------- realtime
@@ -1193,7 +1340,11 @@ export class FileStation {
 
     const row = h(
       "tr",
-      { tabIndex: 0, class: this.selection.has(entry.path) ? "is-selected" : "" },
+      {
+        tabIndex: 0,
+        class: this.selection.has(entry.path) ? "is-selected" : "",
+        dataset: { fsPath: entry.path, fsKind: entry.kind },
+      },
       h("td", { class: "fs-check" }, checkbox),
       h("td", { class: "fs-name-cell" }, h("div", { class: "fs-entry" }, icon, name)),
       h(
@@ -1207,6 +1358,7 @@ export class FileStation {
         relativeTime(entry.modifiedAt),
       ),
     );
+    row.draggable = true;
     row.addEventListener("click", (event) => {
       if ((event.target as HTMLElement).closest("input")) return;
       this.selectEntry(entry, event);
@@ -1240,11 +1392,13 @@ export class FileStation {
           role: "listitem",
           tabIndex: 0,
           title: entry.path,
+          dataset: { fsPath: entry.path, fsKind: entry.kind },
         },
         h("div", { class: "fs-card-icon" }, iconSvg(fileIcon(entry), 30)),
         h("div", { class: "fs-card-name" }, entry.name),
         h("div", { class: "fs-card-meta small muted" }, entry.kind === "dir" ? "Folder" : formatBytesShort(entry.size)),
       );
+      card.draggable = true;
       card.addEventListener("click", (event) => this.selectEntry(entry, event));
       card.addEventListener("dblclick", (event) => {
         if ((event.target as HTMLElement).closest("input")) return;

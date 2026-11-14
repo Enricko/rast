@@ -62,6 +62,10 @@ export interface DesktopIcons {
   rects(): Map<string, Rect>;
   /** Outline the given shortcuts as part of a multi-selection. */
   setSelected(ids: ReadonlySet<string>): void;
+  /** Preferred shortcuts with their current fine-grid positions. */
+  snapshot(): DesktopIcon[];
+  /** Move shortcuts by updating their pixel positions (no save). */
+  applyPixels(positions: Map<string, { x: number; y: number }>): void;
   /** Show the current apps and saved layout (cheap when nothing changed). */
   refresh(): void;
   has(appId: string): boolean;
@@ -693,6 +697,16 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     rects: () => new Map(displayRects),
     setSelected: (ids) => {
       for (const [id, button] of buttons) button.classList.toggle("is-multi-selected", ids.has(id));
+    },
+    snapshot: () => shown.map((icon) => toV2(icon, displayRects.get(icon.id) ?? iconRect(icon))),
+    applyPixels: (positions) => {
+      shown = shown.map((icon) => {
+        const position = positions.get(icon.id);
+        return position
+          ? toV2(icon, { x: position.x, y: position.y, w: ICON_W, h: ICON_H })
+          : icon;
+      });
+      render(true);
     },
     refresh: () => render(),
     has: (appId) => shown.some((icon) => icon.id === appId),
