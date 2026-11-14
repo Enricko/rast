@@ -459,4 +459,38 @@ same-session comparison.
 * **WAN conditions, bandwidth, dropped frames, GPU/NVENC, HiDPI browsers** — loopback software path only; no measurements claimed.
 * **Failure injection on the display transport** (kill Xpra mid-stream, network partition) beyond the server-restart/refresh scenarios; recovery paths are unit-tested.
 * **Native package install on a second distribution** — validated on Ubuntu 26.04 x86_64 only; the `.deb` compatibility checks (architecture, dependencies, APT simulation) are unit/e2e-tested.
+### Post-integration pointer-input fixes and re-verification (2026-11-14, 0.13.3)
+
+Re-integrating the native feature on the 0.11 main line (`c83dd62` /
+`68b13d4`) introduced two pointer-input regressions that the scenario matrix
+above did not catch, because its final run predates that merge:
+
+* the main-line desktop multi-selection guard tested pointer targets with
+  `instanceof Element`. A canvas adopted from the Xpra viewer document keeps
+  the creating document's prototypes, so a click inside a native window was
+  treated as a desktop-background click, started the marquee gesture and
+  called `preventDefault()` — which makes the browser suppress the
+  `mousedown`/`mouseup` events the native application needs;
+* `frontend/src/styles/apps.css` lost the closing brace of
+  `.package-app-frame`, nesting every native-app rule (including the
+  off-screen session viewer size) inside it. The viewer fell back to the
+  browser's default 300×150 iframe size, so Xpra's virtual desktop was
+  300×150 and its pointer coordinates were clamped to that desktop: clicks
+  inside native windows landed at the wrong place.
+
+Both are fixed on `main`: a realm-independent `isElementNode` (`nodeType`)
+check in the desktop marquee guard, the stylesheet brace restored, and the
+off-screen viewer sized to the browser viewport plus a margin so a maximized
+window still fits inside Xpra's virtual desktop. Regression coverage:
+`frontend/tests/dom.test.ts`, `frontend/tests/styles.test.ts` and native E2E
+scenario b (clicking **New Window** opens a second window).
+
+Re-run of the full native matrix after the fixes (same host, Xpra 6.5.5,
+Chrome 157, RAST 0.13.3 at `68b13d4` + the fixes):
+`node tests/e2e/run.mjs --mode=native --instance-root=...` → **13 passed,
+0 failed, 1 skipped** (`m`, needs a Docker-phase run first); raw data in
+`tests/e2e/results/native-2026-11-14T20-36-25-712/`. Frontend unit tests at
+that tree: 119 passed; Rust: `cargo fmt`/`clippy` clean, `cargo test
+--all-targets` 715 passed (Rust code unchanged by these fixes).
+
 <!-- /LEAD-VERIFICATION -->

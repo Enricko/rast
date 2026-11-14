@@ -11,7 +11,7 @@ import {
 } from "../apps/linuxapp/catalog";
 import { onPackageApps, packageAppId, refreshPackageApps } from "../apps/package-apps";
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
-import { h } from "../core/dom";
+import { h, isElementNode } from "../core/dom";
 import { formatClock } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
 import type { MeResponse, Settings } from "../core/types";
@@ -227,7 +227,15 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   function startsMarquee(target: EventTarget | null): boolean {
-    if (!(target instanceof Element)) return true;
+    // Cross-realm check: an adopted native-app canvas was created by the Xpra
+    // viewer document and keeps that realm's prototypes, so
+    // `target instanceof Element` is false for it. Without this, a click
+    // inside a native window looked like a desktop-background click, started
+    // the marquee gesture and called `preventDefault()` on the pointerdown —
+    // which makes the browser suppress the mousedown/mouseup compatibility
+    // events the native application needs (buttons, menus and dialogs did
+    // nothing).
+    if (!isElementNode(target)) return true;
     if (target.closest(".window, .taskbar, .menu-panel, .context-menu, .modal-backdrop, button, input, select, textarea, .widget-resize, .desktop-icon, .desktop-widget")) return false;
     return Boolean(target.closest(".desktop, .desktop-icons, .widget-layer")) || target === desktop;
   }

@@ -4842,6 +4842,8 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
   border: 0;
   display: block;
   background: #17181c;
+}
+
 /* ------------------------------------------------- native Linux apps (Xpra) */
 
 /* The single shared session viewer lives off-screen: the RAST desktop adopts
@@ -4852,8 +4854,12 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
   position: fixed;
   left: -30000px;
   top: 0;
-  width: 1280px;
-  height: 800px;
+  /* Xpra sizes its virtual desktop (and clamps pointer coordinates) to this
+     viewer's viewport, so it must be larger than any adopted window plus the
+     server-side window offsets: a maximized RAST window is nearly the browser
+     viewport size. Keep a generous margin; the iframe itself is off-screen. */
+  width: calc(100vw + 240px);
+  height: calc(100vh + 240px);
   border: 0;
   visibility: visible;
   pointer-events: none;

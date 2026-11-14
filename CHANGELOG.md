@@ -124,6 +124,24 @@ during the upgrade.
 - **Window-manager integration keeps both APIs** from the features ported into
   this release (saved window geometry/state and native transient
   dialogs/owner/taskbar flags) when reopening apps after a reload.
+- **Clicking inside a native application window works on the integrated main
+  line.** Two merge regressions broke mouse input while keyboard input kept
+  working. The desktop multi-selection guard inherited from the 0.11 main line
+  tested pointer targets with `instanceof Element`; a native window canvas is
+  created by the Xpra viewer document and keeps that realm's prototypes, so
+  the guard treated the click as a desktop-background click, started a marquee
+  gesture and called `preventDefault()` on the pointerdown, which makes the
+  browser suppress the `mousedown`/`mouseup` events the application needs.
+  In addition, a missing closing brace nested the entire native-app stylesheet
+  inside `.package-app-frame`; the off-screen Xpra viewer therefore fell back
+  to the browser default 300×150 iframe size, so Xpra's virtual desktop was
+  300×150 and server-side pointer coordinates were clamped to it — clicks in
+  native windows landed at the wrong place. The element check is now
+  realm-independent, the stylesheet is balanced again, and the viewer is sized
+  to the browser viewport plus a margin so maximized windows stay inside the
+  Xpra desktop. Covered by frontend unit tests (including a stylesheet
+  balance guard) and native E2E scenario b (clicking "New Window" opens a
+  second window).
 
 ## [0.13.2] - 2026-11-13
 
