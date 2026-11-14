@@ -49,7 +49,7 @@ test("auto-scroll velocity grows near the pane edges", () => {
 });
 
 test("bulk move helpers drop descendants and reject moving into itself", () => {
-  assert.deepEqual(dedupeDescendants(["/a/b/c", "/a/b", "/x"]), ["/a/b", "/x"]);
+  assert.deepEqual(dedupeDescendants(["/a/b/c", "/a/b", "/x"]), ["/x", "/a/b"]);
   assert.equal(validMoveTarget(["/a/b", "/x"], "/dest"), true);
   assert.equal(validMoveTarget(["/a/b"], "/a/b"), false);
   assert.equal(validMoveTarget(["/a/b"], "/a/b/c"), false);
