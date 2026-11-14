@@ -85,8 +85,13 @@ export interface DesktopWidget {
 /** An app placed on the desktop and its grid cell (column, row from the top left). */
 export interface DesktopIcon {
   id: string;
+  /** Legacy coarse cell, kept for older servers/clients (approximate for v2). */
   col: number;
   row: number;
+  /** Version 2: fine-grid position in CSS pixels relative to the icon area. */
+  gridVersion?: 2;
+  pxX?: number;
+  pxY?: number;
 }
 
 /** Grid limit for desktop icons (matches the server). */
@@ -400,8 +405,25 @@ export function normalizeDesktopIcons(input: unknown): DesktopIcon[] | null {
     const { id, col, row } = item as DesktopIcon;
     if (typeof id !== "string" || !SHORTCUT_ID.test(id)) continue;
     if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col > MAX_DESKTOP_CELL || row > MAX_DESKTOP_CELL) continue;
-    if (out.some((icon) => icon.id === id || (icon.col === col && icon.row === row))) continue;
-    out.push({ id, col, row });
+    const gridVersion = Number((item as DesktopIcon).gridVersion);
+    const pxX = Number((item as DesktopIcon).pxX);
+    const pxY = Number((item as DesktopIcon).pxY);
+    const hasPx =
+      gridVersion === 2 &&
+      Number.isFinite(pxX) &&
+      Number.isFinite(pxY) &&
+      pxX >= 0 &&
+      pxY >= 0 &&
+      pxX <= 100_000 &&
+      pxY <= 100_000;
+    if (out.some((icon) => icon.id === id || (!hasPx && icon.gridVersion !== 2 && icon.col === col && icon.row === row))) continue;
+    const icon: DesktopIcon = { id, col, row };
+    if (hasPx) {
+      icon.gridVersion = 2;
+      icon.pxX = Math.round(pxX);
+      icon.pxY = Math.round(pxY);
+    }
+    out.push(icon);
   }
   return out;
 }

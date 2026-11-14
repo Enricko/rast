@@ -164,12 +164,20 @@ pub struct WidgetDto {
 
 /// An app placed on the desktop: its grid cell (column, row from the top
 /// left; the desktop keeps a cell visible on smaller screens).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DesktopIconDto {
     pub id: String,
+    /// Legacy coarse cell (approximate for v2 icons).
     pub col: u32,
     pub row: u32,
+    /// Version 2: fine-grid position in CSS pixels (8px grid).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub px_y: Option<f64>,
 }
 
 /// Grid limits for desktop icons (far beyond any real screen).
@@ -526,16 +534,56 @@ pub fn validate_desktop_icons(icons: Vec<DesktopIconDto>) -> AppResult<Vec<Deskt
         if out.iter().any(|known| known.id == id) {
             return Err(bad_request("each application can be on the desktop once"));
         }
-        if out
-            .iter()
-            .any(|known| known.col == icon.col && known.row == icon.row)
+        if icon.grid_version.is_some() {
+            if icon.grid_version != Some(2) {
+                return Err(bad_request("unsupported desktop icon layout version"));
+            }
+            let (Some(x), Some(y)) = (icon.px_x, icon.px_y) else {
+                return Err(bad_request("fine-grid icons need a pixel position"));
+            };
+            if !x.is_finite()
+                || !y.is_finite()
+                || !(0.0..=100_000.0).contains(&x)
+                || !(0.0..=100_000.0).contains(&y)
+            {
+                return Err(bad_request("desktop icon pixel position is out of range"));
+            }
+            // Fixed shortcut box (including its label) for overlap validation.
+            let rect = (x.round(), y.round(), x.round() + 104.0, y.round() + 112.0);
+            if out.iter().any(|known| {
+                if known.grid_version != Some(2) {
+                    return false;
+                }
+                let (Some(ox), Some(oy)) = (known.px_x, known.px_y) else {
+                    return false;
+                };
+                let other = (
+                    ox.round(),
+                    oy.round(),
+                    ox.round() + 104.0,
+                    oy.round() + 112.0,
+                );
+                rect.0 < other.2 && rect.2 > other.0 && rect.1 < other.3 && rect.3 > other.1
+            }) {
+                return Err(bad_request("two desktop icons cannot overlap"));
+            }
+        } else if [icon.px_x, icon.px_y]
+            .into_iter()
+            .any(|value| value.is_some())
         {
+            return Err(bad_request("pixel icon fields require gridVersion 2"));
+        } else if out.iter().any(|known| {
+            known.grid_version != Some(2) && known.col == icon.col && known.row == icon.row
+        }) {
             return Err(bad_request("two desktop icons cannot share a place"));
         }
         out.push(DesktopIconDto {
             id,
             col: icon.col,
             row: icon.row,
+            grid_version: icon.grid_version,
+            px_x: icon.px_x,
+            px_y: icon.px_y,
         });
     }
     Ok(out)
@@ -552,9 +600,11 @@ fn parse_stored_desktop_icons(raw: Option<&str>) -> Option<Vec<DesktopIconDto>> 
         let valid = crate::access::is_shortcut_id(&icon.id)
             && icon.col <= MAX_DESKTOP_CELL
             && icon.row <= MAX_DESKTOP_CELL
-            && !out
-                .iter()
-                .any(|k| k.id == icon.id || (k.col == icon.col && k.row == icon.row));
+            && !out.iter().any(|k| k.id == icon.id)
+            && (icon.grid_version == Some(2)
+                || !out
+                    .iter()
+                    .any(|k| k.grid_version != Some(2) && k.col == icon.col && k.row == icon.row));
         if valid {
             out.push(icon);
         }
@@ -2049,6 +2099,9 @@ pub(crate) mod tests {
             id: id.into(),
             col,
             row,
+            grid_version: None,
+            px_x: None,
+            px_y: None,
         };
         assert_eq!(
             get(&pool, 1).await.unwrap().desktop_icons,

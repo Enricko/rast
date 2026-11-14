@@ -17,6 +17,7 @@ import {
   normalizeDesktopIcons,
   normalizeTaskbarPins,
   normalizeWidgets,
+  normalizeDesktopIcons,
   type Appearance,
 } from "../src/core/appearance";
 import type { ApiClient } from "../src/core/api";
@@ -346,4 +347,18 @@ test("widget pixel layout v2 round-trips and legacy fractions stay valid", () =>
     { id: "network", x: 0.5, y: 0.6, gridVersion: 2, pxX: 8, pxY: 8 },
   ]);
   assert.ok(invalid.every((widget) => widget.gridVersion === undefined));
+});
+
+
+test("fine-grid desktop icons normalize with a versioned pixel position", () => {
+  const icons = normalizeDesktopIcons([
+    { id: "files", col: 2, row: 1, gridVersion: 2, pxX: 208, pxY: 112 },
+    { id: "logs", col: 0, row: 0 },
+    { id: "files", col: 9, row: 9, gridVersion: 2, pxX: 900, pxY: 900 },
+    { id: "bogus id", col: 0, row: 2 },
+  ]);
+  assert.deepEqual(icons, [
+    { id: "files", col: 2, row: 1, gridVersion: 2, pxX: 208, pxY: 112 },
+    { id: "logs", col: 0, row: 0 },
+  ]);
 });

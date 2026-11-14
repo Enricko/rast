@@ -24,6 +24,20 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.33] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Desktop application shortcuts now use the same **8px fine-grid** as widgets:
+  fixed shortcut dimensions (labels included), free 8px movement, collision
+  against widgets and other shortcuts, snapped drag preview + grid guides,
+  boundary clamping, and per-account persistence of pixel positions
+  (`gridVersion: 2`). Legacy row/column layouts migrate once preserving their
+  visual position; arrow-key selection is kept, Alt+Arrow moves by 8px
+  (Shift: 64px), and Applications drags/new shortcuts use fine placement.
+
 ## [0.11.32] - 2026-11-14
 
 No database migration (schema stays v12).

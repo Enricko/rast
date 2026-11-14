@@ -4099,3 +4099,18 @@ kbd {
     max-height: 220px;
   }
 }
+
+/* Fine-grid shortcut drag: snapped placement preview. */
+.desktop-icon-drop {
+  position: absolute;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  pointer-events: none;
+  z-index: 4;
+}
+
+.desktop-icon-drop.is-blocked {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
