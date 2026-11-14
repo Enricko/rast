@@ -196,6 +196,7 @@
 }
 
 .widget-foot {
+  margin-top: auto;
   font-size: var(--font-size-xs);
   color: var(--text-faint);
 }

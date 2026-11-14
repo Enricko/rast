@@ -511,6 +511,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     return Math.max(184, Math.round(cellW * 2 - 4));
   }
 
+  /** Every widget is the same 3-row-tall tile (Storage, Health, CPU, …). */
+  function tileHeight(cellH: number): number {
+    return Math.max(280, Math.round(cellH * 3 - 4));
+  }
+
   /** Nearest free snapped slot for a rectangle, avoiding apps and widgets. */
   function findFreeSpot(
     rect: Rect,
@@ -563,7 +568,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     if (disposed) return;
     const { rects: appRects, cellW, cellH } = grid();
     const width = tileWidth(cellW);
-    for (const card of cards.values()) card.el.style.width = `${width}px`;
+    const height = tileHeight(cellH);
+    for (const card of cards.values()) {
+      card.el.style.width = `${width}px`;
+      card.el.style.height = `${height}px`;
+    }
     const placed: Rect[] = [...appRects];
     for (const widget of layout) {
       if (widget.id === dragging) continue;

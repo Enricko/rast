@@ -24,6 +24,17 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.29] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Every widget is now the **same-size tile**: two app-icon columns wide and
+  three icon rows tall, with the footer pinned to the bottom. Storage, System
+  Health, CPU & Memory and Network no longer have different heights, so a set
+  of four widgets forms an even 2×2 block.
+
 ## [0.11.28] - 2026-11-14
 
 No database migration (schema stays v12).
