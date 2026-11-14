@@ -240,11 +240,15 @@ pub(crate) async fn init(options: &NativeOptions) -> Result<(), NativeError> {
     let production = options.require_root && is_root();
     if nft_binary().is_none() {
         if production {
-            tracing::warn!(
-                "nftables (nft) is not installed: Xpra display ports stay reachable by other \
-                 local accounts. Install the nftables package (see docs/INSTALL.md, section \
-                 'Native Linux apps (Xpra)')."
-            );
+            // Fail closed: an Xpra display port that other local accounts can
+            // reach is never started. The operator gets an actionable error
+            // instead of a silently unprotected native session.
+            return Err(NativeError::unavailable(
+                "nftables (nft) is required to restrict Xpra display ports to the RAST service \
+                 account, but it is not installed. Install the 'nftables' package and restart \
+                 rast-native.service (see docs/INSTALL.md, section 'Native Linux apps (Xpra)'), \
+                 or disable native apps with native_enabled = false.",
+            ));
         }
         return Ok(());
     }
@@ -253,10 +257,13 @@ pub(crate) async fn init(options: &NativeOptions) -> Result<(), NativeError> {
         return Ok(());
     }
     let Some(allowed_uid) = options.allowed_peer_uid.or(options.rast_uid) else {
-        tracing::warn!(
-            "no RAST service uid is configured: cannot restrict the Xpra display ports to it"
-        );
-        return Ok(());
+        // Fail closed for the same reason: without the gateway uid there is no
+        // way to restrict the ports, so no session may start.
+        return Err(NativeError::unavailable(
+            "the RAST service account uid could not be resolved, so Xpra display ports cannot \
+             be restricted to it. Check that the 'rast' user and group exist and restart \
+             rast-native.service, or disable native apps with native_enabled = false.",
+        ));
     };
     ensure_ruleset(allowed_uid).await?;
     reconcile().await?;

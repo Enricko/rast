@@ -13,19 +13,38 @@ import {
   type NativeSession,
 } from "../src/apps/linuxapp/catalog";
 import {
+  APPIMAGE_REJECTED_MESSAGE,
+  INSTALL_STAGES,
+  installProgressFraction,
+  installStageFromFraction,
+  installStageFromMessage,
+  installStageIndex,
+  installStageLabel,
+  isSupportedPackageFileName,
+  PACKAGE_FILE_ACCEPT,
+  packageFileProblem,
   previewArchitecture,
+  previewAvailability,
   previewCandidates,
   previewCompatibility,
   previewDependencies,
+  previewDuplicate,
+  previewHost,
   previewIdentity,
+  previewInstallActionLabel,
+  previewInstallPlan,
   previewLauncher,
   previewLauncherOwner,
   previewName,
   previewNeedsChoice,
   previewPackageName,
+  previewProfile,
+  previewProfileSummary,
+  previewSource,
   previewSummary,
   previewTransaction,
   previewVersion,
+  UNSUPPORTED_FILE_MESSAGE,
   type LinuxInstallPreview,
 } from "../src/apps/packages/linux-preview";
 
@@ -299,4 +318,234 @@ test("previewSummary mentions the number of package changes", () => {
   assert.match(withChanges, /changes 2 packages/);
   const plain = previewSummary(preview({ app: { name: "Chrome", version: "130" }, deb: null }));
   assert.equal(plain, "Install Chrome 130?");
+});
+
+// ------------------------------------------------- Install Linux App workflow
+
+test("install stages map from the backend job messages", () => {
+  assert.equal(installStageFromMessage("Validating the package"), "validating");
+  assert.equal(installStageFromMessage("Installing the system package"), "installing");
+  assert.equal(installStageFromMessage("Registering the application"), "registering");
+  assert.equal(installStageFromMessage("Verifying the installation"), "registering");
+  assert.equal(installStageFromMessage("Ready"), "ready");
+  assert.equal(installStageFromMessage("installing the system package"), "installing");
+  assert.equal(installStageFromMessage("Downloading the package"), "uploading");
+  assert.equal(installStageFromMessage(""), "validating");
+  assert.equal(installStageFromMessage("Something new", 3, 5), "registering");
+  assert.equal(installStageFromMessage(undefined as unknown as string), "validating");
+});
+
+test("install stage fraction fallback covers the whole five-step job", () => {
+  assert.deepEqual(INSTALL_STAGES, ["uploading", "validating", "installing", "registering", "ready"]);
+  assert.equal(installStageIndex("uploading"), 0);
+  assert.equal(installStageIndex("ready"), 4);
+  assert.equal(installStageLabel("uploading"), "Uploading");
+  assert.equal(installStageLabel("ready"), "Ready");
+  assert.equal(installStageFromFraction(0, 0), "validating");
+  assert.equal(installStageFromFraction(0, 5), "validating");
+  assert.equal(installStageFromFraction(1, 5), "installing");
+  assert.equal(installStageFromFraction(2, 5), "installing");
+  assert.equal(installStageFromFraction(3, 5), "registering");
+  assert.equal(installStageFromFraction(4, 5), "registering");
+  assert.equal(installStageFromFraction(5, 5), "ready");
+  assert.equal(installStageFromFraction(7, 5), "ready");
+  assert.equal(installProgressFraction(1, 4), 0.25);
+  assert.equal(installProgressFraction(9, 4), 1);
+  assert.equal(installProgressFraction(1, 0), 0);
+});
+
+test("previewInstallPlan prefers the new install field and falls back to deb.preexisting", () => {
+  const modern = previewInstallPlan(
+    preview({
+      install: {
+        mode: "register",
+        hostPackageInstalled: true,
+        existingApp: { id: "example", name: "Example", version: "2.0", status: "ready", backend: "native" },
+      },
+    }),
+  );
+  assert.equal(modern.mode, "register");
+  assert.equal(modern.hostPackageInstalled, true);
+  assert.equal(modern.existingApp?.id, "example");
+  assert.equal(modern.existingApp?.status, "ready");
+
+  const legacyRegister = previewInstallPlan(
+    preview({
+      duplicate: null,
+      deb: { package: { name: "example", version: "2.0", preexisting: true } },
+    }),
+  );
+  assert.equal(legacyRegister.mode, "register");
+  assert.equal(legacyRegister.hostPackageInstalled, true);
+  assert.equal(legacyRegister.existingApp, null);
+
+  const legacyDuplicate = previewInstallPlan(
+    preview({
+      deb: { package: { name: "example", version: "2.0", preexisting: true } },
+      duplicate: { appId: "example", name: "Example", version: "1.0", status: "ready" },
+    }),
+  );
+  assert.equal(legacyDuplicate.mode, "duplicate");
+  assert.equal(legacyDuplicate.existingApp?.id, "example");
+
+  const fresh = previewInstallPlan(preview());
+  assert.equal(fresh.mode, "fresh");
+  assert.equal(fresh.hostPackageInstalled, false);
+  assert.equal(fresh.existingApp, null);
+});
+
+test("previewInstallActionLabel registers an existing package instead of installing it again", () => {
+  const fresh = previewInstallPlan(preview());
+  assert.equal(previewInstallActionLabel(fresh), "Install");
+  const register = previewInstallPlan(preview({ install: { mode: "register", hostPackageInstalled: true } }));
+  assert.equal(previewInstallActionLabel(register), "Add existing installation to RAST");
+  const duplicate = previewInstallPlan(preview({ install: { mode: "duplicate" } }));
+  assert.equal(previewInstallActionLabel(duplicate), "Install");
+});
+
+test("previewProfile reads saved user data and degrades to none", () => {
+  assert.deepEqual(previewProfile(preview({ profile: { exists: true, users: 2 } })), { exists: true, users: 2 });
+  assert.equal(previewProfileSummary({ exists: true, users: 2 }), "2 user profiles will be preserved");
+  assert.equal(previewProfileSummary({ exists: true, users: 1 }), "1 user profile will be preserved");
+  assert.deepEqual(previewProfile(preview({ profile: { exists: true } })), { exists: true, users: 0 });
+  assert.equal(previewProfileSummary({ exists: true, users: 0 }), "Saved app data will be preserved");
+  assert.deepEqual(previewProfile(preview()), { exists: false, users: 0 });
+  assert.equal(previewProfileSummary({ exists: false, users: 0 }), "None yet");
+  assert.deepEqual(previewProfile(preview({ profile: { users: -3 } })), { exists: false, users: 0 });
+});
+
+test("previewAvailability reads server choices and defaults to all users", () => {
+  assert.deepEqual(previewAvailability(preview()), {
+    defaultVisibility: "users",
+    options: ["users", "admins"],
+  });
+  assert.deepEqual(
+    previewAvailability(preview({ availability: { default: "admins", options: ["admins", "users"] } })),
+    { defaultVisibility: "admins", options: ["admins", "users"] },
+  );
+  assert.deepEqual(
+    previewAvailability(preview({ availability: { default: "admins", options: ["admins"] } })),
+    { defaultVisibility: "admins", options: ["admins"] },
+  );
+  // Unknown or repeated values are ignored instead of being shown.
+  assert.deepEqual(previewAvailability(preview({ availability: { options: ["admins", "root", "admins"] } })), {
+    defaultVisibility: "users",
+    options: ["users", "admins"],
+  });
+});
+
+test("previewDuplicate normalizes duplicate and install.existingApp", () => {
+  const duplicate = previewDuplicate(
+    preview({ duplicate: { appId: "chrome", name: "Chrome", version: "130", status: "ready", canUpdate: true } }),
+  );
+  assert.equal(duplicate?.id, "chrome");
+  assert.equal(duplicate?.name, "Chrome");
+  assert.equal(duplicate?.version, "130");
+  assert.equal(duplicate?.canUpdate, true);
+  const fromInstall = previewDuplicate(
+    preview({ duplicate: null, install: { mode: "duplicate", existingApp: { id: "files", name: "Files" } } }),
+  );
+  assert.equal(fromInstall?.id, "files");
+  assert.equal(previewDuplicate(preview()), null);
+});
+
+test("previewHost and previewSource read the host and where the file comes from", () => {
+  assert.deepEqual(previewHost(preview()), { distribution: null, architecture: null });
+  assert.deepEqual(
+    previewHost(preview({ hostDistribution: "Debian GNU/Linux 12", hostArchitecture: "amd64" })),
+    { distribution: "Debian GNU/Linux 12", architecture: "amd64" },
+  );
+  assert.deepEqual(previewSource(preview()), { kind: "path", label: "File Station path", value: "/Downloads/example_2.0_amd64.deb" });
+  assert.deepEqual(
+    previewSource(preview({ source: { kind: "url", url: "https://example.test/example.deb" } })),
+    { kind: "url", label: "Downloaded from", value: "https://example.test/example.deb" },
+  );
+  assert.deepEqual(previewSource(preview({ source: null })), {
+    kind: "file",
+    label: "File",
+    value: "example_2.0_amd64.deb",
+  });
+});
+
+test("packageFileProblem accepts .deb and portable archives and explains AppImage", () => {
+  for (const name of ["app.deb", "app.tar.gz", "app.tgz", "app.tar.xz", "app.txz", "app.tar.bz2", "app.tbz2", "app.tar"]) {
+    assert.equal(packageFileProblem(name), null, name);
+    assert.equal(isSupportedPackageFileName(name), true, name);
+  }
+  assert.equal(packageFileProblem("app.AppImage"), APPIMAGE_REJECTED_MESSAGE);
+  assert.match(APPIMAGE_REJECTED_MESSAGE, /not validated on this server/);
+  assert.equal(packageFileProblem("app.appimage"), APPIMAGE_REJECTED_MESSAGE);
+  assert.equal(isSupportedPackageFileName("app.AppImage"), false);
+  assert.equal(packageFileProblem("setup.exe"), UNSUPPORTED_FILE_MESSAGE);
+  assert.equal(packageFileProblem("archive.gz"), UNSUPPORTED_FILE_MESSAGE);
+  assert.equal(packageFileProblem(""), UNSUPPORTED_FILE_MESSAGE);
+  assert.match(PACKAGE_FILE_ACCEPT, /\.deb/);
+  assert.doesNotMatch(PACKAGE_FILE_ACCEPT, /appimage/i);
+});
+
+test("previewTransaction reads the newer deb.preexisting flag", () => {
+  const summary = previewTransaction(
+    preview({
+      deb: { preexisting: true, transaction: { installs: [], removals: [], upgrades: [] } },
+    }),
+  );
+  assert.equal(summary.preexisting, true);
+  const plan = previewInstallPlan(
+    preview({ install: null, duplicate: null, deb: { preexisting: true } }),
+  );
+  assert.equal(plan.mode, "register");
+  assert.equal(plan.hostPackageInstalled, true);
+});
+
+test("the current server contract preview normalizes for the install dialog", () => {
+  // Shape produced by POST /api/linux-apps/preview on the native backend: the
+  // flat `source` is the string "file", `deb.preexisting` is on `deb`, and the
+  // additive install/profile/availability fields describe the install plan.
+  const live: LinuxInstallPreview = {
+    format: "deb",
+    fileName: "google-chrome-stable_130.0_amd64.deb",
+    sizeBytes: 118_000_000,
+    sha256: "abc",
+    source: "file" as unknown as LinuxInstallPreview["source"],
+    architecture: "amd64",
+    app: {
+      name: "Google Chrome",
+      version: "130.0",
+      package: "google-chrome-stable",
+      launcher: { argv: ["/usr/bin/google-chrome-stable"] },
+    },
+    candidates: [],
+    needsChoice: false,
+    compatibility: { ok: true, reasons: [], warnings: ["Chromium apps use the basic password store"] },
+    deb: {
+      preexisting: true,
+      package: "google-chrome-stable",
+      transaction: { installs: [], upgrades: [], removals: [], downloadBytes: 0 },
+      dependencies: [],
+    },
+    update: null,
+    warnings: ["Chromium apps use the basic password store"],
+    duplicate: null,
+    profile: { exists: true, users: 2 },
+    install: { mode: "register", hostPackageInstalled: true, existingApp: null },
+    availability: { default: "users", options: ["users", "admins"] },
+    hostArchitecture: "amd64",
+    hostDistribution: "Debian GNU/Linux 12",
+  };
+  assert.equal(previewName(live), "Google Chrome");
+  assert.equal(previewVersion(live), "130.0");
+  assert.deepEqual(previewSource(live), {
+    kind: "file",
+    label: "File",
+    value: "google-chrome-stable_130.0_amd64.deb",
+  });
+  assert.deepEqual(previewHost(live), { distribution: "Debian GNU/Linux 12", architecture: "amd64" });
+  assert.equal(previewTransaction(live).preexisting, true);
+  const plan = previewInstallPlan(live);
+  assert.equal(plan.mode, "register");
+  assert.equal(previewInstallActionLabel(plan), "Add existing installation to RAST");
+  assert.deepEqual(previewProfile(live), { exists: true, users: 2 });
+  assert.deepEqual(previewAvailability(live).options, ["users", "admins"]);
+  assert.equal(previewCompatibility(live).ok, true);
+  assert.match(previewCompatibility(live).warnings[0] ?? "", /password store/);
 });

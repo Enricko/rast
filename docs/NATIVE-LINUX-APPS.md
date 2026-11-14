@@ -43,6 +43,79 @@ migration notes in
   linked into or distributed with the RAST binary. See
   [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md#external-programs-invoked-at-runtime).
 
+
+## Install Linux App
+
+Administrators install apps from **App Center → Install Linux App** (the
+primary button in the App Center toolbar; the empty-state tile with the same
+name opens the same dialog). Regular accounts never see the button, and the
+preview/install endpoints are administrator-only on the server.
+
+The dialog has two sources:
+
+* **Upload package** — choose or drop a file, or pick one from File Station.
+  `.deb` packages are fully supported (installed with the host package
+  manager through the root helper). Portable archives (`.tar.gz`, `.tgz`,
+  `.tar.xz`, `.txz`, `.tar.bz2`, `.tbz2`, `.tar`) are supported when they ship
+  a desktop launcher. **AppImage is not offered** in this workflow because it
+  has not been validated on this server; the dialog says so instead of failing
+  later.
+* **Install from URL** — an official vendor `https://` link. The server
+  downloads the file itself (redirects included) and validates it; the URL is
+  not fetched by the browser.
+
+Before anything is installed the server inspects the file and the dialog shows
+a preview: detected app name/version and package format, source, host
+distribution and architecture plus compatibility result, dependency/
+package-transaction changes, whether the host package is **already installed**
+("Add existing installation to RAST" instead of "Install"), whether a RAST app
+entry already exists, how many saved per-user profiles already exist (they are
+preserved), server warnings (for Chromium: the `--password-store=basic`
+headless-keyring note), and **who can use the app** (all RAST users by default,
+or administrators only). Unknown values stay unset rather than guessed.
+
+After confirming, the dialog shows the installation stages — *Uploading →
+Validating → Installing → Registering → Ready* — driven by the real job. The
+dialog can be closed while the job runs (it continues in the background) and
+App Center reattaches to the running job when it is reopened, so the app tile
+keeps showing progress. The app is only reported as Ready after the job
+finished **and** the app row is `ready` with a registered launcher; failures
+show the server's actionable error with **Try again** for the same source.
+Duplicate submissions are rejected (button disabled, server returns 409 while
+an install for the same app is running). When ready, the dialog offers
+**Open**; installed apps appear in App Center, the application launcher and on
+the desktop (the dialog notes when the icon is already on the desktop).
+
+Screenshots: [button](screenshots/native-install-button.png),
+[dialog](screenshots/native-install-dialog.png),
+[preview](screenshots/native-install-preview.png),
+[progress](screenshots/native-install-progress.png),
+[ready](screenshots/native-install-ready.png),
+[installed Chrome](screenshots/native-chrome-installed.png),
+[Chrome windows](screenshots/native-chrome-windows.png).
+
+### Existing host packages and profiles
+
+If the package is already installed on the host and only missing from RAST, the
+preview recognises it and the action is **Add existing installation to RAST**:
+RAST registers the existing installation (it does not claim a fresh package
+installation, does not re-download anything for the `deb` transaction and does
+not remove the host package on uninstall when it pre-dated RAST). A real fresh
+install (APT transaction run by the helper) is used when the package is not on
+the host; the test suite validates both paths.
+
+Uninstalling an app keeps per-user profiles unless the administrator explicitly
+deletes user data. The same `profiles/<app-id>/<user-id>` directories are
+reused by a later reinstall, so browser sign-ins, cookies and app settings
+survive (browser-session cookies by definition do not survive a browser
+restart; persistent cookies do). Reinstalling an existing package preserves the
+profiles by default — both paths are verified in the test run.
+
+Credential and file-access limits of the native mode are described above:
+per-user profiles are protected by the Linux identity, not by an OS keyring;
+only the person's own RAST home is ACL-exposed (read-only) and shared folders
+are not mapped into app profiles.
+
 ## Requirements
 
 | Component | Requirement |

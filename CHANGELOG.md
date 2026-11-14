@@ -11,6 +11,27 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+
+- **A clear "Install Linux App" workflow in App Center.** Administrators get a
+  prominent primary button (and matching empty-state tile) that opens one
+  responsive dialog with *Upload package* and *Install from URL* sources.
+  Supported formats are stated in plain language (`.deb` and portable archives;
+  AppImage is explicitly not offered until validated). Before installing, the
+  dialog shows the server preview: detected name/version, format and source,
+  host distribution/architecture and compatibility, dependency and package
+  changes, whether the host package is already installed (the action becomes
+  "Add existing installation to RAST"), an existing RAST entry, how many saved
+  per-user profiles will be preserved, warnings (including Chromium's
+  `--password-store=basic` headless-keyring note) and who can use the app (all
+  RAST users or administrators only, stored as the app's visibility).
+  Installation shows real stages (Uploading → Validating → Installing →
+  Registering → Ready), survives closing the dialog/App Center (the job
+  continues and progress is reattached when App Center reopens), rejects
+  duplicate submissions, only reports Ready after the app row and launcher are
+  verified, and offers Try again with the original source on failure. The ready
+  view opens the app and points at the existing desktop-shortcut behaviour.
+  Uninstall/reinstall keeps per-user profiles unless data deletion is chosen.
+
 - **Native app prerequisites are checked up front.** Xpra 6.5+ is required
   (validated against 6.5.5 with HTML5 client version 21); the installer
   detects an older Xpra and disables native apps instead of failing at launch,
@@ -1268,4 +1289,3 @@ server required.
   [SECURITY.md](SECURITY.md#known-dependency-advisory-010).
 - Frontend build requires Node.js >= 22 and npm (build-time only); the
   installed server needs neither.
-

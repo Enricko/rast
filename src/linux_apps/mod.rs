@@ -715,14 +715,15 @@ impl LinuxApps {
         format: LinuxFormat,
         source_label: &'static str,
         launcher: Option<Value>,
+        visibility: Visibility,
     ) -> AppResult<Value> {
-        ctx.progress(0, 3, "Preparing the installation").await;
+        // Copying/downloading and hashing the upload is the validation stage;
+        // NativeApps::install continues with the remaining install stages.
+        ctx.progress(0, 5, "Validating the package").await;
         let cancel = ctx.cancel_flag();
         let stage = self
             .stage_native_source(source, file_name.clone(), cancel)
             .await?;
-        ctx.progress(1, 3, "Inspecting the package before changing the system")
-            .await;
         let outcome = self
             .native_apps
             .install(
@@ -730,6 +731,7 @@ impl LinuxApps {
                 &stage.staged,
                 format,
                 source_label,
+                visibility,
                 &ctx,
                 launcher.as_ref(),
             )
@@ -741,7 +743,7 @@ impl LinuxApps {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                ctx.progress(3, 3, "Installed").await;
+                ctx.progress(5, 5, "Ready").await;
                 stage.cleanup();
                 audit::record_with_events(
                     &self.db,
@@ -1267,23 +1269,37 @@ impl LinuxApps {
         storage: &Storage,
         path: &str,
     ) -> AppResult<Value> {
-        self.install_with(user, storage, path, None).await
+        self.install_with(user, storage, path, None, Visibility::Users)
+            .await
     }
 
-    /// Install with an explicit launcher choice for ambiguous archives.
+    /// Install with an explicit launcher choice and visibility.
+    ///
+    /// `visibility` is who may see the new app; every install starts out
+    /// visible to all signed-in users unless the administrator restricts it.
     pub async fn install_with(
         self: &Arc<Self>,
         user: &AuthUser,
         storage: &Storage,
         path: &str,
         launcher: Option<Value>,
+        visibility: Visibility,
     ) -> AppResult<Value> {
         if self.native_enabled {
             self.ensure_native()?;
             let (source, file_name, format) =
                 self.native_source(user, storage, Some(path), None).await?;
+            self.ensure_no_running_install(&file_name).await?;
             return self
-                .begin_native_install(user.clone(), source, file_name, format, "file", launcher)
+                .begin_native_install(
+                    user.clone(),
+                    source,
+                    file_name,
+                    format,
+                    "file",
+                    launcher,
+                    visibility,
+                )
                 .await;
         }
         self.ensure_available().await?;
@@ -1314,27 +1330,40 @@ impl LinuxApps {
             file_name,
             format,
             PackageSource::File(resolved.physical),
+            visibility,
         )
         .await
     }
 
     /// Install the app file behind an `https://` link (downloaded by the server).
     pub async fn install_url(self: &Arc<Self>, user: &AuthUser, url: &str) -> AppResult<Value> {
-        self.install_url_with(user, url, None).await
+        self.install_url_with(user, url, None, Visibility::Users)
+            .await
     }
 
-    /// Install from an `https://` link with an explicit launcher choice.
+    /// Install from an `https://` link with an explicit launcher choice and
+    /// visibility.
     pub async fn install_url_with(
         self: &Arc<Self>,
         user: &AuthUser,
         url: &str,
         launcher: Option<Value>,
+        visibility: Visibility,
     ) -> AppResult<Value> {
         if self.native_enabled {
             self.ensure_native()?;
             let (source, file_name, format) = self.native_url_source(url).await?;
+            self.ensure_no_running_install(&file_name).await?;
             return self
-                .begin_native_install(user.clone(), source, file_name, format, "url", launcher)
+                .begin_native_install(
+                    user.clone(),
+                    source,
+                    file_name,
+                    format,
+                    "url",
+                    launcher,
+                    visibility,
+                )
                 .await;
         }
         self.ensure_available().await?;
@@ -1361,8 +1390,14 @@ impl LinuxApps {
         .await
         .map_err(|e| AppError::internal(e.to_string()))?
         .map_err(AppError::bad_request)?;
-        self.begin_install(user, file_name, format, PackageSource::Url(url.to_string()))
-            .await
+        self.begin_install(
+            user,
+            file_name,
+            format,
+            PackageSource::Url(url.to_string()),
+            visibility,
+        )
+        .await
     }
 
     /// Validate an `https://` link and derive its file name and format.
@@ -1392,7 +1427,19 @@ impl LinuxApps {
         Ok((NativeSource::Url(url.to_string()), file_name, format))
     }
 
+    /// Refuse a duplicate submission while the same app is still installing.
+    ///
+    /// Reinstalls and updates of a finished app are unaffected: only a row that
+    /// is still in the `installing` state blocks a second job.
+    async fn ensure_no_running_install(&self, file_name: &str) -> AppResult<()> {
+        if self.native_apps.installing_duplicate(file_name).await? {
+            return Err(AppError::conflict("This app is already being installed"));
+        }
+        Ok(())
+    }
+
     /// Start a native install job; the NativeApps service owns the app row.
+    #[allow(clippy::too_many_arguments)]
     async fn begin_native_install(
         self: &Arc<Self>,
         user: AuthUser,
@@ -1401,6 +1448,7 @@ impl LinuxApps {
         format: LinuxFormat,
         source_label: &'static str,
         launcher: Option<Value>,
+        visibility: Visibility,
     ) -> AppResult<Value> {
         let this = self.clone();
         let actor = user.clone();
@@ -1414,6 +1462,7 @@ impl LinuxApps {
                 format,
                 source_label,
                 launcher,
+                visibility,
             )
             .await
         })
@@ -1429,20 +1478,22 @@ impl LinuxApps {
         file_name: String,
         format: LinuxFormat,
         source: PackageSource,
+        visibility: Visibility,
     ) -> AppResult<Value> {
         let id = self.new_id(&file_name).await?;
         let now = db::now_ms();
         let cpus = default_cpus();
         sqlx::query(
-            "INSERT INTO linux_apps (id, name, format, file_name, version, status, memory_mb, cpus,
-                 created_by, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'installing', ?, ?, ?, ?, ?)",
+            "INSERT INTO linux_apps (id, name, format, file_name, version, status, visibility,
+                 memory_mb, cpus, created_by, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'installing', ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(display_name_from_file(&file_name))
         .bind(format.as_str())
         .bind(&file_name)
         .bind(version_from_file(&file_name))
+        .bind(visibility.as_str())
         .bind(DEFAULT_MEMORY_MB as i64)
         .bind(cpus as i64)
         .bind(user.id)

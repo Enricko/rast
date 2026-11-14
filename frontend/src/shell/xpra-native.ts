@@ -169,6 +169,8 @@ interface FrameState {
   resizeTimer: number;
   remoteX: number;
   remoteY: number;
+  /** Last maximize state reported by the *remote* window (never by RAST). */
+  remoteMaximized: boolean;
   last: {
     minimized: boolean;
     maximized: boolean;
@@ -628,7 +630,12 @@ export class NativeLinuxHost {
     this.syncRemoteFocus(snapshot);
   }
 
-  private resolveSlug(window: NativeShimWindow): string {
+  private resolveSlug(window: NativeShimWindow, parent?: FrameState | null): string {
+    // A transient window belongs to the app of the window it is attached to;
+    // this is more reliable than class matching (dialogs and file choosers
+    // often have no useful WM_CLASS, and every transient must keep the parent
+    // app's identity for icons, grouping and access checks).
+    if (parent) return parent.slug;
     const nativeApps = linuxApps().filter(isNativeApp);
     const matched = matchWindowApp(nativeApps, window.classInstance);
     if (matched) return matched.id;
@@ -676,7 +683,7 @@ export class NativeLinuxHost {
   }
 
   private createFrame(info: NativeShimWindow, parent: FrameState | null): void {
-    const slug = this.resolveSlug(info);
+    const slug = this.resolveSlug(info, parent);
     const app = linuxAppById(slug);
     const title = info.title?.trim() || app?.name || "Window";
     const popup = isPopupWindow(info);
@@ -733,6 +740,7 @@ export class NativeLinuxHost {
       resizeTimer: 0,
       remoteX: info.x,
       remoteY: info.y,
+      remoteMaximized: info.maximized === true,
       last: {
         minimized: false,
         maximized: false,
@@ -861,15 +869,14 @@ export class NativeLinuxHost {
       this.deps.wm.toggleMinimize(handle.id);
     }
     frame.last.minimized = window.minimized;
-    // An application that maximized itself (a video player, a GTK maximize)
-    // should not leave a small RAST frame stretched around a maximized canvas.
-    if (window.maximized && !frame.last.maximized && !handle.isMaximized() && !frame.closing) {
-      this.deps.wm.toggleMaximize(handle.id);
-    } else if (!window.maximized && frame.last.maximized && handle.isMaximized() && !frame.closing) {
-      // Only follow a remote un-maximize when the remote window itself changed
-      // state; a RAST-side maximize does not change the X11 state.
+    // Only follow a *remote* maximize. Reacting to a remote "not maximized"
+    // as well would undo a RAST-side maximize on the next snapshot (the X11
+    // window itself is not maximized by the RAST window manager), creating a
+    // toggle feedback loop. A RAST-side restore stays local.
+    if (window.maximized && !frame.remoteMaximized && !handle.isMaximized() && !frame.closing) {
       this.deps.wm.toggleMaximize(handle.id);
     }
+    frame.remoteMaximized = window.maximized === true;
     frame.last.maximized = window.maximized;
   }
 
@@ -1213,13 +1220,15 @@ export class NativeLinuxHost {
     if (target instanceof Element) {
       if (
         target.closest(
-          "input, textarea, select, [contenteditable='true'], [contenteditable=''], button, " +
-            "[role='menu'], [role='menuitem'], [role='tab'], " +
+          "input, textarea, select, [contenteditable='true'], [contenteditable=''], " +
             ".taskbar, .start-menu, .context-menu, .panel, .tray, .modal, .auth",
         )
       ) {
         return;
       }
+      // Controls inside the focused native window (min/max/close) still keep
+      // the app's keyboard: a person who clicked the title bar expects typing
+      // to reach the application, not to be swallowed by the shell.
     } else if (target instanceof HTMLElement) {
       if (target.isContentEditable) return;
       const tag = target.tagName;

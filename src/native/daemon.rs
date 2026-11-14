@@ -43,9 +43,9 @@ use crate::native::{
         DebPreviewOp, DebRemoveOp, IdentityEnsureOp, IdentityRemoveOp, NativeError, NativeOp,
         NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp, PackagePolicyOp,
         PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp, PathSymlinkOp,
-        ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp, ResourceLimits,
-        SessionStartOp, SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES,
-        MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
+        ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp, ProfileSummaryOp,
+        ResourceLimits, SessionStartOp, SessionStopOp, UnitStatusOp, MAX_OUTPUT_BYTES,
+        MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
 };
@@ -420,6 +420,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::PathAcl(op) => path_acl(options, op).await,
         NativeOp::PathSymlink(op) => path_symlink(options, op).await,
         NativeOp::ProfilePrepare(op) => profile_prepare(options, op).await,
+        NativeOp::ProfileSummary(op) => profile_summary(options, op),
         NativeOp::ProfileCleanLocks(op) => profile_clean_locks(options, op).await,
         NativeOp::ProfileInstall(op) => profile_install(options, op).await,
         NativeOp::ProfileRemove(op) => profile_remove(options, op).await,
@@ -2563,6 +2564,51 @@ fn ensure_owned_dir(
 /// a browser that was killed or stopped. Chrome refuses to open a window (or
 /// silently delegates to a dead instance) when these stale files remain, and
 /// the legacy Docker image did the same cleanup in its init script.
+/// Count the distinct per-user profiles that already exist for these app ids.
+///
+/// Read-only, bounded and validated: the caller only supplies app ids, never
+/// paths or user ids, and the helper owns the profile root.
+fn profile_summary(options: &NativeOptions, op: ProfileSummaryOp) -> Result<Value, NativeError> {
+    if op.app_ids.len() > 32 {
+        return Err(NativeError::invalid("at most 32 app ids are allowed"));
+    }
+    let profiles = options.profiles_dir();
+    let mut users: Vec<String> = Vec::new();
+    let mut checked: Vec<String> = Vec::new();
+    for app_id in &op.app_ids {
+        validate_app_id(app_id)?;
+        if checked.iter().any(|known| known == app_id) {
+            continue;
+        }
+        checked.push(app_id.clone());
+        let root = profiles.join(app_id);
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir() {
+                continue;
+            }
+            let user = entry.file_name().to_string_lossy().to_string();
+            // Profile directories are named after the numeric RAST user id.
+            if user.is_empty() || !user.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            if !users.contains(&user) {
+                users.push(user);
+            }
+        }
+    }
+    Ok(json!({
+        "exists": !users.is_empty(),
+        "users": users.len(),
+        "appIds": checked,
+    }))
+}
+
 async fn profile_clean_locks(
     options: &NativeOptions,
     op: ProfileCleanLocksOp,
@@ -3963,6 +4009,51 @@ exit 1
             .await
             .unwrap_err();
         assert_eq!(error.code, "acls_unavailable");
+    }
+
+    #[tokio::test]
+    async fn profile_summary_counts_numeric_profiles_only() {
+        let helper = TestHelper::start(|options, dir| {
+            configure_identity(options, dir);
+        })
+        .await;
+        let profiles = helper.options.profiles_dir();
+        for (app, user) in [
+            ("demo", "1"),
+            ("demo", "2"),
+            ("demo-tool", "2"),
+            ("demo-tool", "9"),
+            ("other", "3"),
+        ] {
+            std::fs::create_dir_all(profiles.join(app).join(user)).unwrap();
+        }
+        // A file and a non-numeric directory are not profiles.
+        std::fs::write(profiles.join("demo").join("notes.txt"), b"x").unwrap();
+        std::fs::create_dir_all(profiles.join("demo").join("not-a-user")).unwrap();
+        let summary = helper
+            .call(NativeOp::ProfileSummary(ProfileSummaryOp {
+                app_ids: vec!["demo".into(), "demo-tool".into(), "demo-tool".into()],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(summary["exists"], true);
+        assert_eq!(summary["users"], 3);
+        assert_eq!(summary["appIds"], json!(["demo", "demo-tool"]));
+        let empty = helper
+            .call(NativeOp::ProfileSummary(ProfileSummaryOp {
+                app_ids: vec!["absent".into()],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(empty["exists"], false);
+        assert_eq!(empty["users"], 0);
+        // Path-like or malformed ids are rejected before anything is read.
+        assert!(helper
+            .call(NativeOp::ProfileSummary(ProfileSummaryOp {
+                app_ids: vec!["../../etc".into()],
+            }))
+            .await
+            .is_err());
     }
 
     #[tokio::test]

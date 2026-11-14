@@ -44,7 +44,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
-use super::{native_archive, updates};
+use super::{native_archive, updates, Visibility};
 use crate::{
     config::Config,
     db,
@@ -79,6 +79,23 @@ const CHROMIUM_PASSWORD_STORE_WARNING: &str =
      not by OS-level keyring encryption. Do not store credentials you would not keep in that \
      profile.";
 
+/// App ids whose existing profiles should be counted for this preview: the id
+/// a fresh install would derive plus the id of an existing RAST app matched by
+/// the preview (if any).
+fn preview_profile_ids(staged: &StagedFile, duplicate: &Value) -> Vec<String> {
+    let mut ids = vec![super::id_from_file(&staged.file_name)];
+    if let Some(id) = duplicate
+        .get("appId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    {
+        if ids.iter().all(|known| known != id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
 /// Add the explicit Chromium password-store note to a preview (top level and
 /// the compatibility warning list the App Center shows).
 fn add_chromium_password_store_warning(preview: &mut Value) {
@@ -104,6 +121,15 @@ fn add_chromium_password_store_warning(preview: &mut Value) {
 const MAX_PROFILE_FILES: usize = 200_000;
 /// Largest number of bytes written while copying one migrated profile.
 const MAX_PROFILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Why a finished install cannot be reported as successful.
+///
+/// The package itself is installed at this point, so the message must give the
+/// administrator a way out (choose a launcher in the preview or install a
+/// package that ships a desktop entry).
+const LAUNCHER_NOT_REGISTERED_MESSAGE: &str = "The package was installed but no desktop \
+     launcher could be registered; choose a launcher in the preview or install a package with a \
+     .desktop entry";
 
 // ---------------------------------------------------------------------------
 // Staged files
@@ -577,6 +603,14 @@ fn value_strings(value: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The strings of a JSON argv array, ignoring empty entries.
+fn string_argv(value: &Value) -> Vec<String> {
+    value_strings(value)
+        .into_iter()
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
 impl NativeRow {
     fn format(&self) -> LinuxFormat {
         LinuxFormat::parse(&self.format).unwrap_or(LinuxFormat::Deb)
@@ -596,6 +630,20 @@ impl NativeRow {
 
     fn launcher_value(&self) -> Value {
         parse_json(self.launcher.as_deref())
+    }
+
+    /// The command the app would start, if its row has a usable one.
+    ///
+    /// `launcher.argv` is authoritative for native apps; `command` is the
+    /// shared column the API and the App Center also read.
+    fn launcher_command(&self) -> Option<Vec<String>> {
+        let launcher = self.launcher_value();
+        let argv = string_argv(launcher.get("argv").unwrap_or(&Value::Null));
+        if !argv.is_empty() {
+            return Some(argv);
+        }
+        let command = string_argv(&parse_json(self.command.as_deref()));
+        (!command.is_empty()).then_some(command)
     }
 
     fn migration_value(&self) -> Value {
@@ -916,6 +964,25 @@ impl NativeApps {
         Err(AppError::conflict("too many apps with this name"))
     }
 
+    /// Whether an install of this file is still running.
+    ///
+    /// A second submission must not start a second job: both jobs would write
+    /// the same app row and run two package transactions. Matching is by the
+    /// uploaded file name and by the id the installer derives from it, so a
+    /// retry with a differently named file of the same app is caught too.
+    pub async fn installing_duplicate(&self, file_name: &str) -> AppResult<bool> {
+        let id = super::id_from_file(file_name);
+        let found: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM linux_apps WHERE status = 'installing' AND (file_name = ? OR id = ?) \
+             LIMIT 1",
+        )
+        .bind(file_name)
+        .bind(&id)
+        .fetch_optional(&self.db)
+        .await?;
+        Ok(found.is_some())
+    }
+
     fn staging_root(&self) -> AppResult<PathBuf> {
         let linux_apps = self.config.linux_apps_dir();
         let dir = self.config.linux_staging_dir();
@@ -1167,8 +1234,59 @@ impl NativeApps {
             .duplicate_for_preview(format, &response)
             .await
             .unwrap_or(Value::Null);
+        // The App Center shows who would be affected (people who already have
+        // this app's profile) and what installing would do (a fresh install, a
+        // host package RAST would just register, or a duplicate RAST app).
+        let profile = self.preview_profile(staged, &duplicate).await;
+        response["profile"] = profile;
         response["duplicate"] = duplicate;
+        response["install"] = install_summary(format, &response);
+        response["availability"] = json!({"default": "users", "options": ["users", "admins"]});
         Ok(response)
+    }
+
+    /// How many per-user profiles already exist for the app this file installs.
+    ///
+    /// Profiles live in `<data_dir>/linux-apps/profiles/<app-id>/<user>`. The id
+    /// a fresh install would get is derived from the file name exactly like
+    /// [`NativeApps::new_id`] does; when the file matches an app RAST already
+    /// has, that app's id is checked too (the installer then registers/updates
+    /// it instead of creating a new id).
+    async fn preview_profile(&self, staged: &StagedFile, duplicate: &Value) -> Value {
+        let ids = preview_profile_ids(staged, duplicate);
+        // The per-app profile directory is 0711 root:rast (traversable but not
+        // listable by the unprivileged server), so the privileged helper counts
+        // the profiles. Fall back to a direct scan for unit tests / an older
+        // helper that does not know the operation.
+        if let Ok(summary) = self
+            .call_helper("profile_summary", json!({ "appIds": ids }))
+            .await
+        {
+            if summary.get("users").and_then(Value::as_u64).is_some() {
+                return json!({
+                    "exists": summary.get("exists").and_then(Value::as_bool).unwrap_or(false),
+                    "users": summary.get("users").and_then(Value::as_u64).unwrap_or(0),
+                });
+            }
+        }
+        let mut users: Vec<String> = Vec::new();
+        for id in ids {
+            let root = self.config.linux_profiles_dir().join(&id);
+            let Ok(entries) = fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
+                if !is_dir {
+                    continue;
+                }
+                let user = entry.file_name().to_string_lossy().to_string();
+                if !users.contains(&user) {
+                    users.push(user);
+                }
+            }
+        }
+        json!({"exists": !users.is_empty(), "users": users.len()})
     }
 
     /// Find an existing app that the uploaded package probably corresponds to.
@@ -1573,28 +1691,31 @@ impl NativeApps {
 
     /// Install a staged file as a new app.
     ///
-    /// `source` is `file` or `url`; `launcher_choice` selects one of the
-    /// `candidates` returned by [`NativeApps::preview`] for portable archives
-    /// that contain several programs.
+    /// `source` is `file` or `url`; `visibility` who may see the new app;
+    /// `launcher_choice` selects one of the `candidates` returned by
+    /// [`NativeApps::preview`] for portable archives that contain several
+    /// programs.
+    #[allow(clippy::too_many_arguments)]
     pub async fn install(
         &self,
         actor_id: i64,
         staged: &StagedFile,
         format: LinuxFormat,
         source: &str,
+        visibility: Visibility,
         job: &JobContext,
         launcher_choice: Option<&Value>,
     ) -> AppResult<Value> {
         self.ensure_enabled()?;
         let source = validate_source(source)?;
         self.staged_verify(staged).await?;
-        job.progress(0, 3, "Checking the uploaded app").await;
+        job.progress(0, 5, "Validating the package").await;
         job.check_cancelled()?;
 
         // The row exists while the job runs, so App Center can show progress;
         // a failure from here on is recorded on the row, never silent.
         let id = self.new_id(&staged.file_name).await?;
-        self.insert_installing(actor_id, &id, staged, format, source, &job.id)
+        self.insert_installing(actor_id, &id, staged, format, source, visibility, &job.id)
             .await?;
 
         let prepared = match format {
@@ -1623,20 +1744,23 @@ impl NativeApps {
             }
         };
         job.check_cancelled()?;
-        job.progress(1, 3, "Installing the app").await;
+        job.progress(2, 5, "Installing the system package").await;
 
         let outcome = self
             .finish_install(&id, staged, format, source, prepared, launcher_choice, job)
             .await;
         match outcome {
             Ok(metadata) => {
+                job.progress(3, 5, "Registering the application").await;
                 if let Err(error) = self.apply_metadata(&id, &metadata, 1, None, source).await {
                     self.cleanup_install_files(&id);
                     let message = error.public_message();
                     self.set_status(&id, "failed", Some(&message), None).await;
                     return Err(error);
                 }
-                job.progress(3, 3, "Installed").await;
+                job.progress(4, 5, "Verifying the installation").await;
+                self.verify_registration(&id).await?;
+                job.progress(5, 5, "Ready").await;
                 self.announce(&id);
                 self.json_by_id(&id).await
             }
@@ -1649,6 +1773,37 @@ impl NativeApps {
         }
     }
 
+    /// Check that a finished install really left an openable app behind.
+    ///
+    /// The package manager can succeed while no usable desktop launcher was
+    /// registered (a package without a `.desktop` entry, an unresolvable
+    /// `Exec`, or a launcher that could not be written); the row then must not
+    /// claim success, because App Center would offer an app that cannot open.
+    /// A failure is recorded on the row (status `failed`) and returned to the
+    /// job, so the job is marked failed instead of "Ready".
+    async fn verify_registration(&self, id: &str) -> AppResult<()> {
+        let row = self.row(id).await?;
+        if !row.is_native() {
+            return Ok(());
+        }
+        let launcher = row.launcher_command();
+        let error = if row.status == "ready" && launcher.is_some() {
+            return Ok(());
+        } else if launcher.is_none() {
+            AppError::bad_request(LAUNCHER_NOT_REGISTERED_MESSAGE)
+        } else {
+            AppError::internal(
+                "The package was installed but the app did not become ready; remove it and try \
+                 again.",
+            )
+        };
+        self.cleanup_install_files(id);
+        let message = error.public_message();
+        self.set_status(id, "failed", Some(&message), None).await;
+        Err(error)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn insert_installing(
         &self,
         actor_id: i64,
@@ -1656,6 +1811,7 @@ impl NativeApps {
         staged: &StagedFile,
         format: LinuxFormat,
         source: &str,
+        visibility: Visibility,
         job_id: &str,
     ) -> AppResult<()> {
         let now = db::now_ms();
@@ -1663,14 +1819,16 @@ impl NativeApps {
         let cpus = self.config.linux_app_cpus as i64;
         sqlx::query(
             "INSERT INTO linux_apps (id, name, format, file_name, version, status, backend,
-                 install_source, memory_mb, cpus, created_by, created_at, updated_at, job_id)
-             VALUES (?, ?, ?, ?, ?, 'installing', 'native', ?, ?, ?, ?, ?, ?, ?)",
+                 visibility, install_source, memory_mb, cpus, created_by, created_at,
+                 updated_at, job_id)
+             VALUES (?, ?, ?, ?, ?, 'installing', 'native', ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id)
         .bind(super::display_name_from_file(&staged.file_name))
         .bind(format.as_str())
         .bind(&staged.file_name)
         .bind(super::version_from_file(&staged.file_name))
+        .bind(visibility.as_str())
         .bind(source)
         .bind(memory)
         .bind(cpus)
@@ -1697,8 +1855,7 @@ impl NativeApps {
     ) -> AppResult<AppMetadata> {
         match prepared {
             Prepared::Deb(prepared) => {
-                job.progress(2, 3, "Installing the package and its dependencies")
-                    .await;
+                job.progress(2, 5, "Installing the system package").await;
                 let install = {
                     let _guard = self.package_lock.lock().await;
                     self.deb_install_call(staged).await?
@@ -1707,7 +1864,7 @@ impl NativeApps {
                     .await
             }
             Prepared::Portable(prepared) => {
-                job.progress(2, 3, "Unpacking the app").await;
+                job.progress(2, 5, "Installing the system package").await;
                 let mut launcher = choose_initial_launcher(&prepared, launcher_choice)?;
                 self.ensure_architecture(&prepared, &launcher)?;
                 let final_dir = self.activate_portable(app_id, &prepared, &mut launcher, 1)?;
@@ -2382,7 +2539,7 @@ impl NativeApps {
     // -----------------------------------------------------------------------
 
     async fn prepare_deb(&self, staged: &StagedFile, job: &JobContext) -> AppResult<DebPrepared> {
-        job.progress(0, 3, "Checking the package").await;
+        job.progress(1, 5, "Validating the package").await;
         let preview = self.deb_preview_call(staged).await?;
         let compatible = preview
             .get("compatible")
@@ -3698,6 +3855,44 @@ fn simplify_name(value: &str) -> String {
         .collect()
 }
 
+/// What installing the previewed file would do to the current installation.
+///
+/// `fresh` is a new app, `register` means the `.deb`'s package is already on
+/// the host (RAST adopts it instead of installing it again), and `duplicate`
+/// means a RAST app for the same package/app exists already; `existingApp`
+/// then describes that app for the App Center's "already installed" advice.
+fn install_summary(format: LinuxFormat, preview: &Value) -> Value {
+    let duplicate = &preview["duplicate"];
+    let host_package_installed = matches!(format, LinuxFormat::Deb)
+        && preview
+            .pointer("/deb/preexisting")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let existing_app = if duplicate.is_object() {
+        json!({
+            "id": duplicate.get("appId").cloned().unwrap_or(Value::Null),
+            "name": duplicate.get("name").cloned().unwrap_or(Value::Null),
+            "version": duplicate.get("version").cloned().unwrap_or(Value::Null),
+            "status": duplicate.get("status").cloned().unwrap_or(Value::Null),
+            "backend": duplicate.get("backend").cloned().unwrap_or(Value::Null),
+        })
+    } else {
+        Value::Null
+    };
+    let mode = if !existing_app.is_null() {
+        "duplicate"
+    } else if host_package_installed {
+        "register"
+    } else {
+        "fresh"
+    };
+    json!({
+        "mode": mode,
+        "hostPackageInstalled": host_package_installed,
+        "existingApp": existing_app,
+    })
+}
+
 /// What the `.deb` preview can already say about the app.
 #[derive(Debug, Clone)]
 struct DebPreviewDiscovery {
@@ -4618,7 +4813,92 @@ mod tests {
         assert_eq!(preview["app"]["launcher"]["argv"][0], "bin/demo");
         assert_eq!(preview["app"]["launchGuess"], false);
         assert_eq!(preview["needsChoice"], false);
+        // Nothing is installed yet, so installing is a fresh install.
+        assert_eq!(preview["install"]["mode"], "fresh");
+        assert_eq!(preview["install"]["hostPackageInstalled"], false);
+        assert_eq!(preview["install"]["existingApp"], Value::Null);
+        assert_eq!(preview["profile"], json!({"exists": false, "users": 0}));
+        assert_eq!(
+            preview["availability"],
+            json!({"default": "users", "options": ["users", "admins"]})
+        );
         assert_eq!(app_count(&env).await, 0);
+    }
+
+    #[tokio::test]
+    async fn preview_reports_existing_profiles_and_duplicate_install_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir.path().join("fixture");
+        let files = Arc::new(deb_files(&fixture));
+        // The host has the package and RAST already has an app for it.
+        let env = test_env(deb_handler(
+            files,
+            "demo",
+            "2.0",
+            true,
+            Arc::new(Mutex::new("2.0".into())),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .await;
+        insert_native_row(&env, "demo", LinuxFormat::Deb, Some("demo"), "1.0").await;
+        // Two people already have a profile for the existing app; the id a
+        // fresh install would derive from the file name is checked too, and
+        // the same person is never counted twice.
+        for (id, user) in [("demo", "1"), ("demo", "2"), ("demo-tool", "2")] {
+            fs::create_dir_all(env.config.linux_profiles_dir().join(id).join(user)).unwrap();
+        }
+        fs::write(
+            env.config
+                .linux_profiles_dir()
+                .join("demo")
+                .join("notes.txt"),
+            b"not a profile",
+        )
+        .unwrap();
+        let source = dir.path().join("demo-tool_2.0_amd64.deb");
+        fs::write(&source, b"FAKE DEB 2").unwrap();
+        let staged = stage(&env, &source, "demo-tool_2.0_amd64.deb");
+        let preview = env.apps.preview(&staged, LinuxFormat::Deb).await.unwrap();
+
+        assert_eq!(preview["profile"], json!({"exists": true, "users": 2}));
+        assert_eq!(preview["install"]["mode"], "duplicate");
+        assert_eq!(preview["install"]["hostPackageInstalled"], true);
+        assert_eq!(preview["install"]["existingApp"]["id"], "demo");
+        assert_eq!(preview["install"]["existingApp"]["name"], "Demo");
+        assert_eq!(preview["install"]["existingApp"]["version"], "1.0");
+        assert_eq!(preview["install"]["existingApp"]["status"], "ready");
+        assert_eq!(preview["install"]["existingApp"]["backend"], "native");
+        assert_eq!(
+            preview["availability"],
+            json!({"default": "users", "options": ["users", "admins"]})
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_reports_register_mode_for_a_package_the_host_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir.path().join("fixture");
+        let files = Arc::new(deb_files(&fixture));
+        let env = test_env(deb_handler(
+            files,
+            "demo",
+            "1.0",
+            true,
+            Arc::new(Mutex::new("1.0".into())),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .await;
+        let source = dir.path().join("demo_1.0_amd64.deb");
+        fs::write(&source, b"FAKE DEB").unwrap();
+        let staged = stage(&env, &source, "demo_1.0_amd64.deb");
+        let preview = env.apps.preview(&staged, LinuxFormat::Deb).await.unwrap();
+
+        // No RAST app for it yet, but the host package exists: installing
+        // registers the existing installation instead of a fresh one.
+        assert_eq!(preview["duplicate"], Value::Null);
+        assert_eq!(preview["install"]["mode"], "register");
+        assert_eq!(preview["install"]["hostPackageInstalled"], true);
+        assert_eq!(preview["install"]["existingApp"], Value::Null);
     }
 
     // -----------------------------------------------------------------
@@ -4673,8 +4953,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         let app = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -4700,6 +4988,185 @@ mod tests {
         let status = row_status(&env, "demo").await.unwrap();
         assert_eq!(status.0, "ready");
         assert_eq!(status.2, "native");
+        // The install only returns after the registration was verified.
+        env.apps
+            .verify_registration("demo")
+            .await
+            .expect("registered launcher");
+    }
+
+    #[tokio::test]
+    async fn install_uses_the_requested_visibility() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Arc::new(deb_files(dir.path()));
+        let env = test_env(deb_handler(
+            files,
+            "demo",
+            "1.0",
+            false,
+            Arc::new(Mutex::new("1.0".into())),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .await;
+        let source = dir.path().join("demo_1.0_amd64.deb");
+        fs::write(&source, b"FAKE DEB").unwrap();
+        let staged = stage(&env, &source, "demo_1.0_amd64.deb");
+        in_job(&env, "linuxapps.install", move |apps, ctx| async move {
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Admins,
+                &ctx,
+                None,
+            )
+            .await
+        })
+        .await
+        .expect("install");
+        let visibility: (String,) =
+            sqlx::query_as("SELECT visibility FROM linux_apps WHERE id = 'demo'")
+                .fetch_one(&env.db)
+                .await
+                .unwrap();
+        assert_eq!(visibility.0, "admins");
+    }
+
+    #[tokio::test]
+    async fn install_without_a_desktop_launcher_fails_and_marks_the_row_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        // The package installs a program but no `.desktop` entry: there is
+        // nothing RAST could open, so the install must not end as "ready".
+        let program = dir.path().join("usr/bin/demo");
+        write_file(&program, b"#!/bin/sh\ntrue\n", 0o755);
+        let files = Arc::new(vec![program]);
+        let env = test_env(deb_handler(
+            files,
+            "demo",
+            "1.0",
+            false,
+            Arc::new(Mutex::new("1.0".into())),
+            Arc::new(AtomicBool::new(false)),
+        ))
+        .await;
+        let source = dir.path().join("demo_1.0_amd64.deb");
+        fs::write(&source, b"FAKE DEB").unwrap();
+        let staged = stage(&env, &source, "demo_1.0_amd64.deb");
+        let error = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("desktop launcher"), "{error}");
+        let status = row_status(&env, "demo").await.unwrap();
+        assert_eq!(status.0, "failed");
+        assert!(status.1.unwrap_or_default().contains("launcher"));
+    }
+
+    #[tokio::test]
+    async fn registration_verification_rejects_a_ready_app_without_a_launcher() {
+        let env = test_env(Arc::new(|op: &str, _: &Value| {
+            helper_failure("unsupported", &format!("unexpected helper op {op}"))
+        }))
+        .await;
+        let now = db::now_ms();
+        // A row that claims to be ready but has neither a launcher nor a
+        // command cannot be opened, so the verification must fail it.
+        sqlx::query(
+            "INSERT INTO linux_apps (id, name, format, file_name, status, build, visibility, \
+                 backend, memory_mb, cpus, created_at, updated_at) \
+             VALUES ('demo', 'Demo', 'tarball', 'Demo-1.0.tar.gz', 'ready', 1, 'users', \
+                 'native', 2048, 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&env.db)
+        .await
+        .unwrap();
+        let error = env
+            .apps
+            .verify_registration("demo")
+            .await
+            .expect_err("no launcher");
+        assert_eq!(error.public_message(), LAUNCHER_NOT_REGISTERED_MESSAGE);
+        assert!(error
+            .public_message()
+            .contains("choose a launcher in the preview"));
+        let status = row_status(&env, "demo").await.unwrap();
+        assert_eq!(status.0, "failed");
+        assert_eq!(status.1.as_deref(), Some(LAUNCHER_NOT_REGISTERED_MESSAGE));
+
+        // The shared `command` column is enough when the launcher JSON is
+        // missing (older rows), so it is accepted by the verification.
+        sqlx::query(
+            "INSERT INTO linux_apps (id, name, format, file_name, status, build, visibility, \
+                 backend, command, memory_mb, cpus, created_at, updated_at) \
+             VALUES ('legacy', 'Legacy', 'tarball', 'Legacy-1.0.tar.gz', 'ready', 1, 'users', \
+                 'native', '[\"/usr/bin/legacy\"]', 2048, 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&env.db)
+        .await
+        .unwrap();
+        env.apps
+            .verify_registration("legacy")
+            .await
+            .expect("command is a launcher");
+    }
+
+    #[tokio::test]
+    async fn an_app_that_is_still_installing_cannot_be_installed_again() {
+        let env = test_env(Arc::new(|op: &str, _: &Value| {
+            helper_failure("unsupported", &format!("unexpected helper op {op}"))
+        }))
+        .await;
+        let now = db::now_ms();
+        sqlx::query(
+            "INSERT INTO linux_apps (id, name, format, file_name, status, build, visibility, \
+                 backend, memory_mb, cpus, created_at, updated_at) \
+             VALUES ('demo', 'Demo', 'deb', 'demo_1.0_amd64.deb', 'installing', 0, 'users', \
+                 'native', 2048, 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&env.db)
+        .await
+        .unwrap();
+        // The same upload and a different version of the same app are both
+        // refused while the first job is still running.
+        for file_name in ["demo_1.0_amd64.deb", "demo_2.0_amd64.deb"] {
+            assert!(
+                env.apps.installing_duplicate(file_name).await.unwrap(),
+                "{file_name}"
+            );
+        }
+        // Another app is not affected.
+        assert!(!env
+            .apps
+            .installing_duplicate("other_1.0_amd64.deb")
+            .await
+            .unwrap());
+        // Once the install finished, installing/updating it again is allowed.
+        sqlx::query("UPDATE linux_apps SET status = 'ready' WHERE id = 'demo'")
+            .execute(&env.db)
+            .await
+            .unwrap();
+        assert!(!env
+            .apps
+            .installing_duplicate("demo_2.0_amd64.deb")
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -4727,8 +5194,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         let error = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "url", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "url",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .unwrap_err();
@@ -4748,8 +5223,16 @@ mod tests {
         let archive = demo_tar(dir.path(), "Demo-1.0.tar.gz", "1.0");
         let staged = stage(&env, &archive, "Demo-1.0.tar.gz");
         let app = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -4824,8 +5307,16 @@ mod tests {
 
         let staged = stage(&env, &archive, "Multi-1.0.tar.gz");
         let error = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .unwrap_err();
@@ -4841,6 +5332,7 @@ mod tests {
                 &staged,
                 LinuxFormat::Tarball,
                 "file",
+                Visibility::Users,
                 &ctx,
                 Some(&choice),
             )
@@ -4874,8 +5366,16 @@ mod tests {
         );
         let staged = stage(&env, &archive, "Source-1.0.tar.gz");
         let error = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .unwrap_err();
@@ -4907,8 +5407,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         let app = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -4938,8 +5446,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -4972,8 +5488,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -4997,8 +5521,16 @@ mod tests {
         let archive = demo_tar(dir.path(), "Demo-1.0.tar.gz", "1.0");
         let staged = stage(&env, &archive, "Demo-1.0.tar.gz");
         in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -5284,8 +5816,16 @@ mod tests {
         let archive = demo_tar(dir.path(), "Demo-1.0.tar.gz", "1.0");
         let staged = stage(&env, &archive, "Demo-1.0.tar.gz");
         in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");
@@ -5399,8 +5939,16 @@ mod tests {
         // Simulate the file changing between staging and the job (TOCTOU).
         fs::write(&staged.path, b"tampered").unwrap();
         let error = in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Tarball, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Tarball,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .unwrap_err();
@@ -5439,8 +5987,16 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         let staged = stage(&env, &source, "demo_1.0_amd64.deb");
         in_job(&env, "linuxapps.install", move |apps, ctx| async move {
-            apps.install(1, &staged, LinuxFormat::Deb, "file", &ctx, None)
-                .await
+            apps.install(
+                1,
+                &staged,
+                LinuxFormat::Deb,
+                "file",
+                Visibility::Users,
+                &ctx,
+                None,
+            )
+            .await
         })
         .await
         .expect("install");

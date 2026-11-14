@@ -7,7 +7,7 @@
 //! | Method | Path | Who |
 //! |---|---|---|
 //! | GET | `/api/linux-apps` | any signed-in user: installed apps they may see and their running copies |
-//! | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station file) or `{url}` (https link): install (job) |
+//! | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station file) or `{url}` (https link), `launcher?`, `visibility?` ("users"\|"admins"): install (job) |
 //! | GET | `/api/linux-apps/{id}` | any signed-in user: one app they may see |
 //! | PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` |
 //! | DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: uninstall |
@@ -132,6 +132,8 @@ struct InstallRequest {
     url: Option<String>,
     /// Chosen launcher for an ambiguous portable archive (`preview.candidates`).
     launcher: Option<Value>,
+    /// Who may see the new app: `users` (default) or `admins`.
+    visibility: Option<String>,
 }
 
 async fn install(
@@ -141,13 +143,19 @@ async fn install(
 ) -> AppResult<Json<Value>> {
     let apps = &state.linux_apps;
     let launcher = body.launcher;
+    let visibility = match body.visibility.as_deref().map(str::trim) {
+        None => Visibility::Users,
+        Some(value) => Visibility::parse(value).ok_or_else(|| {
+            crate::error::AppError::bad_request("visibility must be \"users\" or \"admins\"")
+        })?,
+    };
     Ok(Json(match (body.path.as_deref(), body.url.as_deref()) {
         (Some(path), None) => {
-            apps.install_with(&admin.0, &state.storage, path.trim(), launcher)
+            apps.install_with(&admin.0, &state.storage, path.trim(), launcher, visibility)
                 .await?
         }
         (None, Some(url)) => {
-            apps.install_url_with(&admin.0, url.trim(), launcher)
+            apps.install_url_with(&admin.0, url.trim(), launcher, visibility)
                 .await?
         }
         _ => {

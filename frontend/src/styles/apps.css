@@ -5014,3 +5014,400 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
 .native-arrow {
   color: var(--text-faint);
 }
+
+/* ---------------------------------------------- App Center: install dialog */
+
+/* The one "Install Linux App" workflow: source tabs, drop zone, server preview,
+   stage list and the ready/failed views. The footer is the dialog's own
+   .modal-foot (the buttons are relabelled per phase), so no duplicated
+   dialog shell is styled here. */
+
+.pkg-install {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The design-system tabs, full-bleed against the dialog body padding. */
+.pkg-install-tabs {
+  margin: -14px -16px 0;
+  padding: 0 10px;
+}
+
+.pkg-install-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pkg-install-tab .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.pkg-install-view {
+  min-width: 0;
+}
+
+.pkg-install-view:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.pkg-install-pick {
+  gap: 12px;
+  min-width: 0;
+}
+
+.pkg-install-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 26px 16px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  color: var(--text);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.pkg-install-drop:hover,
+.pkg-install-drop.is-over {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.pkg-install-drop:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+
+.pkg-install-drop-icon {
+  display: grid;
+  place-items: center;
+  color: var(--accent-text);
+}
+
+.pkg-install-drop-title {
+  font-weight: 650;
+}
+
+.pkg-install-drop-hint {
+  font-size: var(--font-size-sm);
+  color: var(--text-dim);
+}
+
+.pkg-install-pick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.pkg-install-station {
+  align-self: flex-start;
+}
+
+.pkg-install-formats {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.pkg-install-formats strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pkg-install-hint {
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* -------------------------------------------------- stage list and progress */
+
+.pkg-install-phase {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.pkg-install-phase-title {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.pkg-install-staging {
+  padding: 4px 0;
+}
+
+.pkg-install-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pkg-install-stage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 2px;
+  color: var(--text-faint);
+  font-size: var(--font-size-sm);
+}
+
+.pkg-install-stage-dot {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-2);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.pkg-install-stage.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.pkg-install-stage.is-active .pkg-install-stage-dot {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.pkg-install-stage.is-done {
+  color: var(--text-dim);
+}
+
+.pkg-install-stage.is-done .pkg-install-stage-dot {
+  border-color: var(--border-strong);
+  background: var(--surface);
+  color: var(--ok-strong, var(--ok));
+}
+
+.pkg-install-stage.is-failed {
+  color: var(--danger-strong);
+  font-weight: 600;
+}
+
+.pkg-install-stage.is-failed .pkg-install-stage-dot {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.pkg-install-stage-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
+.pkg-install-progress .progress {
+  height: 8px;
+}
+
+.pkg-install-message {
+  min-height: 18px;
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+/* The File Station upload tray flows inside the dialog instead of floating. */
+.pkg-install .upload-tray {
+  position: static;
+  width: 100%;
+  max-height: 190px;
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------ preview and results */
+
+.pkg-install-preview {
+  gap: 12px;
+}
+
+.pkg-install-preview .banner {
+  margin: 0;
+}
+
+.pkg-install-preview .pkg-preview-list {
+  min-width: 0;
+}
+
+.pkg-install-preview-head {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.pkg-install-change {
+  margin-left: auto;
+}
+
+.pkg-install-transaction.is-remove {
+  border-left: 3px solid var(--danger);
+}
+
+.pkg-install-transaction.is-upgrade {
+  border-left: 3px solid var(--warning);
+}
+
+.pkg-install-transaction.is-install {
+  border-left: 3px solid var(--accent);
+}
+
+.pkg-install-availability {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.pkg-install-availability-title {
+  padding: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pkg-install-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: var(--font-size);
+}
+
+.pkg-install-launcher {
+  margin-bottom: 0;
+}
+
+.pkg-install-ready {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 8px;
+  text-align: center;
+}
+
+.pkg-install-ready-icon {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  color: var(--ok-strong, var(--ok));
+}
+
+.pkg-install-ready-title {
+  font-size: 16px;
+  font-weight: 650;
+}
+
+.pkg-install-ready-sub {
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.pkg-install-ready-detail {
+  max-width: 460px;
+  line-height: 1.5;
+}
+
+.pkg-install-ready-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.pkg-install-note {
+  color: var(--text-faint);
+  font-size: var(--font-size-sm);
+}
+
+.pkg-install-error {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.pkg-install-source {
+  overflow-wrap: anywhere;
+}
+
+.pkg-install-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Narrow dialog: tabs and the stage list keep their order; rows stack so long
+   package names and URLs cannot push the dialog wider than the window. */
+@container win (max-width: 560px) {
+  .pkg-install-tabs {
+    padding: 0 4px;
+  }
+
+  .pkg-install-preview-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .pkg-install-change {
+    margin-left: 0;
+  }
+
+  .pkg-install-preview .pkg-preview-head {
+    align-items: flex-start;
+  }
+
+  .pkg-install-preview .pkg-preview-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .pkg-install-stage {
+    font-size: var(--font-size-xs);
+  }
+
+  .pkg-install-drop {
+    padding: 20px 12px;
+  }
+
+  .pkg-install-ready {
+    padding: 12px 4px;
+  }
+}

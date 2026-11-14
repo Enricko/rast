@@ -428,6 +428,143 @@ async fn preview_validation_happens_before_the_helper_is_called() {
 }
 
 #[tokio::test]
+async fn install_rejects_an_unknown_visibility_before_starting_a_job() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    for visibility in [json!("everyone"), json!("Users"), json!("")] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/linux-apps/install",
+                Some(json!({
+                    "url": "https://example.com/demo_1.0_amd64.deb",
+                    "visibility": visibility,
+                })),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{visibility}: {body}");
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+    // No job was started and no app row was created.
+    let jobs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'linuxapps.install'")
+            .fetch_one(&server.state.db)
+            .await
+            .expect("count jobs");
+    assert_eq!(jobs, 0, "an invalid visibility must not start a job");
+    let apps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM linux_apps")
+        .fetch_one(&server.state.db)
+        .await
+        .expect("count apps");
+    assert_eq!(apps, 0);
+}
+
+#[tokio::test]
+async fn install_threads_the_visibility_to_the_new_native_app_row() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let home = server.state.storage.home_dir("admin");
+    std::fs::create_dir_all(&home).expect("admin home");
+    std::fs::write(home.join("demo_1.0_amd64.deb"), b"FAKE DEB").expect("write package");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/install",
+            Some(json!({"path": "/demo_1.0_amd64.deb", "visibility": "admins"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["installing"], true);
+    assert!(body["jobId"].as_str().is_some(), "{body}");
+
+    // The job inserts the row before it touches the system; wait for it. The
+    // install itself then fails on the absent privileged helper, which is
+    // fine: the row must already carry the requested visibility.
+    let mut visibility = None;
+    for _ in 0..100 {
+        visibility = sqlx::query_scalar::<_, String>(
+            "SELECT visibility FROM linux_apps WHERE file_name = 'demo_1.0_amd64.deb'",
+        )
+        .fetch_optional(&server.state.db)
+        .await
+        .expect("visibility query");
+        if visibility.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        visibility.as_deref(),
+        Some("admins"),
+        "the new native app row must use the requested visibility"
+    );
+}
+
+#[tokio::test]
+async fn install_refuses_a_second_job_while_the_app_is_still_installing() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    // The guard runs after the source is resolved, so the file must exist.
+    let home = server.state.storage.home_dir("admin");
+    std::fs::create_dir_all(&home).expect("admin home");
+    std::fs::write(home.join("demo_1.0_amd64.deb"), b"FAKE DEB").expect("write package");
+    let now = 1_i64;
+    sqlx::query(
+        "INSERT INTO linux_apps \
+         (id, name, format, file_name, status, build, visibility, backend, memory_mb, cpus, \
+          created_by, created_at, updated_at) \
+         VALUES ('demo', 'Demo', 'deb', 'demo_1.0_amd64.deb', 'installing', 0, 'users', \
+          'native', 2048, 1, ?, ?, ?)",
+    )
+    .bind(admin.user_id)
+    .bind(now)
+    .bind(now)
+    .execute(&server.state.db)
+    .await
+    .expect("seed installing app");
+
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/install",
+            Some(json!({"path": "/demo_1.0_amd64.deb", "visibility": "admins"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already being installed"),
+        "{body}"
+    );
+    // The duplicate submission started no job and added no app row.
+    let jobs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE kind = 'linuxapps.install'")
+            .fetch_one(&server.state.db)
+            .await
+            .expect("count jobs");
+    assert_eq!(jobs, 0);
+    let apps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM linux_apps")
+        .fetch_one(&server.state.db)
+        .await
+        .expect("count apps");
+    assert_eq!(apps, 1);
+}
+
+#[tokio::test]
 async fn migrate_rollback_and_cleanup_are_admin_only_and_state_aware() {
     let server = TestServer::start().await;
     server

@@ -171,9 +171,13 @@ class PackageCenterApp {
     });
     this.linuxButton = h(
       "button",
-      { class: "btn btn-ghost btn-sm", type: "button", title: "Install a .deb package, an AppImage or a .tar.gz archive" },
+      {
+        class: "btn btn-primary btn-sm pkg-install-button",
+        type: "button",
+        title: "Install a Linux application on this server",
+      },
       iconSvg("plus", 14),
-      h("span", { class: "pkg-btn-label" }, "Add app"),
+      h("span", { class: "pkg-btn-label" }, "Install Linux App"),
     );
     this.linuxButton.addEventListener("click", () => this.linux.openAdd());
     const toolbar = h(
@@ -287,7 +291,7 @@ class PackageCenterApp {
     }
     this.checkButton.classList.toggle("hidden", this.readOnly);
     this.githubButton.classList.toggle("hidden", this.readOnly);
-    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.enabled);
+    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.available);
     for (const el of [this.settingsButton, this.backButton, this.search]) el.classList.remove("hidden");
     if (wasDenied) void this.reload();
   }
@@ -295,6 +299,11 @@ class PackageCenterApp {
   // ---------------------------------------------------------------- realtime
 
   private subscribe(): void {
+    // Linux app rows appear and change status during install/update jobs; keep
+    // the list (and the reattached job progress) current without a manual reload.
+    this.lc.add(
+      this.realtime.on<{ id?: string }>("linuxapps.changed", () => void this.linux.reload()),
+    );
     this.lc.add(
       this.realtime.on<PackageEvent>("package.changed", (data) => {
         if (data?.jobId && data.packageId) {
@@ -635,7 +644,7 @@ class PackageCenterApp {
       clear(this.linuxGrid);
       for (const app of linuxApps) this.linuxGrid.appendChild(this.linux.tile(app));
       // An empty All Packages list offers the install as a tile.
-      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.dockerEnabled;
+      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.available;
       if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
       this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
       // Docker -> native migration notice: only when the server supports native apps.

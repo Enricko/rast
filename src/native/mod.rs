@@ -375,11 +375,12 @@ impl NativeOptions {
             );
         }
         if firewall::nft_binary().is_none() {
-            warnings.push(
-                "nftables (the 'nft' command) is not installed: the Xpra display ports are bound \
-                 to loopback but other local accounts could connect to them. Install the \
-                 'nftables' package so the helper can restrict the ports to the RAST service \
-                 account"
+            // The helper refuses to start without the display-port restriction
+            // (fail closed), so report this as an error rather than a warning.
+            errors.push(
+                "nftables (the 'nft' command) is not installed: the native helper will refuse \
+                 to start because it cannot restrict Xpra display ports to the RAST service \
+                 account. Install the 'nftables' package"
                     .to_string(),
             );
         }
@@ -1032,12 +1033,15 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
         }
         (None, _) => {
             report.lines.push(
-                "        display firewall: NOT enforced (nftables is not installed)".to_string(),
+                "        display firewall: NOT enforced (nftables is not installed); native \
+                 sessions will not start"
+                    .to_string(),
             );
             warn(
                 &mut report,
-                "nftables is not installed: Xpra display ports are reachable by other local \
-                 accounts. Install the nftables package."
+                "nftables is not installed: the native helper fails closed because Xpra display \
+                 ports cannot be restricted to the RAST service account. Install the nftables \
+                 package."
                     .to_string(),
             );
         }

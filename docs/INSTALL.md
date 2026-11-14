@@ -433,7 +433,7 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 
 ## Native Linux apps (Xpra)
 
-Native Linux desktop apps (App Center → Add app) run directly on the server
+Native Linux desktop apps (App Center → **Install Linux App**) run directly on the server
 instead of inside a Docker image: each RAST user gets one unprivileged Linux
 identity and one lazily started Xpra seamless graphical session that all their
 applications share. Only the RAST reverse proxy can reach a session: the Xpra

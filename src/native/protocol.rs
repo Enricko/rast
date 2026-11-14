@@ -256,6 +256,7 @@ pub enum NativeOp {
     PathAcl(PathAclOp),
     PathSymlink(PathSymlinkOp),
     ProfilePrepare(ProfilePrepareOp),
+    ProfileSummary(ProfileSummaryOp),
     ProfileCleanLocks(ProfileCleanLocksOp),
     ProfileInstall(ProfileInstallOp),
     ProfileRemove(ProfileRemoveOp),
@@ -288,6 +289,7 @@ impl NativeOp {
             Self::PathAcl(_) => "path_acl",
             Self::PathSymlink(_) => "path_symlink",
             Self::ProfilePrepare(_) => "profile_prepare",
+            Self::ProfileSummary(_) => "profile_summary",
             Self::ProfileCleanLocks(_) => "profile_clean_locks",
             Self::ProfileInstall(_) => "profile_install",
             Self::ProfileRemove(_) => "profile_remove",
@@ -397,6 +399,7 @@ impl NativeRequest {
             NativeOp::PathAcl(op) => merge!(op),
             NativeOp::PathSymlink(op) => merge!(op),
             NativeOp::ProfilePrepare(op) => merge!(op),
+            NativeOp::ProfileSummary(op) => merge!(op),
             NativeOp::ProfileCleanLocks(op) => merge!(op),
             NativeOp::ProfileInstall(op) => merge!(op),
             NativeOp::ProfileRemove(op) => merge!(op),
@@ -510,6 +513,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "path_acl" => NativeOp::PathAcl(op_from(rest, "path_acl")?),
         "path_symlink" => NativeOp::PathSymlink(op_from(rest, "path_symlink")?),
         "profile_prepare" => NativeOp::ProfilePrepare(op_from(rest, "profile_prepare")?),
+        "profile_summary" => NativeOp::ProfileSummary(op_from(rest, "profile_summary")?),
         "profile_clean_locks" => NativeOp::ProfileCleanLocks(op_from(rest, "profile_clean_locks")?),
         "profile_install" => NativeOp::ProfileInstall(op_from(rest, "profile_install")?),
         "profile_remove" => NativeOp::ProfileRemove(op_from(rest, "profile_remove")?),
@@ -738,6 +742,18 @@ pub struct ProfileInstallOp {
     /// mapped profile tree (`home/`, `config/`, ...); copied into the person's
     /// profile and owned by their identity.
     pub source: String,
+}
+
+/// Which per-user profiles already exist for one or more app ids.
+///
+/// The web server cannot list `<data_dir>/linux-apps/profiles/<app>` itself:
+/// the per-app directory is 0711 root:rast (traversable, not readable) so the
+/// unprivileged server must ask the helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSummaryOp {
+    #[serde(rename = "appIds")]
+    pub app_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
