@@ -124,6 +124,13 @@ during the upgrade.
 - **Window-manager integration keeps both APIs** from the features ported into
   this release (saved window geometry/state and native transient
   dialogs/owner/taskbar flags) when reopening apps after a reload.
+- **No stray loading ring on native windows.** Xpra's per-window connection
+  spinner (`.spinneroverlay`) was left in the adopted window's DOM. Without
+  the viewer document's stylesheet it was laid out as an in-flow strip, and
+  RAST's global `.spinner` styling turned it into a permanently visible,
+  animated ring at the top-left of every native window (and its animation
+  kept costing paint work). The overlay is now removed on adoption; RAST
+  shows its own connection/reconnect state.
 - **Clicking inside a native application window works on the integrated main
   line.** Two merge regressions broke mouse input while keyboard input kept
   working. The desktop multi-selection guard inherited from the 0.11 main line

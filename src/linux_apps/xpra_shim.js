@@ -942,7 +942,16 @@
       var icons = div.querySelectorAll(".ui-resizable-handle");
       for (var i = 0; i < icons.length; i++) icons[i].style.display = "none";
       var spinner = div.querySelector(".spinneroverlay");
-      if (spinner) spinner.style.pointerEvents = "none";
+      if (spinner) {
+        // Xpra's connection spinner belongs to the viewer document. Without
+        // that document's stylesheet it is laid out here as an in-flow block,
+        // and RAST's global `.spinner` styling turns it into a permanently
+        // visible, animated loading ring at the top-left of the window. The
+        // adopted window paints from its canvas and RAST shows its own
+        // reconnect state, so drop the element entirely (this also stops the
+        // spinning animation from costing paint work).
+        spinner.remove();
+      }
       win.decorations = false;
     } catch (e) {
       /* ignore */
