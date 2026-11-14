@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.37] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- Desktop multi-selection now drives actions: dragging a selected item moves the
+  entire mixed shortcut/widget selection (single-item drag handlers suppressed),
+  the click after a group drag cannot collapse it, right-click menus are built
+  from the selection (bulk remove/pin/unpin, selection count), Delete/Backspace
+  removes every selected desktop item with one Undo, and widget/shortcut
+  layouts are saved together.
+
 ## [0.11.36] - 2026-11-14
 
 No database migration (schema stays v12).

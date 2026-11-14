@@ -39,7 +39,14 @@ import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
 import { createWidgetLayer, type WidgetLayer } from "./widgets";
-import { boxesIntersect, clampGroupDelta, groupCollides, marqueeBox, type Box } from "./selection";
+import {
+  boxesIntersect,
+  clampGroupDelta,
+  groupCollides,
+  marqueeBox,
+  summarizeSelection,
+  type Box,
+} from "./selection";
 
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
@@ -279,6 +286,17 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       renderSelection();
       return;
     }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      const editing =
+        active instanceof HTMLElement &&
+        (active.closest("input, textarea, select, [contenteditable='true']") !== null ||
+          active.isContentEditable);
+      if (desktopFocused && !editing && selectedKeys.size > 0) {
+        event.preventDefault();
+        void removeSelection();
+      }
+      return;
+    }
     if (event.key === "Escape") {
       if (marquee) finishMarquee();
       if (desktopFocused && selectedKeys.size > 0) {
@@ -311,6 +329,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     valid: boolean;
   }
   let groupDrag: GroupDragState | null = null;
+  let suppressDesktopClickUntil = 0;
 
   const elementForSelection = (key: string): HTMLElement | null => {
     if (key.startsWith("icon:")) {
@@ -349,6 +368,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     window.removeEventListener("pointercancel", onGroupCancel);
     document.removeEventListener("keydown", onGroupKey, true);
     document.documentElement.classList.remove("is-selecting");
+    suppressDesktopClickUntil = Date.now() + 450;
     if (!apply || !state.valid || (state.delta.dx === 0 && state.delta.dy === 0)) {
       resetGroupTransform();
       return;
@@ -1510,6 +1530,143 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     });
     void loadLinuxApps();
   }
+
+  // ------------------------------------------- selection-aware actions
+  const selectionSummary = (): ReturnType<typeof summarizeSelection> =>
+    summarizeSelection(selectedKeys);
+
+  async function saveDesktopLayout(
+    icons: ReturnType<typeof desktopIcons.snapshot>,
+    widgetsState: ReturnType<typeof widgets.snapshot>,
+  ): Promise<void> {
+    await appearance.saveDesktopLayout(widgetsState, icons);
+  }
+
+  async function removeSelection(): Promise<void> {
+    if (selectedKeys.size === 0) return;
+    const iconsBefore = desktopIcons.snapshot();
+    const widgetsBefore = widgets.snapshot();
+    const iconIds = new Set(
+      [...selectedKeys].filter((key) => key.startsWith("icon:")).map((key) => key.slice(5)),
+    );
+    const widgetIds = new Set(
+      [...selectedKeys].filter((key) => key.startsWith("widget:")).map((key) => key.slice(7)),
+    );
+    const nextIcons = iconsBefore.filter((icon) => !iconIds.has(icon.id));
+    const nextWidgets = widgetsBefore.filter((widget) => !widgetIds.has(widget.id as never));
+    if (nextIcons.length === iconsBefore.length && nextWidgets.length === widgetsBefore.length) {
+      selectedKeys.clear();
+      renderSelection();
+      return;
+    }
+    const count = selectedKeys.size;
+    try {
+      await saveDesktopLayout(nextIcons, nextWidgets);
+      selectedKeys.clear();
+      renderSelection();
+      toast.success(`Removed ${count} item${count === 1 ? "" : "s"} from the desktop`, {
+        action: {
+          label: "Undo",
+          onClick: () => {
+            void saveDesktopLayout(iconsBefore, widgetsBefore).catch((error) => {
+              toast.error(`Could not restore the desktop: ${errorMessage(error)}`);
+            });
+          },
+        },
+      });
+    } catch (error) {
+      toast.error(`Could not remove the selection: ${errorMessage(error)}`);
+    }
+  }
+
+  function openSelectionMenu(x: number, y: number): void {
+    const summary = selectionSummary();
+    const pinnedAll = [...selectedKeys]
+      .filter((key) => key.startsWith("icon:"))
+      .every((key) => isPinned(key.slice(5)));
+    const entries: ContextMenuEntry[] = [];
+    if (summary.single && summary.shortcuts === 1) {
+      const appId = [...selectedKeys][0]!.slice(5);
+      entries.push(
+        { label: "Open", icon: "arrowRight", onClick: () => openApp(appId) },
+        isPinned(appId)
+          ? { label: "Unpin from taskbar", icon: "unpin", onClick: () => unpinApp(appId) }
+          : { label: "Pin to taskbar", icon: "pin", onClick: () => pinApp(appId) },
+      );
+    } else if (summary.allShortcuts && summary.shortcuts > 1) {
+      entries.push({
+        label: pinnedAll ? "Unpin all from taskbar" : "Pin all to taskbar",
+        icon: pinnedAll ? "unpin" : "pin",
+        onClick: () => {
+          for (const key of selectedKeys) {
+            const appId = key.slice(5);
+            if (pinnedAll) unpinApp(appId);
+            else pinApp(appId);
+          }
+        },
+      });
+    }
+    if (summary.total > 0) {
+      entries.push("separator", {
+        label:
+          summary.total === 1
+            ? summary.widgets === 1
+              ? "Remove widget from desktop"
+              : "Remove from desktop"
+            : `Remove ${summary.total} items from desktop`,
+        icon: "close",
+        onClick: () => void removeSelection(),
+      });
+    }
+    entries.push("separator", {
+      label: "Personalize…",
+      icon: "wallpaper",
+      onClick: () => showPersonalize(),
+    });
+    contextMenu(x, y, entries, { ariaLabel: "Desktop selection" });
+  }
+
+  desktop.addEventListener(
+    "contextmenu",
+    (event) => {
+      if (disposed) return;
+      const target = event.target as Element;
+      const iconEl = target.closest<HTMLElement>(".desktop-icon[data-app]");
+      const widgetEl = target.closest<HTMLElement>(".desktop-widget[data-widget]");
+      const key = iconEl?.dataset.app
+        ? `icon:${iconEl.dataset.app}`
+        : widgetEl?.dataset.widget
+          ? `widget:${widgetEl.dataset.widget}`
+          : null;
+      if (!key) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!selectedKeys.has(key)) {
+        selectedKeys.clear();
+        selectedKeys.add(key);
+        if (event.shiftKey) {
+          /* Shift keeps the previous multi-selection and adds the item. */
+          for (const previous of previousSelection) selectedKeys.add(previous);
+        }
+        renderSelection();
+      }
+      openSelectionMenu(event.clientX, event.clientY);
+    },
+    true,
+  );
+
+  desktop.addEventListener(
+    "click",
+    (event) => {
+      if (Date.now() >= suppressDesktopClickUntil) return;
+      const target = event.target as Element;
+      if (target.closest(".desktop-icon, .desktop-widget")) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    },
+    true,
+  );
 
   // --------------------------------------------------- session-expiry flow
   if (me.user.mustChangePassword) {

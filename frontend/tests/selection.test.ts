@@ -4,6 +4,7 @@ import {
   autoScrollVelocity,
   boxesIntersect,
   dedupeDescendants,
+  summarizeSelection,
   validMoveTarget,
   clampGroupDelta,
   groupCollides,
@@ -54,4 +55,22 @@ test("bulk move helpers drop descendants and reject moving into itself", () => {
   assert.equal(validMoveTarget(["/a/b"], "/a/b"), false);
   assert.equal(validMoveTarget(["/a/b"], "/a/b/c"), false);
   assert.equal(validMoveTarget(["/a/b"], "/a"), true);
+});
+
+test("selection summary recognises mixed shortcut/widget groups", () => {
+  assert.deepEqual(summarizeSelection(["icon:a", "icon:b"]), {
+    total: 2,
+    shortcuts: 2,
+    widgets: 0,
+    allShortcuts: true,
+    single: false,
+  });
+  assert.deepEqual(summarizeSelection(["icon:a", "widget:health"]), {
+    total: 2,
+    shortcuts: 1,
+    widgets: 1,
+    allShortcuts: false,
+    single: false,
+  });
+  assert.equal(summarizeSelection(["icon:a"]).single, true);
 });

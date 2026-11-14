@@ -101,3 +101,23 @@ export function validMoveTarget(paths: readonly string[], destDir: string): bool
     return normalized === folder || normalized.startsWith(folder);
   });
 }
+
+export interface SelectionSummary {
+  total: number;
+  shortcuts: number;
+  widgets: number;
+  allShortcuts: boolean;
+  single: boolean;
+}
+
+/** Count the type-qualified desktop selection keys (`icon:` / `widget:`). */
+export function summarizeSelection(keys: Iterable<string>): SelectionSummary {
+  let shortcuts = 0;
+  let widgets = 0;
+  for (const key of keys) {
+    if (key.startsWith("icon:")) shortcuts += 1;
+    else if (key.startsWith("widget:")) widgets += 1;
+  }
+  const total = shortcuts + widgets;
+  return { total, shortcuts, widgets, allShortcuts: total > 0 && widgets === 0, single: total === 1 };
+}
