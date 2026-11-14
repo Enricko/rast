@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   autoScrollVelocity,
   boxesIntersect,
+  dedupeDescendants,
+  validMoveTarget,
   clampGroupDelta,
   groupCollides,
   marqueeBox,
