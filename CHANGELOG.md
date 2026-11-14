@@ -9,6 +9,8 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-15
+
 ### Added
 
 - **Terminal: a first-class native application with real PTY shells.** Open
