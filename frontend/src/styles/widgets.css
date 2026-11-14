@@ -4,11 +4,11 @@
 
 .widget-layer {
   /* Cards keep a small margin from the screen edges and the taskbar. */
-  --widget-margin: 12px;
+  --widget-margin: 16px;
   position: absolute;
-  /* Origin matches the app-icon grid exactly (no left/top offset), so widget
-     cells and icon cells are the same 1x1 units; the taskbar keeps its space. */
-  inset: 0 0 calc(var(--taskbar-total, var(--taskbar-h)) + var(--widget-margin)) 0;
+  /* Same 16px safe inset as the app icons; the taskbar is excluded. */
+  inset: var(--widget-margin) var(--widget-margin)
+    calc(var(--taskbar-total, var(--taskbar-h)) + var(--widget-margin)) var(--widget-margin);
   /* Above the desktop icons (2, earlier in the DOM), below windows (3). */
   z-index: 2;
   pointer-events: none;
@@ -459,4 +459,35 @@
   border-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+.desktop-widget .widget-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  border-radius: 3px;
+  background:
+    linear-gradient(135deg, transparent 0 45%, var(--border-strong) 45% 55%, transparent 55% 70%, var(--border-strong) 70% 80%, transparent 80%);
+  opacity: 0.6;
+}
+
+.desktop-widget:hover .widget-resize,
+.desktop-widget:focus-within .widget-resize {
+  opacity: 1;
+}
+
+/* Subtle 8px grid shown only while dragging/resizing. */
+.desktop-grid-overlay {
+  position: absolute;
+  z-index: 0;
+  pointer-events: none;
+  border-radius: var(--radius-lg);
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--accent) 16%, transparent) 1px, transparent 1px);
+  background-size: 8px 8px;
+  opacity: 0.55;
 }

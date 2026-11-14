@@ -70,6 +70,9 @@ export interface DesktopWidget {
   id: WidgetId;
   x: number;
   y: number;
+  /** Saved size as fractions of the usable desktop (optional, older layouts). */
+  w?: number;
+  h?: number;
 }
 
 /** An app placed on the desktop and its grid cell (column, row from the top left). */
@@ -335,7 +338,16 @@ export function normalizeWidgets(input: unknown): DesktopWidget[] {
     const id = (item as { id?: unknown } | null)?.id;
     if (typeof id !== "string" || !WIDGET_IDS.includes(id as WidgetId)) continue;
     if (out.some((widget) => widget.id === id)) continue;
-    out.push({ id: id as WidgetId, x: clampFraction((item as DesktopWidget).x), y: clampFraction((item as DesktopWidget).y) });
+    const widget: DesktopWidget = {
+      id: id as WidgetId,
+      x: clampFraction((item as DesktopWidget).x),
+      y: clampFraction((item as DesktopWidget).y),
+    };
+    const w = Number((item as DesktopWidget).w);
+    const h = Number((item as DesktopWidget).h);
+    if (Number.isFinite(w) && w > 0) widget.w = Math.round(Math.max(0.05, Math.min(1, w)) * 10_000) / 10_000;
+    if (Number.isFinite(h) && h > 0) widget.h = Math.round(Math.max(0.05, Math.min(1, h)) * 10_000) / 10_000;
+    out.push(widget);
   }
   return out.slice(0, WIDGET_IDS.length);
 }

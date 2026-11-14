@@ -27,6 +27,17 @@ import type { RealtimeStore } from "../core/realtime";
 import type { ToastCenter } from "../core/toast";
 import type { ComponentHealth, MonitorDisk, MonitorSnapshot } from "../core/types";
 import { modal, sparkline } from "../core/ui";
+import {
+  GRID,
+  WIDGET_GAP,
+  defaultWidgetGroup,
+  fitRect,
+  nearestFreeRect,
+  rectsIntersect,
+  snapUp,
+  type Bounds,
+  type Rect,
+} from "./snap-grid";
 
 export interface WidgetDefinition {
   id: WidgetId;
@@ -450,8 +461,6 @@ export interface WidgetLayer {
   dispose(): void;
 }
 
-const LAYER_GAP = 12;
-const KEY_STEP = 24;
 
 export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const { layer, appearance, toast } = options;
@@ -467,6 +476,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     hidden: true,
   });
   layer.appendChild(dropPreview);
+  const gridOverlay = h("div", { class: "desktop-grid-overlay", ariaHidden: true, hidden: true });
+  layer.appendChild(gridOverlay);
+  function showGrid(): void {
+    const area = bounds();
+    gridOverlay.style.left = `${area.x}px`;
+    gridOverlay.style.top = `${area.y}px`;
+    gridOverlay.style.width = `${area.w}px`;
+    gridOverlay.style.height = `${area.h}px`;
+    gridOverlay.hidden = false;
+  }
+  function hideGrid(): void {
+    gridOverlay.hidden = true;
+  }
   let catalogRefresh: (() => void) | null = null;
 
   const offFeed = feed.subscribe(() => {
@@ -481,139 +503,127 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const onWindowResize = (): void => positionAll();
   if (!resizeObserver) window.addEventListener("resize", onWindowResize);
 
-  interface Rect {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
+  const DEFAULT_WIDGET_WIDTH = 208;
+  const DEFAULT_WIDGET_HEIGHT = 328;
+  const MIN_WIDGET_WIDTH = 200;
+  const MIN_WIDGET_HEIGHT = 200;
+  let repairTimer: number | undefined;
+
+  const bounds = (): Bounds => ({ x: 0, y: 0, w: layer.clientWidth, h: layer.clientHeight });
+  const iconObstacles = (): Rect[] => options.obstacles?.().rects ?? [];
+
+  function widgetSize(widget: DesktopWidget, area: Bounds): { w: number; h: number } {
+    const w = widget.w ? Math.max(MIN_WIDGET_WIDTH, snapUp(widget.w * area.w)) : DEFAULT_WIDGET_WIDTH;
+    const h = widget.h ? Math.max(MIN_WIDGET_HEIGHT, snapUp(widget.h * area.h)) : DEFAULT_WIDGET_HEIGHT;
+    return { w: Math.min(w, Math.max(GRID, area.w)), h: Math.min(h, Math.max(GRID, area.h)) };
   }
 
-  /** Grid of the desktop app icons; widgets span two columns of it. */
-  function grid(): { rects: Rect[]; cellW: number; cellH: number } {
-    return options.obstacles?.() ?? { rects: [], cellW: 104, cellH: 108 };
+  function applyRect(card: Card, rect: Rect): void {
+    card.el.style.left = `${rect.x}px`;
+    card.el.style.top = `${rect.y}px`;
+    card.el.style.width = `${rect.w}px`;
+    card.el.style.height = `${rect.h}px`;
   }
 
-  const intersects = (a: Rect, b: Rect, gap = 4): boolean =>
-    a.x < b.x + b.w + gap &&
-    a.x + a.w + gap > b.x &&
-    a.y < b.y + b.h + gap &&
-    a.y + a.h + gap > b.y;
-
-  function freeArea(card: Card): { width: number; height: number } {
-    return {
-      width: Math.max(0, layer.clientWidth - card.el.offsetWidth),
-      height: Math.max(0, layer.clientHeight - card.el.offsetHeight),
-    };
+  function rectOf(card: Card): Rect {
+    return { x: card.el.offsetLeft, y: card.el.offsetTop, w: card.el.offsetWidth, h: card.el.offsetHeight };
   }
 
-  /** Two app-icon columns wide, so widgets line up with the icon grid. */
-  function tileWidth(cellW: number): number {
-    return Math.max(184, Math.round(cellW * 2 - 4));
-  }
-
-  /** Every widget is the same 3-row-tall tile (Storage, Health, CPU, …). */
-  function tileHeight(cellH: number): number {
-    return Math.max(280, Math.round(cellH * 3 - 4));
-  }
-
-  /** Nearest free snapped slot for a rectangle, avoiding apps and widgets. */
-  function findFreeSpot(
-    rect: Rect,
-    obstacles: Rect[],
-    cellW: number,
-    cellH: number,
-    gap = 4,
-  ): Rect | null {
-    const maxLeft = Math.max(2, layer.clientWidth - rect.w);
-    const maxTop = Math.max(2, layer.clientHeight - rect.h);
-    let best: Rect | null = null;
-    let bestDistance = Infinity;
-    for (let top = 2; top <= maxTop; top += cellH) {
-      for (let left = 2; left <= maxLeft; left += cellW) {
-        const candidate = { x: left, y: top, w: rect.w, h: rect.h };
-        if (obstacles.some((other) => intersects(other, candidate, gap))) continue;
-        const distance = (left - rect.x) ** 2 + (top - rect.y) ** 2;
-        if (distance < bestDistance) {
-          best = candidate;
-          bestDistance = distance;
-        }
-      }
-    }
-    return best;
-  }
-
-  /** Current rectangles of the other widgets (optionally excluding one). */
-  function widgetRects(except?: WidgetId): Rect[] {
+  function otherWidgetRects(except: WidgetId): Rect[] {
     const out: Rect[] = [];
     for (const [id, card] of cards) {
-      if (id === except) continue;
-      if (!card.el.isConnected || card.el.hidden) continue;
-      out.push({
-        x: card.el.offsetLeft,
-        y: card.el.offsetTop,
-        w: card.el.offsetWidth,
-        h: card.el.offsetHeight,
-      });
+      if (id === except || !card.el.isConnected) continue;
+      out.push(rectOf(card));
     }
     return out;
   }
 
-  function position(card: Card, widget: DesktopWidget): void {
-    const area = freeArea(card);
-    card.el.style.left = `${Math.round(widget.x * area.width)}px`;
-    card.el.style.top = `${Math.round(widget.y * area.height)}px`;
-  }
 
+
+  /** Position every card: 8px grid, inside the usable area, clear of icons and
+      the other widgets. Invalid saved layouts are repaired and persisted. */
   function positionAll(): void {
     if (disposed) return;
-    const { rects: appRects, cellW, cellH } = grid();
-    const width = tileWidth(cellW);
-    const height = tileHeight(cellH);
-    for (const card of cards.values()) {
-      card.el.style.width = `${width}px`;
-      card.el.style.height = `${height}px`;
-    }
-    const placed: Rect[] = [...appRects];
-    for (const widget of layout) {
-      if (widget.id === dragging) continue;
+    const area = bounds();
+    const icons = iconObstacles();
+    const sizes = layout.map((widget) => widgetSize(widget, area));
+    layout.forEach((widget, index) => {
       const card = cards.get(widget.id);
-      if (!card) continue;
-      const area = freeArea(card);
-      const w = card.el.offsetWidth;
-      const h = card.el.offsetHeight;
-      const desired = {
-        x: Math.round(widget.x * area.width),
-        y: Math.round(widget.y * area.height),
-        w,
-        h,
-      };
-      const snapped: Rect = {
-        x: Math.max(2, Math.round((desired.x - 2) / cellW) * cellW + 2),
-        y: Math.max(2, Math.round((desired.y - 2) / cellH) * cellH + 2),
-        w,
-        h,
-      };
-      const clamped: Rect = {
-        x: Math.min(snapped.x, Math.max(2, layer.clientWidth - w)),
-        y: Math.min(snapped.y, Math.max(2, layer.clientHeight - h)),
-        w,
-        h,
-      };
-      const target = placed.some((rect) => intersects(rect, clamped))
-        ? findFreeSpot(clamped, placed, cellW, cellH) ?? clamped
-        : clamped;
-      card.el.style.left = `${Math.round(target.x)}px`;
-      card.el.style.top = `${Math.round(target.y)}px`;
+      if (!card) return;
+      const size = sizes[index]!;
+      card.el.style.width = `${size.w}px`;
+      card.el.style.height = `${size.h}px`;
+    });
+    const useDefaultGroup = !appearance.isKnown || !appearance.value.widgetsCustomized;
+    if (useDefaultGroup) {
+      const group = defaultWidgetGroup(sizes, area, WIDGET_GAP);
+      layout.forEach((widget, index) => {
+        const card = cards.get(widget.id);
+        if (!card) return;
+        const target = group[index] ?? fitRect(
+          { x: area.x, y: area.y, w: sizes[index]!.w, h: sizes[index]!.h },
+          area,
+          MIN_WIDGET_WIDTH,
+          MIN_WIDGET_HEIGHT,
+        );
+        applyRect(card, target);
+      });
+      return;
+    }
+    let changed = false;
+    const placed: Rect[] = [...icons];
+    layout.forEach((widget, index) => {
+      const card = cards.get(widget.id);
+      if (!card) return;
+      const size = sizes[index]!;
+      const freeW = Math.max(0, area.w - size.w);
+      const freeH = Math.max(0, area.h - size.h);
+      const desired = fitRect(
+        { x: area.x + widget.x * freeW, y: area.y + widget.y * freeH, w: size.w, h: size.h },
+        area,
+        MIN_WIDGET_WIDTH,
+        MIN_WIDGET_HEIGHT,
+      );
+      let target = desired;
+      if (placed.some((other) => rectsIntersect(other, target))) {
+        target = nearestFreeRect(desired, size, area, placed) ?? desired;
+        changed = true;
+      }
+      applyRect(card, target);
       placed.push(target);
+      const x = freeW > 0 ? (target.x - area.x) / freeW : 0;
+      const y = freeH > 0 ? (target.y - area.y) / freeH : 0;
+      const w = area.w > 0 ? target.w / area.w : 0;
+      const h = area.h > 0 ? target.h / area.h : 0;
+      if (
+        Math.abs(x - widget.x) > 0.002 ||
+        Math.abs(y - widget.y) > 0.002 ||
+        Math.abs(w - (widget.w ?? w)) > 0.002 ||
+        Math.abs(h - (widget.h ?? h)) > 0.002
+      ) {
+        layout[index] = { ...widget, x, y, w, h };
+        changed = true;
+      }
+    });
+    if (changed) {
+      window.clearTimeout(repairTimer);
+      repairTimer = window.setTimeout(() => {
+        if (!disposed && appearance.isKnown) void appearance.saveWidgets(layout);
+      }, 350);
     }
   }
 
-  function fractionsFor(card: Card, left: number, top: number): { x: number; y: number } {
-    const area = freeArea(card);
-    const x = area.width > 0 ? left / area.width : 0;
-    const y = area.height > 0 ? top / area.height : 0;
+  function fractionsFor(rect: Rect): { x: number; y: number; w: number; h: number } {
+    const area = bounds();
+    const freeW = Math.max(0, area.w - rect.w);
+    const freeH = Math.max(0, area.h - rect.h);
     const round = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
-    return { x: round(x), y: round(y) };
+    return {
+      x: round(freeW > 0 ? (rect.x - area.x) / freeW : 0),
+      y: round(freeH > 0 ? (rect.y - area.y) / freeH : 0),
+      w: round(area.w > 0 ? rect.w / area.w : 0),
+      h: round(area.h > 0 ? rect.h / area.h : 0),
+    };
   }
 
   function persist(): void {
@@ -716,149 +726,16 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       },
       head,
       body,
+      h("div", { class: "widget-resize", ariaHidden: true }),
       foot,
     );
     const card: Card = { id, el, head, pill, body, foot };
     attachDrag(card);
     attachKeys(card);
+    attachResize(card);
     resizeObserver?.observe(el);
     renderCard(card);
     return card;
-  }
-
-  // ------------------------------------------------------------- dragging
-  function attachDrag(card: Card): void {
-    // The whole tile is a handle (the title bar keeps the grab cursor), except
-    // the action buttons; the body is not selectable, so this cannot steal a
-    // text selection.
-    card.el.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      if ((event.target as Element).closest("button, a, input, select, textarea")) return;
-      event.preventDefault();
-      const startX = event.clientX;
-      const startY = event.clientY;
-      const startLeft = card.el.offsetLeft;
-      const startTop = card.el.offsetTop;
-      dragging = card.id;
-      bringToFront(card.id);
-      card.el.classList.add("is-dragging");
-      card.el.setPointerCapture(event.pointerId);
-      const area = freeArea(card);
-      let left = startLeft;
-      let top = startTop;
-      let snapped = { x: startLeft, y: startTop };
-      const move = (moveEvent: PointerEvent): void => {
-        left = Math.max(0, Math.min(area.width, startLeft + moveEvent.clientX - startX));
-        top = Math.max(0, Math.min(area.height, startTop + moveEvent.clientY - startY));
-        card.el.style.left = `${Math.round(left)}px`;
-        card.el.style.top = `${Math.round(top)}px`;
-        const { rects: appRects, cellW, cellH } = grid();
-        snapped = {
-          x: Math.max(2, Math.round((left - 2) / cellW) * cellW + 2),
-          y: Math.max(2, Math.round((top - 2) / cellH) * cellH + 2),
-        };
-        const candidate = {
-          x: Math.min(snapped.x, Math.max(2, layer.clientWidth - card.el.offsetWidth)),
-          y: Math.min(snapped.y, Math.max(2, layer.clientHeight - card.el.offsetHeight)),
-          w: card.el.offsetWidth,
-          h: card.el.offsetHeight,
-        };
-        const blocked = [...appRects, ...widgetRects(card.id)].some((rect) =>
-          intersects(rect, candidate),
-        );
-        dropPreview.hidden = false;
-        dropPreview.style.left = `${candidate.x}px`;
-        dropPreview.style.top = `${candidate.y}px`;
-        dropPreview.style.width = `${candidate.w}px`;
-        dropPreview.style.height = `${candidate.h}px`;
-        dropPreview.classList.add("is-visible");
-        dropPreview.classList.toggle("is-blocked", blocked);
-      };
-      const end = (): void => {
-        card.el.removeEventListener("pointermove", move);
-        card.el.removeEventListener("pointerup", end);
-        card.el.removeEventListener("pointercancel", end);
-        card.el.classList.remove("is-dragging");
-        dropPreview.classList.remove("is-visible", "is-blocked");
-        dropPreview.hidden = true;
-        dragging = null;
-        const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
-        const { rects: appRects, cellW, cellH } = grid();
-        const w = card.el.offsetWidth;
-        const h = card.el.offsetHeight;
-        const desired = {
-          x: Math.min(snapped.x, Math.max(2, layer.clientWidth - w)),
-          y: Math.min(snapped.y, Math.max(2, layer.clientHeight - h)),
-          w,
-          h,
-        };
-        const obstacles = [...appRects, ...widgetRects(card.id)];
-        const target = obstacles.some((rect) => intersects(rect, desired))
-          ? findFreeSpot(desired, obstacles, cellW, cellH) ?? desired
-          : desired;
-        card.el.style.left = `${Math.round(target.x)}px`;
-        card.el.style.top = `${Math.round(target.y)}px`;
-        const { x, y } = fractionsFor(card, target.x, target.y);
-        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
-        if (moved || layout[layout.length - 1]?.id === card.id) persist();
-      };
-      card.el.addEventListener("pointermove", move);
-      card.el.addEventListener("pointerup", end);
-      card.el.addEventListener("pointercancel", end);
-    });
-  }
-
-  function attachKeys(card: Card): void {
-    card.el.addEventListener("keydown", (event) => {
-      if (event.target !== card.el) return;
-      if (event.key === "Delete" || event.key === "Backspace") {
-        event.preventDefault();
-        remove(card.id);
-        return;
-      }
-      const step = event.shiftKey ? 4 : KEY_STEP;
-      const delta: Record<string, [number, number]> = {
-        ArrowLeft: [-step, 0],
-        ArrowRight: [step, 0],
-        ArrowUp: [0, -step],
-        ArrowDown: [0, step],
-      };
-      const move = delta[event.key];
-      if (!move) return;
-      event.preventDefault();
-      const { rects: appRects, cellW, cellH } = grid();
-      const w = card.el.offsetWidth;
-      const h = card.el.offsetHeight;
-      const desired = {
-        x: Math.max(
-          2,
-          Math.min(
-            Math.max(2, layer.clientWidth - w),
-            Math.round((card.el.offsetLeft + move[0]) / cellW) * cellW + 2,
-          ),
-        ),
-        y: Math.max(
-          2,
-          Math.min(
-            Math.max(2, layer.clientHeight - h),
-            Math.round((card.el.offsetTop + move[1]) / cellH) * cellH + 2,
-          ),
-        ),
-        w,
-        h,
-      };
-      const obstacles = [...appRects, ...widgetRects(card.id)];
-      const target = obstacles.some((rect) => intersects(rect, desired))
-        ? findFreeSpot(desired, obstacles, cellW, cellH) ?? desired
-        : desired;
-      card.el.style.left = `${Math.round(target.x)}px`;
-      card.el.style.top = `${Math.round(target.y)}px`;
-      const { x, y } = fractionsFor(card, target.x, target.y);
-      layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
-      position(card, layout.find((widget) => widget.id === card.id)!);
-      window.clearTimeout(keySaveTimer);
-      keySaveTimer = window.setTimeout(() => persist(), 500);
-    });
   }
 
   function bringToFront(id: WidgetId): void {
@@ -870,27 +747,177 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     if (card) layer.appendChild(card.el);
   }
 
-  // ------------------------------------------------------- add / remove
-  /** First free slot in the right-hand column (icons occupy the left). */
-  function defaultPlacement(card: Card): { x: number; y: number } {
-    const area = freeArea(card);
-    const height = card.el.offsetHeight;
-    const width = card.el.offsetWidth;
-    const right = layer.clientWidth - width;
-    const occupied = layout
-      .map((widget) => cards.get(widget.id))
-      .filter((other): other is Card => Boolean(other) && other !== card)
-      .map((other) => ({ top: other.el.offsetTop, bottom: other.el.offsetTop + other.el.offsetHeight, left: other.el.offsetLeft, right: other.el.offsetLeft + other.el.offsetWidth }));
-    const candidates = [0, ...occupied.map((rect) => rect.bottom + LAYER_GAP)].sort((a, b) => a - b);
-    for (const top of candidates) {
-      if (top + height > layer.clientHeight) break;
-      const overlaps = occupied.some((rect) => top < rect.bottom && top + height > rect.top && right < rect.right && right + width > rect.left);
-      if (!overlaps) return fractionsFor(card, right, top);
-    }
-    // Column full: start a second column to the left.
-    return { x: area.width > 0 ? Math.max(0, (right - width - LAYER_GAP) / area.width) : 0, y: 0 };
+  // ------------------------------------------------------------- dragging
+  function dragObstacles(card: Card): Rect[] {
+    return [...iconObstacles(), ...otherWidgetRects(card.id)];
   }
 
+  function attachDrag(card: Card): void {
+    card.el.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      if ((event.target as Element).closest("button, a, input, select, textarea, .widget-resize")) return;
+      event.preventDefault();
+      const layerRect = layer.getBoundingClientRect();
+      const startPointerX = event.clientX - layerRect.left;
+      const startPointerY = event.clientY - layerRect.top;
+      const startRect = rectOf(card);
+      const area = bounds();
+      dragging = card.id;
+      bringToFront(card.id);
+      card.el.classList.add("is-dragging");
+      card.el.setPointerCapture(event.pointerId);
+      showGrid();
+      let target: Rect = startRect;
+      let blocked = false;
+      const move = (moveEvent: PointerEvent): void => {
+        const pointerX = moveEvent.clientX - layerRect.left;
+        const pointerY = moveEvent.clientY - layerRect.top;
+        const raw = fitRect(
+          {
+            x: startRect.x + pointerX - startPointerX,
+            y: startRect.y + pointerY - startPointerY,
+            w: startRect.w,
+            h: startRect.h,
+          },
+          area,
+          MIN_WIDGET_WIDTH,
+          MIN_WIDGET_HEIGHT,
+        );
+        target = raw;
+        card.el.style.left = `${raw.x}px`;
+        card.el.style.top = `${raw.y}px`;
+        blocked = dragObstacles(card).some((other) => rectsIntersect(other, raw));
+        dropPreview.hidden = false;
+        dropPreview.style.left = `${raw.x}px`;
+        dropPreview.style.top = `${raw.y}px`;
+        dropPreview.style.width = `${raw.w}px`;
+        dropPreview.style.height = `${raw.h}px`;
+        dropPreview.classList.add("is-visible");
+        dropPreview.classList.toggle("is-blocked", blocked);
+      };
+      const end = (): void => {
+        card.el.removeEventListener("pointermove", move);
+        card.el.removeEventListener("pointerup", end);
+        card.el.removeEventListener("pointercancel", end);
+        card.el.classList.remove("is-dragging");
+        dropPreview.classList.remove("is-visible", "is-blocked");
+        dropPreview.hidden = true;
+        hideGrid();
+        dragging = null;
+        const obstacles = dragObstacles(card);
+        const final = blocked
+          ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
+          : target;
+        applyRect(card, final);
+        const fractions = fractionsFor(final);
+        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+        persist();
+      };
+      card.el.addEventListener("pointermove", move);
+      card.el.addEventListener("pointerup", end);
+      card.el.addEventListener("pointercancel", end);
+    });
+  }
+
+  function attachResize(card: Card): void {
+    const handle = card.el.querySelector<HTMLElement>(".widget-resize");
+    if (!handle) return;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const layerRect = layer.getBoundingClientRect();
+      const startPointerX = event.clientX - layerRect.left;
+      const startPointerY = event.clientY - layerRect.top;
+      const startRect = rectOf(card);
+      const area = bounds();
+      handle.setPointerCapture(event.pointerId);
+      showGrid();
+      let target = startRect;
+      const move = (moveEvent: PointerEvent): void => {
+        const dx = moveEvent.clientX - layerRect.left - startPointerX;
+        const dy = moveEvent.clientY - layerRect.top - startPointerY;
+        target = fitRect(
+          {
+            x: startRect.x,
+            y: startRect.y,
+            w: Math.max(MIN_WIDGET_WIDTH, snapUp(startRect.w + dx)),
+            h: Math.max(MIN_WIDGET_HEIGHT, snapUp(startRect.h + dy)),
+          },
+          area,
+          MIN_WIDGET_WIDTH,
+          MIN_WIDGET_HEIGHT,
+        );
+        applyRect(card, target);
+        dropPreview.hidden = false;
+        dropPreview.style.left = `${target.x}px`;
+        dropPreview.style.top = `${target.y}px`;
+        dropPreview.style.width = `${target.w}px`;
+        dropPreview.style.height = `${target.h}px`;
+        dropPreview.classList.add("is-visible");
+        dropPreview.classList.toggle("is-blocked", false);
+      };
+      const end = (): void => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", end);
+        handle.removeEventListener("pointercancel", end);
+        dropPreview.classList.remove("is-visible", "is-blocked");
+        dropPreview.hidden = true;
+        hideGrid();
+        const obstacles = dragObstacles(card);
+        const final = obstacles.some((other) => rectsIntersect(other, target))
+          ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
+          : target;
+        applyRect(card, final);
+        const fractions = fractionsFor(final);
+        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+        persist();
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", end);
+      handle.addEventListener("pointercancel", end);
+    });
+  }
+
+  function attachKeys(card: Card): void {
+    card.el.addEventListener("keydown", (event) => {
+      if (event.target !== card.el) return;
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        remove(card.id);
+        return;
+      }
+      const step = event.shiftKey ? GRID * 8 : GRID;
+      const delta: Record<string, [number, number]> = {
+        ArrowLeft: [-step, 0],
+        ArrowRight: [step, 0],
+        ArrowUp: [0, -step],
+        ArrowDown: [0, step],
+      };
+      const move = delta[event.key];
+      if (!move) return;
+      event.preventDefault();
+      const area = bounds();
+      const current = rectOf(card);
+      const desired = fitRect(
+        { x: current.x + move[0], y: current.y + move[1], w: current.w, h: current.h },
+        area,
+        MIN_WIDGET_WIDTH,
+        MIN_WIDGET_HEIGHT,
+      );
+      const obstacles = dragObstacles(card);
+      const target = obstacles.some((other) => rectsIntersect(other, desired))
+        ? nearestFreeRect(desired, { w: desired.w, h: desired.h }, area, obstacles) ?? desired
+        : desired;
+      applyRect(card, target);
+      const fractions = fractionsFor(target);
+      layout = layout.map((widget) => (widget.id === card.id ? { ...widget, ...fractions } : widget));
+      window.clearTimeout(keySaveTimer);
+      keySaveTimer = window.setTimeout(() => persist(), 500);
+    });
+  }
+
+  // ------------------------------------------------------- add / remove
   function add(id: WidgetId): void {
     if (!appearance.isKnown) {
       toast.error("Your saved desktop could not be loaded yet, so widgets cannot be changed. Try again in a moment.");
@@ -903,9 +930,8 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     layer.appendChild(card.el);
     if (!feed.isRunning) feed.start();
     renderCard(card);
-    const placement = defaultPlacement(card);
-    layout = [...layout, { id, ...placement }];
-    position(card, layout[layout.length - 1]!);
+    layout = [...layout, { id, x: 0.7, y: 0 }];
+    positionAll();
     card.el.style.visibility = "";
     persist();
     catalogRefresh?.();

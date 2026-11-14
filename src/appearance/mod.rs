@@ -142,6 +142,11 @@ pub struct WidgetDto {
     pub id: String,
     pub x: f64,
     pub y: f64,
+    /// Optional saved size, as fractions of the usable desktop width/height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
 }
 
 /// An app placed on the desktop: its grid cell (column, row from the top
@@ -421,11 +426,18 @@ pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
                 return Err(bad_request("widget position must be between 0 and 1"));
             }
         }
+        for value in [widget.w, widget.h].into_iter().flatten() {
+            if !value.is_finite() || !(0.05..=1.0).contains(&value) {
+                return Err(bad_request("widget size must be between 0.05 and 1"));
+            }
+        }
         seen.push(id.clone());
         out.push(WidgetDto {
             id,
             x: round_fraction(widget.x),
             y: round_fraction(widget.y),
+            w: widget.w.map(round_fraction),
+            h: widget.h.map(round_fraction),
         });
     }
     Ok(out)
@@ -1750,6 +1762,8 @@ pub(crate) mod tests {
             id: id.to_string(),
             x,
             y,
+            w: None,
+            h: None,
         }
     }
 

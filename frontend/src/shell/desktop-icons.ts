@@ -123,8 +123,9 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   }
 
   function position(el: HTMLElement, at: Cell): void {
-    el.style.left = `${Math.round(at.col * cell.w + CELL_GAP / 2)}px`;
-    el.style.top = `${Math.round(at.row * cell.h + CELL_GAP / 2)}px`;
+    // Positioned on the shared 8px grid (cell sizes are multiples of the grid).
+    el.style.left = `${Math.round(at.col * cell.w)}px`;
+    el.style.top = `${Math.round(at.row * cell.h)}px`;
     el.style.width = `${Math.round(cell.w - CELL_GAP)}px`;
     el.style.height = `${Math.round(cell.h - CELL_GAP)}px`;
   }

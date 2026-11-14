@@ -24,6 +24,20 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.31] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Changed
+
+- Desktop layout now uses a shared 8px snap grid, a 16px safe inset and the
+  usable area above the taskbar for icons and widgets. Widget positions and
+  **sizes** snap to the grid (resize handle, minimum 200×200), stay inside the
+  usable desktop, avoid app icons and each other, show a subtle 8px grid with
+  a snapped preview while dragging/resizing, and repaired saved layouts are
+  persisted. Default widgets sit in a right-aligned two-column group with
+  16px gaps. Widget sizes are stored with the existing appearance API.
+
 ## [0.11.30] - 2026-11-14
 
 No database migration (schema stays v12).

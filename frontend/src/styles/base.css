@@ -330,9 +330,9 @@ pre {
    each icon in a cell of this size (and snaps drags to it). */
 .desktop-icons {
   --icon-cell-w: 104px;
-  --icon-cell-h: 108px;
+  --icon-cell-h: 112px;
   position: absolute;
-  inset: 16px 12px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 12px;
+  inset: 16px 16px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 16px;
   z-index: 2;
   pointer-events: none;
 }
@@ -1614,8 +1614,8 @@ pre.code {
   /* Phones: four columns across, filled row by row. */
   .desktop-icons {
     --icon-columns: 4;
-    --icon-cell-h: 100px;
-    inset: 12px 8px calc(var(--taskbar-total, var(--taskbar-h)) + 12px) 8px;
+    --icon-cell-h: 104px;
+    inset: 16px 16px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 16px;
   }
 
   .desktop-icon {
