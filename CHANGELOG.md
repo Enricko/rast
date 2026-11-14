@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.11.30] - 2026-11-14
+
+No database migration (schema stays v12).
+
+### Fixed
+
+- The widget layer had a 12 px top/left inset while the app icons start at the
+  desktop origin, so widget cells were offset by half an icon cell: the space
+  between two widgets never lined up with a 1×1 app slot. The layer now shares
+  the icon grid origin, so a free column between widgets is exactly one app
+  cell and an app icon fits there.
+
 ## [0.11.29] - 2026-11-14
 
 No database migration (schema stays v12).

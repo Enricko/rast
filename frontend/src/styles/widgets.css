@@ -6,8 +6,9 @@
   /* Cards keep a small margin from the screen edges and the taskbar. */
   --widget-margin: 12px;
   position: absolute;
-  inset: var(--widget-margin) var(--widget-margin)
-    calc(var(--taskbar-total, var(--taskbar-h)) + var(--widget-margin)) var(--widget-margin);
+  /* Origin matches the app-icon grid exactly (no left/top offset), so widget
+     cells and icon cells are the same 1x1 units; the taskbar keeps its space. */
+  inset: 0 0 calc(var(--taskbar-total, var(--taskbar-h)) + var(--widget-margin)) 0;
   /* Above the desktop icons (2, earlier in the DOM), below windows (3). */
   z-index: 2;
   pointer-events: none;
