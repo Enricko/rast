@@ -573,7 +573,8 @@ class PackageCenterApp {
       content.appendChild(this.appSection);
     }
     // Linux apps (administrators): Updates lists only those with a newer version.
-    if (this.linux.enabled) {
+    // The whole section disappears when the server quarantines the feature.
+    if (this.linux.enabled && this.linux.offered) {
       this.linuxGrid = h("div", { class: "pkg-grid" });
       this.linuxSection = h("section", { class: "pkg-group", ariaLabel: "Linux apps" }, h("h3", { class: "pkg-group-title" }, "Linux apps"), this.linuxGrid);
       content.appendChild(this.linuxSection);

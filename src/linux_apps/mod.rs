@@ -458,6 +458,8 @@ pub struct LinuxApps {
     native_apps: Arc<NativeApps>,
     /// Whether native execution is enabled (the default on Linux).
     native_enabled: bool,
+    /// Whether the Linux apps feature is offered at all (`linux_apps_enabled`).
+    linux_apps_enabled: bool,
 }
 
 impl LinuxApps {
@@ -471,6 +473,7 @@ impl LinuxApps {
         native_apps: Arc<NativeApps>,
     ) -> Arc<Self> {
         let native_enabled = config.native_enabled && SUPPORTED;
+        let linux_apps_enabled = config.linux_apps_enabled;
         Arc::new(Self {
             config,
             db,
@@ -481,6 +484,7 @@ impl LinuxApps {
             native,
             native_apps,
             native_enabled,
+            linux_apps_enabled,
         })
     }
 
@@ -560,6 +564,22 @@ impl LinuxApps {
         self.native_enabled
     }
 
+    /// Is the whole Linux apps feature offered on this server?
+    pub fn linux_apps_enabled(&self) -> bool {
+        self.linux_apps_enabled
+    }
+
+    /// Reject Linux app mutations when the feature is quarantined.
+    fn ensure_linux_apps_enabled(&self) -> AppResult<()> {
+        if self.linux_apps_enabled {
+            Ok(())
+        } else {
+            Err(AppError::unavailable(
+                "Linux apps are disabled on this server (linux_apps_enabled = false in the RAST configuration).",
+            ))
+        }
+    }
+
     /// The manager of the person's shared graphical session.
     pub fn native_sessions(&self) -> &Arc<NativeSessions> {
         &self.native
@@ -573,6 +593,7 @@ impl LinuxApps {
         path: Option<&str>,
         url: Option<&str>,
     ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
         self.ensure_native()?;
         actor.require_admin()?;
         let (source, file_name, format) = self.native_source(actor, storage, path, url).await?;
@@ -1285,6 +1306,7 @@ impl LinuxApps {
         launcher: Option<Value>,
         visibility: Visibility,
     ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
         if self.native_enabled {
             self.ensure_native()?;
             let (source, file_name, format) =
@@ -1350,6 +1372,7 @@ impl LinuxApps {
         launcher: Option<Value>,
         visibility: Visibility,
     ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
         if self.native_enabled {
             self.ensure_native()?;
             let (source, file_name, format) = self.native_url_source(url).await?;
@@ -1800,6 +1823,7 @@ impl LinuxApps {
         url: Option<&str>,
         storage: Option<&Storage>,
     ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
         let row = self.row(id).await?;
         if row.status != "ready" {
             return Err(AppError::conflict(

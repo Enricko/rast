@@ -120,6 +120,7 @@ async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<V
         },
         "dockerEnabled": state.config.docker_enabled && crate::linux_apps::SUPPORTED,
         "nativeEnabled": state.linux_apps.native_available(),
+        "linuxAppsEnabled": state.linux_apps.linux_apps_enabled(),
     })))
 }
 

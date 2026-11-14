@@ -58,6 +58,7 @@ applied by `src/config.rs`.
 | `worker_socket` | path | `"/run/rast/worker.sock"` | Unix socket path of the worker | `RAST_WORKER_SOCKET` |
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
 | `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
+| `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
 | `native_helper_socket` | path | `"/run/rast/native.sock"` | Unix socket of the privileged native helper | `RAST_NATIVE_HELPER_SOCKET` |
 | `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions; **Xpra 6.5+ is required** and the version is checked by `rast doctor`, `rast native-helper --check` and the installer | `RAST_LINUX_XPRA_BIN` |
 | `linux_uid_base` | integer | `200000` | First uid of the unprivileged Linux identities; a RAST user `id` gets `linux_uid_base + id`. Must not overlap existing accounts | `RAST_LINUX_UID_BASE` |
@@ -103,6 +104,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_WORKER_SOCKET` | `worker_socket` | Must match the worker unit's runtime directory |
 | `RAST_DOCKER_ENABLED` | `docker_enabled` | `true`/`false` |
 | `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
+| `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
 | `RAST_NATIVE_HELPER_SOCKET` | `native_helper_socket` | Must match `rast-native.service` |
 | `RAST_LINUX_XPRA_BIN` | `linux_xpra_bin` | Xpra server binary |
 | `RAST_LINUX_UID_BASE` | `linux_uid_base` | Unprivileged identity uid range start |

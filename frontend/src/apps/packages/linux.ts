@@ -21,19 +21,7 @@ import { watchJob, type JobOutcome } from "../../components/jobs";
 import { banner, emptyBlock, progressBar, type ProgressHandle } from "../../components/states";
 import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
-import {
-  isNativeApp,
-  isOpenable,
-  linuxApps,
-  linuxAppById,
-  linuxNativeSession,
-  linuxOverview,
-  loadLinuxApps,
-  nativeAppsEnabled,
-  NEWER_BUILD,
-  type LinuxApp,
-  type NativeAppInfo,
-} from "../linuxapp/catalog";
+import { NEWER_BUILD, isNativeApp, isOpenable, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadLinuxApps, nativeAppsEnabled, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
 import {
   APPIMAGE_REJECTED_MESSAGE,
   INSTALL_STAGES,
@@ -204,14 +192,22 @@ export class LinuxApps {
   }
 
   /**
+   * Is the Linux apps workflow offered on this server at all? The whole
+   * App Center section and the install button disappear when the operator
+   * quarantined the feature.
+   */
+  get offered(): boolean {
+    return linuxAppsOffered(linuxOverview());
+  }
+
+  /**
    * Can this server install Linux apps at all? The toolbar button and the
-   * empty-state tile hide when neither the native backend nor Docker exists.
+   * empty-state tile hide when the feature is off or neither the native
+   * backend nor Docker exists.
    */
   get available(): boolean {
     if (!this.enabled) return false;
-    const overview = linuxOverview();
-    if (!overview) return true; // until the list arrives, do not flicker
-    return overview.dockerEnabled || overview.nativeEnabled === true;
+    return linuxAppsInstallAvailable(linuxOverview());
   }
 
   reload(): Promise<void> {

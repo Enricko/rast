@@ -115,6 +115,10 @@ pub struct FileConfig {
     /// Native Linux app execution (default: on; Docker stays available for
     /// apps that have not been migrated yet).
     pub native_enabled: Option<bool>,
+    /// Offer the Linux apps workflow at all (default: on). Set to `false` to
+    /// quarantine the whole feature — native and legacy Docker-backed
+    /// installs alike — while keeping its implementation in the binary.
+    pub linux_apps_enabled: Option<bool>,
     /// Unix socket of the privileged native helper (`rast native-helper`).
     pub native_helper_socket: Option<PathBuf>,
     /// Xpra server binary used for per-user graphical sessions.
@@ -156,6 +160,8 @@ pub struct Config {
     pub db_max_connections: u32,
     pub worker_socket: PathBuf,
     pub docker_enabled: bool,
+    /// Whether App Center offers the Linux apps workflow (native or Docker).
+    pub linux_apps_enabled: bool,
     pub default_quota_bytes: u64,
     pub secure_cookies: bool,
     pub job_concurrency: usize,
@@ -434,6 +440,9 @@ impl Config {
             .unwrap_or_else(|| {
                 cfg!(target_os = "linux") && std::path::Path::new(&linux_xpra_bin).exists()
             });
+        let linux_apps_enabled =
+            parse_env_bool(&env, "RAST_LINUX_APPS_ENABLED", file.linux_apps_enabled)?
+                .unwrap_or(true);
         let native_helper_socket = get_str(
             file.native_helper_socket.map(|p| p.display().to_string()),
             "RAST_NATIVE_HELPER_SOCKET",
@@ -529,6 +538,7 @@ impl Config {
             db_max_connections,
             worker_socket,
             docker_enabled,
+            linux_apps_enabled,
             default_quota_bytes,
             secure_cookies,
             job_concurrency,
@@ -753,6 +763,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         db_max_connections: u32,
         worker_socket: String,
         docker_enabled: bool,
+        linux_apps_enabled: bool,
         default_quota_bytes: u64,
         secure_cookies: bool,
         job_concurrency: usize,
@@ -778,6 +789,7 @@ pub fn to_toml_example(cfg: &Config) -> String {
         db_max_connections: cfg.db_max_connections,
         worker_socket: cfg.worker_socket.display().to_string(),
         docker_enabled: cfg.docker_enabled,
+        linux_apps_enabled: cfg.linux_apps_enabled,
         default_quota_bytes: cfg.default_quota_bytes,
         secure_cookies: cfg.secure_cookies,
         job_concurrency: cfg.job_concurrency,
@@ -811,6 +823,14 @@ mod tests {
         assert_eq!(cfg.storage_dir, PathBuf::from(DEFAULT_STORAGE_DIR));
         assert!(!cfg.secure_cookies);
         assert!(!cfg.docker_enabled);
+        assert!(cfg.linux_apps_enabled);
+    }
+
+    #[test]
+    fn linux_apps_can_be_quarantined() {
+        let file = FileConfig::from_toml_str("linux_apps_enabled = false").unwrap();
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        assert!(!cfg.linux_apps_enabled);
     }
 
     #[test]

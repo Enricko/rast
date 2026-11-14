@@ -126,6 +126,13 @@ are not mapped into app profiles.
 | ACL support | `acl` package and an ACL-capable filesystem (ext4, xfs, btrfs) for read access to the person's RAST home |
 | `rast-native.service` + `rast-linux.slice` | Shipped in `deploy/`, installed by the installer |
 
+**Quarantining the feature:** set `linux_apps_enabled = false` to hide the
+App Center Linux-apps section and its "Install Linux App" button and to reject
+new installs (both native and legacy Docker-backed), while keeping the
+implementation, the database schema and any app data in place. Set
+`native_enabled = false` instead when only host-native execution should be
+disabled and legacy Docker-backed installs may stay available.
+
 Only one RAST instance per host may use the native backend: transient unit
 names are keyed by RAST user id (`rast-xpra-u<id>`, `rast-app-u<uid>-…`), so a
 second instance on the same host would fight over the same sessions. Test or

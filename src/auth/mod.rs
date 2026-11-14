@@ -290,6 +290,7 @@ mod tests {
             db_max_connections: 2,
             worker_socket: "/tmp/worker.sock".into(),
             docker_enabled: false,
+            linux_apps_enabled: true,
             default_quota_bytes: 0,
             secure_cookies: false,
             job_concurrency: 1,

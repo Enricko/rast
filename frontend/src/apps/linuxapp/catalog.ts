@@ -127,6 +127,8 @@ export interface LinuxOverview {
   session?: NativeSession | null;
   /** False when this server has no native (host install) support. */
   nativeEnabled?: boolean;
+  /** False when the whole Linux apps workflow is disabled server-side. */
+  linuxAppsEnabled?: boolean;
 }
 
 /** The server reports a newer AppImage build without a version number this way. */
@@ -182,6 +184,26 @@ export function isNativeApp(app: LinuxApp | undefined | null): boolean {
 /** Does this server support native apps at all? (older servers: no) */
 export function nativeAppsEnabled(): boolean {
   return overview?.nativeEnabled === true;
+}
+
+/**
+ * Does this server offer the Linux apps workflow at all? `linux_apps_enabled =
+ * false` quarantines the whole feature (native and legacy Docker backends)
+ * while the implementation stays in the binary.
+ */
+export function linuxAppsOffered(state: LinuxOverview | null): boolean {
+  return state?.linuxAppsEnabled !== false;
+}
+
+/**
+ * Can administrators install a Linux app on this server right now? Requires
+ * the feature to be offered and at least one execution backend to exist.
+ * Until the overview arrives, assume yes so the button does not flicker.
+ */
+export function linuxAppsInstallAvailable(state: LinuxOverview | null): boolean {
+  if (!linuxAppsOffered(state)) return false;
+  if (!state) return true;
+  return state.dockerEnabled || state.nativeEnabled === true;
 }
 
 /**
