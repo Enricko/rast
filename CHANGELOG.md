@@ -9,6 +9,16 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-15
+
+### Fixed
+
+- **Clang catalog verification note fits the manifest limit.** The 0.15.1
+  explanation made the Clang verification text longer than the manifest's
+  300-character limit, so publication kept Clang in the failed state. The note
+  is now concise (the lldb/libpython caveat stays in the package notes and
+  README), so Clang 23.1.5 can be published.
+
 ## [0.15.1] - 2026-11-15
 
 ### Fixed

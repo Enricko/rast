@@ -4480,7 +4480,7 @@ fn verify_item(
             let text = http_text(bundle)?;
             check_llvm_attestation_bundle(&text, &expected)?;
             expected_sha256[0] = Some(expected);
-            verification = "SHA-256 from the GitHub release asset digest, named by LLVM's SLSA build-provenance bundle; gh attestation verify confirms the bundle signature; bytes re-hashed in CI; clang, clang++ and ld.lld (with LD_LIBRARY_PATH=<prefix>/lib) run on the native runner; lldb is shipped but not executed because the official build needs a host libpython shared object".into();
+            verification = "SHA-256 from the GitHub asset digest, named by LLVM's SLSA provenance bundle and confirmed with gh attestation verify; bytes re-hashed; clang, clang++ and ld.lld run on the native runner (lldb is shipped but not executed: the official build needs a host libpython)".into();
         }
         "flutter" => {
             let expected = info
