@@ -41,6 +41,24 @@ pub struct AppState {
     pub login_user_limiter: Arc<RateLimiter>,
 }
 
+impl crate::auth::AuthState for AppState {
+    fn db(&self) -> &SqlitePool {
+        &self.db
+    }
+    fn config(&self) -> &Config {
+        &self.config
+    }
+    fn secrets(&self) -> &Secrets {
+        &self.secrets
+    }
+}
+
+impl crate::linux_apps::HasLinuxApps for AppState {
+    fn linux_apps(&self) -> &Arc<crate::linux_apps::LinuxApps> {
+        &self.linux_apps
+    }
+}
+
 impl AppState {
     /// Build the full state: directories, database, secrets, subsystems.
     pub async fn new(config: Config) -> AppResult<Self> {

@@ -138,6 +138,12 @@ impl Visibility {
     }
 }
 
+/// What the Docker app proxy needs from the application state. The server's
+/// `AppState` implements it, so this module does not depend on it.
+pub trait HasLinuxApps: Clone + Send + Sync + 'static {
+    fn linux_apps(&self) -> &Arc<LinuxApps>;
+}
+
 /// One person's running copy of an app.
 pub struct Session {
     /// Public id used by the API (never part of the app's address).

@@ -13,7 +13,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{access, auth::AuthUser, error::AppError, state::AppState};
+use crate::{
+    access,
+    auth::{AuthState, AuthUser},
+    error::AppError,
+};
 
 /// API path prefixes mapped to the stable application ids.
 pub fn app_for_path(path: &str) -> Option<&'static str> {
@@ -54,8 +58,8 @@ pub fn app_for_path(path: &str) -> Option<&'static str> {
 
 /// Reject the request when group policy denies the application (or when a
 /// read-only grant attempts a mutation).
-pub async fn enforce_app_policy(
-    State(state): State<AppState>,
+pub async fn enforce_app_policy<S: AuthState>(
+    State(state): State<S>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -68,7 +72,7 @@ pub async fn enforce_app_policy(
         return next.run(request).await;
     };
     // An app uninstalled in App Center is closed for everyone.
-    if !access::app_installed(&state.db, app_id).await {
+    if !access::app_installed(state.db(), app_id).await {
         return AppError::Forbidden(
             "this application is not installed; install it from App Center",
         )
@@ -77,7 +81,7 @@ pub async fn enforce_app_policy(
     if user.is_admin() {
         return next.run(request).await;
     }
-    match access::app_access(&state.db, &user, app_id).await {
+    match access::app_access(state.db(), &user, app_id).await {
         Ok(grant) if grant.allowed => {
             if grant.read_only && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS") {
                 return AppError::Forbidden(

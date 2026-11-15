@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, error::AppError, state::AppState};
+use crate::{config::Config, error::AppError, secrets::Secrets};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -110,6 +110,14 @@ impl<'q> sqlx::Encode<'q, sqlx::Sqlite> for Role {
     }
 }
 
+/// What the authentication layer needs from the application state. The
+/// server's `AppState` implements it, so this module does not depend on it.
+pub trait AuthState: Clone + Send + Sync + 'static {
+    fn db(&self) -> &sqlx::SqlitePool;
+    fn config(&self) -> &Config;
+    fn secrets(&self) -> &Secrets;
+}
+
 /// Extracts the TCP peer address if the server was started with connect info.
 #[derive(Debug, Clone, Copy)]
 pub struct PeerAddr(pub std::net::SocketAddr);
@@ -136,12 +144,12 @@ where
     }
 }
 
-impl FromRequestParts<AppState> for AuthUser {
+impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        _state: &AppState,
+        _state: &S,
     ) -> Result<Self, Self::Rejection> {
         parts
             .extensions
@@ -151,12 +159,12 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-impl FromRequestParts<AppState> for ClientIp {
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        _state: &AppState,
+        _state: &S,
     ) -> Result<Self, Self::Rejection> {
         Ok(parts
             .extensions
@@ -172,12 +180,12 @@ impl FromRequestParts<AppState> for ClientIp {
 #[derive(Debug, Clone)]
 pub struct AdminUser(pub AuthUser);
 
-impl FromRequestParts<AppState> for AdminUser {
+impl<S: AuthState> FromRequestParts<S> for AdminUser {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        state: &AppState,
+        state: &S,
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
         user.require_admin()?;
@@ -189,15 +197,15 @@ impl FromRequestParts<AppState> for AdminUser {
 #[derive(Debug, Clone)]
 pub struct SuperAdminUser(pub AuthUser);
 
-impl FromRequestParts<AppState> for SuperAdminUser {
+impl<S: AuthState> FromRequestParts<S> for SuperAdminUser {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        state: &AppState,
+        state: &S,
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
-        require_super_admin(&state.db, &user).await?;
+        require_super_admin(state.db(), &user).await?;
         Ok(SuperAdminUser(user))
     }
 }

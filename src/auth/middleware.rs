@@ -11,9 +11,8 @@ use axum::{
 use std::net::SocketAddr;
 
 use crate::{
-    auth::{self, csrf, session, AuthUser, ClientIp},
+    auth::{self, csrf, session, AuthState, AuthUser, ClientIp},
     error::AppError,
-    state::AppState,
 };
 
 const SAFE_METHODS: [Method; 3] = [Method::GET, Method::HEAD, Method::OPTIONS];
@@ -34,8 +33,8 @@ pub fn allowed_during_forced_password_change(path: &str) -> bool {
 }
 
 /// Authentication + CSRF layer applied to all protected routes.
-pub async fn require_auth(
-    State(state): State<AppState>,
+pub async fn require_auth<S: AuthState>(
+    State(state): State<S>,
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
@@ -44,13 +43,13 @@ pub async fn require_auth(
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or_else(|| std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    let client_ip = auth::client_ip(req.headers(), peer_ip, &state.config);
+    let client_ip = auth::client_ip(req.headers(), peer_ip, state.config());
     req.extensions_mut().insert(ClientIp(client_ip));
 
     let token = auth::cookie_value(req.headers(), session::SESSION_COOKIE)
         .ok_or(AppError::Unauthorized("authentication required"))?;
 
-    let record = session::validate(&state.db, &token, state.config.session_ttl_hours)
+    let record = session::validate(state.db(), &token, state.config().session_ttl_hours)
         .await?
         .ok_or(AppError::Unauthorized("session expired or revoked"))?;
 
@@ -60,22 +59,22 @@ pub async fn require_auth(
          FROM users WHERE id = ?",
     )
     .bind(record.user_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(state.db())
     .await?;
     let Some(row) = row else {
-        session::revoke(&state.db, &record.session_id).await?;
+        session::revoke(state.db(), &record.session_id).await?;
         return Err(AppError::Unauthorized("account no longer exists"));
     };
     if !row.active {
-        session::revoke(&state.db, &record.session_id).await?;
+        session::revoke(state.db(), &record.session_id).await?;
         return Err(AppError::Unauthorized("account is disabled"));
     }
 
     if !SAFE_METHODS.contains(req.method()) {
-        if !csrf::verify(req.headers(), &state.secrets, &record.session_id) {
+        if !csrf::verify(req.headers(), state.secrets(), &record.session_id) {
             return Err(AppError::Forbidden("invalid or missing CSRF token"));
         }
-        if !origin_allowed(req.headers(), &state.config) {
+        if !origin_allowed(req.headers(), state.config()) {
             return Err(AppError::Forbidden("cross-origin request rejected"));
         }
     }

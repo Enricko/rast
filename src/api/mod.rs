@@ -56,9 +56,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
-            crate::access::middleware::enforce_app_policy,
+            crate::access::middleware::enforce_app_policy::<AppState>,
         ))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_auth::<AppState>,
+        ));
 
     Router::new()
         .merge(public_routes())
@@ -86,7 +89,7 @@ fn public_routes() -> Router<AppState> {
         )
         .route(
             "/linux-apps/{*rest}",
-            axum::routing::any(crate::linux_apps::proxy::handle),
+            axum::routing::any(crate::linux_apps::proxy::handle::<AppState>),
         )
 }
 

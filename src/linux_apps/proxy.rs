@@ -34,8 +34,8 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as AppMessage};
 
-use super::{LinuxApps, Session};
-use crate::{docker::linux::URL_PREFIX, state::AppState};
+use super::{HasLinuxApps, LinuxApps, Session};
+use crate::docker::linux::URL_PREFIX;
 
 /// Injected at the start of every HTML page of an app.
 pub const SHIM: &str = include_str!("shim.js");
@@ -99,7 +99,7 @@ fn valid_key(key: &str) -> bool {
 }
 
 /// Handler for every method under `/linux-apps/`.
-pub async fn handle(State(state): State<AppState>, request: Request) -> Response {
+pub async fn handle<S: HasLinuxApps>(State(state): State<S>, request: Request) -> Response {
     let path = request.uri().path();
     let Some(rest) = path.strip_prefix(URL_PREFIX) else {
         return closed_page(StatusCode::NOT_FOUND);
@@ -122,7 +122,7 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
                 .into_response(),
         );
     }
-    let Some(session) = state.linux_apps.find_by_key(key) else {
+    let Some(session) = state.linux_apps().find_by_key(key) else {
         return closed_page(StatusCode::NOT_FOUND);
     };
     // Separate windows: `/linux-apps/<key>/vnc/<window>/` carries the picture
@@ -146,7 +146,7 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
             session,
             port,
             authorization,
-            state.linux_apps.clone(),
+            state.linux_apps().clone(),
         )
         .await
     } else {
@@ -477,9 +477,9 @@ async fn relay(
 
 /// One app window as a VNC client sees it: the browser's WebSocket carries the
 /// RFB bytes of the window's own stream.
-async fn vnc_websocket(
+async fn vnc_websocket<S: HasLinuxApps>(
     request: Request,
-    state: AppState,
+    state: S,
     session: Arc<Session>,
     window: String,
 ) -> Response {
@@ -488,7 +488,11 @@ async fn vnc_websocket(
         Ok(upgrade) => upgrade,
         Err(rejection) => return with_policy(rejection.into_response()),
     };
-    let stream = match state.linux_apps.window_stream_port(&session, &window).await {
+    let stream = match state
+        .linux_apps()
+        .window_stream_port(&session, &window)
+        .await
+    {
         Ok(stream) => stream,
         Err(_) => return bad_gateway("this window is not available"),
     };
