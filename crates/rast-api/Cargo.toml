@@ -1,0 +1,14 @@
+[package]
+name = "rast-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "RAST shared API types (serde DTOs with generated TypeScript). Builds for native and wasm32."
+
+[dependencies]
+serde.workspace = true
+ts-rs.workspace = true

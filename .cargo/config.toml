@@ -1,0 +1,4 @@
+[env]
+# ts-rs writes the generated TypeScript here (relative to the repo root), no
+# matter which directory cargo runs in. See crates/rast-api.
+TS_RS_EXPORT_DIR = { value = "frontend/src/generated", relative = true }

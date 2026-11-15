@@ -3,6 +3,11 @@
 import { ApiError } from "../../core/api";
 import type { FileEntry, FileListing } from "../../core/types";
 
+// Generated from crates/rast-api; re-exported for File Station modules.
+export type { EntryDto } from "../../generated/EntryDto";
+export type { ListingDto } from "../../generated/ListingDto";
+export type { FileEntry, FileListing };
+
 /** Logical path of the server's own file system (super administrators only). */
 export const SYSTEM_ROOT = "/@root";
 

@@ -4,7 +4,7 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 339 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 342 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
 
@@ -20,13 +20,13 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | License expression | Packages |
 | --- | ---: |
 | MIT OR Apache-2.0 | 186 |
-| MIT | 56 |
+| MIT | 58 |
 | Apache-2.0 OR MIT | 24 |
 | Unicode-3.0 | 18 |
 | MIT/Apache-2.0 | 10 |
+| Unlicense OR MIT | 6 |
 | Zlib OR Apache-2.0 OR MIT | 6 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 5 |
-| Unlicense OR MIT | 5 |
 | ISC | 4 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 3 |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 2 |
@@ -290,6 +290,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `sysinfo` | 0.40.1 | MIT | <https://github.com/GuillaumeGomez/sysinfo> |
 | `tar` | 0.4.46 | MIT OR Apache-2.0 | <https://github.com/composefs/tar-rs> |
 | `tempfile` | 3.27.0 | MIT OR Apache-2.0 | <https://github.com/Stebalien/tempfile> |
+| `termcolor` | 1.4.1 | Unlicense OR MIT | <https://github.com/BurntSushi/termcolor> |
 | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
 | `thiserror-impl` | 2.0.21 | MIT OR Apache-2.0 | <https://github.com/dtolnay/thiserror> |
 | `thread_local` | 1.1.10 | MIT OR Apache-2.0 | <https://github.com/Amanieu/thread_local-rs> |
@@ -314,6 +315,8 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `tracing-log` | 0.2.0 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-subscriber` | 0.3.23 | MIT | <https://github.com/tokio-rs/tracing> |
 | `try-lock` | 0.2.5 | MIT | <https://github.com/seanmonstar/try-lock> |
+| `ts-rs` | 12.0.1 | MIT | <https://github.com/Aleph-Alpha/ts-rs> |
+| `ts-rs-macros` | 12.0.1 | MIT | <https://github.com/Aleph-Alpha/ts-rs> |
 | `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | <https://github.com/snapview/tungstenite-rs> |
 | `typed-path` | 0.13.0 | MIT OR Apache-2.0 | <https://github.com/chipsenkbeil/typed-path> |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | <https://github.com/paholg/typenum> |

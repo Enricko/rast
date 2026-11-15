@@ -13,6 +13,13 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- New `crates/rast-api` crate holds the shared File Station DTOs
+  (`EntryDto`, `ListingDto`, `BreadcrumbDto`, `QuotaDto`; JSON unchanged).
+  `ts-rs` generates their TypeScript into `frontend/src/generated/` during
+  `cargo test -p rast-api`, the frontend uses the generated types, and CI fails
+  when the committed files are stale. `EntryDto::new` became
+  `EntryDtoExt::new` in `rast-base`.
+
 - Version 1.0.1 is used for the whole remake line (`Remake` branch) and is not
   bumped per phase. Remake instructions and the prompt pack are in
   `CLAUDE.md` and `docs/remake/PROMPTS.md`. Releases from this branch must be

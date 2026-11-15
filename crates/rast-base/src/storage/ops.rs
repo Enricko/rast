@@ -31,28 +31,17 @@ use crate::{
 // DTOs
 // ---------------------------------------------------------------------------
 
-/// A file or directory entry as exposed by the File Station API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EntryDto {
-    pub name: String,
-    pub path: String,
-    pub kind: String,
-    pub size: i64,
-    pub modified_at: i64,
-    pub mime: String,
-    pub readable: bool,
-    pub writable: bool,
-    pub trashed: bool,
+pub use rast_api::{BreadcrumbDto, EntryDto, ListingDto, QuotaDto};
+
+/// Builds an [`EntryDto`] from filesystem metadata. `EntryDto` lives in
+/// `rast-api` (no filesystem code there), so this extension trait replaces the
+/// former inherent `EntryDto::new`.
+pub trait EntryDtoExt {
+    fn new(logical: &LogicalPath, name: &str, meta: &std::fs::Metadata, writable: bool) -> Self;
 }
 
-impl EntryDto {
-    pub fn new(
-        logical: &LogicalPath,
-        name: &str,
-        meta: &std::fs::Metadata,
-        writable: bool,
-    ) -> Self {
+impl EntryDtoExt for EntryDto {
+    fn new(logical: &LogicalPath, name: &str, meta: &std::fs::Metadata, writable: bool) -> Self {
         let is_dir = meta.is_dir();
         Self {
             name: name.to_string(),
@@ -74,33 +63,6 @@ impl EntryDto {
             trashed: false,
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BreadcrumbDto {
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct QuotaDto {
-    pub quota_bytes: i64,
-    pub used_bytes: i64,
-    pub free_bytes: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListingDto {
-    pub path: String,
-    pub breadcrumbs: Vec<BreadcrumbDto>,
-    pub items: Vec<EntryDto>,
-    pub page: i64,
-    pub per_page: i64,
-    pub total: i64,
-    pub quota: QuotaDto,
 }
 
 #[derive(Debug, Clone, Serialize)]

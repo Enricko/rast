@@ -1,5 +1,10 @@
 // API DTO types shared by every RAST app. Keep in sync with docs/API.md.
 
+import type { BreadcrumbDto } from "../generated/BreadcrumbDto";
+import type { EntryDto } from "../generated/EntryDto";
+import type { ListingDto } from "../generated/ListingDto";
+import type { QuotaDto } from "../generated/QuotaDto";
+
 export type Role = "admin" | "user";
 
 export interface User {
@@ -219,34 +224,12 @@ export interface Page<T> {
   total: number;
 }
 
-export interface Quota {
-  quotaBytes: number;
-  usedBytes: number;
-  freeBytes: number;
-  trashBytes?: number;
-}
-
-export interface FileEntry {
-  name: string;
-  path: string;
-  kind: "file" | "dir";
-  size: number;
-  modifiedAt: number;
-  mime: string;
-  readable: boolean;
-  writable: boolean;
-}
-
-export interface Breadcrumb {
-  name: string;
-  path: string;
-}
-
-export interface FileListing extends Page<FileEntry> {
-  path: string;
-  breadcrumbs: Breadcrumb[];
-  quota: Quota;
-}
+// File Station DTOs are generated from `crates/rast-api` (see src/generated).
+export type FileEntry = EntryDto;
+export type Breadcrumb = BreadcrumbDto;
+/** Quota as returned by listings; `trashBytes` is only sent by some endpoints. */
+export type Quota = QuotaDto & { trashBytes?: number };
+export type FileListing = Omit<ListingDto, "quota"> & Page<FileEntry> & { quota: Quota };
 
 export interface FileRoot {
   name: string;

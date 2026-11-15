@@ -27,6 +27,7 @@ commit; keep the total test count (807 at the start).
 
 | Crate | Modules |
 | --- | --- |
+| `rast-api` | `files` (File Station DTOs with generated TypeScript); no workspace dependencies, builds for wasm32 |
 | `rast-base` | `error`, `config`, `db` (and the embedded migrations), `events`, `secrets`, `users`, `auth`, `access`, `audit`, `jobs`, `storage`, `realtime`, `appearance`, plus `NAME`, `VERSION`, `DESCRIPTION` |
 | `rast-docker` | `docker`, `worker` |
 | `rast-apps` | `packages` |

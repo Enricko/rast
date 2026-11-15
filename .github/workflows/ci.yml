@@ -138,6 +138,17 @@ jobs:
       - name: Tests
         run: cargo test --locked --workspace --all-targets
 
+      - name: Generated TypeScript types are up to date
+        run: |
+          # The tests above export frontend/src/generated via ts-rs.
+          git diff --exit-code -- frontend/src/generated
+          test -z "$(git status --porcelain -- frontend/src/generated)"
+
+      - name: rast-api builds for wasm32
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --locked --target wasm32-unknown-unknown -p rast-api
+
   # ---------------------------------------------------------------------------
   # Release-profile builds on native runners (arm64 is a real arm runner,
   # never a cross-compile — see docs/COMPATIBILITY.md)
