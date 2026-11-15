@@ -10,7 +10,7 @@ Update it at the end of every session.
 ## Phase 0 checklist
 
 - [x] Split the repo into the target workspace with pure moves (task 0.2, ADR 0002)
-- [ ] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs`
+- [x] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs` (task 0.3)
 - [ ] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
 - [ ] Record the current compressed JS bundle size as the baseline
 - [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/`
@@ -46,16 +46,43 @@ Update it at the end of every session.
   - `npm --prefix frontend run build`: OK (existing chunk-size warning above 600 kB)
   - `scripts/generate-third-party-licenses.sh --check`: up to date (no new external dependency)
 
+- **Flaky tests stabilised** (`2b9b8a5`):
+  - `restore_refuses_while_a_server_holds_the_instance_lock` moved, unchanged,
+    into its own integration-test binary `tests/instance_lock.rs`, so no other
+    test forks while it holds the `flock`. Restore spawns no processes, so no
+    retry is needed.
+  - `install_threads_the_visibility_to_the_new_native_app_row` waits for the
+    job's terminal state through `GET /api/jobs/{id}` (30 s safety deadline)
+    instead of polling the row for 2 s.
+  - Independent check: `cargo test --locked --workspace --all-targets` 10 runs
+    in a row, 807 passed and 0 failed in every run.
+- **Task 0.3, `rast-api` + `ts-rs`** (`eed4876`):
+  - `crates/rast-api` holds `EntryDto`, `ListingDto`, `BreadcrumbDto`,
+    `QuotaDto` (JSON unchanged); no workspace dependencies; in `members` only.
+    `rast-base` depends on it and re-exports the types; `EntryDto::new` is now
+    the `EntryDtoExt` extension trait in `rast-base`.
+  - `ts-rs` 12.0.1 (MIT; new transitive crates: `ts-rs-macros` MIT,
+    `termcolor` Unlicense OR MIT) exports into `frontend/src/generated/` during
+    `cargo test -p rast-api` (`TS_RS_EXPORT_DIR` in `.cargo/config.toml`).
+    `i64` fields are typed `number`, `kind` stays `"file" | "dir"`.
+  - `frontend/src/core/types.ts` (`FileEntry`, `Breadcrumb`, `Quota`,
+    `FileListing`) and `frontend/src/apps/files/types.ts` use the generated
+    types.
+  - CI (`rust` job): fails when `frontend/src/generated` is stale after the
+    tests, and runs `cargo check --target wasm32-unknown-unknown -p rast-api`.
+- **Gates after 0.3:** fmt and clippy clean; `cargo test`: 811 passed
+  (807 + 4 ts-rs export tests), 0 failed; npm test 149 passed; npm build OK;
+  third-party licenses up to date (342 crates).
+
 ## In progress
 
 - Nothing.
 
 ## Next
 
-1. Phase 0.3 — `rast-api` + `ts-rs` (needs approval for the `ts-rs` dependency).
-2. Phase 0.4 — `rast-ui` skeleton (needs approval for leptos, wasm-bindgen, web-sys, console_error_panic_hook).
-3. Phase 0.5 — README fixes.
-4. Phase 0.6 — baseline app matrix (ask before running the native instance).
+1. Phase 0.4 — `rast-ui` skeleton (needs approval for leptos, wasm-bindgen, web-sys, console_error_panic_hook).
+2. Phase 0.5 — README fixes.
+3. Phase 0.6 — baseline app matrix (ask before running the native instance).
 
 ## Open questions
 
@@ -71,18 +98,15 @@ Update it at the end of every session.
   them from this host's earlier runs): find which test leaves them behind and
   fix it after 0.2. A full `/tmp` (tmpfs, 16 GB) made every SQLite test fail
   with `disk I/O error` and blocked the shell.
-- **Timing-sensitive tests** (seen during 0.2, all pass alone and on retry):
-  - `backup::tests::restore_refuses_while_a_server_holds_the_instance_lock`
-    failed in roughly one run in five when other tests in the same binary spawn
-    processes. The lock is a `flock` on an open file description, so a child
-    that is between `fork` and `exec` still holds it for a moment. Baseline
-    before the split was 0 of 14; after the split it depends on which tests
-    share the binary (moving `packages` out of it made it disappear with
-    `--skip packages::`, 0 of 15). Fix the test, not the lock (for example
-    retry the final assertion for a short time).
-  - `install_threads_the_visibility_to_the_new_native_app_row`
-    (`tests/native_linux_e2e.rs`) failed twice in about ten full workspace runs (0 of 20 alone); it waits at
-    most 2 s for a background job.
+- **Timing-sensitive tests:** the two known flaky tests were fixed in
+  `2b9b8a5` (see Done). Any other test that holds a `flock` while sibling tests
+  fork processes has the same risk; keep such tests in their own binary.
+- **ts-rs leaves stale files:** removing or renaming a type in `rast-api` does
+  not delete its old `.ts` file, and the CI check does not catch that. Delete
+  the file by hand when a type goes away (or add a clean step later).
+- **`rast-api` is not in `default-members`** (wasm crate rule in
+  `Cargo.toml`): a plain `cargo test` at the root does not regenerate the
+  types; use `--workspace` (as the gates and CI do) or `-p rast-api`.
 - Does `scripts/changelog-section.sh` accept the `## [1.0.1] - Unreleased`
   heading? Yes: it only reads the text inside the square brackets (checked by
   the maintainer).
