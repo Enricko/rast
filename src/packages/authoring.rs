@@ -211,6 +211,7 @@ pub fn build_manifest(
             format: "tar.gz".into(),
             strip_components: 1,
             archives: Vec::new(),
+            phar: None,
             requires: Default::default(),
             provenance,
         });

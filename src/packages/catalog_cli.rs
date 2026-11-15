@@ -61,7 +61,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use super::version::Version;
-use super::{archive, authoring, catalog, manifest, net, version};
+use super::{archive, authoring, catalog, install, manifest, net, version};
 
 /// User agent for every request, identical to the Python reference.
 const UA: &str = "rast-packages-catalog/1 (+https://github.com/Enricko/rast-packages)";
@@ -99,6 +99,29 @@ const DENO_RELEASE_PREDICATE: &str = "https://in-toto.io/attestation/release/v0.
 /// .NET release metadata (the index points at each channel's releases.json).
 const DOTNET_RELEASES_INDEX: &str =
     "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json";
+/// LLVM/Clang official release binaries (`LLVM-<version>-Linux-<arch>.tar.xz`),
+/// built on Ubuntu 22.04, with a SHA-256 in the GitHub asset digest and an
+/// SLSA build-provenance bundle (`<asset>.jsonl`).
+const CLANG_REPO: &str = "llvm/llvm-project";
+/// Google's Flutter Linux release metadata (stable/beta/dev archives).
+const FLUTTER_RELEASES_LINUX: &str =
+    "https://storage.googleapis.com/flutter_infra_release/releases/releases_linux.json";
+/// Official Flutter Linux archives, relative to this base.
+const FLUTTER_ARCHIVE_BASE: &str = "https://storage.googleapis.com/flutter_infra_release/releases/";
+/// Composer: a single-file phar per release, installed with a generated
+/// `bin/composer` wrapper (GitHub asset digest + getcomposer.org SHA-256).
+const COMPOSER_REPO: &str = "composer/composer";
+/// Zig's official download index (per version and target: tarball, shasum, size).
+const ZIG_INDEX: &str = "https://ziglang.org/download/index.json";
+/// Kotlin command-line compiler releases (`kotlin-compiler-<version>.zip`).
+const KOTLIN_REPO: &str = "JetBrains/kotlin";
+/// CMake official release archives and their `SHA-256.txt` checksum file.
+const CMAKE_REPO: &str = "Kitware/CMake";
+/// Gradle's release metadata: one entry per version with download/checksum URLs.
+const GRADLE_VERSIONS: &str = "https://services.gradle.org/versions/all";
+/// Apache Maven's official archive directory listing (all Maven 3 versions).
+const MAVEN_ARCHIVE: &str = "https://archive.apache.org/dist/maven/maven-3/";
+
 /// JSON documents fetched into memory are bounded.
 const MAX_JSON_BYTES: u64 = 64 * 1024 * 1024;
 /// Archives are streamed to disk and bounded while hashing.
@@ -357,6 +380,19 @@ struct TargetConfig {
     /// .NET runtime identifier (`linux-x64`, `linux-arm64`).
     #[serde(default)]
     dotnet_rid: Option<String>,
+    /// LLVM Linux asset architecture (`X64`, `ARM64`).
+    #[serde(default)]
+    clang_arch: Option<String>,
+    /// Flutter Linux host architecture (`x64`; Google publishes no arm64
+    /// Linux SDK archive, so linux-aarch64 maps to `arm64` and is skipped).
+    #[serde(default)]
+    flutter_arch: Option<String>,
+    /// CMake Linux archive architecture (`x86_64`, `aarch64`).
+    #[serde(default)]
+    cmake_arch: Option<String>,
+    /// Zig Linux target architecture (`x86_64`, `aarch64`).
+    #[serde(default)]
+    zig_arch: Option<String>,
 }
 
 impl TargetConfig {
@@ -384,6 +420,26 @@ impl TargetConfig {
         self.dotnet_rid
             .as_deref()
             .ok_or_else(|| format!("catalog.config.json has no targets.{target}.dotnetRid"))
+    }
+    fn clang_arch(&self, target: &str) -> Result<&str, String> {
+        self.clang_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.clangArch"))
+    }
+    fn flutter_arch(&self, target: &str) -> Result<&str, String> {
+        self.flutter_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.flutterArch"))
+    }
+    fn cmake_arch(&self, target: &str) -> Result<&str, String> {
+        self.cmake_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.cmakeArch"))
+    }
+    fn zig_arch(&self, target: &str) -> Result<&str, String> {
+        self.zig_arch
+            .as_deref()
+            .ok_or_else(|| format!("catalog.config.json has no targets.{target}.zigArch"))
     }
 }
 
@@ -590,7 +646,15 @@ fn channel_of(package: &str, version: &str) -> Option<String> {
                 _ => None,
             }
         }
-        "rust" | "bun" | "deno" => Some("stable".to_string()),
+        "rust" | "bun" | "deno" | "clang" | "flutter" | "composer" | "zig" | "kotlin" | "cmake"
+        | "gradle" => Some("stable".to_string()),
+        "maven" => {
+            let mut parts = version.split('.');
+            match (parts.next(), parts.next()) {
+                (Some(major), Some(minor)) => Some(format!("{major}.{minor}")),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -721,6 +785,21 @@ fn download(url: &str, dest: &Path) -> Result<(String, u64), String> {
             .map_err(|error| format!("cannot write download: {error}"))?;
     }
     Ok((hex::encode(hasher.finalize()), size))
+}
+
+/// Bytes available to unprivileged users on the filesystem holding `path`.
+/// Verification extracts into a temporary directory; never let one artifact
+/// fill the disk (the install path has the same guard, plus the manifest's
+/// pinned size and SHA-256).
+fn available_space(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: valid NUL-terminated path and a zeroed out-parameter.
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
+        return None;
+    }
+    Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
 }
 
 /// Final URL of a HEAD request (redirects followed; must stay https).
@@ -2261,6 +2340,1058 @@ fn dotnet_plan_from_release(
     }))
 }
 
+// ------------------------------------------- clang, flutter, composer, …
+
+/// A GitHub release asset by exact name.
+fn release_asset<'a>(assets: &'a [Value], name: &str) -> Option<&'a Value> {
+    assets
+        .iter()
+        .find(|asset| asset.get("name").and_then(Value::as_str) == Some(name))
+}
+
+fn release_assets(release: &Value) -> Result<&[Value], String> {
+    release
+        .get("assets")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| "the GitHub release has no assets".to_string())
+}
+
+fn asset_url(asset: &Value) -> Result<String, String> {
+    Ok(required_str(asset, "browser_download_url")?.to_string())
+}
+
+fn asset_size(asset: &Value, label: &str) -> Result<u64, String> {
+    asset
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("GitHub asset {label} has no size"))
+}
+
+fn asset_sha256(asset: &Value, label: &str) -> Result<String, String> {
+    let digest = asset
+        .get("digest")
+        .and_then(Value::as_str)
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| format!("GitHub asset {label} has no SHA-256 digest"))?;
+    if !is_sha256_hex(digest) {
+        return Err(format!(
+            "GitHub asset {label} digest is not a SHA-256 hex string"
+        ));
+    }
+    Ok(digest.to_string())
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn is_sha512_hex(value: &str) -> bool {
+    value.len() == 128
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn release_published_date(release: &Value) -> Option<String> {
+    release
+        .get("published_at")
+        .and_then(Value::as_str)
+        .map(|stamp| truncate_chars(stamp, 10))
+}
+
+/// HTTP `Content-Length` of `url` (`HEAD`; redirects must stay https).
+fn http_content_length(url: &str) -> Result<u64, String> {
+    let agent = http_agent(Duration::from_secs(60));
+    let response = agent
+        .head(url)
+        .call()
+        .map_err(|error| format!("HEAD {url} failed: {error}"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("{url} answered HTTP {status} to a HEAD request"));
+    }
+    ensure_final_https(url, &response)?;
+    response
+        .headers()
+        .get("content-length")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| format!("{url} has no Content-Length"))
+}
+
+/// The verified phar file of a package with `format: "phar"` artifacts.
+fn phar_path_for(package: &str) -> Option<&'static str> {
+    match package {
+        "composer" => Some("composer.phar"),
+        _ => None,
+    }
+}
+
+/// Why a configured target has no artifact for a package. Used in the
+/// manifest notes so customers get an explicit compatibility reason.
+fn unavailable_reason(package: &str, target: &str) -> Option<&'static str> {
+    match (package, target) {
+        ("flutter", "linux-aarch64") => Some(
+            "Google publishes the Flutter Linux SDK for x86_64 only; there is no official linux-aarch64 host archive",
+        ),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------- clang / llvm
+
+/// LLVM's official Linux release binaries: one `tar.xz` per architecture with
+/// clang, clang++, lld, lldb and the libc++ headers/libraries, plus a
+/// `<asset>.jsonl` SLSA build-provenance bundle.
+fn discover_clang(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.clang.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let releases = github_stable_releases(CLANG_REPO, token)?;
+    clang_plan_from_releases(cfg, package, &releases, held)
+}
+
+fn clang_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match clang_plan_from_release(cfg, package, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("clang@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "clang: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn clang_plan_from_release(
+    cfg: &Config,
+    package: &PackageConfig,
+    release: &Value,
+) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let Some(version) = tag.strip_prefix("llvmorg-") else {
+        return Ok(None);
+    };
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release_assets(release)?;
+    let page = required_str(release, "html_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.clang_arch(target)?;
+        let name = format!("LLVM-{version}-Linux-{arch}.tar.xz");
+        let Some(asset) = release_asset(assets, &name) else {
+            log(format!(
+                "clang {version}: release {tag} has no {name}; not published for {target}"
+            ));
+            continue;
+        };
+        let sums_name = format!("{name}.jsonl");
+        let Some(bundle) = release_asset(assets, &sums_name) else {
+            return Err(format!("Clang release {tag} publishes no {sums_name}"));
+        };
+        let digest = asset_sha256(asset, &name)?;
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(asset_url(asset)?),
+                sha256: Some(digest.clone()),
+                size: Some(asset_size(asset, &name)?),
+                file: Some(name),
+                digest: Some(digest),
+                source: Some(page.clone()),
+                sums_url: Some(asset_url(bundle)?),
+                format: Some("tar.xz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "clang".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        attestations: package.github_attestations,
+        release_date: release_published_date(release),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+/// Validate the DSSE payload of LLVM's build-provenance bundle (the
+/// `LLVM-<version>-Linux-<arch>.tar.xz.jsonl` release asset): it must be the
+/// SLSA provenance v1 predicate and name this exact artifact digest. CI
+/// additionally verifies the bundle signature with
+/// `gh attestation verify --repo llvm/llvm-project`.
+fn check_llvm_attestation_bundle(text: &str, digest: &str) -> Result<(), String> {
+    for line in text.lines() {
+        let Ok(bundle) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(payload) = bundle
+            .get("dsseEnvelope")
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(bytes) = B64.decode(payload) else {
+            continue;
+        };
+        let Ok(statement) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if statement.get("predicateType").and_then(Value::as_str)
+            != Some("https://slsa.dev/provenance/v1")
+        {
+            continue;
+        }
+        let subjects = statement
+            .get("subject")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if subjects.iter().any(|subject| {
+            subject
+                .get("digest")
+                .and_then(|digests| digests.get("sha256"))
+                .and_then(Value::as_str)
+                == Some(digest)
+        }) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "LLVM's build-provenance bundle does not name the artifact digest {digest}"
+    ))
+}
+
+// -------------------------------------------------------------- flutter
+
+/// Google's Flutter Linux SDK archives for the stable channel, with the exact
+/// SHA-256 published in `releases_linux.json`. Only x86_64 host archives are
+/// published; linux-aarch64 is skipped with an explicit reason.
+fn discover_flutter(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.flutter.channels must be exactly [{id: \"stable\"}]"
+                .into(),
+        );
+    }
+    let document = http_json(FLUTTER_RELEASES_LINUX, None)?;
+    flutter_plan_from_releases(cfg, package, &document, held)
+}
+
+fn flutter_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    document: &Value,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let releases = document
+        .get("releases")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{FLUTTER_RELEASES_LINUX} has no releases array"))?;
+    let mut seen = BTreeSet::new();
+    let mut found = Vec::new();
+    for release in releases {
+        if release.get("channel").and_then(Value::as_str) != Some("stable") {
+            continue;
+        }
+        match flutter_plan_from_release(cfg, package, release) {
+            Ok(Some(item)) => {
+                if !seen.insert(item.version.clone()) {
+                    continue;
+                }
+                if !held.contains(&format!("flutter@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "flutter: skipping release {:?}: {error}",
+                release
+                    .get("version")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn flutter_plan_from_release(
+    cfg: &Config,
+    package: &PackageConfig,
+    release: &Value,
+) -> Result<Option<PlanItem>, String> {
+    let version = required_str(release, "version")?;
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let Some(archive) = release
+        .get("archive")
+        .and_then(Value::as_str)
+        .filter(|archive| !archive.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(sha256) = release
+        .get("sha256")
+        .and_then(Value::as_str)
+        .filter(|digest| is_sha256_hex(digest))
+    else {
+        return Err(format!("Flutter release {version} has no SHA-256"));
+    };
+    let release_arch = release
+        .get("dart_sdk_arch")
+        .and_then(Value::as_str)
+        .unwrap_or("x64");
+    let url = format!("{FLUTTER_ARCHIVE_BASE}{archive}");
+    let file = archive.rsplit('/').next().unwrap_or(archive).to_string();
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.flutter_arch(target)?;
+        if arch != release_arch {
+            log(format!(
+                "flutter {version}: no official {arch} Linux archive in {FLUTTER_RELEASES_LINUX}; not published for {target}"
+            ));
+            continue;
+        }
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(url.clone()),
+                sha256: Some(sha256.to_string()),
+                file: Some(file.clone()),
+                source: Some(FLUTTER_RELEASES_LINUX.to_string()),
+                format: Some("tar.xz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    let _ = package;
+    Ok(Some(PlanItem {
+        package: "flutter".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release
+            .get("release_date")
+            .and_then(Value::as_str)
+            .map(|stamp| truncate_chars(stamp, 10)),
+        source: release
+            .get("dart_sdk_version")
+            .and_then(Value::as_str)
+            .map(|dart| json!({ "dart": dart })),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+/// `Dart SDK version: 3.14.0 (stable) (...) on "linux_x64"` (stderr) from
+/// `dart --version`.
+fn dart_sdk_version(output: &str) -> Option<String> {
+    let rest = output.split("Dart SDK version: ").nth(1)?;
+    rest.split_whitespace()
+        .next()
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
+// -------------------------------------------------------------- composer
+
+/// Composer releases: one `composer.phar` per release (architecture
+/// independent). The GitHub asset digest is cross-checked against
+/// getcomposer.org's published SHA-256 and the phar is installed with a
+/// generated `bin/composer` wrapper.
+fn discover_composer(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.composer.channels must be exactly [{id: \"stable\"}]"
+                .into(),
+        );
+    }
+    let releases = github_stable_releases(COMPOSER_REPO, token)?;
+    composer_plan_from_releases(cfg, package, &releases, held)
+}
+
+fn composer_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match composer_plan_from_release(cfg, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("composer@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "composer: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn composer_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release_assets(release)?;
+    let name = "composer.phar";
+    let Some(asset) = release_asset(assets, name) else {
+        return Err(format!("Composer release {tag} publishes no {name}"));
+    };
+    let digest = asset_sha256(asset, name)?;
+    let size = asset_size(asset, name)?;
+    let url = asset_url(asset)?;
+    // getcomposer.org publishes the same SHA-256 for every release.
+    let sums_url = format!("https://getcomposer.org/download/{version}/composer.phar.sha256sum");
+    let page = required_str(release, "html_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for (target, _target_config) in &cfg.targets.entries {
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(url.clone()),
+                sha256: Some(digest.clone()),
+                size: Some(size),
+                file: Some(name.to_string()),
+                digest: Some(digest.clone()),
+                source: Some(page.clone()),
+                sums_url: Some(sums_url.clone()),
+                format: Some("phar".into()),
+                strip_components: Some(0),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    Ok(Some(PlanItem {
+        package: "composer".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release_published_date(release),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+// ------------------------------------------------------------------ zig
+
+/// Zig's official download index: one `.tar.xz` per target, with the SHA-256
+/// and size published in `index.json`.
+fn discover_zig(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.zig.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let document = http_json(ZIG_INDEX, None)?;
+    zig_plan_from_index(cfg, package, &document, held)
+}
+
+fn zig_plan_from_index(
+    cfg: &Config,
+    package: &PackageConfig,
+    document: &Value,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let versions = document
+        .as_object()
+        .ok_or_else(|| format!("{ZIG_INDEX} is not a JSON object"))?;
+    let mut found = Vec::new();
+    for (version, entry) in versions {
+        if version == "master" {
+            continue;
+        }
+        if held.contains(&format!("zig@{version}")) {
+            continue;
+        }
+        let Some(parsed) = Version::parse(version) else {
+            continue;
+        };
+        if parsed.is_prerelease() {
+            continue;
+        }
+        match zig_plan_from_version(cfg, version, entry) {
+            Ok(Some(item)) => found.push(item),
+            Ok(None) => {}
+            Err(error) => log(format!("zig: skipping version {version}: {error}")),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn zig_plan_from_version(
+    cfg: &Config,
+    version: &str,
+    entry: &Value,
+) -> Result<Option<PlanItem>, String> {
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.zig_arch(target)?;
+        let Some(binary) = entry.get(format!("{arch}-linux")) else {
+            log(format!(
+                "zig {version}: index.json has no {arch}-linux build; not published for {target}"
+            ));
+            continue;
+        };
+        let tarball = required_str(binary, "tarball")?;
+        let shasum = required_str(binary, "shasum")?;
+        if !is_sha256_hex(shasum) {
+            return Err(format!(
+                "zig {version} {arch}-linux shasum is not a SHA-256 hex digest"
+            ));
+        }
+        let size = binary
+            .get("size")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            })
+            .ok_or_else(|| format!("zig {version} {arch}-linux has no size"))?;
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(tarball.to_string()),
+                sha256: Some(shasum.to_string()),
+                size: Some(size),
+                file: tarball.rsplit('/').next().map(str::to_string),
+                source: Some(ZIG_INDEX.to_string()),
+                format: Some("tar.xz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "zig".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: entry
+            .get("date")
+            .and_then(Value::as_str)
+            .map(|date| truncate_chars(date, 10)),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+// --------------------------------------------------------------- kotlin
+
+/// The Kotlin command-line compiler: `kotlin-compiler-<version>.zip` per
+/// release (architecture independent; it runs on a JVM), verified against the
+/// GitHub asset digest and the published `.zip.sha256`.
+fn discover_kotlin(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.kotlin.channels must be exactly [{id: \"stable\"}]"
+                .into(),
+        );
+    }
+    let releases = github_stable_releases(KOTLIN_REPO, token)?;
+    kotlin_plan_from_releases(cfg, package, &releases, held)
+}
+
+fn kotlin_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match kotlin_plan_from_release(cfg, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("kotlin@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "kotlin: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn kotlin_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release_assets(release)?;
+    let name = format!("kotlin-compiler-{version}.zip");
+    let Some(asset) = release_asset(assets, &name) else {
+        return Err(format!("Kotlin release {tag} publishes no {name}"));
+    };
+    let sums_name = format!("{name}.sha256");
+    let Some(sums_asset) = release_asset(assets, &sums_name) else {
+        return Err(format!("Kotlin release {tag} publishes no {sums_name}"));
+    };
+    let digest = asset_sha256(asset, &name)?;
+    let size = asset_size(asset, &name)?;
+    let url = asset_url(asset)?;
+    let page = required_str(release, "html_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for (target, _target_config) in &cfg.targets.entries {
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(url.clone()),
+                sha256: Some(digest.clone()),
+                size: Some(size),
+                file: Some(name.clone()),
+                digest: Some(digest.clone()),
+                source: Some(page.clone()),
+                sums_url: Some(asset_url(sums_asset)?),
+                format: Some("zip".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    Ok(Some(PlanItem {
+        package: "kotlin".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release_published_date(release),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+// ---------------------------------------------------------------- cmake
+
+/// CMake's official Linux archives, verified against the GitHub asset digest
+/// and the release's `cmake-<version>-SHA-256.txt`.
+fn discover_cmake(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.cmake.channels must be exactly [{id: \"stable\"}]".into(),
+        );
+    }
+    let releases = github_stable_releases(CMAKE_REPO, token)?;
+    cmake_plan_from_releases(cfg, package, &releases, held)
+}
+
+fn cmake_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match cmake_plan_from_release(cfg, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("cmake@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "cmake: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches as usize);
+    Ok(found)
+}
+
+fn cmake_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let version = tag.strip_prefix('v').unwrap_or(tag);
+    let Some(parsed) = Version::parse(version) else {
+        return Ok(None);
+    };
+    if parsed.is_prerelease() {
+        return Ok(None);
+    }
+    let assets = release_assets(release)?;
+    let sums_name = format!("cmake-{version}-SHA-256.txt");
+    let Some(sums_asset) = release_asset(assets, &sums_name) else {
+        return Err(format!("CMake release {tag} publishes no {sums_name}"));
+    };
+    let sums_url = asset_url(sums_asset)?;
+    let page = required_str(release, "html_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for (target, target_config) in &cfg.targets.entries {
+        let arch = target_config.cmake_arch(target)?;
+        let name = format!("cmake-{version}-linux-{arch}.tar.gz");
+        let Some(asset) = release_asset(assets, &name) else {
+            log(format!(
+                "cmake {version}: release {tag} has no {name}; not published for {target}"
+            ));
+            continue;
+        };
+        let digest = asset_sha256(asset, &name)?;
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(asset_url(asset)?),
+                sha256: Some(digest.clone()),
+                size: Some(asset_size(asset, &name)?),
+                file: Some(name),
+                digest: Some(digest),
+                source: Some(page.clone()),
+                sums_url: Some(sums_url.clone()),
+                format: Some("tar.gz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "cmake".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release_published_date(release),
+        targets,
+        ..PlanItem::default()
+    }))
+}
+
+// --------------------------------------------------------------- gradle
+
+/// Gradle distributions: architecture independent zips from
+/// services.gradle.org, with the SHA-256 published in its version metadata
+/// (and at `<zip>.sha256`).
+fn discover_gradle(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.gradle.channels must be exactly [{id: \"stable\"}]"
+                .into(),
+        );
+    }
+    let document = http_json(GRADLE_VERSIONS, None)?;
+    gradle_plan_from_versions(cfg, package, &document, held)
+}
+
+fn gradle_plan_from_versions(
+    cfg: &Config,
+    package: &PackageConfig,
+    document: &Value,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let releases = document
+        .as_array()
+        .ok_or_else(|| format!("{GRADLE_VERSIONS} did not return a JSON array"))?;
+    // Collect the final (non-snapshot/RC/broken) versions first; the size
+    // probe below only runs for the versions that are kept.
+    let mut candidates: Vec<(String, String, String, String, Option<String>)> = Vec::new();
+    for release in releases {
+        if truthy(release.get("snapshot"))
+            || truthy(release.get("nightly"))
+            || truthy(release.get("releaseNightly"))
+            || truthy(release.get("broken"))
+        {
+            continue;
+        }
+        if !truthy(release.get("final")) {
+            continue;
+        }
+        let version = required_str(release, "version")?;
+        if Version::parse(version).is_none() || held.contains(&format!("gradle@{version}")) {
+            continue;
+        }
+        let (Some(url), Some(sums_url), Some(checksum)) = (
+            release.get("downloadUrl").and_then(Value::as_str),
+            release.get("checksumUrl").and_then(Value::as_str),
+            release.get("checksum").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        if !is_sha256_hex(checksum) {
+            continue;
+        }
+        let release_date = release
+            .get("buildTime")
+            .and_then(Value::as_str)
+            .and_then(gradle_release_date);
+        candidates.push((
+            version.to_string(),
+            url.to_string(),
+            sums_url.to_string(),
+            checksum.to_string(),
+            release_date,
+        ));
+    }
+    candidates.sort_by(|a, b| version::compare(&b.0, &a.0));
+    candidates.dedup_by(|a, b| a.0 == b.0);
+    candidates.truncate(package.keep_patches as usize);
+    let mut found = Vec::new();
+    for (version, url, sums_url, checksum, release_date) in candidates {
+        let file = url
+            .rsplit('/')
+            .next()
+            .unwrap_or("gradle-bin.zip")
+            .to_string();
+        let mut targets = BTreeMap::new();
+        for (target, _target_config) in &cfg.targets.entries {
+            targets.insert(
+                target.clone(),
+                TargetInfo {
+                    url: Some(url.clone()),
+                    sha256: Some(checksum.clone()),
+                    file: Some(file.clone()),
+                    source: Some(GRADLE_VERSIONS.to_string()),
+                    sums_url: Some(sums_url.clone()),
+                    format: Some("zip".into()),
+                    strip_components: Some(1),
+                    ..TargetInfo::default()
+                },
+            );
+        }
+        found.push(PlanItem {
+            package: "gradle".into(),
+            version,
+            channel: "stable".into(),
+            kind: "upstream".into(),
+            revision: 1,
+            release_date,
+            targets,
+            ..PlanItem::default()
+        });
+    }
+    Ok(found)
+}
+
+/// `20261110162215+0000` -> `2026-11-10`.
+fn gradle_release_date(build_time: &str) -> Option<String> {
+    let date = build_time.get(..8)?;
+    if !date.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(format!("{}-{}-{}", &date[0..4], &date[4..6], &date[6..8]))
+}
+
+// ---------------------------------------------------------------- maven
+
+/// Apache Maven binary archives from the official Apache archive directory.
+/// The published `.sha512` is the upstream digest (the manifest pins the
+/// computed SHA-256 of the downloaded bytes).
+fn discover_maven(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    // Maven's update stream is <major>.<minor> (3.9, 3.10, …), so the
+    // configured channels are informational and need not list every line.
+    if channel_ids(package).is_empty() {
+        return Err(
+            "catalog.config.json packages.maven.channels must list at least one channel".into(),
+        );
+    }
+    let listing = http_text(MAVEN_ARCHIVE)?;
+    maven_plan_from_listing(cfg, package, &listing, held)
+}
+
+/// Maven version directories (`3.9.16/`) in Apache's archive listing.
+fn maven_versions_from_listing(html: &str) -> Vec<String> {
+    let mut versions = BTreeSet::new();
+    for fragment in html.split("href=\"").skip(1) {
+        let Some(end) = fragment.find('"') else {
+            continue;
+        };
+        let href = &fragment[..end];
+        let Some(version) = href.strip_suffix('/') else {
+            continue;
+        };
+        // Only exact directory names like `3.9.16/` (no nested paths, no
+        // parent-directory links).
+        if version.is_empty() || version.contains('/') || version.starts_with('.') {
+            continue;
+        }
+        if Version::parse(version).is_some() {
+            versions.insert(version.to_string());
+        }
+    }
+    versions.into_iter().collect()
+}
+
+fn maven_plan_from_listing(
+    cfg: &Config,
+    package: &PackageConfig,
+    html: &str,
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut versions = maven_versions_from_listing(html);
+    versions.sort_by(|a, b| version::compare(b, a));
+    versions.truncate(package.keep_patches as usize);
+    let mut found = Vec::new();
+    for version in versions {
+        if held.contains(&format!("maven@{version}")) {
+            continue;
+        }
+        let name = format!("apache-maven-{version}-bin.tar.gz");
+        let base = format!("{MAVEN_ARCHIVE}{version}/binaries/");
+        let url = format!("{base}{name}");
+        let mut targets = BTreeMap::new();
+        for (target, _target_config) in &cfg.targets.entries {
+            targets.insert(
+                target.clone(),
+                TargetInfo {
+                    url: Some(url.clone()),
+                    file: Some(name.clone()),
+                    source: Some(MAVEN_ARCHIVE.to_string()),
+                    sums_url: Some(format!("{base}{name}.sha512")),
+                    format: Some("tar.gz".into()),
+                    strip_components: Some(1),
+                    ..TargetInfo::default()
+                },
+            );
+        }
+        let channel = default_channel(&version);
+        found.push(PlanItem {
+            package: "maven".into(),
+            version,
+            channel,
+            kind: "upstream".into(),
+            revision: 1,
+            targets,
+            ..PlanItem::default()
+        });
+    }
+    Ok(found)
+}
+
 fn load_previous(directory: Option<&Path>) -> Result<Option<Value>, String> {
     let Some(directory) = directory else {
         return Ok(None);
@@ -2380,6 +3511,14 @@ fn cmd_discover(
             "bun" => discover_bun(&cfg, package, &held, token.as_deref())?,
             "deno" => discover_deno(&cfg, package, &held, token.as_deref())?,
             "dotnet" => discover_dotnet(&cfg, package, &held)?,
+            "clang" => discover_clang(&cfg, package, &held, token.as_deref())?,
+            "flutter" => discover_flutter(&cfg, package, &held)?,
+            "composer" => discover_composer(&cfg, package, &held, token.as_deref())?,
+            "zig" => discover_zig(&cfg, package, &held)?,
+            "kotlin" => discover_kotlin(&cfg, package, &held, token.as_deref())?,
+            "cmake" => discover_cmake(&cfg, package, &held, token.as_deref())?,
+            "gradle" => discover_gradle(&cfg, package, &held)?,
+            "maven" => discover_maven(&cfg, package, &held)?,
             other => {
                 return Err(format!(
                     "catalog.config.json packages.{other} has no catalog provider"
@@ -2645,9 +3784,10 @@ fn run_check(
     args: &[String],
     expect: &str,
     home: &Path,
+    hints: &[(String, String)],
 ) -> Result<String, String> {
     // RAST runs under MemoryDenyWriteExecute; check the same way.
-    let environment = check_environment(root, home);
+    let environment = check_environment(root, home, hints);
     let captured = run_capture(
         &root.join(executable),
         args,
@@ -2739,12 +3879,55 @@ fn pbs_sums(
     let mut sums = BTreeMap::new();
     for line in text.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() == 2 {
-            sums.insert(parts[1].to_string(), parts[0].to_string());
+        match parts.as_slice() {
+            // `<digest>  <file>` (SHASUMS256.txt style).
+            [digest, file] => {
+                sums.insert((*file).to_string(), digest.to_ascii_lowercase());
+            }
+            // A bare digest (`composer.phar.sha256sum`, Apache `.sha512`,
+            // Kotlin `.zip.sha256`, Gradle `.sha256`) is stored under "".
+            [digest]
+                if digest.len() == 64
+                    && digest
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)) =>
+            {
+                sums.insert(String::new(), (*digest).to_string());
+            }
+            [digest] if is_sha512_hex(digest) => {
+                sums.insert(String::new(), (*digest).to_string());
+            }
+            _ => {}
         }
     }
     cache.insert(url.to_string(), sums.clone());
     Ok(sums)
+}
+
+/// One published digest from a parsed checksum document: `file` when named,
+/// otherwise the bare digest stored under `""`.
+fn published_digest(
+    sums: &BTreeMap<String, String>,
+    file: Option<&str>,
+    length: usize,
+) -> Result<String, String> {
+    let label = file.unwrap_or("the artifact");
+    let Some(value) = file
+        .and_then(|file| sums.get(file))
+        .or_else(|| sums.get(""))
+    else {
+        return Err(format!("no published checksum for {label}"));
+    };
+    let valid = value.len() == length
+        && value
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if !valid {
+        return Err(format!(
+            "the published checksum for {label} is not a {length}-digit hex digest"
+        ));
+    }
+    Ok(value.clone())
 }
 
 fn optional_executables(package: &str) -> &'static [(&'static str, &'static str)] {
@@ -2847,8 +4030,12 @@ fn http_text(url: &str) -> Result<String, String> {
 
 /// Environment for the version checks: no inherited state, a writable home,
 /// and the JIT-free Node.js settings RAST itself runs with.
-fn check_environment(root: &Path, home: &Path) -> Vec<(String, String)> {
-    vec![
+fn check_environment(
+    root: &Path,
+    home: &Path,
+    hints: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut environment = vec![
         (
             "PATH".to_string(),
             format!("{}/bin:/usr/local/bin:/usr/bin:/bin", root.display()),
@@ -2868,7 +4055,24 @@ fn check_environment(root: &Path, home: &Path) -> Vec<(String, String)> {
         // .NET's first-run experience must not write outside the temp home.
         ("DOTNET_CLI_TELEMETRY_OPTOUT".to_string(), "1".to_string()),
         ("DOTNET_NOLOGO".to_string(), "1".to_string()),
-    ]
+        // Flutter/Gradle/Maven and other CI-aware tools: non-interactive,
+        // no analytics, caches under the writable temp home.
+        ("CI".to_string(), "true".to_string()),
+        ("FLUTTER_SUPPRESS_ANALYTICS".to_string(), "true".to_string()),
+    ];
+    // Runtime env hints (e.g. JAVA_HOME, DOTNET_ROOT, LD_LIBRARY_PATH) apply
+    // to the checks too, exactly as in the installer; `{root}` is the
+    // extracted prefix. Fixed entries win, so a hint can never replace
+    // PATH/HOME/TMPDIR.
+    for (name, value) in hints {
+        if !environment.iter().any(|(existing, _)| existing == name) {
+            environment.push((
+                name.clone(),
+                value.replace("{root}", &root.display().to_string()),
+            ));
+        }
+    }
+    environment
 }
 
 /// Decode an ASCII-armored OpenPGP block (`-----BEGIN PGP PUBLIC KEY BLOCK-----`)
@@ -3259,6 +4463,143 @@ fn verify_item(
             expected_sizes[0] = None;
             verification = ".NET release metadata SHA-512 verified against the downloaded SDK archive; the manifest pins the computed SHA-256; dotnet --version, --list-sdks and --list-runtimes run on the native runner".into();
         }
+        "clang" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("clang {} has no SHA-256 in the plan", item.version))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("the GitHub asset digest differs from the planned SHA-256".into());
+            }
+            let bundle = info.sums_url.as_deref().ok_or_else(|| {
+                format!(
+                    "clang {} has no provenance bundle in the plan",
+                    item.version
+                )
+            })?;
+            let text = http_text(bundle)?;
+            check_llvm_attestation_bundle(&text, &expected)?;
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the GitHub release asset digest, named by LLVM's SLSA build-provenance bundle; gh attestation verify confirms the bundle signature; bytes re-hashed in CI; clang, clang++, ld.lld and lldb (with LD_LIBRARY_PATH=<prefix>/lib) run on the native runner".into();
+        }
+        "flutter" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("flutter {} has no SHA-256 in the plan", item.version))?;
+            if !is_sha256_hex(&expected) {
+                return Err("flutter SHA-256 in the plan is not a SHA-256 digest".into());
+            }
+            expected_sha256[0] = Some(expected);
+            expected_sizes[0] = Some(http_content_length(planned[0].url)?);
+            verification = "SHA-256 from Google's official releases_linux.json metadata; the size comes from the storage object; bytes re-hashed in CI; flutter --version and dart --version run on the native runner".into();
+        }
+        "composer" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("composer {} has no SHA-256 in the plan", item.version))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("the GitHub asset digest differs from the planned SHA-256".into());
+            }
+            let sums_url = info.sums_url.as_deref().ok_or_else(|| {
+                format!("composer {} has no checksum URL in the plan", item.version)
+            })?;
+            let sums = pbs_sums(sums_url, sums_cache)?;
+            let published = published_digest(&sums, info.file.as_deref(), 64)?;
+            if published != expected {
+                return Err(
+                    "the getcomposer.org SHA-256 differs from the GitHub asset digest".into(),
+                );
+            }
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the GitHub release asset digest, equal to getcomposer.org's published composer.phar.sha256sum; bytes re-hashed in CI; the generated bin/composer wrapper runs composer --version with the PHP CLI on PATH".into();
+        }
+        "zig" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("zig {} has no SHA-256 in the plan", item.version))?;
+            if !is_sha256_hex(&expected) {
+                return Err("zig SHA-256 in the plan is not a SHA-256 digest".into());
+            }
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 and size from ziglang.org's download index.json; bytes re-hashed in CI; zig version runs on the native runner".into();
+        }
+        "kotlin" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("kotlin {} has no SHA-256 in the plan", item.version))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("the GitHub asset digest differs from the planned SHA-256".into());
+            }
+            let sums_url = info.sums_url.as_deref().ok_or_else(|| {
+                format!("kotlin {} has no checksum URL in the plan", item.version)
+            })?;
+            let sums = pbs_sums(sums_url, sums_cache)?;
+            let published = published_digest(&sums, info.file.as_deref(), 64)?;
+            if published != expected {
+                return Err(
+                    "the published .zip.sha256 differs from the GitHub asset digest".into(),
+                );
+            }
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the GitHub release asset digest, equal to the published kotlin-compiler .zip.sha256; bytes re-hashed in CI; kotlinc -version runs with the JDK on PATH".into();
+        }
+        "cmake" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("cmake {} has no SHA-256 in the plan", item.version))?;
+            if info.digest.as_deref() != Some(expected.as_str()) {
+                return Err("the GitHub asset digest differs from the planned SHA-256".into());
+            }
+            let sums_url = info
+                .sums_url
+                .as_deref()
+                .ok_or_else(|| format!("cmake {} has no checksum URL in the plan", item.version))?;
+            let sums = pbs_sums(sums_url, sums_cache)?;
+            let published = published_digest(&sums, info.file.as_deref(), 64)?;
+            if published != expected {
+                return Err("the release SHA-256.txt differs from the GitHub asset digest".into());
+            }
+            expected_sha256[0] = Some(expected);
+            verification = "SHA-256 from the GitHub release asset digest, equal to the release SHA-256.txt; bytes re-hashed in CI; cmake --version and ctest --version run on the native runner".into();
+        }
+        "gradle" => {
+            let expected = info
+                .sha256
+                .clone()
+                .ok_or_else(|| format!("gradle {} has no SHA-256 in the plan", item.version))?;
+            let sums_url = info.sums_url.as_deref().ok_or_else(|| {
+                format!("gradle {} has no checksum URL in the plan", item.version)
+            })?;
+            let sums = pbs_sums(sums_url, sums_cache)?;
+            let published = published_digest(&sums, info.file.as_deref(), 64)?;
+            if published != expected {
+                return Err("the published .sha256 differs from the planned SHA-256".into());
+            }
+            expected_sha256[0] = Some(expected);
+            expected_sizes[0] = Some(http_content_length(planned[0].url)?);
+            verification = "SHA-256 from Gradle's version metadata, equal to the published .sha256; bytes re-hashed in CI; gradle --version runs with the JDK on PATH".into();
+        }
+        "maven" => {
+            let sums_url = info
+                .sums_url
+                .as_deref()
+                .ok_or_else(|| format!("maven {} has no checksum URL in the plan", item.version))?;
+            let sums = pbs_sums(sums_url, sums_cache)?;
+            let published = published_digest(&sums, info.file.as_deref(), 128)?;
+            if !is_sha512_hex(&published) {
+                return Err("Apache's .sha512 file is not a SHA-512 digest".into());
+            }
+            expected_sha512[0] = Some(published);
+            expected_sizes[0] = Some(http_content_length(planned[0].url)?);
+            // The manifest pins the SHA-256 computed from the verified bytes.
+            expected_sha256[0] = None;
+            verification = "SHA-512 from Apache's published .sha512 file; bytes re-hashed in CI; mvn --version runs with the JDK on PATH".into();
+        }
         other => return Err(format!("not an upstream package: {other}")),
     }
     if verification.len() > 300 {
@@ -3317,6 +4658,7 @@ fn verify_item(
             // predicate; Deno attests with the in-toto release predicate.
             match item.package.as_str() {
                 "python" => verify_attestation(&archive_path, PBS_REPO)?,
+                "clang" if item.attestations => verify_attestation(&archive_path, CLANG_REPO)?,
                 "deno" if item.attestations => {
                     verify_deno_release_attestation(&sha256, gh_token().as_deref())?
                 }
@@ -3330,16 +4672,27 @@ fn verify_item(
             format: part.format.to_string(),
             strip_components: part.strip_components,
         });
-        archive::extract_archive(
-            &archive_path,
-            &root,
-            part.format,
-            part.strip_components,
-            archive::MAX_TOTAL_BYTES,
-            &mut progress,
-            &|| false,
-        )?;
-        let _ = fs::remove_file(&archive_path);
+        if part.format == "phar" {
+            // A verified single file (Composer): write it read-only into the
+            // prefix; the wrapper is generated once the runtime spec exists.
+            let path = phar_path_for(&item.package)
+                .ok_or_else(|| format!("{} is not a package with phar artifacts", item.package))?;
+            install::install_phar(&root, &archive_path, path)?;
+        } else {
+            let room = available_space(work)
+                .map(|free| free.saturating_sub(1024 * 1024 * 1024))
+                .unwrap_or(archive::MAX_TOTAL_BYTES);
+            archive::extract_archive(
+                &archive_path,
+                &root,
+                part.format,
+                part.strip_components,
+                room,
+                &mut progress,
+                &|| false,
+            )?;
+            let _ = fs::remove_file(&archive_path);
+        }
     }
     let home = work.join("home");
     fs::create_dir_all(&home)
@@ -3347,7 +4700,7 @@ fn verify_item(
     let mut bundled = BTreeMap::new();
     match item.package.as_str() {
         "nodejs" => {
-            let npm = run_check(&root, "bin/npm", &["--version".to_string()], "", &home)?;
+            let npm = run_check(&root, "bin/npm", &["--version".to_string()], "", &home, &[])?;
             let npm = npm.trim().to_string();
             if let Some(index_npm) = &item.index_npm {
                 if index_npm != &npm {
@@ -3359,7 +4712,14 @@ fn verify_item(
             bundled.insert("npm".to_string(), npm);
         }
         "python" => {
-            let pip = run_check(&root, "bin/pip3", &["--version".to_string()], "pip ", &home)?;
+            let pip = run_check(
+                &root,
+                "bin/pip3",
+                &["--version".to_string()],
+                "pip ",
+                &home,
+                &[],
+            )?;
             let version = pip
                 .split_whitespace()
                 .nth(1)
@@ -3372,7 +4732,7 @@ fn verify_item(
                 &root.join("dotnet"),
                 &["--list-runtimes".to_string()],
                 Some(&home),
-                Some(&check_environment(&root, &home)),
+                Some(&check_environment(&root, &home, &[])),
                 Duration::from_secs(120),
             )?;
             let text = format!("{}{}", captured.stdout, captured.stderr);
@@ -3409,6 +4769,43 @@ fn verify_item(
             }
             bundled.insert("runtime".to_string(), runtime);
         }
+        "flutter" => {
+            let captured = run_capture(
+                &root.join("bin/dart"),
+                &["--version".to_string()],
+                Some(&home),
+                Some(&check_environment(&root, &home, &[])),
+                Duration::from_secs(120),
+            )?;
+            let text = format!("{}{}", captured.stdout, captured.stderr);
+            if captured.exit_code != 0 {
+                return Err(format!(
+                    "dart --version exited {}: {}",
+                    captured.exit_code,
+                    truncate_chars(text.trim(), 300)
+                ));
+            }
+            let dart = dart_sdk_version(&text).ok_or_else(|| {
+                format!(
+                    "dart --version printed no Dart SDK version: {}",
+                    truncate_chars(text.trim(), 200)
+                )
+            })?;
+            if let Some(expected) = item
+                .source
+                .as_ref()
+                .and_then(|source| source.get("dart"))
+                .and_then(Value::as_str)
+                .filter(|dart| !dart.is_empty())
+            {
+                if expected != dart {
+                    return Err(format!(
+                        "Flutter's release metadata says Dart {expected}, the archive ships {dart}"
+                    ));
+                }
+            }
+            bundled.insert("dart".to_string(), dart);
+        }
         _ => {}
     }
     let mut optional = BTreeSet::new();
@@ -3418,11 +4815,22 @@ fn verify_item(
         }
     }
     let spec = runtime_spec(&item.package, &item.version, &bundled, &optional)?;
+    if let Some(phar) = phar_path_for(&item.package) {
+        // Executables of a phar package are wrappers around the verified phar.
+        install::write_phar_wrappers(&root, &spec.executables, phar)?;
+    }
     for executable in &spec.executables {
         if !is_executable_file(&root.join(&executable.path)) {
             return Err(format!("executable {} is missing", executable.path));
         }
     }
+    // The manifest's runtime env hints apply to every check (JAVA_HOME,
+    // DOTNET_ROOT, LD_LIBRARY_PATH, …); install.rs does the same.
+    let hints: Vec<(String, String)> = spec
+        .env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     let mut checks = Vec::new();
     for check in &spec.checks {
         let executable = spec
@@ -3436,6 +4844,7 @@ fn verify_item(
             &check.args,
             &check.expect,
             &home,
+            &hints,
         )?);
     }
     Ok(VerifiedItem {
@@ -3553,6 +4962,7 @@ fn php_result_fields(
         &["-v".to_string()],
         &format!("PHP {version}"),
         &home,
+        &[],
     )?;
     let modules = run_php_modules(&root.join("bin/php"))?;
     let extensions: BTreeSet<String> = modules
@@ -3884,6 +5294,158 @@ fn runtime_spec(
             env.insert("DOTNET_ROOT".into(), "{root}".into());
             path_dirs = vec![".".to_string()];
         }
+        "clang" => {
+            // lld's generic `bin/lld` driver refuses to link; the drivers are
+            // `ld.lld` (ELF), `ld64.lld` and `lld-link`, so expose/check
+            // `ld.lld`. lldb needs liblldb.so from the prefix's lib/.
+            for (name, path) in [
+                ("clang", "bin/clang"),
+                ("clang++", "bin/clang++"),
+                ("ld.lld", "bin/ld.lld"),
+                ("lldb", "bin/lldb"),
+            ] {
+                executables.push(manifest::Executable {
+                    name: name.into(),
+                    path: path.into(),
+                });
+            }
+            checks.push(manifest::VersionCheck {
+                executable: "clang".into(),
+                args: vec!["--version".into()],
+                expect: format!("clang version {version}"),
+                label: None,
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "clang++".into(),
+                args: vec!["--version".into()],
+                expect: format!("clang version {version}"),
+                label: Some("clang++".into()),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "ld.lld".into(),
+                args: vec!["--version".into()],
+                expect: format!("LLD {version}"),
+                label: Some("ld.lld".into()),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "lldb".into(),
+                args: vec!["--version".into()],
+                expect: format!("lldb version {version}"),
+                label: Some("lldb".into()),
+            });
+            // lldb links against lib/liblldb.so.<version> inside the prefix.
+            env.insert("LD_LIBRARY_PATH".into(), "{root}/lib".into());
+        }
+        "flutter" => {
+            executables.push(manifest::Executable {
+                name: "flutter".into(),
+                path: "bin/flutter".into(),
+            });
+            executables.push(manifest::Executable {
+                name: "dart".into(),
+                path: "bin/dart".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "flutter".into(),
+                args: vec!["--version".into()],
+                expect: format!("Flutter {version}"),
+                label: None,
+            });
+            if let Some(dart) = bundled.get("dart") {
+                checks.push(manifest::VersionCheck {
+                    executable: "dart".into(),
+                    args: vec!["--version".into()],
+                    expect: format!("Dart SDK version: {dart}"),
+                    label: Some("Dart".into()),
+                });
+            }
+        }
+        "composer" => {
+            executables.push(manifest::Executable {
+                name: "composer".into(),
+                path: "bin/composer".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "composer".into(),
+                args: vec!["--version".into()],
+                expect: format!("Composer version {version}"),
+                label: None,
+            });
+        }
+        "zig" => {
+            executables.push(manifest::Executable {
+                name: "zig".into(),
+                path: "zig".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "zig".into(),
+                args: vec!["version".into()],
+                expect: version.to_string(),
+                label: None,
+            });
+            // Zig's archive has no bin/: the executable is at the root.
+            path_dirs = vec![".".to_string()];
+        }
+        "kotlin" => {
+            executables.push(manifest::Executable {
+                name: "kotlinc".into(),
+                path: "bin/kotlinc".into(),
+            });
+            executables.push(manifest::Executable {
+                name: "kotlin".into(),
+                path: "bin/kotlin".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "kotlinc".into(),
+                args: vec!["-version".into()],
+                expect: version.to_string(),
+                label: None,
+            });
+        }
+        "cmake" => {
+            for name in ["cmake", "ctest", "cpack"] {
+                executables.push(manifest::Executable {
+                    name: name.into(),
+                    path: format!("bin/{name}"),
+                });
+            }
+            checks.push(manifest::VersionCheck {
+                executable: "cmake".into(),
+                args: vec!["--version".into()],
+                expect: format!("cmake version {version}"),
+                label: None,
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "ctest".into(),
+                args: vec!["--version".into()],
+                expect: format!("ctest version {version}"),
+                label: Some("ctest".into()),
+            });
+        }
+        "gradle" => {
+            executables.push(manifest::Executable {
+                name: "gradle".into(),
+                path: "bin/gradle".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "gradle".into(),
+                args: vec!["--version".into()],
+                expect: format!("Gradle {version}"),
+                label: None,
+            });
+        }
+        "maven" => {
+            executables.push(manifest::Executable {
+                name: "mvn".into(),
+                path: "bin/mvn".into(),
+            });
+            checks.push(manifest::VersionCheck {
+                executable: "mvn".into(),
+                args: vec!["--version".into()],
+                expect: format!("Apache Maven {version}"),
+                label: None,
+            });
+        }
         other => return Err(format!("unknown package {other:?}")),
     }
     let bundled = bundled
@@ -4114,6 +5676,33 @@ fn build_manifest(
                     "glibc": "2.27",
                     "notes": ".NET SDK (includes the runtime); DOTNET_ROOT points at the prefix. NUGET_PACKAGES and DOTNET_CLI_HOME stay per user."
                 }),
+                "clang" => json!({
+                    "glibc": "2.34",
+                    "notes": "LLVM's official Linux release binaries (built on Ubuntu 22.04): clang and clang++ compilers, ld.lld linker, lldb debugger; LLVM libraries are in lib/ and the libc++ headers in include/c++/v1."
+                }),
+                "flutter" => json!({
+                    "glibc": "2.31",
+                    "notes": "Google's official Flutter Linux SDK (includes the Dart SDK). Flutter keeps its cache and downloaded artifacts inside <prefix>/bin/cache, so it needs write access there; use a writable home for its per-user state."
+                }),
+                "composer" => json!({
+                    "notes": "composer.phar is installed read-only at the prefix root; bin/composer is a generated wrapper that runs it with the PHP interpreter found on PATH. A PHP CLI (for example the PHP runtime in this catalog) must be on PATH."
+                }),
+                "zig" => json!({
+                    "notes": "Statically linked Zig compiler; Zig caches (ZIG_GLOBAL_CACHE_DIR/ZIG_LOCAL_CACHE_DIR) stay per user."
+                }),
+                "kotlin" => json!({
+                    "notes": "Runs on the JVM: kotlinc and kotlin need a JDK (java on PATH, e.g. the Temurin JDK from this catalog)."
+                }),
+                "cmake" => json!({
+                    "glibc": "2.31",
+                    "notes": "CMake's official Linux binaries (cmake, ctest, cpack); no extra build toolchain is required for CMake itself."
+                }),
+                "gradle" => json!({
+                    "notes": "Architecture-independent distribution; gradle needs a JDK (java on PATH, e.g. the Temurin JDK from this catalog). Gradle's user home stays at ~/.gradle."
+                }),
+                "maven" => json!({
+                    "notes": "Architecture-independent distribution; mvn needs a JDK (java on PATH, e.g. the Temurin JDK from this catalog). Maven's local repository stays at ~/.m2."
+                }),
                 _ => json!({}),
             };
             (url.to_string(), Value::Object(provenance), requires)
@@ -4168,6 +5757,11 @@ fn build_manifest(
         artifact.insert("size".into(), json!(size));
         artifact.insert("format".into(), json!(format));
         artifact.insert("stripComponents".into(), json!(strip_components));
+        if format == "phar" {
+            let path = phar_path_for(&item.package)
+                .ok_or_else(|| format!("{} is not a package with phar artifacts", item.package))?;
+            artifact.insert("phar".into(), json!({ "path": path }));
+        }
         artifact.insert("provenance".into(), provenance);
         if requires
             .as_object()
@@ -4226,7 +5820,45 @@ fn build_manifest(
             "DOTNET_ROOT is the installed prefix; the SDK includes the runtime. NUGET_PACKAGES and DOTNET_CLI_HOME must stay in each user's home."
                 .into(),
         ),
+        "clang" => notes.push(
+            "clang and clang++ are the C/C++ compilers; the linker is ld.lld and the debugger lldb (runtime.env sets LD_LIBRARY_PATH=<prefix>/lib so lldb finds liblldb.so). The C++ standard library ships as libc++: headers in include/c++/v1, libraries in lib/ (link with -stdlib=libc++)."
+                .into(),
+        ),
+        "flutter" => notes.push(
+            "flutter and dart are in bin/. The SDK cache and downloaded artifacts live inside the prefix (bin/cache), so Flutter needs a writable prefix or a prewarmed cache; Linux host SDK archives are published for x86_64 only."
+                .into(),
+        ),
+        "composer" => notes.push(
+            "composer.phar is never executable and is only run through the generated bin/composer wrapper, which uses the php found on PATH. Install a PHP runtime first."
+                .into(),
+        ),
+        "zig" => notes.push(
+            "zig is a single statically linked executable at the prefix root (pathDirs \".\"); its caches stay in each user's home."
+                .into(),
+        ),
+        "kotlin" => notes.push(
+            "kotlinc and kotlin are in bin/ and run on a JVM: a JDK must be on PATH when they are used."
+                .into(),
+        ),
+        "cmake" => notes.push("cmake, ctest and cpack are in bin/.".into()),
+        "gradle" => notes.push(
+            "gradle is in bin/ and runs on a JVM: a JDK must be on PATH; Gradle keeps its user home in ~/.gradle."
+                .into(),
+        ),
+        "maven" => notes.push(
+            "mvn is in bin/ and runs on a JVM: a JDK must be on PATH; Maven keeps its local repository in ~/.m2."
+                .into(),
+        ),
         _ => {}
+    }
+    // Explicit compatibility reason when a configured target has no artifact.
+    for (target, _) in &cfg.targets.entries {
+        if item.targets.contains_key(target) {
+            continue;
+        }
+        if let Some(reason) = unavailable_reason(&item.package, target) {
+            notes.push(format!("Not available for {target}: {reason}."));
+        }
     }
     if !notes.is_empty() {
         manifest.insert(
@@ -6580,8 +8212,17 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
     const DOTNET_INDEX_ENTRY_FIXTURE: &str = r#"{"channel-version":"10.0","latest-release":"10.0.15","latest-release-date":"2026-11-10","latest-sdk":"10.0.404","latest-runtime":"10.0.15","support-phase":"active","release-type":"lts","releases.json":"https://builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json","eol-date":"2028-11-14"}"#;
     const DOTNET_RELEASES_FIXTURE: &str = r#"{"channel-version":"10.0","latest-sdk":"10.0.404","releases":[{"release-date":"2026-11-10","release-version":"10.0.15","runtime":{"version":"10.0.15"},"sdk":{"version":"10.0.404","files":[{"name":"dotnet-sdk-linux-arm64.tar.gz","rid":"linux-arm64","hash":"3533a3869da219cac45c567aadac3d8e96cdf1c6a04fe1c1d5fdeefea5d45af8424488f0144730d11b4a751f7ad546fb11e4c2b2725cd8401efee726711f8f11","url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-arm64.tar.gz"},{"name":"dotnet-sdk-linux-x64.tar.gz","rid":"linux-x64","hash":"577d0eb17fec33d029104c5c63a1ab0accc3e28776274abef2218dbac5af18d2109b5406d26b31d76f5c245215e3ba0926a94c20246c672c41847c9e1eb1dc50","url":"https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.404/dotnet-sdk-10.0.404-linux-x64.tar.gz"}]}}]}"#;
 
+    const CLANG_RELEASE_FIXTURE: &str = r#"{"tag_name":"llvmorg-23.1.5","prerelease":false,"draft":false,"published_at":"2026-11-03T21:35:47Z","html_url":"https://github.com/llvm/llvm-project/releases/tag/llvmorg-23.1.5","assets":[{"name":"LLVM-23.1.5-Linux-X64.tar.xz","size":2014093084,"digest":"sha256:f72edb0b36580ece7f52e23858f00c18fad4e87395ea7ad05d7e55c39f8fc78a","browser_download_url":"https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/LLVM-23.1.5-Linux-X64.tar.xz"},{"name":"LLVM-23.1.5-Linux-X64.tar.xz.jsonl","size":10990,"digest":"sha256:b2bb5d229cc071b00858b4ab0e414f4ba7218b7cdfa858b2cac281687769ed81","browser_download_url":"https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/LLVM-23.1.5-Linux-X64.tar.xz.jsonl"},{"name":"LLVM-23.1.5-Linux-ARM64.tar.xz","size":1828141344,"digest":"sha256:44f1e4b7a125b2763d56386a199928dd57ec32e151cc6042dce2f7b0da7bb651","browser_download_url":"https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/LLVM-23.1.5-Linux-ARM64.tar.xz"},{"name":"LLVM-23.1.5-Linux-ARM64.tar.xz.jsonl","size":11229,"digest":"sha256:e2cb38e1559d8da56705a4d4f6d4e148b4155e9700d4dcedfffd3b389015b808","browser_download_url":"https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.5/LLVM-23.1.5-Linux-ARM64.tar.xz.jsonl"}]}"#;
+    const FLUTTER_RELEASES_FIXTURE: &str = r#"{"current_release":{"beta":"d040ef5c5c4c8be0948207fadd35e87305920146","stable":"ab2912035e160d9cad6306df307576da6128ebdb"},"releases":[{"hash":"ab2912035e160d9cad6306df307576da6128ebdb","channel":"stable","version":"3.50.0","dart_sdk_version":"3.14.0","dart_sdk_arch":"x64","release_date":"2026-11-11T19:05:47.758707Z","archive":"stable/linux/flutter_linux_3.50.0-stable.tar.xz","sha256":"6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5"},{"hash":"c197ca5199e9ee5661e865596c9c07294dfab51c","channel":"stable","version":"3.47.9","dart_sdk_version":"3.13.7","dart_sdk_arch":"x64","release_date":"2026-10-29T19:22:44.517205Z","archive":"stable/linux/flutter_linux_3.47.9-stable.tar.xz","sha256":"25ed8c3c29d51a7353f2a944310b478af8214920639524b19c50a19e6c044c5a"},{"hash":"d040ef5c5c4c8be0948207fadd35e87305920146","channel":"beta","version":"3.51.0","dart_sdk_version":"3.15.0","dart_sdk_arch":"x64","release_date":"2026-11-12T19:00:00Z","archive":"beta/linux/flutter_linux_3.51.0-beta.tar.xz","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}"#;
+    const COMPOSER_RELEASE_FIXTURE: &str = r#"{"tag_name":"2.11.2","prerelease":false,"draft":false,"published_at":"2026-11-10T09:24:59Z","html_url":"https://github.com/composer/composer/releases/tag/2.11.2","assets":[{"name":"composer.phar.asc","size":589,"digest":"sha256:9a471a170440cb453d7f13e808cd05753704e866baea082967311acee62ce507","browser_download_url":"https://github.com/composer/composer/releases/download/2.11.2/composer.phar.asc"},{"name":"composer.phar","size":3815650,"digest":"sha256:dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028","browser_download_url":"https://github.com/composer/composer/releases/download/2.11.2/composer.phar"}]}"#;
+    const ZIG_INDEX_FIXTURE: &str = r#"{"master":{"version":"0.18.0-dev.1","date":"2026-11-14","x86_64-linux":{"tarball":"https://ziglang.org/builds/zig-x86_64-linux-0.18.0-dev.1.tar.xz","shasum":"1111111111111111111111111111111111111111111111111111111111111111","size":"58000000"}},"0.17.1":{"version":"0.17.1","date":"2026-10-02","x86_64-linux":{"tarball":"https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz","shasum":"3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a","size":"57411036"},"aarch64-linux":{"tarball":"https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz","shasum":"958ed7d1e00d0ea76590d27666efbf7a932281b3d7ba0c6b01b0ff26498f667f","size":"49471996"}}}"#;
+    const KOTLIN_RELEASE_FIXTURE: &str = r#"{"tag_name":"v2.4.21","prerelease":false,"draft":false,"published_at":"2026-10-08T09:25:15Z","html_url":"https://github.com/JetBrains/kotlin/releases/tag/v2.4.21","assets":[{"name":"kotlin-compiler-2.4.21.zip","size":89733618,"digest":"sha256:7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd","browser_download_url":"https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip"},{"name":"kotlin-compiler-2.4.21.zip.sha256","size":64,"digest":"sha256:69012ce92719f8fa0524ca69954e2c36800edd76c8cd7f74965550e53650ac05","browser_download_url":"https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip.sha256"}]}"#;
+    const CMAKE_RELEASE_FIXTURE: &str = r#"{"tag_name":"v4.5.0","prerelease":false,"draft":false,"published_at":"2026-11-12T18:53:08Z","html_url":"https://github.com/Kitware/CMake/releases/tag/v4.5.0","assets":[{"name":"cmake-4.5.0-linux-x86_64.tar.gz","size":67002501,"digest":"sha256:81f0d5b0960fb6adc8197030ffc827fba937640d51e73e39e0e9e40d88c66f6f","browser_download_url":"https://github.com/Kitware/CMake/releases/download/v4.5.0/cmake-4.5.0-linux-x86_64.tar.gz"},{"name":"cmake-4.5.0-linux-aarch64.tar.gz","size":53719606,"digest":"sha256:0c8447e7bba9701467b5ac6155d157aa9e309e71af4981f78bd4b9176107f553","browser_download_url":"https://github.com/Kitware/CMake/releases/download/v4.5.0/cmake-4.5.0-linux-aarch64.tar.gz"},{"name":"cmake-4.5.0-SHA-256.txt","size":2015,"digest":"sha256:32f7aaffd4f866c926835dbb95a8b08fd4c2f5a0b5899e97b2f29f6be3c0b020","browser_download_url":"https://github.com/Kitware/CMake/releases/download/v4.5.0/cmake-4.5.0-SHA-256.txt"}]}"#;
+    const GRADLE_VERSIONS_FIXTURE: &str = r#"[{"version":"9.9.1","buildTime":"20261110162215+0000","snapshot":false,"nightly":false,"releaseNightly":false,"activeRc":false,"rcFor":"","milestoneFor":"","broken":false,"downloadUrl":"https://services.gradle.org/distributions/gradle-9.9.1-bin.zip","checksumUrl":"https://services.gradle.org/distributions/gradle-9.9.1-bin.zip.sha256","checksum":"d8a18a7a841dd5df825d35a685fad6f2d7f12ac0c280e57b67c27b4a520ba228","released":true,"final":true},{"version":"9.9.0","buildTime":"20261028120000+0000","snapshot":false,"nightly":false,"releaseNightly":false,"activeRc":false,"rcFor":"","milestoneFor":"","broken":false,"downloadUrl":"https://services.gradle.org/distributions/gradle-9.9.0-bin.zip","checksumUrl":"https://services.gradle.org/distributions/gradle-9.9.0-bin.zip.sha256","checksum":"2222222222222222222222222222222222222222222222222222222222222222","released":true,"final":true},{"version":"9.10.0-rc1","buildTime":"20261113120000+0000","snapshot":false,"nightly":false,"releaseNightly":false,"activeRc":true,"rcFor":"9.10","milestoneFor":"","broken":false,"downloadUrl":"https://services.gradle.org/distributions/gradle-9.10.0-rc1-bin.zip","checksumUrl":"https://services.gradle.org/distributions/gradle-9.10.0-rc1-bin.zip.sha256","checksum":"3333333333333333333333333333333333333333333333333333333333333333","released":true,"final":false},{"version":"9.8.2","buildTime":"20260901000000+0000","snapshot":true,"nightly":false,"releaseNightly":false,"activeRc":false,"rcFor":"","milestoneFor":"","broken":false,"downloadUrl":"https://services.gradle.org/distributions/gradle-9.8.2-bin.zip","checksumUrl":"https://services.gradle.org/distributions/gradle-9.8.2-bin.zip.sha256","checksum":"4444444444444444444444444444444444444444444444444444444444444444","released":false,"final":true}]"#;
+    const MAVEN_LISTING_FIXTURE: &str = r#"<html><body><table><tr><td><a href="../">../</a></td></tr><tr><td><a href="3.10.1/">3.10.1/</a></td><td>2026-11-05 12:00</td><td>0</td></tr><tr><td><a href="3.10.0/">3.10.0/</a></td><td>2026-10-01 12:00</td><td>0</td></tr><tr><td><a href="3.9.16/">3.9.16/</a></td><td>2026-09-01 12:00</td><td>0</td></tr><tr><td><a href="README.txt">README.txt</a></td></tr></table></body></html>"#;
+
     fn providers_config() -> Config {
-        serde_json::from_str(r#"{"name": "RAST official catalog", "publisher": {"id": "rast", "name": "RAST", "url": "https://github.com/Enricko/rast-packages"}, "repository": "https://github.com/Enricko/rast-packages", "keyId": "rast-official-2026-11", "publicKey": "keys/rast-official-2026-11.pub.pem", "minRastVersion": "0.5.0", "expiresDays": 30, "refreshBeforeDays": 10, "allowedHosts": ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "static.rust-lang.org", "builds.dotnet.microsoft.com"], "targets": {"linux-x86_64": {"runner": "ubuntu-24.04", "go": "amd64", "node": "x64", "python": "x86_64", "rustTriple": "x86_64-unknown-linux-gnu", "javaArch": "x64", "bunArch": "x64", "denoArch": "x86_64", "dotnetRid": "linux-x64"}, "linux-aarch64": {"runner": "ubuntu-24.04-arm", "go": "arm64", "node": "arm64", "python": "aarch64", "rustTriple": "aarch64-unknown-linux-gnu", "javaArch": "aarch64", "bunArch": "aarch64", "denoArch": "aarch64", "dotnetRid": "linux-arm64"}}, "withheld": [], "revisions": {}, "packages": {"rust": {"name": "Rust", "description": "Rust toolchain", "homepage": "https://www.rust-lang.org", "license": "MIT OR Apache-2.0", "keepPatches": 1, "channels": [{"id": "stable", "label": "Rust stable", "status": "stable"}]}, "java": {"name": "Eclipse Temurin JDK", "description": "Temurin JDK", "homepage": "https://adoptium.net", "license": "GPL-2.0 WITH Classpath-exception-2.0", "keepPatches": 1, "channels": [{"id": "25", "label": "Temurin 25", "status": "LTS"}]}, "bun": {"name": "Bun", "description": "Bun runtime", "homepage": "https://bun.com", "license": "MIT", "keepPatches": 2, "channels": [{"id": "stable", "label": "Bun stable", "status": "stable"}]}, "deno": {"name": "Deno", "description": "Deno runtime", "homepage": "https://deno.com", "license": "MIT", "keepPatches": 2, "githubAttestations": true, "channels": [{"id": "stable", "label": "Deno stable", "status": "stable"}]}, "dotnet": {"name": ".NET SDK", "description": ".NET SDK and runtime", "homepage": "https://dotnet.microsoft.com", "license": "MIT", "keepPatches": 1, "channels": [{"id": "10.0", "label": ".NET 10", "status": "LTS"}]}}}"#).unwrap()
+        serde_json::from_str(r#"{"name": "RAST official catalog", "publisher": {"id": "rast", "name": "RAST", "url": "https://github.com/Enricko/rast-packages"}, "repository": "https://github.com/Enricko/rast-packages", "keyId": "rast-official-2026-11", "publicKey": "keys/rast-official-2026-11.pub.pem", "minRastVersion": "0.5.0", "expiresDays": 30, "refreshBeforeDays": 10, "allowedHosts": ["github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "static.rust-lang.org", "builds.dotnet.microsoft.com"], "targets": {"linux-x86_64": {"runner": "ubuntu-24.04", "go": "amd64", "node": "x64", "python": "x86_64", "rustTriple": "x86_64-unknown-linux-gnu", "javaArch": "x64", "bunArch": "x64", "denoArch": "x86_64", "dotnetRid": "linux-x64", "clangArch": "X64", "flutterArch": "x64", "cmakeArch": "x86_64", "zigArch": "x86_64"}, "linux-aarch64": {"runner": "ubuntu-24.04-arm", "go": "arm64", "node": "arm64", "python": "aarch64", "rustTriple": "aarch64-unknown-linux-gnu", "javaArch": "aarch64", "bunArch": "aarch64", "denoArch": "aarch64", "dotnetRid": "linux-arm64", "clangArch": "ARM64", "flutterArch": "arm64", "cmakeArch": "aarch64", "zigArch": "aarch64"}}, "withheld": [], "revisions": {}, "packages": {"rust": {"name": "Rust", "description": "Rust toolchain", "homepage": "https://www.rust-lang.org", "license": "MIT OR Apache-2.0", "keepPatches": 1, "channels": [{"id": "stable", "label": "Rust stable", "status": "stable"}]}, "java": {"name": "Eclipse Temurin JDK", "description": "Temurin JDK", "homepage": "https://adoptium.net", "license": "GPL-2.0 WITH Classpath-exception-2.0", "keepPatches": 1, "channels": [{"id": "25", "label": "Temurin 25", "status": "LTS"}]}, "bun": {"name": "Bun", "description": "Bun runtime", "homepage": "https://bun.com", "license": "MIT", "keepPatches": 2, "channels": [{"id": "stable", "label": "Bun stable", "status": "stable"}]}, "deno": {"name": "Deno", "description": "Deno runtime", "homepage": "https://deno.com", "license": "MIT", "keepPatches": 2, "githubAttestations": true, "channels": [{"id": "stable", "label": "Deno stable", "status": "stable"}]}, "dotnet": {"name": ".NET SDK", "description": ".NET SDK and runtime", "homepage": "https://dotnet.microsoft.com", "license": "MIT", "keepPatches": 1, "channels": [{"id": "10.0", "label": ".NET 10", "status": "LTS"}]}, "clang": {"name": "Clang/LLVM", "description": "LLVM C/C++ toolchain", "homepage": "https://llvm.org", "license": "Apache-2.0 WITH LLVM-exception", "keepPatches": 1, "githubAttestations": true, "channels": [{"id": "stable", "label": "LLVM stable", "status": "stable"}]}, "flutter": {"name": "Flutter", "description": "Flutter SDK and Dart", "homepage": "https://flutter.dev", "license": "BSD-3-Clause", "keepPatches": 2, "channels": [{"id": "stable", "label": "Flutter stable", "status": "stable"}]}, "composer": {"name": "Composer", "description": "Composer PHP dependency manager", "homepage": "https://getcomposer.org", "license": "MIT", "keepPatches": 2, "channels": [{"id": "stable", "label": "Composer stable", "status": "stable"}]}, "zig": {"name": "Zig", "description": "Zig compiler", "homepage": "https://ziglang.org", "license": "MIT", "keepPatches": 2, "channels": [{"id": "stable", "label": "Zig stable", "status": "stable"}]}, "kotlin": {"name": "Kotlin", "description": "Kotlin command-line compiler", "homepage": "https://kotlinlang.org", "license": "Apache-2.0", "keepPatches": 1, "channels": [{"id": "stable", "label": "Kotlin stable", "status": "stable"}]}, "cmake": {"name": "CMake", "description": "CMake build system", "homepage": "https://cmake.org", "license": "BSD-3-Clause", "keepPatches": 2, "channels": [{"id": "stable", "label": "CMake stable", "status": "stable"}]}, "gradle": {"name": "Gradle", "description": "Gradle build tool", "homepage": "https://gradle.org", "license": "Apache-2.0", "keepPatches": 2, "channels": [{"id": "stable", "label": "Gradle stable", "status": "stable"}]}, "maven": {"name": "Apache Maven", "description": "Maven build tool", "homepage": "https://maven.apache.org", "license": "Apache-2.0", "keepPatches": 2, "channels": [{"id": "3.10", "label": "Maven 3.10", "status": "stable"}]}}}"#).unwrap()
     }
 
     fn rust_doc() -> toml::Value {
@@ -6919,6 +8560,456 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
     }
 
     #[test]
+    fn clang_discovery_uses_llvm_release_binaries_and_attestation() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "clang").unwrap().clone();
+        assert!(package.github_attestations);
+        let items = clang_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(CLANG_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.version, "23.1.5");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.kind, "upstream");
+        assert!(item.attestations);
+        assert_eq!(item.release_date.as_deref(), Some("2026-11-03"));
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.xz"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("f72edb0b36580ece7f52e23858f00c18fad4e87395ea7ad05d7e55c39f8fc78a")
+        );
+        assert_eq!(x86.digest, x86.sha256);
+        assert_eq!(x86.size, Some(2_014_093_084));
+        assert!(x86.sums_url.as_deref().unwrap().ends_with(".tar.xz.jsonl"));
+        assert_eq!(
+            item.targets["linux-aarch64"].file.as_deref(),
+            Some("LLVM-23.1.5-Linux-ARM64.tar.xz")
+        );
+
+        // The version check commands and manifest shape.
+        let spec = runtime_spec("clang", "23.1.5", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(
+            spec.executables
+                .iter()
+                .map(|exe| exe.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["clang", "clang++", "ld.lld", "lldb"]
+        );
+        assert_eq!(spec.checks.len(), 4);
+        assert_eq!(spec.checks[0].expect, "clang version 23.1.5");
+        assert_eq!(spec.checks[2].expect, "LLD 23.1.5");
+        assert_eq!(spec.checks[3].expect, "lldb version 23.1.5");
+        assert_eq!(spec.env["LD_LIBRARY_PATH"], "{root}/lib");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["channel"], "stable");
+        assert_eq!(manifest["artifacts"][0]["format"], "tar.xz");
+        assert_eq!(manifest["artifacts"][0]["requires"]["glibc"], "2.34");
+        assert_eq!(manifest["runtime"]["env"]["LD_LIBRARY_PATH"], "{root}/lib");
+        assert_eq!(manifest["artifacts"][0]["provenance"]["kind"], "upstream");
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        // Withheld and pre-release releases are not planned.
+        let held = BTreeSet::from(["clang@23.1.5".to_string()]);
+        assert!(clang_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(CLANG_RELEASE_FIXTURE)],
+            &held
+        )
+        .unwrap()
+        .is_empty());
+        let mut prerelease = release_fixture(CLANG_RELEASE_FIXTURE);
+        prerelease["prerelease"] = Value::Bool(true);
+        assert!(
+            clang_plan_from_releases(&cfg, &package, &[prerelease], &BTreeSet::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn llvm_attestation_bundle_must_name_the_artifact_digest() {
+        let digest = "f72edb0b36580ece7f52e23858f00c18fad4e87395ea7ad05d7e55c39f8fc78a";
+        let statement = json!({
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [
+                {"name": "LLVM-23.1.5-Linux-X64.tar.xz", "digest": {"sha256": digest}},
+                {"name": "LLVM-23.1.5-Linux-X64.tar.zst", "digest": {"sha256": "0000"}}
+            ]
+        });
+        let payload = B64.encode(serde_json::to_vec(&statement).unwrap());
+        let bundle = json!({
+            "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+            "dsseEnvelope": {"payloadType": "application/vnd.in-toto+json", "payload": payload}
+        });
+        let good = format!("{}\n", serde_json::to_string(&bundle).unwrap());
+        check_llvm_attestation_bundle(&good, digest).expect("matching digest");
+
+        let wrong = json!({
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [{"digest": {"sha256": "ab".repeat(32).to_string()}}]
+        });
+        let payload = B64.encode(serde_json::to_vec(&wrong).unwrap());
+        let bundle = json!({"dsseEnvelope": {"payload": payload}});
+        let bad = format!("{}\nnot json\n", serde_json::to_string(&bundle).unwrap());
+        assert!(check_llvm_attestation_bundle(&bad, digest).is_err());
+        // A different predicate is not LLVM's build provenance.
+        let slsa_wrong = json!({
+            "predicateType": "https://in-toto.io/attestation/release/v0.2",
+            "subject": [{"digest": {"sha256": digest}}]
+        });
+        let payload = B64.encode(serde_json::to_vec(&slsa_wrong).unwrap());
+        let bundle = json!({"dsseEnvelope": {"payload": payload}});
+        let text = format!("{}\n", serde_json::to_string(&bundle).unwrap());
+        assert!(check_llvm_attestation_bundle(&text, digest).is_err());
+    }
+
+    #[test]
+    fn flutter_discovery_uses_google_metadata_and_skips_aarch64() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "flutter").unwrap().clone();
+        let document = release_fixture(FLUTTER_RELEASES_FIXTURE);
+        let items =
+            flutter_plan_from_releases(&cfg, &package, &document, &BTreeSet::new()).unwrap();
+        assert_eq!(
+            items.len(),
+            2,
+            "only the newest stable releases are planned"
+        );
+        assert_eq!(items[1].version, "3.47.9");
+        let item = &items[0];
+        assert_eq!(item.version, "3.50.0");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.release_date.as_deref(), Some("2026-11-11"));
+        assert_eq!(item.source.as_ref().unwrap()["dart"], "3.14.0");
+        assert_eq!(
+            item.targets.keys().cloned().collect::<Vec<_>>(),
+            vec!["linux-x86_64"]
+        );
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.xz"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("6ea2d806fd57269ae783e6788e2a81fc26eaad782f1e0d0ff38623bb765ff9f5")
+        );
+        assert_eq!(
+            x86.file.as_deref(),
+            Some("flutter_linux_3.50.0-stable.tar.xz")
+        );
+        assert_eq!(
+            x86.url.as_deref(),
+            Some("https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_3.50.0-stable.tar.xz")
+        );
+
+        let bundled = BTreeMap::from([("dart".to_string(), "3.14.0".to_string())]);
+        let spec = runtime_spec("flutter", "3.50.0", &bundled, &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "bin/flutter");
+        assert_eq!(spec.executables[1].path, "bin/dart");
+        assert_eq!(spec.checks[0].expect, "Flutter 3.50.0");
+        assert_eq!(spec.checks[1].expect, "Dart SDK version: 3.14.0");
+
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["requires"]["glibc"], "2.31");
+        let notes = manifest["notes"].as_str().unwrap();
+        assert!(notes.contains("Not available for linux-aarch64"), "{notes}");
+        assert!(notes.contains("x86_64 only"), "{notes}");
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let arm = crate::packages::host::incompatibility(&parsed, &host_for("linux-aarch64"))
+            .expect("aarch64 is not published");
+        assert!(arm.contains("No build for this server"), "{arm}");
+        assert!(
+            crate::packages::host::incompatibility(&parsed, &host_for("linux-x86_64")).is_none()
+        );
+
+        assert_eq!(
+            dart_sdk_version("Dart SDK version: 3.14.0 (stable) (Tue) on \"linux_x64\""),
+            Some("3.14.0".to_string())
+        );
+        assert_eq!(dart_sdk_version("no version here"), None);
+    }
+
+    #[test]
+    fn composer_discovery_uses_the_github_phar_and_getcomposer_sha256() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "composer").unwrap().clone();
+        let items = composer_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(COMPOSER_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let item = &items[0];
+        assert_eq!(item.version, "2.11.2");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.targets.len(), 2);
+        for info in item.targets.values() {
+            assert_eq!(info.format.as_deref(), Some("phar"));
+            assert_eq!(info.strip_components, Some(0));
+            assert_eq!(
+                info.sha256.as_deref(),
+                Some("dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028")
+            );
+            assert_eq!(
+                info.sums_url.as_deref(),
+                Some("https://getcomposer.org/download/2.11.2/composer.phar.sha256sum")
+            );
+            assert_eq!(info.size, Some(3_815_650));
+        }
+        let spec = runtime_spec("composer", "2.11.2", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].name, "composer");
+        assert_eq!(spec.executables[0].path, "bin/composer");
+        assert_eq!(spec.checks[0].expect, "Composer version 2.11.2");
+        assert_eq!(phar_path_for("composer"), Some("composer.phar"));
+
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["format"], "phar");
+        assert_eq!(manifest["artifacts"][0]["phar"]["path"], "composer.phar");
+        assert_eq!(manifest["artifacts"][0]["provenance"]["kind"], "upstream");
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            parsed.artifacts[0].phar.as_ref().unwrap().path,
+            "composer.phar"
+        );
+        // The phar's wrapper path is generated by the installer, so the
+        // manifest only lists bin/composer.
+        assert_eq!(parsed.runtime.executables[0].path, "bin/composer");
+    }
+
+    #[test]
+    fn zig_discovery_uses_the_official_download_index() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "zig").unwrap().clone();
+        let document = release_fixture(ZIG_INDEX_FIXTURE);
+        let items = zig_plan_from_index(&cfg, &package, &document, &BTreeSet::new()).unwrap();
+        assert_eq!(items.len(), 1, "master/development builds are not planned");
+        let item = &items[0];
+        assert_eq!(item.version, "0.17.1");
+        assert_eq!(item.release_date.as_deref(), Some("2026-10-02"));
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.xz"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(x86.size, Some(57_411_036));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a")
+        );
+        let spec = runtime_spec("zig", "0.17.1", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "zig");
+        assert_eq!(spec.path_dirs, vec![".".to_string()]);
+        assert_eq!(spec.checks[0].args, vec!["version".to_string()]);
+        assert_eq!(spec.checks[0].expect, "0.17.1");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["format"], "tar.xz");
+        assert_eq!(manifest["runtime"]["pathDirs"][0], ".");
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn kotlin_discovery_uses_github_zip_and_sha256_file() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "kotlin").unwrap().clone();
+        let items = kotlin_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(KOTLIN_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let item = &items[0];
+        assert_eq!(item.version, "2.4.21", "the v prefix is normalised away");
+        assert_eq!(item.channel, "stable");
+        assert_eq!(item.targets.len(), 2);
+        assert_eq!(
+            item.targets["linux-aarch64"].url, item.targets["linux-x86_64"].url,
+            "the compiler zip is architecture independent"
+        );
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("zip"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd")
+        );
+        assert!(x86.sums_url.as_deref().unwrap().ends_with(".zip.sha256"));
+        let spec = runtime_spec("kotlin", "2.4.21", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(
+            spec.executables
+                .iter()
+                .map(|exe| exe.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bin/kotlinc", "bin/kotlin"]
+        );
+        assert_eq!(spec.checks[0].expect, "2.4.21");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        manifest::parse(&serde_json::to_vec(&manifest.unwrap()).unwrap()).unwrap();
+
+        // Pre-release tags are filtered before version normalisation.
+        let mut prerelease = release_fixture(KOTLIN_RELEASE_FIXTURE);
+        prerelease["prerelease"] = Value::Bool(true);
+        assert!(
+            kotlin_plan_from_releases(&cfg, &package, &[prerelease], &BTreeSet::new())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn cmake_discovery_uses_linux_archives_and_the_sha256_file() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "cmake").unwrap().clone();
+        let items = cmake_plan_from_releases(
+            &cfg,
+            &package,
+            &[release_fixture(CMAKE_RELEASE_FIXTURE)],
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        let item = &items[0];
+        assert_eq!(item.version, "4.5.0");
+        assert_eq!(item.targets.len(), 2);
+        assert_eq!(
+            item.targets["linux-x86_64"].file.as_deref(),
+            Some("cmake-4.5.0-linux-x86_64.tar.gz")
+        );
+        assert_eq!(
+            item.targets["linux-aarch64"].file.as_deref(),
+            Some("cmake-4.5.0-linux-aarch64.tar.gz")
+        );
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.gz"));
+        assert!(x86.sums_url.as_deref().unwrap().ends_with("SHA-256.txt"));
+        let spec = runtime_spec("cmake", "4.5.0", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(
+            spec.executables
+                .iter()
+                .map(|exe| exe.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["cmake", "ctest", "cpack"]
+        );
+        assert_eq!(spec.checks[0].expect, "cmake version 4.5.0");
+        assert_eq!(spec.checks[1].expect, "ctest version 4.5.0");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["artifacts"][0]["requires"]["glibc"], "2.31");
+        manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn gradle_discovery_uses_version_metadata_and_filters_unreleased_versions() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "gradle").unwrap().clone();
+        let document = release_fixture(GRADLE_VERSIONS_FIXTURE);
+        let items = gradle_plan_from_versions(&cfg, &package, &document, &BTreeSet::new()).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.version.as_str())
+                .collect::<Vec<_>>(),
+            vec!["9.9.1", "9.9.0"],
+            "RC/snapshot/broken versions are filtered"
+        );
+        let item = &items[0];
+        assert_eq!(item.release_date.as_deref(), Some("2026-11-10"));
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("zip"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert_eq!(
+            x86.sha256.as_deref(),
+            Some("d8a18a7a841dd5df825d35a685fad6f2d7f12ac0c280e57b67c27b4a520ba228")
+        );
+        assert!(x86
+            .url
+            .as_deref()
+            .unwrap()
+            .ends_with("gradle-9.9.1-bin.zip"));
+        let spec = runtime_spec("gradle", "9.9.1", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "bin/gradle");
+        assert_eq!(spec.checks[0].expect, "Gradle 9.9.1");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        manifest::parse(&serde_json::to_vec(&manifest.unwrap()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn maven_discovery_parses_the_apache_archive_listing() {
+        let cfg = providers_config();
+        let package = package_config(&cfg, "maven").unwrap().clone();
+        assert_eq!(
+            maven_versions_from_listing(MAVEN_LISTING_FIXTURE),
+            vec![
+                "3.10.0".to_string(),
+                "3.10.1".to_string(),
+                "3.9.16".to_string()
+            ]
+        );
+        let items =
+            maven_plan_from_listing(&cfg, &package, MAVEN_LISTING_FIXTURE, &BTreeSet::new())
+                .unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.version.as_str())
+                .collect::<Vec<_>>(),
+            vec!["3.10.1", "3.10.0"]
+        );
+        let item = &items[0];
+        assert_eq!(item.channel, "3.10");
+        assert_eq!(item.targets.len(), 2);
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.format.as_deref(), Some("tar.gz"));
+        assert_eq!(x86.strip_components, Some(1));
+        assert!(x86
+            .url
+            .as_deref()
+            .unwrap()
+            .ends_with("maven-3/3.10.1/binaries/apache-maven-3.10.1-bin.tar.gz"));
+        assert!(x86.sums_url.as_deref().unwrap().ends_with(".tar.gz.sha512"));
+        assert!(
+            x86.sha256.is_none(),
+            "the SHA-512 is fetched at verify time"
+        );
+        let spec = runtime_spec("maven", "3.10.1", &BTreeMap::new(), &BTreeSet::new()).unwrap();
+        assert_eq!(spec.executables[0].path, "bin/mvn");
+        assert_eq!(spec.checks[0].expect, "Apache Maven 3.10.1");
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        manifest::parse(&serde_json::to_vec(&manifest.unwrap()).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn new_provider_target_architectures_are_configured() {
+        let cfg = providers_config();
+        let x86 = cfg.targets.get("linux-x86_64").unwrap();
+        assert_eq!(x86.clang_arch("linux-x86_64").unwrap(), "X64");
+        assert_eq!(x86.flutter_arch("linux-x86_64").unwrap(), "x64");
+        assert_eq!(x86.cmake_arch("linux-x86_64").unwrap(), "x86_64");
+        assert_eq!(x86.zig_arch("linux-x86_64").unwrap(), "x86_64");
+        let arm = cfg.targets.get("linux-aarch64").unwrap();
+        assert_eq!(arm.clang_arch("linux-aarch64").unwrap(), "ARM64");
+        assert_eq!(arm.flutter_arch("linux-aarch64").unwrap(), "arm64");
+        assert_eq!(arm.cmake_arch("linux-aarch64").unwrap(), "aarch64");
+        assert_eq!(arm.zig_arch("linux-aarch64").unwrap(), "aarch64");
+        assert!(unavailable_reason("flutter", "linux-aarch64")
+            .unwrap()
+            .contains("x86_64 only"));
+        assert!(unavailable_reason("bun", "linux-aarch64").is_none());
+    }
+
+    #[test]
     fn bun_discovery_uses_github_releases_and_shasums() {
         let cfg = providers_config();
         let package = package_config(&cfg, "bun").unwrap().clone();
@@ -7145,6 +9236,16 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
         assert_eq!(channel_of("java", "25.0.5+8"), Some("25".into()));
         assert_eq!(channel_of("java", "8.0.512+9"), Some("8".into()));
         assert_eq!(channel_of("dotnet", "10.0.404"), Some("10.0".into()));
+        for package in [
+            "clang", "flutter", "composer", "zig", "kotlin", "cmake", "gradle",
+        ] {
+            assert_eq!(
+                channel_of(package, "1.2.3"),
+                Some("stable".to_string()),
+                "{package}"
+            );
+        }
+        assert_eq!(channel_of("maven", "3.10.1"), Some("3.10".to_string()));
 
         let value = json!({
             "package": "rust",
@@ -7196,6 +9297,7 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             &["-version".to_string()],
             "javac 25.0.5",
             &home,
+            &[],
         )
         .unwrap();
         assert!(run_check(
@@ -7203,8 +9305,31 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             "bin/javac",
             &["-version".to_string()],
             "javac 1.8.0_512",
-            &home
+            &home,
+            &[]
         )
         .is_err());
+
+        // Runtime env hints reach the checks with {root} resolved; the fixed
+        // entries (PATH/HOME/TMPDIR) can never be replaced by a hint.
+        let environment = check_environment(
+            &root,
+            &home,
+            &[
+                ("DEMO_HOME".to_string(), "{root}/share".to_string()),
+                ("HOME".to_string(), "{root}".to_string()),
+            ],
+        );
+        let lookup = |name: &str| {
+            environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(
+            lookup("DEMO_HOME"),
+            Some(format!("{}/share", root.display()).as_str())
+        );
+        assert_eq!(lookup("HOME"), Some(home.display().to_string().as_str()));
     }
 }
