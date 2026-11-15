@@ -16,7 +16,7 @@ resource limits apply. For configuration keys see
 ## Design constraints
 
 * **Single binary, no runtime dependencies.** The frontend is built with
-  Node.js + npm at release time and embedded into the executable with
+  Node.js + npm (and the Leptos UI with Trunk) at release time and embedded into the executable with
   `rust-embed`; the installed server needs neither Node.js nor a separate static
   file server.
 * **No default credentials, no privileged web process.** The HTTP server runs
@@ -147,7 +147,8 @@ Since the workspace split (ADR 0002) most code lives in `crates/`; module paths 
 | `src/main.rs` | CLI parsing, `serve` bootstrap, `status`, `doctor`, user management, restore entry point |
 | `crates/rast-base/src/config.rs` | Layered configuration (defaults → TOML → `RAST_*` env → CLI flags), validation, warnings |
 | `crates/rast-server/src/state.rs` | Shared `AppState` (config, DB pool, secrets, event bus, jobs, monitor, storage, Docker client), maintenance timer |
-| `crates/rast-server/src/server.rs` | Embedded static assets (`rust-embed`), cache headers, ETag, CSP, SPA fallback |
+| `crates/rast-server/src/server.rs` | Embedded static assets (`rust-embed`), cache headers, ETag, CSP, SPA fallback; the Leptos/WASM UI under `/ui/` |
+| `crates/rast-ui` | Leptos (CSR) UI compiled to WebAssembly with Trunk, loaded on demand by the TypeScript shell (ADR 0003); wasm-only, in workspace `members` but not `default-members` |
 | `crates/rast-server/src/api/` | Axum router and handlers; auth, users, files, apps, monitor, jobs, logs, settings, backup, system, events |
 | `crates/rast-base/src/auth/` | Argon2id passwords, opaque server-side sessions, CSRF, rate limiting and lockout, client-IP resolution, middleware |
 | `crates/rast-base/src/storage/` | Safe path resolution, quota accounting, recycle bin, streaming file operations, shared-folder ACLs |
@@ -461,14 +462,15 @@ host with `/api/system/info`, `rast status --json` and `df -h`.
 
 ## Build and release pipeline
 
-1. `.github/workflows/ci.yml` builds the frontend once (Node.js 22 + npm),
-   runs `cargo fmt`, strict `cargo clippy -D warnings`, `cargo test`, builds
+1. `.github/workflows/ci.yml` builds the frontend once (Node.js 22 + npm) and
+   the Leptos UI once (`scripts/build-ui.sh`, Trunk 0.22, with the WASM size
+   check), runs `cargo fmt`, strict `cargo clippy -D warnings`, `cargo test`, builds
    release binaries for both architectures on native runners (x86_64 on Ubuntu
    22.04, aarch64 on `ubuntu-24.04-arm`), lints the shell scripts and checks
    the embedded installer assets are in sync.
 2. `.github/workflows/release.yml` runs on a `v*` tag (or manual dispatch),
    cross-checks the version against `Cargo.toml` and `CHANGELOG.md`, builds the
-   binaries with the embedded frontend, publishes:
+   binaries with the embedded frontend and Leptos UI, publishes:
    `rast-linux-x86_64`, `rast-linux-aarch64`, `SHA256SUMS`, `install.sh`,
    `uninstall.sh` and `rast.toml.example`.
 3. The release `install.sh` is pinned to its own tag and verifies the

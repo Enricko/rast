@@ -270,12 +270,20 @@ start_as() {
   fi
 }
 
-# Debug builds serve the frontend from <repo>/frontend/dist at runtime (the
-# release binary embeds it). The server runs as $SERVER_USER, which usually
-# cannot traverse the operator's home directory: add an ACL traverse entry
-# where needed instead of loosening directory modes.
+# Debug builds serve the frontend from <repo>/frontend/dist and the Leptos UI
+# from <repo>/crates/rast-ui/dist at runtime (the release binary embeds both).
+# The server runs as $SERVER_USER, which usually cannot traverse the
+# operator's home directory: add an ACL traverse entry where needed instead of
+# loosening directory modes.
 ensure_asset_access() {
-  local root="$REPO_DIR/frontend/dist"
+  local root
+  for root in "$REPO_DIR/frontend/dist" "$REPO_DIR/crates/rast-ui/dist"; do
+    ensure_asset_access_for "$root"
+  done
+}
+
+ensure_asset_access_for() {
+  local root="$1"
   [ -d "$root" ] || return 0
   local path="$root" need=()
   while [ "$path" != "/" ] && [ -n "$path" ]; do
@@ -291,7 +299,7 @@ ensure_asset_access() {
     done
   fi
   if ! sudo -u "$SERVER_USER" test -r "$root/index.html" 2>/dev/null; then
-    warn "$root/index.html is not readable by $SERVER_USER (build the frontend or fix permissions)"
+    warn "$root is not readable by $SERVER_USER (build the assets or fix permissions)"
   fi
 }
 

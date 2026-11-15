@@ -6144,3 +6144,8 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
     max-width: 70%;
   }
 }
+
+/* About RAST (Leptos): host element of the WASM-rendered component. */
+.about-leptos {
+  padding: 16px;
+}

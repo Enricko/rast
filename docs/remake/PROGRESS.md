@@ -11,8 +11,8 @@ Update it at the end of every session.
 
 - [x] Split the repo into the target workspace with pure moves (task 0.2, ADR 0002)
 - [x] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs` (task 0.3)
-- [ ] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
-- [ ] Record the current compressed JS bundle size as the baseline
+- [x] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
+- [x] Record the current compressed JS bundle size as the baseline
 - [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/`
 - [x] Create `docs/remake/PROGRESS.md` and the first ADRs
 - [ ] Fix the README: duplicated "Linux apps" row and stale status line
@@ -75,6 +75,13 @@ Update it at the end of every session.
   (807 + 4 ts-rs export tests), 0 failed; npm test 149 passed; npm build OK;
   third-party licenses up to date (342 crates).
 
+- **Gates after 0.4:** fmt and clippy clean; `cargo test --workspace`: 818 passed
+  (811 + 5 server tests for `/ui/`, `.wasm` mime and CSP + 2 `rast-ui`), 0 failed;
+  npm test 152 passed (149 + 3 loader tests); npm build OK; shellcheck clean on
+  all scripts; third-party licenses regenerated (425 crates);
+  `cargo build --release --locked` OK with both dists and fails with a clear
+  message when `crates/rast-ui/dist` is missing.
+
 - **Clean regeneration of API types** (this commit):
   - `scripts/gen-api-types.sh` empties `frontend/src/generated/` (keeps the
     README) and runs `cargo test --locked -p rast-api`.
@@ -83,15 +90,67 @@ Update it at the end of every session.
   - `rast-api` is in `default-members`; ADR 0002 records that only wasm-only
     crates (`rast-ui`) stay in `members` only.
 
+- **JS bundle baseline** (`frontend/dist`, 2026-11-15, commit `f8f86e1`), measured
+  with `scripts/measure-bundle.sh frontend/dist --group-ext jpg` (gzip -9, brotli
+  quality 11 through node's zlib):
+
+  | File | Raw (B) | Gzip -9 (B) | Brotli q11 (B) |
+  | --- | ---: | ---: | ---: |
+  | `assets/index-*.js` | 720639 | 207754 | 166428 |
+  | `assets/xterm-bundle-*.js` | 362837 | 92744 | 73710 |
+  | `assets/rfb-*.js` (noVNC) | 181861 | 54624 | 46332 |
+  | `assets/index-*.css` | 225191 | 40155 | 32246 |
+  | `assets/xterm-bundle-*.css` | 5175 | 1903 | 1415 |
+  | `boot-wallpaper.js` | 1297 | 637 | 517 |
+  | `index.html` | 4959 | 1928 | 1515 |
+  | wallpapers (4 jpg) | 763415 | 742815 | 736119 |
+  | **Total, all files** | **2265374** | **1142560** | **1058282** |
+  | **Total without wallpapers (JS + CSS + HTML)** | **1501959** | **399745** | **322163** |
+
+  The wallpapers are already compressed images and not code, so the remake
+  baseline is the line "without wallpapers". The final-gate budget (1.5x) is
+  therefore 1.5 x 399745 = 599617 B gzip, stored in
+  `crates/rast-ui/wasm-budget.txt` and enforced by `scripts/check-wasm-size.sh`.
+- **Task 0.4, `rast-ui` skeleton** (this commit; ADR 0003):
+  - `crates/rast-ui`: Leptos 0.8.23 (`csr`), `wasm-bindgen`, `web-sys`,
+    `console_error_panic_hook` (the four approved dependencies; 83 new
+    transitive crates, 425 in `Cargo.lock`). One component, "About RAST
+    (Leptos)", exported as `mount_about(el) -> MountHandle` (`dispose()`
+    unmounts). In `members` only; `[profile.wasm-release]` added.
+  - Trunk 0.22.1 (installed with `cargo install trunk --locked`), stable output
+    names `rast-ui.js` and `rast-ui_bg.wasm` under `/ui/`; output embedded by a
+    second `RustEmbed` in `rast-server` (`.wasm` as `application/wasm`,
+    `no-cache` + ETag, unknown `/ui/*` is 404). `build.rs` fails a release build
+    without a real `crates/rast-ui/dist`.
+  - CSP: `script-src 'self' 'wasm-unsafe-eval'` (approved by the maintainer).
+  - Frontend: `about-leptos` app, loader `frontend/src/core/wasm-ui.ts`
+    (load-once, retry after failure), 3 new unit tests; Vite dev proxy for `/ui`.
+  - CI and release workflows: new `ui` job (pinned Trunk 0.22.1 binary with
+    SHA-256 check, `scripts/build-ui.sh`, `scripts/check-wasm-size.sh`), artifact
+    `rast-ui-dist` consumed by the release builds, which also verify the UI is
+    not the placeholder.
+  - `wasm-opt` needs explicit feature flags with Rust 1.99
+    (`data-wasm-opt-params` in `crates/rast-ui/index.html`).
+  - WASM size (`scripts/check-wasm-size.sh`): `rast-ui_bg.wasm` 65283 B raw /
+    26993 gzip / 22918 brotli; `rast-ui.js` 25394 / 5778 / 5057; total 90677 /
+    32771 / 27975, against a gzip budget of 599617 B (baseline 399745 B).
+  - Licenses of the new crates: all MIT, Apache-2.0 or dual MIT/Apache-2.0,
+    except Zlib (`const_format`, `const_format_proc_macros`, `konst`,
+    `konst_macro_rules`, `slotmap`), CC0-1.0 (`base16`) and BSL-1.0
+    (`xxhash-rust`); all permissive.
+  - Verified in headless Chromium against a stand-in server with the new CSP:
+    module loads, component renders its text, `dispose()` empties the host, no
+    console errors (see the task report; the disposable RAST instance was not
+    started because `dev-instance.sh up` needs sudo).
+
 ## In progress
 
 - Nothing.
 
 ## Next
 
-1. Phase 0.4 — `rast-ui` skeleton (needs approval for leptos, wasm-bindgen, web-sys, console_error_panic_hook).
-2. Phase 0.5 — README fixes.
-3. Phase 0.6 — baseline app matrix (ask before running the native instance).
+1. Phase 0.5 — README fixes.
+2. Phase 0.6 — baseline app matrix (ask before running the native instance).
 
 ## Open questions
 
@@ -115,7 +174,6 @@ Update it at the end of every session.
   the maintainer).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
-- Baseline JS bundle size (compressed `frontend/dist`) is not recorded yet.
 - `yamllint` is not installed for the default `python3` on this host (a
   RAST-managed Python comes first in `PATH`), so the workflow files were not
   linted locally.

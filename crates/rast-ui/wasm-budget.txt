@@ -1,0 +1,6 @@
+# Maximum gzip -9 size, in bytes, of crates/rast-ui/dist (.wasm + glue JS).
+# = 1.5 x the gzip baseline of frontend/dist code (JS, CSS, HTML; wallpapers
+# excluded) measured on 2026-11-15: 399745 B. This is the final remake gate of
+# CLAUDE.md (Phase 5) and applies to the finished WASM UI; see
+# docs/remake/PROGRESS.md for the baseline table. Change only with an ADR.
+599617

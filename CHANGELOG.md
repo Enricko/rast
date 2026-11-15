@@ -11,6 +11,29 @@ this file by `scripts/changelog-section.sh`.
 
 ## [1.0.1] - Unreleased
 
+### Added
+
+- **About RAST (Leptos)** app: the first window rendered by the new
+  `crates/rast-ui` crate (Leptos, compiled to WebAssembly and built with
+  Trunk). It shows the product name and version; the WASM module is fetched
+  from `/ui/` only when the window is first opened. See
+  `docs/adr/0003-rast-ui-leptos.md`.
+
+### Security
+
+- The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
+  `script-src` (needed to compile WebAssembly). It does not allow JavaScript
+  `eval`, inline scripts or external hosts; everything else is unchanged.
+
+### Upgrade note
+
+- Packagers and anyone building from source: a release build
+  (`cargo build --release`) now also needs the Leptos UI, built with
+  `scripts/build-ui.sh` (Rust target `wasm32-unknown-unknown` and Trunk 0.22).
+  It fails with a clear message when `crates/rast-ui/dist` is missing. Debug
+  builds, `cargo clippy` and `cargo test` are unaffected. Installed servers
+  need nothing new.
+
 ### Changed
 
 - New `crates/rast-api` crate holds the shared File Station DTOs

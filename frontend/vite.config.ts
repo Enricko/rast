@@ -26,6 +26,11 @@ export default defineConfig({
         target: "http://127.0.0.1:8720",
         changeOrigin: false,
       },
+      // Leptos/WASM UI (crates/rast-ui), embedded in the server binary.
+      "/ui": {
+        target: "http://127.0.0.1:8720",
+        changeOrigin: false,
+      },
       "/healthz": {
         target: "http://127.0.0.1:8720",
         changeOrigin: false,
