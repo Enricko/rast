@@ -9,6 +9,14 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-15
+
+### Changed
+
+- Version bumped to 1.0.1 to start the remake line (`Remake` branch). No
+  behaviour change; remake instructions and the prompt pack are in
+  `CLAUDE.md` and `docs/remake/PROMPTS.md`.
+
 ## [0.18.2] - 2026-11-15
 
 ### Fixed
