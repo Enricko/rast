@@ -231,6 +231,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Verify the frontend is embedded
+        run: |
+          if grep -q "rast-placeholder-frontend" target/release/rast; then
+            echo "the release binary embeds the placeholder page, not the frontend" >&2
+            exit 1
+          fi
+
       - name: Verify binary version
         run: |
           set -euo pipefail

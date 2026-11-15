@@ -183,6 +183,10 @@ jobs:
       - name: Smoke test
         run: |
           test -f frontend/dist/index.html
+          if grep -q "rast-placeholder-frontend" target/release/rast; then
+            echo "the release binary embeds the placeholder page, not the frontend" >&2
+            exit 1
+          fi
           ./target/release/rast version
 
       - name: Stage release asset

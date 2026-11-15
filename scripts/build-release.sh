@@ -159,6 +159,11 @@ BIN="target/release/rast"
     exit 1
 }
 
+if grep -q "rast-placeholder-frontend" "$BIN"; then
+    echo "build-release: $BIN embeds the placeholder page instead of the frontend" >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 3. Version self-check
 # ---------------------------------------------------------------------------
