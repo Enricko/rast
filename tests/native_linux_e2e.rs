@@ -485,22 +485,34 @@ async fn install_threads_the_visibility_to_the_new_native_app_row() {
     assert_eq!(body["installing"], true);
     assert!(body["jobId"].as_str().is_some(), "{body}");
 
-    // The job inserts the row before it touches the system; wait for it. The
-    // install itself then fails on the absent privileged helper, which is
-    // fine: the row must already carry the requested visibility.
-    let mut visibility = None;
-    for _ in 0..100 {
-        visibility = sqlx::query_scalar::<_, String>(
-            "SELECT visibility FROM linux_apps WHERE file_name = 'demo_1.0_amd64.deb'",
-        )
-        .fetch_optional(&server.state.db)
-        .await
-        .expect("visibility query");
-        if visibility.is_some() {
+    // Wait for the job to reach a terminal state (the install fails on the
+    // absent privileged helper, which is fine). Only then check the row: it
+    // is inserted before the job touches the system, so it must already carry
+    // the requested visibility. 30 s is a safety net, not an expected wait.
+    let job_id = body["jobId"].as_str().expect("job id").to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, _, job) = server
+            .request("GET", &format!("/api/jobs/{job_id}"), None, admin.headers())
+            .await;
+        if matches!(
+            job["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "install job {job_id} did not finish within 30 s: {job}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+    let visibility = sqlx::query_scalar::<_, String>(
+        "SELECT visibility FROM linux_apps WHERE file_name = 'demo_1.0_amd64.deb'",
+    )
+    .fetch_optional(&server.state.db)
+    .await
+    .expect("visibility query");
     assert_eq!(
         visibility.as_deref(),
         Some("admins"),
