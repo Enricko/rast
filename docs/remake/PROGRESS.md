@@ -13,9 +13,9 @@ Update it at the end of every session.
 - [x] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs` (task 0.3)
 - [x] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
 - [x] Record the current compressed JS bundle size as the baseline
-- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/`
+- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/` (task 0.6, waiting for a separate test host; see Next)
 - [x] Create `docs/remake/PROGRESS.md` and the first ADRs
-- [ ] Fix the README: duplicated "Linux apps" row and stale status line
+- [x] Fix the README: duplicated "Linux apps" row and stale status line (task 0.5)
 - [ ] **Exit:** CI green, still a single release binary, no behaviour change
 
 ## Done
@@ -75,14 +75,15 @@ Update it at the end of every session.
   (807 + 4 ts-rs export tests), 0 failed; npm test 149 passed; npm build OK;
   third-party licenses up to date (342 crates).
 
-- **Gates after 0.4:** fmt and clippy clean; `cargo test --workspace`: 818 passed
-  (811 + 5 server tests for `/ui/`, `.wasm` mime and CSP + 2 `rast-ui`), 0 failed;
+- **Gates after 0.4:** fmt and clippy clean; `cargo test --workspace`: 819 passed
+  (811 + 6 server tests for `/ui/`, `.wasm` mime, CSP and the unchanged
+  frontend cache policy + 2 `rast-ui`), 0 failed;
   npm test 152 passed (149 + 3 loader tests); npm build OK; shellcheck clean on
   all scripts; third-party licenses regenerated (425 crates);
   `cargo build --release --locked` OK with both dists and fails with a clear
   message when `crates/rast-ui/dist` is missing.
 
-- **Clean regeneration of API types** (this commit):
+- **Clean regeneration of API types** (`f8f86e1`):
   - `scripts/gen-api-types.sh` empties `frontend/src/generated/` (keeps the
     README) and runs `cargo test --locked -p rast-api`.
   - The CI step runs the script and fails on any `git status` difference in
@@ -111,7 +112,7 @@ Update it at the end of every session.
   baseline is the line "without wallpapers". The final-gate budget (1.5x) is
   therefore 1.5 x 399745 = 599617 B gzip, stored in
   `crates/rast-ui/wasm-budget.txt` and enforced by `scripts/check-wasm-size.sh`.
-- **Task 0.4, `rast-ui` skeleton** (this commit; ADR 0003):
+- **Task 0.4, `rast-ui` skeleton** (`f9c2eb2`; ADR 0003):
   - `crates/rast-ui`: Leptos 0.8.23 (`csr`), `wasm-bindgen`, `web-sys`,
     `console_error_panic_hook` (the four approved dependencies; 83 new
     transitive crates, 425 in `Cargo.lock`). One component, "About RAST
@@ -142,6 +143,16 @@ Update it at the end of every session.
     module loads, component renders its text, `dispose()` empties the host, no
     console errors (see the task report; the disposable RAST instance was not
     started because `dev-instance.sh up` needs sudo).
+  - Coordinator review: the cache refactor in `server.rs` had made `/` and
+    `/index.html` cacheable for an hour (was `no-cache`); fixed before the
+    commit and covered by `frontend_cache_policy_is_unchanged`. The pinned
+    Trunk SHA-256 matches the digest GitHub publishes for the v0.22.1 asset.
+- **Task 0.5, README** (`79f0116`): removed the truncated duplicate
+  "Linux apps" row; the Status line now says v1.0.1, unreleased on `Remake`
+  (latest release v0.18.2).
+- **Housekeeping:** `stash@{0}` (`docker-move-wip`) dropped on the
+  maintainer's decision (its code equals `7663996`; its doc draft was
+  superseded by `cc274e1`).
 
 ## In progress
 
@@ -149,8 +160,12 @@ Update it at the end of every session.
 
 ## Next
 
-1. Phase 0.5 — README fixes.
-2. Phase 0.6 — baseline app matrix (ask before running the native instance).
+1. Phase 0.6 — baseline app matrix. **Waiting for a separate test host:**
+   `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
+   (systemd unit names are keyed by user id), and production uses it on this
+   host. Do not run `dev-instance.sh up native` here.
+2. Then the Phase 0 exit check (CI green, single release binary, no behaviour
+   change).
 
 ## Open questions
 
@@ -174,6 +189,13 @@ Update it at the end of every session.
   the maintainer).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
+- **WASM budget baseline:** the 1.5x budget uses the gzip size of
+  `frontend/dist` without the four wallpaper JPEGs (399745 B, not 1142560 B),
+  because they are images, not code. Confirm with the maintainer.
+- **Tests need a short `TMPDIR`:** with a long `TMPDIR` (for example a
+  per-session scratch path) four `rast-agent` tests fail because unix-socket
+  paths exceed ~108 bytes. When `/tmp` is nearly full, use a short directory on
+  disk such as `TMPDIR=~/.cache/rast-tmp`.
 - `yamllint` is not installed for the default `python3` on this host (a
   RAST-managed Python comes first in `PATH`), so the workflow files were not
   linted locally.
