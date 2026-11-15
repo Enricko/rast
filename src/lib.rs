@@ -6,7 +6,6 @@
 
 pub mod api;
 pub mod backup;
-pub mod docker;
 pub mod linux_apps;
 pub mod monitor;
 pub mod native;
@@ -16,7 +15,6 @@ pub mod server;
 pub mod state;
 pub mod terminal;
 pub mod update;
-pub mod worker;
 
 pub use rast_base::{
     access, appearance, audit, auth, config, db, error, events, jobs, realtime, secrets, storage,
@@ -26,3 +24,5 @@ pub use rast_base::{
 pub use rast_base::{DESCRIPTION, NAME, VERSION};
 
 pub use rast_apps::packages;
+
+pub use rast_docker::{docker, worker};

@@ -1768,6 +1768,7 @@ dependencies = [
  "rand 0.9.5",
  "rast-apps",
  "rast-base",
+ "rast-docker",
  "ring",
  "rust-embed",
  "serde",
@@ -1855,6 +1856,28 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml",
+ "tracing",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
+name = "rast-docker"
+version = "1.0.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "hex",
+ "libc",
+ "rast-base",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
  "tracing",
  "uuid",
  "walkdir",
