@@ -114,8 +114,8 @@ Run before every commit:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 npm --prefix frontend ci              # first time, or after lockfile changes
 npm --prefix frontend test
 npm --prefix frontend run build       # tsc --noEmit + vite build

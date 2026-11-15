@@ -65,8 +65,8 @@ CI (and `cargo`-based review) runs:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ```
 
 Additionally, packaging changes are checked with:

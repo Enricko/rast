@@ -1,12 +1,12 @@
 [package]
 name = "rast"
-version = "1.0.1"
-edition = "2021"
-rust-version = "1.94"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "RAST — Resource Administration & Storage Toolkit"
-license = "MIT"
-repository = "https://github.com/Enricko/rast"
-homepage = "https://github.com/Enricko/rast"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 readme = "README.md"
 keywords = ["self-hosted", "server", "storage", "admin", "axum"]
 categories = ["web-programming::http-server", "command-line-utilities"]
@@ -19,7 +19,22 @@ path = "src/main.rs"
 name = "rast"
 path = "src/lib.rs"
 
-[dependencies]
+[workspace]
+members = ["."]
+# Plain `cargo build/clippy/test` at the root covers every native crate; list
+# a crate in both places (crates that target wasm32 go in `members` only).
+default-members = ["."]
+resolver = "2"
+
+[workspace.package]
+version = "1.0.1"
+edition = "2021"
+rust-version = "1.94"
+license = "MIT"
+repository = "https://github.com/Enricko/rast"
+homepage = "https://github.com/Enricko/rast"
+
+[workspace.dependencies]
 axum = { version = "0.8.9", features = ["macros", "ws"] }
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "sync", "time", "signal", "process"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -67,11 +82,62 @@ notify = "8.2.2"
 httparse = "1.10"
 tokio-tungstenite = "0.29"
 zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
-
-[dev-dependencies]
 tempfile = "3"
 http-body-util = "0.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+rand.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+base64.workspace = true
+hex.workspace = true
+aes-gcm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+sysinfo.workspace = true
+uuid.workspace = true
+futures.workspace = true
+tokio-stream.workspace = true
+mime_guess.workspace = true
+percent-encoding.workspace = true
+rust-embed.workspace = true
+ipnet.workspace = true
+walkdir.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+flate2.workspace = true
+tar.workspace = true
+xz2.workspace = true
+bzip2.workspace = true
+ureq.workspace = true
+ring.workspace = true
+async-trait.workspace = true
+socket2.workspace = true
+libc.workspace = true
+chrono.workspace = true
+notify.workspace = true
+httparse.workspace = true
+tokio-tungstenite.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+http-body-util.workspace = true
+sqlx.workspace = true
 
 [profile.release]
 opt-level = "z"
