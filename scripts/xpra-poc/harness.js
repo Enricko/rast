@@ -1,6 +1,6 @@
 /* RAST xpra PoC harness: a miniature RAST window manager.
  *
- * Proves the integration contract of src/xpra_shim.js:
+ * Proves the integration contract of crates/rast-server/src/xpra_shim.js:
  *  - ONE Xpra HTML5 client connection for the whole desktop (one iframe);
  *  - every remote top-level Xpra window becomes one RAST-managed window
  *    (title bar, taskbar entry, focus/raise, resize, minimize/maximize,

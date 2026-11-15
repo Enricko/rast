@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
 const DIST = path.join(ROOT, "frontend/dist");
-const SHIM = path.join(ROOT, "src/xpra_shim.js");
+const SHIM = path.join(ROOT, "crates/rast-server/src/xpra_shim.js");
 const XPRA_HOST = process.env.XPRA_HOST || "127.0.0.1";
 const XPRA_PORT = Number(process.env.XPRA_PORT || 14591);
 const PORT = Number(process.argv[2] || process.env.MOCK_PORT || 14593);

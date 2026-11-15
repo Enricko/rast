@@ -11,7 +11,7 @@ use rust_embed::RustEmbed;
 use crate::state::AppState;
 
 #[derive(RustEmbed)]
-#[folder = "frontend/dist/"]
+#[folder = "../../frontend/dist/"]
 struct Assets;
 
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \

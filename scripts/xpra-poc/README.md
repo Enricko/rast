@@ -4,7 +4,7 @@ This directory proves the native-apps integration **before/independently of the
 Rust backend**, against the live Xpra 6.5.5 + xpra-html5 v21 session on this
 host (`127.0.0.1:14591`, display `:101`).
 
-Two harnesses run against the **real** shim (`src/xpra_shim.js`):
+Two harnesses run against the **real** shim (`crates/rast-server/src/xpra_shim.js`):
 
 | Harness | What it proves |
 | --- | --- |

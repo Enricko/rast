@@ -1771,6 +1771,7 @@ dependencies = [
  "rast-base",
  "rast-docker",
  "rast-helper",
+ "rast-server",
  "rast-session",
  "ring",
  "rust-embed",
@@ -1925,6 +1926,45 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rast-server"
+version = "1.0.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "flate2",
+ "futures",
+ "hex",
+ "http-body-util",
+ "httparse",
+ "mime_guess",
+ "percent-encoding",
+ "rand 0.9.5",
+ "rast-agent",
+ "rast-apps",
+ "rast-base",
+ "rast-docker",
+ "rast-helper",
+ "rast-session",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "subtle",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "ureq",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

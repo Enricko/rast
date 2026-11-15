@@ -1,0 +1,47 @@
+[package]
+name = "rast-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "The Axum application: REST and SSE API, backups, monitoring, shared state and the native session proxy."
+
+[dependencies]
+rast-agent = { path = "../rast-agent" }
+rast-apps = { path = "../rast-apps" }
+rast-base = { path = "../rast-base" }
+rast-docker = { path = "../rast-docker" }
+rast-helper = { path = "../rast-helper" }
+rast-session = { path = "../rast-session" }
+axum.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tower.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+sqlx.workspace = true
+rand.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+sysinfo.workspace = true
+uuid.workspace = true
+futures.workspace = true
+percent-encoding.workspace = true
+walkdir.workspace = true
+flate2.workspace = true
+tar.workspace = true
+ureq.workspace = true
+chrono.workspace = true
+httparse.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+http-body-util.workspace = true

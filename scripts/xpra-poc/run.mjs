@@ -1,7 +1,7 @@
 // End-to-end Playwright proof for the RAST native Xpra integration.
 //
 // Starts scripts/xpra-poc/server.mjs (HTTP+WS reverse proxy injecting the real
-// src/xpra_shim.js into the live Xpra HTML5 page), opens the
+// crates/rast-server/src/xpra_shim.js into the live Xpra HTML5 page), opens the
 // miniature RAST desktop (index.html + harness.js), and drives the whole
 // contract against the live Xpra session on 127.0.0.1:14591 (display :101):
 //

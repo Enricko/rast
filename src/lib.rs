@@ -4,12 +4,6 @@
 //! file station, application deployment, resource monitoring, control panel,
 //! backups and audit logs — shipped as a single Rust binary.
 
-pub mod api;
-pub mod backup;
-pub mod monitor;
-pub mod native_proxy;
-pub mod server;
-pub mod state;
 pub mod update;
 
 pub use rast_base::{
@@ -28,3 +22,5 @@ pub use rast_helper::native;
 pub use rast_agent::{rootfs, terminal};
 
 pub use rast_session::linux_apps;
+
+pub use rast_server::{api, backup, monitor, native_proxy, server, state};
