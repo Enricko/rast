@@ -9,6 +9,19 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-15
+
+### Fixed
+
+- **Clang/LLVM catalog verification no longer executes `lldb`.** The official
+  LLVM Linux release links `lldb` against a specific host libpython shared
+  object (e.g. `libpython3.14.so.1.0`), which is absent on the catalog CI
+  runners even though `clang`, `clang++` and `ld.lld` run correctly. `lldb`
+  is still installed and finds `liblldb.so` through `LD_LIBRARY_PATH`, but the
+  version check now covers the compilers and linker only; using `lldb`
+  requires installing the matching python3 library on the server (documented
+  in the package notes and rast-packages README).
+
 ## [0.15.0] - 2026-11-15
 
 ### Added

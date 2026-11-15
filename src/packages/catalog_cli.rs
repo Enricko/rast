@@ -4480,7 +4480,7 @@ fn verify_item(
             let text = http_text(bundle)?;
             check_llvm_attestation_bundle(&text, &expected)?;
             expected_sha256[0] = Some(expected);
-            verification = "SHA-256 from the GitHub release asset digest, named by LLVM's SLSA build-provenance bundle; gh attestation verify confirms the bundle signature; bytes re-hashed in CI; clang, clang++, ld.lld and lldb (with LD_LIBRARY_PATH=<prefix>/lib) run on the native runner".into();
+            verification = "SHA-256 from the GitHub release asset digest, named by LLVM's SLSA build-provenance bundle; gh attestation verify confirms the bundle signature; bytes re-hashed in CI; clang, clang++ and ld.lld (with LD_LIBRARY_PATH=<prefix>/lib) run on the native runner; lldb is shipped but not executed because the official build needs a host libpython shared object".into();
         }
         "flutter" => {
             let expected = info
@@ -5327,13 +5327,13 @@ fn runtime_spec(
                 expect: format!("LLD {version}"),
                 label: Some("ld.lld".into()),
             });
-            checks.push(manifest::VersionCheck {
-                executable: "lldb".into(),
-                args: vec!["--version".into()],
-                expect: format!("lldb version {version}"),
-                label: Some("lldb".into()),
-            });
-            // lldb links against lib/liblldb.so.<version> inside the prefix.
+            // lldb is shipped but not executed as a version check: the
+            // official LLVM Linux build links it against a specific libpython
+            // shared object most hosts do not have (e.g.
+            // libpython3.14.so.1.0), so executing it in CI would fail even
+            // though clang/clang++/ld.lld work. lldb stays in bin/ and finds
+            // liblldb.so via LD_LIBRARY_PATH; users who need it install the
+            // matching libpython package.
             env.insert("LD_LIBRARY_PATH".into(), "{root}/lib".into());
         }
         "flutter" => {
@@ -5678,7 +5678,7 @@ fn build_manifest(
                 }),
                 "clang" => json!({
                     "glibc": "2.34",
-                    "notes": "LLVM's official Linux release binaries (built on Ubuntu 22.04): clang and clang++ compilers, ld.lld linker, lldb debugger; LLVM libraries are in lib/ and the libc++ headers in include/c++/v1."
+                    "notes": "LLVM's official Linux release binaries (built on Ubuntu 22.04): clang and clang++ compilers, ld.lld linker and lldb (shipped; needs a matching host libpython shared object to run); LLVM libraries are in lib/ and the libc++ headers in include/c++/v1."
                 }),
                 "flutter" => json!({
                     "glibc": "2.31",
@@ -5821,7 +5821,7 @@ fn build_manifest(
                 .into(),
         ),
         "clang" => notes.push(
-            "clang and clang++ are the C/C++ compilers; the linker is ld.lld and the debugger lldb (runtime.env sets LD_LIBRARY_PATH=<prefix>/lib so lldb finds liblldb.so). The C++ standard library ships as libc++: headers in include/c++/v1, libraries in lib/ (link with -stdlib=libc++)."
+            "clang and clang++ are the C/C++ compilers; the linker is ld.lld. lldb is shipped and finds liblldb.so via LD_LIBRARY_PATH=<prefix>/lib, but the official build needs a matching host libpython shared object (install the matching python3 library to use lldb; clang/clang++/ld.lld work without it). The C++ standard library ships as libc++: headers in include/c++/v1, libraries in lib/ (link with -stdlib=libc++)."
                 .into(),
         ),
         "flutter" => notes.push(
@@ -8603,10 +8603,10 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
                 .collect::<Vec<_>>(),
             vec!["clang", "clang++", "ld.lld", "lldb"]
         );
-        assert_eq!(spec.checks.len(), 4);
+        assert_eq!(spec.checks.len(), 3);
         assert_eq!(spec.checks[0].expect, "clang version 23.1.5");
         assert_eq!(spec.checks[2].expect, "LLD 23.1.5");
-        assert_eq!(spec.checks[3].expect, "lldb version 23.1.5");
+        assert!(spec.checks.iter().all(|check| check.executable != "lldb"));
         assert_eq!(spec.env["LD_LIBRARY_PATH"], "{root}/lib");
         let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
         let manifest = manifest.unwrap();
