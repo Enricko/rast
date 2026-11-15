@@ -1,0 +1,31 @@
+[package]
+name = "rast-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "Per-user and root agents: the File Station file agent, the PTY agent and the terminal manager."
+
+[dependencies]
+rast-apps = { path = "../rast-apps" }
+rast-base = { path = "../rast-base" }
+rast-helper = { path = "../rast-helper" }
+axum.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+rand.workspace = true
+subtle.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+walkdir.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

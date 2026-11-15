@@ -9,10 +9,8 @@ pub mod backup;
 pub mod linux_apps;
 pub mod monitor;
 pub mod native_proxy;
-pub mod rootfs;
 pub mod server;
 pub mod state;
-pub mod terminal;
 pub mod update;
 
 pub use rast_base::{
@@ -27,3 +25,5 @@ pub use rast_apps::packages;
 pub use rast_docker::{docker, worker};
 
 pub use rast_helper::native;
+
+pub use rast_agent::{rootfs, terminal};
