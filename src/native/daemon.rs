@@ -2104,7 +2104,9 @@ async fn terminal_start(
     prepare_terminal_base(options, gid)?;
     let session_dir = terminal_base_dir(options).join(&op.session_id);
     prepare_terminal_session_dir(options, &session_dir, uid, gid)?;
-    if identity.is_some() {
+    // The agent creates its socket in the session directory as the shell's
+    // user: anyone but root must be able to pass the directories above it.
+    if identity.is_some() || account.is_some() {
         ensure_identity_traversal(options, &session_dir)?;
     }
     let token = random_terminal_token();

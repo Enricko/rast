@@ -9,6 +9,16 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-11-15
+
+### Fixed
+
+- **A terminal with `terminal_admin_account` did not start** ("the terminal
+  unit did not start"): the login account could not enter RAST's terminal
+  runtime directory to create the agent socket. The directory is now
+  traversable for it, as it already was for ordinary users' identities.
+  Broken in 0.17.2 and 0.17.3.
+
 ## [0.17.3] - 2026-11-15
 
 ### Fixed
