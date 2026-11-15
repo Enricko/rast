@@ -284,6 +284,10 @@ export class TerminalSession {
     if (!message) return;
     switch (message.type) {
       case "ready":
+        // Rejoining a session: the server replays its recent output next.
+        // Start from a clean screen, or the replay would be added below what
+        // is already shown, once per reconnect.
+        if (message.reconnected) this.term?.reset();
         this.transition({ type: "ready", ready: message });
         this.fitSoon();
         this.term?.focus();

@@ -9,6 +9,18 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-15
+
+### Fixed
+
+- **An idle Terminal kept reconnecting and repeating its screen.** Behind a
+  reverse proxy or tunnel that closes quiet WebSockets (Cloudflare: after 100
+  seconds), a terminal nobody typed in was disconnected again and again, and
+  every reconnect printed the session's recent output below what was already
+  shown, hiding the command being typed. The server now pings the connection
+  every 20 seconds so it stays open, and rejoining a session redraws the
+  screen instead of adding to it.
+
 ## [0.18.0] - 2026-11-15
 
 ### Added

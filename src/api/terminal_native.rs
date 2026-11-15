@@ -46,6 +46,10 @@ use crate::{
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the signed-in session and permission are re-checked.
 const SESSION_CHECK: Duration = Duration::from_secs(30);
+/// A ping this often keeps an idle terminal's connection open: reverse
+/// proxies and tunnels close a WebSocket that carries nothing for a while
+/// (Cloudflare: 100 seconds).
+const KEEPALIVE: Duration = Duration::from_secs(20);
 /// Largest WebSocket message accepted from the browser (a big paste).
 const MAX_MESSAGE: usize = 1024 * 1024;
 /// Upper bound for per-terminal runtime override entries.
@@ -334,8 +338,15 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
 
     let mut session_check = tokio::time::interval(SESSION_CHECK);
     session_check.tick().await;
+    let mut keepalive = tokio::time::interval(KEEPALIVE);
+    keepalive.tick().await;
     loop {
         tokio::select! {
+            _ = keepalive.tick() => {
+                if socket.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
             message = socket.recv() => {
                 match message {
                     Some(Ok(Message::Binary(bytes))) => {
