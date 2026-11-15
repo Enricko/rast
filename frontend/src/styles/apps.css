@@ -2678,16 +2678,20 @@ button.pkg-pill {
 }
 
 /* Package-provided SVG/PNG icons sit on a plain tile and are never stretched. */
+/* Monochrome brand marks (Simple Icons) are drawn with currentColor = black,
+   so they need a light plate in both themes to stay readable; coloured PNG
+   icons benefit from the same neutral background. */
 .pkg-icon.has-image {
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: #eef2f7;
+  border: 1px solid rgba(12, 18, 26, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
   overflow: hidden;
 }
 
 .pkg-icon.has-image img {
   display: block;
-  width: 72%;
-  height: 72%;
+  width: 74%;
+  height: 74%;
   object-fit: contain;
 }
 

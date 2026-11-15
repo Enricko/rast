@@ -9,6 +9,16 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-15
+
+### Fixed
+
+- **Runtime icons are readable in the dark theme.** The official Simple Icons
+  brand marks are monochrome (black); they were drawn almost invisibly on the
+  dark App Center tile. Package icons now sit on a light neutral plate, so both
+  monochrome SVG marks and coloured PNG icons are legible in light and dark
+  themes.
+
 ## [0.16.1] - 2026-11-15
 
 ### Fixed
