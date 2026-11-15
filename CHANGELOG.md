@@ -9,6 +9,20 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.17.2] - 2026-11-15
+
+### Added
+
+- **`terminal_admin_account`: the administrators' Terminal as a Linux login
+  account, exactly like SSH.** Set it to the account you log in to the server
+  with (it must be in `sudo`, `admin` or `wheel`) and an administrator's
+  terminal is a login shell of that account instead of a root shell: its own
+  home, groups, `~/.profile`/`~/.bashrc`, version managers and tool logins
+  (rustup's toolchain, `claude` with its sign-in and skills, …), with `sudo`
+  for root. Nothing RAST-specific is added to that environment and the
+  Terminal runtime selection does not apply to it. A folder the account
+  cannot enter (Open in Terminal) starts in its home instead.
+
 ## [0.17.1] - 2026-11-15
 
 ### Added

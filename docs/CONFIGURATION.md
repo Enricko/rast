@@ -61,6 +61,7 @@ applied by `src/config.rs`.
 | `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
 | `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
 | `terminal_admin_root` | boolean | `true` | Administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Selected ordinary users always run unprivileged. Set `false` if administrators should not get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
+| `terminal_admin_account` | string | unset | With `terminal_admin_root`: run the administrators' terminals as this Linux login account (it must be a member of `sudo`, `admin` or `wheel`) instead of root. The shell is a login shell with the account's own environment, exactly like its SSH login; `sudo` gives root | `RAST_TERMINAL_ADMIN_ACCOUNT` |
 | `terminal_path_extra` | list of strings | `[]` | Absolute directories appended to the `PATH` of administrator root shells, in addition to the per-user tool directories of the accounts in `sudo`/`admin`/`wheel`, which are added automatically (for example `["/home/alice/.local/bin"]`). They come last, so they never shadow a system command; root runs whatever is in them, so list only directories of accounts you trust. At most 16 | `RAST_TERMINAL_PATH_EXTRA` (colon separated) |
 | `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
 | `terminal_grace_seconds` | integer | `30` | Minimum time a terminal without a viewer is kept (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
@@ -116,6 +117,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
 | `RAST_TERMINAL_ENABLED` | `terminal_enabled` | `true`/`false` |
 | `RAST_TERMINAL_ADMIN_ROOT` | `terminal_admin_root` | `true`/`false` |
+| `RAST_TERMINAL_ADMIN_ACCOUNT` | `terminal_admin_account` | account name |
 | `RAST_TERMINAL_PATH_EXTRA` | `terminal_path_extra` | colon-separated directories |
 | `RAST_TERMINAL_MAX_SESSIONS` | `terminal_max_sessions` | integer |
 | `RAST_TERMINAL_GRACE_SECONDS` | `terminal_grace_seconds` | integer |

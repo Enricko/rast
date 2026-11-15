@@ -196,6 +196,9 @@ fn set_window_size(fd: RawFd, cols: u16, rows: u16) {
     }
 }
 
+/// Set by the helper for the agent only: start the shell as a login shell.
+pub const LOGIN_SHELL_ENV: &str = "RAST_TERMINAL_LOGIN";
+
 /// Environment for the shell: the agent's (deliberate) environment, with the
 /// terminal identity forced and secrets from the service environment dropped.
 fn shell_environment(shell: &Path) -> Vec<(String, String)> {
@@ -205,7 +208,11 @@ fn shell_environment(shell: &Path) -> Vec<(String, String)> {
             // let the service account's secrets reach the user shell.
             !matches!(
                 key.as_str(),
-                "RAST_CONFIG" | "RAST_DATA_DIR" | "RAST_SECRET_KEY" | "RAST_MASTER_KEY"
+                "RAST_CONFIG"
+                    | "RAST_DATA_DIR"
+                    | "RAST_SECRET_KEY"
+                    | "RAST_MASTER_KEY"
+                    | LOGIN_SHELL_ENV
             ) && !key.starts_with("RAST_PACKAGES_")
         })
         .collect();
@@ -307,7 +314,19 @@ fn spawn_shell_process(
     let shell_arg = CString::new(shell.display().to_string())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid shell path"))?;
     let interactive = CString::new("-i").expect("static argument");
-    let argv_ptrs = [shell_arg.as_ptr(), interactive.as_ptr(), std::ptr::null()];
+    let login = CString::new("-l").expect("static argument");
+    // An account shell (`terminal_admin_account`) is a login shell, so the
+    // account's own profile builds the environment, as over SSH.
+    let argv_ptrs = if std::env::var_os(LOGIN_SHELL_ENV).is_some() {
+        vec![
+            shell_arg.as_ptr(),
+            login.as_ptr(),
+            interactive.as_ptr(),
+            std::ptr::null(),
+        ]
+    } else {
+        vec![shell_arg.as_ptr(), interactive.as_ptr(), std::ptr::null()]
+    };
     let env = shell_environment(shell);
     let (owned_env, env_ptrs) = c_strings(&env)?;
     let pid = unsafe { spawn_shell(&shell_c, &argv_ptrs, &env_ptrs, &cwd_c, slave, master) }?;

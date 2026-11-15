@@ -152,6 +152,11 @@ terminal_enabled = true
 # Set to false to give administrators the mapped unprivileged identity too.
 # env: RAST_TERMINAL_ADMIN_ROOT
 terminal_admin_root = true
+# Run the administrators' terminals as this Linux login account (a member of
+# sudo, admin or wheel) instead of root: a login shell with that account's own
+# environment, exactly like its SSH login; use sudo for root.
+# env: RAST_TERMINAL_ADMIN_ACCOUNT
+# terminal_admin_account = "alice"
 # Extra directories at the end of an administrator root shell's PATH, for
 # tools installed in another account's home (root runs whatever is in them).
 # env: RAST_TERMINAL_PATH_EXTRA (colon separated)

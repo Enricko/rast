@@ -116,6 +116,9 @@ pub struct Session {
     pub cwd: String,
     /// Root shell (administrators only, `terminal_admin_root`).
     pub root: bool,
+    /// The Linux login account an administrator shell runs as, when it is
+    /// not root itself (`terminal_admin_account`).
+    pub account: Option<String>,
     pub started_at: i64,
     /// Runtime versions this shell was started with (shown on reconnect).
     pub runtimes: BTreeMap<String, String>,
@@ -127,12 +130,14 @@ pub struct Session {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         id: String,
         owner: &AuthUser,
         shell: String,
         cwd: String,
         root: bool,
+        account: Option<String>,
         runtimes: BTreeMap<String, String>,
         commands: mpsc::Sender<AgentCommand>,
     ) -> Arc<Self> {
@@ -143,6 +148,7 @@ impl Session {
             shell,
             cwd,
             root,
+            account,
             started_at: db::now_ms(),
             runtimes,
             inner: Mutex::new(SessionInner {
@@ -156,6 +162,11 @@ impl Session {
             }),
             commands,
         })
+    }
+
+    /// A shell that really runs as root (shown as such in the browser).
+    fn is_root_shell(&self) -> bool {
+        self.root && self.account.is_none()
     }
 
     async fn push_output(&self, bytes: &[u8]) {
@@ -200,7 +211,7 @@ impl Session {
             session_id: self.id.clone(),
             shell: self.shell.clone(),
             cwd: self.cwd.clone(),
-            root: self.root,
+            root: self.is_root_shell(),
             runtimes: self.runtimes.clone(),
             viewer_id: inner.viewer_id,
             replay,
@@ -431,7 +442,7 @@ impl TerminalManager {
                 "id": session.id,
                 "shell": session.shell,
                 "cwd": session.cwd,
-                "root": session.root,
+                "root": session.is_root_shell(),
                 "state": "running",
                 "startedAt": session.started_at,
                 "viewers": if inner.viewer.is_some() { 1 } else { 0 },
@@ -476,6 +487,7 @@ impl TerminalManager {
         let root = user.is_admin() && self.config.terminal.admin_root;
         let environment = self.environment(user.id).await?;
         let selected = environment.selected_overrides(&spec.overrides);
+        let account = self.config.terminal.admin_account.clone().filter(|_| root);
         let mut env_map = environment.shell_env(&selected);
         if root {
             // Tools the administrator installed for another Linux account
@@ -502,6 +514,7 @@ impl TerminalManager {
             "shell": shell,
             "cwd": cwd,
             "root": root,
+            "account": account,
             "writeAccess": spec.write_access,
             "env": env_map,
             "memoryMaxMb": self.config.terminal.memory_mb,
@@ -564,7 +577,14 @@ impl TerminalManager {
             shell.clone(),
             final_cwd.clone(),
             root,
-            selected.clone(),
+            account.clone(),
+            // An account shell builds its own environment from its profile;
+            // the managed runtime selection is not applied to it.
+            if account.is_some() {
+                BTreeMap::new()
+            } else {
+                selected.clone()
+            },
             commands_tx,
         );
         self.sessions
@@ -938,6 +958,7 @@ mod tests {
             "/bin/bash".into(),
             "/root".into(),
             true,
+            None,
             BTreeMap::new(),
             commands,
         );

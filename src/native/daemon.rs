@@ -1607,6 +1607,78 @@ fn terminal_environment(
     Ok(env)
 }
 
+/// Whether `account` can change into `dir` (checked as that account).
+async fn account_can_enter(account: &crate::packages::accounts::Account, dir: &Path) -> bool {
+    tokio::process::Command::new("/usr/sbin/runuser")
+        .arg("-u")
+        .arg(&account.name)
+        .arg("--")
+        .arg("/usr/bin/test")
+        .arg("-x")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .is_ok_and(|status| status.success())
+}
+
+/// The value of `KEY=value` / `KEY="value"` in an environment-style file.
+fn env_file_value(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let value = line.trim().strip_prefix(key)?.strip_prefix('=')?;
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        (!value.is_empty()
+            && value.len() <= 1024
+            && !value.chars().any(|c| c.is_control() || c == '$'))
+        .then(|| value.to_string())
+    })
+}
+
+/// Environment of an administrator shell that runs as a login account: only
+/// what sshd/PAM would provide. The shell is a login shell, so `/etc/profile`
+/// and the account's own `~/.profile`/`~/.bashrc` build the rest (PATH with
+/// its tool directories, version managers, …) exactly as over SSH. Nothing
+/// RAST-specific is injected and the managed runtime selection is not applied.
+fn account_environment(
+    account: &crate::packages::accounts::Account,
+    shell: &str,
+) -> BTreeMap<String, String> {
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    env.insert("HOME".into(), account.home.display().to_string());
+    env.insert("USER".into(), account.name.clone());
+    env.insert("LOGNAME".into(), account.name.clone());
+    env.insert("SHELL".into(), shell.to_string());
+    env.insert("TERM".into(), "xterm-256color".into());
+    env.insert(
+        "LANG".into(),
+        env_file_value(&read("/etc/default/locale"), "LANG").unwrap_or_else(|| "C.UTF-8".into()),
+    );
+    env.insert(
+        "PATH".into(),
+        env_file_value(&read("/etc/environment"), "PATH").unwrap_or_else(|| {
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin".into()
+        }),
+    );
+    // The account's systemd user session, when it has one (logged in or
+    // lingering): user services and the session bus work as over SSH.
+    let runtime = PathBuf::from(format!("/run/user/{}", account.uid));
+    if runtime.is_dir() {
+        env.insert("XDG_RUNTIME_DIR".into(), runtime.display().to_string());
+        let bus = runtime.join("bus");
+        if bus.exists() {
+            env.insert(
+                "DBUS_SESSION_BUS_ADDRESS".into(),
+                format!("unix:path={}", bus.display()),
+            );
+        }
+    }
+    env.insert(crate::terminal::agent::LOGIN_SHELL_ENV.into(), "1".into());
+    env
+}
+
 /// The PATH a login shell of this account would have: the account's own
 /// `~/.local/bin` and `~/bin` first (tools installed for that user, as
 /// `~/.profile` does on Debian/Ubuntu) and `/snap/bin` last. Directories that
@@ -1800,6 +1872,8 @@ async fn grant_terminal_acl(
 struct TerminalUnitSpec<'a> {
     unit: &'a str,
     root: bool,
+    /// Administrator shell that runs as this login account instead of root.
+    run_as: Option<&'a str>,
     uid: u32,
     gid: u32,
 }
@@ -1819,6 +1893,7 @@ fn build_terminal_systemd_args(
     let TerminalUnitSpec {
         unit,
         root,
+        run_as,
         uid,
         gid,
     } = *spec;
@@ -1835,6 +1910,10 @@ fn build_terminal_systemd_args(
         // Root shell: no identity, no service hardening and no resource
         // limits; the administrator needs the full server (package manager,
         // builds, system paths, devices), like a root login over SSH.
+        if let Some(account) = run_as {
+            // User= also gives the account its supplementary groups.
+            args.push(OsString::from(format!("--uid={account}")));
+        }
         args.extend([
             OsString::from("--property=TasksMax=infinity"),
             OsString::from("--property=NoNewPrivileges=no"),
@@ -1939,18 +2018,46 @@ async fn terminal_start(
         identity::ensure_home(options, &identity).await?;
         Some(identity)
     };
-    let (uid, home, username) = match identity.as_ref() {
-        Some(identity) => (
+    // `terminal_admin_account`: the administrator's shell runs as a Linux
+    // login account that may itself become root (sudo/admin/wheel), with
+    // that account's own environment, exactly like its SSH login.
+    let account = match op.account.as_deref() {
+        None => None,
+        Some(_) if !op.root => {
+            return Err(NativeError::invalid(
+                "a terminal account is only valid for an administrator shell",
+            ));
+        }
+        Some(name) => Some(
+            crate::packages::accounts::admin_accounts()
+                .into_iter()
+                .find(|account| account.name == name)
+                .ok_or_else(|| {
+                    NativeError::invalid(format!(
+                        "{name:?} is not a login account in the sudo, admin or wheel group"
+                    ))
+                })?,
+        ),
+    };
+    let (uid, home, username) = match (identity.as_ref(), account.as_ref()) {
+        (Some(identity), _) => (
             identity.uid,
             identity.home.clone(),
             identity.username.clone(),
         ),
-        None => (0, PathBuf::from("/root"), "root".to_string()),
+        (None, Some(account)) => (account.uid, account.home.clone(), account.name.clone()),
+        (None, None) => (0, PathBuf::from("/root"), "root".to_string()),
     };
     let cwd = if op.cwd.is_empty() {
         home.clone()
     } else if op.root {
-        terminal_root_working_directory(&op.cwd)?
+        let cwd = terminal_root_working_directory(&op.cwd)?;
+        match account.as_ref() {
+            // A folder the account cannot enter: start in its home instead
+            // of failing (it can still `sudo` there).
+            Some(account) if !account_can_enter(account, &cwd).await => home.clone(),
+            _ => cwd,
+        }
     } else {
         let identity = identity.as_ref().expect("identity");
         terminal_working_directory(options, identity, &op.cwd, op.write_access).await?
@@ -1969,7 +2076,10 @@ async fn terminal_start(
     let token_file = session_dir.join("token");
     write_terminal_token(options, &token_file, &token, uid, gid)?;
     let socket = session_dir.join("agent.sock");
-    let env = terminal_environment(&home, &username, &session_dir, &op.shell, &op.env)?;
+    let env = match account.as_ref() {
+        Some(account) => account_environment(account, &op.shell),
+        None => terminal_environment(&home, &username, &session_dir, &op.shell, &op.env)?,
+    };
     let exe = std::env::current_exe().map_err(|error| {
         NativeError::command_failed(format!(
             "cannot locate the RAST binary for the terminal agent: {error}"
@@ -1987,11 +2097,14 @@ async fn terminal_start(
         "--cwd".into(),
         cwd.display().to_string(),
     ];
-    let unit = terminal_unit(uid, &op.session_id);
+    // Administrator shells keep the uid-0 unit name whichever account they
+    // run as, so `terminal_stop` finds them from `root` alone.
+    let unit = terminal_unit(if op.root { 0 } else { uid }, &op.session_id);
     validate_unit(&unit)?;
     let unit_spec = TerminalUnitSpec {
         unit: &unit,
         root: op.root,
+        run_as: account.as_ref().map(|account| account.name.as_str()),
         uid,
         gid,
     };
@@ -5229,6 +5342,59 @@ exit 0
     }
 
     #[test]
+    fn an_account_shell_gets_a_login_environment_and_its_own_user() {
+        let account = crate::packages::accounts::Account {
+            name: "ada".into(),
+            uid: 4_000_000,
+            gid: 4_000_000,
+            home: PathBuf::from("/home/ada"),
+        };
+        let env = account_environment(&account, "/bin/bash");
+        assert_eq!(env.get("HOME").map(String::as_str), Some("/home/ada"));
+        assert_eq!(env.get("USER").map(String::as_str), Some("ada"));
+        assert!(env.contains_key("PATH") && env.contains_key("LANG"));
+        // Nothing RAST-specific: no private TMPDIR, caches or runtime PATH.
+        assert!(!env.contains_key("TMPDIR") && !env.contains_key("CARGO_HOME"));
+        assert!(!env.contains_key("XDG_RUNTIME_DIR"));
+        assert!(env.contains_key(crate::terminal::agent::LOGIN_SHELL_ENV));
+
+        assert_eq!(
+            env_file_value("# comment\nPATH=\"/usr/bin:/bin\"\n", "PATH").as_deref(),
+            Some("/usr/bin:/bin")
+        );
+        assert_eq!(
+            env_file_value("LANG=en_US.UTF-8\n", "LANG").as_deref(),
+            Some("en_US.UTF-8")
+        );
+        assert_eq!(env_file_value("PATH=$HOME/bin\n", "PATH"), None);
+
+        let args: Vec<String> = build_terminal_systemd_args(
+            &TerminalUnitSpec {
+                unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
+                root: true,
+                run_as: Some("ada"),
+                uid: 4_000_000,
+                gid: 4_000_000,
+            },
+            ResourceLimits {
+                memory_max_mb: 512,
+                cpu_quota_percent: 100,
+                tasks_max: 256,
+            },
+            Path::new("/home/ada"),
+            &env,
+            &["/usr/local/bin/rast".to_string()],
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+        let joined = args.join(" ");
+        assert!(joined.contains("--uid=ada"));
+        // sudo must keep working: no NoNewPrivileges, no limits.
+        assert!(joined.contains("NoNewPrivileges=no") && !joined.contains("MemoryMax="));
+    }
+
+    #[test]
     fn login_path_adds_the_accounts_own_bin_directories() {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
@@ -5330,6 +5496,7 @@ exit 0
             &TerminalUnitSpec {
                 unit: "rast-term-u200007-0123456789abcdef0123456789abcdef",
                 root: false,
+                run_as: None,
                 uid: identity.uid,
                 gid: identity.gid,
             },
@@ -5365,6 +5532,7 @@ exit 0
             &TerminalUnitSpec {
                 unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
                 root: true,
+                run_as: None,
                 uid: 0,
                 gid: 0,
             },

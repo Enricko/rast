@@ -70,6 +70,17 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   added with `terminal_path_extra`. Set `terminal_admin_root = false` to give administrators the
   mapped unprivileged identity instead. Ordinary users are never granted root
   by this feature.
+* **Administrator shell as a login account** (`terminal_admin_account`): set
+  this to the Linux account the server is administered with over SSH (a
+  member of `sudo`, `admin` or `wheel`; the helper refuses any other account)
+  and an administrator's Terminal is a *login shell of that account* instead
+  of root. The helper passes only what sshd/PAM would (`HOME`, `USER`,
+  `SHELL`, `LANG` from `/etc/default/locale`, `PATH` from `/etc/environment`,
+  `XDG_RUNTIME_DIR` when the account has a user session); `/etc/profile` and
+  the account's `~/.profile`/`~/.bashrc` build the rest. The same commands,
+  versions and tool sign-ins as over SSH are therefore available, and `sudo`
+  gives root. The Terminal runtime selection and per-tab overrides are not
+  applied to these shells. Ordinary users are unaffected.
 * **Secrets**: the agent and shell run in a fresh, explicitly constructed
   environment. The RAST data directory, `secret.key`, the helper/worker
   sockets and the Docker socket are not readable by the identity (ownership
@@ -193,6 +204,7 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 |---|---|---|
 | `terminal_enabled` | `true` | Offer the Terminal feature (permission rules still apply). |
 | `terminal_admin_root` | `true` | Administrators get a root shell; selected ordinary users always get their unprivileged identity. |
+| `terminal_admin_account` | unset | Run administrators' terminals as this login account (sudo/admin/wheel member), like SSH, instead of root. |
 | `terminal_path_extra` | `[]` | Directories appended to an administrator root shell's `PATH` (tools in another account's home). |
 | `terminal_max_sessions` | `8` | Maximum concurrent terminals per account. |
 | `terminal_grace_seconds` | `30` | Minimum time a terminal without a viewer is kept. |

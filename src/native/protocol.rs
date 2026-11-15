@@ -653,6 +653,11 @@ pub struct TerminalStartOp {
     /// whole request and the session is one transient root unit with limits.
     #[serde(default)]
     pub root: bool,
+    /// With `root`: run the administrator's shell as this Linux login account
+    /// (a login shell with its own environment, as over SSH) instead of root.
+    /// The helper only accepts an account that may itself become root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// RAST folder permission allows writing (drives the recursive ACL grant).
     #[serde(rename = "writeAccess")]
     pub write_access: bool,
@@ -1987,6 +1992,7 @@ mod tests {
                 shell: "/bin/bash".into(),
                 cwd: String::new(),
                 root: true,
+                account: None,
                 write_access: false,
                 env: BTreeMap::new(),
                 memory_max_mb: 512,

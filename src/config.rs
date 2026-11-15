@@ -165,6 +165,8 @@ pub struct FileConfig {
     pub terminal_cpus: Option<u32>,
     /// Process (task) limit of one terminal session.
     pub terminal_tasks: Option<u32>,
+    /// Linux login account administrators' terminals run as, instead of root.
+    pub terminal_admin_account: Option<String>,
     /// Extra directories at the end of an administrator root shell's PATH.
     pub terminal_path_extra: Option<Vec<String>>,
 }
@@ -228,6 +230,9 @@ pub struct TerminalConfig {
     pub memory_mb: u32,
     pub cpus: u32,
     pub tasks: u32,
+    /// With `admin_root`: the Linux login account (in sudo/admin/wheel) the
+    /// administrators' shells run as, with its own login environment.
+    pub admin_account: Option<String>,
     /// Absolute directories appended to the PATH of administrator root
     /// shells, for tools installed in another account's home.
     pub path_extra: Vec<String>,
@@ -245,6 +250,7 @@ impl Default for TerminalConfig {
             cpus: 2,
             tasks: 512,
             path_extra: Vec::new(),
+            admin_account: None,
         }
     }
 }
@@ -608,7 +614,23 @@ impl Config {
                 "terminal_path_extra must be at most 16 absolute directories without '..'".into(),
             ));
         }
+        let terminal_admin_account =
+            get_str(file.terminal_admin_account, "RAST_TERMINAL_ADMIN_ACCOUNT")
+                .map(|name| name.trim().to_string())
+                .filter(|name| !name.is_empty() && name != "root");
+        if terminal_admin_account.as_ref().is_some_and(|name| {
+            name.len() > 32
+                || name.starts_with('-')
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        }) {
+            return Err(ConfigError::Invalid(
+                "terminal_admin_account must be a Linux account name".into(),
+            ));
+        }
         let terminal = TerminalConfig {
+            admin_account: terminal_admin_account,
             path_extra: terminal_path_extra,
             enabled: parse_env_bool(&env, "RAST_TERMINAL_ENABLED", file.terminal_enabled)?
                 .unwrap_or(true),
