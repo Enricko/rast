@@ -6769,10 +6769,20 @@ fn cmd_php_publish(
 fn cmd_collect(artifacts: &Path, work: &Path, verify_result: &str) -> Result<(), String> {
     fs::create_dir_all(work)
         .map_err(|error| format!("cannot create {}: {error}", work.display()))?;
-    // The plan artifact (plan.json + previous/).
+    // The plan artifact (plan.json + previous/). With several artifacts GitHub
+    // unpacks each into `<path>/<name>`; with only the plan artifact (e.g. a
+    // `republish` run where verify/php are skipped) it may unpack the files
+    // directly into `<path>`. Support both layouts.
     let plan_dir = artifacts.join("plan");
     if plan_dir.is_dir() {
         copy_tree(&plan_dir, work)?;
+    } else if artifacts.join("plan.json").is_file() {
+        fs::copy(artifacts.join("plan.json"), work.join("plan.json"))
+            .map_err(|error| format!("cannot copy plan.json: {error}"))?;
+        let previous = artifacts.join("previous");
+        if previous.is_dir() {
+            copy_tree(&previous, &work.join("previous"))?;
+        }
     }
     let results = work.join("results");
     fs::create_dir_all(&results)
@@ -9289,6 +9299,20 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
         assert!(
             crate::packages::host::incompatibility(&parsed, &host_for("linux-x86_64")).is_none()
         );
+    }
+
+    #[test]
+    fn collect_accepts_a_flat_plan_artifact() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = temp.path().join("artifacts");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join("plan.json"), b"{\"sequence\":1}").unwrap();
+        std::fs::create_dir_all(artifacts.join("previous")).unwrap();
+        std::fs::write(artifacts.join("previous/catalog.json"), b"{}").unwrap();
+        let work = temp.path().join("work");
+        cmd_collect(&artifacts, &work, "skipped").unwrap();
+        assert!(work.join("plan.json").is_file());
+        assert!(work.join("previous/catalog.json").is_file());
     }
 
     #[test]

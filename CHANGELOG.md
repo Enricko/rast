@@ -9,6 +9,17 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-15
+
+### Fixed
+
+- **Catalog: republishing without re-verification works.** In a
+  `republish` workflow run (no new versions, verify/php skipped) GitHub unpacks
+  the single plan artifact directly instead of into a `plan/` directory;
+  `rast catalog collect` now accepts both layouts, so a metadata/icon-only
+  republish can assemble and sign the catalog. This is what published the
+  runtime icons; no runtime versions changed.
+
 ## [0.16.0] - 2026-11-15
 
 ### Added
