@@ -244,6 +244,9 @@ pub enum NativeOp {
     SessionStop(SessionStopOp),
     UnitStatus(UnitStatusOp),
     UnitsList,
+    /// Start (or find) the root file agent behind File Station's root file
+    /// system; replies with its socket and token.
+    RootfsStart,
     /// Official runtimes in the administrator accounts' home directories.
     RuntimesDetect(RuntimesDetectOp),
     AppStart(AppStartOp),
@@ -281,6 +284,7 @@ impl NativeOp {
             Self::SessionStop(_) => "session_stop",
             Self::UnitStatus(_) => "unit_status",
             Self::UnitsList => "units_list",
+            Self::RootfsStart => "rootfs_start",
             Self::RuntimesDetect(_) => "runtimes_detect",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
@@ -330,6 +334,7 @@ impl NativeOp {
             Self::Ping
                 | Self::UnitStatus(_)
                 | Self::UnitsList
+                | Self::RootfsStart
                 | Self::PackagePolicy(_)
                 | Self::PathMkdir(_)
                 | Self::PathRemove(_)
@@ -389,7 +394,7 @@ impl NativeRequest {
             }};
         }
         match &self.op {
-            NativeOp::Ping | NativeOp::UnitsList | NativeOp::AptUpdate => {}
+            NativeOp::Ping | NativeOp::UnitsList | NativeOp::RootfsStart | NativeOp::AptUpdate => {}
             NativeOp::IdentityEnsure(op) => merge!(op),
             NativeOp::IdentityRemove(op) => merge!(op),
             NativeOp::SessionStart(op) => merge!(op),
@@ -512,6 +517,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "session_stop" => NativeOp::SessionStop(op_from(rest, "session_stop")?),
         "unit_status" => NativeOp::UnitStatus(op_from(rest, "unit_status")?),
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
+        "rootfs_start" => no_fields(rest, "rootfs_start").map(|_| NativeOp::RootfsStart)?,
         "runtimes_detect" => NativeOp::RuntimesDetect(op_from(rest, "runtimes_detect")?),
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
@@ -1971,6 +1977,7 @@ mod tests {
                 unit: "rast-app-demo".into(),
             }),
             NativeOp::UnitsList,
+            NativeOp::RootfsStart,
             NativeOp::AppStart(AppStartOp {
                 user_id: 7,
                 app_id: "demo".into(),

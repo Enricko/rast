@@ -262,7 +262,7 @@ pub async fn login(
         state.config.secure_cookies,
     );
     let body = LoginResponse {
-        user: UserDto::from(record),
+        user: users::dto(&state.db, record).await?,
         csrf_token,
         expires_at: new_session.expires_at,
     };
@@ -362,7 +362,7 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
         },
         permissions: PermissionsDto { apps, groups },
         server_time: db::now_ms(),
-        user: UserDto::from(record),
+        user: users::dto(&state.db, record).await?,
     }))
 }
 
@@ -615,6 +615,8 @@ pub async fn setup(
         Some(0),
     )
     .await?;
+    // The first administrator owns the server.
+    users::set_super_admin(&state.db, user.id, true).await?;
     // Invalidate the token: one-shot.
     let _ = db::set_setting(&state.db, "setup_token_hash", "").await;
     let _ = db::set_setting(&state.db, "setup_token_expires", "0").await;
@@ -632,7 +634,7 @@ pub async fn setup(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "user": UserDto::from(user),
+            "user": users::dto(&state.db, user).await?,
             "message": "administrator created; sign in to continue"
         })),
     )

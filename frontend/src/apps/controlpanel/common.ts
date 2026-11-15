@@ -55,8 +55,17 @@ export function notifyError(ctx: AppContext, error: unknown): void {
   ctx.toast.error(errorMessage(error));
 }
 
-export function roleBadge(role: Role): HTMLElement {
-  return role === "admin" ? badge("Administrator", "info") : badge("User", "neutral");
+export function roleBadge(role: Role, superAdmin = false): HTMLElement {
+  if (role !== "admin") return badge("User", "neutral");
+  return superAdmin ? badge("Super administrator", "warn") : badge("Administrator", "info");
+}
+
+/** The three-level role name the users API accepts. */
+export type RoleName = "superadmin" | "admin" | "user";
+
+export function roleNameOf(user: { role: Role; superAdmin?: boolean }): RoleName {
+  if (user.role !== "admin") return "user";
+  return user.superAdmin ? "superadmin" : "admin";
 }
 
 export function activeBadge(active: boolean): HTMLElement {

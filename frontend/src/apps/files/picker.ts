@@ -9,6 +9,8 @@ import { iconSvg } from "../../core/icons";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import { isUnavailableError, unavailableReason, unavailableState } from "../../components/states";
 
+import { isSystemPath, SYSTEM_ROOT } from "./types";
+
 export interface FolderPickerOptions {
   title: string;
   confirmLabel: string;
@@ -65,13 +67,17 @@ export function pickDestination(
       clear(list);
       clear(crumbs);
       status.textContent = "Loading folders…";
-      const parent = path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/";
-      const crumbRoot = h("button", { class: "picker-crumb", type: "button" }, "Home");
-      crumbRoot.addEventListener("click", () => navigate("/"));
+      // The root file system is its own tree: its top has no parent, and a
+      // copy or move never crosses between it and RAST storage.
+      const system = isSystemPath(path);
+      const top = system ? SYSTEM_ROOT : "/";
+      const parent = path === top ? null : path.slice(0, path.lastIndexOf("/")) || "/";
+      const crumbRoot = h("button", { class: "picker-crumb", type: "button" }, system ? "Root file system" : "Home");
+      crumbRoot.addEventListener("click", () => navigate(top));
       crumbs.appendChild(crumbRoot);
-      if (path !== "/") {
-        const parts = path.split("/").filter(Boolean);
-        let accumulated = "";
+      if (path !== top) {
+        const parts = path.split("/").filter(Boolean).slice(system ? 1 : 0);
+        let accumulated = system ? SYSTEM_ROOT : "";
         for (const part of parts) {
           accumulated += `/${part}`;
           const target = accumulated;

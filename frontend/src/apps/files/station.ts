@@ -42,6 +42,8 @@ import {
   parentPath,
   previewKind,
   sortEntries,
+  isSystemPath,
+  systemPathLabel,
   validateFileName,
   type JobRef,
   type TrashPage,
@@ -279,7 +281,7 @@ export class FileStation {
     this.fileInput = h("input", { type: "file", multiple: true, class: "hidden", tabIndex: -1 });
     this.fileInput.addEventListener("change", () => {
       const files = this.fileInput.files;
-      if (files && files.length > 0) this.uploads.enqueue(files, this.path);
+      if (files && files.length > 0) void this.enqueueUploads(files);
       this.fileInput.value = "";
     });
 
@@ -296,7 +298,6 @@ export class FileStation {
     const sidebar = h(
       "aside",
       { class: "app-sidebar fs-sidebar", ariaLabel: "Locations" },
-      h("div", { class: "fs-sidebar-title" }, "Locations"),
       this.rootsNav,
       h("div", { class: "menu-sep" }),
       this.trashNav,
@@ -409,7 +410,7 @@ export class FileStation {
       this.dragDepth = 0;
       this.dropOverlay.classList.add("hidden");
       const files = event.dataTransfer?.files;
-      if (files && files.length > 0) this.uploads.enqueue(files, this.path);
+      if (files && files.length > 0) void this.enqueueUploads(files);
     });
     // Clicking blank space clears the selection; marquee selection starts
     // only from empty pane space (not entries, controls or the table header).
@@ -1072,22 +1073,37 @@ export class FileStation {
         (this.path === root.path || this.path.startsWith(root.path === "/" ? "/" : `${root.path}/`));
       if (matches && (!activeRoot || root.path.length > activeRoot.path.length)) activeRoot = root;
     }
-    for (const root of this.roots) {
-      const btn = h(
-        "button",
-        {
-          class: `nav-item${activeRoot === root ? " is-active" : ""}`,
-          type: "button",
-          title: root.path,
-        },
-        iconSvg(root.kind === "home" ? "files" : "folder", 16),
-        h("span", { class: "nav-label" }, root.name),
-      );
-      if (root.kind === "share" && root.perms) {
-        btn.appendChild(h("span", { class: `badge ${root.perms === "read" ? "" : "info"} fs-root-badge` }, root.perms === "read" ? "read-only" : root.perms));
+    // Three places: your own storage, the folders shared with you, and (for
+    // super administrators) the server's own file system.
+    const groups: Array<{ title: string; kind: FileRoot["kind"]; empty?: string }> = [
+      { title: "Home", kind: "home" },
+      { title: "Shared folders", kind: "share", empty: "Nothing shared with you yet" },
+      { title: "Server", kind: "system" },
+    ];
+    for (const group of groups) {
+      const roots = this.roots.filter((root) => root.kind === group.kind);
+      if (roots.length === 0 && !group.empty) continue;
+      this.rootsNav.appendChild(h("div", { class: "fs-sidebar-title" }, group.title));
+      if (roots.length === 0) {
+        this.rootsNav.appendChild(h("div", { class: "fs-sidebar-note small" }, group.empty ?? ""));
       }
-      btn.addEventListener("click", () => void this.navigate(root.path));
-      this.rootsNav.appendChild(btn);
+      for (const root of roots) {
+        const btn = h(
+          "button",
+          {
+            class: `nav-item${activeRoot === root ? " is-active" : ""}`,
+            type: "button",
+            title: root.kind === "system" ? "The server's own files, as root" : root.path,
+          },
+          iconSvg(root.kind === "home" ? "home" : root.kind === "system" ? "disk" : "folder", 16),
+          h("span", { class: "nav-label" }, root.kind === "home" ? "My files" : root.name),
+        );
+        if (root.kind === "share" && root.perms) {
+          btn.appendChild(h("span", { class: `badge ${root.perms === "read" ? "" : "info"} fs-root-badge` }, root.perms === "read" ? "read-only" : root.perms));
+        }
+        btn.addEventListener("click", () => void this.navigate(root.path));
+        this.rootsNav.appendChild(btn);
+      }
     }
     this.trashNav.classList.toggle("is-active", this.section === "trash");
     if (this.rootsError) {
@@ -1105,11 +1121,26 @@ export class FileStation {
 
   private renderUsage(): void {
     clear(this.usageHost);
-    const quota = this.usage?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0;
-    const used = this.usage?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0;
-    const free = Math.max(0, quota - used);
-    const title = h("div", { class: "fs-sidebar-title" }, "Storage");
+    // On the root file system the numbers are the disk behind the open
+    // folder, not the account's quota.
+    const system = this.section === "files" && isSystemPath(this.path);
+    const quota = (system ? undefined : this.usage?.quotaBytes) ?? this.listing?.quota?.quotaBytes ?? 0;
+    const used = (system ? undefined : this.usage?.usedBytes) ?? this.listing?.quota?.usedBytes ?? 0;
+    const free = system ? (this.listing?.quota?.freeBytes ?? 0) : Math.max(0, quota - used);
+    const title = h("div", { class: "fs-sidebar-title" }, system ? "Disk" : "Storage");
     this.usageHost.appendChild(title);
+    if (system) {
+      const fraction = quota > 0 ? Math.min(1, used / quota) : 0;
+      const bar = h("div", { class: "progress fs-usage-bar" });
+      const fill = h("div", { class: "progress-bar" });
+      fill.style.width = `${(fraction * 100).toFixed(1)}%`;
+      if (fraction > 0.92) fill.classList.add("is-error");
+      bar.appendChild(fill);
+      this.usageHost.appendChild(bar);
+      this.usageHost.appendChild(h("div", { class: "fs-usage-line" }, `${formatBytes(used)} of ${formatBytes(quota)}`));
+      this.usageHost.appendChild(h("div", { class: "fs-usage-line muted" }, `${formatBytes(free)} free`));
+      return;
+    }
     if (this.usageError && !this.usage) {
       this.usageHost.appendChild(
         h(
@@ -1739,7 +1770,7 @@ export class FileStation {
       entryKind: entry.kind,
       path: entry.path,
     });
-    if (terminalFolder) {
+    if (terminalFolder && !isSystemPath(entry.path)) {
       items.push({
         label: "Open in Terminal",
         icon: "terminal",
@@ -1748,7 +1779,7 @@ export class FileStation {
     }
     if (entry.kind === "file") {
       items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
-      if (this.ctx.store.isAdmin() && isLinuxPackageName(entry.name)) {
+      if (this.ctx.store.isAdmin() && isLinuxPackageName(entry.name) && !isSystemPath(entry.path)) {
         items.push({ label: "Install as Linux app", icon: "box", onClick: () => void this.installLinuxApp(entry) });
       }
       items.push("separator");
@@ -1800,6 +1831,7 @@ export class FileStation {
       }),
     );
     if (!name) return;
+    if (!(await this.confirmSystemWrite(this.path, "Create folder", `Create "${name.trim()}"`))) return;
     try {
       await this.ctx.api.post("/api/files/mkdir", { path: joinPath(this.path, name.trim()) });
       this.ctx.toast.success("Folder created");
@@ -1825,6 +1857,7 @@ export class FileStation {
       }),
     );
     if (!name || name.trim() === entry.name) return;
+    if (!(await this.confirmSystemWrite(entry.path, "Rename", `Rename "${entry.name}" to "${name.trim()}"`))) return;
     try {
       await this.ctx.api.post("/api/files/rename", { path: entry.path, newName: name.trim() });
       this.ctx.toast.success("Renamed");
@@ -1863,6 +1896,8 @@ export class FileStation {
     );
     if (!destDir) return;
     const paths = entries.map((entry) => entry.path);
+    const verb = kind === "copy" ? "Copy" : "Move";
+    if (!(await this.confirmSystemWrite(destDir, verb, `${verb} ${paths.length} item(s) to ${systemPathLabel(destDir)}`))) return;
     try {
       const response = await this.ctx.api.post<JobRef>(kind === "copy" ? "/api/files/copy" : "/api/files/move", {
         paths,
@@ -1884,13 +1919,24 @@ export class FileStation {
   private async deleteSelected(): Promise<void> {
     if (this.selection.size === 0) return;
     const count = this.selection.size;
+    // The root file system has no recycle bin.
+    const permanent = isSystemPath(this.path);
     const confirmed = await this.withEditContext("delete", [...this.selection], () =>
-      confirmDialog({
-        title: "Move to recycle bin",
-        message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
-        confirmLabel: "Move to recycle bin",
-        danger: true,
-      }),
+      confirmDialog(
+        permanent
+          ? {
+              title: "Delete permanently",
+              message: `Permanently delete ${count} item(s) from ${systemPathLabel(this.path)} on the server? This is done as root and cannot be undone.`,
+              confirmLabel: "Delete permanently",
+              danger: true,
+            }
+          : {
+              title: "Move to recycle bin",
+              message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
+              confirmLabel: "Move to recycle bin",
+              danger: true,
+            },
+      ),
     );
     if (!confirmed) return;
     const paths = [...this.selection];
@@ -1907,6 +1953,29 @@ export class FileStation {
     } catch (error) {
       this.ctx.toast.error(`Delete failed: ${friendlyFileError(error)}`);
     }
+  }
+
+  /**
+   * Writes on the root file system are made as root on the server itself:
+   * each one is confirmed. Anywhere else this resolves to true at once.
+   */
+  private async confirmSystemWrite(path: string, title: string, action: string): Promise<boolean> {
+    if (!isSystemPath(path)) return true;
+    return confirmDialog({
+      title,
+      message: `${action} in ${systemPathLabel(path)}? This changes the server's own files, as root.`,
+      confirmLabel: title,
+      danger: true,
+    });
+  }
+
+  /** Queue uploads into the open folder (confirmed first on the root file system). */
+  private async enqueueUploads(files: FileList): Promise<void> {
+    const dir = this.path;
+    // The list is live: copy it before the input is cleared.
+    const picked = Array.from(files);
+    if (!(await this.confirmSystemWrite(dir, "Upload", `Upload ${picked.length} file(s)`))) return;
+    this.uploads.enqueue(picked, dir);
   }
 
   private async runJob(label: string, jobId: string): Promise<void> {

@@ -356,7 +356,10 @@ impl TerminalManager {
         let Some(role) = crate::auth::Role::parse(&role) else {
             return true;
         };
-        if session.root && role != crate::auth::Role::Admin {
+        if session.root
+            && (role != crate::auth::Role::Admin
+                || !crate::users::is_super_admin(&self.db, session.user_id).await)
+        {
             return true;
         }
         let mut owner = session.owner.clone();
@@ -416,7 +419,10 @@ impl TerminalManager {
     /// Runtime panel data for the Terminal app.
     pub async fn env_dto(&self, user: &AuthUser) -> AppResult<Value> {
         let environment = self.environment(user.id).await?;
-        Ok(environment.to_json(&self.config.terminal, self.enabled()))
+        let root = self.config.terminal.admin_root
+            && user.is_admin()
+            && crate::users::is_super_admin(&self.db, user.id).await;
+        Ok(environment.to_json(&self.config.terminal, self.enabled(), root))
     }
 
     /// Persist per-user default runtime versions.
@@ -481,10 +487,13 @@ impl TerminalManager {
         } else {
             "/bin/sh".to_string()
         };
-        // Administrators may get a real root shell (full server access) when
-        // the operator keeps `terminal_admin_root` enabled (default). Selected
-        // ordinary users always run as their unprivileged identity.
-        let root = user.is_admin() && self.config.terminal.admin_root;
+        // Super administrators may get a real root shell (full server access)
+        // when the operator keeps `terminal_admin_root` enabled (default).
+        // Administrators and selected ordinary users always run as their
+        // unprivileged identity.
+        let root = self.config.terminal.admin_root
+            && user.is_admin()
+            && crate::users::is_super_admin(&self.db, user.id).await;
         let environment = self.environment(user.id).await?;
         let selected = environment.selected_overrides(&spec.overrides);
         let account = self.config.terminal.admin_account.clone().filter(|_| root);

@@ -50,8 +50,10 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   Groups → application access, or a direct per-user override in Effective
   Access). Selected ordinary users always run as their unprivileged
   `rast-u<id>` identity (no sudo/root, no `docker` group).
-* **Administrator root shell**: by default (`terminal_admin_root = true`) an
-  administrator's Terminal is a real root shell — `HOME=/root`, full
+* **Administrator root shell**: by default (`terminal_admin_root = true`) a
+  **super administrator's** Terminal is a real root shell (administrators
+  without that level run as their unprivileged identity, like selected
+  users) — `HOME=/root`, full
   filesystem and command access, including package management and system
   services. This is intentional: RAST administrators are server owners and
   already control the host through Docker/App Center. The session still runs
@@ -67,7 +69,7 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   shadow a system command; a directory another account can write to is
   skipped). Such a tool runs as root with root's own settings (`HOME=/root`),
   so for example `claude` asks root to sign in once. Other directories can be
-  added with `terminal_path_extra`. Set `terminal_admin_root = false` to give administrators the
+  added with `terminal_path_extra`. Set `terminal_admin_root = false` to give super administrators the
   mapped unprivileged identity instead. Ordinary users are never granted root
   by this feature.
 * **Administrator shell as a login account** (`terminal_admin_account`): set
@@ -204,8 +206,8 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 | Key | Default | Meaning |
 |---|---|---|
 | `terminal_enabled` | `true` | Offer the Terminal feature (permission rules still apply). |
-| `terminal_admin_root` | `true` | Administrators get a root shell; selected ordinary users always get their unprivileged identity. |
-| `terminal_admin_account` | unset | Run administrators' terminals as this login account (sudo/admin/wheel member), like SSH, instead of root. |
+| `terminal_admin_root` | `true` | Super administrators get a root shell; administrators and selected ordinary users always get their unprivileged identity. |
+| `terminal_admin_account` | unset | Run super administrators' terminals as this login account (sudo/admin/wheel member), like SSH, instead of root. |
 | `terminal_path_extra` | `[]` | Directories appended to an administrator root shell's `PATH` (tools in another account's home). |
 | `terminal_max_sessions` | `8` | Maximum concurrent terminals per account. |
 | `terminal_grace_seconds` | `30` | Minimum time a terminal without a viewer is kept. |

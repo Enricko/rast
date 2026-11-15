@@ -73,6 +73,13 @@ before using RAST`.
 | GET | `/api/users?page&perPage&q` | list |
 | POST | `/api/users` | `{username, password, role, displayName?, quotaBytes?, active?, mustChangePassword?, groupIds?, folderRules?, appRules?}` (see below) |
 | PATCH | `/api/users/{id}` | `{displayName?, role?, active?, quotaBytes?, mustChangePassword?}` |
+
+`role` in a request is `superadmin`, `admin` or `user`. In responses `role`
+stays `admin|user` and `superAdmin: true` marks a super administrator. Only a
+super administrator may create administrators, change any role, or edit,
+disable, reset the password of or revoke the sessions of another
+administrator (`403` otherwise); nobody changes their own role, and the last
+active super administrator cannot be demoted or disabled (`400`).
 | DELETE | `/api/users/{id}` | deactivate (data preserved) |
 | POST | `/api/users/{id}/password` | `{password, mustChangePassword?}` |
 | GET | `/api/users/{id}/sessions` | active sessions |
@@ -98,10 +105,19 @@ Paths are **logical** paths: `/` is the user's home root. Shared folders are
 mounted read-only or read-write under `/shared/<name>` (per ACL). Use
 `/api/files/roots` to discover them.
 
+For super administrators, paths under `/@root` are the server's own file
+system (`/@root/etc/hosts` is `/etc/hosts`), served as root with the same
+endpoints and shapes: listing, stat, mkdir, upload (single and chunked),
+download, preview, text, rename, search, and copy/move/delete as jobs. There
+is no quota (`quota` in a listing is the disk behind the folder) and no
+recycle bin (delete is permanent). One request cannot mix `/@root` paths
+with storage paths (`400`). Anyone else gets `403`. `@root` is a reserved
+name in Home and shared folders.
+
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |
-| GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]` |
+| GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]`; super administrators also get `{name:"Root file system", path:"/@root", kind:"system"}` |
 | GET | `/api/files/stat?path=` | single entry |
 | POST | `/api/files/mkdir` | `{path}` (parent + name) |
 | POST | `/api/files/upload?dir=/&name=file.bin&overwrite=false` | **raw stream** body; `Content-Length` required; returns entry |

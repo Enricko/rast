@@ -34,6 +34,8 @@ pub struct AppState {
     pub linux_apps: Arc<crate::linux_apps::LinuxApps>,
     /// Native PTY terminals (independent from the Docker terminal).
     pub terminal: Arc<crate::terminal::manager::TerminalManager>,
+    /// File Station's root file system (super administrators).
+    pub rootfs: Arc<crate::rootfs::RootFs>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -117,6 +119,10 @@ impl AppState {
             crate::native::client::NativeClient::from_config(&config),
         );
         terminal.spawn_sweeper();
+        let rootfs = Arc::new(crate::rootfs::RootFs::new(
+            config.files_root_enabled,
+            crate::native::client::NativeClient::from_config(&config),
+        ));
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -145,6 +151,7 @@ impl AppState {
             packages,
             linux_apps,
             terminal,
+            rootfs,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

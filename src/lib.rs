@@ -21,6 +21,7 @@ pub mod monitor;
 pub mod native;
 pub mod packages;
 pub mod realtime;
+pub mod rootfs;
 pub mod secrets;
 pub mod server;
 pub mod state;

@@ -92,6 +92,11 @@ export class Store {
     return this.state.user?.role === "admin";
   }
 
+  /** The server owner level: root file system, host terminal, managing administrators. */
+  isSuperAdmin(): boolean {
+    return this.isAdmin() && this.state.user?.superAdmin === true;
+  }
+
   subscribe(listener: StoreListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

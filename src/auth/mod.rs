@@ -185,6 +185,33 @@ impl FromRequestParts<AppState> for AdminUser {
     }
 }
 
+/// Super-administrator-only extractor (the server owner level).
+#[derive(Debug, Clone)]
+pub struct SuperAdminUser(pub AuthUser);
+
+impl FromRequestParts<AppState> for SuperAdminUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        require_super_admin(&state.db, &user).await?;
+        Ok(SuperAdminUser(user))
+    }
+}
+
+/// The account must be an active super administrator right now (read from
+/// the database, so a demotion takes effect on the next request).
+pub async fn require_super_admin(pool: &sqlx::SqlitePool, user: &AuthUser) -> Result<(), AppError> {
+    if user.is_admin() && crate::users::is_super_admin(pool, user.id).await {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("super administrator role required"))
+    }
+}
+
 /// Parse one cookie value from the `Cookie` header.
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
@@ -294,6 +321,7 @@ mod tests {
             default_quota_bytes: 0,
             secure_cookies: false,
             job_concurrency: 1,
+            files_root_enabled: true,
             setup_token_required: true,
             trust_forwarded_headers: true,
             packages_catalog_url: crate::packages::catalog::OFFICIAL_CATALOG_URL.into(),

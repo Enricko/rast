@@ -1,6 +1,6 @@
 [package]
 name = "rast"
-version = "0.17.4"
+version = "0.18.0"
 edition = "2021"
 rust-version = "1.94"
 description = "RAST — Resource Administration & Storage Toolkit"
@@ -51,6 +51,8 @@ percent-encoding = "2"
 rust-embed = { version = "8", features = ["include-exclude"] }
 ipnet = "2"
 walkdir = "2"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 flate2 = "1"
 tar = "0.4"
 xz2 = "0.1"

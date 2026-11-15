@@ -36,6 +36,8 @@ import {
   lastLoginCell,
   quotaCell,
   roleBadge,
+  roleNameOf,
+  type RoleName,
   type SaveWorkflow,
   type TabRenderContext,
 } from "./common";
@@ -142,6 +144,8 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
   const viewer = ctx.store.get().user;
   if (!viewer) throw new Error("not authenticated");
   const viewerId = viewer.id;
+  // Administrator accounts are managed by super administrators only.
+  const viewerIsSuper = ctx.store.isSuperAdmin();
   let page = 1;
   let perPage = DEFAULT_PER_PAGE;
   let query = "";
@@ -355,13 +359,14 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       );
       actionButton.addEventListener("click", () => {
         const rect = actionButton.getBoundingClientRect();
-        const canDeactivate = !isSelf && !(user.role === "admin" && user.active && adminCount === 1);
+        const locked = !viewerIsSuper && !isSelf && user.role === "admin";
+        const canDeactivate = !locked && !isSelf && !(user.role === "admin" && user.active && adminCount === 1);
         contextMenu(
           rect.right - 12,
           rect.bottom + 4,
           [
-            { label: "Edit user", icon: "edit", onClick: () => openEditModal(user) },
-            { label: "Reset password", icon: "key", onClick: () => openResetPasswordModal(user) },
+            { label: "Edit user", icon: "edit", disabled: locked, onClick: () => openEditModal(user) },
+            { label: "Reset password", icon: "key", disabled: locked, onClick: () => openResetPasswordModal(user) },
             { label: "View sessions", icon: "sessions", onClick: () => openSessionsModal(user) },
             "separator",
             user.active
@@ -372,7 +377,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
                   disabled: !canDeactivate,
                   onClick: () => void deactivateUser(user),
                 }
-              : { label: "Enable account", icon: "check", onClick: () => void enableUser(user) },
+              : { label: "Enable account", icon: "check", disabled: locked, onClick: () => void enableUser(user) },
           ],
           { ariaLabel: `${user.username} actions` },
         );
@@ -395,7 +400,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
             ),
           ),
         ),
-        h("td", {}, roleBadge(user.role)),
+        h("td", {}, roleBadge(user.role, user.superAdmin)),
         h("td", { class: "hide-sm" }, groupChips(user.groups, 2)),
         h("td", {}, activeBadge(user.active)),
         h("td", { class: "quota-col" }, quotaCell(user)),
@@ -458,9 +463,20 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       "select",
       { class: "select", dataset: { createField: "role" } },
       h("option", { value: "user", selected: true }, "User"),
-      h("option", { value: "admin" }, "Administrator"),
+      ...(viewerIsSuper
+        ? [
+            h("option", { value: "admin" }, "Administrator"),
+            h("option", { value: "superadmin" }, "Super administrator"),
+          ]
+        : []),
     );
-    const roleField = formField({ label: "Role", control: role, hint: "Administrators can manage users, storage and system settings." });
+    const roleField = formField({
+      label: "Role",
+      control: role,
+      hint: viewerIsSuper
+        ? "Administrators manage users, groups, shared folders and apps. Super administrators also get the server itself: root files, the host terminal and other administrators."
+        : "Only a super administrator can create administrators.",
+    });
     const quota = h("input", { class: "input", type: "number", min: "0", step: "1", value: "0", dataset: { createField: "quota" } });
     const quotaField = formField({
       label: "Storage quota (GiB)",
@@ -531,7 +547,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       );
     const adminNotes = [adminNote(), adminNote()];
     role.addEventListener("change", () => {
-      for (const note of adminNotes) note.hidden = role.value !== "admin";
+      for (const note of adminNotes) note.hidden = role.value === "user";
     });
 
     const alert = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
@@ -696,6 +712,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     if (openAccessEditor) return;
     const isSelf = user.id === viewerId;
     const isLastAdminRole = adminCount === 1 && user.role === "admin" && user.active;
+    const currentRole = roleNameOf(user);
 
     let data: Awaited<ReturnType<typeof loadUserAccessData>>;
     try {
@@ -718,18 +735,23 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     const role = h(
       "select",
       { class: "select" },
-      h("option", { value: "user", selected: user.role === "user" }, "User"),
-      h("option", { value: "admin", selected: user.role === "admin" }, "Administrator"),
+      h("option", { value: "user", selected: currentRole === "user" }, "User"),
+      h("option", { value: "admin", selected: currentRole === "admin" }, "Administrator"),
+      h("option", { value: "superadmin", selected: currentRole === "superadmin" }, "Super administrator"),
     );
     const roleField = formField({ label: "Role", control: role });
-    if (isSelf || isLastAdminRole) {
+    if (isSelf || isLastAdminRole || !viewerIsSuper) {
       role.disabled = true;
       roleField.hintEl?.remove();
       roleField.el.appendChild(
         h(
           "span",
           { class: "field-hint" },
-          isSelf ? "You cannot change your own role." : "This is the only active administrator; the role is locked.",
+          isSelf
+            ? "You cannot change your own role."
+            : isLastAdminRole
+              ? "This is the only active administrator; the role is locked."
+              : "Only a super administrator can change roles.",
         ),
       );
     }
@@ -808,7 +830,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     );
     const readProfile = () => ({
       displayName: displayInput.value.trim(),
-      role: role.disabled ? user.role : (role.value as User["role"]),
+      role: role.disabled ? currentRole : (role.value as RoleName),
       active: activeSwitch.isChecked(),
       quotaBytes: gibToBytes(parseGib(quota.value)),
       mustChangePassword: forceChange.isChecked(),
@@ -827,7 +849,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       const quotaError = validateGib(quota.value, { allowZero: true });
       if (quotaError) return quotaError;
       const profile = readProfile();
-      if (isLastAdminRole && (profile.role !== "admin" || !profile.active)) {
+      if (isLastAdminRole && (profile.role === "user" || !profile.active)) {
         return "The last active administrator cannot be demoted or disabled.";
       }
       return null;

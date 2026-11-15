@@ -70,6 +70,7 @@ pub async fn list_users(
     )
     .await?;
     let mut items: Vec<UserDto> = rows.into_iter().map(UserDto::from).collect();
+    users::fill_super_admin(&state.db, &mut items).await?;
     attach_groups(&state.db, &mut items).await?;
     Ok(Json(UserPage {
         items,
@@ -92,7 +93,34 @@ async fn attach_groups(pool: &sqlx::SqlitePool, items: &mut [UserDto]) -> AppRes
     Ok(())
 }
 
-/// POST /api/users
+/// Parse an API role name into the stored role and the super administrator
+/// level: `superadmin`, `admin` or `user`.
+fn parse_role(value: &str) -> AppResult<(Role, bool)> {
+    match value {
+        "superadmin" => Ok((Role::Admin, true)),
+        "admin" => Ok((Role::Admin, false)),
+        "user" => Ok((Role::User, false)),
+        other => Err(AppError::bad_request(format!(
+            "invalid role {other:?}; expected superadmin, admin or user"
+        ))),
+    }
+}
+
+/// Administrator accounts are managed by super administrators only; a plain
+/// administrator manages ordinary users.
+async fn ensure_can_manage(
+    state: &AppState,
+    actor: &crate::auth::AuthUser,
+    target: &users::UserRecord,
+) -> AppResult<()> {
+    if target.role == Role::Admin && !users::is_super_admin(&state.db, actor.id).await {
+        return Err(AppError::Forbidden(
+            "only a super administrator can manage administrator accounts",
+        ));
+    }
+    Ok(())
+}
+
 /// Body of `POST /api/users`. Everything after the password is optional and
 /// is saved in the same transaction as the account.
 #[derive(Debug, Deserialize)]
@@ -127,15 +155,12 @@ pub async fn create_user(
     admin: AdminUser,
     Json(body): Json<CreateUserRequest>,
 ) -> AppResult<Json<UserDto>> {
-    let role = match body.role.as_deref() {
-        None | Some("user") => Role::User,
-        Some("admin") => Role::Admin,
-        Some(other) => {
-            return Err(AppError::bad_request(format!(
-                "invalid role {other:?}; expected admin or user"
-            )))
-        }
-    };
+    let (role, super_admin) = parse_role(body.role.as_deref().unwrap_or("user"))?;
+    if role == Role::Admin && !users::is_super_admin(&state.db, admin.0.id).await {
+        return Err(AppError::Forbidden(
+            "only a super administrator can create administrator accounts",
+        ));
+    }
     // Validate the whole selection before anything is written.
     let group_ids = groups::validate_group_ids(&state.db, &body.group_ids).await?;
     let folder_rules = groups::validate_folder_rules(&state.db, &body.folder_rules).await?;
@@ -164,6 +189,9 @@ pub async fn create_user(
         &initial,
     )
     .await?;
+    if super_admin {
+        users::set_super_admin(&state.db, user.id, true).await?;
+    }
     if !group_ids.is_empty() || !folder_rules.is_empty() || !app_rules.is_empty() {
         crate::access::bump_generation();
     }
@@ -190,7 +218,7 @@ pub async fn create_user(
         .unwrap_or_default();
     let mut detail = format!(
         "role={}, quota={}, active={}, mustChangePassword={}, groups=[{}]",
-        user.role,
+        users::role_name(user.role, super_admin),
         user.quota_bytes,
         user.active,
         user.must_change_password,
@@ -215,7 +243,7 @@ pub async fn create_user(
             .detail(groups::truncate_detail(&detail)),
     )
     .await;
-    Ok(Json(UserDto::from(user)))
+    Ok(Json(users::dto(&state.db, user).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,23 +263,38 @@ pub async fn update_user(
     Path(id): Path<i64>,
     Json(body): Json<UpdateUserRequest>,
 ) -> AppResult<Json<UserDto>> {
-    let role = match body.role.as_deref() {
-        None => None,
-        Some("admin") => Some(Role::Admin),
-        Some("user") => Some(Role::User),
-        Some(other) => {
-            return Err(AppError::bad_request(format!(
-                "invalid role {other:?}; expected admin or user"
-            )))
-        }
-    };
+    let wanted = body.role.as_deref().map(parse_role).transpose()?;
+    let role = wanted.map(|(role, _)| role);
+    let target = users::find_by_id(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("user not found"))?;
+    // Everyone may still edit their own profile (never their own role).
+    if id != admin.0.id {
+        ensure_can_manage(&state, &admin.0, &target).await?;
+    }
+    let was_super = users::is_super_admin(&state.db, id).await;
+    // Only a real change of role counts: the editor sends the role back with
+    // every save.
+    let wanted = wanted.filter(|&(role, level)| role != target.role || level != was_super);
     if body.active == Some(false) && id == admin.0.id {
         return Err(AppError::bad_request(
             "you cannot deactivate your own account",
         ));
     }
-    if role == Some(Role::User) && id == admin.0.id {
-        return Err(AppError::bad_request("you cannot demote your own account"));
+    if wanted.is_some() {
+        if id == admin.0.id {
+            return Err(AppError::bad_request(
+                "you cannot change the role of your own account",
+            ));
+        }
+        if !users::is_super_admin(&state.db, admin.0.id).await {
+            return Err(AppError::Forbidden(
+                "only a super administrator can change roles",
+            ));
+        }
+    }
+    if was_super && (body.active == Some(false) || matches!(wanted, Some((_, false)))) {
+        users::ensure_not_last_super_admin(&state.db, id).await?;
     }
     let updated = users::update(
         &state.db,
@@ -263,6 +306,11 @@ pub async fn update_user(
         body.must_change_password,
     )
     .await?;
+    if let Some((_, level)) = wanted {
+        users::set_super_admin(&state.db, id, level).await?;
+    }
+    let level = users::is_super_admin(&state.db, id).await
+        || (was_super && !updated.active && wanted.is_none());
     // Deactivating an account must not leave its graphical sessions or native
     // applications running: there is no way back for that identity.
     if !updated.active {
@@ -287,11 +335,13 @@ pub async fn update_user(
             .success()
             .detail(format!(
                 "role={}, active={}, quota={}",
-                updated.role, updated.active, updated.quota_bytes
+                users::role_name(updated.role, level),
+                updated.active,
+                updated.quota_bytes
             )),
     )
     .await;
-    Ok(Json(UserDto::from(updated)))
+    Ok(Json(users::dto(&state.db, updated).await?))
 }
 
 /// DELETE /api/users/{id} — deactivates the account, never deletes data.
@@ -308,6 +358,8 @@ pub async fn deactivate_user(
     let target = users::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
+    ensure_can_manage(&state, &admin.0, &target).await?;
+    users::ensure_not_last_super_admin(&state.db, id).await?;
     users::deactivate(&state.db, id).await?;
     // A deactivated account must not keep graphical sessions/apps running.
     state.linux_apps.stop_user_sessions(id).await;
@@ -349,6 +401,9 @@ pub async fn admin_set_password(
     let target = users::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
+    if id != admin.0.id {
+        ensure_can_manage(&state, &admin.0, &target).await?;
+    }
     users::set_password(
         &state.db,
         id,
@@ -410,6 +465,9 @@ pub async fn revoke_user_sessions(
     let target = users::find_by_id(&state.db, id)
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
+    if id != admin.0.id {
+        ensure_can_manage(&state, &admin.0, &target).await?;
+    }
     let n = crate::auth::session::revoke_all_for_user(&state.db, id, None).await?;
     audit::record_with_events(
         &state.db,

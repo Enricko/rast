@@ -90,6 +90,9 @@ pub struct FileConfig {
     pub default_quota_bytes: Option<u64>,
     pub secure_cookies: Option<bool>,
     pub job_concurrency: Option<usize>,
+    /// File Station shows the server's own file system to super
+    /// administrators (default: true).
+    pub files_root_enabled: Option<bool>,
     /// Require an operator-provided setup token to create the first admin via
     /// the web UI (`rast setup-token` prints one). CLI creation always works.
     pub setup_token_required: Option<bool>,
@@ -191,6 +194,8 @@ pub struct Config {
     pub default_quota_bytes: u64,
     pub secure_cookies: bool,
     pub job_concurrency: usize,
+    /// File Station's root file system, for super administrators.
+    pub files_root_enabled: bool,
     pub setup_token_required: bool,
     pub trust_forwarded_headers: bool,
     pub packages_catalog_url: String,
@@ -426,6 +431,10 @@ impl Config {
                 "job_concurrency must be between 1 and 8".into(),
             ));
         }
+
+        let files_root_enabled =
+            parse_env_bool(&env, "RAST_FILES_ROOT_ENABLED", file.files_root_enabled)?
+                .unwrap_or(true);
 
         // Safe default: the first-run web setup requires an operator-generated
         // token unless an operator explicitly opts out. This prevents the first
@@ -685,6 +694,7 @@ impl Config {
             default_quota_bytes,
             secure_cookies,
             job_concurrency,
+            files_root_enabled,
             setup_token_required,
             trust_forwarded_headers,
             packages_catalog_url,

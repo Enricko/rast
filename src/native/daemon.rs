@@ -406,6 +406,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::UnitStatus(op) => unit_status(options, op).await,
         NativeOp::UnitsList => units_list(options).await,
         NativeOp::RuntimesDetect(op) => runtimes_detect(op).await,
+        NativeOp::RootfsStart => rootfs_start(options).await,
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
         NativeOp::TerminalStart(op) => terminal_start(options, op).await,
@@ -2196,6 +2197,108 @@ async fn terminal_start(
         "uid": uid,
         "gid": gid,
     }))
+}
+
+/// Unit of the root file agent (see [`crate::rootfs`]).
+const ROOTFS_UNIT: &str = "rast-rootfs";
+/// The agent stops itself after this long without a request.
+const ROOTFS_IDLE_SECONDS: u64 = 900;
+
+/// Start the root file agent, or find the one that is running, and reply
+/// with its socket and token.
+///
+/// The agent is root with no sandbox: it is File Station's root file system.
+/// Like every helper operation this only answers the RAST service, which
+/// offers it to super administrators (`files_root_enabled`).
+async fn rootfs_start(options: &NativeOptions) -> Result<Value, NativeError> {
+    let gid = options.effective_rast_gid()?;
+    let dir = options.run_dir.join("rootfs");
+    let socket = dir.join("agent.sock");
+    let token_file = dir.join("token");
+    let reply = |token: &str| {
+        json!({
+            "unit": ROOTFS_UNIT,
+            "socket": socket.display().to_string(),
+            "token": token,
+        })
+    };
+    if socket.exists() && unit_state(options, ROOTFS_UNIT).await?.active {
+        if let Ok(token) = std::fs::read_to_string(&token_file) {
+            if token.trim().len() >= 32 {
+                return Ok(reply(token.trim()));
+            }
+        }
+    }
+    let _ = stop_unit(options, ROOTFS_UNIT).await;
+    let failed = |what: &str, error: io::Error| {
+        NativeError::command_failed(format!("cannot {what} {}: {error}", dir.display()))
+    };
+    if std::fs::symlink_metadata(&dir).is_ok() {
+        std::fs::remove_dir_all(&dir).map_err(|error| failed("reset", error))?;
+    }
+    std::fs::create_dir_all(&dir).map_err(|error| failed("create", error))?;
+    // root:rast, setgid, 0750: only the service group reaches the socket,
+    // and the socket the agent creates there inherits that group.
+    if !options.is_test_mode() {
+        std::os::unix::fs::chown(&dir, Some(0), Some(gid))
+            .map_err(|error| failed("chown", error))?;
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o2750))
+        .map_err(|error| failed("chmod", error))?;
+    let token = random_terminal_token();
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&token_file)
+            .map_err(|error| failed("write the token in", error))?;
+        file.write_all(token.as_bytes())
+            .map_err(|error| failed("write the token in", error))?;
+    }
+    let exe = std::env::current_exe().map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot locate the RAST binary for the root file agent: {error}"
+        ))
+    })?;
+    let args: Vec<OsString> = [
+        format!("--unit={ROOTFS_UNIT}"),
+        "--collect".into(),
+        "--quiet".into(),
+        "--property=Type=exec".into(),
+        "--property=KillMode=control-group".into(),
+        "--property=WorkingDirectory=/".into(),
+        "--property=UMask=0022".into(),
+        "--".into(),
+        exe.display().to_string(),
+        "rootfs-agent".into(),
+        "--socket".into(),
+        socket.display().to_string(),
+        "--token-file".into(),
+        token_file.display().to_string(),
+        "--idle-seconds".into(),
+        ROOTFS_IDLE_SECONDS.to_string(),
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    run_systemd_unit(options, ROOTFS_UNIT, args).await?;
+    for _ in 0..50 {
+        if socket.exists() {
+            tracing::info!(unit = ROOTFS_UNIT, "started the root file agent");
+            return Ok(reply(&token));
+        }
+        if unit_state(options, ROOTFS_UNIT).await?.state == "failed" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = stop_unit(options, ROOTFS_UNIT).await;
+    Err(NativeError::command_failed(format!(
+        "the root file agent did not start; check `journalctl -u {ROOTFS_UNIT}`"
+    )))
 }
 
 /// Official runtimes installed in the home directories of the accounts that

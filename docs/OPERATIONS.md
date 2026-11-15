@@ -286,9 +286,11 @@ show `backend: docker` in App Center and can be migrated one by one.
 
 The native feature adds durable per-person state outside the database:
 installed app trees (`<data_dir>/linux-apps/apps`) and per-app per-person
-profiles (`<data_dir>/linux-apps/profiles`). The database schema is **v13**
-(migration `0013_native_linux_apps.sql`, `linux_identities`,
-`linux_sessions`, `linux_runs`).
+profiles (`<data_dir>/linux-apps/profiles`). The database schema is **v14**
+(migration `0013_native_linux_apps.sql`: `linux_identities`,
+`linux_sessions`, `linux_runs`; migration `0014_super_admin.sql`: the
+`users.super_admin` flag, set for every administrator that existed at the
+upgrade).
 
 Upgrade:
 
@@ -489,6 +491,42 @@ sudo -u rast rast user create-admin <name> --password-stdin [--display-name NAME
 sudo -u rast rast user reset-password <name> --password-stdin   # revokes that user's sessions
 sudo -u rast rast setup-token                                   # one-shot web setup token, 60 min
 ```
+
+### Roles
+
+| Role | What it is for |
+| --- | --- |
+| **Super administrator** | The server owner: everything an administrator does, plus the server itself: File Station's **Root file system**, the root (or `terminal_admin_account`) shell in Terminal, and creating, changing, disabling or resetting **administrator** accounts. |
+| **Administrator** | Runs RAST for its people: users, groups, shared folders, apps, backups, settings. Cannot manage administrator accounts or change roles, has no root file system, and gets the unprivileged identity in Terminal. |
+| **User** | Their own Home, the shared folders and applications they were given. |
+
+The first account (web setup) and accounts made with `rast user create-admin`
+are super administrators. Upgrading to 0.18.0 makes every existing
+administrator a super administrator, so nobody loses access; demote the ones
+who should only run RAST in Control Panel → Users. The last active super
+administrator cannot be demoted or disabled.
+
+An administrator is trusted with the applications of the server (Docker,
+App Center, Linux apps), which run with wide privileges: the role keeps
+day-to-day administration away from the server's own files and shells, it is
+not a sandbox against a hostile administrator.
+
+### Root file system in File Station
+
+Super administrators see a third location in File Station, after Home and
+Shared folders: **Root file system**, the server's own files from `/`, with
+full access as root (browse, preview, download, upload, new folder, rename,
+copy, move, delete). There is no quota and **no recycle bin**: a delete is
+permanent, and File Station asks before every change. New files and folders
+get the owner of the folder they are created in; a replaced file keeps its
+owner and mode. Copy and move work inside the root file system, not between
+it and RAST storage. Every change and download is in the activity log.
+
+The hardened service cannot read system files, so these requests are served
+by a root process in its own unit, `rast-rootfs`, that the helper starts on
+first use and that stops itself after 15 idle minutes
+(`journalctl -u rast-rootfs`). `files_root_enabled = false` removes the
+location for everyone.
 
 ## App Center on the shell PATH
 

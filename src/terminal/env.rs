@@ -234,7 +234,14 @@ impl TerminalEnvironment {
     }
 
     /// JSON for the Terminal environment panel.
-    pub fn to_json(&self, terminal: &crate::config::TerminalConfig, enabled: bool) -> Value {
+    /// `root`: whether this person's shell is the administrator shell (a
+    /// super administrator with `terminal_admin_root`).
+    pub fn to_json(
+        &self,
+        terminal: &crate::config::TerminalConfig,
+        enabled: bool,
+        root: bool,
+    ) -> Value {
         let runtimes: Vec<Value> = self
             .runtimes
             .iter()
@@ -257,8 +264,8 @@ impl TerminalEnvironment {
             .collect();
         json!({
             "enabled": enabled && crate::terminal::manager::supported(),
-            "adminRoot": terminal.admin_root && terminal.admin_account.is_none(),
-            "adminAccount": terminal.admin_account.as_ref().filter(|_| terminal.admin_root),
+            "adminRoot": root && terminal.admin_account.is_none(),
+            "adminAccount": terminal.admin_account.as_ref().filter(|_| root),
             "shell": if Path::new("/bin/bash").is_file() { "/bin/bash" } else { "/bin/sh" },
             "fallbackShell": "/bin/sh",
             "maxSessions": terminal.max_sessions,

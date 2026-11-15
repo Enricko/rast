@@ -125,6 +125,19 @@ enum Command {
         #[arg(long)]
         cwd: PathBuf,
     },
+    /// Internal: root file agent (File Station's root file system)
+    #[command(hide = true)]
+    RootfsAgent {
+        /// Unix socket the RAST server connects to.
+        #[arg(long)]
+        socket: PathBuf,
+        /// Token file written by the helper.
+        #[arg(long = "token-file")]
+        token_file: PathBuf,
+        /// Exit after this many seconds without a request.
+        #[arg(long = "idle-seconds", default_value_t = 900)]
+        idle_seconds: u64,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -517,6 +530,20 @@ async fn run(
                     .map_err(|error| -> Box<dyn std::error::Error> {
                         format!("terminal agent failed: {error}").into()
                     }),
+                Command::RootfsAgent {
+                    socket,
+                    token_file,
+                    idle_seconds,
+                } => rast::rootfs::agent::run(
+                    socket,
+                    token_file,
+                    std::time::Duration::from_secs(idle_seconds.max(30)),
+                )
+                .await
+                .map(|_| ExitCode::SUCCESS)
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    format!("root file agent failed: {error}").into()
+                }),
                 Command::Serve { .. }
                 | Command::Version
                 | Command::Package { .. }
@@ -1250,6 +1277,8 @@ async fn user_command(
                 quota_bytes,
             )
             .await?;
+            // An administrator created on the server itself owns the server.
+            users::set_super_admin(&pool, user.id, true).await?;
             rast::audit::record(
                 &pool,
                 rast::audit::AuditLog::new("user.create_admin")

@@ -22,6 +22,7 @@ pub mod linux_apps;
 pub mod logs;
 pub mod monitor;
 pub mod packages;
+pub mod rootfs;
 pub mod settings;
 pub mod system;
 pub mod terminal;
@@ -37,7 +38,10 @@ pub fn router(state: AppState) -> Router {
         .merge(logs::routes())
         .merge(jobs::routes())
         .merge(system::protected_routes())
-        .merge(files::routes())
+        .merge(files::routes().route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rootfs::dispatch,
+        )))
         .merge(groups::routes())
         .merge(appearance::routes())
         .merge(apps::routes())

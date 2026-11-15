@@ -60,8 +60,8 @@ applied by `src/config.rs`.
 | `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
 | `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
 | `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
-| `terminal_admin_root` | boolean | `true` | Administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Selected ordinary users always run unprivileged. Set `false` if administrators should not get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
-| `terminal_admin_account` | string | unset | With `terminal_admin_root`: run the administrators' terminals as this Linux login account (it must be a member of `sudo`, `admin` or `wheel`) instead of root. The shell is a login shell with the account's own environment, exactly like its SSH login; `sudo` gives root | `RAST_TERMINAL_ADMIN_ACCOUNT` |
+| `terminal_admin_root` | boolean | `true` | Super administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Administrators and selected ordinary users always run unprivileged. Set `false` if nobody should get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
+| `terminal_admin_account` | string | unset | With `terminal_admin_root`: run the super administrators' terminals as this Linux login account (it must be a member of `sudo`, `admin` or `wheel`) instead of root. The shell is a login shell with the account's own environment, exactly like its SSH login; `sudo` gives root | `RAST_TERMINAL_ADMIN_ACCOUNT` |
 | `terminal_path_extra` | list of strings | `[]` | Absolute directories appended to the `PATH` of administrator root shells, in addition to the per-user tool directories of the accounts in `sudo`/`admin`/`wheel`, which are added automatically (for example `["/home/alice/.local/bin"]`). They come last, so they never shadow a system command; root runs whatever is in them, so list only directories of accounts you trust. At most 16 | `RAST_TERMINAL_PATH_EXTRA` (colon separated) |
 | `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
 | `terminal_grace_seconds` | integer | `30` | Minimum time a terminal without a viewer is kept (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
@@ -83,6 +83,7 @@ applied by `src/config.rs`.
 | `default_quota_bytes` | integer | `21474836480` (20 GiB) | `0` = unlimited; applies to newly created accounts | `RAST_DEFAULT_QUOTA_BYTES` |
 | `secure_cookies` | boolean | auto | Auto = `true` when `public_url` starts with `https://` | `RAST_SECURE_COOKIES` |
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
+| `files_root_enabled` | boolean | `true` | File Station shows the server's own file system ("Root file system") to super administrators, with full access as root. `false` removes it for everyone | `RAST_FILES_ROOT_ENABLED` |
 | `setup_token_required` | boolean | `false` | Require a one-shot token for the web first-run setup; CLI account creation always works | `RAST_SETUP_TOKEN_REQUIRED` |
 | `trust_forwarded_headers` | boolean | auto | Auto = `true` when `trusted_proxies` is non-empty | `RAST_TRUST_FORWARDED_HEADERS` |
 | `packages_catalog_url` | string | official catalog (`https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json`) | `https://` or `file:///`; the detached signature is read from `<url>.sig` | `RAST_PACKAGES_CATALOG_URL` |
@@ -135,6 +136,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_DEFAULT_QUOTA_BYTES` | `default_quota_bytes` | New accounts only |
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |
+| `RAST_FILES_ROOT_ENABLED` | `files_root_enabled` | `true`/`false` |
 | `RAST_SETUP_TOKEN_REQUIRED` | `setup_token_required` | Harden the web first-run flow |
 | `RAST_PACKAGES_CATALOG_URL` | `packages_catalog_url` | App Center catalog (or a local mirror) |
 | `RAST_PACKAGES_CATALOG_KEYS` | `packages_catalog_keys` | Comma-separated `<key-id>:<base64>` |

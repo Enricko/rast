@@ -362,6 +362,105 @@ pub async fn list_filtered(
     Ok((rows.into_iter().map(map_user).collect(), total))
 }
 
+/// Whether the account is an active super administrator (the server owner
+/// level: root file system, host terminal, managing administrators).
+pub async fn is_super_admin(pool: &SqlitePool, id: i64) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM users WHERE id = ? AND role = 'admin' AND super_admin = 1 AND active = 1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// The role name shown and accepted by the API: `superadmin`, `admin`, `user`.
+pub fn role_name(role: Role, super_admin: bool) -> &'static str {
+    match (role, super_admin) {
+        (Role::Admin, true) => "superadmin",
+        (Role::Admin, false) => "admin",
+        (Role::User, _) => "user",
+    }
+}
+
+/// Grant or remove the super administrator level. Removing it from (or
+/// granting it to) an account that is not an administrator clears the flag.
+/// The last active super administrator cannot lose it.
+pub async fn set_super_admin(pool: &SqlitePool, id: i64, value: bool) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    let row: Option<(String, bool, bool)> =
+        sqlx::query_as("SELECT role, active, super_admin FROM users WHERE id = ?")
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let (role, active, current) = row.ok_or(AppError::NotFound("user not found"))?;
+    let value = value && role == "admin";
+    if current && !value && active {
+        let others: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users
+             WHERE role = 'admin' AND super_admin = 1 AND active = 1 AND id <> ?",
+        )
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if others == 0 {
+            return Err(AppError::bad_request(
+                "the last active super administrator cannot lose that role",
+            ));
+        }
+    }
+    sqlx::query("UPDATE users SET super_admin = ?, updated_at = ? WHERE id = ?")
+        .bind(value)
+        .bind(db::now_ms())
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Refuse to deactivate or demote the last active super administrator.
+pub async fn ensure_not_last_super_admin(pool: &SqlitePool, id: i64) -> AppResult<()> {
+    if !is_super_admin(pool, id).await {
+        return Ok(());
+    }
+    let others: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users
+         WHERE role = 'admin' AND super_admin = 1 AND active = 1 AND id <> ?",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await?;
+    if others == 0 {
+        return Err(AppError::bad_request(
+            "the last active super administrator cannot be demoted or deactivated",
+        ));
+    }
+    Ok(())
+}
+
+/// Fill `super_admin` on API DTOs.
+pub async fn fill_super_admin(pool: &SqlitePool, items: &mut [UserDto]) -> AppResult<()> {
+    let ids: Vec<i64> =
+        sqlx::query_scalar("SELECT id FROM users WHERE role = 'admin' AND super_admin = 1")
+            .fetch_all(pool)
+            .await?;
+    for item in items {
+        item.super_admin = item.role == Role::Admin && ids.contains(&item.id);
+    }
+    Ok(())
+}
+
+/// One record as an API DTO, with its super administrator level.
+pub async fn dto(pool: &SqlitePool, record: UserRecord) -> AppResult<UserDto> {
+    let mut items = [UserDto::from(record)];
+    fill_super_admin(pool, &mut items).await?;
+    let [item] = items;
+    Ok(item)
+}
+
 pub async fn active_admin_count(pool: &SqlitePool) -> AppResult<i64> {
     let n = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1")
         .fetch_one(pool)
@@ -547,6 +646,8 @@ pub struct UserDto {
     pub username: String,
     pub display_name: String,
     pub role: Role,
+    /// An administrator at the server owner level (see [`is_super_admin`]).
+    pub super_admin: bool,
     pub active: bool,
     pub quota_bytes: i64,
     pub used_bytes: i64,
@@ -567,6 +668,7 @@ impl From<UserRecord> for UserDto {
             username: u.username,
             display_name: u.display_name,
             role: u.role,
+            super_admin: false,
             active: u.active,
             quota_bytes: u.quota_bytes,
             used_bytes: u.used_bytes,

@@ -9,6 +9,41 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-15
+
+### Added
+
+- **Three roles: super administrator, administrator and user.** A super
+  administrator is the server owner: besides everything an administrator
+  does, they get the server itself (the root file system in File Station and
+  the root shell in Terminal) and they alone create, change, disable or reset
+  administrator accounts and change roles. An administrator runs RAST for its
+  people (users, groups, shared folders, apps, backups, settings) without the
+  server's own files or shells. Control Panel → Users shows and sets the
+  three roles. The first account and `rast user create-admin` accounts are
+  super administrators; the last active one cannot be demoted or disabled.
+- **Root file system in File Station**, for super administrators. File
+  Station now has three places: **Home** (your own storage), **Shared
+  folders**, and **Server → Root file system**, the server's own files from
+  `/` with full access as root: browse, preview, download, upload (resumable),
+  new folder, rename, copy, move and delete. There is no quota and no recycle
+  bin there, so a delete is permanent and every change asks first. New files
+  get the owner of their folder; a replaced file keeps its owner and mode.
+  Changes and downloads are in the activity log. Turn it off for everyone
+  with `files_root_enabled = false`.
+
+### Changed
+
+- **Upgrade note (schema v14):** every administrator that exists at the
+  upgrade becomes a super administrator, so nobody loses access. Demote the
+  accounts that should only run RAST in Control Panel → Users.
+- The root (or `terminal_admin_account`) shell in Terminal is for super
+  administrators. Administrators without that level get the unprivileged
+  identity, like selected users; a root terminal closes when its owner stops
+  being a super administrator.
+- `@root` is a reserved name for new files and folders in Home and shared
+  folders.
+
 ## [0.17.4] - 2026-11-15
 
 ### Fixed
