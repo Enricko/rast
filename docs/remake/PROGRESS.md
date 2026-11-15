@@ -33,7 +33,7 @@ Update it at the end of every session.
   - `3f42f29` auth, access and the Docker proxy no longer name `AppState`
   - `fc8b3eb` `rast-base`, `1f3b138` `rast-apps`, `7663996` `rast-docker`,
     `a465e8c` `rast-helper`, `dba65bd` `rast-agent`, `33c9e7e` `rast-session`,
-    then `rast-server` (`server.rs` and its frontend embed now live there)
+    `6e47aa8` `rast-server` (`server.rs` and its frontend embed now live there)
   - The root package `rast` stays at the repository root (binary, `update.rs`,
     Git revision `build.rs`, facade `pub use`); `tests/*.rs` are unchanged
     except `tests/event_kinds.rs`, which now also scans `crates/*/src`.
