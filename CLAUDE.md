@@ -47,6 +47,18 @@ behind nginx on `8721`).
 - Never run the installer (`installer/install.sh`) on this host. Use
   `scripts/test-installer-clean.sh`, which runs in containers.
 
+## Versioning and releases
+
+- The whole remake uses version **1.0.1** on the `Remake` branch. Do not bump
+  the version per phase or per task.
+- Any GitHub release cut from this branch **must be marked pre-release** until
+  the final remake gate passes. `rast update` (`src/update.rs`,
+  `/releases/latest`) offers the newest non-pre-release to every installed
+  server, production included.
+- Record all remake changes under `## [1.0.1] - Unreleased` in `CHANGELOG.md`
+  until the maintainer releases it. Never tag, push or publish without being
+  asked.
+
 ## Every session
 
 1. Read `docs/remake/PROGRESS.md` (create it in Phase 0): current phase, what is
@@ -313,7 +325,7 @@ Do phases in order. Week numbers are estimates for one full-time developer.
 - Keep the REST + SSE API; use `rast-api` types on both sides.
 - When nothing depends on them any more, remove TypeScript, Vite and Node from
   the build. Ship xterm.js as a vendored static asset with its license.
-- **Exit (RAST 1.0 gate):** no TypeScript beyond thin bindings; `npm` not needed
+- **Exit (final remake gate):** no TypeScript beyond thin bindings; `npm` not needed
   to build; compressed WASM bundle at most 1.5× the Phase 0 JS baseline; full
   app matrix green.
 
@@ -322,7 +334,7 @@ Do phases in order. Week numbers are estimates for one full-time developer.
 - mkosi image with RAST, Xpra, Flatpak, PipeWire, acl and nftables
   preinstalled; first-boot setup in the browser with a one-time token.
 
-### Phase 7 — Research (optional, after 1.0)
+### Phase 7 — Research (optional, after the final remake gate)
 
 - A Rust/WASM Xpra client (WebCodecs) or an own Wayland compositor (Smithay).
   Only if the Phase 4 adapter keeps causing problems.

@@ -397,7 +397,7 @@ claude --model sonnet --effort high
 ```text
 Once every app is Leptos, remove TypeScript, Vite and Node from the build. Keep xterm.js as a static asset (with its license); the Xpra client still comes from the installed Xpra package.
 Update CI, scripts/build-release.sh, CONTRIBUTING.md and README.md. Make sure the release binary is still a single file.
-Check the RAST 1.0 gate: compressed WASM size at most 1.5x the Phase 0 JS baseline, and the app matrix fully green.
+Check the final remake gate: compressed WASM size at most 1.5x the Phase 0 JS baseline, and the app matrix fully green.
 ```
 
 ## Phase 6 — RAST OS
@@ -414,7 +414,7 @@ On first boot, print a one-time token on the console to create the super adminis
 Build the image in CI (not on the production host) and write docs/OS-IMAGE.md.
 ```
 
-## Phase 7 — Research (optional, after 1.0)
+## Phase 7 — Research (optional, after the final remake gate)
 
 ```bash
 claude --model opus --effort max

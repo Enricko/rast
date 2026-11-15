@@ -9,13 +9,14 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-11-15
+## [1.0.1] - Unreleased
 
 ### Changed
 
-- Version bumped to 1.0.1 to start the remake line (`Remake` branch). No
-  behaviour change; remake instructions and the prompt pack are in
-  `CLAUDE.md` and `docs/remake/PROMPTS.md`.
+- Version 1.0.1 is used for the whole remake line (`Remake` branch) and is not
+  bumped per phase. Remake instructions and the prompt pack are in
+  `CLAUDE.md` and `docs/remake/PROMPTS.md`. Releases from this branch must be
+  marked pre-release until the final remake gate passes.
 
 ## [0.18.2] - 2026-11-15
 
