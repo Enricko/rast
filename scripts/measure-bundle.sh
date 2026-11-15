@@ -27,7 +27,10 @@ while [ $# -gt 0 ]; do
     *) dir="$1"; shift ;;
   esac
 done
-[ -n "$dir" ] && [ -d "$dir" ] || { echo "usage: $0 <dir> [--group-ext jpg,png] [--tsv]" >&2; exit 2; }
+if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+  echo "usage: $0 <dir> [--group-ext jpg,png] [--tsv]" >&2
+  exit 2
+fi
 command -v node >/dev/null || { echo "node is required (brotli via zlib)" >&2; exit 2; }
 
 node - "$dir" "$group" "$tsv" "$skip" "$only" <<'JS'
