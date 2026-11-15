@@ -428,7 +428,7 @@ fn install_staged(
     }
     let home = stage.join("home");
     fs::create_dir_all(&home).ok();
-    run_checks(manifest, &root, &home, untrusted)?;
+    run_checks(manifest, &root, &home, untrusted, Some(layout))?;
     if reporter.cancelled() {
         return Err("cancelled".into());
     }
@@ -488,7 +488,7 @@ fn install_staged(
         return Err(format!("cannot move the version into place: {e}"));
     }
     // 7. Check again from the final location (relocation must not break it).
-    let checks = match run_checks(manifest, &target, &home, untrusted) {
+    let checks = match run_checks(manifest, &target, &home, untrusted, Some(layout)) {
         Ok(checks) => checks,
         Err(e) => {
             let failed = layout
@@ -598,15 +598,33 @@ pub fn write_phar_wrappers(
 /// Run every declared check: no shell, cleared environment, timeout, and the
 /// confinement described in [`sandbox`] (process group, seccomp, Landlock).
 /// `untrusted` (imported packages) makes Landlock mandatory.
+///
+/// With `layout`, a package from the official catalog also finds the runtimes
+/// already installed by App Center, ahead of the system's: a tool that runs
+/// on another runtime (Composer on PHP) is checked with the interpreter it
+/// will really use. Imported packages never see them.
 pub fn run_checks(
     manifest: &Manifest,
     root: &Path,
     home: &Path,
     untrusted: bool,
+    layout: Option<&Layout>,
 ) -> Result<Vec<CheckResult>, String> {
     let mut results = Vec::new();
     let bin_path = root.join("bin");
-    let confinement = sandbox::Confinement::new(root, home, untrusted)?;
+    let layout = layout.filter(|_| !untrusted);
+    let peers: Vec<PathBuf> = layout
+        .map(|layout| vec![layout.bin_dir(), layout.runtimes()])
+        .unwrap_or_default();
+    let path = match layout {
+        Some(layout) => format!(
+            "{}:{}:/usr/local/bin:/usr/bin:/bin",
+            bin_path.display(),
+            layout.bin_dir().display()
+        ),
+        None => format!("{}:/usr/local/bin:/usr/bin:/bin", bin_path.display()),
+    };
+    let confinement = sandbox::Confinement::with_peers(root, home, untrusted, &peers)?;
     // Runtime env hints (JAVA_HOME, DOTNET_ROOT, …) apply to the checks too;
     // {root} is the staging or final prefix. They are set before the fixed
     // entries, so a hint can never replace PATH/HOME/TMPDIR.
@@ -640,10 +658,7 @@ pub fn run_checks(
                 .current_dir(root)
                 .env_clear()
                 .envs(hinted.iter().map(|(name, value)| (name, value)))
-                .env(
-                    "PATH",
-                    format!("{}:/usr/local/bin:/usr/bin:/bin", bin_path.display()),
-                )
+                .env("PATH", &path)
                 .env("HOME", home)
                 .env("LANG", "C.UTF-8")
                 .env("TMPDIR", home)
@@ -871,10 +886,23 @@ mod tests {
         archive::extract_tar_gz(&archive_path, &root, 1, u64::MAX, &mut |_| {}, &|| false).unwrap();
         let home = dir.path().join("home");
         fs::create_dir(&home).unwrap();
-        let ok = run_checks(&manifest_for("1.0.0", "demo 1.0.0"), &root, &home, false).unwrap();
+        let ok = run_checks(
+            &manifest_for("1.0.0", "demo 1.0.0"),
+            &root,
+            &home,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(ok[0].output, "demo 1.0.0");
-        let err =
-            run_checks(&manifest_for("1.0.0", "demo 2.0.0"), &root, &home, false).unwrap_err();
+        let err = run_checks(
+            &manifest_for("1.0.0", "demo 2.0.0"),
+            &root,
+            &home,
+            false,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("expected it to contain"), "{err}");
     }
 
@@ -959,7 +987,8 @@ mod tests {
         assert!(err.contains("expected it to contain"), "{err}");
         let home = dir.path().join("home");
         fs::create_dir_all(&home).unwrap();
-        let still = run_checks(&m, &layout.version_dir("demo", "1.0.0"), &home, false).unwrap();
+        let still =
+            run_checks(&m, &layout.version_dir("demo", "1.0.0"), &home, false, None).unwrap();
         assert_eq!(still[0].output, "demo 1.0.0");
 
         // Cancellation stops the job without leaving a version behind.
@@ -1143,8 +1172,45 @@ mod tests {
         let m = crate::packages::manifest::parse(&serde_json::to_vec(&v).unwrap()).unwrap();
         let home = dir.path().join("home");
         fs::create_dir_all(&home).unwrap();
-        let checks = run_checks(&m, &root, &home, false).unwrap();
+        let checks = run_checks(&m, &root, &home, false, None).unwrap();
         assert_eq!(checks[0].output, format!("demo 1.0.0 {}", root.display()));
+    }
+
+    /// A tool that runs on another runtime (Composer on PHP) is checked with
+    /// the runtime App Center installed, which lives outside its own tree.
+    #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
+    fn checks_find_the_runtimes_app_center_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path().join("packages"));
+        layout.ensure().unwrap();
+        // An installed interpreter, linked into the shared bin directory. The
+        // name exists nowhere on the system PATH.
+        let interpreter = layout.version_dir("interp", "1.0.0").join("bin");
+        fs::create_dir_all(&interpreter).unwrap();
+        let program = interpreter.join("rast-test-interp");
+        fs::write(&program, "#!/bin/sh\necho \"demo 1.0.0\"\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(layout.bin_dir()).unwrap();
+        std::os::unix::fs::symlink(&program, layout.bin_dir().join("rast-test-interp")).unwrap();
+        // The tool: a wrapper that runs on that interpreter.
+        let root = dir.path().join("tool");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let wrapper = root.join("bin/demo");
+        fs::write(&wrapper, "#!/bin/sh\nexec rast-test-interp \"$@\"\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let manifest = manifest_for("1.0.0", "demo 1.0.0");
+
+        let ok = run_checks(&manifest, &root, &home, false, Some(&layout)).unwrap();
+        assert_eq!(ok[0].output, "demo 1.0.0");
+        // Without the installed runtimes the interpreter is not found, and an
+        // imported (untrusted) package never gets them.
+        assert!(run_checks(&manifest, &root, &home, false, None).is_err());
+        if sandbox::landlock_abi().is_some() {
+            assert!(run_checks(&manifest, &root, &home, true, Some(&layout)).is_err());
+        }
     }
 
     #[test]

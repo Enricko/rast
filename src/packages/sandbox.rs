@@ -130,6 +130,9 @@ mod linux {
         "/etc/ssl",
         "/etc/ca-certificates",
         "/etc/alternatives",
+        // Interpreter configuration of the distribution's PHP: its extensions
+        // (phar among them) are loaded from here, and Composer needs phar.
+        "/etc/php",
         "/proc/meminfo",
         "/proc/cpuinfo",
         "/proc/stat",
@@ -170,11 +173,23 @@ mod linux {
         /// directory the check may write to. With `require_landlock`, a kernel
         /// without Landlock is an error instead of a weaker sandbox.
         pub fn new(root: &Path, home: &Path, require_landlock: bool) -> Result<Self, String> {
+            Self::with_peers(root, home, require_landlock, &[])
+        }
+
+        /// Like [`Confinement::new`], and the check may also read and execute
+        /// from `peers`: the other runtimes installed next to this one, for a
+        /// package that runs on one of them (Composer on PHP).
+        pub fn with_peers(
+            root: &Path,
+            home: &Path,
+            require_landlock: bool,
+            peers: &[std::path::PathBuf],
+        ) -> Result<Self, String> {
             let filter = Arc::new(seccomp_filter()?);
             let abi = landlock_abi();
             let ruleset = match abi {
                 Some(abi) => Some(
-                    landlock_ruleset(abi, root, home)
+                    landlock_ruleset(abi, root, home, peers)
                         .map_err(|e| format!("cannot prepare the Landlock sandbox: {e}"))?,
                 ),
                 None if require_landlock => {
@@ -284,7 +299,12 @@ mod linux {
         Ok(())
     }
 
-    fn landlock_ruleset(abi: i32, root: &Path, home: &Path) -> io::Result<OwnedFd> {
+    fn landlock_ruleset(
+        abi: i32,
+        root: &Path,
+        home: &Path,
+        peers: &[std::path::PathBuf],
+    ) -> io::Result<OwnedFd> {
         let mut handled_fs = (1u64 << 13) - 1; // ABI 1: execute .. make_sym
         if abi >= 2 {
             handled_fs |= FS_REFER;
@@ -331,6 +351,9 @@ mod linux {
         let read_exec = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
         allow(&ruleset, root, read_exec, handled_fs, true)?;
         allow(&ruleset, home, handled_fs, handled_fs, true)?;
+        for peer in peers {
+            allow(&ruleset, peer, read_exec, handled_fs, false)?;
+        }
         for dir in SYSTEM_DIRS {
             allow(&ruleset, Path::new(dir), read_exec, handled_fs, false)?;
         }
@@ -478,6 +501,15 @@ mod other {
 
     impl Confinement {
         pub fn new(_root: &Path, _home: &Path, _require_landlock: bool) -> Result<Self, String> {
+            Err(UNSUPPORTED.to_string())
+        }
+
+        pub fn with_peers(
+            _root: &Path,
+            _home: &Path,
+            _require_landlock: bool,
+            _peers: &[std::path::PathBuf],
+        ) -> Result<Self, String> {
             Err(UNSUPPORTED.to_string())
         }
 

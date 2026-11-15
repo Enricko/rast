@@ -9,6 +9,19 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-15
+
+### Fixed
+
+- **Composer could not be installed or updated** ("PHP's phar extension is
+  missing"). The version check that ends an install runs in a sandbox that
+  could reach neither the PHP that App Center installed nor the
+  configuration of the distribution's PHP (`/etc/php`, where the phar
+  extension is enabled), so Composer started on a PHP without phar. A check
+  of an official package now finds the runtimes App Center installed, ahead
+  of the system's, exactly as a terminal does, and the system PHP reads its
+  configuration. Imported packages still see only their own files.
+
 ## [0.18.1] - 2026-11-15
 
 ### Fixed
