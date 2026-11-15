@@ -148,6 +148,9 @@ pub struct FileConfig {
     /// Enable the server-wide Terminal application (admins must still grant
     /// the app to groups; ordinary accounts are denied by default).
     pub terminal_enabled: Option<bool>,
+    /// Administrators get a root shell in Terminal (default: true). Selected
+    /// ordinary users always get their unprivileged `rast-u<id>` identity.
+    pub terminal_admin_root: Option<bool>,
     /// Maximum concurrent terminal sessions per user.
     pub terminal_max_sessions: Option<u32>,
     /// Seconds a disconnected terminal stays alive for reconnection.
@@ -214,6 +217,8 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalConfig {
     pub enabled: bool,
+    /// Whether administrators get a root shell (full server access).
+    pub admin_root: bool,
     pub max_sessions: u32,
     pub grace_seconds: u32,
     pub idle_minutes: u32,
@@ -226,6 +231,7 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            admin_root: true,
             max_sessions: 8,
             grace_seconds: 30,
             idle_minutes: 240,
@@ -574,6 +580,8 @@ impl Config {
         let terminal = TerminalConfig {
             enabled: parse_env_bool(&env, "RAST_TERMINAL_ENABLED", file.terminal_enabled)?
                 .unwrap_or(true),
+            admin_root: parse_env_bool(&env, "RAST_TERMINAL_ADMIN_ROOT", file.terminal_admin_root)?
+                .unwrap_or(true),
             max_sessions: parse_env_num(
                 &env,
                 "RAST_TERMINAL_MAX_SESSIONS",
@@ -906,6 +914,22 @@ mod tests {
         assert!(!cfg.secure_cookies);
         assert!(!cfg.docker_enabled);
         assert!(cfg.linux_apps_enabled);
+    }
+
+    #[test]
+    fn terminal_admin_root_is_on_by_default_and_configurable() {
+        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
+        assert!(cfg.terminal.enabled);
+        assert!(cfg.terminal.admin_root);
+        let file = FileConfig::from_toml_str("terminal_admin_root = false").unwrap();
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        assert!(!cfg.terminal.admin_root);
+        let env = |k: &str| match k {
+            "RAST_TERMINAL_ADMIN_ROOT" => Some("false".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
+        assert!(!cfg.terminal.admin_root);
     }
 
     #[test]

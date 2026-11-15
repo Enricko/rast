@@ -1410,8 +1410,8 @@ fn validate_terminal_session_id(session_id: &str) -> Result<(), NativeError> {
     Ok(())
 }
 
-fn terminal_unit(identity: &Identity, session_id: &str) -> String {
-    format!("rast-term-u{}-{}", identity.uid, session_id)
+fn terminal_unit(uid: u32, session_id: &str) -> String {
+    format!("rast-term-u{uid}-{session_id}")
 }
 
 fn terminal_base_dir(options: &NativeOptions) -> PathBuf {
@@ -1550,18 +1550,19 @@ fn write_terminal_token(
 /// the service): identity, private runtime/tmp/config dirs and the server's
 /// runtime PATH.
 fn terminal_environment(
-    identity: &Identity,
+    home: &Path,
+    username: &str,
     session_dir: &Path,
     shell: &str,
     extra: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, String>, NativeError> {
-    let home = identity.home.display().to_string();
+    let home = home.display().to_string();
     let runtime = session_dir.join("runtime");
     let tmp = session_dir.join("tmp");
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert("HOME".into(), home.clone());
-    env.insert("USER".into(), identity.username.clone());
-    env.insert("LOGNAME".into(), identity.username.clone());
+    env.insert("USER".into(), username.to_string());
+    env.insert("LOGNAME".into(), username.to_string());
     env.insert("SHELL".into(), shell.to_string());
     env.insert("TERM".into(), "xterm-256color".into());
     env.insert("LANG".into(), "C.UTF-8".into());
@@ -1658,6 +1659,32 @@ async fn terminal_working_directory(
     Ok(canonical)
 }
 
+/// Administrator root shells may start anywhere the server resolved; the
+/// server still only sends RAST folder paths (or nothing for the default), and
+/// the helper requires an existing real directory.
+fn terminal_root_working_directory(requested: &str) -> Result<PathBuf, NativeError> {
+    let path = Path::new(requested);
+    if !path.is_absolute() {
+        return Err(NativeError::invalid(
+            "the terminal working directory must be an absolute path",
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        NativeError::cwd_inaccessible(format!(
+            "cannot inspect terminal working directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(NativeError::cwd_inaccessible(
+            "the terminal working directory must be a real directory",
+        ));
+    }
+    std::fs::canonicalize(path).map_err(|error| {
+        NativeError::cwd_inaccessible(format!("cannot resolve {}: {error}", path.display()))
+    })
+}
+
 /// Add the "others execute" bit on storage ancestors (never on files) so the
 /// identity can search its way to the granted folder. Listing still requires
 /// the ACL below.
@@ -1736,19 +1763,34 @@ async fn grant_terminal_acl(
     }
 }
 
+/// Identity and unit name of one terminal agent.
+struct TerminalUnitSpec<'a> {
+    unit: &'a str,
+    root: bool,
+    uid: u32,
+    gid: u32,
+}
+
 /// systemd-run arguments for one terminal agent unit.
+///
+/// Administrator root shells keep the cgroup limits but otherwise run like a
+/// root login (full filesystem/system access); ordinary users keep the
+/// hardening below. The cgroup limits still apply in both cases.
 fn build_terminal_systemd_args(
-    unit: &str,
-    identity: &Identity,
+    spec: &TerminalUnitSpec<'_>,
     limits: ResourceLimits,
     cwd: &Path,
     env: &BTreeMap<String, String>,
     argv: &[String],
 ) -> Vec<OsString> {
+    let TerminalUnitSpec {
+        unit,
+        root,
+        uid,
+        gid,
+    } = *spec;
     let mut args: Vec<OsString> = vec![
         OsString::from(format!("--unit={unit}")),
-        OsString::from(format!("--uid={}", identity.uid)),
-        OsString::from(format!("--gid={}", identity.gid)),
         OsString::from("--collect"),
         OsString::from("--quiet"),
         OsString::from("--property=Type=exec"),
@@ -1757,23 +1799,46 @@ fn build_terminal_systemd_args(
         OsString::from(format!("--property=TasksMax={}", limits.tasks_max)),
         OsString::from("--property=KillMode=control-group"),
         OsString::from(format!("--property=WorkingDirectory={}", path_string(cwd))),
-        // Hardening except executable-memory restrictions: Rust/Java/Bun/
-        // Deno/.NET JITs need PROT_EXEC mappings.
-        OsString::from("--property=NoNewPrivileges=yes"),
-        OsString::from("--property=PrivateTmp=yes"),
-        OsString::from("--property=ProtectSystem=full"),
-        OsString::from("--property=ProtectControlGroups=yes"),
-        OsString::from("--property=ProtectKernelTunables=yes"),
-        OsString::from("--property=ProtectKernelModules=yes"),
-        OsString::from("--property=ProtectClock=yes"),
-        OsString::from("--property=ProtectHostname=yes"),
-        OsString::from("--property=RestrictSUIDSGID=yes"),
-        OsString::from("--property=RestrictRealtime=yes"),
-        OsString::from("--property=LockPersonality=yes"),
-        OsString::from("--property=SystemCallArchitectures=native"),
-        OsString::from("--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"),
         OsString::from("--property=UMask=0022"),
     ];
+    if root {
+        // Root shell: no identity, no service hardening; the administrator
+        // needs the full server (package manager, system paths, devices).
+        args.extend([
+            OsString::from("--property=NoNewPrivileges=no"),
+            OsString::from("--property=ProtectSystem=no"),
+            OsString::from("--property=ProtectHome=no"),
+            OsString::from("--property=PrivateTmp=no"),
+            OsString::from("--property=ProtectControlGroups=no"),
+            OsString::from("--property=ProtectKernelTunables=no"),
+            OsString::from("--property=ProtectKernelModules=no"),
+            OsString::from("--property=RestrictSUIDSGID=no"),
+            OsString::from("--property=RestrictRealtime=no"),
+            OsString::from("--property=LockPersonality=no"),
+        ]);
+    } else {
+        args.push(OsString::from(format!("--uid={uid}")));
+        args.push(OsString::from(format!("--gid={gid}")));
+        // Hardening except executable-memory restrictions: Rust/Java/Bun/
+        // Deno/.NET JITs need PROT_EXEC mappings.
+        args.extend([
+            OsString::from("--property=NoNewPrivileges=yes"),
+            OsString::from("--property=PrivateTmp=yes"),
+            OsString::from("--property=ProtectSystem=full"),
+            OsString::from("--property=ProtectControlGroups=yes"),
+            OsString::from("--property=ProtectKernelTunables=yes"),
+            OsString::from("--property=ProtectKernelModules=yes"),
+            OsString::from("--property=ProtectClock=yes"),
+            OsString::from("--property=ProtectHostname=yes"),
+            OsString::from("--property=RestrictSUIDSGID=yes"),
+            OsString::from("--property=RestrictRealtime=yes"),
+            OsString::from("--property=LockPersonality=yes"),
+            OsString::from("--property=SystemCallArchitectures=native"),
+            OsString::from(
+                "--property=RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            ),
+        ]);
+    }
     for (key, value) in env {
         args.push(OsString::from(format!("--setenv={key}={value}")));
     }
@@ -1825,25 +1890,49 @@ async fn terminal_start(
         tasks_max: op.tasks_max,
     };
     validate_limits(limits, ctx.terminal_limits, "terminal")?;
-    let (identity, _created) = identity::ensure_identity(options, op.user_id).await?;
-    identity::ensure_home(options, &identity).await?;
-    let cwd = if op.cwd.is_empty() {
-        identity.home.clone()
-    } else {
-        terminal_working_directory(options, &identity, &op.cwd, op.write_access).await?
-    };
-    ensure_identity_traversal(options, &cwd)?;
-    validate_cwd_traversable(options, &cwd, &identity)?;
     let gid = options.effective_rast_gid()?;
+    // Administrators with `terminal_admin_root` get a root shell: no mapped
+    // identity, HOME=/root, full system access (cgroup limits still apply).
+    // Everyone else keeps the unprivileged `rast-u<id>` identity, private home
+    // and ACL-mapped storage access.
+    let identity = if op.root {
+        None
+    } else {
+        let (identity, _created) = identity::ensure_identity(options, op.user_id).await?;
+        identity::ensure_home(options, &identity).await?;
+        Some(identity)
+    };
+    let (uid, home, username) = match identity.as_ref() {
+        Some(identity) => (
+            identity.uid,
+            identity.home.clone(),
+            identity.username.clone(),
+        ),
+        None => (0, PathBuf::from("/root"), "root".to_string()),
+    };
+    let cwd = if op.cwd.is_empty() {
+        home.clone()
+    } else if op.root {
+        terminal_root_working_directory(&op.cwd)?
+    } else {
+        let identity = identity.as_ref().expect("identity");
+        terminal_working_directory(options, identity, &op.cwd, op.write_access).await?
+    };
+    if let Some(identity) = identity.as_ref() {
+        ensure_identity_traversal(options, &cwd)?;
+        validate_cwd_traversable(options, &cwd, identity)?;
+    }
     prepare_terminal_base(options, gid)?;
     let session_dir = terminal_base_dir(options).join(&op.session_id);
-    prepare_terminal_session_dir(options, &session_dir, identity.uid, gid)?;
-    ensure_identity_traversal(options, &session_dir)?;
+    prepare_terminal_session_dir(options, &session_dir, uid, gid)?;
+    if identity.is_some() {
+        ensure_identity_traversal(options, &session_dir)?;
+    }
     let token = random_terminal_token();
     let token_file = session_dir.join("token");
-    write_terminal_token(options, &token_file, &token, identity.uid, gid)?;
+    write_terminal_token(options, &token_file, &token, uid, gid)?;
     let socket = session_dir.join("agent.sock");
-    let env = terminal_environment(&identity, &session_dir, &op.shell, &op.env)?;
+    let env = terminal_environment(&home, &username, &session_dir, &op.shell, &op.env)?;
     let exe = std::env::current_exe().map_err(|error| {
         NativeError::command_failed(format!(
             "cannot locate the RAST binary for the terminal agent: {error}"
@@ -1861,9 +1950,15 @@ async fn terminal_start(
         "--cwd".into(),
         cwd.display().to_string(),
     ];
-    let unit = terminal_unit(&identity, &op.session_id);
+    let unit = terminal_unit(uid, &op.session_id);
     validate_unit(&unit)?;
-    let args = build_terminal_systemd_args(&unit, &identity, limits, &cwd, &env, &argv);
+    let unit_spec = TerminalUnitSpec {
+        unit: &unit,
+        root: op.root,
+        uid,
+        gid,
+    };
+    let args = build_terminal_systemd_args(&unit_spec, limits, &cwd, &env, &argv);
     if let Err(error) = run_systemd_unit(options, &unit, args).await {
         cleanup_terminal_session(options, &op.session_id);
         return Err(error);
@@ -1889,7 +1984,8 @@ async fn terminal_start(
     }
     tracing::info!(
         user_id = op.user_id,
-        uid = identity.uid,
+        uid,
+        root = op.root,
         %unit,
         cwd = %cwd.display(),
         write_access = op.write_access,
@@ -1899,18 +1995,23 @@ async fn terminal_start(
         "unit": unit,
         "socket": socket.display().to_string(),
         "token": token,
-        "home": identity.home.display().to_string(),
+        "home": home.display().to_string(),
         "cwd": cwd.display().to_string(),
         "shell": op.shell,
-        "uid": identity.uid,
-        "gid": identity.gid,
+        "root": op.root,
+        "uid": uid,
+        "gid": gid,
     }))
 }
 
 async fn terminal_stop(options: &NativeOptions, op: TerminalStopOp) -> Result<Value, NativeError> {
     validate_terminal_session_id(&op.session_id)?;
-    let identity = Identity::derive(options, op.user_id)?;
-    let unit = terminal_unit(&identity, &op.session_id);
+    let uid = if op.root {
+        0
+    } else {
+        Identity::derive(options, op.user_id)?.uid
+    };
+    let unit = terminal_unit(uid, &op.session_id);
     validate_unit(&unit)?;
     stop_unit(options, &unit).await?;
     let session_dir = terminal_base_dir(options).join(&op.session_id);
@@ -5063,10 +5164,15 @@ exit 0
             gid: 200_007,
             home: PathBuf::from("/var/lib/rast/linux-users/7"),
         };
-        let unit = terminal_unit(&identity, "0123456789abcdef0123456789abcdef");
+        let unit = terminal_unit(identity.uid, "0123456789abcdef0123456789abcdef");
         assert_eq!(unit, "rast-term-u200007-0123456789abcdef0123456789abcdef");
         validate_unit(&unit).unwrap();
         assert!(crate::native::protocol::is_managed_unit(&unit));
+        // Administrator root sessions use uid 0 in the unit name.
+        let root_unit = terminal_unit(0, "0123456789abcdef0123456789abcdef");
+        assert_eq!(root_unit, "rast-term-u0-0123456789abcdef0123456789abcdef");
+        validate_unit(&root_unit).unwrap();
+        assert!(crate::native::protocol::is_managed_unit(&root_unit));
     }
 
     #[test]
@@ -5085,7 +5191,14 @@ exit 0
             "/opt/runtimes/rust/bin:/usr/bin".to_string(),
         );
         extra.insert("JAVA_HOME".to_string(), "/opt/runtimes/java".to_string());
-        let env = terminal_environment(&identity, session_dir, "/bin/bash", &extra).unwrap();
+        let env = terminal_environment(
+            &identity.home,
+            &identity.username,
+            session_dir,
+            "/bin/bash",
+            &extra,
+        )
+        .unwrap();
         assert_eq!(
             env.get("HOME").map(String::as_str),
             Some("/var/lib/rast/linux-users/7")
@@ -5119,6 +5232,17 @@ exit 0
             Some("/var/lib/rast/linux-users/7/.nuget/packages")
         );
         assert!(!env.contains_key("RAST_CONFIG"));
+
+        // Administrator root shell: HOME=/root, caches in /root, identity vars.
+        let root_env =
+            terminal_environment(Path::new("/root"), "root", session_dir, "/bin/bash", &extra)
+                .unwrap();
+        assert_eq!(root_env.get("HOME").map(String::as_str), Some("/root"));
+        assert_eq!(root_env.get("USER").map(String::as_str), Some("root"));
+        assert_eq!(
+            root_env.get("CARGO_HOME").map(String::as_str),
+            Some("/root/.cargo")
+        );
     }
 
     #[test]
@@ -5138,8 +5262,12 @@ exit 0
             "terminal-agent".to_string(),
         ];
         let args: Vec<String> = build_terminal_systemd_args(
-            "rast-term-u200007-0123456789abcdef0123456789abcdef",
-            &identity,
+            &TerminalUnitSpec {
+                unit: "rast-term-u200007-0123456789abcdef0123456789abcdef",
+                root: false,
+                uid: identity.uid,
+                gid: identity.gid,
+            },
             limits,
             Path::new("/srv/rast/homes/admin"),
             &env,
@@ -5165,5 +5293,33 @@ exit 0
         assert!(!joined.contains("--slice="));
         assert!(args.iter().any(|arg| arg == "--"));
         assert_eq!(args.last().unwrap(), "terminal-agent");
+
+        // Administrator root shell keeps cgroup limits but not the unprivileged
+        // hardening (full server access is the point).
+        let root_args: Vec<String> = build_terminal_systemd_args(
+            &TerminalUnitSpec {
+                unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
+                root: true,
+                uid: 0,
+                gid: 0,
+            },
+            limits,
+            Path::new("/root"),
+            &env,
+            &argv,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .collect();
+        let root_joined = root_args.join(" ");
+        assert!(!root_joined.contains("--uid="));
+        assert!(!root_joined.contains("--gid="));
+        assert!(root_joined.contains("MemoryMax=512M"));
+        assert!(root_joined.contains("TasksMax=256"));
+        assert!(root_joined.contains("NoNewPrivileges=no"));
+        assert!(root_joined.contains("ProtectSystem=no"));
+        assert!(root_joined.contains("WorkingDirectory=/root"));
+        assert!(root_joined.contains("--setenv=PATH=/usr/bin"));
+        assert!(!root_joined.contains("RestrictSUIDSGID=yes"));
     }
 }

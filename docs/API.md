@@ -426,9 +426,14 @@ application. Starting a shell requires the native helper
 |---|---|---|
 | GET | `/api/terminal/env` | Runtime panel: available runtimes/versions, selected version, source (`rast`/`system`), executable locations, missing dependencies, this user's defaults |
 | PATCH | `/api/terminal/env` | Save defaults: `{"defaults":{"rust":"1.100.0",…}}`; versions must be installed |
-| GET | `/api/terminal/sessions` | This account's live sessions (`id`, `shell`, `cwd`, `state`, `startedAt`, `viewers`) |
+| GET | `/api/terminal/sessions` | This account's live sessions (`id`, `shell`, `cwd`, `root`, `state`, `startedAt`, `viewers`) |
 | POST | `/api/terminal/sessions/{id}/close` | Close one session you own |
 | GET (WebSocket) | `/api/terminal/ws` | Same-origin upgrade; cookie session; CSRF token in the first message |
+
+A `ready` message includes `"root": true` when the shell is the administrator's
+root shell; `GET /api/terminal/env` includes `"adminRoot": true` when the server
+gives administrators root. Ordinary users always receive their unprivileged
+identity.
 
 WebSocket messages:
 
@@ -437,7 +442,7 @@ WebSocket messages:
   "session":"<id>"?}`; then binary keyboard bytes; text
   `{"type":"resize","cols":N,"rows":N}`; text `{"type":"close"}`.
 * server → client: text `{"type":"ready","sessionId":"…","shell":"…",
-  "cwd":"…","reconnected":false,"runtimes":{…}}`; binary output; text
+  "cwd":"…","root":false,"reconnected":false,"runtimes":{…}}`; binary output; text
   `{"type":"exit","code":N|null}`; text `{"type":"error","message":"…"}`.
 
 `folder.path` is a File Station logical path (`/`, `/sub`, or

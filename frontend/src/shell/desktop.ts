@@ -1463,11 +1463,6 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toggleStartPanel(startButton);
       return;
     }
-    if (event.key === "Meta" && !event.repeat) {
-      event.preventDefault();
-      toggleStartPanel(startButton);
-      return;
-    }
     if (isEditable(event.target)) return;
     if (event.key === "?" || ((event.ctrlKey || event.metaKey) && event.key === "/")) {
       event.preventDefault();

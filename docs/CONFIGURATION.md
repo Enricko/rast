@@ -60,6 +60,7 @@ applied by `src/config.rs`.
 | `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
 | `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
 | `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
+| `terminal_admin_root` | boolean | `true` | Administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Selected ordinary users always run unprivileged. Set `false` if administrators should not get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
 | `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
 | `terminal_grace_seconds` | integer | `30` | Reconnect grace period for a disconnected terminal before its process tree is terminated (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
 | `terminal_idle_minutes` | integer | `240` | Close terminals with no viewer after this many idle minutes; `0` keeps only the reconnect grace | `RAST_TERMINAL_IDLE_MINUTES` |
@@ -113,6 +114,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
 | `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
 | `RAST_TERMINAL_ENABLED` | `terminal_enabled` | `true`/`false` |
+| `RAST_TERMINAL_ADMIN_ROOT` | `terminal_admin_root` | `true`/`false` |
 | `RAST_TERMINAL_MAX_SESSIONS` | `terminal_max_sessions` | integer |
 | `RAST_TERMINAL_GRACE_SECONDS` | `terminal_grace_seconds` | integer |
 | `RAST_TERMINAL_IDLE_MINUTES` | `terminal_idle_minutes` | integer |

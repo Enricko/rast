@@ -31,7 +31,8 @@ RAST server (uid rast)  ── Unix socket (JSON helper protocol) ──▶ raš
    │                                                                   ├─ ensure useradd rast-u<id>
    │  connect to the per-session agent socket                          ├─ grant OS ACL from RAST perms
    ▼                                                                   ├─ systemd-run transient unit:
-agent process (uid 200000+id, gid rast-u<id>)                            rast terminal-agent
+agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast terminal-agent
+               administrators: root, HOME=/root — cgroup limits only)
    ├─ fresh PTY (posix_openpt), controlling terminal                     uid=identity, cgroup limits
    ├─ approved shell (bash, sh fallback), HOME of the identity           hardening, no WEA
    ├─ SIGWINCH via TIOCSWINSZ / ioctls
@@ -44,10 +45,21 @@ agent process (uid 200000+id, gid rast-u<id>)                            rast te
   `nologin` shell and are not usable for external login: the authenticated PTY
   explicitly execs an approved shell. Opening Terminal never starts Xpra and
   does not require `native_enabled` or the Linux apps feature.
-* **Permissions**: the app id is `terminal`. Administrators may use it;
+* **Permissions**: the app id is `terminal`. Administrators always may use it;
   ordinary accounts are denied until a group grant allows it (Control Panel →
-  Groups → application access). An administrator gets an unprivileged shell —
-  no sudo/root. The identity has no extra groups (`docker` is not reachable).
+  Groups → application access, or a direct per-user override in Effective
+  Access). Selected ordinary users always run as their unprivileged
+  `rast-u<id>` identity (no sudo/root, no `docker` group).
+* **Administrator root shell**: by default (`terminal_admin_root = true`) an
+  administrator's Terminal is a real root shell — `HOME=/root`, full
+  filesystem and command access, including package management and system
+  services. This is intentional: RAST administrators are server owners and
+  already control the host through Docker/App Center. The session still runs
+  in its own transient cgroup with the configured memory/CPU/task limits, but
+  the unprivileged hardening used for ordinary users is disabled so system
+  tools work. Set `terminal_admin_root = false` to give administrators the
+  mapped unprivileged identity instead. Ordinary users are never granted root
+  by this feature.
 * **Secrets**: the agent and shell run in a fresh, explicitly constructed
   environment. The RAST data directory, `secret.key`, the helper/worker
   sockets and the Docker socket are not readable by the identity (ownership
@@ -72,7 +84,10 @@ agent process (uid 200000+id, gid rast-u<id>)                            rast te
 ## Limits and security
 
 * `terminal_max_sessions` per user, `terminal_memory_mb`, `terminal_cpus`,
-  `terminal_tasks` per session (systemd `MemoryMax`, `CPUQuota`, `TasksMax`).
+  `terminal_tasks` per session (systemd `MemoryMax`, `CPUQuota`, `TasksMax`);
+  the same cgroup limits apply to administrator root shells.
+* Administrator shells are full root shells (see Permissions); everyone else is
+  confined to the mapped identity and ACL-granted folders.
 * Output is streamed in bounded frames and a slow browser applies TCP
   backpressure to the agent (the shell blocks instead of the server buffering
   unbounded output). A reconnecting browser receives at most 256 KiB of recent
@@ -87,13 +102,18 @@ agent process (uid 200000+id, gid rast-u<id>)                            rast te
 
 New tabs receive a composed environment:
 
-* `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM=xterm-256color`,
+* `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM=xterm-256color` (administrator root
+  shells use `HOME=/root`, `USER=root`; everyone else gets the identity home),
   `XDG_RUNTIME_DIR` and `TMPDIR` in the session's private directory,
   `XDG_CONFIG_HOME`/`XDG_CACHE_HOME`/`XDG_DATA_HOME`/`XDG_STATE_HOME` under the
   identity's private home.
-* `PATH` from the selected managed runtimes (Rust, Java/Temurin, Bun, Deno,
-  .NET, Python, PHP, Go, Node.js) followed by the standard system directories,
-  plus `JAVA_HOME`, `DOTNET_ROOT`, etc. for the selected versions.
+* `PATH` from the selected managed runtimes (Python, PHP CLI, Go, Node.js,
+  Rust, Eclipse Temurin JDK, Bun, Deno, .NET SDK (C#), Clang/LLVM (C/C++),
+  Flutter/Dart, Composer, Zig, Kotlin, CMake, Gradle, Apache Maven) followed by
+  the standard system directories, plus `JAVA_HOME`, `DOTNET_ROOT`, etc. for
+  the selected versions. Composer's `composer` wrapper uses the `php` that is
+  first on the shell's `PATH` (managed PHP when selected, otherwise the OS
+  PHP).
 * Per-user defaults live in the Terminal environment panel (stored in RAST's
   settings, not in a shared file). A tab can override a version for its own
   shell. Shared runtime trees are read-only; caches (`CARGO_HOME`,
@@ -152,6 +172,7 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 | Key | Default | Meaning |
 |---|---|---|
 | `terminal_enabled` | `true` | Offer the Terminal feature (permission rules still apply). |
+| `terminal_admin_root` | `true` | Administrators get a root shell; selected ordinary users always get their unprivileged identity. |
 | `terminal_max_sessions` | `8` | Maximum concurrent terminals per account. |
 | `terminal_grace_seconds` | `30` | How long a disconnected tab may reconnect to the same shell. |
 | `terminal_idle_minutes` | `240` | Close sessions with no viewer after this idle time (0 = only the grace period). |
@@ -159,7 +180,7 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 | `terminal_cpus` | `2` | CPU limit per terminal (`CPUQuota` = 100× this). |
 | `terminal_tasks` | `512` | Process/thread limit per terminal (`TasksMax`). |
 
-Environment equivalents: `RAST_TERMINAL_ENABLED`, `RAST_TERMINAL_MAX_SESSIONS`,
+Environment equivalents: `RAST_TERMINAL_ENABLED`, `RAST_TERMINAL_ADMIN_ROOT`, `RAST_TERMINAL_MAX_SESSIONS`,
 `RAST_TERMINAL_GRACE_SECONDS`, `RAST_TERMINAL_IDLE_MINUTES`,
 `RAST_TERMINAL_MEMORY_MB`, `RAST_TERMINAL_CPUS`, `RAST_TERMINAL_TASKS`.
 

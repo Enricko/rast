@@ -309,6 +309,7 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
         "sessionId": session_id,
         "shell": viewer.shell,
         "cwd": viewer.cwd,
+        "root": viewer.root,
         "reconnected": reconnected,
         "runtimes": viewer.runtimes,
     });

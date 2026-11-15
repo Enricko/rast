@@ -565,8 +565,12 @@ Requirements:
 * `terminal_enabled = true` (default).
 
 Grant the app to groups in Control Panel → Groups → application access.
-Administrators always receive an unprivileged shell; they do not get sudo or
-root. See [TERMINAL.md](TERMINAL.md) for configuration, limits and the runtime
+Administrators use Terminal without a grant and, by default
+(`terminal_admin_root = true`), receive a real root shell with full server
+access; selected ordinary users always run as their unprivileged
+`rast-u<id>` identity (no sudo/root). Set `terminal_admin_root = false` if
+administrators should not get root through RAST. See
+[TERMINAL.md](TERMINAL.md) for configuration, limits and the runtime
 environment panel.
 
 ## Manual installation (no installer)

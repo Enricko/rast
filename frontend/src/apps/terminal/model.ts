@@ -211,6 +211,8 @@ export interface TerminalReadyMessage {
   sessionId: string;
   shell: string;
   cwd: string;
+  /** Administrator shell running as root (full server access). */
+  root: boolean;
   reconnected: boolean;
   runtimes: Record<string, string>;
 }
@@ -242,6 +244,7 @@ export function parseTerminalServerMessage(text: string): TerminalServerMessage 
         sessionId: message.sessionId,
         shell: stringValue(message.shell),
         cwd: stringValue(message.cwd),
+        root: message.root === true,
         reconnected: message.reconnected === true,
         runtimes: normalizeRuntimeOverrides(message.runtimes),
       };
@@ -299,6 +302,8 @@ export interface TerminalState {
   sessionId: string | null;
   shell: string;
   cwd: string;
+  /** Administrator root shell (see `terminal_admin_root` on the server). */
+  root: boolean;
   reconnected: boolean;
   runtimes: Record<string, string>;
   exitCode: number | null;
@@ -325,6 +330,7 @@ export function initialTerminalState(): TerminalState {
     sessionId: null,
     shell: "",
     cwd: "",
+    root: false,
     reconnected: false,
     runtimes: {},
     exitCode: null,
@@ -357,6 +363,7 @@ export function reduceTerminalState(state: TerminalState, event: TerminalEvent):
         sessionId: event.ready.sessionId,
         shell: event.ready.shell,
         cwd: event.ready.cwd,
+        root: event.ready.root,
         reconnected: event.ready.reconnected,
         runtimes: event.ready.runtimes,
         exitCode: null,
@@ -514,6 +521,8 @@ export interface TerminalRuntime {
 
 export interface TerminalEnv {
   enabled: boolean;
+  /** Administrators get a root shell on this server (server config). */
+  adminRoot: boolean;
   shell: string | null;
   fallbackShell: string | null;
   maxSessions: number;
@@ -527,6 +536,7 @@ export interface TerminalEnv {
 export function emptyTerminalEnv(): TerminalEnv {
   return {
     enabled: true,
+    adminRoot: false,
     shell: null,
     fallbackShell: null,
     maxSessions: TERMINAL_DEFAULT_MAX_SESSIONS,
@@ -583,6 +593,7 @@ export function normalizeTerminalEnv(raw: unknown): TerminalEnv {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return env;
   const record = raw as Record<string, unknown>;
   env.enabled = record.enabled !== false;
+  env.adminRoot = record.adminRoot === true;
   env.shell = typeof record.shell === "string" && record.shell ? record.shell : null;
   env.fallbackShell = typeof record.fallbackShell === "string" && record.fallbackShell ? record.fallbackShell : null;
   env.maxSessions =

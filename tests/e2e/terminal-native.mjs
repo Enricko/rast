@@ -203,10 +203,10 @@ async function wsScenarios(page, { csrf, adminSessionId }) {
     // 4. Identity and HOME are the mapped per-user identity.
     {
       const state = await start();
-      await type(state, "id -un; id -u; echo HOME=$HOME; echo CWD=$(pwd)\n");
+      await type(state, "id -un; id -u; echo HOME=$HOME; echo CWD=$(pwd); head -1 /etc/shadow | cut -d: -f1,2\n");
       await waitFor(state, () => decoder.decode(state.raw).includes("HOME="), 15_000);
-      await sleep(300);
-      outcome.identity = decoder.decode(state.raw).slice(-500);
+      await sleep(500);
+      outcome.identity = decoder.decode(state.raw).slice(-700);
       state.ws.send(JSON.stringify({ type: "close" }));
     }
 
@@ -299,7 +299,14 @@ async function main() {
     check("reconnected shell keeps output", ws.reconnectOutput === true);
     check("symlink escape is refused", !ws.symlink?.ready && Boolean(ws.symlink?.error), ws.symlink);
     check("path traversal is refused", !ws.traversal?.ready && Boolean(ws.traversal?.error), ws.traversal);
-    check("shell identity is unprivileged and per-user", /rast-u\d+/.test(ws.identity ?? "") && /HOME=\/.*linux-users\/\d+/.test(ws.identity ?? ""), ws.identity);
+    check(
+      "administrator shell runs as root with full server access",
+      /(^|[\r\n])root[\r\n]/.test(ws.identity ?? "") &&
+        /(^|[\r\n])0[\r\n]/.test(ws.identity ?? "") &&
+        /HOME=\/root/.test(ws.identity ?? "") &&
+        /(^|[\r\n])root:[^\r\n]*/.test(ws.identity ?? ""),
+      ws.identity,
+    );
 
     // -- Cross-user attach -------------------------------------------------
     const otherContext = await browser.newContext({ viewport: { width: 1200, height: 800 } });
@@ -345,9 +352,13 @@ async function main() {
       return { text: chunks.join(""), messages };
     }, { csrf: otherLogin.csrfToken ?? otherMe.csrfToken });
     if (!otherWs.text) console.log("second-user WS debug:", JSON.stringify(otherWs.messages));
-    const adminUid = (ws.identity ?? "").match(/rast-u(\d+)/)?.[1];
+    const adminIsRoot = /(^|[\r\n])root[\r\n]/.test(ws.identity ?? "") && /HOME=\/root/.test(ws.identity ?? "");
     const otherUid = (otherWs.text ?? "").match(/rast-u(\d+)/)?.[1];
-    check("two users get separate identities/homes", Boolean(adminUid && otherUid && adminUid !== otherUid), { adminUid, otherUid, output: otherWs.text?.slice(-200) });
+    check(
+      "admin is root while a selected user stays unprivileged",
+      adminIsRoot && Boolean(otherUid) && /HOME=\/.*linux-users\/\d+/.test(otherWs.text ?? ""),
+      { adminIsRoot, otherUid, output: otherWs.text?.slice(-240) },
+    );
 
     // -- UI: Terminal app, command, screenshots ----------------------------
     await launchApp(adminPage, "Terminal");

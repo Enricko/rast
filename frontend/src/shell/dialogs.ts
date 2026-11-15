@@ -110,7 +110,6 @@ export function forcePasswordChange(
 
 const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["Ctrl", "Space"], label: "Open the start menu and application search" },
-  { keys: ["Cmd", "Space"], label: "Open the start menu (macOS)" },
   { keys: ["?"], label: "Show this keyboard shortcuts dialog" },
   { keys: ["Esc"], label: "Close menus, dialogs and popovers" },
   { keys: ["↑", "↓", "←", "→"], label: "Move between desktop icons or search results" },
@@ -142,7 +141,7 @@ export function showShortcutsDialog(): void {
       h(
         "p",
         { class: "muted" },
-        "RAST is designed to be fully usable from the keyboard. On Windows and Linux use Ctrl where macOS uses Cmd.",
+        "RAST is designed to be fully usable from the keyboard. RAST shortcuts use Ctrl on every platform; browser copy/paste and screenshot shortcuts keep working because RAST no longer reacts to the Cmd/Windows key itself.",
       ),
       list,
     ),

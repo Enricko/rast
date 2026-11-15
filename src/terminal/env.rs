@@ -257,6 +257,7 @@ impl TerminalEnvironment {
             .collect();
         json!({
             "enabled": enabled && crate::terminal::manager::supported(),
+            "adminRoot": terminal.admin_root,
             "shell": if Path::new("/bin/bash").is_file() { "/bin/bash" } else { "/bin/sh" },
             "fallbackShell": "/bin/sh",
             "maxSessions": terminal.max_sessions,

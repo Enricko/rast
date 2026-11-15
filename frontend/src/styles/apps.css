@@ -5907,6 +5907,20 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
 
 /* ---------------------------------------------------------------- status bar */
 
+.term-statusbar .term-root-badge {
+  padding: 1px 7px;
+  border: 1px solid rgba(240, 179, 107, 0.55);
+  border-radius: 999px;
+  color: #f0b36b;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.term-statusbar .term-root-badge[hidden] {
+  display: none;
+}
+
 .term-statusbar {
   display: flex;
   align-items: center;

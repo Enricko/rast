@@ -43,3 +43,6 @@ tests/e2e/terminal-native-result.json
 
 # Production deployment verification screenshots (manual)
 tests/e2e/prod-*.png
+
+# Local admin-root Terminal verification screenshot
+tests/e2e/dev-*.png

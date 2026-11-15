@@ -76,6 +76,9 @@ pub struct TerminalViewer {
     pub session_id: String,
     pub shell: String,
     pub cwd: String,
+    /// Administrator root shell (full server access) instead of the mapped
+    /// unprivileged identity.
+    pub root: bool,
     pub runtimes: BTreeMap<String, String>,
     /// Recent output to replay before live frames.
     pub replay: Vec<u8>,
@@ -102,6 +105,8 @@ pub struct Session {
     pub user_id: i64,
     pub shell: String,
     pub cwd: String,
+    /// Root shell (administrators only, `terminal_admin_root`).
+    pub root: bool,
     pub started_at: i64,
     /// Runtime versions this shell was started with (shown on reconnect).
     pub runtimes: BTreeMap<String, String>,
@@ -115,6 +120,7 @@ impl Session {
         user_id: i64,
         shell: String,
         cwd: String,
+        root: bool,
         runtimes: BTreeMap<String, String>,
         commands: mpsc::Sender<AgentCommand>,
     ) -> Arc<Self> {
@@ -123,6 +129,7 @@ impl Session {
             user_id,
             shell,
             cwd,
+            root,
             started_at: db::now_ms(),
             runtimes,
             inner: Mutex::new(SessionInner {
@@ -171,6 +178,7 @@ impl Session {
             session_id: self.id.clone(),
             shell: self.shell.clone(),
             cwd: self.cwd.clone(),
+            root: self.root,
             runtimes: self.runtimes.clone(),
             replay,
             events: rx,
@@ -274,12 +282,13 @@ impl TerminalManager {
         self.sessions.lock().await.remove(&session.id);
         let session_id = session.id.clone();
         let user_id = session.user_id;
+        let root = session.root;
         let helper = self.helper.clone();
         tokio::spawn(async move {
             let _ = helper
                 .call_json(
                     "terminal_stop",
-                    json!({"userId": user_id, "sessionId": session_id}),
+                    json!({"userId": user_id, "sessionId": session_id, "root": root}),
                 )
                 .await;
         });
@@ -342,6 +351,7 @@ impl TerminalManager {
                 "id": session.id,
                 "shell": session.shell,
                 "cwd": session.cwd,
+                "root": session.root,
                 "state": "running",
                 "startedAt": session.started_at,
                 "viewers": if inner.viewer.is_some() { 1 } else { 0 },
@@ -380,6 +390,10 @@ impl TerminalManager {
         } else {
             "/bin/sh".to_string()
         };
+        // Administrators may get a real root shell (full server access) when
+        // the operator keeps `terminal_admin_root` enabled (default). Selected
+        // ordinary users always run as their unprivileged identity.
+        let root = user.is_admin() && self.config.terminal.admin_root;
         let environment = self.environment(user.id).await?;
         let selected = environment.selected_overrides(&spec.overrides);
         let env_map = environment.shell_env(&selected);
@@ -394,6 +408,7 @@ impl TerminalManager {
             "sessionId": session_id,
             "shell": shell,
             "cwd": cwd,
+            "root": root,
             "writeAccess": spec.write_access,
             "env": env_map,
             "memoryMaxMb": self.config.terminal.memory_mb,
@@ -429,7 +444,7 @@ impl TerminalManager {
                     .helper
                     .call_json(
                         "terminal_stop",
-                        json!({"userId": user.id, "sessionId": session_id}),
+                        json!({"userId": user.id, "sessionId": session_id, "root": root}),
                     )
                     .await;
                 return Err(error);
@@ -442,7 +457,7 @@ impl TerminalManager {
                     .helper
                     .call_json(
                         "terminal_stop",
-                        json!({"userId": user.id, "sessionId": session_id}),
+                        json!({"userId": user.id, "sessionId": session_id, "root": root}),
                     )
                     .await;
                 return Err(AppError::unavailable(message));
@@ -455,6 +470,7 @@ impl TerminalManager {
             user.id,
             shell.clone(),
             final_cwd.clone(),
+            root,
             selected.clone(),
             commands_tx,
         );
@@ -674,12 +690,13 @@ impl TerminalManager {
         self.sessions.lock().await.remove(&session.id);
         let user_id = session.user_id;
         let session_id = session.id.clone();
+        let root = session.root;
         let helper = self.helper.clone();
         tokio::spawn(async move {
             let _ = helper
                 .call_json(
                     "terminal_stop",
-                    json!({"userId": user_id, "sessionId": session_id}),
+                    json!({"userId": user_id, "sessionId": session_id, "root": root}),
                 )
                 .await;
         });

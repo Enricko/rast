@@ -165,6 +165,7 @@ test("server ready/exit/error frames are parsed strictly", () => {
       sessionId: "s1",
       shell: "/bin/bash",
       cwd: "/srv/rast/homes/alice",
+      root: false,
       reconnected: false,
       runtimes: { rust: "1.90.0" },
     },
@@ -174,6 +175,7 @@ test("server ready/exit/error frames are parsed strictly", () => {
     sessionId: "s1",
     shell: "",
     cwd: "",
+    root: false,
     reconnected: false,
     runtimes: {},
   });
@@ -205,9 +207,23 @@ test("exit notices and session-expiry messages are plain language", () => {
 
 // --------------------------------------------------------- phase machine
 
-function ready(sessionId = "s1", reconnected = false): ReturnType<typeof parseTerminalServerMessage> {
-  return { type: "ready", sessionId, shell: "/bin/bash", cwd: "/home/alice", reconnected, runtimes: {} };
+function ready(sessionId = "s1", reconnected = false, root = false): ReturnType<typeof parseTerminalServerMessage> {
+  return { type: "ready", sessionId, shell: "/bin/bash", cwd: "/home/alice", root, reconnected, runtimes: {} };
 }
+
+test("administrator root shells are surfaced by the ready frame", () => {
+  const parsed = parseTerminalServerMessage(
+    '{"type":"ready","sessionId":"root1","shell":"/bin/bash","cwd":"/root","root":true,"reconnected":false,"runtimes":{}}',
+  );
+  assert.equal(parsed?.type, "ready");
+  assert.equal((parsed as { root?: boolean }).root, true);
+  let state = initialTerminalState();
+  state = reduceTerminalState(state, { type: "ready", ready: parsed as never });
+  assert.equal(state.root, true);
+  assert.equal(state.cwd, "/root");
+  const unprivileged = reduceTerminalState(initialTerminalState(), { type: "ready", ready: ready() as never });
+  assert.equal(unprivileged.root, false);
+});
 
 test("a session connects, reconnects once, then gives up", () => {
   let state = initialTerminalState();
@@ -316,6 +332,7 @@ test("tabs add, activate and close with neighbour focus", () => {
 
 const ENV_RAW = {
   enabled: true,
+  adminRoot: true,
   shell: "/bin/bash",
   fallbackShell: "sh",
   maxSessions: 8,
@@ -343,6 +360,7 @@ const ENV_RAW = {
 test("terminal env DTO is normalised and defaults are respected", () => {
   const env = normalizeTerminalEnv(ENV_RAW);
   assert.equal(env.enabled, true);
+  assert.equal(env.adminRoot, true);
   assert.equal(env.shell, "/bin/bash");
   assert.equal(env.fallbackShell, "sh");
   assert.equal(env.maxSessions, 8);

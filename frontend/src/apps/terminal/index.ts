@@ -97,6 +97,7 @@ class TerminalApp {
   private readonly statusText: HTMLElement;
   private readonly statusDot: HTMLElement;
   private readonly statusShell: HTMLElement;
+  private readonly statusRoot: HTMLElement;
   private readonly statusCwd: HTMLElement;
   private readonly statusSession: HTMLElement;
   private readonly statusRuntimes: HTMLElement;
@@ -180,6 +181,15 @@ class TerminalApp {
 
     // ---------------------------------------------------------- status bar
     this.statusShell = h("span", { class: "term-status-item mono" }, "—");
+    this.statusRoot = h(
+      "span",
+      {
+        class: "term-status-item term-root-badge",
+        title: "Administrator shell: runs as root on this server",
+        hidden: true,
+      },
+      "root",
+    );
     this.statusCwd = h("span", { class: "term-status-item term-status-cwd mono", title: "" }, "—");
     this.statusSession = h("span", { class: "term-status-item term-status-session mono muted" }, "");
     this.statusRuntimes = h("span", { class: "term-status-item term-status-runtimes muted" }, "");
@@ -187,6 +197,7 @@ class TerminalApp {
       "div",
       { class: "term-statusbar", role: "status", ariaLive: "off" },
       this.statusShell,
+      this.statusRoot,
       this.statusCwd,
       h("span", { class: "term-status-spacer" }),
       this.statusRuntimes,
@@ -572,6 +583,7 @@ class TerminalApp {
   private renderStatusbar(): void {
     const current = activeTab(this.tabs);
     this.statusShell.textContent = current?.state.shell || this.env?.shell || "—";
+    this.statusRoot.hidden = current?.state.root !== true;
     const cwd = current?.state.cwd || (current?.folder ? terminalFolderLabel(current.folder) : "—");
     this.statusCwd.textContent = cwd;
     this.statusCwd.title = cwd;

@@ -143,10 +143,15 @@ linux_apps_enabled = true
 # ---- Terminal (native PTY shells) ----------------------------------------
 # Interactive shells run as the mapped per-user identity through the native
 # helper (rast-native.service) — no Docker, Xpra or graphical session needed.
-# Administrators keep access; ordinary accounts are denied until a group grant
-# allows the "terminal" application.
+# Administrators keep access and get a root shell on this server by default;
+# ordinary accounts are denied until a group grant allows the "terminal"
+# application and always run as their unprivileged rast-u<id> identity.
 # env: RAST_TERMINAL_ENABLED
 terminal_enabled = true
+# Administrators get a real root shell (full server access, HOME=/root).
+# Set to false to give administrators the mapped unprivileged identity too.
+# env: RAST_TERMINAL_ADMIN_ROOT
+terminal_admin_root = true
 # Maximum concurrent terminals per account.
 # env: RAST_TERMINAL_MAX_SESSIONS
 terminal_max_sessions = 8

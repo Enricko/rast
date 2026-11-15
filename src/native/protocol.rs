@@ -640,8 +640,14 @@ pub struct TerminalStartOp {
     pub session_id: String,
     /// Approved shell path (bash preferred, sh/dash fallback).
     pub shell: String,
-    /// Absolute working directory, or empty to use the identity home.
+    /// Absolute working directory, or empty to use the home directory.
     pub cwd: String,
+    /// Run as the server root user instead of the mapped identity. Only the
+    /// trusted RAST server sets this (it does so for administrators when
+    /// `terminal_admin_root` is enabled); the helper still re-validates the
+    /// whole request and the session is one transient root unit with limits.
+    #[serde(default)]
+    pub root: bool,
     /// RAST folder permission allows writing (drives the recursive ACL grant).
     #[serde(rename = "writeAccess")]
     pub write_access: bool,
@@ -663,6 +669,10 @@ pub struct TerminalStopOp {
     pub user_id: i64,
     #[serde(rename = "sessionId")]
     pub session_id: String,
+    /// Whether the session was the administrator's root shell (unit name
+    /// uses uid 0 instead of the mapped identity).
+    #[serde(default)]
+    pub root: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1962,6 +1972,7 @@ mod tests {
                 session_id: "0123456789abcdef0123456789abcdef".into(),
                 shell: "/bin/bash".into(),
                 cwd: String::new(),
+                root: true,
                 write_access: false,
                 env: BTreeMap::new(),
                 memory_max_mb: 512,
@@ -1971,6 +1982,7 @@ mod tests {
             NativeOp::TerminalStop(TerminalStopOp {
                 user_id: 7,
                 session_id: "0123456789abcdef0123456789abcdef".into(),
+                root: true,
             }),
             NativeOp::DebPreview(DebPreviewOp {
                 path: "/var/lib/rast/linux-apps/staging/x.deb".into(),
