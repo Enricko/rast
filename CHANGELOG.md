@@ -9,6 +9,15 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-11-15
+
+### Fixed
+
+- A terminal that runs as a login account (`terminal_admin_account`) gets the
+  umask of that account's login session (pam_umask: `UMASK` from `login.defs`
+  with `USERGROUPS_ENAB`, `0002` on Debian/Ubuntu) instead of `0022`, so files
+  created there have the same permissions as over SSH.
+
 ## [0.17.2] - 2026-11-15
 
 ### Added

@@ -1624,6 +1624,37 @@ async fn account_can_enter(account: &crate::packages::accounts::Account, dir: &P
         .is_ok_and(|status| status.success())
 }
 
+/// The umask a login session gives `account` (pam_umask): `UMASK` from
+/// login.defs (022 by default), and with `USERGROUPS_ENAB yes` the group
+/// bits follow the owner bits when the account has its own private group
+/// (same id and name), which makes it `0002` on Debian/Ubuntu.
+fn login_umask(
+    account: &crate::packages::accounts::Account,
+    login_defs: &str,
+    group: &str,
+) -> String {
+    let setting = |key: &str| {
+        login_defs.lines().find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(key)).then(|| words.next().unwrap_or("").to_string())
+        })
+    };
+    let mut mask = setting("UMASK")
+        .and_then(|value| u32::from_str_radix(&value, 8).ok())
+        .filter(|mask| *mask <= 0o777)
+        .unwrap_or(0o022);
+    let private_group = account.uid == account.gid
+        && group.lines().any(|line| {
+            let mut fields = line.split(':');
+            fields.next() == Some(account.name.as_str())
+                && fields.nth(1).and_then(|gid| gid.parse::<u32>().ok()) == Some(account.gid)
+        });
+    if private_group && setting("USERGROUPS_ENAB").is_some_and(|v| v.eq_ignore_ascii_case("yes")) {
+        mask = (mask & !0o070) | ((mask >> 3) & 0o070);
+    }
+    format!("{mask:04o}")
+}
+
 /// The value of `KEY=value` / `KEY="value"` in an environment-style file.
 fn env_file_value(text: &str, key: &str) -> Option<String> {
     text.lines().find_map(|line| {
@@ -1874,6 +1905,9 @@ struct TerminalUnitSpec<'a> {
     root: bool,
     /// Administrator shell that runs as this login account instead of root.
     run_as: Option<&'a str>,
+    /// File-creation mask of the shell (`0022`; a login account gets what
+    /// its login session would).
+    umask: &'a str,
     uid: u32,
     gid: u32,
 }
@@ -1894,6 +1928,7 @@ fn build_terminal_systemd_args(
         unit,
         root,
         run_as,
+        umask,
         uid,
         gid,
     } = *spec;
@@ -1904,7 +1939,7 @@ fn build_terminal_systemd_args(
         OsString::from("--property=Type=exec"),
         OsString::from("--property=KillMode=control-group"),
         OsString::from(format!("--property=WorkingDirectory={}", path_string(cwd))),
-        OsString::from("--property=UMask=0022"),
+        OsString::from(format!("--property=UMask={umask}")),
     ];
     if root {
         // Root shell: no identity, no service hardening and no resource
@@ -2105,6 +2140,13 @@ async fn terminal_start(
         unit: &unit,
         root: op.root,
         run_as: account.as_ref().map(|account| account.name.as_str()),
+        umask: &account.as_ref().map_or_else(
+            || "0022".to_string(),
+            |account| {
+                let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+                login_umask(account, &read("/etc/login.defs"), &read("/etc/group"))
+            },
+        ),
         uid,
         gid,
     };
@@ -5373,6 +5415,7 @@ exit 0
                 unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
                 root: true,
                 run_as: Some("ada"),
+                umask: "0002",
                 uid: 4_000_000,
                 gid: 4_000_000,
             },
@@ -5390,6 +5433,14 @@ exit 0
         .collect();
         let joined = args.join(" ");
         assert!(joined.contains("--uid=ada"));
+        assert!(joined.contains("UMask=0002"));
+        let defs = "# comment\nUMASK\t\t022\nUSERGROUPS_ENAB yes\n";
+        let own = account.clone();
+        assert_eq!(login_umask(&own, defs, "ada:x:4000000:\n"), "0002");
+        // A shared primary group, or user groups disabled: the plain UMASK.
+        assert_eq!(login_umask(&own, defs, "staff:x:4000000:ada\n"), "0022");
+        assert_eq!(login_umask(&own, "UMASK 027\n", "ada:x:4000000:\n"), "0027");
+        assert_eq!(login_umask(&own, "", ""), "0022");
         // sudo must keep working: no NoNewPrivileges, no limits.
         assert!(joined.contains("NoNewPrivileges=no") && !joined.contains("MemoryMax="));
     }
@@ -5497,6 +5548,7 @@ exit 0
                 unit: "rast-term-u200007-0123456789abcdef0123456789abcdef",
                 root: false,
                 run_as: None,
+                umask: "0022",
                 uid: identity.uid,
                 gid: identity.gid,
             },
@@ -5533,6 +5585,7 @@ exit 0
                 unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
                 root: true,
                 run_as: None,
+                umask: "0022",
                 uid: 0,
                 gid: 0,
             },

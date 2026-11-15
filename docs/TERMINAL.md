@@ -76,7 +76,8 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   and an administrator's Terminal is a *login shell of that account* instead
   of root. The helper passes only what sshd/PAM would (`HOME`, `USER`,
   `SHELL`, `LANG` from `/etc/default/locale`, `PATH` from `/etc/environment`,
-  `XDG_RUNTIME_DIR` when the account has a user session); `/etc/profile` and
+  `XDG_RUNTIME_DIR` when the account has a user session, and the login
+  umask); `/etc/profile` and
   the account's `~/.profile`/`~/.bashrc` build the rest. The same commands,
   versions and tool sign-ins as over SSH are therefore available, and `sudo`
   gives root. The Terminal runtime selection and per-tab overrides are not
