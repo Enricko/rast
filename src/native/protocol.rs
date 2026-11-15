@@ -244,6 +244,8 @@ pub enum NativeOp {
     SessionStop(SessionStopOp),
     UnitStatus(UnitStatusOp),
     UnitsList,
+    /// Official runtimes in the administrator accounts' home directories.
+    RuntimesDetect(RuntimesDetectOp),
     AppStart(AppStartOp),
     AppStop(AppStopOp),
     TerminalStart(TerminalStartOp),
@@ -279,6 +281,7 @@ impl NativeOp {
             Self::SessionStop(_) => "session_stop",
             Self::UnitStatus(_) => "unit_status",
             Self::UnitsList => "units_list",
+            Self::RuntimesDetect(_) => "runtimes_detect",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
             Self::TerminalStart(_) => "terminal_start",
@@ -392,6 +395,7 @@ impl NativeRequest {
             NativeOp::SessionStart(op) => merge!(op),
             NativeOp::SessionStop(op) => merge!(op),
             NativeOp::UnitStatus(op) => merge!(op),
+            NativeOp::RuntimesDetect(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
             NativeOp::TerminalStart(op) => merge!(op),
@@ -508,6 +512,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "session_stop" => NativeOp::SessionStop(op_from(rest, "session_stop")?),
         "unit_status" => NativeOp::UnitStatus(op_from(rest, "unit_status")?),
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
+        "runtimes_detect" => NativeOp::RuntimesDetect(op_from(rest, "runtimes_detect")?),
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
         "terminal_start" => NativeOp::TerminalStart(op_from(rest, "terminal_start")?),
@@ -659,6 +664,15 @@ pub struct TerminalStartOp {
     pub cpu_quota_percent: u32,
     #[serde(rename = "tasksMax")]
     pub tasks_max: u32,
+}
+
+/// Look for official runtimes in the administrator accounts' tool
+/// directories. `skip` lists package ids already found system-wide.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "RuntimesDetectOp", deny_unknown_fields)]
+pub struct RuntimesDetectOp {
+    #[serde(default)]
+    pub skip: Vec<String>,
 }
 
 /// Stop a native PTY terminal and remove its runtime directory.

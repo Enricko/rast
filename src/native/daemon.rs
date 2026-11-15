@@ -405,6 +405,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::SessionStop(op) => session_stop(options, op).await,
         NativeOp::UnitStatus(op) => unit_status(options, op).await,
         NativeOp::UnitsList => units_list(options).await,
+        NativeOp::RuntimesDetect(op) => runtimes_detect(op).await,
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
         NativeOp::TerminalStart(op) => terminal_start(options, op).await,
@@ -1590,7 +1591,19 @@ fn terminal_environment(
     let path = extra.get("PATH").cloned().unwrap_or_else(|| {
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
     });
-    env.insert("PATH".into(), login_path(&path, Path::new(&home)));
+    let mut path = login_path(&path, Path::new(&home));
+    if username == "root" {
+        // What the server's administrators installed for their own account
+        // (claude, uv, rustup, …) also runs in the root shell; last, so it
+        // never shadows a system command or an App Center default.
+        for dir in crate::packages::accounts::admin_tool_dirs() {
+            if !path.split(':').any(|have| have == dir) {
+                path.push(':');
+                path.push_str(&dir);
+            }
+        }
+    }
+    env.insert("PATH".into(), path);
     Ok(env)
 }
 
@@ -2026,6 +2039,22 @@ async fn terminal_start(
         "uid": uid,
         "gid": gid,
     }))
+}
+
+/// Official runtimes installed in the home directories of the accounts that
+/// may become root (see [`crate::packages::accounts`]); the service cannot
+/// read `/home`. Version commands run as the owning account.
+async fn runtimes_detect(
+    op: crate::native::protocol::RuntimesDetectOp,
+) -> Result<Value, NativeError> {
+    if op.skip.len() > 64 || op.skip.iter().any(|id| id.len() > 64) {
+        return Err(NativeError::invalid("invalid runtime list"));
+    }
+    let skip: std::collections::HashSet<String> = op.skip.into_iter().collect();
+    let found = tokio::task::spawn_blocking(move || crate::packages::accounts::detect(&skip))
+        .await
+        .unwrap_or_default();
+    Ok(json!({ "runtimes": found }))
 }
 
 async fn terminal_stop(options: &NativeOptions, op: TerminalStopOp) -> Result<Value, NativeError> {

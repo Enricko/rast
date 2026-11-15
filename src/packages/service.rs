@@ -100,6 +100,8 @@ pub struct PackageManager {
     system: RwLock<HashMap<String, SystemInstall>>,
     /// Set by tests that provide their own system runtimes.
     system_fixed: std::sync::atomic::AtomicBool,
+    /// The privileged helper, for what the service itself may not read.
+    native: std::sync::OnceLock<crate::native::client::NativeClient>,
     /// The login-shell profile script (see [`shell`]).
     profile: RwLock<std::path::PathBuf>,
     busy: Arc<Mutex<HashSet<String>>>,
@@ -370,6 +372,7 @@ impl PackageManager {
             github_updates: RwLock::new(HashMap::new()),
             system: RwLock::new(HashMap::new()),
             system_fixed: std::sync::atomic::AtomicBool::new(false),
+            native: std::sync::OnceLock::new(),
             profile: RwLock::new(std::path::PathBuf::from(shell::PROFILE_SCRIPT)),
             busy: Arc::new(Mutex::new(HashSet::new())),
             check_lock: tokio::sync::Mutex::new(()),
@@ -381,6 +384,11 @@ impl PackageManager {
     }
 
     /// Restore the persisted check state and start the periodic checker.
+    /// Give the service the privileged helper (before [`Self::start`]).
+    pub fn set_native(&self, client: crate::native::client::NativeClient) {
+        let _ = self.native.set(client);
+    }
+
     pub async fn start(self: &Arc<Self>) {
         self.recover_displaced().await;
         let me = self.clone();
@@ -570,9 +578,28 @@ impl PackageManager {
     pub async fn refresh_system(&self) {
         let root = self.layout.root.clone();
         let scratch = self.layout.staging();
-        let found = tokio::task::spawn_blocking(move || system::detect_all(&root, &scratch))
+        let mut found = tokio::task::spawn_blocking(move || system::detect_all(&root, &scratch))
             .await
             .unwrap_or_default();
+        // Runtimes an administrator installed for their own Linux account
+        // (rustup, Bun, a Flutter checkout): only the privileged helper can
+        // look into /home. Without the helper they are simply not listed.
+        if let Some(helper) = self.native.get() {
+            let skip: Vec<&String> = found.keys().collect();
+            if let Ok(reply) = helper
+                .call_json("runtimes_detect", json!({ "skip": skip }))
+                .await
+            {
+                let extra: HashMap<String, SystemInstall> = reply
+                    .get("runtimes")
+                    .cloned()
+                    .and_then(|v| serde_json::from_value(v).ok())
+                    .unwrap_or_default();
+                for (id, install) in extra {
+                    found.entry(id).or_insert(install);
+                }
+            }
+        }
         let key = |m: &HashMap<String, SystemInstall>| {
             let mut v: Vec<(String, String, String, Option<String>)> = m
                 .iter()

@@ -9,6 +9,27 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-15
+
+### Added
+
+- **Root terminals run the tools of the server's administrators.** Commands
+  installed for the Linux account of someone who may already become root
+  (members of `sudo`, `admin` or `wheel`) — `claude`, `uv`, rustup's `cargo`,
+  `opencode`, pnpm, Bun, Deno, a Flutter checkout, … in `~/.local/bin`,
+  `~/.cargo/bin` and the other usual per-user directories — are on the `PATH`
+  of an administrator's root shell. They come last, so they never shadow a
+  system command or an App Center default; directories other accounts can
+  write to are left out.
+- **App Center finds runtimes installed in an administrator's home**, such as
+  rustup's Rust in `~/.cargo/bin`, and lists them as *System* installs with
+  the verified version as an update. The privileged helper looks (the service
+  cannot read `/home`) and runs version commands as the owning account.
+  Flutter is detected too; its version is read from the SDK instead of
+  running `flutter`.
+- **`terminal_path_extra`**: further directories to append to the `PATH` of
+  administrator root shells.
+
 ## [0.17.0] - 2026-11-15
 
 ### Added

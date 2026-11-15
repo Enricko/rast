@@ -476,7 +476,20 @@ impl TerminalManager {
         let root = user.is_admin() && self.config.terminal.admin_root;
         let environment = self.environment(user.id).await?;
         let selected = environment.selected_overrides(&spec.overrides);
-        let env_map = environment.shell_env(&selected);
+        let mut env_map = environment.shell_env(&selected);
+        if root {
+            // Tools the administrator installed for another Linux account
+            // (`terminal_path_extra`); last, so they never shadow a system
+            // command.
+            if let Some(path) = env_map.get_mut("PATH") {
+                for dir in &self.config.terminal.path_extra {
+                    if !path.split(':').any(|have| have == dir) {
+                        path.push(':');
+                        path.push_str(dir);
+                    }
+                }
+            }
+        }
         let session_id = random_hex(16);
         let cwd = spec
             .cwd

@@ -165,6 +165,8 @@ pub struct FileConfig {
     pub terminal_cpus: Option<u32>,
     /// Process (task) limit of one terminal session.
     pub terminal_tasks: Option<u32>,
+    /// Extra directories at the end of an administrator root shell's PATH.
+    pub terminal_path_extra: Option<Vec<String>>,
 }
 
 /// Fully resolved configuration.
@@ -226,6 +228,9 @@ pub struct TerminalConfig {
     pub memory_mb: u32,
     pub cpus: u32,
     pub tasks: u32,
+    /// Absolute directories appended to the PATH of administrator root
+    /// shells, for tools installed in another account's home.
+    pub path_extra: Vec<String>,
 }
 
 impl Default for TerminalConfig {
@@ -239,6 +244,7 @@ impl Default for TerminalConfig {
             memory_mb: 1024,
             cpus: 2,
             tasks: 512,
+            path_extra: Vec::new(),
         }
     }
 }
@@ -578,7 +584,32 @@ impl Config {
             ));
         }
 
+        let terminal_path_extra: Vec<String> = get_str(
+            file.terminal_path_extra.map(|v| v.join(":")),
+            "RAST_TERMINAL_PATH_EXTRA",
+        )
+        .map(|raw| {
+            raw.split(':')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+        if terminal_path_extra.len() > 16
+            || terminal_path_extra.iter().any(|dir| {
+                !dir.starts_with('/')
+                    || dir.len() > 256
+                    || dir.split('/').any(|part| part == "..")
+                    || dir.chars().any(|c| c.is_control() || c == ':')
+            })
+        {
+            return Err(ConfigError::Invalid(
+                "terminal_path_extra must be at most 16 absolute directories without '..'".into(),
+            ));
+        }
         let terminal = TerminalConfig {
+            path_extra: terminal_path_extra,
             enabled: parse_env_bool(&env, "RAST_TERMINAL_ENABLED", file.terminal_enabled)?
                 .unwrap_or(true),
             admin_root: parse_env_bool(&env, "RAST_TERMINAL_ADMIN_ROOT", file.terminal_admin_root)?
@@ -931,6 +962,30 @@ mod tests {
         };
         let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
         assert!(!cfg.terminal.admin_root);
+    }
+
+    #[test]
+    fn terminal_path_extra_takes_absolute_directories_only() {
+        let no_env = |_: &str| None;
+        let file = FileConfig {
+            terminal_path_extra: Some(vec!["/home/ada/.local/bin".into()]),
+            ..FileConfig::default()
+        };
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        assert_eq!(cfg.terminal.path_extra, vec!["/home/ada/.local/bin"]);
+        let env = |k: &str| match k {
+            "RAST_TERMINAL_PATH_EXTRA" => Some("/opt/a/bin:/opt/b/bin".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
+        assert_eq!(cfg.terminal.path_extra, vec!["/opt/a/bin", "/opt/b/bin"]);
+        for bad in ["bin", "/home/ada/../root/bin"] {
+            let file = FileConfig {
+                terminal_path_extra: Some(vec![bad.into()]),
+                ..FileConfig::default()
+            };
+            assert!(Config::from_parts(None, file, no_env).is_err());
+        }
     }
 
     #[test]

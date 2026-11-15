@@ -152,6 +152,10 @@ terminal_enabled = true
 # Set to false to give administrators the mapped unprivileged identity too.
 # env: RAST_TERMINAL_ADMIN_ROOT
 terminal_admin_root = true
+# Extra directories at the end of an administrator root shell's PATH, for
+# tools installed in another account's home (root runs whatever is in them).
+# env: RAST_TERMINAL_PATH_EXTRA (colon separated)
+# terminal_path_extra = ["/home/alice/.local/bin"]
 # Maximum concurrent terminals per account.
 # env: RAST_TERMINAL_MAX_SESSIONS
 terminal_max_sessions = 8

@@ -68,6 +68,7 @@ impl AppState {
             events.clone(),
             jobs.clone(),
         );
+        packages.set_native(crate::native::client::NativeClient::from_config(&config));
         // Restores the catalog check state and starts the periodic checker.
         packages.start().await;
         // Native backend: the unprivileged web server drives the privileged

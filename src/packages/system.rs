@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{sandbox, version};
 
@@ -42,6 +42,12 @@ pub struct Probe {
     args: &'static [&'static str],
     /// Well-known install locations that are not on the system PATH.
     extra: &'static [&'static str],
+}
+
+impl Probe {
+    pub fn args(&self) -> &'static [&'static str] {
+        self.args
+    }
 }
 
 pub const PROBES: &[Probe] = &[
@@ -107,6 +113,14 @@ pub const PROBES: &[Probe] = &[
         extra: &[],
     },
     Probe {
+        id: "flutter",
+        command: "flutter",
+        // Normally read from the SDK's version file: `flutter --version`
+        // is slow and writes to the SDK.
+        args: &["--version", "--suppress-analytics"],
+        extra: &["/opt/flutter/bin", "/usr/local/flutter/bin"],
+    },
+    Probe {
         id: "composer",
         command: "composer",
         args: &["--version", "--no-ansi"],
@@ -149,7 +163,7 @@ pub fn primary_command(id: &str) -> Option<&'static str> {
     PROBES.iter().find(|p| p.id == id).map(|p| p.command)
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemInstall {
     pub command: String,
@@ -336,6 +350,12 @@ fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
 fn read_version(probe: &Probe, f: &Found, scratch: &Path) -> Result<(String, String), String> {
     let home = scratch.join(format!("detect-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&home).map_err(|e| format!("cannot create a scratch directory: {e}"))?;
+    if let Some(text) = version_from_files(probe.id, &f.real) {
+        let line = text.trim().to_string();
+        return parse_version(probe.id, &text)
+            .map(|v| (v, line.clone()))
+            .ok_or_else(|| format!("no version in {line}"));
+    }
     let result = (|| {
         let confinement = sandbox::Confinement::new(&install_root(&f.real), &home, false)?;
         let output = sandbox::run(
@@ -370,6 +390,29 @@ fn read_version(probe: &Probe, f: &Found, scratch: &Path) -> Result<(String, Str
     })();
     let _ = fs::remove_dir_all(&home);
     result
+}
+
+/// Runtimes whose version is written in their install tree, so the command
+/// need not run: a Flutter SDK has `version` (older releases) or
+/// `bin/cache/flutter.version.json` next to `bin/flutter`.
+pub fn version_from_files(id: &str, real: &Path) -> Option<String> {
+    if id != "flutter" {
+        return None;
+    }
+    let sdk = real.parent()?.parent()?;
+    if let Ok(text) = fs::read_to_string(sdk.join("version")) {
+        let version = text.trim();
+        if !version.is_empty() && version.len() <= 64 {
+            return Some(format!("Flutter {version}"));
+        }
+    }
+    let json = fs::read_to_string(sdk.join("bin/cache/flutter.version.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+    ["flutterVersion", "frameworkVersion"]
+        .iter()
+        .find_map(|key| value.get(key).and_then(|v| v.as_str()))
+        .filter(|v| v.len() <= 64)
+        .map(|v| format!("Flutter {v}"))
 }
 
 /// The directory a runtime lives in: `/usr/local/go` for

@@ -58,10 +58,16 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   in its own transient cgroup (so closing the tab ends everything it started),
   but without the resource limits and the unprivileged hardening used for
   ordinary users, so system tools work. `PATH` is what a root login has,
-  including `/root/.local/bin` and `/snap/bin`. A tool installed only for
-  another Linux account (for example in `/home/<name>/.local/bin`) is not on
-  root's `PATH`, exactly as with `sudo -i`: install it for root or run it by
-  its full path. Set `terminal_admin_root = false` to give administrators the
+  including `/root/.local/bin` and `/snap/bin`. Tools the server's
+  administrators installed for their own Linux account also run: for every
+  login account that may already become root (a member of `sudo`, `admin` or
+  `wheel`), its `~/.local/bin`, `~/bin`, `~/.cargo/bin`, `~/.bun/bin`,
+  `~/.deno/bin`, `~/go/bin`, `~/.opencode/bin` and similar per-user tool
+  directories are appended to the root shell's `PATH` (last, so they never
+  shadow a system command; a directory another account can write to is
+  skipped). Such a tool runs as root with root's own settings (`HOME=/root`),
+  so for example `claude` asks root to sign in once. Other directories can be
+  added with `terminal_path_extra`. Set `terminal_admin_root = false` to give administrators the
   mapped unprivileged identity instead. Ordinary users are never granted root
   by this feature.
 * **Secrets**: the agent and shell run in a fresh, explicitly constructed
@@ -187,6 +193,7 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 |---|---|---|
 | `terminal_enabled` | `true` | Offer the Terminal feature (permission rules still apply). |
 | `terminal_admin_root` | `true` | Administrators get a root shell; selected ordinary users always get their unprivileged identity. |
+| `terminal_path_extra` | `[]` | Directories appended to an administrator root shell's `PATH` (tools in another account's home). |
 | `terminal_max_sessions` | `8` | Maximum concurrent terminals per account. |
 | `terminal_grace_seconds` | `30` | Minimum time a terminal without a viewer is kept. |
 | `terminal_idle_minutes` | `1440` | Close a terminal nobody is viewing after this many minutes without output (0 = right after the grace period). |
