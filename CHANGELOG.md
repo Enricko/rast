@@ -9,6 +9,27 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-15
+
+### Added
+
+- **Package icons in App Center.** Every official runtime now shows its
+  programming-language/runtime brand logo (Python, PHP, Go, Node.js, Rust,
+  Eclipse Temurin, Bun, Deno, .NET, Clang/LLVM, Flutter, Composer, Zig, Kotlin,
+  CMake, Gradle, Maven) and app-type packages can ship their own icon instead
+  of a letter monogram. Package manifests support an optional `icon`
+  (`mediaType` `image/svg+xml`/`image/png`, standard base64, decoded image at
+  most 64 KiB, optional attribution); RAST validates the encoding, image
+  signature and SVG content (no scripts, event handlers, `foreignObject`,
+  `javascript:` or external references) on import, install and catalog
+  publication, and renders icons through `<img>` so SVG can never execute in
+  the page. Package authors can embed an icon with the new
+  `rast package embed-icon <image> --manifest rast-package.json` command; the
+  signed catalog carries one icon per package, so all versions of a runtime
+  show the same logo without duplication. Icons use Simple Icons (CC0) brand
+  marks; trademarks belong to their owners and identify the corresponding
+  runtime. See [docs/PACKAGE-ICONS.md](docs/PACKAGE-ICONS.md).
+
 ## [0.15.2] - 2026-11-15
 
 ### Fixed
