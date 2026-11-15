@@ -44,6 +44,13 @@ this file by `scripts/changelog-section.sh`.
 - `@root` is a reserved name for new files and folders in Home and shared
   folders.
 
+### Fixed
+
+- The in-process access cache is keyed per database as well as per account.
+  A single server was never affected; the test suite, which runs several
+  servers in one process, could read another server's decision (the
+  intermittent `role_enforcement_and_user_management` failure).
+
 ## [0.17.4] - 2026-11-15
 
 ### Fixed
