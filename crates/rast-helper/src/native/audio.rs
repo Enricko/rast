@@ -18,7 +18,7 @@ const CONFIG_DIR: &str = ".xpra-audio";
 const CONFIG: &str = "# RAST playback-only audio; do not run distro Pulse configure commands.\n\
                        pulseaudio-configure-commands = none\n";
 
-pub(crate) fn config_dir(runtime_root: &Path) -> PathBuf {
+pub fn config_dir(runtime_root: &Path) -> PathBuf {
     runtime_root.join(CONFIG_DIR)
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn config_dir(runtime_root: &Path) -> PathBuf {
 /// produces two shell commands named `none`. A final config layer replaces the
 /// list instead. This root-owned directory is outside the identity-writable
 /// trees, overrides only this setting and is never read as a Pulse script.
-pub(crate) fn prepare_config(runtime_root: &Path) -> Result<(), NativeError> {
+pub fn prepare_config(runtime_root: &Path) -> Result<(), NativeError> {
     let dir = config_dir(runtime_root);
     let failure = |error| {
         NativeError::unavailable(format!(
@@ -76,14 +76,14 @@ pub(crate) fn prepare_config(runtime_root: &Path) -> Result<(), NativeError> {
 }
 
 /// Xpra's server-side speaker is a recording source: the monitor of this sink.
-pub(crate) const SPEAKER_SINK: &str = "Xpra-Speaker";
-pub(crate) const SPEAKER_MONITOR: &str = "Xpra-Speaker.monitor";
+pub const SPEAKER_SINK: &str = "Xpra-Speaker";
+pub const SPEAKER_MONITOR: &str = "Xpra-Speaker.monitor";
 
 /// Pin every Pulse endpoint to the identity's 0700 runtime tree. Apps have
 /// distinct profile HOMEs, so neither their Pulse defaults nor the helper's
 /// environment may select a different server. An explicit PULSE_SERVER also
 /// prevents libpulse from autospawning a fallback daemon when this one is down.
-pub(crate) fn environment(runtime: &Path) -> BTreeMap<String, String> {
+pub fn environment(runtime: &Path) -> BTreeMap<String, String> {
     let pulse = runtime.join("pulse");
     BTreeMap::from([
         (
@@ -106,7 +106,7 @@ pub(crate) fn environment(runtime: &Path) -> BTreeMap<String, String> {
 /// before Popen (no shell). It expands the two pinned Pulse path variables.
 /// Do not use Xpra's `auto` command: it also creates microphone devices and can
 /// read an administrator's xpra.pa. No --start: never adopt another daemon.
-pub(crate) fn pulseaudio_command() -> &'static str {
+pub fn pulseaudio_command() -> &'static str {
     "/usr/bin/pulseaudio -n --daemonize=false --system=false --fail=true \
      --use-pid-file=false --exit-idle-time=-1 --disable-shm=yes \
      --realtime=no --high-priority=no --disallow-module-loading=yes \

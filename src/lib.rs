@@ -8,7 +8,6 @@ pub mod api;
 pub mod backup;
 pub mod linux_apps;
 pub mod monitor;
-pub mod native;
 pub mod native_proxy;
 pub mod rootfs;
 pub mod server;
@@ -26,3 +25,5 @@ pub use rast_base::{DESCRIPTION, NAME, VERSION};
 pub use rast_apps::packages;
 
 pub use rast_docker::{docker, worker};
+
+pub use rast_helper::native;

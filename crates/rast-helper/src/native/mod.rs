@@ -25,7 +25,7 @@
 //! Run `rast native-helper --check` to validate the environment (root, systemd,
 //! Xpra, required binaries, socket group) without binding the socket.
 
-pub(crate) mod audio;
+pub mod audio;
 pub mod client;
 pub mod daemon;
 pub(crate) mod firewall;

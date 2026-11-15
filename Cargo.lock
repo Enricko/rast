@@ -1769,6 +1769,7 @@ dependencies = [
  "rast-apps",
  "rast-base",
  "rast-docker",
+ "rast-helper",
  "ring",
  "rust-embed",
  "serde",
@@ -1881,6 +1882,24 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+]
+
+[[package]]
+name = "rast-helper"
+version = "1.0.1"
+dependencies = [
+ "async-trait",
+ "hex",
+ "libc",
+ "rand 0.9.5",
+ "rast-apps",
+ "rast-base",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
