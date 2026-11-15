@@ -9,6 +9,50 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-15
+
+### Added
+
+- **Managed runtime catalog: eight more verified language/tool packages.**
+  App Center now discovers, verifies and publishes, side by side with the
+  existing runtimes:
+  **Clang/LLVM** (C and C++, clang/clang++/lld/lldb from the official LLVM
+  Linux release, GitHub build-provenance attestation verified);
+  **Flutter with Dart** (official Google Linux SDK archives; x86_64 host SDK
+  only upstream — aarch64 reports an explicit incompatibility);
+  **Composer** (PHP dependency manager, verified `composer.phar` plus a
+  generated read-only `bin/composer` wrapper, SHA-256 cross-checked with
+  getcomposer.org);
+  **Zig**; **Kotlin** command-line compiler; **CMake**; **Gradle**; and
+  **Apache Maven 3.10**. The .NET SDK entry is now labelled for C#/.NET.
+  Integrity is anchored in upstream metadata (GitHub asset digests, official
+  JSON indexes, published checksum files; LLVM additionally via its SLSA
+  provenance bundle and `gh attestation verify`), and every artifact is
+  executed on the native runner during verification. The manifest schema
+  gained safe `tar.xz` extraction and verified single-file `phar` packages
+  with generated wrappers; existing manifests remain compatible. The 12 GiB
+  extraction ceiling was raised to 16 GiB after measuring LLVM's 11.55 GiB
+  toolchain, with the installer's free-space checks still bounding installs.
+  Database **servers** (MySQL/PostgreSQL) are deliberately not runtime-catalog
+  packages: they are daemons/OS packages, not read-only toolchains.
+- **Administrators get a real root shell in Terminal (configurable).** With
+  `terminal_admin_root = true` (default), an administrator's Terminal runs as
+  root with `HOME=/root` and full server/filesystem access — package manager,
+  system services and every command are usable — while still living in its own
+  transient cgroup with the configured memory/CPU/task limits. Selected
+  ordinary users always run as their unprivileged `rast-u<id>` identity;
+  administrators only. Set `terminal_admin_root = false` to keep
+  administrators unprivileged too. The terminal status bar shows a `root`
+  badge for these shells.
+
+### Changed
+
+- The start menu no longer opens when the Cmd/Windows key is pressed on its
+  own: it reacted to Cmd before every Cmd+C/Cmd+V/screenshot shortcut, which
+  was intrusive. Use **Ctrl+Space**, the taskbar start button or the desktop
+  context menu instead. Browser copy/paste and screenshot shortcuts are
+  unaffected.
+
 ## [0.14.2] - 2026-11-15
 
 ### Fixed
