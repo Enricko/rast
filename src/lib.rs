@@ -11,7 +11,6 @@ pub mod linux_apps;
 pub mod monitor;
 pub mod native;
 pub mod native_proxy;
-pub mod packages;
 pub mod rootfs;
 pub mod server;
 pub mod state;
@@ -24,9 +23,6 @@ pub use rast_base::{
     users,
 };
 
-/// Product name.
-pub const NAME: &str = "RAST";
-/// Semantic version of this build (from Cargo.toml).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Product description used in UI/metadata.
-pub const DESCRIPTION: &str = "Resource Administration & Storage Toolkit";
+pub use rast_base::{DESCRIPTION, NAME, VERSION};
+
+pub use rast_apps::packages;
