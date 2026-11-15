@@ -2330,12 +2330,12 @@ async fn app_name(db: &SqlitePool, app_id: &str) -> String {
         .unwrap_or_else(|| app_id.to_string())
 }
 
-/// Constructors and observers used by the proxy's tests.
-#[cfg(test)]
+/// Constructors and observers used by the proxy's tests (`feature = "test-support"`).
+#[cfg(any(test, feature = "test-support"))]
 impl NativeSession {
     /// A ready session with no Xpra upstream (HTTP/WS tests supply the port
     /// themselves).
-    pub(crate) fn for_test(key: String, user_id: i64) -> Arc<Self> {
+    pub fn for_test(key: String, user_id: i64) -> Arc<Self> {
         Arc::new(Self {
             key,
             user_id,
@@ -2362,11 +2362,11 @@ impl NativeSession {
         })
     }
 
-    pub(crate) fn viewers_for_test(&self) -> usize {
+    pub fn viewers_for_test(&self) -> usize {
         self.lock().viewers
     }
 
-    pub(crate) fn last_input_for_test(&self) -> Instant {
+    pub fn last_input_for_test(&self) -> Instant {
         self.lock().last_input
     }
 }

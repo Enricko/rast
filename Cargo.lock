@@ -1771,6 +1771,7 @@ dependencies = [
  "rast-base",
  "rast-docker",
  "rast-helper",
+ "rast-session",
  "ring",
  "rust-embed",
  "serde",
@@ -1924,6 +1925,40 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rast-session"
+version = "1.0.1"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bzip2",
+ "flate2",
+ "futures",
+ "hex",
+ "httparse",
+ "libc",
+ "rand 0.9.5",
+ "rast-apps",
+ "rast-base",
+ "rast-docker",
+ "rast-helper",
+ "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "sqlx",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "walkdir",
+ "xz2",
 ]
 
 [[package]]
