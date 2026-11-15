@@ -9,6 +9,18 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-15
+
+### Fixed
+
+- **Catalog: Deno releases are verified with their actual provenance
+  predicate.** `gh attestation verify` enforces the SLSA provenance v1
+  predicate by default, while Deno publishes the in-toto release predicate
+  (`https://in-toto.io/attestation/release/v0.2`). The Deno provider now asks
+  GitHub for that predicate explicitly, so Deno 2.9.8/2.9.7 verification (and
+  therefore catalog publication) succeeds instead of staying in the `failed`
+  state. Other providers are unchanged.
+
 ## [0.14.0] - 2026-11-15
 
 ### Added

@@ -94,6 +94,8 @@ const ADOPTIUM_LATEST: &str = "https://api.adoptium.net/v3/assets/latest/{featur
 /// GitHub repositories whose stable releases provide self-contained binaries.
 const BUN_REPO: &str = "oven-sh/bun";
 const DENO_REPO: &str = "denoland/deno";
+/// Deno attests with the in-toto release predicate, not SLSA provenance v1.
+const DENO_RELEASE_PREDICATE: &str = "https://in-toto.io/attestation/release/v0.2";
 /// .NET release metadata (the index points at each channel's releases.json).
 const DOTNET_RELEASES_INDEX: &str =
     "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json";
@@ -2996,21 +2998,39 @@ fn rust_component_hashes(
     Ok(hashes)
 }
 
-/// `gh attestation verify <file> --repo <repo>` (GitHub build provenance).
-fn verify_attestation(archive: &Path, repo: &str) -> Result<(), String> {
-    let captured = run_capture(
-        Path::new("gh"),
-        &[
-            "attestation".to_string(),
-            "verify".to_string(),
-            archive.display().to_string(),
-            "--repo".to_string(),
-            repo.to_string(),
-        ],
-        None,
-        None,
-        Duration::from_secs(120),
-    )?;
+/// `gh attestation verify` argument list.
+///
+/// `gh` enforces the SLSA provenance v1 predicate by default; repositories
+/// that publish a different predicate (Deno uses the in-toto release
+/// predicate) must name it explicitly.
+fn attestation_verify_args(
+    archive: &Path,
+    repo: &str,
+    predicate_type: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "attestation".to_string(),
+        "verify".to_string(),
+        archive.display().to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+    ];
+    if let Some(predicate_type) = predicate_type {
+        args.push("--predicate-type".to_string());
+        args.push(predicate_type.to_string());
+    }
+    args
+}
+
+/// `gh attestation verify <file> --repo <repo> [--predicate-type <type>]`
+/// (GitHub build provenance).
+fn verify_attestation(
+    archive: &Path,
+    repo: &str,
+    predicate_type: Option<&str>,
+) -> Result<(), String> {
+    let args = attestation_verify_args(archive, repo, predicate_type);
+    let captured = run_capture(Path::new("gh"), &args, None, None, Duration::from_secs(120))?;
     if captured.exit_code != 0 {
         let detail = if captured.stderr.trim().is_empty() {
             captured.stdout.trim()
@@ -3156,7 +3176,7 @@ fn verify_item(
             }
             expected_sha256[0] = Some(expected);
             verification = if item.package == "deno" {
-                "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; GitHub build-provenance attestation verified with gh attestation verify".into()
+                "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; the GitHub release provenance attestation (in-toto release predicate) verified with gh attestation verify".into()
             } else {
                 "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
             };
@@ -3230,13 +3250,15 @@ fn verify_item(
             }
         }
         if index == 0 {
-            let repo = match item.package.as_str() {
-                "python" => Some(PBS_REPO),
-                "deno" if item.attestations => Some(DENO_REPO),
+            // `gh attestation verify` defaults to the SLSA provenance v1
+            // predicate; Deno attests with the in-toto release predicate.
+            let attestation_repo = match item.package.as_str() {
+                "python" => Some((PBS_REPO, None)),
+                "deno" if item.attestations => Some((DENO_REPO, Some(DENO_RELEASE_PREDICATE))),
                 _ => None,
             };
-            if let Some(repo) = repo {
-                verify_attestation(&archive_path, repo)?;
+            if let Some((repo, predicate_type)) = attestation_repo {
+                verify_attestation(&archive_path, repo, predicate_type)?;
             }
         }
         archives.push(ArchiveResult {
@@ -6898,6 +6920,20 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
         assert!(
             crate::packages::host::incompatibility(&parsed, &host_for("linux-x86_64")).is_none()
         );
+    }
+
+    #[test]
+    fn deno_attestation_verification_names_the_release_predicate() {
+        let archive = Path::new("/tmp/deno.zip");
+        let default_args = attestation_verify_args(archive, DENO_REPO, None);
+        assert!(default_args.contains(&"--repo".to_string()));
+        assert!(!default_args.contains(&"--predicate-type".to_string()));
+        let deno_args = attestation_verify_args(archive, DENO_REPO, Some(DENO_RELEASE_PREDICATE));
+        let position = deno_args
+            .iter()
+            .position(|arg| arg == "--predicate-type")
+            .expect("predicate type flag");
+        assert_eq!(deno_args[position + 1], DENO_RELEASE_PREDICATE);
     }
 
     #[test]
