@@ -1,0 +1,44 @@
+[package]
+name = "rast-base"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false
+description = "RAST foundation: errors, configuration, database, events, authentication, access rules, jobs and File Station storage."
+
+[features]
+# Test helpers used by other crates' tests.
+test-support = []
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+sqlx.workspace = true
+argon2.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+base64.workspace = true
+hex.workspace = true
+aes-gcm.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+futures.workspace = true
+mime_guess.workspace = true
+percent-encoding.workspace = true
+ipnet.workspace = true
+walkdir.workspace = true
+libc.workspace = true
+notify.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

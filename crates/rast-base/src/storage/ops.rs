@@ -253,7 +253,7 @@ pub fn breadcrumbs_for(resolved: &ResolvedPath) -> Vec<BreadcrumbDto> {
     out
 }
 
-pub(crate) fn sort_entries(items: &mut [EntryDto], sort: &str, order: &str) {
+pub fn sort_entries(items: &mut [EntryDto], sort: &str, order: &str) {
     let descending = order.eq_ignore_ascii_case("desc");
     let sort = sort.to_ascii_lowercase();
     items.sort_by(|a, b| {
@@ -495,7 +495,7 @@ fn relative_components(path: &Path) -> Option<Vec<String>> {
     Some(out)
 }
 
-pub(crate) fn kind_matches(filter: &str, is_dir: bool, name: &str) -> bool {
+pub fn kind_matches(filter: &str, is_dir: bool, name: &str) -> bool {
     match filter {
         "file" | "files" => !is_dir,
         "dir" | "dirs" | "folder" | "folders" => is_dir,

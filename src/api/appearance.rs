@@ -349,7 +349,7 @@ pub async fn reset_appearance(
 mod tests {
     use super::*;
     use crate::{
-        appearance::tests::{png_fixture, webp_lossy_fixture},
+        appearance::fixtures::{png_fixture, webp_lossy_fixture},
         auth::Role,
         config::{Config, FileConfig},
         state::AppState,

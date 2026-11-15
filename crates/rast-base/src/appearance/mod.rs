@@ -1564,14 +1564,12 @@ pub async fn upload_for_serving(
     })
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::{auth::Role, db};
+/// Image fixtures shared with the API tests (`feature = "test-support"`).
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures {
+    use super::PNG_SIGNATURE;
 
-    // ---------------------------------------------------------------- fixtures
-
-    pub(crate) fn jpeg_fixture(width: u16, height: u16) -> Vec<u8> {
+    pub fn jpeg_fixture(width: u16, height: u16) -> Vec<u8> {
         let mut data = vec![0xFF, 0xD8];
         // Minimal APP0 segment (empty payload).
         data.extend([0xFF, 0xE0, 0x00, 0x02]);
@@ -1591,7 +1589,7 @@ pub(crate) mod tests {
         data
     }
 
-    pub(crate) fn png_fixture(width: u32, height: u32) -> Vec<u8> {
+    pub fn png_fixture(width: u32, height: u32) -> Vec<u8> {
         let mut data = PNG_SIGNATURE.to_vec();
         let mut ihdr = Vec::new();
         ihdr.extend(width.to_be_bytes());
@@ -1618,7 +1616,7 @@ pub(crate) mod tests {
         data
     }
 
-    pub(crate) fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
+    pub fn webp_lossy_fixture(width: u16, height: u16) -> Vec<u8> {
         let mut chunk = vec![0u8; 10];
         chunk[3..6].copy_from_slice(&[0x9D, 0x01, 0x2A]);
         chunk[6..8].copy_from_slice(&(width & 0x3FFF).to_le_bytes());
@@ -1626,7 +1624,7 @@ pub(crate) mod tests {
         webp_container(*b"VP8 ", &chunk)
     }
 
-    pub(crate) fn webp_lossless_fixture(width: u32, height: u32) -> Vec<u8> {
+    pub fn webp_lossless_fixture(width: u32, height: u32) -> Vec<u8> {
         let width = width - 1;
         let height = height - 1;
         let chunk = [
@@ -1639,7 +1637,7 @@ pub(crate) mod tests {
         webp_container(*b"VP8L", &chunk)
     }
 
-    pub(crate) fn webp_extended_fixture(width: u32, height: u32) -> Vec<u8> {
+    pub fn webp_extended_fixture(width: u32, height: u32) -> Vec<u8> {
         let mut chunk = vec![0u8; 10];
         let w = width - 1;
         let h = height - 1;
@@ -1647,6 +1645,13 @@ pub(crate) mod tests {
         chunk[7..10].copy_from_slice(&[h as u8, (h >> 8) as u8, (h >> 16) as u8]);
         webp_container(*b"VP8X", &chunk)
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::fixtures::*;
+    use super::*;
+    use crate::{auth::Role, db};
 
     fn auth_user(id: i64, username: &str) -> AuthUser {
         AuthUser {

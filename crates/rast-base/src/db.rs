@@ -13,7 +13,7 @@ use sqlx::{
 use crate::{config::Config, error::AppResult};
 
 /// Migration set compiled into the binary.
-pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 
 /// Current Unix epoch in milliseconds.
 pub fn now_ms() -> i64 {

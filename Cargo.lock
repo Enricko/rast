@@ -1766,6 +1766,7 @@ dependencies = [
  "notify",
  "percent-encoding",
  "rand 0.9.5",
+ "rast-base",
  "ring",
  "rust-embed",
  "serde",
@@ -1793,6 +1794,38 @@ dependencies = [
  "walkdir",
  "xz2",
  "zip",
+]
+
+[[package]]
+name = "rast-base"
+version = "1.0.1"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "axum",
+ "base64 0.22.1",
+ "futures",
+ "hex",
+ "hmac 0.12.1",
+ "ipnet",
+ "libc",
+ "mime_guess",
+ "notify",
+ "percent-encoding",
+ "rand 0.9.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

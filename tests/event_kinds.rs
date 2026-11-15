@@ -54,6 +54,15 @@ fn every_published_event_kind_reaches_the_browser() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     rust_files(&root.join("src"), &mut files);
+    // The remake splits the code into crates under `crates/`.
+    if let Ok(crates) = fs::read_dir(root.join("crates")) {
+        for entry in crates {
+            let src = entry.unwrap().path().join("src");
+            if src.is_dir() {
+                rust_files(&src, &mut files);
+            }
+        }
+    }
     let mut published = BTreeSet::new();
     for file in files {
         published.extend(published_kinds(&fs::read_to_string(file).unwrap()));

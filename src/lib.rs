@@ -4,33 +4,25 @@
 //! file station, application deployment, resource monitoring, control panel,
 //! backups and audit logs — shipped as a single Rust binary.
 
-pub mod access;
 pub mod api;
-pub mod appearance;
-pub mod audit;
-pub mod auth;
 pub mod backup;
-pub mod config;
-pub mod db;
 pub mod docker;
-pub mod error;
-pub mod events;
-pub mod jobs;
 pub mod linux_apps;
 pub mod monitor;
 pub mod native;
 pub mod native_proxy;
 pub mod packages;
-pub mod realtime;
 pub mod rootfs;
-pub mod secrets;
 pub mod server;
 pub mod state;
-pub mod storage;
 pub mod terminal;
 pub mod update;
-pub mod users;
 pub mod worker;
+
+pub use rast_base::{
+    access, appearance, audit, auth, config, db, error, events, jobs, realtime, secrets, storage,
+    users,
+};
 
 /// Product name.
 pub const NAME: &str = "RAST";
