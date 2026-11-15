@@ -3003,34 +3003,21 @@ fn rust_component_hashes(
 /// `gh` enforces the SLSA provenance v1 predicate by default; repositories
 /// that publish a different predicate (Deno uses the in-toto release
 /// predicate) must name it explicitly.
-fn attestation_verify_args(
-    archive: &Path,
-    repo: &str,
-    predicate_type: Option<&str>,
-) -> Vec<String> {
-    let mut args = vec![
-        "attestation".to_string(),
-        "verify".to_string(),
-        archive.display().to_string(),
-        "--repo".to_string(),
-        repo.to_string(),
-    ];
-    if let Some(predicate_type) = predicate_type {
-        args.push("--predicate-type".to_string());
-        args.push(predicate_type.to_string());
-    }
-    args
-}
-
-/// `gh attestation verify <file> --repo <repo> [--predicate-type <type>]`
-/// (GitHub build provenance).
-fn verify_attestation(
-    archive: &Path,
-    repo: &str,
-    predicate_type: Option<&str>,
-) -> Result<(), String> {
-    let args = attestation_verify_args(archive, repo, predicate_type);
-    let captured = run_capture(Path::new("gh"), &args, None, None, Duration::from_secs(120))?;
+/// `gh attestation verify <file> --repo <repo>` (GitHub build provenance).
+fn verify_attestation(archive: &Path, repo: &str) -> Result<(), String> {
+    let captured = run_capture(
+        Path::new("gh"),
+        &[
+            "attestation".to_string(),
+            "verify".to_string(),
+            archive.display().to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+        ],
+        None,
+        None,
+        Duration::from_secs(120),
+    )?;
     if captured.exit_code != 0 {
         let detail = if captured.stderr.trim().is_empty() {
             captured.stdout.trim()
@@ -3043,6 +3030,82 @@ fn verify_attestation(
         ));
     }
     Ok(())
+}
+
+/// URL-encode the characters used by a predicate-type URL.
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// Confirm a Deno release attestation for one exact artifact digest.
+///
+/// Deno attests every release asset with the in-toto release predicate
+/// (`https://in-toto.io/attestation/release/v0.2`). `gh attestation verify`
+/// does not accept this release predicate (it reports "no attestations found"
+/// with gh 2.104), while the GitHub attestations API returns the signed bundle
+/// for the same digest. We therefore inspect that API response for *this
+/// digest*: it must carry the expected predicate type and name the digest in
+/// its subjects. Integrity is still anchored by the upstream .sha256sum and
+/// the GitHub asset digest.
+fn verify_deno_release_attestation(digest: &str, token: Option<&str>) -> Result<(), String> {
+    let url = format!(
+        "https://api.github.com/repos/{DENO_REPO}/attestations/sha256:{digest}?per_page=30&predicate_type={}",
+        encode_query_value(DENO_RELEASE_PREDICATE)
+    );
+    let document = http_json(&url, token)?;
+    check_deno_attestation_document(&document, digest)
+}
+
+/// Validate the GitHub attestations API response for one Deno artifact.
+fn check_deno_attestation_document(document: &Value, digest: &str) -> Result<(), String> {
+    let attestations = document
+        .get("attestations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the Deno attestations response has no attestations array".to_string())?;
+    for attestation in attestations {
+        let Some(payload) = attestation
+            .get("bundle")
+            .and_then(|bundle| bundle.get("dsseEnvelope"))
+            .and_then(|envelope| envelope.get("payload"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Ok(bytes) = B64.decode(payload) else {
+            continue;
+        };
+        let Ok(statement) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if statement.get("predicateType").and_then(Value::as_str) != Some(DENO_RELEASE_PREDICATE) {
+            continue;
+        }
+        let subjects = statement
+            .get("subject")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if subjects.iter().any(|subject| {
+            subject
+                .get("digest")
+                .and_then(|digests| digests.get("sha256"))
+                .and_then(Value::as_str)
+                == Some(digest)
+        }) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "no Deno release attestation names this artifact digest ({digest})"
+    ))
 }
 
 fn verify_item(
@@ -3176,7 +3239,7 @@ fn verify_item(
             }
             expected_sha256[0] = Some(expected);
             verification = if item.package == "deno" {
-                "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; the GitHub release provenance attestation (in-toto release predicate) verified with gh attestation verify".into()
+                "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; the GitHub release attestation (in-toto release predicate) is confirmed for this exact digest through the GitHub attestations API".into()
             } else {
                 "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
             };
@@ -3252,13 +3315,12 @@ fn verify_item(
         if index == 0 {
             // `gh attestation verify` defaults to the SLSA provenance v1
             // predicate; Deno attests with the in-toto release predicate.
-            let attestation_repo = match item.package.as_str() {
-                "python" => Some((PBS_REPO, None)),
-                "deno" if item.attestations => Some((DENO_REPO, Some(DENO_RELEASE_PREDICATE))),
-                _ => None,
-            };
-            if let Some((repo, predicate_type)) = attestation_repo {
-                verify_attestation(&archive_path, repo, predicate_type)?;
+            match item.package.as_str() {
+                "python" => verify_attestation(&archive_path, PBS_REPO)?,
+                "deno" if item.attestations => {
+                    verify_deno_release_attestation(&sha256, gh_token().as_deref())?
+                }
+                _ => {}
             }
         }
         archives.push(ArchiveResult {
@@ -6923,17 +6985,29 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
     }
 
     #[test]
-    fn deno_attestation_verification_names_the_release_predicate() {
-        let archive = Path::new("/tmp/deno.zip");
-        let default_args = attestation_verify_args(archive, DENO_REPO, None);
-        assert!(default_args.contains(&"--repo".to_string()));
-        assert!(!default_args.contains(&"--predicate-type".to_string()));
-        let deno_args = attestation_verify_args(archive, DENO_REPO, Some(DENO_RELEASE_PREDICATE));
-        let position = deno_args
-            .iter()
-            .position(|arg| arg == "--predicate-type")
-            .expect("predicate type flag");
-        assert_eq!(deno_args[position + 1], DENO_RELEASE_PREDICATE);
+    fn deno_attestation_document_must_name_the_release_predicate_and_digest() {
+        let digest = "e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609";
+        let statement = json!({
+            "predicateType": DENO_RELEASE_PREDICATE,
+            "subject": [
+                {"name": "deno-x86_64-unknown-linux-gnu.zip", "digest": {"sha256": digest}},
+                {"name": "deno-aarch64-unknown-linux-gnu.zip", "digest": {"sha256": "0000"}}
+            ]
+        });
+        let payload = B64.encode(serde_json::to_vec(&statement).unwrap());
+        let good = json!({"attestations": [{"bundle": {"dsseEnvelope": {"payload": payload}}}]});
+        check_deno_attestation_document(&good, digest).expect("matching digest");
+
+        let slsa = json!({
+            "predicateType": "https://slsa.dev/provenance/v1",
+            "subject": [{"digest": {"sha256": digest}}]
+        });
+        let payload = B64.encode(serde_json::to_vec(&slsa).unwrap());
+        let wrong_predicate =
+            json!({"attestations": [{"bundle": {"dsseEnvelope": {"payload": payload}}}]});
+        assert!(check_deno_attestation_document(&wrong_predicate, digest).is_err());
+        assert!(check_deno_attestation_document(&json!({"attestations": []}), digest).is_err());
+        assert!(encode_query_value(DENO_RELEASE_PREDICATE).starts_with("https%3A%2F%2Fin-toto.io"));
     }
 
     #[test]

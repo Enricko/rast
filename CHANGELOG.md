@@ -9,6 +9,20 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-15
+
+### Fixed
+
+- **Catalog: Deno release attestations are confirmed through the GitHub
+  attestations API.** `gh attestation verify` reports "no attestations found"
+  for Deno's in-toto release predicate even when the GitHub API returns the
+  signed bundle for the exact artifact digest (verified against gh 2.104 and
+  the API). Deno verification now validates the API response itself: the
+  expected release predicate must be present and the artifact's SHA-256 must
+  be named in the attestation subjects; the upstream `.sha256sum` and the
+  GitHub asset digest remain the integrity anchors. This unblocks publishing
+  Deno 2.9.8/2.9.7 instead of leaving them in the failed state.
+
 ## [0.14.1] - 2026-11-15
 
 ### Fixed
