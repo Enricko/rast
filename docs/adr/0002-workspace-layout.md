@@ -110,9 +110,11 @@ by `main.rs` and `tests/*.rs` are unchanged.
 - Versions and dependencies are shared through `[workspace.package]` and
   `[workspace.dependencies]`; the literal version stays in the root manifest,
   where `release.yml` and the scripts read it.
-- `default-members` lists every native crate, and CI and `CLAUDE.md` pass
-  `--workspace` to `clippy` and `test`, so no crate is skipped. A crate that
-  targets `wasm32` (`rast-ui`) goes in `members` only.
+- `default-members` lists every crate that compiles natively, `rast-api`
+  included (it also builds for `wasm32`, which CI checks separately), and CI
+  and `CLAUDE.md` pass `--workspace` to `clippy` and `test`, so no crate is
+  skipped. Only wasm-only crates such as `rast-ui` go in `members` only. A
+  plain `cargo test` at the root therefore regenerates the TypeScript types.
 - `tests/event_kinds.rs` scans `crates/*/src` as well as `src`.
 
 ## Consequences

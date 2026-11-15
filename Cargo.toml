@@ -21,9 +21,10 @@ path = "src/lib.rs"
 
 [workspace]
 members = [".", "crates/rast-api", "crates/rast-server", "crates/rast-session", "crates/rast-agent", "crates/rast-helper", "crates/rast-docker", "crates/rast-apps", "crates/rast-base"]
-# Plain `cargo build/clippy/test` at the root covers every native crate; list
-# a crate in both places (crates that target wasm32 go in `members` only).
-default-members = [".", "crates/rast-server", "crates/rast-session", "crates/rast-agent", "crates/rast-helper", "crates/rast-docker", "crates/rast-apps", "crates/rast-base"]
+# Plain `cargo build/clippy/test` at the root covers every crate that compiles
+# natively, so each of those is listed in both places. Only wasm-only crates
+# (such as the coming `rast-ui`) go in `members` only.
+default-members = [".", "crates/rast-api", "crates/rast-server", "crates/rast-session", "crates/rast-agent", "crates/rast-helper", "crates/rast-docker", "crates/rast-apps", "crates/rast-base"]
 resolver = "2"
 
 [workspace.package]

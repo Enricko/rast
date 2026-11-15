@@ -58,7 +58,8 @@ Update it at the end of every session.
     in a row, 807 passed and 0 failed in every run.
 - **Task 0.3, `rast-api` + `ts-rs`** (`eed4876`):
   - `crates/rast-api` holds `EntryDto`, `ListingDto`, `BreadcrumbDto`,
-    `QuotaDto` (JSON unchanged); no workspace dependencies; in `members` only.
+    `QuotaDto` (JSON unchanged); no workspace dependencies; first in `members`
+    only, moved to `default-members` later (see "Clean regeneration").
     `rast-base` depends on it and re-exports the types; `EntryDto::new` is now
     the `EntryDtoExt` extension trait in `rast-base`.
   - `ts-rs` 12.0.1 (MIT; new transitive crates: `ts-rs-macros` MIT,
@@ -73,6 +74,14 @@ Update it at the end of every session.
 - **Gates after 0.3:** fmt and clippy clean; `cargo test`: 811 passed
   (807 + 4 ts-rs export tests), 0 failed; npm test 149 passed; npm build OK;
   third-party licenses up to date (342 crates).
+
+- **Clean regeneration of API types** (this commit):
+  - `scripts/gen-api-types.sh` empties `frontend/src/generated/` (keeps the
+    README) and runs `cargo test --locked -p rast-api`.
+  - The CI step runs the script and fails on any `git status` difference in
+    that directory, so stale files are caught.
+  - `rast-api` is in `default-members`; ADR 0002 records that only wasm-only
+    crates (`rast-ui`) stay in `members` only.
 
 ## In progress
 
@@ -101,12 +110,6 @@ Update it at the end of every session.
 - **Timing-sensitive tests:** the two known flaky tests were fixed in
   `2b9b8a5` (see Done). Any other test that holds a `flock` while sibling tests
   fork processes has the same risk; keep such tests in their own binary.
-- **ts-rs leaves stale files:** removing or renaming a type in `rast-api` does
-  not delete its old `.ts` file, and the CI check does not catch that. Delete
-  the file by hand when a type goes away (or add a clean step later).
-- **`rast-api` is not in `default-members`** (wasm crate rule in
-  `Cargo.toml`): a plain `cargo test` at the root does not regenerate the
-  types; use `--workspace` (as the gates and CI do) or `-p rast-api`.
 - Does `scripts/changelog-section.sh` accept the `## [1.0.1] - Unreleased`
   heading? Yes: it only reads the text inside the square brackets (checked by
   the maintainer).

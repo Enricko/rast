@@ -140,9 +140,16 @@ jobs:
 
       - name: Generated TypeScript types are up to date
         run: |
-          # The tests above export frontend/src/generated via ts-rs.
-          git diff --exit-code -- frontend/src/generated
-          test -z "$(git status --porcelain -- frontend/src/generated)"
+          # Empties frontend/src/generated and regenerates it via ts-rs, so
+          # stale files from removed or renamed types show up too.
+          scripts/gen-api-types.sh
+          status="$(git status --porcelain -- frontend/src/generated)"
+          if [ -n "$status" ]; then
+            echo "Generated TypeScript types are out of date:"
+            echo "$status"
+            git diff -- frontend/src/generated
+            exit 1
+          fi
 
       - name: rast-api builds for wasm32
         run: |
