@@ -307,7 +307,7 @@ claude --model opus --effort xhigh
 ```
 
 ```text
-Wrap the Xpra integration (src/linux_apps/xpra_shim.js and frontend/src/shell/xpra-native.ts) behind one versioned adapter.
+Wrap the Xpra integration (src/xpra_shim.js and frontend/src/shell/xpra-native.ts) behind one versioned adapter.
 Write contract tests in CI based on scripts/xpra-poc that check window adoption, focus, resize, keyboard/mouse input, transient dialogs and clipboard. Pin the Xpra version that passes and document how to upgrade.
 Do not change any user-visible behaviour.
 ```

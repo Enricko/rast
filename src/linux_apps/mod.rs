@@ -22,7 +22,6 @@
 
 pub mod native_apps;
 pub mod native_archive;
-pub mod native_proxy;
 pub mod native_session;
 pub mod proxy;
 mod updates;
@@ -1325,7 +1324,7 @@ impl LinuxApps {
                 .await;
         }
         self.ensure_available().await?;
-        crate::api::validate_logical_path(path)?;
+        crate::storage::safe_path::validate_logical_path(path)?;
         let resolved = storage.resolve(&self.db, user, path, Access::Read).await?;
         let file_name = resolved
             .physical

@@ -58,7 +58,7 @@ pub async fn page(
     user: AuthUser,
     Query(query): Query<PageQuery>,
 ) -> Result<Response, AppError> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
+    access::app_surface(&state.db, &user, "packages").await?;
     let requested = query.url;
     if requested.len() > 2048 {
         return Err(AppError::bad_request("URL is too long"));

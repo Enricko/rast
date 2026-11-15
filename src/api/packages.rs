@@ -82,7 +82,7 @@ pub fn routes() -> Router<AppState> {
 
 /// GET /api/packages
 pub async fn overview(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
+    access::app_surface(&state.db, &user, "packages").await?;
     let manage = can_manage(&state, &user).await?;
     let overview = state.packages.overview(manage).await?;
     let mut body = serde_json::to_value(overview).map_err(|e| AppError::internal(e.to_string()))?;
@@ -203,7 +203,7 @@ pub async fn package(
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
+    access::app_surface(&state.db, &user, "packages").await?;
     let manage = can_manage(&state, &user).await?;
     let (view, jobs) = state.packages.package(&id, manage).await?;
     Ok(Json(
@@ -420,7 +420,7 @@ pub async fn package_app_asset(
     PackageManager(user): PackageManager,
     Path((id, path)): Path<(String, String)>,
 ) -> AppResult<axum::response::Response> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
+    access::app_surface(&state.db, &user, "packages").await?;
     let (bytes, content_type) = state.packages.app_asset(&id, &path).await?;
     Ok((
         [
@@ -446,7 +446,7 @@ pub async fn run_package_app(
     Path(id): Path<String>,
     Json(body): Json<RunAppRequest>,
 ) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
+    access::app_surface(&state.db, &user, "packages").await?;
     let output = state.packages.run_package_app(&id, body.args).await?;
     Ok(Json(
         serde_json::to_value(output).map_err(|e| AppError::internal(e.to_string()))?,

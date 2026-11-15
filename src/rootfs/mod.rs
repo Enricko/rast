@@ -26,7 +26,7 @@ use crate::native::client::NativeClient;
 /// Logical prefix of the root file system.
 pub const PREFIX: &str = "/@root";
 /// The reserved first path segment (no home or shared folder may use it).
-pub const RESERVED_NAME: &str = "@root";
+pub use crate::storage::safe_path::RESERVED_NAME;
 /// Prefix of chunked upload ids that belong to the agent.
 pub const UPLOAD_PREFIX: &str = "sys-";
 /// Header carrying the agent token.

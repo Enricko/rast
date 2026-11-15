@@ -83,7 +83,7 @@ pub async fn list_backups(
 ) -> AppResult<Json<Value>> {
     // Read handler: admins or non-admins with the read-only `backup` grant.
     // Read-only viewers receive status metadata only (see module docs).
-    access::app_surface(&state.db, &state, &user, "backup").await?;
+    access::app_surface(&state.db, &user, "backup").await?;
     let is_admin = user.is_admin();
     let page = q.page.unwrap_or(1).max(1);
     let per_page = q.per_page.unwrap_or(25).clamp(1, 100);
@@ -230,7 +230,7 @@ pub async fn create_backup(
 
 /// GET /api/backups/schedule
 pub async fn get_schedule(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "backup").await?;
+    access::app_surface(&state.db, &user, "backup").await?;
     let schedules = schedule::list(&state.db).await?;
     Ok(Json(json!({"schedule": schedules.first()})))
 }

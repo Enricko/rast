@@ -39,18 +39,18 @@ use tokio::{
 };
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message as UpstreamMessage};
 
-use super::native_session::{NativeSession, SESSION_PATH_PREFIX};
+use crate::linux_apps::native_session::{NativeSession, SESSION_PATH_PREFIX};
 use crate::state::AppState;
 
 /// The frontend-owned shim, served from this proxy and injected into every
 /// proxied HTML page.
 ///
-/// The real file is `src/linux_apps/xpra_shim.js` (owned by the frontend
+/// The real file is `src/xpra_shim.js` (owned by the frontend
 /// teammate). Until it lands this inline placeholder keeps the page loadable
 /// and the proxy testable; switching it over is a one-line change to
 /// `include_str!("xpra_shim.js")`.
 /// The frontend-owned shim, embedded at build time and served from this proxy
-/// for every proxied HTML page (`src/linux_apps/xpra_shim.js` is owned by the
+/// for every proxied HTML page (`src/xpra_shim.js` is owned by the
 /// frontend teammate; the proxy only serves and injects it).
 pub const SHIM_JS: &str = include_str!("xpra_shim.js");
 

@@ -32,12 +32,12 @@ use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
-use crate::api::files::{serve_path, Disposition, PREVIEW_CSP};
 use crate::error::{AppError, AppResult};
 use crate::storage::chunked::{ChunkResponse, InitUploadResponse};
 use crate::storage::ops::{
     self, BreadcrumbDto, EntryDto, ListingDto, QuotaDto, SearchDto, TextPreviewDto,
 };
+use crate::storage::serve::{serve_path, Disposition, PREVIEW_CSP};
 
 use super::{logical, physical, TOKEN_HEADER, UPLOAD_PREFIX};
 

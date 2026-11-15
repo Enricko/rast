@@ -85,6 +85,18 @@ impl Drop for BusyGuard {
     }
 }
 
+/// What the package service needs from the privileged helper. The helper
+/// (`crate::native`) implements it, so this module does not depend on it.
+#[async_trait::async_trait]
+pub trait Helper: Send + Sync {
+    /// Send one generic JSON request and return the reply's `data` object.
+    async fn call_json(
+        &self,
+        op: &str,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, String>;
+}
+
 pub struct PackageManager {
     config: Arc<Config>,
     db: SqlitePool,
@@ -101,7 +113,7 @@ pub struct PackageManager {
     /// Set by tests that provide their own system runtimes.
     system_fixed: std::sync::atomic::AtomicBool,
     /// The privileged helper, for what the service itself may not read.
-    native: std::sync::OnceLock<crate::native::client::NativeClient>,
+    native: std::sync::OnceLock<Arc<dyn Helper>>,
     /// The login-shell profile script (see [`shell`]).
     profile: RwLock<std::path::PathBuf>,
     busy: Arc<Mutex<HashSet<String>>>,
@@ -385,7 +397,7 @@ impl PackageManager {
 
     /// Restore the persisted check state and start the periodic checker.
     /// Give the service the privileged helper (before [`Self::start`]).
-    pub fn set_native(&self, client: crate::native::client::NativeClient) {
+    pub fn set_native(&self, client: Arc<dyn Helper>) {
         let _ = self.native.set(client);
     }
 

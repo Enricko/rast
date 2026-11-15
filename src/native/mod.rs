@@ -57,6 +57,10 @@ use crate::config::Config;
 /// Required system binaries. They are invoked by absolute path; the account
 /// tools (shadow-utils) live in `/usr/sbin` on Debian/Ubuntu, so their
 /// candidates are resolved at startup.
+/// Set by the helper for the terminal agent only: start the shell as a login
+/// shell.
+pub const LOGIN_SHELL_ENV: &str = "RAST_TERMINAL_LOGIN";
+
 pub const SYSTEMD_RUN_BIN: &str = "/usr/bin/systemd-run";
 pub const SYSTEMCTL_BIN: &str = "/usr/bin/systemctl";
 pub const APT_GET_BIN: &str = "/usr/bin/apt-get";

@@ -205,7 +205,7 @@ pub async fn docker_status(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> AppResult<Json<Value>> {
-    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &user, "applications").await?;
     let status = state.docker.status().await;
     Ok(Json(if access.read_only {
         docker_status_for_read_only(status)
@@ -313,7 +313,7 @@ pub async fn list_apps(
 ) -> AppResult<Json<Value>> {
     // Defence in depth: the policy middleware also gates /api/apps, but the
     // handler must never rely on the route layer alone.
-    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &user, "applications").await?;
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(50).clamp(1, 200);
     let offset = (page - 1) * per_page;
@@ -381,7 +381,7 @@ pub async fn get_app(
     user: AuthUser,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
-    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &user, "applications").await?;
     let app = load_app(&state, &id).await?;
     let (containers, docker_reason) = probe_app_containers(&state, &app.slug).await;
     let status = derive_status(&containers, &app.status);
@@ -647,7 +647,7 @@ pub async fn app_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Json<Value>> {
-    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    crate::access::app_surface(&state.db, &user, "applications").await?;
     // F2: container logs commonly contain credentials/tokens; only
     // administrators may read them (read-only grants get a clear 403).
     if !user.is_admin() {
@@ -1073,7 +1073,7 @@ pub async fn app_logs_stream(
     headers: HeaderMap,
     Query(query): Query<LogsQuery>,
 ) -> AppResult<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>> {
-    crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    crate::access::app_surface(&state.db, &user, "applications").await?;
     // F2: container logs are administrator-only; F7 revalidates this identity on
     // every poll and closes the stream if the account loses the role.
     if !user.is_admin() {
@@ -1124,7 +1124,7 @@ pub async fn app_history(
     user: AuthUser,
     AxumPath(id): AxumPath<String>,
 ) -> AppResult<Json<Value>> {
-    let access = crate::access::app_surface(&state.db, &state, &user, "applications").await?;
+    let access = crate::access::app_surface(&state.db, &user, "applications").await?;
     let _app = load_app(&state, &id).await?;
     let rows = sqlx::query(
         "SELECT id, action, status, detail, created_at, finished_at

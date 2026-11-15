@@ -1707,7 +1707,7 @@ fn account_environment(
             );
         }
     }
-    env.insert(crate::terminal::agent::LOGIN_SHELL_ENV.into(), "1".into());
+    env.insert(crate::native::LOGIN_SHELL_ENV.into(), "1".into());
     env
 }
 
@@ -5503,7 +5503,7 @@ exit 0
         // Nothing RAST-specific: no private TMPDIR, caches or runtime PATH.
         assert!(!env.contains_key("TMPDIR") && !env.contains_key("CARGO_HOME"));
         assert!(!env.contains_key("XDG_RUNTIME_DIR"));
-        assert!(env.contains_key(crate::terminal::agent::LOGIN_SHELL_ENV));
+        assert!(env.contains_key(crate::native::LOGIN_SHELL_ENV));
 
         assert_eq!(
             env_file_value("# comment\nPATH=\"/usr/bin:/bin\"\n", "PATH").as_deref(),

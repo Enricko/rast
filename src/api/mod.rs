@@ -6,7 +6,7 @@
 
 use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, Router};
 
-use crate::{auth::middleware::require_auth, error::AppError, server, state::AppState};
+use crate::{auth::middleware::require_auth, server, state::AppState};
 
 pub mod appearance;
 pub mod apps;
@@ -78,11 +78,11 @@ fn public_routes() -> Router<AppState> {
         // (see `linux_apps::proxy`).
         .route(
             "/linux-apps/session/{*rest}",
-            axum::routing::any(crate::linux_apps::native_proxy::handle),
+            axum::routing::any(crate::native_proxy::handle),
         )
         .route(
             "/linux-apps/session/",
-            axum::routing::any(crate::linux_apps::native_proxy::handle),
+            axum::routing::any(crate::native_proxy::handle),
         )
         .route(
             "/linux-apps/{*rest}",
@@ -109,19 +109,4 @@ pub fn parse_bounded(value: Option<&str>, default: usize, max: usize) -> usize {
         .clamp(1, max)
 }
 
-/// Reject paths containing traversal or control characters before any
-/// filesystem call. Backend handlers still re-check after resolution.
-pub fn validate_logical_path(path: &str) -> Result<(), AppError> {
-    if path.contains('\0') || path.contains('\\') {
-        return Err(AppError::bad_request("invalid path"));
-    }
-    for segment in path.split('/') {
-        if segment == ".." {
-            return Err(AppError::bad_request("path traversal is not allowed"));
-        }
-        if segment.chars().any(|c| c.is_control()) {
-            return Err(AppError::bad_request("invalid path"));
-        }
-    }
-    Ok(())
-}
+pub use crate::storage::safe_path::validate_logical_path;

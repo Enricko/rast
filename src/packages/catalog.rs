@@ -21,13 +21,13 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 
+pub use crate::config::{parse_trusted_key, TrustedKey, OFFICIAL_CATALOG_URL};
+
 use super::{
     manifest::{self, Manifest, PackageIcon, Publisher},
     net::{self, OriginPolicy},
 };
 
-pub const OFFICIAL_CATALOG_URL: &str =
-    "https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json";
 /// Official signing keys (`key id`, base64 raw Ed25519 public key).
 pub const OFFICIAL_KEYS: &[(&str, &str)] = &[(
     "rast-official-2026-11",
@@ -41,33 +41,6 @@ pub const GITHUB_DOWNLOAD_HOSTS: &[&str] = &[
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
 ];
-
-#[derive(Debug, Clone)]
-pub struct TrustedKey {
-    pub id: String,
-    pub key: Vec<u8>,
-    pub official: bool,
-}
-
-/// Parse `"<key-id>:<base64>"` (configuration format).
-pub fn parse_trusted_key(raw: &str) -> Result<TrustedKey, String> {
-    let (id, b64) = raw
-        .split_once(':')
-        .ok_or_else(|| format!("catalog key {raw:?} must look like <key-id>:<base64>"))?;
-    let key = B64
-        .decode(b64.trim())
-        .map_err(|_| format!("catalog key {id:?} is not valid base64"))?;
-    if key.len() != 32 || id.trim().is_empty() {
-        return Err(format!(
-            "catalog key {id:?} must be a 32-byte Ed25519 public key"
-        ));
-    }
-    Ok(TrustedKey {
-        id: id.trim().to_string(),
-        key,
-        official: false,
-    })
-}
 
 pub fn trusted_keys(extra: &[String]) -> Vec<TrustedKey> {
     let mut keys: Vec<TrustedKey> = OFFICIAL_KEYS

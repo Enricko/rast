@@ -97,7 +97,7 @@ rast-native.service (root: `rast native-helper`)
   `linux_admission_reserve_mb` (replacing the old unconditional 4 GiB check).
 * **Window integration**: the frontend embeds the pinned Xpra HTML5 client once
   per user in a same-origin iframe. A shim injected by `native_proxy`
-  (`src/linux_apps/xpra_shim.js`) captures the client, hides its chrome and
+  (`src/xpra_shim.js`) captures the client, hides its chrome and
   exposes a narrow API (`window.RASTNative`) with the remote window list and
   commands. `frontend/src/shell/xpra-native.ts` adopts each remote window's DOM
   node into a RAST window body (no per-window pixel copy and no second
@@ -181,7 +181,7 @@ Rust server:
 | `src/linux_apps/native_proxy.rs` | Same-origin HTTP/WebSocket proxy with per-user authorization, shim serving/injection, CSP |
 | `src/linux_apps/native_apps.rs` | Native install/update/uninstall/migration service: previews, `.deb` via helper, archive/AppImage handling, package ownership, profiles, migration |
 | `src/linux_apps/native_archive.rs` | Path-safe archive extraction, `.desktop` parsing, launcher/icon discovery |
-| `src/linux_apps/native_proxy` shim | `src/linux_apps/xpra_shim.js` served to the session page |
+| `src/native_proxy` shim | `src/xpra_shim.js` served to the session page |
 | `src/native/*` | Privileged helper: protocol, client, daemon, identities, deployment; `src/native/firewall.rs` adds the nftables display-port restriction and reconciliation |
 | `src/api/users.rs` | Account deactivation stops that person's native sessions |
 | `tests/native_linux_e2e.rs`, `tests/e2e/*` | Authorization/lifecycle tests and the real-browser E2E harness (13 native scenarios, XSS/revocation checks) |

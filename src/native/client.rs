@@ -288,6 +288,15 @@ where
 /// Convenience wrapper: the default quick deadline.
 pub const DEFAULT_CALL_TIMEOUT: Duration = QUICK_OP_TIMEOUT;
 
+#[async_trait::async_trait]
+impl crate::packages::service::Helper for NativeClient {
+    async fn call_json(&self, op: &str, params: Value) -> Result<Value, String> {
+        NativeClient::call_json(self, op, params)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

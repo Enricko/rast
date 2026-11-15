@@ -170,7 +170,7 @@ scripts/e2e/dev-instance.sh down
 | `src/terminal/` | PTY agent that runs as `rast-u<id>` |
 | `src/native/` | Root helper: JSON-lines protocol, identities, transient units, nftables |
 | `src/linux_apps/native_*.rs` | Xpra sessions, authenticated proxy, native app install/update |
-| `src/linux_apps/xpra_shim.js`, `frontend/src/shell/xpra-native.ts` | Window adoption from the Xpra HTML5 client (iframe + injected shim) |
+| `src/xpra_shim.js`, `frontend/src/shell/xpra-native.ts` | Window adoption from the Xpra HTML5 client (iframe + injected shim) |
 | `src/linux_apps/{mod.rs,proxy.rs,shim.js}`, `src/docker/linux.rs`, `src/worker/linux.rs`, `src/worker/linux_assets/`, `frontend/src/shell/linux-windows.ts` | **Legacy** Docker/Selkies + noVNC backend for Linux apps — remove in Phase 4 |
 | `src/packages/` | App Center: runtime catalog, GitHub packages |
 | `src/docker/`, `src/worker/` | Docker Compose app and its privileged worker (keep) |

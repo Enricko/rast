@@ -11,6 +11,7 @@
 //! here *and* there so a compromised/buggy client cannot smuggle paths into
 //! the worker.
 
+pub use crate::access::{validate_slug, MAX_SLUG_LEN};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -40,9 +41,6 @@ pub const DEFAULT_LOGS_SINCE_TAIL: u32 = 500;
 
 /// How far into the future a `sinceSecs` cursor may point (clock tolerance).
 pub const MAX_SINCE_SKEW_SECS: i64 = 86_400;
-
-/// Longest accepted application slug.
-pub const MAX_SLUG_LEN: usize = 40;
 
 /// Timeout for cheap Docker queries (version/info/ps/stats/inspect).
 pub const QUICK_OP_TIMEOUT: Duration = Duration::from_secs(30);
@@ -695,32 +693,6 @@ fn validated_since(since: Option<i64>) -> Result<Option<i64>, String> {
 /// Docker Compose project name for a managed app: always `rast-<slug>`.
 pub fn project_name(slug: &str) -> String {
     format!("rast-{slug}")
-}
-
-/// Application slugs are generated server-side and must stay in a tight
-/// alphabet: lowercase alphanumerics with interior dashes only.
-pub fn validate_slug(slug: &str) -> Result<(), String> {
-    if slug.is_empty() || slug.len() > MAX_SLUG_LEN {
-        return Err(format!(
-            "invalid app slug: expected 1-{MAX_SLUG_LEN} characters"
-        ));
-    }
-    let bytes = slug.as_bytes();
-    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit() {
-        return Err("invalid app slug: must start with a lowercase letter or digit".into());
-    }
-    let last = bytes[bytes.len() - 1];
-    if !last.is_ascii_lowercase() && !last.is_ascii_digit() {
-        return Err("invalid app slug: must end with a lowercase letter or digit".into());
-    }
-    for b in bytes {
-        if !matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-') {
-            return Err(
-                "invalid app slug: only lowercase letters, digits and '-' are allowed".into(),
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Docker container ids are hex strings (short ids are 12 chars, full ids 64).

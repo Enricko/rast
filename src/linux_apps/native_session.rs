@@ -22,7 +22,7 @@
 //!   orphans and drops database rows whose units are gone.
 //!
 //! Everything the browser needs is in [`NativeSession::json`]; the proxy in
-//! [`super::native_proxy`] only needs [`NativeSession::upstream_port`] and the
+//! [`crate::native_proxy`] only needs [`NativeSession::upstream_port`] and the
 //! activity counters.
 
 use std::{

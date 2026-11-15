@@ -21,6 +21,27 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{AppError, AppResult};
 
+/// The reserved first path segment (no home or shared folder may use it); it
+/// names the root file system (`crate::rootfs`).
+pub const RESERVED_NAME: &str = "@root";
+
+/// Reject paths containing traversal or control characters before any
+/// filesystem call. Backend handlers still re-check after resolution.
+pub fn validate_logical_path(path: &str) -> Result<(), AppError> {
+    if path.contains('\0') || path.contains('\\') {
+        return Err(AppError::bad_request("invalid path"));
+    }
+    for segment in path.split('/') {
+        if segment == ".." {
+            return Err(AppError::bad_request("path traversal is not allowed"));
+        }
+        if segment.chars().any(|c| c.is_control()) {
+            return Err(AppError::bad_request("invalid path"));
+        }
+    }
+    Ok(())
+}
+
 /// Temporary upload/copy file prefix. Never listed, searchable or addressable.
 pub const TEMP_PREFIX: &str = ".rast-tmp-";
 
@@ -108,7 +129,7 @@ pub fn validate_new_name(part: &str) -> AppResult<()> {
     if part.starts_with(TEMP_PREFIX) {
         return Err(AppError::bad_request("reserved file name prefix"));
     }
-    if part == crate::rootfs::RESERVED_NAME {
+    if part == RESERVED_NAME {
         return Err(AppError::bad_request("reserved file name"));
     }
     Ok(())

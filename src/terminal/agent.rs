@@ -196,8 +196,7 @@ fn set_window_size(fd: RawFd, cols: u16, rows: u16) {
     }
 }
 
-/// Set by the helper for the agent only: start the shell as a login shell.
-pub const LOGIN_SHELL_ENV: &str = "RAST_TERMINAL_LOGIN";
+pub use crate::native::LOGIN_SHELL_ENV;
 
 /// Environment for the shell: the agent's (deliberate) environment, with the
 /// terminal identity forced and secrets from the service environment dropped.

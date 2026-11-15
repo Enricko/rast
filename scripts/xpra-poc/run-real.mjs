@@ -1,7 +1,7 @@
 // End-to-end proof of the REAL frontend integration (not the PoC harness):
 // the built RAST desktop (frontend/dist) served by a mock RAST API, with the
 // single Xpra session proxied at `/linux-apps/session/<key>/` and the real
-// `src/linux_apps/xpra_shim.js` injected, exactly like the Rust backend will.
+// `src/xpra_shim.js` injected, exactly like the Rust backend will.
 //
 // Proves: native app launch from the launcher -> one shared client -> every
 // remote Xpra window is a first-class RAST window (title bar + taskbar entry),

@@ -21,6 +21,7 @@ use std::{
     str::FromStr,
 };
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
@@ -451,7 +452,7 @@ impl Config {
         .unwrap_or(!trusted_proxies.is_empty());
 
         let packages_catalog_url = get_str(file.packages_catalog_url, "RAST_PACKAGES_CATALOG_URL")
-            .unwrap_or_else(|| crate::packages::catalog::OFFICIAL_CATALOG_URL.to_string());
+            .unwrap_or_else(|| OFFICIAL_CATALOG_URL.to_string());
         if !(packages_catalog_url.starts_with("https://")
             || packages_catalog_url.starts_with("file:///"))
         {
@@ -472,7 +473,7 @@ impl Config {
         })
         .unwrap_or_default();
         for key in &packages_catalog_keys {
-            crate::packages::catalog::parse_trusted_key(key).map_err(ConfigError::Invalid)?;
+            parse_trusted_key(key).map_err(ConfigError::Invalid)?;
         }
         let packages_check_interval_minutes = parse_env_num(
             &env,
@@ -961,6 +962,36 @@ pub fn to_toml_example(cfg: &Config) -> String {
     )
 }
 
+/// Default package catalog location.
+pub const OFFICIAL_CATALOG_URL: &str =
+    "https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json";
+#[derive(Debug, Clone)]
+pub struct TrustedKey {
+    pub id: String,
+    pub key: Vec<u8>,
+    pub official: bool,
+}
+
+/// Parse `"<key-id>:<base64>"` (configuration format).
+pub fn parse_trusted_key(raw: &str) -> Result<TrustedKey, String> {
+    let (id, b64) = raw
+        .split_once(':')
+        .ok_or_else(|| format!("catalog key {raw:?} must look like <key-id>:<base64>"))?;
+    let key = B64
+        .decode(b64.trim())
+        .map_err(|_| format!("catalog key {id:?} is not valid base64"))?;
+    if key.len() != 32 || id.trim().is_empty() {
+        return Err(format!(
+            "catalog key {id:?} must be a 32-byte Ed25519 public key"
+        ));
+    }
+    Ok(TrustedKey {
+        id: id.trim().to_string(),
+        key,
+        official: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,7 +1197,7 @@ mod tests {
         assert_eq!(parsed.bind.as_deref(), Some(DEFAULT_BIND));
         assert_eq!(
             parsed.packages_catalog_url.as_deref(),
-            Some(crate::packages::catalog::OFFICIAL_CATALOG_URL)
+            Some(OFFICIAL_CATALOG_URL)
         );
         assert_eq!(parsed.packages_check_interval_minutes, Some(360));
         assert!(!text.contains("packages_github_token"));

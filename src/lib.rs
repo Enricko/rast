@@ -19,6 +19,7 @@ pub mod jobs;
 pub mod linux_apps;
 pub mod monitor;
 pub mod native;
+pub mod native_proxy;
 pub mod packages;
 pub mod realtime;
 pub mod rootfs;
