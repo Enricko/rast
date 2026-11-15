@@ -160,24 +160,30 @@ scripts/e2e/dev-instance.sh down
 
 ## Repository map (today)
 
+Code lives in the root package `rast` and in the crates under `crates/` (ADR
+0002). Module paths inside a crate are unchanged: `crate::config::Config` is
+still `crates/rast-base/src/config.rs`.
+
 | Path | What it is |
 | --- | --- |
-| `src/main.rs` | CLI: `serve`, `doctor`, `user`, `backup`, `restore`, `update`, `worker`, `native-helper`, agents |
-| `src/api/` | Axum routes (REST + SSE) |
-| `src/auth/` | Argon2id, server-side sessions, CSRF, rate limiting |
-| `src/storage/` | File Station backend: safe paths, quota, trash, shares, chunked uploads |
-| `src/rootfs/` | Root file agent: the File Station API over a real filesystem, started by the helper. **Template for the per-user file agent.** |
-| `src/terminal/` | PTY agent that runs as `rast-u<id>` |
-| `src/native/` | Root helper: JSON-lines protocol, identities, transient units, nftables |
-| `src/linux_apps/native_*.rs` | Xpra sessions, authenticated proxy, native app install/update |
-| `src/xpra_shim.js`, `frontend/src/shell/xpra-native.ts` | Window adoption from the Xpra HTML5 client (iframe + injected shim) |
-| `src/linux_apps/{mod.rs,proxy.rs,shim.js}`, `src/docker/linux.rs`, `src/worker/linux.rs`, `src/worker/linux_assets/`, `frontend/src/shell/linux-windows.ts` | **Legacy** Docker/Selkies + noVNC backend for Linux apps — remove in Phase 4 |
-| `src/packages/` | App Center: runtime catalog, GitHub packages |
-| `src/docker/`, `src/worker/` | Docker Compose app and its privileged worker (keep) |
+| `src/main.rs`, `src/update.rs`, `build.rs`, `src/lib.rs` | The `rast` binary: CLI (`serve`, `doctor`, `user`, `backup`, `restore`, `update`, `worker`, `native-helper`, agents), self-update, Git revision, and `pub use` of every module so tests and `main.rs` keep their paths |
+| `crates/rast-server/src/api/` | Axum routes (REST + SSE) |
+| `crates/rast-server/src/{state,backup,monitor,server}.rs` | App state, backups, monitoring, embedded frontend (`server.rs`, with `build.rs` that fails a release build when the frontend is missing) |
+| `crates/rast-base/src/auth/` | Argon2id, server-side sessions, CSRF, rate limiting |
+| `crates/rast-base/src/storage/` | File Station backend: safe paths, quota, trash, shares, chunked uploads, file streaming |
+| `crates/rast-base/src/` (others) | `error`, `config`, `db` (embeds `migrations/`), `events`, `secrets`, `users`, `access`, `audit`, `jobs`, `realtime`, `appearance` |
+| `crates/rast-agent/src/rootfs/` | Root file agent: the File Station API over a real filesystem, started by the helper. **Template for the per-user file agent.** |
+| `crates/rast-agent/src/terminal/` | PTY agent that runs as `rast-u<id>`, and the terminal manager |
+| `crates/rast-helper/src/native/` | Root helper: JSON-lines protocol, identities, transient units, nftables |
+| `crates/rast-session/src/linux_apps/native_*.rs` | Xpra sessions, native app install/update |
+| `crates/rast-server/src/native_proxy.rs`, `crates/rast-server/src/xpra_shim.js`, `frontend/src/shell/xpra-native.ts` | Authenticated Xpra proxy and window adoption from the Xpra HTML5 client (iframe + injected shim) |
+| `crates/rast-session/src/linux_apps/{mod.rs,proxy.rs,shim.js}`, `crates/rast-docker/src/docker/linux.rs`, `crates/rast-docker/src/worker/linux.rs`, `crates/rast-docker/src/worker/linux_assets/`, `frontend/src/shell/linux-windows.ts` | **Legacy** Docker/Selkies + noVNC backend for Linux apps — remove in Phase 4 |
+| `crates/rast-apps/src/packages/` | App Center: runtime catalog, GitHub packages |
+| `crates/rast-docker/src/{docker,worker}/` | Docker Compose app and its privileged worker (keep) |
 | `frontend/src/` | TypeScript UI: `core/wm.ts` window manager, `shell/`, `apps/*` |
 | `migrations/` | SQLx migrations (forward-only) |
 | `deploy/`, `installer/` | systemd units, config template, POSIX-sh installer |
-| `tests/e2e/` | Playwright scenarios and perf harness |
+| `tests/` | Rust integration tests (`tests/*.rs`) and `tests/e2e/` Playwright scenarios and perf harness |
 
 ## Security invariants (never break)
 
@@ -215,21 +221,39 @@ scripts/e2e/dev-instance.sh down
   (X11 now, Wayland later) and the apps.
 - **One HOME per user:** `/srv/rast/homes/<username>`, owned by `rast-u<id>`.
 
-Target workspace (still ONE binary with subcommands):
+Target workspace (still ONE binary with subcommands). Task 0.2 created the
+crates marked "exists"; the others come with their phase:
 
 ```text
-crates/rast-api      shared DTOs (serde; ts-rs during the transition)
-crates/rast-core     pure logic: logical paths, access rules, name validation (native + wasm32)
-crates/rast-server   Axum app: api, auth, storage, realtime, jobs, backup, update
-crates/rast-helper   root helper (from src/native)
-crates/rast-agent    per-user agent: files (from src/rootfs/agent.rs), PTY (src/terminal/agent.rs),
-                     portal, notifications, tray
-crates/rast-session  Xpra sessions, app launch, proxy (native_session.rs, native_proxy.rs, xpra_shim.js)
-crates/rast-apps     launcher index, Flatpak, .deb, AppImage (native_apps.rs, native_archive.rs, src/packages)
-crates/rast-docker   Docker Compose app + worker
-crates/rast-ui       Leptos CSR app
-crates/rast          the single binary
+crates/rast-api      shared DTOs (serde; ts-rs during the transition)               (task 0.3)
+crates/rast-core     pure logic: logical paths, access rules, name validation
+                     (native + wasm32)                                               (deferred, see PROGRESS.md)
+crates/rast-base     exists. Foundation: error, config, db + migrations, events, secrets,
+                     users, auth, access, audit, jobs, storage, realtime, appearance.
+                     Deviation from the original target: it breaks the dependency cycles
+                     (ADR 0002) and will be split later.
+crates/rast-docker   exists. Docker Compose app + worker (docker, worker)
+crates/rast-apps     exists. App Center runtime catalog (packages). Launcher index,
+                     Flatpak, AppImage come in Phase 3
+crates/rast-helper   exists. Root helper (native)
+crates/rast-agent    exists. rootfs and terminal (file agent, PTY agent, terminal manager).
+                     Portal, notifications and tray come later
+crates/rast-session  exists. Xpra sessions, app launch and the legacy Docker Linux-app
+                     backend (linux_apps)
+crates/rast-server   exists. api, backup, monitor, state, server (frontend embed),
+                     native_proxy (+ xpra_shim.js)
+crates/rast-ui       Leptos CSR app                                                  (task 0.4)
+crates/rast          the single binary. For now the root package `rast` (src/main.rs,
+                     update.rs, build.rs) re-exports every module so tests/*.rs
+                     and main.rs keep their paths. It moves to crates/rast later.
 ```
+
+Dependency order: `rast-base` < `rast-docker` < `rast-apps` < `rast-helper` <
+`rast-agent` < `rast-session` < `rast-server` < `rast`. A lower crate must never
+name a higher one; talk through a trait (see `AuthState`, `HasLinuxApps` and
+`packages::service::Helper`). Each crate keeps the old module names, and its
+`lib.rs` re-imports the modules of lower crates, so `crate::config::Config`
+still resolves.
 
 `rast-core` and `rast-api` must build for `wasm32-unknown-unknown`: no
 filesystem, process or tokio code in them.

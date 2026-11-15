@@ -140,30 +140,32 @@ keeps it inactive in that case.
 
 ## Code map
 
+Since the workspace split (ADR 0002) most code lives in `crates/`; module paths inside a crate are unchanged.
+
 | Path | Responsibility |
 | --- | --- |
 | `src/main.rs` | CLI parsing, `serve` bootstrap, `status`, `doctor`, user management, restore entry point |
-| `src/config.rs` | Layered configuration (defaults → TOML → `RAST_*` env → CLI flags), validation, warnings |
-| `src/state.rs` | Shared `AppState` (config, DB pool, secrets, event bus, jobs, monitor, storage, Docker client), maintenance timer |
-| `src/server.rs` | Embedded static assets (`rust-embed`), cache headers, ETag, CSP, SPA fallback |
-| `src/api/` | Axum router and handlers; auth, users, files, apps, monitor, jobs, logs, settings, backup, system, events |
-| `src/auth/` | Argon2id passwords, opaque server-side sessions, CSRF, rate limiting and lockout, client-IP resolution, middleware |
-| `src/storage/` | Safe path resolution, quota accounting, recycle bin, streaming file operations, shared-folder ACLs |
-| `src/jobs.rs` | Persistent background job queue with bounded concurrency, progress reporting and cooperative cancellation |
-| `src/events.rs` | In-process broadcast bus for Server-Sent Events (`/api/events`) |
-| `src/monitor/` | One process-wide resource sampler (CPU, memory, disks, network, containers) |
-| `src/docker/` | Worker-socket client, compose validation, deployment metadata |
-| `src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions; `linux.rs` also builds the legacy app images and exports legacy data volumes for migration |
-| `src/native/` | Privileged native helper: JSON-lines protocol with strict validation (`protocol.rs`), client for the web server (`client.rs`), root daemon (`daemon.rs`), per-user Linux identities (`identity.rs`), Xpra 6.5+ version checking, and the display-port firewall (`firewall.rs`: owned nftables table/set restricting the loopback Xpra ports to the RAST uid) |
-| `src/linux_apps/native_session.rs` | Per-user shared Xpra session manager: lazy start, application launch, idle/session lifecycle, restart recovery, systemd cgroup limits |
-| `src/linux_apps/native_proxy.rs` | Same-origin HTTP + WebSocket proxy for `/linux-apps/session/<key>/`, per-user authorization, live 5 s login-session revalidation of display streams, shim injection |
-| `src/linux_apps/native_apps.rs` | Native installation, update, uninstall and Docker→native migration service (APT, portable archives, AppImage, compatibility preview, profiles, Chromium `--password-store=basic` warning) |
-| `src/linux_apps/native_archive.rs` | Path-safe archive extraction, desktop-entry parsing, launcher/icon detection for portable applications |
-| `src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
-| `src/packages/` | App Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz/tar.xz/zip extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
+| `crates/rast-base/src/config.rs` | Layered configuration (defaults → TOML → `RAST_*` env → CLI flags), validation, warnings |
+| `crates/rast-server/src/state.rs` | Shared `AppState` (config, DB pool, secrets, event bus, jobs, monitor, storage, Docker client), maintenance timer |
+| `crates/rast-server/src/server.rs` | Embedded static assets (`rust-embed`), cache headers, ETag, CSP, SPA fallback |
+| `crates/rast-server/src/api/` | Axum router and handlers; auth, users, files, apps, monitor, jobs, logs, settings, backup, system, events |
+| `crates/rast-base/src/auth/` | Argon2id passwords, opaque server-side sessions, CSRF, rate limiting and lockout, client-IP resolution, middleware |
+| `crates/rast-base/src/storage/` | Safe path resolution, quota accounting, recycle bin, streaming file operations, shared-folder ACLs |
+| `crates/rast-base/src/jobs.rs` | Persistent background job queue with bounded concurrency, progress reporting and cooperative cancellation |
+| `crates/rast-base/src/events.rs` | In-process broadcast bus for Server-Sent Events (`/api/events`) |
+| `crates/rast-server/src/monitor/` | One process-wide resource sampler (CPU, memory, disks, network, containers) |
+| `crates/rast-docker/src/docker/` | Worker-socket client, compose validation, deployment metadata |
+| `crates/rast-docker/src/worker/` | Privileged worker: Unix-socket JSON-lines server, whitelisted actions; `linux.rs` also builds the legacy app images and exports legacy data volumes for migration |
+| `crates/rast-helper/src/native/` | Privileged native helper: JSON-lines protocol with strict validation (`protocol.rs`), client for the web server (`client.rs`), root daemon (`daemon.rs`), per-user Linux identities (`identity.rs`), Xpra 6.5+ version checking, and the display-port firewall (`firewall.rs`: owned nftables table/set restricting the loopback Xpra ports to the RAST uid) |
+| `crates/rast-session/src/linux_apps/native_session.rs` | Per-user shared Xpra session manager: lazy start, application launch, idle/session lifecycle, restart recovery, systemd cgroup limits |
+| `crates/rast-server/src/native_proxy.rs` | Same-origin HTTP + WebSocket proxy for `/linux-apps/session/<key>/`, per-user authorization, live 5 s login-session revalidation of display streams, shim injection |
+| `crates/rast-session/src/linux_apps/native_apps.rs` | Native installation, update, uninstall and Docker→native migration service (APT, portable archives, AppImage, compatibility preview, profiles, Chromium `--password-store=basic` warning) |
+| `crates/rast-session/src/linux_apps/native_archive.rs` | Path-safe archive extraction, desktop-entry parsing, launcher/icon detection for portable applications |
+| `crates/rast-server/src/backup/` | Tar.gz backup archives (`db`, `config`, `users`, `apps` scopes), verification, restore, scheduling/retention |
+| `crates/rast-apps/src/packages/` | App Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz/tar.xz/zip extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
 | `src/update.rs` | GitHub-Release self-update with checksum verification, DB backup, atomic binary replacement and rollback of the binary |
-| `src/audit.rs` | Append-only audit log writer |
-| `src/secrets.rs` | Master key at `<data_dir>/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
+| `crates/rast-base/src/audit.rs` | Append-only audit log writer |
+| `crates/rast-base/src/secrets.rs` | Master key at `<data_dir>/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
 | `migrations/` | SQLx migrations compiled into the binary and applied at startup |
 
 ## Request flow
@@ -188,17 +190,17 @@ keeps it inactive in that case.
 
 ### Background work
 
-* **Jobs** (`src/jobs.rs`): persisted rows in `jobs`, bounded concurrency
+* **Jobs** (`crates/rast-base/src/jobs.rs`): persisted rows in `jobs`, bounded concurrency
   (`RAST_JOB_CONCURRENCY`), progress throttled to one SQLite write per 250 ms,
   cooperative cancellation, stale-job recovery on startup.
-* **Monitor** (`src/monitor/`): one sampler per process (not per browser tab),
+* **Monitor** (`crates/rast-server/src/monitor/`): one sampler per process (not per browser tab),
   interval `RAST_MONITOR_INTERVAL_SECS`, published on the event bus and kept in
   a bounded in-memory ring buffer for `/api/monitor/history`.
-* **Maintenance timer** (`src/state.rs`): every ~5 minutes prunes expired
+* **Maintenance timer** (`crates/rast-server/src/state.rs`): every ~5 minutes prunes expired
   sessions, old audit rows (90 days), finished jobs (30 days), login attempts
   (7 days) and expired sessions; the backup scheduler evaluates due backup
   schedules using the server's local timezone.
-* **Backup scheduler** (`src/backup/schedule.rs`): schedules stored in
+* **Backup scheduler** (`crates/rast-server/src/backup/schedule.rs`): schedules stored in
   `backup_schedules`, retention count configurable in the UI; runs as
   background jobs so large archives do not block HTTP.
 
@@ -229,7 +231,7 @@ explains the decision the backend actually makes. Decisions are cached per
 account/resource and invalidated by a generation counter after every committed
 membership/rule/share change. Legacy `share_members` produces the fallback
 level when no new rule grants access, which preserves existing access on
-upgrade; share creators get no implicit grant. `src/access/review.rs` builds
+upgrade; share creators get no implicit grant. `crates/rast-base/src/access/review.rs` builds
 the administrator views (paginated Effective Access with conflict
 explanations, group member pages, group-deletion impact) on top of the same
 evaluator and its pure precedence helpers. Read-only Applications/Backup
@@ -240,7 +242,7 @@ contract.
 
 ## Live updates
 
-One process-wide `EventBus` (`src/events.rs`) fans out to every authenticated
+One process-wide `EventBus` (`crates/rast-base/src/events.rs`) fans out to every authenticated
 SSE connection (`GET /api/events`). Events carry a monotonic sequence number and
 an authorization scope; the stream handler filters per principal and revalidates
 the session every 20 seconds, so expiry, revocation, deactivation and role
@@ -427,8 +429,8 @@ plenty). Tune with systemd drop-ins and configuration keys.
 | SQLite connections | 8 | `RAST_DB_MAX_CONNECTIONS` (1–64) |
 | Background jobs | 2 concurrent | `RAST_JOB_CONCURRENCY` (1–8) |
 | Monitor sampling | one sampler per process every 5 s | `RAST_MONITOR_INTERVAL_SECS` (1–300) |
-| SSE fan-out | broadcast buffer of 256 events | `src/events.rs::BUS_CAPACITY` |
-| Job queue | 128 pending | `src/jobs.rs::QUEUE_CAPACITY` |
+| SSE fan-out | broadcast buffer of 256 events | `crates/rast-base/src/events.rs::BUS_CAPACITY` |
+| Job queue | 128 pending | `crates/rast-base/src/jobs.rs::QUEUE_CAPACITY` |
 | File descriptors | 65536 | `LimitNOFILE` in both units |
 | Uploads | streamed, never buffered whole | `RAST_MAX_UPLOAD_BYTES` |
 | Native Linux apps | one shared session per user: 4 GiB memory / quarter of the CPUs (2–8) / 2048 tasks by default; per application: 2 GiB / 2 CPUs / 1024 tasks (App Center → the app's page → Memory and CPU); admission requires free memory ≥ the app's limit + 1 GiB reserve | `linux_session_*`, `linux_app_*`, `linux_admission_reserve_mb` |

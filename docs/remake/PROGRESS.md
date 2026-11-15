@@ -9,8 +9,8 @@ Update it at the end of every session.
 
 ## Phase 0 checklist
 
-- [ ] Split the repo into the target workspace with pure moves (ADR 0002)
-- [ ] Create `rast-api` with `EntryDto` and `ListingDto` (from `src/storage/ops.rs`) and generate TypeScript types with `ts-rs`
+- [x] Split the repo into the target workspace with pure moves (task 0.2, ADR 0002)
+- [ ] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs`
 - [ ] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
 - [ ] Record the current compressed JS bundle size as the baseline
 - [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/`
@@ -26,43 +26,73 @@ Update it at the end of every session.
   the final remake gate passes (commit `aeeec51`).
 - Progress log and ADR template (`docs/adr/0000-template.md`,
   `docs/adr/0001-incremental-remake.md`).
-- **Quality gate baseline** (at `aeeec51`, all passing):
-  - `cargo fmt --all -- --check`, `cargo clippy --locked --all-targets -- -D warnings`: clean
-  - `cargo test --locked --all-targets`: 750 + 33 + 15 + 7 + 2 tests (plus empty suites), 0 failed
+- **Task 0.2, workspace split** (ADR 0002). Commits, in order:
+  - `dedd14f` break module dependency cycles (no behaviour change)
+  - `c949b1b` Cargo workspace; `--workspace` for clippy and test (CI, CLAUDE.md, CONTRIBUTING.md)
+  - `962955f` release builds fail when the frontend is missing or is the placeholder page
+  - `3f42f29` auth, access and the Docker proxy no longer name `AppState`
+  - `fc8b3eb` `rast-base`, `1f3b138` `rast-apps`, `7663996` `rast-docker`,
+    `a465e8c` `rast-helper`, `dba65bd` `rast-agent`, `33c9e7e` `rast-session`,
+    then `rast-server` (`server.rs` and its frontend embed now live there)
+  - The root package `rast` stays at the repository root (binary, `update.rs`,
+    Git revision `build.rs`, facade `pub use`); `tests/*.rs` are unchanged
+    except `tests/event_kinds.rs`, which now also scans `crates/*/src`.
+  - Path-only change approved by the maintainer: `frontend/tests/xpra-input.test.ts`
+    reads `xpra_shim.js` from its new location.
+- **Quality gate baseline** (start of 0.2, and unchanged after every crate move):
+  - `cargo fmt --all -- --check`, `cargo clippy --locked --workspace --all-targets -- -D warnings`: clean
+  - `cargo test --locked --workspace --all-targets`: 807 tests in total (750 + 33 + 15 + 7 + 2 at the start; the split across crates changes, the total does not), 0 failed
   - `npm --prefix frontend test`: 149 passed, 0 failed
   - `npm --prefix frontend run build`: OK (existing chunk-size warning above 600 kB)
+  - `scripts/generate-third-party-licenses.sh --check`: up to date (no new external dependency)
 
 ## In progress
 
-- Nothing yet.
+- Nothing.
 
 ## Next
 
-1. Phase 0.2 — workspace split (plan mode, `opusplan` / `high`); ADR 0002.
-2. Phase 0.3 — `rast-api` + `ts-rs` (needs approval for the `ts-rs` dependency).
-3. Phase 0.4 — `rast-ui` skeleton (needs approval for leptos, wasm-bindgen, web-sys, console_error_panic_hook).
-4. Phase 0.5 — README fixes.
-5. Phase 0.6 — baseline app matrix (ask before running the native instance).
+1. Phase 0.3 — `rast-api` + `ts-rs` (needs approval for the `ts-rs` dependency).
+2. Phase 0.4 — `rast-ui` skeleton (needs approval for leptos, wasm-bindgen, web-sys, console_error_panic_hook).
+3. Phase 0.5 — README fixes.
+4. Phase 0.6 — baseline app matrix (ask before running the native instance).
 
 ## Open questions
 
+- **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for
+  `wasm32` yet — `storage::safe_path` still uses `AppError` and the filesystem.
+  Create the crate when the pure parts (logical paths, name validation, access
+  rules) can be separated; see ADR 0002.
+- **Follow-ups from ADR 0002:** move the root package to `crates/rast`; split
+  `rast-base`; separate `native_apps`/`native_archive` (now in `rast-session`)
+  from the session code, and the terminal manager from the PTY agent; drop the
+  workspace dependencies that the root package no longer uses directly.
+- **Leftover `.tmp*` folders in `/tmp`** (3,718 found on 2026-11-15, some of
+  them from this host's earlier runs): find which test leaves them behind and
+  fix it after 0.2. A full `/tmp` (tmpfs, 16 GB) made every SQLite test fail
+  with `disk I/O error` and blocked the shell.
+- **Timing-sensitive tests** (seen during 0.2, all pass alone and on retry):
+  - `backup::tests::restore_refuses_while_a_server_holds_the_instance_lock`
+    failed in roughly one run in five when other tests in the same binary spawn
+    processes. The lock is a `flock` on an open file description, so a child
+    that is between `fork` and `exec` still holds it for a moment. Baseline
+    before the split was 0 of 14; after the split it depends on which tests
+    share the binary (moving `packages` out of it made it disappear with
+    `--skip packages::`, 0 of 15). Fix the test, not the lock (for example
+    retry the final assertion for a short time).
+  - `install_threads_the_visibility_to_the_new_native_app_row`
+    (`tests/native_linux_e2e.rs`) failed twice in about ten full workspace runs (0 of 20 alone); it waits at
+    most 2 s for a background job.
 - Does `scripts/changelog-section.sh` accept the `## [1.0.1] - Unreleased`
-  heading? Check before the first pre-release.
+  heading? Yes: it only reads the text inside the square brackets (checked by
+  the maintainer).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
 - Baseline JS bundle size (compressed `frontend/dist`) is not recorded yet.
+- `yamllint` is not installed for the default `python3` on this host (a
+  RAST-managed Python comes first in `PATH`), so the workflow files were not
+  linted locally.
 
-## Repository map (as surveyed)
+## Repository map
 
-- `src/`: `access`, `api`, `appearance`, `auth`, `backup`, `docker`,
-  `linux_apps`, `monitor`, `native`, `packages`, `realtime`, `rootfs`,
-  `storage`, `terminal`, `worker`, plus `audit.rs`, `config.rs`, `db.rs`,
-  `error.rs`, `events.rs`, `jobs.rs`, `secrets.rs`, `server.rs`, `state.rs`,
-  `update.rs`, `users.rs`. Single crate today.
-- `frontend/src/`: `apps/` (applications, backup, controlpanel, files, launcher,
-  linuxapp, logs, monitor, packages, terminal, registry.ts), `components/`,
-  `core/`, `shell/`, `styles/`, `types/`.
-- `tests/e2e/`: Playwright scenarios, `run.mjs`, `perf/`, `results/`,
-  terminal benches.
-- `docs/`: `ARCHITECTURE.md`, `NATIVE-LINUX-APPS.md`, `TERMINAL.md`, `API.md`,
-  `REALTIME.md` and others.
+See `CLAUDE.md` (Repository map) and ADR 0002 for the crate layout.

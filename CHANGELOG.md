@@ -17,6 +17,15 @@ this file by `scripts/changelog-section.sh`.
   bumped per phase. Remake instructions and the prompt pack are in
   `CLAUDE.md` and `docs/remake/PROMPTS.md`. Releases from this branch must be
   marked pre-release until the final remake gate passes.
+- The code is split into a Cargo workspace (`crates/rast-base`, `rast-docker`,
+  `rast-apps`, `rast-helper`, `rast-agent`, `rast-session`, `rast-server`);
+  the binary, its name, its output path and its behaviour are unchanged. See
+  `docs/adr/0002-workspace-layout.md`. Run `cargo clippy` and `cargo test` with
+  `--workspace`.
+- `cargo build --release` now fails when `frontend/dist/index.html` is missing
+  or is the build placeholder (build the frontend first:
+  `npm --prefix frontend run build`). CI, the release workflow and
+  `scripts/build-release.sh` also check the finished binary.
 
 ## [0.18.2] - 2026-11-15
 
