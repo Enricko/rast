@@ -303,6 +303,7 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
     };
     let (mut viewer, reconnected) = viewer;
     let session_id = viewer.session_id.clone();
+    let viewer_id = viewer.viewer_id;
 
     let ready = json!({
         "type": "ready",
@@ -318,7 +319,7 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
         .await
         .is_err()
     {
-        state.terminal.detach(&session_id).await;
+        state.terminal.detach(&session_id, viewer_id).await;
         return;
     }
     if !viewer.replay.is_empty()
@@ -327,7 +328,7 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
             .await
             .is_err()
     {
-        state.terminal.detach(&session_id).await;
+        state.terminal.detach(&session_id, viewer_id).await;
         return;
     }
 
@@ -394,7 +395,7 @@ async fn run_terminal(mut socket: WebSocket, state: AppState, user: AuthUser) {
             }
         }
     }
-    state.terminal.detach(&session_id).await;
+    state.terminal.detach(&session_id, viewer_id).await;
     let _ = socket.send(Message::Close(None)).await;
 }
 

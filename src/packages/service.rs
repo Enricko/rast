@@ -1266,15 +1266,30 @@ impl PackageManager {
             .map(|v| system::channel_of(v, &channel_ids));
         if let (Some(sv), Some(sch)) = (&system_version, &system_channel) {
             if !channels_installed.contains(sch) {
-                let candidate = versions.iter().find(|c| {
-                    &c.channel == sch
-                        && c.compatible
+                let newer = |c: &&VersionChoice| {
+                    c.compatible
                         && !c.prerelease
                         && version::compare(&c.version, sv) == std::cmp::Ordering::Greater
-                });
+                };
+                // The system's own release line first. A line the catalog no
+                // longer carries (Maven 3.9, Node.js 20) moves to the newest
+                // verified version instead of being stuck without an offer.
+                let candidate = versions
+                    .iter()
+                    .filter(newer)
+                    .find(|c| &c.channel == sch)
+                    .or_else(|| {
+                        if channel_ids.contains(sch) {
+                            return None;
+                        }
+                        versions
+                            .iter()
+                            .filter(newer)
+                            .max_by(|a, b| version::compare(&a.version, &b.version))
+                    });
                 if let Some(c) = candidate {
                     updates.push(UpdateView {
-                        channel: sch.clone(),
+                        channel: c.channel.clone(),
                         from: sv.clone(),
                         to: c.version.clone(),
                         revision: c.revision,
@@ -1574,12 +1589,20 @@ impl PackageManager {
                             .and_then(|s| s.version)
                             .map(|v| system::channel_of(&v, &channel_ids))
                     });
+                let usable = |m: &&Manifest| {
+                    host::incompatibility(m, &self.host).is_none() && !m.is_prerelease()
+                };
+                // The release line in use; the newest verified version when
+                // the catalog does not carry that line.
                 pkg.versions
                     .iter()
-                    .find(|m| {
-                        host::incompatibility(m, &self.host).is_none()
-                            && !m.is_prerelease()
-                            && channel.as_ref().is_none_or(|c| &m.channel() == c)
+                    .filter(usable)
+                    .find(|m| channel.as_ref().is_none_or(|c| &m.channel() == c))
+                    .or_else(|| {
+                        pkg.versions
+                            .iter()
+                            .filter(usable)
+                            .max_by(|a, b| version::compare(&a.version, &b.version))
                     })
                     .ok_or_else(|| AppError::bad_request("No compatible version is available."))?
             }

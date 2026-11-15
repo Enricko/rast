@@ -155,8 +155,9 @@ pub struct FileConfig {
     pub terminal_max_sessions: Option<u32>,
     /// Seconds a disconnected terminal stays alive for reconnection.
     pub terminal_grace_seconds: Option<u32>,
-    /// Minutes without any viewer after which a terminal is closed (0 = only
-    /// close after the reconnect grace period).
+    /// Minutes a terminal nobody is viewing (page reloaded, browser closed)
+    /// keeps running without output before it is closed (0 = close right
+    /// after the reconnect grace period).
     pub terminal_idle_minutes: Option<u32>,
     /// Memory limit of one terminal session (MiB).
     pub terminal_memory_mb: Option<u32>,
@@ -234,7 +235,7 @@ impl Default for TerminalConfig {
             admin_root: true,
             max_sessions: 8,
             grace_seconds: 30,
-            idle_minutes: 240,
+            idle_minutes: 1440,
             memory_mb: 1024,
             cpus: 2,
             tasks: 512,
@@ -601,7 +602,7 @@ impl Config {
                 "RAST_TERMINAL_IDLE_MINUTES",
                 file.terminal_idle_minutes,
             )?
-            .unwrap_or(240)
+            .unwrap_or(1440)
             .clamp(0, 10_080),
             memory_mb: parse_env_num(&env, "RAST_TERMINAL_MEMORY_MB", file.terminal_memory_mb)?
                 .unwrap_or(1024)

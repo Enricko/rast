@@ -2678,9 +2678,9 @@ button.pkg-pill {
 }
 
 /* Package-provided SVG/PNG icons sit on a plain tile and are never stretched. */
-/* Monochrome brand marks (Simple Icons) are drawn with currentColor = black,
-   so they need a light plate in both themes to stay readable; coloured PNG
-   icons benefit from the same neutral background. */
+/* The official runtime logos are full colour, but several are dark marks
+   (Rust, Deno, Gradle): a light plate in both themes keeps every icon
+   readable. */
 .pkg-icon.has-image {
   background: #eef2f7;
   border: 1px solid rgba(12, 18, 26, 0.12);

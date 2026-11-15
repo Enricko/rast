@@ -87,6 +87,11 @@ export interface TerminalSessionOptions {
   folder: TerminalFolder | null;
   /** Runtime overrides for a NEW session (empty = server/user defaults). */
   runtimes: Record<string, string>;
+  /**
+   * A shell that is already running on the server (the page was reloaded or
+   * Terminal was reopened): the tab attaches to it instead of starting one.
+   */
+  attach?: string | null;
   fontSize: number;
   onState(state: TerminalState): void;
   onReady?(ready: TerminalReadyMessage): void;
@@ -119,6 +124,7 @@ export class TerminalSession {
     this.folder = options.folder ? { path: options.folder.path } : null;
     this.runtimes = { ...options.runtimes };
     this.currentFontSize = options.fontSize;
+    if (options.attach) this.state = { ...this.state, sessionId: options.attach };
     this.el = h("div", { class: "term-screen-host" });
   }
 
@@ -140,7 +146,7 @@ export class TerminalSession {
     if (this.disposed) return;
     this.createTerminal(xterm);
     this.transition({ type: "loaded" });
-    this.openSocket(false);
+    this.openSocket(Boolean(this.state.sessionId));
   }
 
   private createTerminal(xterm: XtermModule): void {
@@ -419,9 +425,9 @@ export class TerminalSession {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
-    // Tell the backend this tab is gone so it closes the PTY immediately
-    // instead of holding it for the grace period. (A plain socket close is a
-    // detach, not a close.)
+    // Tell the backend this tab is gone so it closes the PTY. (A plain socket
+    // close, as on a page reload, is a detach: the shell keeps running and
+    // Terminal attaches to it again.)
     if (
       this.socket &&
       this.socket.readyState === WebSocket.OPEN &&

@@ -1590,8 +1590,28 @@ fn terminal_environment(
     let path = extra.get("PATH").cloned().unwrap_or_else(|| {
         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()
     });
-    env.insert("PATH".into(), path);
+    env.insert("PATH".into(), login_path(&path, Path::new(&home)));
     Ok(env)
+}
+
+/// The PATH a login shell of this account would have: the account's own
+/// `~/.local/bin` and `~/bin` first (tools installed for that user, as
+/// `~/.profile` does on Debian/Ubuntu) and `/snap/bin` last. Directories that
+/// do not exist are left out.
+fn login_path(path: &str, home: &Path) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut add = |dir: String, must_exist: bool| {
+        if !dir.is_empty() && !dirs.contains(&dir) && (!must_exist || Path::new(&dir).is_dir()) {
+            dirs.push(dir);
+        }
+    };
+    add(home.join(".local/bin").display().to_string(), true);
+    add(home.join("bin").display().to_string(), true);
+    for dir in path.split(':') {
+        add(dir.to_string(), false);
+    }
+    add("/snap/bin".to_string(), true);
+    dirs.join(":")
 }
 
 /// Validate a requested terminal working directory and map the RAST folder
@@ -1794,17 +1814,16 @@ fn build_terminal_systemd_args(
         OsString::from("--collect"),
         OsString::from("--quiet"),
         OsString::from("--property=Type=exec"),
-        OsString::from(format!("--property=MemoryMax={}M", limits.memory_max_mb)),
-        OsString::from(format!("--property=CPUQuota={}%", limits.cpu_quota_percent)),
-        OsString::from(format!("--property=TasksMax={}", limits.tasks_max)),
         OsString::from("--property=KillMode=control-group"),
         OsString::from(format!("--property=WorkingDirectory={}", path_string(cwd))),
         OsString::from("--property=UMask=0022"),
     ];
     if root {
-        // Root shell: no identity, no service hardening; the administrator
-        // needs the full server (package manager, system paths, devices).
+        // Root shell: no identity, no service hardening and no resource
+        // limits; the administrator needs the full server (package manager,
+        // builds, system paths, devices), like a root login over SSH.
         args.extend([
+            OsString::from("--property=TasksMax=infinity"),
             OsString::from("--property=NoNewPrivileges=no"),
             OsString::from("--property=ProtectSystem=no"),
             OsString::from("--property=ProtectHome=no"),
@@ -1819,6 +1838,11 @@ fn build_terminal_systemd_args(
     } else {
         args.push(OsString::from(format!("--uid={uid}")));
         args.push(OsString::from(format!("--gid={gid}")));
+        args.extend([
+            OsString::from(format!("--property=MemoryMax={}M", limits.memory_max_mb)),
+            OsString::from(format!("--property=CPUQuota={}%", limits.cpu_quota_percent)),
+            OsString::from(format!("--property=TasksMax={}", limits.tasks_max)),
+        ]);
         // Hardening except executable-memory restrictions: Rust/Java/Bun/
         // Deno/.NET JITs need PROT_EXEC mappings.
         args.extend([
@@ -5176,6 +5200,18 @@ exit 0
     }
 
     #[test]
+    fn login_path_adds_the_accounts_own_bin_directories() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join(".local/bin")).unwrap();
+        let path = login_path("/usr/local/bin:/usr/bin:/usr/bin", home.path());
+        let own = home.path().join(".local/bin").display().to_string();
+        assert!(path.starts_with(&format!("{own}:/usr/local/bin:/usr/bin")));
+        // `~/bin` does not exist here and is left out; nothing is repeated.
+        assert!(!path.contains(&home.path().join("bin:").display().to_string()));
+        assert_eq!(path.matches("/usr/bin").count(), 1);
+    }
+
+    #[test]
     fn terminal_environment_is_deliberate_and_private() {
         let identity = Identity {
             user_id: 7,
@@ -5210,10 +5246,10 @@ exit 0
             env.get("JAVA_HOME").map(String::as_str),
             Some("/opt/runtimes/java")
         );
-        assert_eq!(
-            env.get("PATH").map(String::as_str),
-            Some("/opt/runtimes/rust/bin:/usr/bin")
-        );
+        // The composed PATH is kept in order (the host may add /snap/bin).
+        assert!(env
+            .get("PATH")
+            .is_some_and(|path| path.starts_with("/opt/runtimes/rust/bin:/usr/bin")));
         assert_eq!(
             env.get("XDG_RUNTIME_DIR").map(String::as_str),
             Some("/run/rast-linux/terminal/abc/runtime")
@@ -5294,8 +5330,8 @@ exit 0
         assert!(args.iter().any(|arg| arg == "--"));
         assert_eq!(args.last().unwrap(), "terminal-agent");
 
-        // Administrator root shell keeps cgroup limits but not the unprivileged
-        // hardening (full server access is the point).
+        // Administrator root shell: neither the cgroup limits nor the
+        // unprivileged hardening (full server access is the point).
         let root_args: Vec<String> = build_terminal_systemd_args(
             &TerminalUnitSpec {
                 unit: "rast-term-u0-0123456789abcdef0123456789abcdef",
@@ -5314,8 +5350,9 @@ exit 0
         let root_joined = root_args.join(" ");
         assert!(!root_joined.contains("--uid="));
         assert!(!root_joined.contains("--gid="));
-        assert!(root_joined.contains("MemoryMax=512M"));
-        assert!(root_joined.contains("TasksMax=256"));
+        assert!(!root_joined.contains("MemoryMax="));
+        assert!(!root_joined.contains("CPUQuota="));
+        assert!(root_joined.contains("TasksMax=infinity"));
         assert!(root_joined.contains("NoNewPrivileges=no"));
         assert!(root_joined.contains("ProtectSystem=no"));
         assert!(root_joined.contains("WorkingDirectory=/root"));

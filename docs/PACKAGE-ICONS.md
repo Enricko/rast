@@ -17,7 +17,11 @@ element, never injected as inline markup.
   catalogs and third-party packages continue to look right.
 * The icon's optional `attribution` is used as the hover title.
 
-The official icons are [Simple Icons](https://simpleicons.org) (CC0). Brand
+The official icons are the full-colour logos from
+[Devicon](https://devicon.dev) (MIT); Eclipse Temurin and .NET use the
+[Simple Icons](https://simpleicons.org) (CC0) mark in the brand colour. App
+Center draws every package icon on a light plate, so dark marks (Rust, Deno,
+Gradle) stay readable in the dark theme. Brand
 names and logos are trademarks of their respective owners and are used only to
 identify the corresponding runtime; the catalog README notes this as well.
 

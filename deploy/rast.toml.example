@@ -155,12 +155,14 @@ terminal_admin_root = true
 # Maximum concurrent terminals per account.
 # env: RAST_TERMINAL_MAX_SESSIONS
 terminal_max_sessions = 8
-# How long a disconnected tab may reconnect to the same shell (seconds).
+# Minimum time a terminal without a viewer is kept (seconds).
 # env: RAST_TERMINAL_GRACE_SECONDS
 terminal_grace_seconds = 30
-# Close terminals with no viewer after this many idle minutes (0 = grace only).
+# A terminal keeps running when the page is reloaded or the browser is closed.
+# Close it after this many minutes without output while nobody views it
+# (0 = right after the grace period).
 # env: RAST_TERMINAL_IDLE_MINUTES
-terminal_idle_minutes = 240
+terminal_idle_minutes = 1440
 # Per-terminal systemd limits.
 # env: RAST_TERMINAL_MEMORY_MB
 terminal_memory_mb = 1024

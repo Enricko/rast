@@ -139,7 +139,7 @@
           "maxLength": 87380
         },
         "attribution": {
-          "description": "Optional credit line, e.g. the icon source and license (the official catalog uses Simple Icons, CC0). At most 300 characters.",
+          "description": "Optional credit line, e.g. the icon source and license (the official catalog uses Devicon, MIT, and Simple Icons, CC0). At most 300 characters.",
           "type": "string",
           "maxLength": 300
         }

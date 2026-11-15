@@ -31,6 +31,7 @@ import {
   createTabSet,
   normalizeTerminalEnv,
   normalizeTerminalParams,
+  parseTerminalSessions,
   readFontSize,
   runtimeSummary,
   stepFontSize,
@@ -40,10 +41,12 @@ import {
   terminalShortcut,
   terminalTabTitle,
   TERMINAL_ENV_PATH,
+  TERMINAL_SESSIONS_PATH,
   validateRuntimeOverrides,
   writeFontSize,
   type TerminalEnv,
   type TerminalFolder,
+  type TerminalSessionInfo,
   type TerminalState,
   type TerminalTabSet,
 } from "./model";
@@ -63,6 +66,14 @@ interface TabEntry {
   titleEl: HTMLElement;
   closeButton: HTMLButtonElement;
 }
+
+/**
+ * Running shells already shown by a tab of this page, so two Terminal windows
+ * restored together do not both attach to the same one.
+ */
+const claimedSessions = new Set<string>();
+/** A viewer that is going away (page reload) is seen as gone within this time. */
+const RESTORE_RECHECK_MS = 2_000;
 
 /** localStorage is unavailable in some privacy modes; never let that break the app. */
 function localStorageOrNull(): Storage | null {
@@ -232,9 +243,15 @@ class TerminalApp {
   private cleanup(): void {
     if (this.disposed) return;
     this.disposed = true;
-    for (const entry of [...this.tabs.tabs]) entry.session.dispose();
+    for (const entry of [...this.tabs.tabs]) this.disposeEntry(entry);
     this.tabs = createTabSet();
     this.el.remove();
+  }
+
+  private disposeEntry(entry: TabEntry): void {
+    const sessionId = entry.session.status.sessionId;
+    if (sessionId) claimedSessions.delete(sessionId);
+    entry.session.dispose();
   }
 
   private refit(): void {
@@ -259,9 +276,16 @@ class TerminalApp {
         this.renderDisabled();
         return;
       }
-      this.renderBodyState(null);
       if (this.tabs.tabs.length === 0) {
-        this.addTab(normalizeTerminalParams(this.ctx.params));
+        // Shells keep running on the server when the page is reloaded or the
+        // browser is closed: show them again before starting anything new.
+        const folder = normalizeTerminalParams(this.ctx.params);
+        const restored = await this.restoreSessions(true);
+        if (this.disposed) return;
+        this.renderBodyState(null);
+        if (folder || (restored === 0 && this.tabs.tabs.length === 0)) this.addTab(folder);
+      } else {
+        this.renderBodyState(null);
       }
     } catch (error) {
       if (this.disposed) return;
@@ -333,8 +357,43 @@ class TerminalApp {
     this.renderToolbarState();
   }
 
-  private addTab(folder: TerminalFolder | null): void {
+  /**
+   * Open a tab for every running shell of this account that nobody is
+   * viewing. Returns how many were attached. A failure only means nothing is
+   * restored: the caller opens a fresh shell.
+   */
+  private async restoreSessions(recheck: boolean): Promise<number> {
+    let sessions: TerminalSessionInfo[] | null = null;
+    try {
+      sessions = parseTerminalSessions(await this.ctx.api.get<unknown>(TERMINAL_SESSIONS_PATH));
+    } catch {
+      return 0;
+    }
+    if (this.disposed || !sessions || !this.env?.enabled) return 0;
+    let restored = 0;
+    let busy = false;
+    for (const info of sessions) {
+      if (claimedSessions.has(info.id)) continue;
+      if (info.viewers > 0) {
+        busy = true;
+        continue;
+      }
+      this.addTab(null, info.id);
+      restored += 1;
+    }
+    // Right after a reload the server may still count the old page as a
+    // viewer; look once more when it has noticed.
+    if (busy && recheck) {
+      window.setTimeout(() => {
+        if (!this.disposed) void this.restoreSessions(false);
+      }, RESTORE_RECHECK_MS);
+    }
+    return restored;
+  }
+
+  private addTab(folder: TerminalFolder | null, attach: string | null = null): void {
     if (this.disposed || !this.env?.enabled) return;
+    if (attach) claimedSessions.add(attach);
     const id = `term-tab-${++this.tabSeq}`;
     const ordinal = ++this.tabOrdinal;
     const runtimes = validateRuntimeOverrides(this.env, this.overrides);
@@ -343,7 +402,8 @@ class TerminalApp {
     const session = new TerminalSession({
       api: this.ctx.api,
       folder,
-      runtimes,
+      runtimes: attach ? {} : runtimes,
+      attach,
       fontSize: this.fontSize,
       onState: (state) => this.onSessionState(id, state),
       onSearchResults: (index, count) => this.onSearchResults(index, count),
@@ -389,7 +449,7 @@ class TerminalApp {
   private closeTab(id: string): void {
     const entry = this.tabs.tabs.find((tab) => tab.id === id);
     if (!entry) return;
-    entry.session.dispose();
+    this.disposeEntry(entry);
     entry.pane.remove();
     const result = closeTabModel(this.tabs, id);
     this.tabs = result.set;
@@ -436,6 +496,7 @@ class TerminalApp {
     if (!entry) return;
     const previous = entry.state;
     entry.state = state;
+    if (state.sessionId) claimedSessions.add(state.sessionId);
     entry.tabRoot.dataset.phase = state.phase;
     entry.pane.dataset.phase = state.phase;
     const title = this.tabTitle(entry);
@@ -453,7 +514,9 @@ class TerminalApp {
         this.notice.show(state.error, { kind: "warning", timeoutMs: 0, action: { label: "Retry", onClick: () => entry.session.retry() } });
       } else if (state.phase === "connected") {
         this.notice.dismiss();
-        if (state.reconnected) this.ctx.toast.success("Terminal reconnected");
+        // A restored tab attaches quietly; only a dropped connection that
+        // came back is worth a message.
+        if (state.reconnected && previous.phase === "reconnecting") this.ctx.toast.success("Terminal reconnected");
       }
     }
     if (entry.id === this.tabs.activeId) {

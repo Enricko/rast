@@ -1,5 +1,5 @@
-//! Runtimes the operating system already has: apt packages (`php8.5-cli`),
-//! manual installs (`/usr/local/go`, a Node.js tarball linked into
+//! Runtimes the operating system already has: apt packages (`php8.5-cli`,
+//! `composer`, a JDK), manual installs (`/usr/local/go`, a Node.js tarball linked into
 //! `/usr/local/bin`) and snaps. App Center lists them as *System*
 //! installs so a newer verified version can be offered as an update.
 //!
@@ -69,6 +69,78 @@ pub const PROBES: &[Probe] = &[
         // Without php.ini: the version line does not depend on extensions.
         args: &["-n", "--version"],
         extra: &[],
+    },
+    Probe {
+        id: "rust",
+        command: "rustc",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "java",
+        command: "java",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "bun",
+        command: "bun",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "deno",
+        command: "deno",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "dotnet",
+        command: "dotnet",
+        args: &["--version"],
+        extra: &["/usr/share/dotnet", "/usr/lib/dotnet"],
+    },
+    Probe {
+        id: "clang",
+        command: "clang",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "composer",
+        command: "composer",
+        args: &["--version", "--no-ansi"],
+        extra: &[],
+    },
+    Probe {
+        id: "zig",
+        command: "zig",
+        args: &["version"],
+        extra: &[],
+    },
+    Probe {
+        id: "kotlin",
+        command: "kotlinc",
+        args: &["-version"],
+        extra: &[],
+    },
+    Probe {
+        id: "cmake",
+        command: "cmake",
+        args: &["--version"],
+        extra: &[],
+    },
+    Probe {
+        id: "gradle",
+        command: "gradle",
+        args: &["--version"],
+        extra: &["/opt/gradle/bin"],
+    },
+    Probe {
+        id: "maven",
+        command: "mvn",
+        args: &["--version"],
+        extra: &["/opt/maven/bin"],
     },
 ];
 
@@ -169,7 +241,19 @@ pub fn detect_with(
             .join(" ");
         let (version, output) = match read_version(&probe, &f, scratch) {
             Ok((v, line)) => (Some(v), line),
-            Err(e) => (None, e),
+            // A command that cannot run confined (Composer needs PHP's
+            // extensions, a JVM needs executable memory): the version dpkg
+            // recorded for the package that owns it.
+            Err(e) => match source_package
+                .as_deref()
+                .and_then(|package| dpkg_version(&search.dpkg_info, package))
+            {
+                Some((v, raw)) => (
+                    Some(v),
+                    format!("{} {raw} (apt)", source_package.as_deref().unwrap_or("")),
+                ),
+                None => (None, e),
+            },
         };
         out.insert(
             probe.id.to_string(),
@@ -305,8 +389,21 @@ fn install_root(real: &Path) -> PathBuf {
 }
 
 /// The version in a runtime's `--version` output: `go1.27.4`, `v22.23.4`,
-/// `Python 3.14.4`, `PHP 8.5.4 (cli)` or `PHP 8.3.6-1ubuntu1 (cli)`.
+/// `Python 3.14.4`, `PHP 8.5.4 (cli)`, `PHP 8.3.6-1ubuntu1 (cli)`,
+/// `rustc 1.99.1 (…)`, `openjdk 25 2026-09-16`, `Composer version 2.9.5 …`,
+/// `Ubuntu clang version 20.1.2`, `info: kotlinc-jvm 2.4.21 (JRE …)`,
+/// `Gradle 9.9.1` or `Apache Maven 3.10.1 (…)`.
 pub fn parse_version(id: &str, output: &str) -> Option<String> {
+    // A first feature release of Java has no dots: `openjdk 25 2026-09-16`.
+    if id == "java" {
+        let mut words = output.split_whitespace();
+        if let (Some(_), Some(second)) = (words.next(), words.next()) {
+            if !second.is_empty() && second.len() <= 3 && second.bytes().all(|b| b.is_ascii_digit())
+            {
+                return Some(second.to_string());
+            }
+        }
+    }
     for token in output.split_whitespace() {
         let token = match id {
             "go" => match token.strip_prefix("go") {
@@ -320,9 +417,15 @@ pub fn parse_version(id: &str, output: &str) -> Option<String> {
             .chars()
             .take_while(|c| c.is_ascii_digit() || *c == '.')
             .collect();
-        let numeric = numeric.trim_end_matches('.');
-        if numeric.contains('.') && version::Version::parse(numeric).is_some() {
-            return Some(numeric.to_string());
+        // Distribution builds append their own counters (`25.0.5.0.3`).
+        let numeric = numeric
+            .trim_end_matches('.')
+            .split('.')
+            .take(4)
+            .collect::<Vec<_>>()
+            .join(".");
+        if numeric.contains('.') && version::Version::parse(&numeric).is_some() {
+            return Some(numeric);
         }
     }
     None
@@ -376,14 +479,45 @@ fn dpkg_owners(info: &Path, paths: &[String]) -> HashMap<String, String> {
     owners
 }
 
+/// The upstream version of an installed dpkg package, with the version dpkg
+/// records (`2.9.5-1`, `1:25.0.5+8-1ubuntu1`): read from the `status` file
+/// next to the `info` directory.
+fn dpkg_version(info: &Path, package: &str) -> Option<(String, String)> {
+    let status = fs::read_to_string(info.parent()?.join("status")).ok()?;
+    for stanza in status.split("\n\n") {
+        let field = |name: &str| {
+            stanza
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .map(str::trim)
+        };
+        let name = field("Package:")?;
+        if name != package || !field("Status:").is_some_and(|s| s.ends_with(" installed")) {
+            continue;
+        }
+        let raw = field("Version:")?;
+        // Without the epoch (`1:`); the Debian revision is not numeric-dotted
+        // and falls away in `parse_version`.
+        let upstream = raw.split_once(':').map_or(raw, |(_, rest)| rest);
+        return parse_version("", upstream).map(|v| (v, raw.to_string()));
+    }
+    None
+}
+
 /// The release line of a system version in the catalog's channels: the
 /// longest channel id it starts with (`3.14` for `3.14.4`, `22` for
-/// `22.23.4`), else the default line of that version.
+/// `22.23.4`); a package with one rolling line (`stable`) has every version
+/// on it; else the default line of that version.
 pub fn channel_of(version: &str, channels: &[String]) -> String {
     channels
         .iter()
         .filter(|c| version == c.as_str() || version.starts_with(&format!("{c}.")))
         .max_by_key(|c| c.len())
+        .or_else(|| {
+            channels
+                .iter()
+                .find(|c| !c.starts_with(|ch: char| ch.is_ascii_digit()))
+        })
         .cloned()
         .unwrap_or_else(|| {
             version::Version::parse(version)
@@ -404,6 +538,40 @@ mod tests {
     }
 
     #[test]
+    fn the_dpkg_version_stands_in_when_the_command_cannot_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let info = dir.path().join("info");
+        fs::create_dir_all(&info).unwrap();
+        fs::write(
+            dir.path().join("status"),
+            "Package: composer\nStatus: install ok installed\nVersion: 2.9.5-1\n\n\
+             Package: openjdk-25-jre-headless\nStatus: install ok installed\n\
+             Version: 1:25.0.5+8-1ubuntu1\n\n\
+             Package: gone\nStatus: deinstall ok config-files\nVersion: 1.2.3-1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            dpkg_version(&info, "composer"),
+            Some(("2.9.5".into(), "2.9.5-1".into()))
+        );
+        assert_eq!(
+            dpkg_version(&info, "openjdk-25-jre-headless").map(|v| v.0),
+            Some("25.0.5".into())
+        );
+        assert_eq!(dpkg_version(&info, "gone"), None);
+        assert_eq!(dpkg_version(&info, "missing"), None);
+    }
+
+    #[test]
+    fn rolling_packages_have_every_version_on_their_line() {
+        let stable = vec!["stable".to_string()];
+        assert_eq!(channel_of("2.9.5", &stable), "stable");
+        let lines = vec!["3.10".to_string()];
+        assert_eq!(channel_of("3.10.1", &lines), "3.10");
+        assert_eq!(channel_of("3.9.9", &lines), "3.9");
+    }
+
+    #[test]
     fn versions_are_read_from_each_runtime_output() {
         let cases = [
             ("go", "go version go1.27.4 linux/amd64", Some("1.27.4")),
@@ -415,6 +583,56 @@ mod tests {
                 Some("8.5.4"),
             ),
             ("php", "PHP 8.3.6-1ubuntu1.2 (cli)", Some("8.3.6")),
+            (
+                "rust",
+                "rustc 1.99.1 (4d2c3a1b9 2026-10-02)",
+                Some("1.99.1"),
+            ),
+            (
+                "java",
+                "openjdk 25.0.1 2026-10-20 LTS\nOpenJDK Runtime Environment",
+                Some("25.0.1"),
+            ),
+            ("java", "openjdk 25 2026-09-16\nOpenJDK Runtime", Some("25")),
+            ("bun", "1.4.4\n", Some("1.4.4")),
+            (
+                "deno",
+                "deno 2.9.8 (stable, release)\nv8 14.1",
+                Some("2.9.8"),
+            ),
+            ("dotnet", "11.0.100\n", Some("11.0.100")),
+            (
+                "clang",
+                "Ubuntu clang version 20.1.2 (0ubuntu1)\nTarget: x86_64",
+                Some("20.1.2"),
+            ),
+            (
+                "composer",
+                "Composer version 2.9.5 2026-01-29 11:40:53\nPHP version 8.5.4",
+                Some("2.9.5"),
+            ),
+            ("zig", "0.17.1\n", Some("0.17.1")),
+            (
+                "kotlin",
+                "info: kotlinc-jvm 2.4.21 (JRE 25.0.1+9)",
+                Some("2.4.21"),
+            ),
+            ("cmake", "cmake version 4.5.0\n\nCMake suite", Some("4.5.0")),
+            (
+                "gradle",
+                "\n------------------------------\nGradle 9.9.1\n------\n\nBuild time: 2026-10-01",
+                Some("9.9.1"),
+            ),
+            (
+                "maven",
+                "Apache Maven 3.10.1 (abc123)\nMaven home: /usr/share/maven",
+                Some("3.10.1"),
+            ),
+            (
+                "java",
+                "openjdk 25.0.5.0.3 2026-10-24\nOpenJDK Runtime Environment",
+                Some("25.0.5.0"),
+            ),
             ("go", "go: unknown command", None),
             ("python", "", None),
         ];

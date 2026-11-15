@@ -9,6 +9,49 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-15
+
+### Added
+
+- **Terminals survive a page reload.** A shell now stays open until its tab
+  (or the Terminal window) is closed. Reloading the page, closing the browser
+  or losing the network only detaches it: the shell and its programs keep
+  running, and Terminal shows every running shell again as a tab when it is
+  opened next, with recent output replayed. A shell nobody is viewing is
+  closed after `terminal_idle_minutes` without output (default now 24 hours;
+  it used to be reaped 30 seconds after the page went away). Unattended shells
+  are still closed within 30 seconds when their owner is disabled, loses the
+  Terminal permission or (root shells) stops being an administrator.
+- **App Center detects every official runtime the server already has**, not
+  only Go, Node.js, Python and PHP: Rust, Java, Bun, Deno, .NET, Clang,
+  Composer, Zig, Kotlin, CMake, Gradle and Maven installed with apt, snap or
+  by hand are listed as *System* installs with an update to the verified
+  version. With `packages_system_wide`, their commands are linked into
+  `/usr/local/bin` as well, so the updated version replaces the old one for
+  terminals, `sudo` and services (the apt files are shadowed, never changed).
+
+### Changed
+
+- **Administrator root shells behave like a root login.** They are no longer
+  held to the per-terminal memory/CPU/task limits (1 GiB and 512 tasks stopped
+  builds and larger tools), and their `PATH` includes `~/.local/bin`, `~/bin`
+  and `/snap/bin` like a login shell. Ordinary users keep their limits.
+- A system runtime on a release line the catalog no longer carries is offered
+  the newest verified version instead of no update, and **Install** no longer
+  fails with "No compatible version is available" in that case.
+
+### Fixed
+
+- A system version is recognised for packages with one rolling line
+  (`stable`); Composer 2.9 was treated as its own release line with nothing to
+  install.
+- The version of a system command that cannot run inside the check sandbox
+  (Composer needs PHP's extensions, distribution JDK builds such as
+  `25.0.5.0.3`) is read from the dpkg database or shortened instead of being
+  reported as unknown.
+- A terminal window that lost its session to another window no longer detaches
+  the new viewer.
+
 ## [0.16.2] - 2026-11-15
 
 ### Fixed

@@ -55,9 +55,13 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   filesystem and command access, including package management and system
   services. This is intentional: RAST administrators are server owners and
   already control the host through Docker/App Center. The session still runs
-  in its own transient cgroup with the configured memory/CPU/task limits, but
-  the unprivileged hardening used for ordinary users is disabled so system
-  tools work. Set `terminal_admin_root = false` to give administrators the
+  in its own transient cgroup (so closing the tab ends everything it started),
+  but without the resource limits and the unprivileged hardening used for
+  ordinary users, so system tools work. `PATH` is what a root login has,
+  including `/root/.local/bin` and `/snap/bin`. A tool installed only for
+  another Linux account (for example in `/home/<name>/.local/bin`) is not on
+  root's `PATH`, exactly as with `sudo -i`: install it for root or run it by
+  its full path. Set `terminal_admin_root = false` to give administrators the
   mapped unprivileged identity instead. Ordinary users are never granted root
   by this feature.
 * **Secrets**: the agent and shell run in a fresh, explicitly constructed
@@ -73,19 +77,28 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   account may not open in File Station. Folders that are not opened once remain
   inaccessible from the shell until an administrator changes their RAST access
   or they are opened in a terminal once (the ACL is grant-only and idempotent).
-* **Lifecycle**: sessions live in the server's memory. Closing a tab terminates
-  that process tree (SIGTERM, then SIGKILL after a short grace). A network
-  interruption keeps the shell alive for `terminal_grace_seconds`; reconnecting
-  attaches to the existing PTY. Signing out, disabling the account or revoking
-  the Terminal permission closes the affected sessions within 30 seconds.
+* **Lifecycle**: a terminal stays open until it is closed. Closing a tab (or
+  the Terminal window) terminates that process tree (SIGTERM, then SIGKILL
+  after a short grace). Reloading the page, closing the browser or losing the
+  network only detaches the viewer: the shell and whatever runs in it keep
+  going, and Terminal shows every running shell again as a tab when it is
+  opened next (the desktop reopens the Terminal window after a reload), with
+  the most recent 256 KiB of output replayed. A shell nobody is viewing is
+  closed after `terminal_idle_minutes` without output (default 24 hours). One
+  window shows a session at a time: opening it elsewhere takes it over.
+  Signing out, disabling the account or revoking the Terminal permission
+  closes the affected sessions within 30 seconds, viewed or not. Sessions live
+  in the server's memory, so restarting or updating RAST ends them.
   Server shutdown stops the transient units through systemd (they are
   `KillMode=control-group`), never touching other users' processes.
 
 ## Limits and security
 
 * `terminal_max_sessions` per user, `terminal_memory_mb`, `terminal_cpus`,
-  `terminal_tasks` per session (systemd `MemoryMax`, `CPUQuota`, `TasksMax`);
-  the same cgroup limits apply to administrator root shells.
+  `terminal_tasks` per session (systemd `MemoryMax`, `CPUQuota`, `TasksMax`)
+  for ordinary users. Administrator root shells are not limited (builds,
+  package managers and tools such as coding agents need more than the default
+  1 GiB / 512 tasks), like a root login over SSH.
 * Administrator shells are full root shells (see Permissions); everyone else is
   confined to the mapped identity and ACL-granted folders.
 * Output is streamed in bounded frames and a slow browser applies TCP
@@ -111,7 +124,8 @@ New tabs receive a composed environment:
   Rust, Eclipse Temurin JDK, Bun, Deno, .NET SDK (C#), Clang/LLVM (C/C++),
   Flutter/Dart, Composer, Zig, Kotlin, CMake, Gradle, Apache Maven) followed by
   the standard system directories, plus `JAVA_HOME`, `DOTNET_ROOT`, etc. for
-  the selected versions. Composer's `composer` wrapper uses the `php` that is
+  the selected versions; the account's own `~/.local/bin` and `~/bin` come
+  first and `/snap/bin` last when they exist. Composer's `composer` wrapper uses the `php` that is
   first on the shell's `PATH` (managed PHP when selected, otherwise the OS
   PHP).
 * Per-user defaults live in the Terminal environment panel (stored in RAST's
@@ -174,11 +188,11 @@ Settings are flat file keys (see `deploy/rast.toml.example`):
 | `terminal_enabled` | `true` | Offer the Terminal feature (permission rules still apply). |
 | `terminal_admin_root` | `true` | Administrators get a root shell; selected ordinary users always get their unprivileged identity. |
 | `terminal_max_sessions` | `8` | Maximum concurrent terminals per account. |
-| `terminal_grace_seconds` | `30` | How long a disconnected tab may reconnect to the same shell. |
-| `terminal_idle_minutes` | `240` | Close sessions with no viewer after this idle time (0 = only the grace period). |
-| `terminal_memory_mb` | `1024` | Memory limit per terminal (systemd `MemoryMax`). |
-| `terminal_cpus` | `2` | CPU limit per terminal (`CPUQuota` = 100× this). |
-| `terminal_tasks` | `512` | Process/thread limit per terminal (`TasksMax`). |
+| `terminal_grace_seconds` | `30` | Minimum time a terminal without a viewer is kept. |
+| `terminal_idle_minutes` | `1440` | Close a terminal nobody is viewing after this many minutes without output (0 = right after the grace period). |
+| `terminal_memory_mb` | `1024` | Memory limit per terminal of an ordinary user (systemd `MemoryMax`). |
+| `terminal_cpus` | `2` | CPU limit per terminal of an ordinary user (`CPUQuota` = 100× this). |
+| `terminal_tasks` | `512` | Process/thread limit per terminal of an ordinary user (`TasksMax`). |
 
 Environment equivalents: `RAST_TERMINAL_ENABLED`, `RAST_TERMINAL_ADMIN_ROOT`, `RAST_TERMINAL_MAX_SESSIONS`,
 `RAST_TERMINAL_GRACE_SECONDS`, `RAST_TERMINAL_IDLE_MINUTES`,

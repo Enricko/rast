@@ -45,6 +45,8 @@ const VIEWER_QUEUE: usize = 64;
 const AGENT_QUEUE: usize = 64;
 /// How long to wait for the agent socket after the unit started.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How often the owner of an unattended session is re-checked.
+const OWNER_CHECK: Duration = Duration::from_secs(30);
 /// Sweeper interval.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -80,6 +82,9 @@ pub struct TerminalViewer {
     /// unprivileged identity.
     pub root: bool,
     pub runtimes: BTreeMap<String, String>,
+    /// Identifies this attachment: a later attach (another window, a page
+    /// reload) replaces it, and a stale detach must not drop the new viewer.
+    pub viewer_id: u64,
     /// Recent output to replay before live frames.
     pub replay: Vec<u8>,
     pub events: mpsc::Receiver<ViewerEvent>,
@@ -94,6 +99,10 @@ enum AgentCommand {
 
 struct SessionInner {
     viewer: Option<mpsc::Sender<ViewerEvent>>,
+    viewer_id: u64,
+    /// When the owner's account and Terminal permission were last re-checked
+    /// while nobody was viewing the session.
+    owner_checked: Instant,
     ring: VecDeque<u8>,
     detach_deadline: Option<Instant>,
     last_activity: Instant,
@@ -110,6 +119,9 @@ pub struct Session {
     pub started_at: i64,
     /// Runtime versions this shell was started with (shown on reconnect).
     pub runtimes: BTreeMap<String, String>,
+    /// The account that opened the session, for the checks made while no
+    /// browser is attached.
+    owner: AuthUser,
     inner: Mutex<SessionInner>,
     commands: mpsc::Sender<AgentCommand>,
 }
@@ -117,7 +129,7 @@ pub struct Session {
 impl Session {
     fn new(
         id: String,
-        user_id: i64,
+        owner: &AuthUser,
         shell: String,
         cwd: String,
         root: bool,
@@ -126,7 +138,8 @@ impl Session {
     ) -> Arc<Self> {
         Arc::new(Self {
             id,
-            user_id,
+            user_id: owner.id,
+            owner: owner.clone(),
             shell,
             cwd,
             root,
@@ -134,6 +147,8 @@ impl Session {
             runtimes,
             inner: Mutex::new(SessionInner {
                 viewer: None,
+                viewer_id: 0,
+                owner_checked: Instant::now(),
                 ring: VecDeque::with_capacity(REPLAY_LIMIT.min(64 * 1024)),
                 detach_deadline: None,
                 last_activity: Instant::now(),
@@ -170,7 +185,14 @@ impl Session {
             return None;
         }
         let (tx, rx) = mpsc::channel(VIEWER_QUEUE);
+        // One viewer at a time: the window that had it is told why it stops.
+        if let Some(previous) = inner.viewer.take() {
+            let _ = previous.try_send(ViewerEvent::Error(
+                "This terminal was opened in another window.".to_string(),
+            ));
+        }
         inner.viewer = Some(tx);
+        inner.viewer_id += 1;
         inner.detach_deadline = None;
         inner.last_activity = Instant::now();
         let replay: Vec<u8> = inner.ring.iter().copied().collect();
@@ -180,15 +202,22 @@ impl Session {
             cwd: self.cwd.clone(),
             root: self.root,
             runtimes: self.runtimes.clone(),
+            viewer_id: inner.viewer_id,
             replay,
             events: rx,
         })
     }
 
-    async fn detach(&self) {
+    async fn detach(&self, viewer_id: u64) {
         let mut inner = self.inner.lock().await;
+        if inner.viewer_id != viewer_id {
+            // A newer viewer took over; it stays attached.
+            return;
+        }
         inner.viewer = None;
         inner.detach_deadline = Some(Instant::now());
+        inner.last_activity = Instant::now();
+        inner.owner_checked = Instant::now();
     }
 
     async fn mark_closed(&self) {
@@ -225,8 +254,10 @@ impl TerminalManager {
         })
     }
 
-    /// Background sweeper: reaps detached sessions after the grace period and
-    /// enforces the idle timeout.
+    /// Background sweeper: a session nobody is viewing (page reloaded, browser
+    /// closed, network lost) keeps running until it has been idle for
+    /// `terminal_idle_minutes`, so reopening Terminal finds it again. It is
+    /// closed sooner when its owner may no longer use the Terminal.
     pub fn spawn_sweeper(self: &Arc<Self>) {
         let manager = self.clone();
         tokio::spawn(async move {
@@ -263,16 +294,65 @@ impl TerminalManager {
                     true
                 } else if inner.viewer.is_none() {
                     match inner.detach_deadline {
-                        Some(deadline) => now.duration_since(deadline) >= grace,
+                        Some(deadline) => {
+                            now.duration_since(deadline) >= grace
+                                && idle.is_none_or(|limit| {
+                                    now.duration_since(inner.last_activity) >= limit
+                                })
+                        }
                         None => false,
                     }
                 } else {
-                    idle.is_some_and(|limit| now.duration_since(inner.last_activity) >= limit)
+                    false
                 }
             };
+            let close = close || self.owner_lost_access(&session, now).await;
             if close {
                 self.close_session(&session).await;
             }
+        }
+    }
+
+    /// Whether the owner of an unattended session may no longer use it: the
+    /// account was disabled or removed, lost the Terminal permission, or (for
+    /// a root shell) is no longer an administrator. Attached sessions are
+    /// checked by their WebSocket; this is checked every [`OWNER_CHECK`].
+    async fn owner_lost_access(&self, session: &Arc<Session>, now: Instant) -> bool {
+        {
+            let mut inner = session.inner.lock().await;
+            if inner.closed
+                || inner.viewer.is_some()
+                || now.duration_since(inner.owner_checked) < OWNER_CHECK
+            {
+                return false;
+            }
+            inner.owner_checked = now;
+        }
+        let row: Result<Option<(String, i64)>, _> =
+            sqlx::query_as("SELECT role, active FROM users WHERE id = ?")
+                .bind(session.user_id)
+                .fetch_optional(&self.db)
+                .await;
+        let (role, active) = match row {
+            Ok(Some(found)) => found,
+            Ok(None) => return true,
+            // A database hiccup is not a reason to kill someone's shell.
+            Err(_) => return false,
+        };
+        if active != 1 {
+            return true;
+        }
+        let Some(role) = crate::auth::Role::parse(&role) else {
+            return true;
+        };
+        if session.root && role != crate::auth::Role::Admin {
+            return true;
+        }
+        let mut owner = session.owner.clone();
+        owner.role = role;
+        match crate::access::app_access(&self.db, &owner, "terminal").await {
+            Ok(access) => !access.allowed,
+            Err(_) => false,
         }
     }
 
@@ -467,7 +547,7 @@ impl TerminalManager {
         let (commands_tx, commands_rx) = mpsc::channel(AGENT_QUEUE);
         let session = Session::new(
             session_id.clone(),
-            user.id,
+            user,
             shell.clone(),
             final_cwd.clone(),
             root,
@@ -493,7 +573,8 @@ impl TerminalManager {
         Ok(viewer)
     }
 
-    /// Re-attach an existing session after a temporary network interruption.
+    /// Attach to a running session: after a network interruption, a page
+    /// reload or reopening Terminal.
     pub async fn attach(
         self: &Arc<Self>,
         user: &AuthUser,
@@ -517,14 +598,14 @@ impl TerminalManager {
             .ok_or(AppError::NotFound("that terminal has ended"))
     }
 
-    /// Mark a viewer detached; the sweeper reaps the session after the grace.
-    pub async fn detach(&self, session_id: &str) {
+    /// Mark a viewer detached; the shell keeps running for a later attach.
+    pub async fn detach(&self, session_id: &str, viewer_id: u64) {
         let session = {
             let map = self.sessions.lock().await;
             map.get(session_id).cloned()
         };
         if let Some(session) = session {
-            session.detach().await;
+            session.detach(viewer_id).await;
         }
     }
 
@@ -821,5 +902,53 @@ mod tests {
             ring.push_back(*byte);
         }
         assert_eq!(ring.len(), REPLAY_LIMIT);
+    }
+
+    fn owner() -> AuthUser {
+        AuthUser {
+            id: 7,
+            username: "ada".into(),
+            display_name: "Ada".into(),
+            role: crate::auth::Role::Admin,
+            session_id: "s".into(),
+            quota_bytes: 0,
+            must_change_password: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reload_reattaches_and_a_stale_detach_keeps_the_new_viewer() {
+        let (commands, _rx) = mpsc::channel(4);
+        let session = Session::new(
+            "abc".into(),
+            &owner(),
+            "/bin/bash".into(),
+            "/root".into(),
+            true,
+            BTreeMap::new(),
+            commands,
+        );
+        let mut first = session.attach().await.unwrap();
+        session.push_output(b"hello").await;
+        // The page is reloaded: the new page attaches before the old socket
+        // is seen closing, and gets the output so far.
+        let second = session.attach().await.unwrap();
+        assert_eq!(second.replay, b"hello");
+        assert_ne!(first.viewer_id, second.viewer_id);
+        assert!(matches!(
+            first.events.recv().await,
+            Some(ViewerEvent::Output(_))
+        ));
+        assert!(matches!(
+            first.events.recv().await,
+            Some(ViewerEvent::Error(message)) if message.contains("another window")
+        ));
+        // The old socket's detach arrives late and changes nothing.
+        session.detach(first.viewer_id).await;
+        assert!(session.inner.lock().await.viewer.is_some());
+        // Closing the browser detaches for real; the shell stays for later.
+        session.detach(second.viewer_id).await;
+        let inner = session.inner.lock().await;
+        assert!(inner.viewer.is_none() && inner.detach_deadline.is_some() && !inner.closed);
     }
 }

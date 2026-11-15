@@ -62,8 +62,8 @@ applied by `src/config.rs`.
 | `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
 | `terminal_admin_root` | boolean | `true` | Administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Selected ordinary users always run unprivileged. Set `false` if administrators should not get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
 | `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
-| `terminal_grace_seconds` | integer | `30` | Reconnect grace period for a disconnected terminal before its process tree is terminated (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
-| `terminal_idle_minutes` | integer | `240` | Close terminals with no viewer after this many idle minutes; `0` keeps only the reconnect grace | `RAST_TERMINAL_IDLE_MINUTES` |
+| `terminal_grace_seconds` | integer | `30` | Minimum time a terminal without a viewer is kept (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
+| `terminal_idle_minutes` | integer | `1440` | A terminal keeps running after a page reload or a closed browser; close it after this many minutes without output while nobody views it (`0` = right after the grace, 0-10080) | `RAST_TERMINAL_IDLE_MINUTES` |
 | `terminal_memory_mb` | integer | `1024` | `MemoryMax` of one terminal session | `RAST_TERMINAL_MEMORY_MB` |
 | `terminal_cpus` | integer | `2` | `CPUQuota` of one terminal session, in CPUs | `RAST_TERMINAL_CPUS` |
 | `terminal_tasks` | integer | `512` | `TasksMax` (processes/threads) of one terminal session | `RAST_TERMINAL_TASKS` |
