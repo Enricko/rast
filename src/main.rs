@@ -149,6 +149,14 @@ enum PackageCommand {
         #[arg(long, value_name = "DIR")]
         dist: Option<PathBuf>,
     },
+    /// Embed an SVG/PNG icon into a package manifest (default rast-package.json)
+    EmbedIcon {
+        /// SVG or PNG icon to embed (max 64 KiB)
+        image: PathBuf,
+        /// Manifest to update (default: rast-package.json)
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+    },
     /// Write rast-package.json for a release tag from archives in dist/
     Manifest {
         /// Repository package.json with the manifest template
@@ -531,6 +539,19 @@ fn package_command(cmd: PackageCommand) -> Result<ExitCode, Box<dyn std::error::
                 value.id,
                 value.version,
                 value.revision
+            );
+        }
+        PackageCommand::EmbedIcon { image, manifest } => {
+            let path = manifest.unwrap_or_else(|| PathBuf::from("rast-package.json"));
+            let package = authoring::embed_icon(&path, &image)?;
+            let icon = package.icon.as_ref().expect("embed_icon sets the icon");
+            println!(
+                "{}: embedded {} icon ({} base64 chars) for {} {}",
+                path.display(),
+                icon.media_type,
+                icon.data.len(),
+                package.id,
+                package.version
             );
         }
         PackageCommand::Manifest {

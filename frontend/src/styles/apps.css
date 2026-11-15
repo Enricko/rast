@@ -2677,6 +2677,20 @@ button.pkg-pill {
   --pkg-size: 92px;
 }
 
+/* Package-provided SVG/PNG icons sit on a plain tile and are never stretched. */
+.pkg-icon.has-image {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.pkg-icon.has-image img {
+  display: block;
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+}
+
 /* RAST's own apps keep their app icon on a plain tile. */
 .pkg-icon.is-app {
   background: var(--surface);

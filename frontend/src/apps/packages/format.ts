@@ -247,3 +247,27 @@ export function monogram(name: string, id = ""): string {
   if (!letters) return "?";
   return letters.length > 2 && /^[A-Z]{2,}/.test(letters) ? letters.slice(0, 3) : letters.slice(0, 2).replace(/^./, (c) => c.toUpperCase());
 }
+
+/** Allowed icon types; anything else is ignored (the tile falls back to a monogram). */
+const PACKAGE_ICON_TYPES = new Set(["image/svg+xml", "image/png"]);
+/** ~64 KiB decoded icon; base64 is ~4/3 of that. */
+const PACKAGE_ICON_MAX_BASE64 = 96 * 1024;
+
+/**
+ * Build a safe data: URI for a package icon.
+ *
+ * The backend validates icons before publishing them, but the browser must not
+ * trust catalog/manifest data: only the two image types RAST supports are
+ * rendered, the payload must be plain base64, and it is bounded. SVGs are
+ * served through an `<img>` element (script execution and external references
+ * are blocked there), never injected as inline markup.
+ */
+export function packageIconDataUrl(icon: { mediaType?: unknown; data?: unknown } | null | undefined): string | null {
+  if (!icon || typeof icon !== "object") return null;
+  const mediaType = typeof icon.mediaType === "string" ? icon.mediaType : "";
+  const data = typeof icon.data === "string" ? icon.data.trim() : "";
+  if (!PACKAGE_ICON_TYPES.has(mediaType)) return null;
+  if (!data || data.length > PACKAGE_ICON_MAX_BASE64) return null;
+  if (data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data)) return null;
+  return `data:${mediaType};base64,${data}`;
+}

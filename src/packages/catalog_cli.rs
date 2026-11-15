@@ -312,6 +312,14 @@ impl<T> Ordered<T> {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
     }
+
+    #[cfg(test)]
+    fn get_mut(&mut self, key: &str) -> Option<&mut T> {
+        self.entries
+            .iter_mut()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
 }
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for Ordered<T> {
@@ -356,6 +364,10 @@ struct Config {
     #[serde(default)]
     revisions: BTreeMap<String, u32>,
     packages: Ordered<PackageConfig>,
+    /// Directory of the `catalog.config.json` that was loaded; package `icon`
+    /// paths are relative to it. Never serialized/deserialized.
+    #[serde(skip)]
+    config_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -463,13 +475,41 @@ struct PackageConfig {
     /// attestations (a missing attestation fails the verification job).
     #[serde(default)]
     github_attestations: bool,
+    /// Package icon file, relative to `catalog.config.json` (or absolute):
+    /// `.svg` or `.png`, at most 64 KiB decoded. Embedded base64 into the
+    /// package entry of every catalog the workflow publishes.
+    #[serde(default)]
+    icon: Option<String>,
     channels: Vec<Value>,
 }
 
+impl PackageConfig {
+    /// Absolute path of the configured icon file, if any.
+    fn icon_path(&self, config_dir: &Path) -> Option<PathBuf> {
+        self.icon.as_deref().map(|icon| {
+            let path = Path::new(icon);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                config_dir.join(path)
+            }
+        })
+    }
+}
+
 fn load_config() -> Result<Config, String> {
-    let path = PathBuf::from("catalog.config.json");
-    let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("{} is not valid: {e}", path.display()))
+    load_config_from(Path::new("catalog.config.json"))
+}
+
+/// Read the catalog configuration from `path` and remember its directory so
+/// package `icon` paths resolve relative to the config file (not the current
+/// directory).
+fn load_config_from(path: &Path) -> Result<Config, String> {
+    let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut config: Config = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("{} is not valid: {e}", path.display()))?;
+    config.config_dir = path.parent().unwrap_or_else(|| Path::new("")).to_path_buf();
+    Ok(config)
 }
 
 fn channel_ids(package: &PackageConfig) -> Vec<String> {
@@ -5874,25 +5914,40 @@ fn build_manifest(
     Ok((Some(Value::Object(manifest)), String::new()))
 }
 
-fn package_entries(cfg: &Config) -> Vec<(String, Value)> {
-    cfg.packages
-        .entries
-        .iter()
-        .map(|(id, package)| {
-            let entry = json!({
-                "id": id,
-                "type": "runtime",
-                "name": package.name,
-                "description": package.description,
-                "homepage": package.homepage,
-                "license": package.license,
-                "channels": package.channels,
-                "versions": [],
-                "detected": [],
-            });
-            (id.clone(), entry)
-        })
-        .collect()
+/// The catalog package entries (one per configured package, no versions yet).
+///
+/// Package-level metadata comes from `catalog.config.json`; a configured
+/// `icon` file is loaded, validated and embedded as base64 in the entry (the
+/// same [`manifest::PackageIcon`] shape as a manifest icon). Package entries
+/// are regenerated from the config by every command, so interim and final
+/// catalogs always carry the current icons.
+fn package_entries(cfg: &Config) -> Result<Vec<(String, Value)>, String> {
+    let mut entries = Vec::with_capacity(cfg.packages.entries.len());
+    for (id, package) in &cfg.packages.entries {
+        let mut entry = json!({
+            "id": id,
+            "type": "runtime",
+            "name": package.name,
+            "description": package.description,
+            "homepage": package.homepage,
+            "license": package.license,
+            "channels": package.channels,
+            "versions": [],
+            "detected": [],
+        });
+        if let Some(path) = package.icon_path(&cfg.config_dir) {
+            let icon = manifest::package_icon_from_file(&path)
+                .map_err(|error| format!("catalog.config.json packages.{id}.icon: {error}"))?;
+            let icon = serde_json::to_value(&icon)
+                .map_err(|error| format!("cannot serialize the {id} icon: {error}"))?;
+            entry
+                .as_object_mut()
+                .expect("a package entry is a JSON object")
+                .insert("icon".into(), icon);
+        }
+        entries.push((id.clone(), entry));
+    }
+    Ok(entries)
 }
 
 fn push_version(packages: &mut [(String, Value)], version: &Value) -> Result<(), String> {
@@ -6032,7 +6087,7 @@ fn interim_with_config(
 ) -> Result<(), String> {
     let plan = read_plan(plan_path)?;
     let prev = load_previous(Some(previous))?;
-    let mut packages = package_entries(cfg);
+    let mut packages = package_entries(cfg)?;
     let keep = carry_keys(&plan);
     for manifest in carried_manifests(prev.as_ref(), &keep).values() {
         push_version(&mut packages, manifest)?;
@@ -6170,7 +6225,7 @@ fn assemble_with_config(
         })
         .collect::<Result<_, _>>()?;
     let php_releases = load_php_releases(php_releases_path)?;
-    let mut packages = package_entries(cfg);
+    let mut packages = package_entries(cfg)?;
     let keep = carry_keys(&plan);
     for manifest in carried_manifests(prev.as_ref(), &keep).values() {
         push_version(&mut packages, manifest)?;
@@ -6328,6 +6383,11 @@ fn catalog_problems(document: &Value) -> Result<Vec<String>, String> {
     }
     let mut problems = Vec::new();
     for package in &parsed.packages {
+        if let Some(icon) = &package.icon {
+            if let Err(error) = manifest::validate_icon(icon) {
+                problems.push(format!("{} icon: {error}", package.id));
+            }
+        }
         for manifest in &package.versions {
             if let Err(error) = manifest::validate(manifest) {
                 problems.push(format!("{} {}: {error}", package.id, manifest.version));
@@ -7126,6 +7186,37 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
         .unwrap()
     }
 
+    const TINY_NODE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 2 2 22h20z"/></svg>"#;
+    const TINY_PYTHON_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>"#;
+
+    /// `test_config` with two package icons on disk: relative paths resolved
+    /// against `dir` as if it were the directory of catalog.config.json.
+    fn icon_config(dir: &Path) -> Config {
+        fs::create_dir_all(dir.join("icons")).unwrap();
+        fs::write(dir.join("icons/nodejs.svg"), TINY_NODE_SVG).unwrap();
+        fs::write(dir.join("icons/python.svg"), TINY_PYTHON_SVG).unwrap();
+        let mut cfg = test_config();
+        cfg.config_dir = dir.to_path_buf();
+        cfg.packages.get_mut("nodejs").unwrap().icon = Some("icons/nodejs.svg".into());
+        cfg.packages.get_mut("python").unwrap().icon = Some("icons/python.svg".into());
+        cfg
+    }
+
+    fn assert_package_icons(document: &Value) {
+        for (id, svg) in [("nodejs", TINY_NODE_SVG), ("python", TINY_PYTHON_SVG)] {
+            let package = document["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|package| package["id"] == id)
+                .unwrap_or_else(|| panic!("catalog has no {id} package"));
+            assert_eq!(package["icon"]["mediaType"], "image/svg+xml", "{id}");
+            let data = package["icon"]["data"].as_str().unwrap();
+            assert_eq!(B64.decode(data).unwrap(), svg.as_bytes(), "{id}");
+            assert!(package["icon"].get("attribution").is_none(), "{id}");
+        }
+    }
+
     fn python_item() -> PlanItem {
         let mut targets = BTreeMap::new();
         targets.insert(
@@ -7470,7 +7561,7 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
     #[test]
     fn package_entries_keep_the_configuration_order() {
         let cfg = test_config();
-        let packages = package_entries(&cfg);
+        let packages = package_entries(&cfg).unwrap();
         assert_eq!(
             packages
                 .iter()
@@ -7482,6 +7573,131 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
         assert_eq!(packages[0].1["channels"][0]["id"], "24");
         assert_eq!(packages[0].1["versions"], json!([]));
         assert_eq!(packages[0].1["detected"], json!([]));
+        assert!(
+            packages[0].1.get("icon").is_none(),
+            "no configured icon means no icon key"
+        );
+    }
+
+    #[test]
+    fn package_icons_are_loaded_relative_to_the_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = icon_config(dir.path());
+        let packages = package_entries(&cfg).unwrap();
+        let node = &packages[0].1;
+        assert_eq!(node["icon"]["mediaType"], "image/svg+xml");
+        assert_eq!(
+            B64.decode(node["icon"]["data"].as_str().unwrap()).unwrap(),
+            TINY_NODE_SVG.as_bytes()
+        );
+        assert!(node["icon"].get("attribution").is_none());
+        let python = &packages[1].1;
+        assert_eq!(
+            B64.decode(python["icon"]["data"].as_str().unwrap())
+                .unwrap(),
+            TINY_PYTHON_SVG.as_bytes()
+        );
+
+        // Absolute icon paths are accepted too.
+        let mut cfg = icon_config(dir.path());
+        cfg.packages.get_mut("python").unwrap().icon = Some(
+            dir.path()
+                .join("icons/python.svg")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let packages = package_entries(&cfg).unwrap();
+        assert!(packages[1].1.get("icon").is_some());
+
+        // A missing file is a clear error naming the package and the path.
+        cfg.packages.get_mut("nodejs").unwrap().icon = Some("icons/missing.svg".into());
+        let error = package_entries(&cfg).unwrap_err();
+        assert!(error.contains("packages.nodejs.icon"), "{error}");
+        assert!(error.contains("missing.svg"), "{error}");
+
+        // The icon goes through the same validation as a manifest icon.
+        std::fs::write(dir.path().join("icons/bad.svg"), "<svg onload=\"x\"></svg>").unwrap();
+        let mut cfg = icon_config(dir.path());
+        cfg.packages.get_mut("python").unwrap().icon = Some("icons/bad.svg".into());
+        let error = package_entries(&cfg).unwrap_err();
+        assert!(error.contains("event handler"), "{error}");
+    }
+
+    #[test]
+    fn package_icons_reach_interim_and_final_catalogs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = icon_config(dir.path());
+        let previous_dir = dir.path().join("previous");
+        let old = previous_manifest(&cfg, "3.12.1", &["linux-x86_64"]);
+        write_previous_catalog(&previous_dir, 4, vec![old]);
+        let mut carry = python_item_for("3.12.1", &["linux-x86_64"], 1);
+        carry.status = "carry".into();
+        let plan = Plan {
+            generated_at: "2026-01-01T00:00:00Z".into(),
+            previous_sequence: 4,
+            withheld: Vec::new(),
+            items: vec![carry],
+            dropped: Vec::new(),
+        };
+        let plan_path = dir.path().join("plan.json");
+        write_json(&plan_path, &serde_json::to_value(&plan).unwrap()).unwrap();
+
+        let interim = dir.path().join("interim/catalog.json");
+        interim_with_config(&cfg, &plan_path, &previous_dir, &interim).unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(&interim).unwrap()).unwrap();
+        assert_package_icons(&document);
+        assert!(catalog_problems(&document).unwrap().is_empty());
+
+        let results_dir = dir.path().join("results");
+        fs::create_dir_all(&results_dir).unwrap();
+        let final_out = dir.path().join("out/catalog.json");
+        assemble_with_config(
+            &cfg,
+            &plan_path,
+            &previous_dir,
+            &results_dir,
+            None,
+            &final_out,
+        )
+        .unwrap();
+        let document: Value = serde_json::from_slice(&fs::read(&final_out).unwrap()).unwrap();
+        assert_package_icons(&document);
+        assert!(catalog_problems(&document).unwrap().is_empty());
+    }
+
+    #[test]
+    fn catalog_problems_reject_a_bad_package_icon() {
+        let cfg = test_config();
+        let mut packages = package_entries(&cfg).unwrap();
+        let document = catalog_doc(&cfg, 1, &mut packages).unwrap();
+        assert!(catalog_problems(&document).unwrap().is_empty());
+
+        let mut unknown = document.clone();
+        unknown["packages"][0]["icon"] = json!({"mediaType": "image/gif", "data": "AAAA"});
+        let problems = catalog_problems(&unknown).unwrap();
+        assert!(
+            problems
+                .iter()
+                .any(|problem| problem.contains("nodejs icon")
+                    && problem.contains("not supported")),
+            "{problems:?}"
+        );
+
+        let mut script = document.clone();
+        script["packages"][0]["icon"] = json!({
+            "mediaType": "image/svg+xml",
+            "data": B64.encode("<svg><script>alert(1)</script></svg>"),
+        });
+        let problems = catalog_problems(&script).unwrap();
+        assert!(
+            problems.iter().any(|problem| problem.contains("script")),
+            "{problems:?}"
+        );
+
+        // A malformed icon envelope is a parse error, not a list of problems.
+        let mut malformed = document;
+        malformed["packages"][0]["icon"] = json!({"mediaType": "image/svg+xml"});
+        assert!(catalog_problems(&malformed).is_err());
     }
 
     #[test]
@@ -7523,7 +7739,7 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
         manifest::validate(&parsed).unwrap();
 
         // The minimal assembled catalog validates through catalog::parse.
-        let mut packages = package_entries(&cfg);
+        let mut packages = package_entries(&cfg).unwrap();
         push_version(&mut packages, &manifest).unwrap();
         let doc = catalog_doc(&cfg, 3, &mut packages).unwrap();
         assert_eq!(doc["kind"], "rast-catalog");
@@ -7697,7 +7913,7 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
         let item = python_item();
         let (manifest, _) = build_manifest(&cfg, &item, &[python_result()], None).unwrap();
         let manifest = manifest.unwrap();
-        let mut packages = package_entries(&cfg);
+        let mut packages = package_entries(&cfg).unwrap();
         push_version(&mut packages, &manifest).unwrap();
         let doc = catalog_doc(&cfg, 1, &mut packages).unwrap();
 

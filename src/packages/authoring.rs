@@ -460,6 +460,31 @@ fn tempdir() -> Result<TempDir, String> {
     Ok(TempDir(path))
 }
 
+/// Embed an SVG/PNG icon into an existing package manifest.
+///
+/// The image is validated with the same rules the installer applies
+/// (`manifest::package_icon_from_file`), stored as base64 in the manifest's
+/// `icon` field and the manifest is re-validated before it is written back.
+pub fn embed_icon(manifest_path: &Path, image_path: &Path) -> Result<Manifest, String> {
+    let raw = std::fs::read(manifest_path)
+        .map_err(|error| format!("cannot read {}: {error}", manifest_path.display()))?;
+    let mut package: Manifest = serde_json::from_slice(&raw).map_err(|error| {
+        format!(
+            "{} is not a valid package manifest: {error}",
+            manifest_path.display()
+        )
+    })?;
+    let icon = crate::packages::manifest::package_icon_from_file(image_path)?;
+    package.icon = Some(icon);
+    crate::packages::manifest::validate(&package)?;
+    let mut pretty = serde_json::to_vec_pretty(&package)
+        .map_err(|error| format!("cannot encode the manifest: {error}"))?;
+    pretty.push(b'\n');
+    std::fs::write(manifest_path, pretty)
+        .map_err(|error| format!("cannot write {}: {error}", manifest_path.display()))?;
+    Ok(package)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,7 @@ import {
   linkLabel,
   monogram,
   monogramColor,
+  packageIconDataUrl,
   shortSha,
   sortForTiles,
   stateLabel,
@@ -741,15 +742,11 @@ class PackageCenterApp {
         class: "pkg-tile is-app is-installed",
         dataset: { appId: pkg.id },
       },
-      h(
-        "div",
-        { class: "pkg-icon pkg-icon-tile is-app", ariaHidden: true },
-        h(
-          "span",
-          { class: "pkg-monogram", style: `--monogram-color:${monogramColor(pkg.id)}` },
-          monogram(pkg.name),
-        ),
-      ),
+      (() => {
+        const icon = this.iconEl(pkg, "tile");
+        icon.classList.add("is-app");
+        return icon;
+      })(),
       h(
         "div",
         { class: "pkg-tile-body" },
@@ -943,6 +940,31 @@ class PackageCenterApp {
   }
 
   private iconEl(p: PackageView, size: "tile" | "hero"): HTMLElement {
+    const image = packageIconDataUrl(p.icon);
+    if (image) {
+      const imageEl = h("img", { ariaHidden: true });
+      imageEl.src = image;
+      imageEl.alt = "";
+      imageEl.loading = "lazy";
+      imageEl.decoding = "async";
+      const el = h(
+        "div",
+        { class: `pkg-icon pkg-icon-${size} has-image`, ariaHidden: true },
+        imageEl,
+      );
+      el.title = p.icon?.attribution ?? p.name;
+      return el;
+    }
+    if (p.packageType === "app") {
+      // App-type packages without a manifest icon get a neutral app glyph
+      // rather than a letter monogram.
+      const appEl = h(
+        "div",
+        { class: `pkg-icon pkg-icon-${size} is-app`, ariaHidden: true },
+        iconSvg("apps", size === "hero" ? 54 : 34),
+      );
+      return appEl;
+    }
     const text = monogram(p.name, p.id);
     const el = h("div", { class: `pkg-icon pkg-icon-${size}`, ariaHidden: true, dataset: { len: String(text.length) } }, text);
     el.style.setProperty("--pkg-color", monogramColor(p.id));

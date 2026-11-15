@@ -21,7 +21,9 @@
 //! The JSON Schema for authors lives in `docs/rast-package.schema.json`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 
 use super::version::{self, Version};
@@ -30,6 +32,15 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const MANIFEST_KIND: &str = "rast-package";
 pub const MANIFEST_FILE: &str = "rast-package.json";
 pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+/// Media types a package icon may use: an SVG document or a PNG image.
+pub const ICON_MEDIA_TYPES: &[&str] = &["image/svg+xml", "image/png"];
+/// Icons are embedded base64 in manifests and in the signed catalog; the
+/// decoded image is bounded so a catalog stays small.
+pub const MAX_ICON_BYTES: usize = 64 * 1024;
+/// Maximum length of an icon's optional attribution text.
+pub const MAX_ICON_ATTRIBUTION_CHARS: usize = 300;
+/// The 8 bytes every PNG file starts with.
+const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 pub const MAX_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// Archive formats the installer can extract safely (and, for `phar`, write
 /// as a verified single file).
@@ -157,6 +168,22 @@ pub struct AppSpec {
     /// Entry page for `web` apps, relative to `app/` (default index.html).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entry: Option<String>,
+}
+
+/// An icon shown for a package in the Package Center (runtimes) or App
+/// Center (apps). The image is embedded as base64 in the manifest (and in the
+/// catalog package entry), never fetched from the network, so an icon can not
+/// track or leak anything. Published catalogs use icons to identify official
+/// runtimes with their brand mark; see [`decode_icon`] for the exact rules.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PackageIcon {
+    /// `image/svg+xml` or `image/png`
+    pub media_type: String,
+    /// Standard base64 (no data: prefix, no whitespace)
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<String>,
 }
 
 /// One additional archive of a host target. Rust is installed from five
@@ -302,6 +329,10 @@ pub struct Manifest {
     /// Presentation for app-type packages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<AppSpec>,
+    /// Presentation icon embedded as base64; allowed on app and runtime
+    /// manifests alike and also used for catalog package entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<PackageIcon>,
 }
 
 impl Manifest {
@@ -469,6 +500,189 @@ fn is_sha256(value: &str) -> bool {
             .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
+/// Decode and validate an embedded package icon, returning the image bytes.
+///
+/// The same rules apply to a manifest's `icon` and to a catalog package
+/// entry's `icon`:
+///
+/// * `mediaType` is `image/svg+xml` or `image/png`;
+/// * `data` is standard base64 (padding required, no whitespace, no `data:`
+///   prefix);
+/// * the decoded image is 1 byte to 64 KiB;
+/// * PNG data starts with the 8-byte PNG signature;
+/// * SVG data is valid UTF-8 and contains no `<script`, `<foreignObject`,
+///   no event handler attribute (`onload="…"`), no `javascript:` URL and no
+///   external `href`/`xlink:href` to an http(s) resource.
+///
+/// The optional attribution text is checked by [`validate_icon`].
+pub fn decode_icon(icon: &PackageIcon) -> Result<Vec<u8>, String> {
+    if !ICON_MEDIA_TYPES.contains(&icon.media_type.as_str()) {
+        return Err(format!(
+            "icon mediaType {:?} is not supported (use {})",
+            icon.media_type,
+            ICON_MEDIA_TYPES.join(" or ")
+        ));
+    }
+    let bytes = B64
+        .decode(icon.data.as_bytes())
+        .map_err(|error| format!("icon data is not standard base64: {error}"))?;
+    if bytes.is_empty() || bytes.len() > MAX_ICON_BYTES {
+        return Err(format!(
+            "icon data must be 1 byte to {} KiB, found {} bytes",
+            MAX_ICON_BYTES / 1024,
+            bytes.len()
+        ));
+    }
+    match icon.media_type.as_str() {
+        "image/png" => {
+            if !bytes.starts_with(PNG_SIGNATURE) {
+                return Err("icon data is not a PNG image (bad signature)".into());
+            }
+        }
+        _ => validate_icon_svg(&bytes)?,
+    }
+    Ok(bytes)
+}
+
+/// Every rule of an embedded package icon: [`decode_icon`] plus an attribution
+/// of at most [`MAX_ICON_ATTRIBUTION_CHARS`] characters.
+pub fn validate_icon(icon: &PackageIcon) -> Result<(), String> {
+    decode_icon(icon)?;
+    if let Some(attribution) = &icon.attribution {
+        text(
+            "icon.attribution",
+            attribution,
+            0,
+            MAX_ICON_ATTRIBUTION_CHARS,
+        )?;
+    }
+    Ok(())
+}
+
+/// Load an icon file (`<name>.svg` or `<name>.png`) as an embeddable
+/// [`PackageIcon`], validating it through the same rules as an inline icon.
+/// Used by the catalog tooling to embed the official brand marks; attribution
+/// is omitted (catalog authors add it in the manifest/schema when needed).
+pub fn package_icon_from_file(path: &Path) -> Result<PackageIcon, String> {
+    let media_type = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        _ => {
+            return Err(format!(
+                "icon {} must be a .svg or .png file",
+                path.display()
+            ))
+        }
+    };
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("cannot read icon {}: {error}", path.display()))?;
+    if metadata.len() > MAX_ICON_BYTES as u64 {
+        return Err(format!(
+            "icon {} is larger than {} KiB",
+            path.display(),
+            MAX_ICON_BYTES / 1024
+        ));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("cannot read icon {}: {error}", path.display()))?;
+    if bytes.len() > MAX_ICON_BYTES {
+        return Err(format!(
+            "icon {} is larger than {} KiB",
+            path.display(),
+            MAX_ICON_BYTES / 1024
+        ));
+    }
+    let icon = PackageIcon {
+        media_type: media_type.into(),
+        data: B64.encode(&bytes),
+        attribution: None,
+    };
+    validate_icon(&icon).map_err(|error| format!("icon {}: {error}", path.display()))?;
+    Ok(icon)
+}
+
+/// SVG is text; reject active content so an embedded icon can not script the
+/// Web UI. Simple Icons brand marks (the official catalog's icons) pass.
+fn validate_icon_svg(bytes: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "icon data is not valid UTF-8 (image/svg+xml must be text)")?;
+    // The checks are case-insensitive: SVG/XML names and attribute values in
+    // an HTML foreign-content context are case-insensitive too.
+    let lower = text.to_ascii_lowercase();
+    for (needle, label) in [
+        ("<script", "a script element"),
+        ("<foreignobject", "a foreignObject element"),
+        ("javascript:", "a javascript: URL"),
+    ] {
+        if lower.contains(needle) {
+            return Err(format!("icon SVG must not contain {label}"));
+        }
+    }
+    if has_svg_event_handler(&lower) {
+        return Err("icon SVG must not contain an event handler attribute".into());
+    }
+    if has_svg_external_href(&lower) {
+        return Err("icon SVG must not reference an external http(s) resource".into());
+    }
+    Ok(())
+}
+
+/// Whether the lowercase document contains an `on<alpha>+=` attribute.
+fn has_svg_event_handler(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut index = 0;
+    while index + 2 < bytes.len() {
+        if bytes[index] == b'o'
+            && bytes[index + 1] == b'n'
+            && bytes[index + 2].is_ascii_alphabetic()
+        {
+            let mut cursor = index + 2;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
+                cursor += 1;
+            }
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            if cursor < bytes.len() && bytes[cursor] == b'=' {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Whether the lowercase document has an `href=`/`xlink:href=` whose value
+/// starts with an absolute `http:`/`https:` URL.
+fn has_svg_external_href(lower: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut search = 0;
+    while let Some(offset) = lower[search..].find("href") {
+        let start = search + offset + "href".len();
+        let mut cursor = start;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'=' {
+            cursor += 1;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+            let value = lower[cursor..].trim_start_matches(['"', '\'']);
+            if value.starts_with("http:") || value.starts_with("https:") {
+                return true;
+            }
+        }
+        search = start;
+    }
+    false
+}
+
 /// Every rule of schema version 1 (after JSON shape checks).
 pub fn validate(m: &Manifest) -> Result<(), String> {
     if m.schema_version != SCHEMA_VERSION {
@@ -544,6 +758,9 @@ pub fn validate(m: &Manifest) -> Result<(), String> {
     }
     if let Some(notes) = &m.notes {
         text("notes", notes, 0, 1000)?;
+    }
+    if let Some(icon) = &m.icon {
+        validate_icon(icon)?;
     }
     validate_runtime(&m.runtime)?;
     validate_artifacts(&m.artifacts)?;
@@ -1132,6 +1349,217 @@ pub(crate) mod tests {
             mutate(&mut value);
             assert!(parse_value(&value).is_err(), "{name} accepted");
         }
+    }
+
+    /// A 1x1 transparent PNG (a real, minimal PNG file).
+    const PNG_1X1_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+    fn tiny_svg() -> &'static str {
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="currentColor" d="M12 2 2 22h20z"/></svg>"#
+    }
+
+    fn icon(media_type: &str, data: &[u8]) -> serde_json::Value {
+        serde_json::json!({"mediaType": media_type, "data": B64.encode(data)})
+    }
+
+    #[test]
+    fn package_icons_are_embedded_and_validated() {
+        let mut v = sample();
+        v["icon"] = icon("image/svg+xml", tiny_svg().as_bytes());
+        let m = parse_value(&v).unwrap();
+        let embedded = m.icon.as_ref().unwrap();
+        assert_eq!(embedded.media_type, "image/svg+xml");
+        assert!(embedded.attribution.is_none());
+        assert_eq!(decode_icon(embedded).unwrap(), tiny_svg().as_bytes());
+        // Round-trips with camelCase keys and no attribution when absent.
+        let value = serde_json::to_value(&m).unwrap();
+        assert_eq!(value["icon"]["mediaType"], "image/svg+xml");
+        assert_eq!(value["icon"]["data"], B64.encode(tiny_svg().as_bytes()));
+        assert!(value["icon"].get("attribution").is_none());
+
+        // Attribution (CC0 brand marks credit their source) is optional text.
+        v["icon"]["attribution"] = "Simple Icons (CC0)".into();
+        let m = parse_value(&v).unwrap();
+        assert_eq!(
+            m.icon.as_ref().unwrap().attribution.as_deref(),
+            Some("Simple Icons (CC0)")
+        );
+
+        // A real PNG passes (signature check) and app-type manifests accept
+        // icons too.
+        let png = B64.decode(PNG_1X1_B64).unwrap();
+        v["icon"] = icon("image/png", &png);
+        v["type"] = "app".into();
+        v["app"] = serde_json::json!({"kind": "web"});
+        let m = parse_value(&v).unwrap();
+        assert_eq!(m.icon.as_ref().unwrap().media_type, "image/png");
+        assert_eq!(decode_icon(m.icon.as_ref().unwrap()).unwrap(), png);
+
+        // Manifests without icons keep serializing without the key.
+        let m = parse_value(&sample()).unwrap();
+        assert!(serde_json::to_value(&m).unwrap().get("icon").is_none());
+        // Unknown icon keys are rejected (deny_unknown_fields).
+        let mut unknown = sample();
+        unknown["icon"] = serde_json::json!({
+            "mediaType": "image/svg+xml", "data": B64.encode(tiny_svg()), "colour": "red"
+        });
+        assert!(parse_value(&unknown).is_err());
+    }
+
+    #[test]
+    fn invalid_icons_are_rejected() {
+        let png = B64.decode(PNG_1X1_B64).unwrap();
+        let cases: Vec<(&str, serde_json::Value, &str)> = vec![
+            (
+                "unknown media type",
+                icon("image/gif", tiny_svg().as_bytes()),
+                "mediaType",
+            ),
+            (
+                "bad base64",
+                serde_json::json!({"mediaType": "image/svg+xml", "data": "not base64!"}),
+                "base64",
+            ),
+            (
+                "base64 with whitespace",
+                serde_json::json!({"mediaType": "image/svg+xml", "data": "PHN2 Zz48L3N2Zz4="}),
+                "base64",
+            ),
+            (
+                "too large",
+                icon("image/png", &vec![0u8; MAX_ICON_BYTES + 1]),
+                "64 KiB",
+            ),
+            ("empty", icon("image/png", &[]), "1 byte"),
+            (
+                "bad PNG signature",
+                icon("image/png", tiny_svg().as_bytes()),
+                "PNG",
+            ),
+            (
+                "non-UTF-8 SVG",
+                icon("image/svg+xml", &[0xff, 0xfe]),
+                "UTF-8",
+            ),
+            (
+                "script SVG",
+                icon("image/svg+xml", b"<svg><script>alert(1)</script></svg>"),
+                "script",
+            ),
+            (
+                "foreignObject SVG",
+                icon(
+                    "image/svg+xml",
+                    b"<svg><foreignObject><body/></foreignObject></svg>",
+                ),
+                "foreignObject",
+            ),
+            (
+                "javascript URL",
+                icon(
+                    "image/svg+xml",
+                    b"<svg><a href=\"javascript:alert(1)\"><text>x</text></a></svg>",
+                ),
+                "javascript:",
+            ),
+            (
+                "event handler",
+                icon(
+                    "image/svg+xml",
+                    b"<svg onload=\"alert(1)\"><path d=\"M0 0\"/></svg>",
+                ),
+                "event handler",
+            ),
+            (
+                "external href",
+                icon(
+                    "image/svg+xml",
+                    b"<svg><image href=\"https://evil.example/a.png\"/></svg>",
+                ),
+                "external http(s)",
+            ),
+            (
+                "external xlink href",
+                icon(
+                    "image/svg+xml",
+                    b"<svg><image xlink:href='http://evil.example/a.png'/></svg>",
+                ),
+                "external http(s)",
+            ),
+            (
+                "attribution too long",
+                {
+                    let mut icon = icon("image/svg+xml", tiny_svg().as_bytes());
+                    icon["attribution"] = "x".repeat(MAX_ICON_ATTRIBUTION_CHARS + 1).into();
+                    icon
+                },
+                "0-300 characters",
+            ),
+        ];
+        for (name, icon_value, expected) in cases {
+            let mut v = sample();
+            v["icon"] = icon_value;
+            let error = parse_value(&v).unwrap_err();
+            assert!(error.contains(expected), "{name}: {error}");
+        }
+
+        // An internal fragment reference is fine; a PNG may be any size up to
+        // the bound (checked above with all-zero bytes that are large but not
+        // valid PNGs only after the size check).
+        let mut valid = sample();
+        valid["icon"] = icon(
+            "image/svg+xml",
+            b"<svg xmlns:xlink=\"http://www.w3.org/1999/xlink\"><use xlink:href=\"#icon\"/></svg>",
+        );
+        parse_value(&valid).unwrap();
+        assert_eq!(
+            decode_icon(&PackageIcon {
+                media_type: "image/png".into(),
+                data: B64.encode(&png),
+                attribution: None,
+            })
+            .unwrap()
+            .len(),
+            png.len()
+        );
+    }
+
+    #[test]
+    fn icon_files_are_loaded_through_the_same_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let svg_path = dir.path().join("python.svg");
+        std::fs::write(&svg_path, tiny_svg()).unwrap();
+        let icon = package_icon_from_file(&svg_path).unwrap();
+        assert_eq!(icon.media_type, "image/svg+xml");
+        assert!(icon.attribution.is_none());
+        assert_eq!(decode_icon(&icon).unwrap(), tiny_svg().as_bytes());
+
+        let png_path = dir.path().join("app.PNG");
+        std::fs::write(&png_path, B64.decode(PNG_1X1_B64).unwrap()).unwrap();
+        let icon = package_icon_from_file(&png_path).unwrap();
+        assert_eq!(icon.media_type, "image/png");
+
+        // Missing files, wrong extensions, oversized files and dangerous SVG
+        // are clear errors that name the file.
+        let missing = dir.path().join("missing.svg");
+        let error = package_icon_from_file(&missing).unwrap_err();
+        assert!(error.contains("missing.svg"), "{error}");
+
+        let gif_path = dir.path().join("icon.gif");
+        std::fs::write(&gif_path, b"GIF89a").unwrap();
+        let error = package_icon_from_file(&gif_path).unwrap_err();
+        assert!(error.contains(".svg or .png"), "{error}");
+
+        let big_path = dir.path().join("big.svg");
+        std::fs::write(&big_path, vec![b'x'; MAX_ICON_BYTES + 1]).unwrap();
+        let error = package_icon_from_file(&big_path).unwrap_err();
+        assert!(error.contains("larger than 64 KiB"), "{error}");
+
+        let dangerous = dir.path().join("dangerous.svg");
+        std::fs::write(&dangerous, b"<svg onload=\"alert(1)\"></svg>").unwrap();
+        let error = package_icon_from_file(&dangerous).unwrap_err();
+        assert!(error.contains("dangerous.svg"), "{error}");
+        assert!(error.contains("event handler"), "{error}");
     }
 
     #[test]

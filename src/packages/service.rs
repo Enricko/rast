@@ -290,6 +290,9 @@ pub struct PackageView {
     pub terminal: Option<TerminalView>,
     /// Presentation for app-type packages (command runner or web entry).
     pub app: Option<manifest::AppSpec>,
+    /// Package icon from the signed catalog (or the installed manifest for
+    /// GitHub imports); App Center falls back to a monogram when absent.
+    pub icon: Option<manifest::PackageIcon>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1127,6 +1130,11 @@ impl PackageManager {
         } else {
             newest_installed
         };
+        // Package-level catalog icons are preferred; imported packages carry
+        // their icon inside the installed manifest.
+        let icon = from_catalog
+            .and_then(|package| package.icon.clone())
+            .or_else(|| base.and_then(|manifest| manifest.icon.clone()));
         // A catalog package without any verified version yet is still listed
         // (with the reason) from its catalog entry.
         if base.is_none() && !(official && from_catalog.is_some()) {
@@ -1447,6 +1455,7 @@ impl PackageManager {
             system: system.cloned(),
             terminal,
             app: base.and_then(|b| b.app.clone()),
+            icon,
         })
     }
 
