@@ -83,6 +83,11 @@ impl HomeSpace {
         })
     }
 
+    /// The (canonical) HOME directory.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     fn home_root(&self) -> StorageRoot {
         StorageRoot {
             physical: self.home.clone(),
@@ -369,6 +374,7 @@ pub fn router(agent: Arc<HomeAgent>) -> Router {
         .route("/api/files/search", get(search))
         .route("/api/files/copy", post(copy))
         .route("/api/files/move", post(move_items))
+        .route(fileagent::WATCH_ROUTE, get(super::watch::stream))
         .merge(fileagent::upload_routes::<HomeSpace>())
         .layer(axum::extract::DefaultBodyLimit::disable())
         .layer(axum::middleware::from_fn_with_state(
@@ -1191,6 +1197,84 @@ mod tests {
         assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
         let bytes = axum::body::to_bytes(part.into_body(), 64).await.unwrap();
         assert_eq!(&bytes[..], b"bc");
+    }
+
+    /// Lines of a watch stream, as JSON, until `stop` says so or 10 s pass.
+    async fn watch_until(
+        body: &mut axum::body::BodyDataStream,
+        buffer: &mut Vec<u8>,
+        mut stop: impl FnMut(&Value) -> bool,
+    ) -> Vec<Value> {
+        use futures::StreamExt;
+        let mut seen = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=end).collect();
+                let value: Value = serde_json::from_slice(&line).unwrap();
+                let done = stop(&value);
+                seen.push(value);
+                if done {
+                    return seen;
+                }
+            }
+            match tokio::time::timeout_at(deadline, body.next()).await {
+                Ok(Some(Ok(bytes))) => buffer.extend_from_slice(&bytes),
+                other => panic!("watch stream ended early: {other:?}, seen {seen:?}"),
+            }
+        }
+    }
+
+    fn has_path(value: &Value, path: &str) -> bool {
+        value["paths"]
+            .as_array()
+            .is_some_and(|paths| paths.iter().any(|item| item == path))
+    }
+
+    #[tokio::test]
+    async fn the_watch_stream_reports_changes_in_the_visible_tree() {
+        let fx = start(None).await;
+        std::fs::create_dir_all(fx.home.join("docs")).unwrap();
+        std::fs::create_dir_all(fx.home.join(".cache/app")).unwrap();
+        let response = fx
+            .send(
+                Method::GET,
+                "/api/files/watch",
+                &HeaderMap::new(),
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/x-ndjson"
+        );
+        let mut body = response.into_body().into_data_stream();
+        let mut buffer = Vec::new();
+        watch_until(&mut body, &mut buffer, |value| value["ready"] == true).await;
+
+        // Hidden folders are not watched; visible ones are.
+        std::fs::write(fx.home.join(".cache/app/blob"), b"x").unwrap();
+        std::fs::write(fx.home.join("docs/a.txt"), b"a").unwrap();
+        let seen = watch_until(&mut body, &mut buffer, |value| {
+            has_path(value, "/docs/a.txt")
+        })
+        .await;
+        assert!(
+            seen.iter()
+                .all(|value| !value.to_string().contains("cache")),
+            "{seen:?}"
+        );
+
+        // A folder created later is watched too.
+        std::fs::create_dir(fx.home.join("projects")).unwrap();
+        watch_until(&mut body, &mut buffer, |value| has_path(value, "/projects")).await;
+        std::fs::write(fx.home.join("projects/b.txt"), b"b").unwrap();
+        watch_until(&mut body, &mut buffer, |value| {
+            has_path(value, "/projects/b.txt")
+        })
+        .await;
     }
 
     #[tokio::test]

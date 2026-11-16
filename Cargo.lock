@@ -2380,6 +2380,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
+ "notify",
  "rand 0.9.5",
  "rast-apps",
  "rast-base",

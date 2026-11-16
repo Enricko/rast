@@ -8,6 +8,7 @@
 //! served in-process as before. No database column records the mode.
 
 pub mod agent;
+pub mod watch;
 
 /// Prefix of chunked upload ids that belong to a per-user agent (the root
 /// agent uses `sys-`).

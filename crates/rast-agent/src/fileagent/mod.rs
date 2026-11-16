@@ -98,6 +98,9 @@ pub struct Agent<S> {
     last_request: AtomicU64,
     active: AtomicUsize,
     uploads: Mutex<HashMap<String, Upload>>,
+    /// Becomes true when the agent stops, so long-lived streams end and the
+    /// graceful shutdown does not wait for them.
+    stop: tokio::sync::watch::Sender<bool>,
     pub space: S,
 }
 
@@ -109,6 +112,7 @@ impl<S: UploadSpace> Agent<S> {
             last_request: AtomicU64::new(0),
             active: AtomicUsize::new(0),
             uploads: Mutex::new(HashMap::new()),
+            stop: tokio::sync::watch::channel(false).0,
             space,
         })
     }
@@ -144,6 +148,19 @@ impl<S: UploadSpace> Agent<S> {
             {
                 return;
             }
+        }
+    }
+
+    /// Tell long-lived streams that the agent stops.
+    pub fn stop(&self) {
+        self.stop.send_replace(true);
+    }
+
+    /// Resolves when the agent is stopping.
+    pub fn stopping(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let mut stop = self.stop.subscribe();
+        async move {
+            let _ = stop.wait_for(|stopped| *stopped).await;
         }
     }
 
@@ -629,7 +646,10 @@ pub async fn serve<S: UploadSpace>(
 ) -> io::Result<()> {
     let watcher = agent.clone();
     let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move { watcher.wait_idle(idle, keep_alive).await })
+        .with_graceful_shutdown(async move {
+            watcher.wait_idle(idle, keep_alive).await;
+            watcher.stop();
+        })
         .await;
     agent.drop_uploads().await;
     result

@@ -27,6 +27,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 libc.workspace = true
 tracing.workspace = true
+notify.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
