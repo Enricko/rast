@@ -25,6 +25,14 @@
 //! session restarts or access is granted again. A move from write to read
 //! gets no entry (it cannot be expressed on the container).
 //!
+//! A **repair pass** (`share_dir_repair`) applies the group layout again to
+//! everything in every migrated container: at start-up, which follows every
+//! `rast migrate shares` (its apply needs the server stopped), and then
+//! daily. It resets entries that kept a foreign group (moved in with
+//! `rename`, `chgrp`, `cp -p`, or by the legacy in-process File Station),
+//! so the group quota of a share (D3: "filesystem, best effort") counts
+//! them again.
+//!
 //! Pending restarts live in memory, so every pass also asks the helper
 //! which share groups the running processes carry (`share_session_groups`):
 //! a session that still holds a group its user lost (after a server
@@ -64,6 +72,10 @@ const RESTART_GRACE: Duration = Duration::from_secs(30);
 const SESSION_GROUPS_BATCH: usize = 100;
 /// Users with deny entries on one container (the helper accepts 256).
 const MAX_DENIALS: usize = 256;
+/// How often the repair pass runs (also once at start-up).
+const REPAIR_INTERVAL: Duration = Duration::from_secs(24 * 3600);
+/// Paths of entries with foreign ACL entries logged per share.
+const REPAIR_LOGGED_PATHS: usize = 5;
 
 /// The members of one shared folder's two groups (RAST user ids, sorted).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -261,10 +273,27 @@ pub fn spawn(state: AppState) {
         // The same failure (a helper without these operations, or down) is
         // logged once as a warning, then at debug level.
         let mut last_error = None;
+        let mut last_repair = None;
+        let repairing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             let wait = match sync_once(&state, &native, &mut known).await {
                 Ok(()) => {
                     last_error = None;
+                    // The groups exist now: time for the repair pass?
+                    let now = std::time::Instant::now();
+                    if repair_due(last_repair, now)
+                        && !repairing.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        last_repair = Some(now);
+                        let (state, native, repairing) =
+                            (state.clone(), native.clone(), repairing.clone());
+                        tokio::spawn(async move {
+                            if let Err(error) = repair_all(&state, &native).await {
+                                tracing::warn!(error = %error, "shared folder repair pass failed");
+                            }
+                            repairing.store(false, std::sync::atomic::Ordering::SeqCst);
+                        });
+                    }
                     RESYNC_INTERVAL
                 }
                 Err(error) => {
@@ -290,6 +319,85 @@ pub fn spawn(state: AppState) {
             }
         }
     });
+}
+
+/// Whether the repair pass is due: never run yet, or a day ago. (It
+/// starts only after a successful sync, so the helper is up and the groups
+/// exist; a pass that fails waits for the next day like any other.)
+fn repair_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= REPAIR_INTERVAL)
+}
+
+/// One repair pass over every shared folder, one at a time.
+pub async fn repair_all(state: &AppState, native: &NativeClient) -> AppResult<RepairSummary> {
+    let mut summary = RepairSummary::default();
+    for record in shares::list_records(&state.db).await? {
+        let Ok(container) = shares::validated_container(&record.container_path) else {
+            continue;
+        };
+        let reply = match native
+            .call_json(
+                "share_dir_repair",
+                json!({"shareId": record.id, "container": container}),
+            )
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                summary.failed += 1;
+                tracing::warn!(share = %record.id, error = %error, "cannot repair a shared folder");
+                continue;
+            }
+        };
+        if reply["repaired"] != true {
+            summary.not_migrated += 1;
+            continue;
+        }
+        summary.repaired += 1;
+        let report = &reply["report"];
+        let changed = report["changes"]["count"].as_u64().unwrap_or(0);
+        summary.changed += changed;
+        if changed > 0 {
+            tracing::info!(
+                share = %record.id,
+                name = %record.name,
+                changed,
+                "shared folder repair: entries got the group layout back"
+            );
+        }
+        let foreign = report["foreignAclEntries"]["count"].as_u64().unwrap_or(0);
+        if foreign > 0 {
+            let sample: Vec<&str> = report["foreignAclEntries"]["paths"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(REPAIR_LOGGED_PATHS)
+                        .collect()
+                })
+                .unwrap_or_default();
+            tracing::warn!(
+                share = %record.id,
+                name = %record.name,
+                entries = foreign,
+                sample = ?sample,
+                "shared folder repair removed ACL entries that RAST does not manage"
+            );
+        }
+    }
+    Ok(summary)
+}
+
+/// What one repair pass did.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RepairSummary {
+    pub repaired: u64,
+    /// Legacy containers, left for `rast migrate shares`.
+    pub not_migrated: u64,
+    pub failed: u64,
+    /// Entries changed over all shares.
+    pub changed: u64,
 }
 
 async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -> AppResult<()> {

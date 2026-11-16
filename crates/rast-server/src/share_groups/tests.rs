@@ -285,6 +285,14 @@ async fn sessions_that_carry_a_lost_group_are_found() {
 /// A helper that answers every operation and records `(op, shareId,
 /// userIds)`.
 fn recording_helper(socket: &std::path::Path) -> Arc<Mutex<Vec<(String, String, Value)>>> {
+    recording_helper_with(socket, |_| Some(json!({"applied": true})))
+}
+
+type Calls = Arc<Mutex<Vec<(String, String, Value)>>>;
+
+/// [`recording_helper`] with the data of each reply from `answer` (`None`:
+/// an error).
+fn recording_helper_with(socket: &std::path::Path, answer: fn(&Value) -> Option<Value>) -> Calls {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let calls = Arc::new(Mutex::new(Vec::new()));
     let listener = tokio::net::UnixListener::bind(socket).unwrap();
@@ -304,7 +312,11 @@ fn recording_helper(socket: &std::path::Path) -> Arc<Mutex<Vec<(String, String, 
                     request["shareId"].as_str().unwrap_or_default().to_string(),
                     request["userIds"].clone(),
                 ));
-                let reply = json!({"id": request["id"], "ok": true, "data": {"applied": true}});
+                let reply = match answer(&request) {
+                    Some(data) => json!({"id": request["id"], "ok": true, "data": data}),
+                    None => json!({"id": request["id"], "ok": false, "error": {
+                        "code": "not_found", "message": "planted"}}),
+                };
                 let mut bytes = serde_json::to_vec(&reply).unwrap();
                 bytes.push(b'\n');
                 let _ = write.write_all(&bytes).await;
@@ -322,20 +334,7 @@ async fn containers_deny_users_until_their_restart() {
     let restarts = state.session_restarts.clone();
     let socket = dir.path().join("h.sock");
     let calls = recording_helper(&socket);
-    let native = NativeClient::from_config(
-        &Config::from_parts(
-            None,
-            FileConfig {
-                data_dir: Some(dir.path().join("data")),
-                storage_dir: Some(dir.path().join("storage")),
-                native_enabled: Some(true),
-                native_helper_socket: Some(socket),
-                ..Default::default()
-            },
-            |_| None,
-        )
-        .unwrap(),
-    );
+    let native = native_for(dir.path(), socket);
     let share = |id: &str, container: &str| ShareInfo {
         id: id.to_string(),
         name: String::new(),
@@ -445,4 +444,83 @@ async fn a_revocation_warns_then_restarts_and_a_grant_only_offers() {
     restarts.granted(&state, 3);
     restarts.restart_now(&state, 3).await;
     assert!(restarts.pending(3).is_none());
+}
+
+fn native_for(dir: &std::path::Path, socket: std::path::PathBuf) -> NativeClient {
+    NativeClient::from_config(
+        &Config::from_parts(
+            None,
+            FileConfig {
+                data_dir: Some(dir.join("data")),
+                storage_dir: Some(dir.join("storage")),
+                native_enabled: Some(true),
+                native_helper_socket: Some(socket),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn the_repair_pass_runs_at_start_and_then_daily() {
+    let now = std::time::Instant::now();
+    assert!(repair_due(None, now));
+    assert!(!repair_due(Some(now), now + Duration::from_secs(3600)));
+    assert!(repair_due(Some(now), now + REPAIR_INTERVAL));
+}
+
+#[tokio::test]
+async fn the_repair_pass_visits_every_shared_folder() {
+    const BROKEN: &str = "33333333-4444-4555-8666-777777777777";
+    const ODD: &str = "44444444-5555-4666-8777-888888888888";
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(test_config(dir.path())).await.unwrap();
+    seed(&state.db).await;
+    for (id, name, container) in [(BROKEN, "Broken", "broken"), (ODD, "Odd", "../etc")] {
+        sqlx::query(
+            "INSERT INTO shares (id, name, container_path, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(container)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+    let socket = dir.path().join("h.sock");
+    let calls = recording_helper_with(&socket, |request| match request["shareId"].as_str() {
+        Some(TEAM) => Some(json!({"repaired": true, "report": {
+            "changes": {"count": 3, "paths": []},
+            "foreignAclEntries": {"count": 1, "paths": ["docs: u:1001:rwx"]},
+        }})),
+        Some(SALES) => Some(json!({"repaired": false, "reason": "not_migrated"})),
+        _ => None,
+    });
+    let native = native_for(dir.path(), socket);
+    let summary = repair_all(&state, &native).await.unwrap();
+    assert_eq!(
+        summary,
+        RepairSummary {
+            repaired: 1,
+            not_migrated: 1,
+            failed: 1,
+            changed: 3,
+        }
+    );
+    let mut visited: Vec<String> = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(op, share, _)| {
+            assert_eq!(op, "share_dir_repair");
+            share.clone()
+        })
+        .collect();
+    visited.sort();
+    let mut expected = vec![TEAM.to_string(), SALES.to_string(), BROKEN.to_string()];
+    expected.sort();
+    assert_eq!(visited, expected, "an invalid container is never sent");
 }

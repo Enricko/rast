@@ -152,6 +152,13 @@ this file by `scripts/changelog-section.sh`.
     the restart or when access is granted again. A move from write to read
     gets no entry; a move from read to write is no longer treated as a
     revocation.
+  - A repair pass applies the group layout again to every migrated shared
+    folder when the server starts (so after every `rast migrate shares`)
+    and then daily: entries that kept a foreign group or mode (renamed in
+    from HOME, `chgrp`, `cp -p`, or moved in by the legacy in-process File
+    Station) get the rw group, group write and the ACL back. It logs each
+    shared folder where it changed entries or removed ACL entries that RAST
+    does not manage.
   - At start-up and every five minutes the server asks the helper which
     share groups the running processes of each account carry. A session
     that still holds a group its account lost (because the server

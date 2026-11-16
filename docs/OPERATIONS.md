@@ -716,7 +716,8 @@ sudo systemctl start rast
   named entries that RAST does not manage (anything other than `u:rast`,
   the read-only group and old per-user entries of RAST accounts), with the
   entries themselves, for example `docs/plan.txt: u:1001:rw-, default
-  g:2000:r-x`. They are removed by the apply. The journal keeps them for a rollback; to keep a copy of
+  g:2000:r-x`. They are removed by the apply, and again by the daily
+  repair pass (below), which logs each one it removes. The journal keeps them for a rollback; to keep a copy of
   your own, save them first with `sudo getfacl -R -p <path>`.
 - `sudo -u rast rast migrate shares --rollback` (server stopped) restores
   the journal: only entries that are still the recorded inode with the
@@ -728,6 +729,20 @@ sudo systemctl start rast
   `<stamp>.rolled-back/dropped-bits.txt` (`<recorded> <restored> <path>`).
 - `--json` prints a machine-readable report; the exit code is 1 when any
   shared folder failed (the others are still done).
+- **Repair pass.** The server applies the group layout again to every
+  migrated shared folder when it starts (so right after every
+  `rast migrate shares`, whose apply needs it stopped) and then once a day
+  (helper operation `share_dir_repair`; legacy, not yet migrated folders
+  are left alone). It gives the rw group, group write and the ACL back to
+  entries that lost them: files renamed in from HOME, `chgrp` or `cp -p`
+  by a member, and files that the legacy in-process File Station (`rast`,
+  accounts not yet on one HOME) moved or restored into a migrated folder
+  (review finding F4). It also replaces ACL entries that RAST does not
+  manage, and logs each share where it changed entries
+  (`journalctl -u rast | grep "shared folder repair"`). Under group quota
+  (Q-a) a share's limit is therefore **"filesystem, best effort"**: files
+  with a foreign group escape it until the next pass, and a member can
+  charge files outside the share to it (ADR 0005, D3).
 - Running apps and terminals keep the groups they started with. A
   revocation restarts the person's apps and terminals after a 60-second
   warning; a grant is offered as *Restart session now*. When the person
