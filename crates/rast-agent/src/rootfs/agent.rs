@@ -60,7 +60,13 @@ impl UploadSpace for RootSpace {
     type Target = Target;
     type Temp = PathBuf;
 
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target> {
+    fn target(
+        &self,
+        dir: &str,
+        name: &str,
+        overwrite: bool,
+        _headers: &HeaderMap,
+    ) -> AppResult<Target> {
         let dest = upload_target(dir, name, overwrite)?;
         Ok(Target {
             logical: logical(&dest),

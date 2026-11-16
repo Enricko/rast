@@ -5,8 +5,11 @@
 //! Namespace (ADR 0005, section 2):
 //!
 //! * `/` is HOME;
-//! * `/shared/<name>/…` resolves through the symlink `~/Shared/<name>`, whose
-//!   target must be a direct child of the shared root;
+//! * `/shared/<name>/…` is the container that the server names for `<name>`
+//!   in [`SHARES_HEADER`](crate::fileagent::SHARES_HEADER), read from its
+//!   database after its access checks. The agent opens it directly below the
+//!   shared root and checks its owner and group; it never follows
+//!   `~/Shared/<name>` (those links are for apps);
 //! * `/@root` is never served here.
 //!
 //! The agent runs as the user: every app and terminal of the user shares its
@@ -21,11 +24,9 @@
 //! request.
 
 use std::collections::HashSet;
-use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsFd, OwnedFd};
-use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -52,16 +53,42 @@ use crate::storage::{
 };
 
 use super::fsat::{self, fs_error, Info, Kind, Step};
-use super::{SHARED_DIR, UPLOAD_PREFIX};
+use super::{ShareRoots, UPLOAD_PREFIX};
+use crate::storage::shares::rw_group_name;
 
-/// Where `~/Shared/<name>` links may point.
-fn share_target_ok(shared_root: &Path, target: &Path) -> bool {
-    target.is_absolute()
-        && target.parent() == Some(shared_root)
-        && target
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| validate_component(name).is_ok())
+/// The gid of a group in the system's group database.
+fn group_id(name: &str) -> Option<u32> {
+    let name = std::ffi::CString::new(name).ok()?;
+    let mut buffer: Vec<libc::c_char> = vec![0; 4096];
+    loop {
+        // SAFETY: `group` and `found` are plain out-parameters, `buffer` is
+        // valid for `buffer.len()` bytes and outlives the call.
+        let mut group: libc::group = unsafe { std::mem::zeroed() };
+        let mut found: *mut libc::group = std::ptr::null_mut();
+        let error = unsafe {
+            libc::getgrnam_r(
+                name.as_ptr(),
+                &mut group,
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if error == libc::ERANGE && buffer.len() < 1 << 20 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        return (error == 0 && !found.is_null()).then_some(group.gr_gid);
+    }
+}
+
+/// Whether a container is set up as a RAST shared folder: a folder owned by
+/// root or by the owner of the shared root, whose group is the shared
+/// root's (legacy containers) or the share's read-write group.
+fn container_ok(container: &Info, shared_root: &Info, rw_gid: Option<u32>) -> bool {
+    container.is_dir()
+        && (container.uid == 0 || container.uid == shared_root.uid)
+        && (container.gid == shared_root.gid || Some(container.gid) == rw_gid)
 }
 
 /// The namespace of one HOME. Both roots are opened once; every lookup
@@ -71,8 +98,8 @@ pub struct HomeSpace {
     home: PathBuf,
     home_root: Arc<OwnedFd>,
     home_info: Info,
-    shared_root: PathBuf,
     shared_dir: Arc<OwnedFd>,
+    shared_info: Info,
 }
 
 /// The root of one namespace: HOME, or the container of a shared folder.
@@ -81,7 +108,7 @@ struct NsRoot {
     fd: Arc<OwnedFd>,
     info: Info,
     kind: RootKind,
-    /// The shared folder's name.
+    /// The shared folder's display name.
     share_name: Option<String>,
 }
 
@@ -112,13 +139,13 @@ impl HomeSpace {
         let home = std::fs::canonicalize(home)?;
         let shared_root = std::fs::canonicalize(shared_root)?;
         let (home_root, home_info) = fsat::open_root(&home)?;
-        let (shared_dir, _) = fsat::open_root(&shared_root)?;
+        let (shared_dir, shared_info) = fsat::open_root(&shared_root)?;
         Ok(Self {
             home,
             home_root: Arc::new(home_root),
             home_info,
-            shared_root,
             shared_dir: Arc::new(shared_dir),
+            shared_info,
         })
     }
 
@@ -127,37 +154,44 @@ impl HomeSpace {
         &self.home
     }
 
-    /// The container that `~/Shared/<name>` points to, when it is a valid
-    /// share link. The link is read, never followed.
-    fn share_container(&self, name: &str) -> Option<String> {
-        validate_component(name).ok()?;
-        let (links, _) = fsat::open_dir(self.home_root.as_fd(), &[SHARED_DIR.to_string()]).ok()?;
-        let target = rustix::fs::readlinkat(&links, name, Vec::new()).ok()?;
-        let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
-        if !share_target_ok(&self.shared_root, &target) {
-            return None;
-        }
-        target.file_name()?.to_str().map(str::to_string)
-    }
-
-    /// The root of the shared folder `name`: its container, a real folder
-    /// directly in the shared root.
-    fn share_root(&self, name: &str) -> AppResult<NsRoot> {
-        let container = self
-            .share_container(name)
+    /// The root of the shared folder that `/shared/<name>` names: the
+    /// container the server sent, a real folder directly in the shared root
+    /// (no link followed), with the owner and group of a shared folder.
+    fn share_root(&self, name: &str, shares: &ShareRoots) -> AppResult<NsRoot> {
+        let share = shares
+            .get(name)
             .ok_or(AppError::NotFound("path not found"))?;
-        let (fd, info) = fsat::open_dir(self.shared_dir.as_fd(), &[container])
-            .map_err(|_| AppError::NotFound("path not found"))?;
+        let (fd, info) = fsat::open_dir(
+            self.shared_dir.as_fd(),
+            std::slice::from_ref(&share.container),
+        )
+        .map_err(fs_error)?;
+        let rw_gid = if info.gid == self.shared_info.gid {
+            None
+        } else {
+            rw_group_name(&share.id).and_then(|group| group_id(&group))
+        };
+        if !container_ok(&info, &self.shared_info, rw_gid) {
+            tracing::warn!(
+                share = %share.id,
+                uid = info.uid,
+                gid = info.gid,
+                "the container of a shared folder has an unexpected owner or group"
+            );
+            return Err(AppError::Forbidden(
+                "this shared folder is not set up correctly",
+            ));
+        }
         Ok(NsRoot {
             fd: Arc::new(fd),
             info,
             kind: RootKind::Share,
-            share_name: Some(name.to_string()),
+            share_name: Some(share.name.clone()),
         })
     }
 
     /// The namespace root of a logical path.
-    fn root_for(&self, logical: &LogicalPath) -> AppResult<NsRoot> {
+    fn root_for(&self, logical: &LogicalPath, shares: &ShareRoots) -> AppResult<NsRoot> {
         let first = logical.segments().first().map(String::as_str);
         if first == Some(safe_path::RESERVED_NAME) {
             return Err(AppError::bad_request(
@@ -165,7 +199,7 @@ impl HomeSpace {
             ));
         }
         if let Some((name, _)) = logical.shared_parts() {
-            return self.share_root(name);
+            return self.share_root(name, shares);
         }
         if first == Some("shared") {
             return Err(AppError::NotFound("path not found"));
@@ -180,8 +214,8 @@ impl HomeSpace {
 
     /// An existing entry: its folder is opened below the namespace root
     /// (no link followed), the entry itself is a name in that folder.
-    fn node(&self, logical: &LogicalPath) -> AppResult<Node> {
-        let root = self.root_for(logical)?;
+    fn node(&self, logical: &LogicalPath, shares: &ShareRoots) -> AppResult<Node> {
+        let root = self.root_for(logical, shares)?;
         let Some((name, parents)) = logical.relative_segments().split_last() else {
             return Ok(Node {
                 logical: logical.clone(),
@@ -205,8 +239,8 @@ impl HomeSpace {
         })
     }
 
-    fn node_at(&self, path: &str) -> AppResult<Node> {
-        self.node(&LogicalPath::parse(path)?)
+    fn node_at(&self, path: &str, shares: &ShareRoots) -> AppResult<Node> {
+        self.node(&LogicalPath::parse(path)?, shares)
     }
 }
 
@@ -339,9 +373,15 @@ impl UploadSpace for HomeSpace {
     type Target = HomeTarget;
     type Temp = HomeTemp;
 
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<HomeTarget> {
+    fn target(
+        &self,
+        dir: &str,
+        name: &str,
+        overwrite: bool,
+        headers: &HeaderMap,
+    ) -> AppResult<HomeTarget> {
         validate_new_name(name)?;
-        let parent = self.node_at(dir)?;
+        let parent = self.node_at(dir, &ShareRoots::from_headers(headers)?)?;
         let folder = parent.folder("upload destination is not a directory")?;
         let logical = parent.logical.child(name)?;
         match fsat::stat_at(folder.as_fd(), name).map_err(fs_error)? {
@@ -641,48 +681,17 @@ fn page_params(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
     )
 }
 
-/// Valid share links in `~/Shared`, as folders named `/shared/<name>`.
-fn share_link_entries(space: &HomeSpace, needle: Option<&str>) -> Vec<EntryDto> {
-    let Ok((links, info)) = fsat::open_dir(space.home_root.as_fd(), &[SHARED_DIR.to_string()])
-    else {
-        return Vec::new();
-    };
-    let Ok(items) = fsat::open_listing(links.as_fd(), None, &info)
-        .ok()
-        .map(|listing| fsat::entries(listing.as_fd()))
-        .transpose()
-    else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for (name, item) in items.unwrap_or_default() {
-        if item.kind != Kind::Symlink {
-            continue;
-        }
-        if needle.is_some_and(|needle| !name.to_lowercase().contains(needle)) {
-            continue;
-        }
-        let Ok(root) = space.share_root(&name) else {
-            continue;
-        };
-        let Ok(logical) = LogicalPath::parse(&format!("/shared/{name}")) else {
-            continue;
-        };
-        let writable = fsat::writable_at(root.fd.as_fd(), ".");
-        out.push(entry_of(&logical, &name, &root.info, writable));
-    }
-    out
-}
-
 async fn list(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<ListQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Json<ListingDto>> {
     let space = agent.space.clone();
+    let shares = ShareRoots::from_headers(&headers)?;
     blocking(move || {
         let logical = LogicalPath::parse(query.path.as_deref().unwrap_or("/"))?;
         let (page, per_page) = page_params(query.page, query.per_page);
-        let node = space.node(&logical)?;
+        let node = space.node(&logical, &shares)?;
         let dir = node.listing("path is not a directory")?;
         let show_hidden = query.hidden.unwrap_or(true);
         let mut entries = Vec::new();
@@ -708,9 +717,6 @@ async fn list(
             .map(str::to_lowercase);
         if let Some(needle) = &needle {
             entries.retain(|entry| entry.name.to_lowercase().contains(needle));
-        }
-        if node.in_home() && logical.segments() == [SHARED_DIR] {
-            entries.extend(share_link_entries(&space, needle.as_deref()));
         }
         ops::sort_entries(
             &mut entries,
@@ -758,10 +764,12 @@ fn required(path: &Option<String>) -> AppResult<String> {
 async fn stat(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Json<EntryDto>> {
     let space = agent.space.clone();
     let path = required(&query.path)?;
-    blocking(move || Ok(space.node_at(&path)?.entry()))
+    let shares = ShareRoots::from_headers(&headers)?;
+    blocking(move || Ok(space.node_at(&path, &shares)?.entry()))
         .await
         .map(Json)
 }
@@ -769,7 +777,9 @@ async fn stat(
 async fn search(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<ListQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Json<SearchDto>> {
+    let shares = ShareRoots::from_headers(&headers)?;
     let (page, per_page) = page_params(query.page, query.per_page);
     let q = query
         .q
@@ -783,7 +793,7 @@ async fn search(
     let needle = q.to_lowercase();
     let space = agent.space.clone();
     blocking(move || {
-        let node = space.node_at(query.path.as_deref().unwrap_or("/"))?;
+        let node = space.node_at(query.path.as_deref().unwrap_or("/"), &shares)?;
         let dir = node.listing("search path is not a directory")?;
         let kind = query.kind.as_deref().map(|k| k.trim().to_ascii_lowercase());
         let show_hidden = query.hidden.unwrap_or(true);
@@ -853,8 +863,10 @@ struct MkdirRequest {
 
 async fn mkdir(
     State(agent): State<Arc<HomeAgent>>,
+    headers: HeaderMap,
     Json(body): Json<MkdirRequest>,
 ) -> AppResult<Json<EntryDto>> {
+    let shares = ShareRoots::from_headers(&headers)?;
     let logical = match (body.path, body.parent, body.name) {
         (Some(path), _, _) => LogicalPath::parse(&path)?,
         (None, Some(parent), Some(name)) => LogicalPath::parse(&parent)?.child(&name)?,
@@ -872,7 +884,7 @@ async fn mkdir(
         .to_string();
     let space = agent.space.clone();
     blocking(move || {
-        let parent = space.node(&parent_logical)?;
+        let parent = space.node(&parent_logical, &shares)?;
         let dir = parent.folder("parent is not a directory")?;
         fsat::mkdir_at(dir.as_fd(), &name).map_err(exists_as(
             "a file or folder with that name already exists".to_string(),
@@ -895,11 +907,13 @@ struct RenameRequest {
 
 async fn rename(
     State(agent): State<Arc<HomeAgent>>,
+    headers: HeaderMap,
     Json(body): Json<RenameRequest>,
 ) -> AppResult<Json<EntryDto>> {
     let space = agent.space.clone();
+    let shares = ShareRoots::from_headers(&headers)?;
     blocking(move || {
-        let node = space.node_at(&body.path)?;
+        let node = space.node_at(&body.path, &shares)?;
         let Some((dir, old)) = &node.at else {
             return Err(AppError::bad_request("cannot rename a storage root"));
         };
@@ -930,11 +944,16 @@ async fn rename(
 // ---------------------------------------------------------------------------
 
 /// The regular file of a query, opened (the inode checked) for reading.
-async fn regular_file(agent: &HomeAgent, query: &PathQuery) -> AppResult<(tokio::fs::File, Node)> {
+async fn regular_file(
+    agent: &HomeAgent,
+    query: &PathQuery,
+    headers: &HeaderMap,
+) -> AppResult<(tokio::fs::File, Node)> {
     let space = agent.space.clone();
     let path = required(&query.path)?;
+    let shares = ShareRoots::from_headers(headers)?;
     blocking(move || {
-        let node = space.node_at(&path)?;
+        let node = space.node_at(&path, &shares)?;
         let file = node.file()?;
         Ok((tokio::fs::File::from_std(file), node))
     })
@@ -946,7 +965,7 @@ async fn download(
     Query(query): Query<PathQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let (file, node) = regular_file(&agent, &query).await?;
+    let (file, node) = regular_file(&agent, &query, &headers).await?;
     let content_type = ops::mime_for_name(node.name());
     serve_open_file(
         file,
@@ -965,7 +984,7 @@ async fn preview(
     Query(query): Query<PathQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let (file, node) = regular_file(&agent, &query).await?;
+    let (file, node) = regular_file(&agent, &query, &headers).await?;
     let name = node.name();
     let kind = ops::preview_kind(name).ok_or(AppError::UnsupportedMediaType(
         "preview is not supported for this file type",
@@ -986,8 +1005,9 @@ async fn preview(
 async fn text(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<PathQuery>,
+    headers: HeaderMap,
 ) -> AppResult<Json<TextPreviewDto>> {
-    let (file, node) = regular_file(&agent, &query).await?;
+    let (file, node) = regular_file(&agent, &query, &headers).await?;
     let limit = query
         .max_bytes
         .unwrap_or(crate::storage::DEFAULT_TEXT_PREVIEW_BYTES)
@@ -1019,19 +1039,23 @@ fn quota_budget(headers: &HeaderMap) -> Option<u64> {
 
 /// The checks of `transfer::plan_batch`, against this namespace: the
 /// destination folder (held open) and the sources (never namespace roots).
-fn plan(space: &HomeSpace, body: &BatchRequest) -> AppResult<(Node, OwnedFd, Vec<Node>)> {
+fn plan(
+    space: &HomeSpace,
+    body: &BatchRequest,
+    shares: &ShareRoots,
+) -> AppResult<(Node, OwnedFd, Vec<Node>)> {
     if body.paths.is_empty() {
         return Err(AppError::bad_request("at least one path is required"));
     }
     if body.paths.len() > MAX_BATCH_PATHS {
         return Err(AppError::bad_request("too many paths in one request"));
     }
-    let dest = space.node_at(&body.dest_dir)?;
+    let dest = space.node_at(&body.dest_dir, shares)?;
     let dest_dir = dest.folder("destination is not a directory")?;
     let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(body.paths.len());
     for raw in &body.paths {
-        let node = space.node_at(raw)?;
+        let node = space.node_at(raw, shares)?;
         if node.is_storage_root() {
             return Err(AppError::bad_request(
                 "storage roots cannot be copied, moved or deleted",
@@ -1087,8 +1111,9 @@ async fn transfer_items(
     let _guard = CancelOnDrop(cancel.clone());
     let space = agent.space.clone();
     let budget = quota_budget(&headers);
+    let shares = ShareRoots::from_headers(&headers)?;
     blocking(move || {
-        let (dest, dest_dir, plan) = plan(&space, &body)?;
+        let (dest, dest_dir, plan) = plan(&space, &body, &shares)?;
         let dest_in_home = dest.in_home();
         // Sizes first: the whole batch must fit, so a full quota writes
         // nothing (in-process transfers stop at the item that does not fit).
@@ -1204,6 +1229,10 @@ mod tests {
     use axum::http::{header, Method, StatusCode};
 
     use crate::fileagent::client;
+    use crate::homefs::{ShareRoot, SHARED_DIR};
+
+    /// A dummy share id.
+    const SHARE_ID: &str = "00000000-0000-4000-8000-000000000001";
 
     struct Fixture {
         dir: tempfile::TempDir,
@@ -1211,6 +1240,8 @@ mod tests {
         shared: PathBuf,
         socket: PathBuf,
         token: String,
+        /// What the server would send in the shares header.
+        shares: std::sync::Mutex<ShareRoots>,
     }
 
     fn euid() -> u32 {
@@ -1248,10 +1279,22 @@ mod tests {
             shared,
             socket,
             token,
+            shares: std::sync::Mutex::new(ShareRoots::default()),
         }
     }
 
     impl Fixture {
+        /// Let requests name `/shared/<name>` with this container, as the
+        /// server does after its checks.
+        fn share(&self, name: &str, container: &str) {
+            let root = ShareRoot {
+                id: SHARE_ID.to_string(),
+                name: name.to_string(),
+                container: container.to_string(),
+            };
+            self.shares.lock().unwrap().insert(name, root).unwrap();
+        }
+
         async fn send(
             &self,
             method: Method,
@@ -1260,13 +1303,17 @@ mod tests {
             body: Body,
         ) -> AppResult<Response> {
             let stream = tokio::net::UnixStream::connect(&self.socket).await?;
+            let mut headers = headers.clone();
+            if !headers.contains_key(fileagent::SHARES_HEADER) {
+                self.shares.lock().unwrap().apply(&mut headers)?;
+            }
             client::send(
                 "file agent",
                 stream,
                 &self.token,
                 method,
                 uri,
-                headers,
+                &headers,
                 body,
             )
             .await
@@ -1479,57 +1526,128 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_folders_resolve_only_through_valid_links() {
+    async fn shared_folders_are_the_containers_the_server_names() {
         let fx = start(None).await;
         let team = fx.shared.join("team-1");
-        std::fs::create_dir(&team).unwrap();
+        std::fs::create_dir_all(team.join("sub")).unwrap();
         std::fs::write(team.join("plan.txt"), b"plan").unwrap();
-        std::fs::create_dir(fx.shared.join("team-1/sub")).unwrap();
-        let links = fx.home.join(SHARED_DIR);
-        std::fs::create_dir(&links).unwrap();
-        std::os::unix::fs::symlink(&team, links.join("Team")).unwrap();
-        // Invalid targets: outside, nested, relative, a link in the root.
-        std::os::unix::fs::symlink(fx.dir.path(), links.join("Up")).unwrap();
-        std::os::unix::fs::symlink(team.join("sub"), links.join("Nested")).unwrap();
-        std::os::unix::fs::symlink("../../shared/team-1", links.join("Relative")).unwrap();
-        std::os::unix::fs::symlink(fx.dir.path(), fx.shared.join("alias")).unwrap();
-        std::os::unix::fs::symlink(fx.shared.join("alias"), links.join("Alias")).unwrap();
+        let other = fx.shared.join("other-2");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("salaries.txt"), b"secret").unwrap();
+        // A link in the shared root, and a container that is a file.
+        std::os::unix::fs::symlink(&other, fx.shared.join("alias")).unwrap();
+        std::fs::write(fx.shared.join("plain"), b"x").unwrap();
+        // The path names `team`, the share's display name is `Team`.
+        let root = ShareRoot {
+            id: SHARE_ID.to_string(),
+            name: "Team".to_string(),
+            container: "team-1".to_string(),
+        };
+        fx.shares.lock().unwrap().insert("team", root).unwrap();
+        fx.share("Alias", "alias");
+        fx.share("Plain", "plain");
+        fx.share("Gone", "gone-3");
 
-        let (status, listing) = fx.get("/api/files?path=/shared/Team").await;
+        let (status, listing) = fx.get("/api/files?path=/shared/team").await;
         assert_eq!(status, StatusCode::OK, "{listing}");
-        assert_eq!(listing["path"], "/shared/Team");
+        assert_eq!(listing["path"], "/shared/team");
+        // The breadcrumb shows the share's display name (as in-process).
         assert_eq!(listing["breadcrumbs"][0]["path"], "/shared/Team");
-        assert_eq!(listing["items"][0]["path"], "/shared/Team/plan.txt");
-        let (status, entry) = fx.get("/api/files/stat?path=/shared/Team").await;
+        assert_eq!(listing["breadcrumbs"][0]["name"], "Team");
+        assert_eq!(listing["items"][0]["path"], "/shared/team/plan.txt");
+        let (status, entry) = fx.get("/api/files/stat?path=/shared/team").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(entry["name"], "Team");
-        for name in ["Up", "Nested", "Relative", "Alias", "Missing"] {
-            let (status, _) = fx.get(&format!("/api/files?path=/shared/{name}")).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{name}");
+        // A share the server did not name does not exist for the agent;
+        // a linked container is refused, a missing one is not found.
+        for (name, expected) in [
+            ("Other", StatusCode::NOT_FOUND),
+            ("Gone", StatusCode::NOT_FOUND),
+            ("Alias", StatusCode::FORBIDDEN),
+            ("Plain", StatusCode::NOT_FOUND),
+        ] {
+            let (status, body) = fx.get(&format!("/api/files?path=/shared/{name}")).await;
+            assert_eq!(status, expected, "{name}: {body}");
         }
-        // `~/Shared` lists the valid links as folders named /shared/<name>.
-        let (_, links_listing) = fx.get("/api/files?path=/Shared").await;
-        let items = links_listing["items"].as_array().unwrap();
-        assert_eq!(items.len(), 1, "{links_listing}");
-        assert_eq!(items[0]["path"], "/shared/Team");
-        assert_eq!(items[0]["kind"], "dir");
+
+        // `~/Shared/<name>` links are for apps: never followed, never
+        // listed, even when they point elsewhere than the server's
+        // container.
+        let links = fx.home.join(SHARED_DIR);
+        std::fs::create_dir(&links).unwrap();
+        std::os::unix::fs::symlink(&other, links.join("team")).unwrap();
+        std::os::unix::fs::symlink(&other, links.join("Other")).unwrap();
+        let (_, listing) = fx.get("/api/files?path=/shared/team").await;
+        assert_eq!(listing["total"], 2, "{listing}");
+        let (status, _) = fx.get("/api/files?path=/shared/Other").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, links_listing) = fx.get("/api/files?path=/Shared").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(links_listing["total"], 0, "{links_listing}");
+        for uri in [
+            "/api/files?path=/Shared/team",
+            "/api/files/download?path=/Shared/Other/salaries.txt",
+        ] {
+            let (status, _) = fx.get(uri).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
+        }
 
         // Copy from a share into HOME stays inside the agent.
         let (status, copied) = fx
             .post(
                 "/api/files/copy",
-                json!({"paths": ["/shared/Team/plan.txt"], "destDir": "/"}),
+                json!({"paths": ["/shared/team/plan.txt"], "destDir": "/"}),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{copied}");
         assert_eq!(copied["copied"], 1);
         assert_eq!(std::fs::read(fx.home.join("plan.txt")).unwrap(), b"plan");
 
-        // A symlinked ~/Shared is not followed either.
-        std::fs::rename(&links, fx.home.join("old-links")).unwrap();
-        std::os::unix::fs::symlink(fx.home.join("old-links"), &links).unwrap();
-        let (status, _) = fx.get("/api/files?path=/shared/Team").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
+        // An invalid shares header is refused as a whole.
+        let mut headers = HeaderMap::new();
+        headers.insert(fileagent::SHARES_HEADER, "7a7a".parse().unwrap());
+        let response = fx
+            .send(
+                Method::GET,
+                "/api/files?path=/shared/team",
+                &headers,
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn only_containers_set_up_as_shared_folders_are_used() {
+        let info = |uid: u32, gid: u32, kind: Kind| Info {
+            kind,
+            len: 0,
+            modified_ms: 0,
+            dev: 1,
+            ino: 2,
+            uid,
+            gid,
+            mode: 0o2770,
+        };
+        // The shared root of an install: rast (uid 900, gid 900).
+        let root = info(900, 900, Kind::Dir);
+        // Legacy containers, and task 1.3's root:rast-s<h>-rw (gid 1500).
+        assert!(container_ok(&info(900, 900, Kind::Dir), &root, None));
+        assert!(container_ok(&info(0, 1500, Kind::Dir), &root, Some(1500)));
+        assert!(container_ok(&info(0, 900, Kind::Dir), &root, None));
+        // A folder a user owns, a group of their own, not a folder.
+        assert!(!container_ok(&info(1001, 900, Kind::Dir), &root, None));
+        assert!(!container_ok(&info(0, 1001, Kind::Dir), &root, Some(1500)));
+        assert!(!container_ok(&info(0, 1500, Kind::Dir), &root, None));
+        assert!(!container_ok(&info(900, 900, Kind::File), &root, None));
+    }
+
+    #[test]
+    fn group_ids_come_from_the_group_database() {
+        assert_eq!(group_id("root"), Some(0));
+        assert_eq!(group_id("rast-s0000000000000000-rw"), None);
+        assert_eq!(group_id("bad\0name"), None);
     }
 
     #[tokio::test]
@@ -1640,8 +1758,7 @@ mod tests {
         std::fs::write(fx.home.join("tree/b.bin"), [0u8; 6]).unwrap();
         let team = fx.shared.join("team-1");
         std::fs::create_dir(&team).unwrap();
-        std::fs::create_dir(fx.home.join(SHARED_DIR)).unwrap();
-        std::os::unix::fs::symlink(&team, fx.home.join("Shared/Team")).unwrap();
+        fx.share("Team", "team-1");
         let budget = |bytes: u64| {
             let mut headers = HeaderMap::new();
             headers.insert(fileagent::QUOTA_HEADER, bytes.into());
@@ -1806,8 +1923,7 @@ mod tests {
         let fx = start(None).await;
         let team = fx.shared.join("team-1");
         std::fs::create_dir(&team).unwrap();
-        std::fs::create_dir(fx.home.join(SHARED_DIR)).unwrap();
-        std::os::unix::fs::symlink(&team, fx.home.join("Shared/Team")).unwrap();
+        fx.share("Team", "team-1");
         std::fs::create_dir_all(fx.home.join(".ssh")).unwrap();
         let key = fx.home.join(".ssh/id_ed25519");
         std::fs::write(&key, b"PRIVATE KEY").unwrap();

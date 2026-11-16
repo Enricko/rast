@@ -128,9 +128,11 @@ differences:
 
 * `writable` in an entry is what the account's Linux user may write.
 * Chunked upload ids start with `usr-`.
-* `/shared/<name>` is reached through the HOME link `~/Shared/<name>`; RAST's
-  access rules still apply (`404` for a hidden folder, `403` for writes to a
-  read-only one).
+* `/shared/<name>` is the shared folder's container as RAST's database
+  records it (never the HOME link `~/Shared/<name>`, which is for apps);
+  RAST's access rules still apply (`404` for a hidden folder, `403` for
+  writes to a read-only one). `~/Shared` lists no shared folders: they are
+  listed by `GET /api/files/roots`, as for every account.
 * A copy or move into HOME that does not fit the quota fails as a whole
   (`413` in the job), before anything is written.
 * `503` when the account's file agent cannot be started or reached (the

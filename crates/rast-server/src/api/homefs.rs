@@ -9,8 +9,11 @@
 //! effective access of `/shared/<name>` with 404 for hidden and 403 for
 //! read-only folders, the RAST quota, audit, background jobs for copy and
 //! move, realtime events), then forwards path, query and body unchanged and
-//! streams the response back. When the helper or the agent is down the
-//! account gets 503: the server never falls back to in-process access.
+//! streams the response back. The containers of the shared folders a
+//! request names travel in a header that only the server sets
+//! ([`SHARES_HEADER`]): the agent never follows `~/Shared/<name>`. When the
+//! helper or the agent is down the account gets 503: the server never falls
+//! back to in-process access.
 //!
 //! Deleting, the recycle bin and the usage view are not served for one-HOME
 //! accounts yet: they move to XDG Trash and a HOME scan with task 1.4.
@@ -28,8 +31,9 @@ use serde_json::{json, Value};
 use crate::api::files::audit_file;
 use crate::auth::{AuthUser, ClientIp};
 use crate::error::{AppError, AppResult};
-use crate::fileagent::{client, QUOTA_HEADER, REPLACED_HEADER};
+use crate::fileagent::{client, QUOTA_HEADER, REPLACED_HEADER, SHARES_HEADER};
 use crate::homefs::client::AGENT;
+use crate::homefs::{ShareRoot, ShareRoots};
 use crate::jobs::JobSpec;
 use crate::state::AppState;
 use crate::storage::ops::{EntryDto, QuotaDto};
@@ -119,7 +123,15 @@ enum Need {
 
 /// RAST's own rules for one logical path; the agent's uid then applies the
 /// kernel's. A hidden shared folder is 404, a read-only one refuses writes.
-async fn check(state: &AppState, user: &AuthUser, raw: &str, need: Need) -> AppResult<LogicalPath> {
+/// The container of a shared folder that passes is recorded in `roots`,
+/// for the agent.
+async fn check(
+    state: &AppState,
+    user: &AuthUser,
+    raw: &str,
+    need: Need,
+    roots: &mut ShareRoots,
+) -> AppResult<LogicalPath> {
     let logical = LogicalPath::parse(raw)?;
     if let Some((name, _)) = logical.shared_parts() {
         let share = shares::find_by_name(&state.db, name)
@@ -130,8 +142,24 @@ async fn check(state: &AppState, user: &AuthUser, raw: &str, need: Need) -> AppR
         if need == Need::Write && !perm.allows_write() {
             return Err(AppError::Forbidden("write permission required"));
         }
+        let container = shares::validated_container(&share.container_path)?;
+        roots.insert(
+            name,
+            ShareRoot {
+                id: share.id,
+                name: share.name,
+                container,
+            },
+        )?;
     }
     Ok(logical)
+}
+
+/// The headers of an agent request: the shares the checks recorded.
+fn agent_headers(roots: &ShareRoots) -> AppResult<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    roots.apply(&mut headers)?;
+    Ok(headers)
 }
 
 /// Whether a logical path is in HOME (where the quota applies).
@@ -236,8 +264,10 @@ async fn forward(
 ) -> AppResult<Response> {
     let (mut parts, body) = request.into_parts();
     let ip = ClientIp::from_request_parts(&mut parts, state).await?;
-    // Only the server states the free quota.
+    // Only the server states the free quota and the shares' containers.
     parts.headers.remove(QUOTA_HEADER);
+    parts.headers.remove(SHARES_HEADER);
+    let mut roots = ShareRoots::default();
     let query: HashMap<String, String> = Query::try_from_uri(&parts.uri)
         .map(|Query(query)| query)
         .unwrap_or_default();
@@ -246,7 +276,7 @@ async fn forward(
     let need = Need::Read;
     for key in ["path", "dir"] {
         if let Some(path) = query.get(key).filter(|_| !uploading) {
-            check(state, &user, path, need).await?;
+            check(state, &user, path, need, &mut roots).await?;
         }
     }
 
@@ -254,7 +284,7 @@ async fn forward(
     let mut reserved = 0i64;
     if uploading {
         let dir = query.get("dir").map(String::as_str).unwrap_or("/");
-        let logical = check(state, &user, dir, Need::Write).await?;
+        let logical = check(state, &user, dir, Need::Write, &mut roots).await?;
         let length = header_number(&parts.headers, header::CONTENT_LENGTH.as_str())
             .ok_or_else(|| AppError::bad_request("Content-Length is required for uploads"))?;
         if length > state.storage.max_upload_bytes {
@@ -271,6 +301,7 @@ async fn forward(
         }
     }
 
+    roots.apply(&mut parts.headers)?;
     let sent = state
         .homefs
         .send(
@@ -450,10 +481,11 @@ async fn json_request(
                 }
                 _ => return Err(AppError::bad_request("path (or parent + name) is required")),
             };
-            check(state, &user, &target, Need::Write).await?;
+            let mut roots = ShareRoots::default();
+            check(state, &user, &target, Need::Write, &mut roots).await?;
             let value = state
                 .homefs
-                .call(user.id, "/api/files/mkdir", &body, HeaderMap::new())
+                .call(user.id, "/api/files/mkdir", &body, agent_headers(&roots)?)
                 .await?;
             let entry = agent_entry(&value)?;
             audit_file(
@@ -479,10 +511,13 @@ async fn json_request(
         "/api/files/rename" => {
             let from = string_field(&body, &["path"])
                 .ok_or_else(|| AppError::bad_request("path is required"))?;
-            let old = check(state, &user, from, Need::Write).await?.as_string();
+            let mut roots = ShareRoots::default();
+            let old = check(state, &user, from, Need::Write, &mut roots)
+                .await?
+                .as_string();
             let value = state
                 .homefs
-                .call(user.id, "/api/files/rename", &body, HeaderMap::new())
+                .call(user.id, "/api/files/rename", &body, agent_headers(&roots)?)
                 .await?;
             let entry = agent_entry(&value)?;
             audit_file(
@@ -516,7 +551,8 @@ async fn json_request(
 /// start it.
 async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResult<Response> {
     let dir = string_field(body, &["dir"]).unwrap_or("/");
-    let logical = check(state, user, dir, Need::Write).await?;
+    let mut roots = ShareRoots::default();
+    let logical = check(state, user, dir, Need::Write, &mut roots).await?;
     let size = body
         .get("size")
         .and_then(Value::as_u64)
@@ -538,7 +574,12 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
     }
     let reply = state
         .homefs
-        .call(user.id, "/api/files/upload/init", body, HeaderMap::new())
+        .call(
+            user.id,
+            "/api/files/upload/init",
+            body,
+            agent_headers(&roots)?,
+        )
         .await;
     let value = match reply {
         Ok(value) => value,
@@ -601,11 +642,12 @@ async fn transfer(
     let dest_raw = string_field(&body, &["destDir", "dest_dir"])
         .ok_or_else(|| AppError::bad_request("destDir is required"))?
         .to_string();
-    let dest = check(state, user, &dest_raw, Need::Write).await?;
+    let mut roots = ShareRoots::default();
+    let dest = check(state, user, &dest_raw, Need::Write, &mut roots).await?;
     let need = if moving { Need::Write } else { Need::Read };
     let mut sources = Vec::with_capacity(paths.len());
     for path in &paths {
-        sources.push(check(state, user, path, need).await?);
+        sources.push(check(state, user, path, need, &mut roots).await?);
     }
 
     // What changes, for realtime: the sources of a move and the new names.
@@ -620,7 +662,7 @@ async fn transfer(
             }
         }
     }
-    let mut headers = HeaderMap::new();
+    let mut headers = agent_headers(&roots)?;
     if in_home(&dest) {
         let info = quota::info(&state.db, user.id).await?;
         // The rule of `quota::reserve`: administrators are unlimited.

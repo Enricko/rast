@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 
-use super::{QUOTA_HEADER, TOKEN_HEADER};
+use super::{QUOTA_HEADER, SHARES_HEADER, TOKEN_HEADER};
 
 /// Largest JSON reply read completely from an agent.
 pub const MAX_JSON_REPLY: usize = 4 * 1024 * 1024;
@@ -41,6 +41,7 @@ pub async fn send(
         header::CONTENT_LENGTH,
         header::RANGE,
         HeaderName::from_static(QUOTA_HEADER),
+        HeaderName::from_static(SHARES_HEADER),
     ] {
         if let Some(value) = headers.get(&name) {
             request = request.header(name, value);

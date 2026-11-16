@@ -108,6 +108,14 @@ pub fn validated_container(container_path: &str) -> AppResult<String> {
     Ok(container_path.to_string())
 }
 
+/// The Linux group of a share's read-write members (ADR 0005, section 1):
+/// `rast-s<h>-rw`, where `<h>` is the first 16 hex digits of the share
+/// UUID. `None` when `share_id` is not a UUID.
+pub fn rw_group_name(share_id: &str) -> Option<String> {
+    let simple = Uuid::parse_str(share_id).ok()?.simple().to_string();
+    Some(format!("rast-s{}-rw", &simple[..16]))
+}
+
 /// Find a share by display name (case-insensitive, matches the UNIQUE index).
 pub async fn find_by_name(pool: &SqlitePool, name: &str) -> AppResult<Option<ShareRecord>> {
     let row = sqlx::query(

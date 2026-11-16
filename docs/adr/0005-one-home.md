@@ -111,7 +111,7 @@ What this means:
 | `<storage>/homes/` | `rast:rast` 0755 (unchanged) | the server can still `stat` each HOME |
 | `<storage>/homes/<username>` | `rast-u<id>:rast-u<id>` **0700** | the one HOME and the passwd home of `rast-u<id>`; `rast` has no access |
 | `~/.local/share/Trash/{files,info}` | user, 0700 | XDG Trash (section 5) |
-| `~/Shared/<share name>` | symlinks to `<storage>/shared/<container>` | maintained by the agent; it adds and removes only symlinks that point into the shared root and never touches other files there |
+| `~/Shared/<share name>` | symlinks to `<storage>/shared/<container>` | for apps only (file dialogs, terminals); the agent never follows or lists them (section 2). Task 1.3 decides who maintains them; whoever does adds and removes only symlinks that point into the shared root and never touches other files there |
 | `~/.local/bin` | user | on the session `PATH` (ADR 0004) |
 | `<storage>/shared/<container>` | `root:rast-s<h>-rw` **2770**; ACL `g:rast-s<h>-ro:r-x`, `u:rast:rwx`; the same entries as default ACLs | `<h>` = first 16 hex digits of the share UUID |
 | `<storage>/shared/<container>/.Trash-<uid>` | user, 0700 | recycle bin of a share (Trash spec "top directory" layout) |
@@ -128,9 +128,24 @@ needed. Installs with some users in each mode work. Hosts without the helper
 
 - **Agent.** A hidden subcommand `rast file-agent`, generalised from
   `rootfs/agent.rs` with a namespace trait: the root namespace (`/@root`, as
-  today) and the home namespace (`/` is HOME; `/shared/<name>/…` resolves
-  through the target of `~/Shared/<name>`, which must be a direct child of the
-  shared root).
+  today) and the home namespace (`/` is HOME; `/shared/<name>/…` is the
+  share's container, see "Shared folders" below).
+- **Shared folders.** The agent never follows `~/Shared/<name>`: checking a
+  link and then following it leaves a race, and a link pointed at another
+  share would bypass a share size limit that only RAST enforces (fallback
+  Q-a). Instead, after its access checks the server sends the share id,
+  display name and container from its database for every `/shared/<name>`
+  that a request names, in the header `x-rast-shares` (hex-encoded JSON).
+  Only the server sets it: the header from the browser is removed, and the
+  agent parses it strictly (unknown fields, an invalid container or a
+  non-UUID id refuse the whole request with 400). The agent opens the
+  container directly below its descriptor of the shared root, as the root
+  of that request's namespace (a link there is refused), then checks that it
+  is a folder owned by root or by the owner of the shared root, whose group
+  is the shared root's (legacy containers) or the share's read-write group
+  `rast-s<h>-rw` (otherwise 403). A share that the header does not name is
+  404. The `~/Shared` links are for apps only; File Station lists shared
+  folders from `/api/files/roots`, as before.
 - **Unit.** The agent runs as `rast-u<id>`, with its supplementary groups
   from `/etc/group`, in a socket-activated transient system unit
   `rast-files-u<uid>` (Phase 1: in `rast-linux.slice`; Phase 2 moves it into
@@ -188,12 +203,12 @@ needed. Installs with some users in each mode work. Hosts without the helper
   for, wherever it now is, and never redirects it. The safe-path layer still
   validates every name first. Tests swap entries for links at points in the
   middle of a copy and an upload, on the source and the destination side.
-  Listings keep skipping symlinks, except `~/Shared/*`, which are shown as
-  folders whose `path` is `/shared/<name>`.
+  Listings keep skipping symlinks, `~/Shared/*` included.
 - **Realtime.** The agent watches the visible tree of HOME (not dot
-  directories) and `~/Shared/*`, and streams logical paths to the server,
-  which keeps the existing debounce and audience logic. The server's own
-  watcher skips one-HOME homes.
+  directories) and streams logical paths to the server, which keeps the
+  existing debounce and audience logic. The server's own watcher skips
+  one-HOME homes and keeps watching the shared root, so changes in shared
+  folders reach their members as before.
 - **UI.** File Station hides dot files by default and gets a "Show hidden
   files" toggle.
 
@@ -609,7 +624,9 @@ tests):
   list, stat, mkdir, rename, upload, chunked upload, ranged download,
   preview, text, search, copy, move and delete; traversal (`..`, `%2e%2e`,
   NUL, absolute paths) is rejected; symlink escape is rejected in the middle
-  and in the last component; `~/Shared` mapping; peer uid and token checks;
+  and in the last component; shares only through the server's
+  `x-rast-shares` header (never `~/Shared` links), container owner and group
+  checks; peer uid and token checks;
   `EDQUOT` becomes 413.
 - **XDG Trash:** `.trashinfo` encoding and decoding (spaces, Unicode,
   newline, `%`), name collisions, `directorysizes`, restore conflicts,

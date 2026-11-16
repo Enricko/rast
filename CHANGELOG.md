@@ -28,9 +28,12 @@ this file by `scripts/changelog-section.sh`.
     socket-activated unit `rast-files-u<uid>`, running as `rast-u<id>`).
     Removing a Linux identity also stops its file agent.
   - New hidden subcommand `rast file-agent`: File Station over one HOME,
-    with `/shared/<name>` reached through `~/Shared/<name>` links, the same
-    safe-path checks and JSON shapes, `writable` from the Linux account, and
-    a realtime stream of changes in the visible tree.
+    with the same safe-path checks and JSON shapes, `writable` from the
+    Linux account, and a realtime stream of changes in the visible tree.
+    `/shared/<name>` is the container that the server reads from its
+    database and sends in a header only the server sets; the agent opens it
+    directly below the shared root, checks its owner and group, and never
+    follows `~/Shared/<name>` links (they are for apps).
   - File Station forwards the requests of a one-HOME account (HOME owned by
     its Linux identity, `native_enabled` on) to that account's agent after
     the usual session, CSRF, path, shared-folder access, quota and audit

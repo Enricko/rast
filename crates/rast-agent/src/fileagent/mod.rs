@@ -48,6 +48,10 @@ pub const REPLACED_HEADER: &str = "x-rast-replaced-bytes";
 /// Header of a copy or move into HOME: the free quota in bytes, set by the
 /// server only (it removes the header from browser requests).
 pub const QUOTA_HEADER: &str = "x-rast-quota-free";
+/// Header of a request that names shared folders: the containers the
+/// server's database records for them (`homefs::ShareRoots`). Set by the
+/// server only (it removes the header from browser requests).
+pub const SHARES_HEADER: &str = "x-rast-shares";
 
 /// Where a validated upload of the root agent goes.
 #[derive(Debug, Clone)]
@@ -78,7 +82,13 @@ pub trait UploadSpace: Send + Sync + 'static {
     type Temp: Send + Sync + 'static;
 
     /// Validate where an upload goes, refusing what it may not replace.
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Self::Target>;
+    fn target(
+        &self,
+        dir: &str,
+        name: &str,
+        overwrite: bool,
+        headers: &HeaderMap,
+    ) -> AppResult<Self::Target>;
 
     /// Create the temporary file of upload `id` next to its destination
     /// (`TEMP_PREFIX` + `id`, a new file with mode 0600).
@@ -499,6 +509,7 @@ async fn upload<S: UploadSpace>(
         query.dir.as_deref().unwrap_or(S::DEFAULT_DIR),
         &name,
         overwrite,
+        &headers,
     )?;
     let (temp, file) = agent.space.create_temp(&target, &random_id())?;
     let mut file = tokio::fs::File::from_std(file);
@@ -529,6 +540,7 @@ struct InitUploadRequest {
 
 async fn upload_init<S: UploadSpace>(
     State(agent): State<Arc<Agent<S>>>,
+    headers: HeaderMap,
     Json(body): Json<InitUploadRequest>,
 ) -> AppResult<Json<InitUploadResponse>> {
     let overwrite = body.overwrite.unwrap_or(false);
@@ -536,6 +548,7 @@ async fn upload_init<S: UploadSpace>(
         body.dir.as_deref().unwrap_or(S::DEFAULT_DIR),
         &body.name,
         overwrite,
+        &headers,
     )?;
     let id = format!("{}{}", S::ID_PREFIX, random_id());
     let (temp, _file) = agent.space.create_temp(&target, &id)?;

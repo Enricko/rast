@@ -755,18 +755,58 @@ async fn shared_folders_keep_the_rast_access_rules() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    // The links the agent resolves (maintained by task 1.3 later).
-    let links = server.home("alice").join("Shared");
-    std::fs::create_dir(&links).unwrap();
     let shared = server.state.config.shared_dir();
     for name in ["Team", "Board", "Secret"] {
         std::fs::write(shared.join(name).join("readme.txt"), name).unwrap();
-        std::os::unix::fs::symlink(shared.join(name), links.join(name)).unwrap();
+    }
+    // `~/Shared` links are for apps: the agent never follows them, so a
+    // link that alice points at another share changes nothing.
+    let links = server.home("alice").join("Shared");
+    std::fs::create_dir(&links).unwrap();
+    for name in ["Team", "Board", "Secret"] {
+        std::os::unix::fs::symlink(shared.join("Secret"), links.join(name)).unwrap();
     }
 
     let (status, listing) = server.get("/api/files?path=/shared/Team", &alice).await;
     assert_eq!(status, StatusCode::OK, "{listing}");
     assert_eq!(names(&listing), vec!["readme.txt"]);
+    let (status, _, bytes) = server
+        .raw(
+            "GET",
+            "/api/files/download?path=/shared/Team/readme.txt",
+            Some(&alice),
+            HeaderMap::new(),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"Team");
+    // Only the server names containers: a header from the browser that
+    // maps Team to Secret's container is dropped.
+    let mut planted = rast::homefs::ShareRoots::default();
+    planted
+        .insert(
+            "Team",
+            rast::homefs::ShareRoot {
+                id: "00000000-0000-4000-8000-000000000001".to_string(),
+                name: "Team".to_string(),
+                container: "Secret".to_string(),
+            },
+        )
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    planted.apply(&mut headers).unwrap();
+    let (status, _, bytes) = server
+        .raw(
+            "GET",
+            "/api/files/download?path=/shared/Team/readme.txt",
+            Some(&alice),
+            headers,
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, b"Team");
     let (status, entry) = server
         .upload(&alice, "dir=/shared/Team&name=new.txt", b"team")
         .await;
