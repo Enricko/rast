@@ -524,3 +524,66 @@ async fn the_repair_pass_visits_every_shared_folder() {
     expected.sort();
     assert_eq!(visited, expected, "an invalid container is never sent");
 }
+
+#[tokio::test]
+async fn a_shared_folder_the_helper_refuses_does_not_hold_up_the_others() {
+    // "Broken" sorts first. Its groups cannot be set (for example an
+    // account with an unexpected uid); Team still loses user 3, and that
+    // revocation must still be acted on.
+    const BROKEN: &str = "33333333-4444-4555-8666-777777777777";
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(test_config(dir.path())).await.unwrap();
+    state.session_restarts = SessionRestarts::with_warning(Duration::from_secs(600));
+    seed(&state.db).await;
+    sqlx::query(
+        "INSERT INTO shares (id, name, container_path, created_at, updated_at)
+         VALUES (?, 'Broken', 'broken', 1, 1)",
+    )
+    .bind(BROKEN)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    let socket = dir.path().join("h.sock");
+    let calls = recording_helper_with(&socket, |request| {
+        let share = request["shareId"].as_str().unwrap_or_default();
+        let unchanged = json!({"added": [], "removed": []});
+        match request["op"].as_str() {
+            Some("share_members_set") if share == BROKEN => None,
+            Some("share_members_set") if share == TEAM => Some(json!({
+                "shareId": share,
+                "write": {"added": [], "removed": [3]},
+                "read": unchanged,
+            })),
+            Some("share_members_set") => {
+                Some(json!({"shareId": share, "write": unchanged, "read": unchanged}))
+            }
+            Some("share_session_groups") => Some(json!({"users": [], "groups": {}})),
+            _ => Some(json!({"applied": true})),
+        }
+    });
+    let native = native_for(dir.path(), socket);
+    let mut known = Known::default();
+    sync_once(&state, &native, &mut known).await.unwrap();
+
+    let calls = calls.lock().unwrap().clone();
+    let set: BTreeSet<&str> = calls
+        .iter()
+        .filter(|(op, _, _)| op == "share_members_set")
+        .map(|(_, share, _)| share.as_str())
+        .collect();
+    assert_eq!(set, BTreeSet::from([BROKEN, SALES, TEAM]));
+    assert!(calls.iter().any(|(op, _, _)| op == "share_session_groups"));
+    assert!(calls
+        .iter()
+        .any(|(op, share, users)| op == "share_deny_set" && share == TEAM && *users == json!([3])));
+    assert!(state.session_restarts.pending_forced(3).is_some());
+    assert!(known.share_errors.contains_key(BROKEN));
+    assert!(!known.share_errors.contains_key(TEAM));
+
+    // A helper that cannot be reached ends the pass with an error.
+    let gone = native_for(dir.path(), dir.path().join("missing.sock"));
+    let error = sync_once(&state, &gone, &mut Known::default())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("share_group_ensure"), "{error}");
+}

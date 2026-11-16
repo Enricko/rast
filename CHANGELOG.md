@@ -141,7 +141,10 @@ this file by `scripts/changelog-section.sh`.
   Effective Access: write or admin → read-write group, read → read-only
   group, deny, no access or a deactivated account → neither.
   Administrators are in every read-write group. Only accounts that have a
-  Linux identity are members.
+  Linux identity are members. A shared folder whose groups the helper
+  refuses is logged and skipped; the others are still updated, and their
+  revocations still restart sessions (one such folder used to stop every
+  update after it, so revoked members kept the groups of later folders).
   - A new shared folder gets its groups and a `root:rast-s<h>-rw` 2770
     container; a deleted one gets its container back as `rast:rast` 0700
     (the data stays) and loses its groups.

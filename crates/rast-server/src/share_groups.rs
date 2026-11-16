@@ -53,6 +53,7 @@ use crate::db::now_ms;
 use crate::error::AppResult;
 use crate::homefs::{ShareRoot, ShareRoots};
 use crate::native::client::NativeClient;
+use crate::native::NativeError;
 use crate::state::AppState;
 use crate::storage::shares;
 
@@ -254,6 +255,9 @@ impl Changes {
 struct Known {
     /// The last `share_session_groups` call failed (logged once).
     stale_check_failed: bool,
+    /// The last error of each shared folder whose groups could not be set
+    /// (a warning when it changes, then at debug level).
+    share_errors: HashMap<String, String>,
     /// Shares whose groups exist.
     ensured: HashSet<String>,
     /// The `~/Shared` links last sent to each one-HOME agent.
@@ -400,39 +404,82 @@ pub struct RepairSummary {
     pub changed: u64,
 }
 
+/// Ensure the groups of one shared folder (once) and set their members.
+async fn sync_share(
+    native: &NativeClient,
+    known: &mut Known,
+    share: &ShareInfo,
+    plan: &Plan,
+) -> Result<Value, (&'static str, NativeError)> {
+    if !known.ensured.contains(&share.id) {
+        native
+            .call_json(
+                "share_group_ensure",
+                json!({"shareId": share.id, "container": share.container}),
+            )
+            .await
+            .map_err(|error| ("share_group_ensure", error))?;
+        known.ensured.insert(share.id.clone());
+    }
+    let membership = plan.members.get(&share.id).cloned().unwrap_or_default();
+    native
+        .call_json(
+            "share_members_set",
+            json!({
+                "shareId": share.id,
+                "write": membership.write,
+                "read": membership.read,
+            }),
+        )
+        .await
+        .map_err(|error| ("share_members_set", error))
+}
+
 async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -> AppResult<()> {
     let plan = plan(&state.db).await?;
     let mut changes = Changes::default();
+    // A shared folder whose groups the helper refuses (a group name taken
+    // outside the range, an account with an unexpected uid) must not hold
+    // up the others: their members still change, and every revocation
+    // still restarts the sessions and sets the deny entries below. Only a
+    // helper that cannot be reached ends the pass early.
+    let mut unreachable = None;
     for share in &plan.shares {
-        if !known.ensured.contains(&share.id) {
-            native
-                .call_json(
-                    "share_group_ensure",
-                    json!({"shareId": share.id, "container": share.container}),
-                )
-                .await
-                .map_err(|error| {
-                    crate::error::AppError::unavailable(format!("share_group_ensure: {error}"))
-                })?;
-            known.ensured.insert(share.id.clone());
+        match sync_share(native, known, share, &plan).await {
+            Ok(reply) => {
+                known.share_errors.remove(&share.id);
+                changes.record(&reply);
+            }
+            Err((op, error)) if error.code == "unavailable" => {
+                unreachable = Some(format!("{op}: {error}"));
+                break;
+            }
+            Err((op, error)) => {
+                let message = format!("{op}: {error}");
+                if known.share_errors.get(&share.id) != Some(&message) {
+                    tracing::warn!(
+                        share = %share.id,
+                        name = %share.name,
+                        error = %message,
+                        "shared folder groups: cannot set the groups of a shared folder"
+                    );
+                } else {
+                    tracing::debug!(share = %share.id, error = %message, "shared folder groups: still failing");
+                }
+                known.share_errors.insert(share.id.clone(), message);
+            }
         }
-        let membership = plan.members.get(&share.id).cloned().unwrap_or_default();
-        let reply = native
-            .call_json(
-                "share_members_set",
-                json!({
-                    "shareId": share.id,
-                    "write": membership.write,
-                    "read": membership.read,
-                }),
-            )
-            .await
-            .map_err(|error| {
-                crate::error::AppError::unavailable(format!("share_members_set: {error}"))
-            })?;
-        changes.record(&reply);
     }
+    let current: HashSet<&str> = plan.shares.iter().map(|share| share.id.as_str()).collect();
+    known
+        .share_errors
+        .retain(|id, _| current.contains(id.as_str()));
+    // Changes the helper already made are acted on even when it went away
+    // half way through.
     apply_changes(state, &changes, &plan).await;
+    if let Some(error) = unreachable {
+        return Err(crate::error::AppError::unavailable(error));
+    }
     // Sessions that still carry a group their user lost.
     match stale_sessions(native, &plan).await {
         Ok(stale) => {

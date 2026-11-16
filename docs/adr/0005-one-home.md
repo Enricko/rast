@@ -584,7 +584,9 @@ falls back on its next `quota_status` check.
 - Server: a syncer recomputes membership on every `access::bump_generation`
   (now also on role and status changes of accounts) and every five minutes,
   for the active accounts that have a Linux identity, and calls
-  `share_members_set`. A change restarts the file agent at once and updates
+  `share_members_set` (a shared folder whose groups cannot be set is logged
+  and skipped; the pass goes on with the others and acts on their changes,
+  and only an unreachable helper ends it early). A change restarts the file agent at once and updates
   the `~/Shared` links; a revocation (any group lost, write → read
   included; since the follow-up, read → write is not one) restarts apps
   and terminals after 60 seconds, a grant offers
