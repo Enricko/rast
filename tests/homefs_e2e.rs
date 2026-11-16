@@ -528,6 +528,45 @@ async fn uploads_reserve_and_account_the_quota() {
 }
 
 #[tokio::test]
+async fn chunked_uploads_are_limited_like_in_process_ones() {
+    let (server, alice, _bob) = setup().await;
+    let limit = rast::storage::chunked::MAX_UPLOADS_PER_USER;
+    let mut ids = Vec::new();
+    for index in 0..limit {
+        let (status, init) = server
+            .post(
+                "/api/files/upload/init",
+                &alice,
+                json!({"dir": "/", "name": format!("f{index}.bin"), "size": 1}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{init}");
+        ids.push(init["uploadId"].as_str().unwrap().to_string());
+    }
+    let one_more = json!({"dir": "/", "name": "one-more.bin", "size": 1});
+    let (status, body) = server
+        .post("/api/files/upload/init", &alice, one_more.clone())
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    // Refused before any quota is reserved.
+    assert_eq!(server.used(alice.id).await, (0, limit as i64));
+    // Cancelling one frees its place.
+    let (status, _, _) = server
+        .json(
+            "DELETE",
+            &format!("/api/files/upload?uploadId={}", ids[0]),
+            Some(&alice),
+            None,
+        )
+        .await;
+    assert!(status.is_success(), "{status}");
+    let (status, init) = server
+        .post("/api/files/upload/init", &alice, one_more)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{init}");
+}
+
+#[tokio::test]
 async fn chunked_uploads_belong_to_their_account() {
     let (server, alice, bob) = setup().await;
     let (status, init) = server

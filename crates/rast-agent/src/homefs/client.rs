@@ -22,6 +22,7 @@ use crate::events::EventBus;
 use crate::fileagent::{client, UPLOAD_TTL, WATCH_ROUTE};
 use crate::native::client::NativeClient;
 use crate::realtime::{self, Audience};
+use crate::storage::chunked::{MAX_UPLOADS_GLOBAL, MAX_UPLOADS_PER_USER};
 use crate::storage::safe_path::validate_component;
 use crate::storage::LogicalPath;
 
@@ -33,13 +34,58 @@ pub const AGENT: &str = "file agent";
 const MAX_WATCH_LINE: usize = 256 * 1024;
 
 /// Bytes reserved in `storage_usage` for a chunked upload an agent is
-/// receiving; committed or released when it completes, is cancelled or
-/// expires.
+/// receiving (0 for a shared folder); committed or released when it
+/// completes, is cancelled or expires.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reservation {
     pub user_id: i64,
     pub bytes: i64,
     pub expires: Instant,
+}
+
+/// The chunked uploads the agents are receiving, and those being started.
+#[derive(Debug, Default)]
+struct Uploads {
+    reservations: HashMap<String, Reservation>,
+    /// Uploads being started, per account, until they are registered.
+    starting: HashMap<i64, usize>,
+}
+
+/// A chunked upload being started (see [`HomeFs::begin_upload`]). It counts
+/// against the limits until it is registered or dropped.
+pub struct UploadSlot<'a> {
+    uploads: &'a std::sync::Mutex<Uploads>,
+    user_id: i64,
+}
+
+impl UploadSlot<'_> {
+    /// Record the upload the agent accepted, with the quota bytes reserved
+    /// for it.
+    pub fn register(self, upload_id: &str, bytes: i64) {
+        if let Ok(mut uploads) = self.uploads.lock() {
+            uploads.reservations.insert(
+                upload_id.to_string(),
+                Reservation {
+                    user_id: self.user_id,
+                    bytes,
+                    expires: Instant::now() + UPLOAD_TTL + Duration::from_secs(60),
+                },
+            );
+        }
+    }
+}
+
+impl Drop for UploadSlot<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut uploads) = self.uploads.lock() {
+            if let Some(count) = uploads.starting.get_mut(&self.user_id) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    uploads.starting.remove(&self.user_id);
+                }
+            }
+        }
+    }
 }
 
 /// Connections to the per-user file agents.
@@ -51,7 +97,7 @@ pub struct HomeFs {
     events: EventBus,
     agents: Mutex<HashMap<i64, (PathBuf, String)>>,
     watching: Arc<std::sync::Mutex<HashSet<i64>>>,
-    reservations: std::sync::Mutex<HashMap<String, Reservation>>,
+    uploads: std::sync::Mutex<Uploads>,
 }
 
 impl HomeFs {
@@ -63,7 +109,7 @@ impl HomeFs {
             events,
             agents: Mutex::new(HashMap::new()),
             watching: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            reservations: std::sync::Mutex::new(HashMap::new()),
+            uploads: std::sync::Mutex::new(Uploads::default()),
         }
     }
 
@@ -219,26 +265,43 @@ impl HomeFs {
     }
 
     // -----------------------------------------------------------------------
-    // Quota reservations of chunked uploads
+    // Chunked uploads: limits and quota reservations
     // -----------------------------------------------------------------------
 
-    pub fn reserve(&self, upload_id: &str, user_id: i64, bytes: i64) {
-        if let Ok(mut map) = self.reservations.lock() {
-            map.insert(
-                upload_id.to_string(),
-                Reservation {
-                    user_id,
-                    bytes,
-                    expires: Instant::now() + UPLOAD_TTL + Duration::from_secs(60),
-                },
-            );
+    /// Start a chunked upload of `user_id` within the limits of in-process
+    /// uploads (`storage::chunked`): at most [`MAX_UPLOADS_PER_USER`] per
+    /// account and [`MAX_UPLOADS_GLOBAL`] in all, counting uploads into
+    /// shared folders too. `429` when they are reached.
+    pub fn begin_upload(&self, user_id: i64) -> AppResult<UploadSlot<'_>> {
+        let mut uploads = self
+            .uploads
+            .lock()
+            .map_err(|_| AppError::internal("upload state is unavailable"))?;
+        let mine = uploads
+            .reservations
+            .values()
+            .filter(|reservation| reservation.user_id == user_id)
+            .count()
+            + uploads.starting.get(&user_id).copied().unwrap_or(0);
+        let all = uploads.reservations.len() + uploads.starting.values().sum::<usize>();
+        if mine >= MAX_UPLOADS_PER_USER || all >= MAX_UPLOADS_GLOBAL {
+            return Err(AppError::TooManyRequests {
+                retry_after_secs: 60,
+                message: "too many concurrent uploads, finish or cancel one first",
+            });
         }
+        *uploads.starting.entry(user_id).or_default() += 1;
+        Ok(UploadSlot {
+            uploads: &self.uploads,
+            user_id,
+        })
     }
 
     /// Take the reservation of an upload of `user_id` (another user's id
     /// finds nothing).
     pub fn take(&self, upload_id: &str, user_id: i64) -> Option<Reservation> {
-        let mut map = self.reservations.lock().ok()?;
+        let mut uploads = self.uploads.lock().ok()?;
+        let map = &mut uploads.reservations;
         if map.get(upload_id)?.user_id != user_id {
             return None;
         }
@@ -247,9 +310,10 @@ impl HomeFs {
 
     /// Remove and return the reservations whose uploads have expired.
     pub fn expired(&self) -> Vec<Reservation> {
-        let Ok(mut map) = self.reservations.lock() else {
+        let Ok(mut uploads) = self.uploads.lock() else {
             return Vec::new();
         };
+        let map = &mut uploads.reservations;
         let now = Instant::now();
         let ids: Vec<String> = map
             .iter()
@@ -342,6 +406,62 @@ pub fn publish_watch_line(events: &EventBus, user_id: i64, line: &[u8]) {
             &paths,
             None,
             "external",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn homefs() -> HomeFs {
+        HomeFs::new(
+            true,
+            NativeClient::new(PathBuf::from("/nonexistent/native.sock")),
+            PathBuf::from("/nonexistent/homes"),
+            EventBus::new(),
+        )
+    }
+
+    #[test]
+    fn chunked_uploads_have_the_in_process_limits() {
+        let fs = homefs();
+        // Per account: slots being started count as well as registered ones.
+        let starting = fs.begin_upload(1).unwrap();
+        for index in 1..MAX_UPLOADS_PER_USER {
+            fs.begin_upload(1)
+                .unwrap()
+                .register(&format!("usr-a{index}"), 0);
+        }
+        let error = fs.begin_upload(1).err().unwrap();
+        assert!(
+            matches!(error, AppError::TooManyRequests { .. }),
+            "{error:?}"
+        );
+        // A slot dropped without registering frees its place.
+        drop(starting);
+        fs.begin_upload(1).unwrap().register("usr-a0", 0);
+        assert!(fs.begin_upload(1).is_err());
+        // Taking an upload (complete or cancel) frees its place.
+        assert!(fs.take("usr-a0", 1).is_some());
+        assert!(fs.begin_upload(1).is_ok());
+
+        // In all: the other accounts fill the rest of the global limit.
+        let mut user = 2;
+        let mut registered = MAX_UPLOADS_PER_USER - 1;
+        while registered < MAX_UPLOADS_GLOBAL {
+            for _ in 0..MAX_UPLOADS_PER_USER.min(MAX_UPLOADS_GLOBAL - registered) {
+                fs.begin_upload(user)
+                    .unwrap()
+                    .register(&format!("usr-{user}-{registered}"), 0);
+                registered += 1;
+            }
+            user += 1;
+        }
+        let error = fs.begin_upload(user + 1).err().unwrap();
+        assert!(
+            matches!(error, AppError::TooManyRequests { .. }),
+            "{error:?}"
         );
     }
 }

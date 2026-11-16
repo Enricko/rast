@@ -526,6 +526,8 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
             "file exceeds the maximum upload size",
         ));
     }
+    // The limits of in-process uploads, before any quota is reserved.
+    let slot = state.homefs.begin_upload(user.id)?;
     let mut reserved = 0i64;
     if in_home(&logical) {
         let bytes = i64::try_from(size).unwrap_or(i64::MAX);
@@ -553,9 +555,7 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
         .filter(|id| id.starts_with(crate::homefs::UPLOAD_PREFIX));
     match upload_id {
         Some(id) => {
-            if reserved > 0 {
-                state.homefs.reserve(id, user.id, reserved);
-            }
+            slot.register(id, reserved);
             Ok(json_response(StatusCode::OK, value))
         }
         None => {
