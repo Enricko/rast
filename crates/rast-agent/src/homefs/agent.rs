@@ -98,6 +98,8 @@ pub struct HomeSpace {
     home: PathBuf,
     home_root: Arc<OwnedFd>,
     home_info: Info,
+    /// The canonical shared root, as the `~/Shared` links name it.
+    shared_root: PathBuf,
     shared_dir: Arc<OwnedFd>,
     shared_info: Info,
 }
@@ -144,6 +146,7 @@ impl HomeSpace {
             home,
             home_root: Arc::new(home_root),
             home_info,
+            shared_root,
             shared_dir: Arc::new(shared_dir),
             shared_info,
         })
@@ -646,6 +649,7 @@ pub fn router(agent: Arc<HomeAgent>) -> Router {
         .route("/api/files/search", get(search))
         .route("/api/files/copy", post(copy))
         .route("/api/files/move", post(move_items))
+        .route(SHARED_LINKS_ROUTE, post(shared_links))
         .route(fileagent::WATCH_ROUTE, get(super::watch::stream))
         .merge(fileagent::upload_routes::<HomeSpace>())
         .layer(axum::extract::DefaultBodyLimit::disable())
@@ -654,6 +658,22 @@ pub fn router(agent: Arc<HomeAgent>) -> Router {
             fileagent::guard::<HomeSpace>,
         ))
         .with_state(agent)
+}
+
+/// Internal route: bring the `~/Shared` links in line with the shared folders
+/// in the request's shares header (the server sends all that the user may
+/// open). Not part of the File Station API.
+pub const SHARED_LINKS_ROUTE: &str = "/internal/shared-links";
+
+async fn shared_links(
+    State(agent): State<Arc<HomeAgent>>,
+    headers: HeaderMap,
+) -> AppResult<Json<super::links::SharedLinks>> {
+    let shares = ShareRoots::from_headers(&headers)?;
+    let space = agent.space.clone();
+    blocking(move || super::links::sync(space.home_root.as_fd(), &space.shared_root, &shares))
+        .await
+        .map(Json)
 }
 
 // ---------------------------------------------------------------------------

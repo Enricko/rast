@@ -20,6 +20,7 @@ use crate::storage::shares::{rw_group_name, MAX_SHARE_NAME};
 pub mod agent;
 pub mod client;
 pub mod fsat;
+pub mod links;
 pub mod watch;
 
 /// Prefix of chunked upload ids that belong to a per-user agent (the root
@@ -68,6 +69,11 @@ impl ShareRoots {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Every share, by the name in its paths.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &ShareRoot)> {
+        self.0.iter()
     }
 
     /// The header value (`None` when the request names no share).

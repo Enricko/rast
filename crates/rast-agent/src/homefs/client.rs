@@ -227,7 +227,7 @@ impl HomeFs {
             tracing::warn!(
                 user_id,
                 error = %error,
-                "could not stop the file agent of a deactivated account"
+                "could not stop a file agent"
             );
         }
         self.forget(user_id).await;
