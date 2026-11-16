@@ -528,6 +528,34 @@ Update it at the end of every session.
     failed; npm test 156 passed; npm build OK. No dependency, migration,
     protocol or deploy change.
 
+- **Task 1.3 security review: the maintainer's decisions** (2026-11-16,
+  the five questions of the review):
+  - `80078f0` fix(helper): `share_session_groups` counts only processes in
+    the user's own units (first non-slice cgroup component:
+    `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…`,
+    `rast-term-u<uid>-…`) whose real and effective uid are the identity;
+    status and cgroup are read through one `/proc/<pid>` descriptor.
+  - `468e691` fix(helper): an account `rast-u<id>` with an unexpected uid
+    is never added, is taken out of the groups and is reported
+    (`conflicts`); the other members are still set; the server logs it and
+    `rast doctor` lists it.
+  - `da68e37` fix(helper): mount ids (`statx` `STATX_MNT_ID`) in every
+    helper walk and in `share_dir_remove`; a container that is a mount
+    point is refused.
+  - `271fbe9` fix(base): the traverse bit on the data directory is still
+    needed (app profiles, identity homes, package runtimes), so the
+    database and `secret.key` move into `<data_dir>/private` (0700) at the
+    first server start, with links at the old names; `backups/` 0700;
+    `rast doctor` checks `fs.protected_hardlinks = 1`, the folder and
+    conflicts (ADR 0006). The helper already skipped files with more than
+    one link (also those of `rast`); a test pins it.
+  - `58d5fc3` fix(helper): per-share lock in the helper for every container
+    operation (`share_busy` after 10 s) and a `flock` in the journal
+    folder for apply and rollback.
+  - Gates: fmt and clippy clean; `cargo test --workspace` 937 passed, 0
+    failed; npm test 156 passed; npm build OK. On-disk layout change
+    (ADR 0006, approved); no dependency, migration or deploy change.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
@@ -624,6 +652,12 @@ fake helper).
   session restarts (`share_session_groups` sees the old gid in
   `/proc/<pid>/status`); leftover deny entries from before the stop are
   removed by the first pass.
+- Task 1.3 decisions: a bind mount (`mount --bind`) inside a share is
+  left alone by the repair pass and stops `share_dir_remove`; a session
+  restart is not triggered by a set-uid program of the user run by another
+  account; the first start of 1.0.1 on a copy of production data moves
+  `rast.db` and `secret.key` into `private/` (and an older binary still
+  starts through the links).
 - Task 1.3 review: a FUSE mount by a member inside a share (for example
   `sshfs` or `squashfuse`) is left out of File Station search, size, copy
   and delete (delete answers 403); a hard link (with
@@ -654,31 +688,6 @@ fake helper).
    host. Do not run `dev-instance.sh up native` here.
 
 ## Open questions
-
-- **Task 1.3 security review, for the maintainer** (design, protocol or
-  ADR; not changed):
-  1. `share_session_groups` counts every process whose effective uid is
-     the identity, not only the processes in that user's units. A set-uid
-     program of user X run by user Y carries Y's groups, so X's session is
-     restarted again and again. Options: filter by `/proc/<pid>/cgroup`
-     (the user's units) or require real uid == effective uid.
-  2. One identity with an unexpected uid makes `share_members_set` fail
-     for the whole share (no revocation for that share until it is
-     fixed). Option: skip and report it, like accounts without a Linux
-     identity.
-  3. A bind mount on the same file system inside a share (root only) has
-     the container's `st_dev`, so the helper walk and `share_dir_remove`
-     do not see it. Option: `statx` `STATX_MNT_ID` or `openat2`
-     `RESOLVE_NO_XDEV` in the helper.
-  4. `/var/lib/rast` is 0751. With `fs.protected_hardlinks = 0`, `rast`'s
-     own files there can be hard-linked into a share and are regrouped by
-     the repair pass once the original is replaced (`rast` is an allowed
-     owner). Options: 0750, and a `rast doctor` check for
-     `fs.protected_hardlinks = 1` (production has 1).
-  5. No per-share lock in the helper: apply, rollback, repair and
-     `share_deny_set` on one share can overlap (apply and rollback only if
-     the CLI is killed; repair vs. deny set is a read-modify-write of the
-     container ACL).
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user
