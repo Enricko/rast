@@ -264,7 +264,7 @@ operation is idempotent.
 | `shares_migrate_scan`, `shares_migrate_apply`, `shares_migrate_rollback` | `shareId`, `container` | Same pattern for shared folders (task 1.3). |
 | `share_dir_repair` | `shareId`, `container` | Daily repair pass (D3 decision, 2026-11-16): the recursive `share_dir_prepare` of a container that already has the layout (owned by root); a legacy container is left for `rast migrate shares`. Keeps the container's deny entries. |
 | `share_deny_set` | `shareId`, `container`, `userIds` (at most 256) | D7 decision (2026-11-16): the full set of `u:rast-u<id>:---` entries on the access ACL of a prepared container, the stopgap while a full revocation waits for the user's session restart. Entries of users not listed are removed; the default ACL is not touched. |
-| `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run with the identity's effective uid and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. Lets the server find sessions that still hold a revoked group after a server restart. |
+| `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run as the identity in one of the user's units and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. A process counts only when its real and effective uid are the identity's and the first non-slice component of its cgroup (`/proc/<pid>/cgroup`) is `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…` or `rast-term-u<uid>-…` (`.service`); both files are read through one descriptor of `/proc/<pid>`, which stays bound to that process. Lets the server find sessions that still hold a revoked group after a server restart. Phase 2 (user units under `user@<uid>.service`) must extend the unit rule. |
 | `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (same pattern as `rootfs_start`). It only streams tar archives of the fixed homes and shared roots (section 7). |
 
 **Trust assumption.** The helper cannot check the `userId` ↔ `username`
@@ -633,7 +633,9 @@ falls back on its next `quota_status` check.
   still live in memory, but every pass of the syncer (start-up, every
   change, every five minutes) asks the helper which share groups the
   running processes of every identity carry (`share_session_groups`, the
-  `Groups:` line of `/proc/<pid>/status`). A session that holds a group its
+  `Groups:` line of `/proc/<pid>/status`, only for processes in the
+  user's own units with real and effective uid of the identity; review
+  follow-up). A session that holds a group its
   user is no longer in (rw of a share it may now only read, or any group of
   a share it lost; deactivated accounts included) gets the warning and the
   forced restart again, and its agent is restarted. Sessions restarted less

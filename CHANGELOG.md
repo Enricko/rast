@@ -95,7 +95,13 @@ this file by `scripts/changelog-section.sh`.
     `u:rast-u<id>:---` entries on a prepared container, at most 256,
     which every prepare keeps) and the read-only `share_session_groups`
     (which share groups the running processes of up to 200 users carry,
-    from `/proc/<pid>/status`).
+    from `/proc/<pid>/status`). Only processes in the user's own units
+    (session, file agent, apps, terminals, from `/proc/<pid>/cgroup`)
+    whose real and effective uid are the identity count, so a set-uid
+    program of one user run by another no longer makes the first user's
+    session restart again and again; both files are read through one
+    descriptor of `/proc/<pid>`, so a reused pid is never read as the
+    process it replaced.
   - The helper walks shared folders through directory descriptors and
     changes entries with `fchown`, `fchmod` and `fsetxattr` on the open
     descriptor, so a member who swaps an entry for a symlink cannot point

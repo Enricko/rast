@@ -24,7 +24,9 @@
 //!   (D7); every prepare keeps them.
 //! * `share_session_groups` reports which share groups the running
 //!   processes of some users carry, from `/proc/<pid>/status`, so the
-//!   server can find sessions that still hold a revoked group.
+//!   server can find sessions that still hold a revoked group. Only
+//!   processes in that user's own units (`/proc/<pid>/cgroup`) whose real
+//!   and effective uid are the identity count.
 //!
 //! The members of a shared folder can change it while root works on it, so
 //! every tree walk goes through directory descriptors: entries are looked up
@@ -1628,15 +1630,18 @@ const MAX_PROCESSES: usize = 1 << 20;
 /// Bytes of one `/proc/<pid>/status` read at most.
 const MAX_STATUS_BYTES: u64 = 64 * 1024;
 
-/// The effective uid and the supplementary groups of a process, from its
-/// `/proc/<pid>/status`.
-pub fn parse_proc_status(text: &str) -> Option<(u32, Vec<u32>)> {
-    let mut euid = None;
+/// The real uid, the effective uid and the supplementary groups of a
+/// process, from its `/proc/<pid>/status`.
+pub fn parse_proc_status(text: &str) -> Option<(u32, u32, Vec<u32>)> {
+    let mut uids = None;
     let mut groups = None;
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             // Real, effective, saved set and file system uid.
-            euid = rest.split_whitespace().nth(1)?.parse().ok();
+            let mut fields = rest.split_whitespace();
+            let real = fields.next()?.parse().ok();
+            let effective = fields.next()?.parse().ok();
+            uids = real.zip(effective);
         } else if let Some(rest) = line.strip_prefix("Groups:") {
             groups = rest
                 .split_whitespace()
@@ -1644,7 +1649,46 @@ pub fn parse_proc_status(text: &str) -> Option<(u32, Vec<u32>)> {
                 .collect::<Option<Vec<u32>>>();
         }
     }
-    Some((euid?, groups?))
+    let (real, effective) = uids?;
+    Some((real, effective, groups?))
+}
+
+/// The systemd unit of a process, from its `/proc/<pid>/cgroup`: the first
+/// component of its cgroup path (unified hierarchy, or the `name=systemd`
+/// one without it) that is not a slice. systemd names it (root); cgroups
+/// that a delegated unit makes below it are never read, so a process
+/// cannot pass for a unit by the name of a cgroup.
+pub fn parse_proc_cgroup(text: &str) -> Option<String> {
+    let path_of = |prefix: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::to_string)
+    };
+    let path = path_of("0::").or_else(|| {
+        text.lines().find_map(|line| {
+            let mut fields = line.splitn(3, ':');
+            let (_, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+            (controllers == "name=systemd").then(|| path.to_string())
+        })
+    })?;
+    path.split('/')
+        .filter(|part| !part.is_empty())
+        .find(|part| !part.ends_with(".slice"))
+        .map(str::to_string)
+}
+
+/// Whether `unit` is one of the units RAST starts for the identity `uid`
+/// of user `user_id`: its graphical session, file agent, apps and
+/// terminals.
+pub fn is_user_unit(unit: &str, user_id: i64, uid: u32) -> bool {
+    let Some(name) = unit.strip_suffix(".service") else {
+        return false;
+    };
+    name == format!("rast-xpra-u{user_id}")
+        || name == format!("{}{uid}", crate::native::homes::FILES_UNIT_PREFIX)
+        || [format!("rast-app-u{uid}-"), format!("rast-term-u{uid}-")]
+            .iter()
+            .any(|prefix| name.len() > prefix.len() && name.starts_with(prefix.as_str()))
 }
 
 fn proc_dir(options: &NativeOptions) -> PathBuf {
@@ -1656,16 +1700,36 @@ fn proc_dir(options: &NativeOptions) -> PathBuf {
     PathBuf::from("/proc")
 }
 
-/// Per user: how many processes run with the identity's uid, and which gids
-/// from `range` they carry.
+/// Read at most [`MAX_STATUS_BYTES`] of the file `name` in the process
+/// folder `dir`.
+fn read_proc_file(dir: &OwnedFd, name: &CStr) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::from(open_at(dir.as_raw_fd(), name, libc::O_RDONLY).ok()?);
+    let mut text = String::new();
+    file.take(MAX_STATUS_BYTES).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// Per user: how many processes run as the identity in one of the user's
+/// units ([`is_user_unit`]), and which gids from `range` they carry. A
+/// process counts only when its real and effective uid are both the
+/// identity's: a set-uid program of the identity run by someone else
+/// carries that person's groups, not the user's.
+///
+/// Both files of a process are read through one descriptor of its
+/// `/proc/<pid>` folder, which stays bound to that process: when it ends
+/// and its pid is reused, the reads fail instead of reading the new
+/// process.
 fn scan_processes(
     proc: &std::path::Path,
     users: &HashMap<u32, i64>,
     range: &RangeInclusive<u32>,
 ) -> Result<BTreeMap<i64, (u64, BTreeSet<u32>)>, NativeError> {
-    use std::io::Read;
     let entries = std::fs::read_dir(proc).map_err(|error| {
         NativeError::command_failed(format!("cannot list {}: {error}", proc.display()))
+    })?;
+    let proc_fd = open_dir(proc).map_err(|error| {
+        NativeError::command_failed(format!("cannot open {}: {error}", proc.display()))
     })?;
     let mut out: BTreeMap<i64, (u64, BTreeSet<u32>)> = BTreeMap::new();
     for entry in entries.take(MAX_PROCESSES) {
@@ -1676,23 +1740,27 @@ fn scan_processes(
             continue;
         }
         // A process that ended meanwhile is skipped.
-        let Ok(file) = std::fs::File::open(entry.path().join("status")) else {
+        let Ok(dir) = open_at(
+            proc_fd.as_raw_fd(),
+            &c_name(pid).expect("digits"),
+            DIR_FLAGS,
+        ) else {
             continue;
         };
-        let mut text = String::new();
-        if file
-            .take(MAX_STATUS_BYTES)
-            .read_to_string(&mut text)
-            .is_err()
-        {
+        let Some((ruid, euid, groups)) =
+            read_proc_file(&dir, c"status").and_then(|text| parse_proc_status(&text))
+        else {
+            continue;
+        };
+        let Some(user_id) = users.get(&euid).filter(|_| ruid == euid) else {
+            continue;
+        };
+        let in_unit = read_proc_file(&dir, c"cgroup")
+            .and_then(|text| parse_proc_cgroup(&text))
+            .is_some_and(|unit| is_user_unit(&unit, *user_id, euid));
+        if !in_unit {
             continue;
         }
-        let Some((euid, groups)) = parse_proc_status(&text) else {
-            continue;
-        };
-        let Some(user_id) = users.get(&euid) else {
-            continue;
-        };
         let slot = out.entry(*user_id).or_default();
         slot.0 += 1;
         slot.1

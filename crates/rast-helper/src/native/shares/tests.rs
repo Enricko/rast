@@ -1212,16 +1212,16 @@ async fn the_repair_pass_reapplies_the_layout_of_migrated_shares_only() {
 }
 
 #[test]
-fn process_status_gives_the_effective_uid_and_the_groups() {
+fn process_status_gives_the_real_and_effective_uid_and_the_groups() {
     let status = "Name:\tbash\nUid:\t200003\t200004\t200003\t200003\n\
                   Gid:\t200003\t200003\t200003\t200003\nGroups:\t4 1200001 \n";
     assert_eq!(
         parse_proc_status(status),
-        Some((200_004, vec![4, 1_200_001]))
+        Some((200_003, 200_004, vec![4, 1_200_001]))
     );
     assert_eq!(
         parse_proc_status("Uid:\t1\t2\t3\t4\nGroups:\n"),
-        Some((2, vec![]))
+        Some((1, 2, vec![]))
     );
     for bad in [
         "",
@@ -1243,6 +1243,60 @@ fn process_status_gives_the_effective_uid_and_the_groups() {
     }
 }
 
+#[test]
+fn the_unit_of_a_process_is_the_first_cgroup_below_the_slices() {
+    let unit = |text: &str| parse_proc_cgroup(text);
+    assert_eq!(
+        unit("0::/rast.slice/rast-linux.slice/rast-xpra-u3.service\n").as_deref(),
+        Some("rast-xpra-u3.service")
+    );
+    // A cgroup below the unit (a delegated unit names it) is never read.
+    assert_eq!(
+        unit("0::/system.slice/rast-term-u200003-ab.service/rast-xpra-u4.service\n").as_deref(),
+        Some("rast-term-u200003-ab.service")
+    );
+    // cgroup v1: the systemd hierarchy.
+    assert_eq!(
+        unit("12:cpu,cpuacct:/x\n1:name=systemd:/rast.slice/rast-linux.slice/rast-files-u200003.service\n")
+            .as_deref(),
+        Some("rast-files-u200003.service")
+    );
+    assert_eq!(
+        unit("0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.service\n").as_deref(),
+        Some("user@1000.service")
+    );
+    for none in [
+        "",
+        "0::/\n",
+        "0::/rast.slice/rast-linux.slice\n",
+        "3:cpu:/x\n",
+    ] {
+        assert_eq!(unit(none), None, "{none:?}");
+    }
+
+    let own = |unit: &str| is_user_unit(unit, 3, 200_003);
+    for yes in [
+        "rast-xpra-u3.service",
+        "rast-files-u200003.service",
+        "rast-app-u200003-code-0.service",
+        "rast-term-u200003-0123456789abcdef0123456789abcdef.service",
+    ] {
+        assert!(own(yes), "{yes}");
+    }
+    for no in [
+        "rast-xpra-u30.service",
+        "rast-xpra-u3.scope",
+        "rast-files-u2000031.service",
+        "rast-app-u2000031-code-0.service",
+        "rast-app-u200003-.service",
+        "rast-term-u200004-ab.service",
+        "user@200003.service",
+        "rast.service",
+    ] {
+        assert!(!own(no), "{no}");
+    }
+}
+
 #[tokio::test]
 async fn session_groups_name_the_share_groups_processes_carry() {
     let mut fx = fixture();
@@ -1254,20 +1308,52 @@ async fn session_groups_name_the_share_groups_processes_carry() {
             .unwrap()
             .uid
     };
-    for (pid, euid, groups) in [
-        ("100", uid(3), "4 1200001 1200002"),
-        ("101", uid(3), "1200003 27"),
-        ("102", uid(4), ""),
+    let linux = "0::/rast.slice/rast-linux.slice";
+    let term3 = format!("0::/system.slice/rast-term-u{}-ab.service", uid(3));
+    let files4 = format!("{linux}/rast-files-u{}.service", uid(4));
+    for (pid, ruid, euid, groups, cgroup) in [
+        (
+            "100",
+            uid(3),
+            uid(3),
+            "4 1200001 1200002",
+            format!("{linux}/rast-xpra-u3.service"),
+        ),
+        ("101", uid(3), uid(3), "1200003 27", term3),
+        ("102", uid(4), uid(4), "", files4.clone()),
         // Not asked about.
-        ("103", uid(5), "1200001"),
-        ("104", 1000, "1200001"),
+        (
+            "103",
+            uid(5),
+            uid(5),
+            "1200001",
+            format!("{linux}/rast-xpra-u5.service"),
+        ),
+        ("104", 1000, 1000, "1200001", files4.clone()),
+        // User 3's identity outside user 3's units: a set-uid program of
+        // user 3 run by user 4 (it carries user 4's groups), a process in
+        // user 4's session, one outside every RAST unit.
+        ("106", uid(4), uid(3), "1200004", files4.clone()),
+        ("107", uid(3), uid(3), "1200004", files4),
+        (
+            "108",
+            uid(3),
+            uid(3),
+            "1200004",
+            "0::/user.slice/user-1000.slice/session-2.scope".into(),
+        ),
+        // Without a cgroup file nothing is known: not counted.
+        ("109", uid(3), uid(3), "1200004", String::new()),
     ] {
         std::fs::create_dir_all(proc.join(pid)).unwrap();
         std::fs::write(
             proc.join(pid).join("status"),
-            format!("Name:\tx\nUid:\t{euid}\t{euid}\t{euid}\t{euid}\nGroups:\t{groups}\n"),
+            format!("Name:\tx\nUid:\t{ruid}\t{euid}\t{euid}\t{euid}\nGroups:\t{groups}\n"),
         )
         .unwrap();
+        if !cgroup.is_empty() {
+            std::fs::write(proc.join(pid).join("cgroup"), format!("{cgroup}\n")).unwrap();
+        }
     }
     std::fs::create_dir_all(proc.join("105")).unwrap();
     std::fs::write(proc.join("105/status"), "garbage").unwrap();
