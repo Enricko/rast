@@ -336,6 +336,27 @@ Update it at the end of every session.
       corrects it. `quota::recalculate` cannot read a one-HOME HOME (0700).
     - Nothing calls `home_ensure` yet: no account becomes one-HOME before
       `rast migrate home` (task 1.5).
+- **Task 1.2 security review** (2026-11-16, independent review of
+  `8b986d8`..`f2a1746` against ADR 0005). Nothing was exploitable on
+  production, where every account is still legacy. Fixed:
+  - `b5afbec` test(helper): unit tests wait out `ETXTBSY` on fake binaries
+    (the home and file agent tests failed about one run in ten).
+  - `1a04a46` fix(helper): `home_ensure` reopened a folder it had just made
+    with `mkdirat` by name, so a directory renamed into its place was
+    chowned (and, for the HOME, chmodded) by root; the reopen now requires
+    an empty folder owned by the helper.
+  - `79ca283` fix(server): streamed agent replies keep only the file
+    headers; the server sets `nosniff` and the sandboxing preview CSP, so
+    an agent taken over by the user's other processes cannot set cookies
+    or run script on the RAST origin.
+  - `d298a7f` fix(agent): `rast file-agent` is non-dumpable
+    (`PR_SET_DUMPABLE` 0), so same-uid processes cannot ptrace it where
+    `ptrace_scope` is 0.
+  - `445b7b0` fix(server): chunked uploads of one-HOME accounts have the
+    in-process limits (8 per account, 64 in all, `429`).
+  - Gates after the review: fmt and clippy clean; `cargo test --workspace`
+    867 passed, 0 failed; npm test 154 passed; npm build OK.
+  - Open findings for the maintainer: see "Open questions".
 
 ## Phase 1 checklist
 
@@ -402,6 +423,35 @@ fake helper).
 
 ## Open questions
 
+- **From the task 1.2 security review (need a decision before task 1.3
+  creates `~/Shared` links or gives members kernel access to shares):**
+  - The server checks Effective Access by share *name*, but the agent
+    resolves `/shared/<name>` through `~/Shared/<name>`, a link the user can
+    repoint to any container of the shared root. The kernel still bounds
+    access, but audit entries and realtime audiences then name the wrong
+    share. Proposal: the server sends the share's container from the
+    database (a server-only header, like the quota header) and the agent
+    accepts the link only when it points there, or uses the container
+    directly. Touches ADR 0005, section 2.
+  - Copy, move and upload in the agent use path-based calls
+    (`std::fs::copy` follows a symlink at the target; intermediate folders
+    are looked up again on every call). Once other members can write a
+    share, they can redirect user A's agent with planted links, for example
+    copying A's `~/.ssh` key into a share they read, or writing files into
+    A's `~/.config/autostart`. ADR 0005 says a race only reaches what the
+    agent's uid can reach, which is true but misses this confused-deputy
+    case. Proposal: `openat`/`O_NOFOLLOW`/`O_EXCL` operations on directory
+    descriptors for everything in shared folders, before task 1.3.
+  - Lower priority: the server holds one lock for all accounts while the
+    helper starts an agent (one slow start stalls every one-HOME account);
+    agent errors on mkdir, rename and copy come back as `400` instead of
+    `403`/`404`; a socket unit restarted outside RAST leaves the server
+    with a stale token (`403` until the server restarts); deactivating an
+    account does not stop its agent yet (ADR 0005, section 7); extra unit
+    hardening beyond the ADR (`ProtectKernelTunables`,
+    `ProtectKernelModules`, `ProtectControlGroups`, `RestrictNamespaces`,
+    `LockPersonality`, `RestrictSUIDSGID`, `SystemCallFilter=@system-service`)
+    to be tried on the test host.
 - Task 1.3 results for the maintainer: group quota as the share limit under
   Q-a (D3) and the deny ACL entry instead of a forced restart (D7).
 - **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for

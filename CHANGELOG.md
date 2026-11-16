@@ -37,6 +37,14 @@ this file by `scripts/changelog-section.sh`.
     checks. `503` when the agent cannot be started; deleting, the recycle
     bin and the usage view answer `503` for such accounts until the recycle
     bin moves to XDG Trash. Legacy accounts are unchanged.
+  - Hardening from the task 1.2 security review: chunked uploads of such
+    accounts have the in-process limits (8 at a time per account, 64 in
+    all, then `429`); downloads, previews and other streamed agent replies
+    reach the browser with the agent's file headers only, and the server
+    sets `X-Content-Type-Options: nosniff` and a sandboxing CSP itself; the
+    agent cannot be traced by the account's other processes; `home_ensure`
+    never takes over a folder that was swapped in while it was being
+    created.
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
