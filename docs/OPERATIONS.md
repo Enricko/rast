@@ -711,6 +711,13 @@ sudo systemctl start rast
   root-owned entries, special files and other file systems are left
   unchanged and listed in the report. An apply that stopped half way
   resumes with its journal when run again.
+- The apply **replaces the whole ACL** of every entry with the RAST
+  layout. Read the dry run first: it lists every entry whose ACL holds
+  named entries that RAST does not manage (anything other than `u:rast`,
+  the read-only group and old per-user entries of RAST accounts), with the
+  entries themselves, for example `docs/plan.txt: u:1001:rw-, default
+  g:2000:r-x`. They are removed by the apply. The journal keeps them for a rollback; to keep a copy of
+  your own, save them first with `sudo getfacl -R -p <path>`.
 - `sudo -u rast rast migrate shares --rollback` (server stopped) restores
   the journal: only entries that are still the recorded inode with the
   recorded owner; entries changed since are reported and left. The groups

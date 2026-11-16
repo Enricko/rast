@@ -895,6 +895,11 @@ pub struct TreeReport {
     /// Entries with named-user ACL entries of RAST identities (terminal
     /// grants), which the new ACL replaces.
     pub identity_acl_entries: Sample,
+    /// Entries whose ACLs hold named entries that RAST does not manage
+    /// (neither `u:rast`, the read-only group nor a RAST identity), which
+    /// the new ACL removes. Each path is followed by those entries, for
+    /// example `docs/plan.txt: u:1001:rw-, default g:2000:r-x`.
+    pub foreign_acl_entries: Sample,
     /// Entries that vanished or were swapped while the walk ran.
     pub changed_during_walk: Sample,
     /// The container already had (before this run) its target owner,
@@ -1065,6 +1070,23 @@ fn has_identity_entries(layout: &Layout, raw: Option<&[u8]>) -> bool {
         .is_some_and(|acl| acl.named_users().any(|(uid, _)| layout.is_identity(uid)))
 }
 
+/// The named entries of an ACL that the layout does not manage, in
+/// `getfacl` notation (`prefix` marks the default ACL).
+fn foreign_entries(layout: &Layout, raw: Option<&[u8]>, prefix: &str) -> Vec<String> {
+    let Some(acl) = raw.and_then(Acl::decode) else {
+        return Vec::new();
+    };
+    acl.0
+        .iter()
+        .filter(|entry| match entry.tag {
+            Tag::User(uid) => uid != layout.rast_uid && !layout.is_identity(uid),
+            Tag::Group(gid) => gid != layout.ro_gid,
+            _ => false,
+        })
+        .map(|entry| format!("{prefix}{}", Acl(vec![*entry]).describe()))
+        .collect()
+}
+
 /// Inspect (and with `apply`, change) one entry.
 fn handle_entry(
     layout: &Layout,
@@ -1083,6 +1105,13 @@ fn handle_entry(
         || has_identity_entries(layout, now.default.as_deref())
     {
         report.identity_acl_entries.add(show(path));
+    }
+    let mut foreign = foreign_entries(layout, now.access.as_deref(), "");
+    foreign.extend(foreign_entries(layout, now.default.as_deref(), "default "));
+    if !foreign.is_empty() {
+        report
+            .foreign_acl_entries
+            .add(&format!("{}: {}", show(path), foreign.join(", ")));
     }
     let target = Target::of(layout, stat, container);
     if target.matches(stat, &now, layout.test_mode) {

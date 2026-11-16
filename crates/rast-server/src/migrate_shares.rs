@@ -188,6 +188,32 @@ pub fn describe(mode: Mode, outcome: &ShareOutcome) -> Vec<String> {
                     .unwrap_or_default();
                 lines.push(format!("  {n} {label}: {}", sample.join(", ")));
             }
+            // ACL entries that the new ACL removes: every listed one, so
+            // the administrator knows what will be lost.
+            let foreign = count("foreignAclEntries");
+            if foreign > 0 {
+                lines.push(format!(
+                    "  {foreign} entries with ACL entries that RAST does not manage ({}):",
+                    if mode == Mode::DryRun {
+                        "they will be removed"
+                    } else {
+                        "removed"
+                    }
+                ));
+                let listed: Vec<&str> = report["foreignAclEntries"]["paths"]
+                    .as_array()
+                    .map(|paths| paths.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+                for entry in &listed {
+                    lines.push(format!("    {entry}"));
+                }
+                if (listed.len() as u64) < foreign {
+                    lines.push(format!(
+                        "    and {} more (save them first with getfacl -R)",
+                        foreign - listed.len() as u64
+                    ));
+                }
+            }
             if let Some(journal) = outcome.report["journal"].as_str() {
                 lines.push(format!("  journal: {journal}"));
             }
@@ -369,6 +395,10 @@ mod tests {
                     "changes": {"count": 5, "paths": []},
                     "symlinks": {"count": 1, "paths": ["docs/link"]},
                     "hardLinks": {"count": 0, "paths": []},
+                    "foreignAclEntries": {"count": 3, "paths": [
+                        "docs: u:1001:rwx, default g:2000:r-x",
+                        "docs/plan.txt: u:1001:rw-",
+                    ]},
                 }
             }),
             members: Value::Null,
@@ -381,7 +411,20 @@ mod tests {
             "  2 folders, 3 files, 10 bytes; 5 entries changed"
         );
         assert_eq!(lines[2], "  1 symlinks (left unchanged): docs/link");
-        assert_eq!(lines[3], "  journal: 1763251200");
+        assert_eq!(
+            lines[3..7],
+            [
+                "  3 entries with ACL entries that RAST does not manage (removed):",
+                "    docs: u:1001:rwx, default g:2000:r-x",
+                "    docs/plan.txt: u:1001:rw-",
+                "    and 1 more (save them first with getfacl -R)",
+            ]
+        );
+        assert_eq!(lines[7], "  journal: 1763251200");
+        assert_eq!(
+            describe(Mode::DryRun, &outcome)[3],
+            "  3 entries with ACL entries that RAST does not manage (they will be removed):"
+        );
         let failed = ShareOutcome {
             ok: false,
             error: Some("shares_migrate_apply: forbidden".into()),

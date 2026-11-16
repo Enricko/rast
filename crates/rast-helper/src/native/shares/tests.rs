@@ -665,6 +665,39 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
     ]);
     acl::write(docs.as_raw_fd(), acl::ACCESS_XATTR, &granted).unwrap();
     drop(docs);
+    // ACL entries that RAST does not manage: listed by the dry run.
+    let plan = std::fs::File::open(team.join("docs/plan.txt")).unwrap();
+    let foreign = Acl::new(vec![
+        Entry {
+            tag: Tag::UserObj,
+            perm: 6,
+        },
+        Entry {
+            tag: Tag::User(1001),
+            perm: 6,
+        },
+        Entry {
+            tag: Tag::GroupObj,
+            perm: 4,
+        },
+        Entry {
+            tag: Tag::Group(2000),
+            perm: 4,
+        },
+        Entry {
+            tag: Tag::Mask,
+            perm: 6,
+        },
+        Entry {
+            tag: Tag::Other,
+            perm: 4,
+        },
+    ]);
+    acl::write(plan.as_raw_fd(), acl::ACCESS_XATTR, &foreign).unwrap();
+    drop(plan);
+    let deep = std::fs::File::open(team.join("docs/deep")).unwrap();
+    acl::write(deep.as_raw_fd(), acl::DEFAULT_XATTR, &foreign).unwrap();
+    drop(deep);
     // A set-gid folder keeps the bit on rollback; a set-gid file loses it.
     std::fs::set_permissions(
         team.join("docs/deep"),
@@ -706,6 +739,20 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
     assert_eq!(
         scan["report"]["identityAclEntries"]["paths"],
         json!(["docs"])
+    );
+    let mut foreign_paths: Vec<&str> = scan["report"]["foreignAclEntries"]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    foreign_paths.sort_unstable();
+    assert_eq!(
+        foreign_paths,
+        [
+            "docs/deep: default u:1001:rw-, default g:2000:r--",
+            "docs/plan.txt: u:1001:rw-, g:2000:r--",
+        ]
     );
     assert_eq!(mode(&team), 0o750, "the scan changes nothing");
 

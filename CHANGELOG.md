@@ -103,7 +103,9 @@ this file by `scripts/changelog-section.sh`.
   of an existing install to the group layout, before `rast migrate home`.
   Run it as the service user: `sudo -u rast rast migrate shares --dry-run`
   reports per shared folder what would change (entries, skipped symlinks,
-  hard-linked files, root-owned entries, old per-user ACL entries) and may
+  hard-linked files, root-owned entries, old per-user ACL entries, and
+  every entry whose ACL holds entries RAST does not manage, with those
+  entries, since the apply replaces the whole ACL) and may
   run while the server runs; `rast migrate shares` (apply) and
   `rast migrate shares --rollback` need the server stopped. `--share <name>`
   limits it to one shared folder, `--json` gives a machine-readable report.
