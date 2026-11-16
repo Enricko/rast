@@ -203,25 +203,7 @@ impl Storage {
         access: Access,
     ) -> AppResult<ResolvedPath> {
         let root = self.resolve_root(pool, user, logical).await?;
-        if access == Access::Write && !root.perm.allows_write() {
-            return Err(AppError::Forbidden("write permission required"));
-        }
-        let physical = safe_path::physical_path(&root.physical, logical.relative_segments())?;
-        let exists = safe_path::verify_no_symlinks(&root.physical, &physical)?;
-        if !exists {
-            return Err(AppError::NotFound("path not found"));
-        }
-        safe_path::verify_containment(&root.physical, &physical)?;
-        Ok(ResolvedPath {
-            logical: logical.clone(),
-            physical,
-            root_physical: root.physical,
-            kind: root.kind,
-            perm: root.perm,
-            in_home: root.in_home,
-            share_id: root.share_id,
-            share_name: root.share_name,
-        })
+        root.resolve(logical, access)
     }
 
     /// Build (and validate) a not-yet-existing child of an already resolved
@@ -232,11 +214,7 @@ impl Storage {
         parent: &ResolvedPath,
         name: &str,
     ) -> AppResult<(LogicalPath, PathBuf, bool)> {
-        let logical = parent.logical.child(name)?;
-        let physical = parent.physical.join(name);
-        let exists = safe_path::verify_no_symlinks(&parent.root_physical, &physical)?;
-        safe_path::verify_containment(&parent.root_physical, &physical)?;
-        Ok((logical, physical, exists))
+        parent.child_target(name)
     }
 
     /// Ensure the per-user recycle bin directory exists (0700).

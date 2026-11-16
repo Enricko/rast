@@ -284,7 +284,46 @@ pub struct ResolvedPath {
     pub share_name: Option<String>,
 }
 
+impl StorageRoot {
+    /// Resolve an existing logical path inside this root: rebuild the
+    /// physical path from validated segments, refuse every symlink on the
+    /// way and check containment. Touches nothing but metadata, and needs no
+    /// database, so the per-user file agent uses it as well.
+    pub fn resolve(&self, logical: &LogicalPath, access: Access) -> AppResult<ResolvedPath> {
+        if access == Access::Write && !self.perm.allows_write() {
+            return Err(AppError::Forbidden("write permission required"));
+        }
+        let physical = physical_path(&self.physical, logical.relative_segments())?;
+        let exists = verify_no_symlinks(&self.physical, &physical)?;
+        if !exists {
+            return Err(AppError::NotFound("path not found"));
+        }
+        verify_containment(&self.physical, &physical)?;
+        Ok(ResolvedPath {
+            logical: logical.clone(),
+            physical,
+            root_physical: self.physical.clone(),
+            kind: self.kind,
+            perm: self.perm,
+            in_home: self.in_home,
+            share_id: self.share_id.clone(),
+            share_name: self.share_name.clone(),
+        })
+    }
+}
+
 impl ResolvedPath {
+    /// Build (and validate) a not-yet-existing child of this resolved
+    /// directory. Returns the logical path, physical path and whether an
+    /// object currently exists at that location.
+    pub fn child_target(&self, name: &str) -> AppResult<(LogicalPath, PathBuf, bool)> {
+        let logical = self.logical.child(name)?;
+        let physical = self.physical.join(name);
+        let exists = verify_no_symlinks(&self.root_physical, &physical)?;
+        verify_containment(&self.root_physical, &physical)?;
+        Ok((logical, physical, exists))
+    }
+
     /// Last logical component (empty for a namespace root).
     pub fn name(&self) -> &str {
         self.logical.name().unwrap_or("")

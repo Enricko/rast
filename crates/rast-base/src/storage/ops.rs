@@ -238,7 +238,8 @@ pub fn sort_entries(items: &mut [EntryDto], sort: &str, order: &str) {
     });
 }
 
-fn paginate<T>(mut items: Vec<T>, page: i64, per_page: i64) -> (Vec<T>, i64, i64, i64) {
+/// One page of `items`, with the clamped page, page size and total count.
+pub fn paginate<T>(mut items: Vec<T>, page: i64, per_page: i64) -> (Vec<T>, i64, i64, i64) {
     let page = page.max(1);
     let per_page = per_page.clamp(1, MAX_PAGE_SIZE);
     let total = items.len() as i64;
@@ -268,6 +269,32 @@ pub async fn list(
     per_page: i64,
 ) -> AppResult<ListingDto> {
     let resolved = storage.resolve(pool, user, path, Access::Read).await?;
+    let entries = read_entries(&resolved, q, sort, order).await?;
+    let (items, page, per_page, total) = paginate(entries, page, per_page);
+    let quota = quota::info(pool, user.id).await?;
+    Ok(ListingDto {
+        path: resolved.logical.as_string(),
+        breadcrumbs: breadcrumbs_for(&resolved),
+        items,
+        page,
+        per_page,
+        total,
+        quota: QuotaDto {
+            quota_bytes: quota.quota_bytes,
+            used_bytes: quota.used_bytes,
+            free_bytes: quota.free_bytes(),
+        },
+    })
+}
+
+/// Every listable entry of a resolved directory (no symlinks, no temporary
+/// files, no names the API cannot address), filtered by `q` and sorted.
+pub async fn read_entries(
+    resolved: &ResolvedPath,
+    q: Option<&str>,
+    sort: &str,
+    order: &str,
+) -> AppResult<Vec<EntryDto>> {
     if !resolved.physical.is_dir() {
         return Err(AppError::bad_request("path is not a directory"));
     }
@@ -308,21 +335,7 @@ pub async fn list(
         entries.retain(|entry| entry.name.to_lowercase().contains(&needle));
     }
     sort_entries(&mut entries, sort, order);
-    let (items, page, per_page, total) = paginate(entries, page, per_page);
-    let quota = quota::info(pool, user.id).await?;
-    Ok(ListingDto {
-        path: resolved.logical.as_string(),
-        breadcrumbs: breadcrumbs_for(&resolved),
-        items,
-        page,
-        per_page,
-        total,
-        quota: QuotaDto {
-            quota_bytes: quota.quota_bytes,
-            used_bytes: quota.used_bytes,
-            free_bytes: quota.free_bytes(),
-        },
-    })
+    Ok(entries)
 }
 
 pub async fn stat(
@@ -393,13 +406,18 @@ pub async fn mkdir(
     let parent = storage
         .resolve_logical(pool, user, &parent_logical, Access::Write)
         .await?;
-    if !parent.physical.is_dir() {
-        return Err(AppError::bad_request("parent is not a directory"));
-    }
     let name = logical
         .name()
         .ok_or_else(|| AppError::bad_request("invalid path"))?;
-    let (target_logical, physical, exists) = storage.child_target(&parent, name)?;
+    mkdir_in(&parent, name).await
+}
+
+/// Create the folder `name` in a resolved (writable) parent directory.
+pub async fn mkdir_in(parent: &ResolvedPath, name: &str) -> AppResult<EntryDto> {
+    if !parent.physical.is_dir() {
+        return Err(AppError::bad_request("parent is not a directory"));
+    }
+    let (target_logical, physical, exists) = parent.child_target(name)?;
     if exists {
         return Err(AppError::conflict(
             "a file or folder with that name already exists",
@@ -420,19 +438,29 @@ pub async fn rename(
     if resolved.is_storage_root() {
         return Err(AppError::bad_request("cannot rename a storage root"));
     }
+    let parent_logical = resolved
+        .logical
+        .parent()
+        .ok_or_else(|| AppError::bad_request("invalid path"))?;
     let new_name = new_name.trim();
     safe_path::validate_new_name(new_name)?;
     if new_name == resolved.name() {
         return entry_for_resolved(&resolved).await;
     }
-    let parent_logical = resolved
-        .logical
-        .parent()
-        .ok_or_else(|| AppError::bad_request("invalid path"))?;
     let parent = storage
         .resolve_logical(pool, user, &parent_logical, Access::Write)
         .await?;
-    let (target_logical, target, exists) = storage.child_target(&parent, new_name)?;
+    rename_in(&resolved, &parent, new_name).await
+}
+
+/// Rename a resolved entry inside its resolved (writable) parent. The caller
+/// has refused storage roots and validated `new_name`.
+pub async fn rename_in(
+    resolved: &ResolvedPath,
+    parent: &ResolvedPath,
+    new_name: &str,
+) -> AppResult<EntryDto> {
+    let (target_logical, target, exists) = parent.child_target(new_name)?;
     if exists {
         return Err(AppError::conflict(
             "a file or folder with that name already exists",
@@ -476,6 +504,12 @@ pub async fn search(
     page: i64,
     per_page: i64,
 ) -> AppResult<SearchDto> {
+    validate_search_query(query)?;
+    let base = storage.resolve(pool, user, path, Access::Read).await?;
+    search_in(&base, query, kind, page, per_page).await
+}
+
+fn validate_search_query(query: &str) -> AppResult<&str> {
     let query = query.trim();
     if query.is_empty() {
         return Err(AppError::bad_request("search query is required"));
@@ -483,7 +517,19 @@ pub async fn search(
     if query.chars().count() > 128 {
         return Err(AppError::bad_request("search query is too long"));
     }
-    let base = storage.resolve(pool, user, path, Access::Read).await?;
+    Ok(query)
+}
+
+/// Search below a resolved directory (bounded depth, results and entries;
+/// symlinks are never followed).
+pub async fn search_in(
+    base: &ResolvedPath,
+    query: &str,
+    kind: Option<&str>,
+    page: i64,
+    per_page: i64,
+) -> AppResult<SearchDto> {
+    let query = validate_search_query(query)?;
     if !base.physical.is_dir() {
         return Err(AppError::bad_request("search path is not a directory"));
     }
@@ -625,6 +671,16 @@ pub async fn text_preview(
     max_bytes: Option<u64>,
 ) -> AppResult<TextPreviewDto> {
     let resolved = require_file(pool, storage, user, path, Access::Read).await?;
+    text_preview_of(&resolved, max_bytes).await
+}
+
+/// Read at most `max_bytes` of a resolved regular file (`O_NOFOLLOW`, and the
+/// opened inode must be the one that was checked).
+pub async fn text_preview_of(
+    resolved: &ResolvedPath,
+    max_bytes: Option<u64>,
+) -> AppResult<TextPreviewDto> {
+    ensure_regular_file(resolved).await?;
     let meta = tokio::fs::symlink_metadata(&resolved.physical).await?;
     let limit = max_bytes
         .unwrap_or(DEFAULT_TEXT_PREVIEW_BYTES)
@@ -659,6 +715,12 @@ pub async fn require_file(
     access: Access,
 ) -> AppResult<ResolvedPath> {
     let resolved = storage.resolve(pool, user, path, access).await?;
+    ensure_regular_file(&resolved).await?;
+    Ok(resolved)
+}
+
+/// Refuse a resolved path that is a directory or not a regular file.
+pub async fn ensure_regular_file(resolved: &ResolvedPath) -> AppResult<()> {
     let meta = tokio::fs::symlink_metadata(&resolved.physical).await?;
     if meta.is_dir() {
         return Err(AppError::bad_request("path is a directory"));
@@ -666,7 +728,7 @@ pub async fn require_file(
     if !meta.is_file() {
         return Err(AppError::bad_request("path is not a regular file"));
     }
-    Ok(resolved)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
