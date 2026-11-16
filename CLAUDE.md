@@ -288,7 +288,9 @@ Do phases in order. Week numbers are estimates for one full-time developer.
   `setfacl -R` in `start_run` and the read-only `RAST` symlink.
 - Shared folders become Linux groups (read-write and read-only), setgid
   directories with default ACLs, linked under `~/Shared`. An access change
-  restarts the user's session, with a warning.
+  restarts the user's session, with a warning. `rast migrate shares`
+  (`--dry-run`, `--rollback`) applies the groups and ACLs to existing shared
+  folders before `rast migrate home`.
 - Recycle bin uses XDG Trash (`~/.local/share/Trash`). Quota uses filesystem
   user quota (project quota for shared folders).
 - `rast migrate home --dry-run` and `--rollback`, per user and idempotent, with

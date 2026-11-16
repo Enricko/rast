@@ -1,6 +1,6 @@
 # 0005. One HOME per user
 
-- Status: proposed (decisions D1–D14 need the maintainer's approval)
+- Status: accepted (decisions D1–D14 taken by the maintainer on 2026-11-16)
 - Date: 2026-11-16
 
 ## Context
@@ -60,7 +60,7 @@ apps that launchers install, and per-user Flatpak in Phase 3, live in HOME.
   (`rootfs_start`) and `crates/rast-server/src/api/rootfs.rs` (`dispatch`)
   forwards File Station requests to it.
 
-### Production host (checked 2026-11-16, read-only)
+### Production host (checked 2026-11-16, read-only; root checks run by the maintainer)
 
 | Check | Result |
 | --- | --- |
@@ -71,8 +71,10 @@ apps that launchers install, and per-user Flatpak in Phase 3, live in HOME.
 | Kernel 7.0 | `CONFIG_QUOTA=y`, `CONFIG_QFMT_V2=m`, `CONFIG_QUOTACTL=y` |
 | Tools | `quota` not installed (4.09 in the archive); `xfs_quota`, `tune2fs`, `setfacl` installed |
 | `lsattr -p` on `/srv/rast/*` | project id 0 everywhere |
-| ext4 `quota` / `project` features | **unconfirmed**: needs root. Ubuntu's `/etc/mke2fs.conf` does not enable them for ext4, so they are almost certainly off. Confirm with `sudo dumpe2fs -h /dev/mapper/ubuntu--vg-ubuntu--lv \| grep -iE 'features\|inode size'` |
-| Free space in `ubuntu-vg` | **unconfirmed**: `sudo vgs ubuntu-vg` |
+| ext4 `quota` / `project` features (`sudo dumpe2fs -h /dev/mapper/ubuntu--vg-ubuntu--lv \| grep -iE 'features\|inode size'`) | **neither `quota` nor `project`** in the feature list; inode size **256** |
+| Free space in `ubuntu-vg` (`sudo vgs ubuntu-vg`) | 2 PV, 2 LV, VSize <1.14t, **VFree 0** |
+| Quota kernel modules | `quota_v2` and `quota_tree` in `linux-modules-7.0.0-38-generic` (installed, not loaded) |
+| systemd quota units | `systemd-quotacheck-root.service` and `quotaon-root.service` (`quotaon -ug /`) ship with systemd 259 |
 | systemd | 259 (Ubuntu 26.04.1 LTS); `systemd-run --socket-property` available |
 
 What this means:
@@ -90,9 +92,13 @@ What this means:
   - **Q-c, a dedicated LV for `/srv/rast`:** ext4 created with
     `-O quota,project`, or XFS mounted with `uquota,pquota`. User and project
     quota, and user data can no longer fill `/`. Needs free extents in
-    `ubuntu-vg`, a data copy and a short downtime.
+    `ubuntu-vg`, a data copy and a short downtime. **Not possible on this
+    host without an extra disk: `ubuntu-vg` has VFree 0.**
 - **Project quota** is not possible with Q-a: ext4 project quota needs both
-  the `project` and the `quota` features, so only Q-b or Q-c.
+  the `project` and the `quota` features, so only Q-b or Q-c. The inode size
+  of 256 would allow it (project ids live in the extended inode), but Q-b
+  needs the root filesystem offline and Q-c a new disk, so **production will
+  not have project quota** (D1).
 - **Risk today:** HOME, the production database and the OS share one
   filesystem. An app that fills a HOME stops production RAST.
 
@@ -185,7 +191,7 @@ operation is idempotent.
 | `share_dir_remove` | `shareId`, `container` | Removes the container tree (no-follow, one device). |
 | `quota_status` | none | Device and filesystem type of the homes and shared roots; user and project quota each `off`, `accounting` or `enforced`; grace times. |
 | `quota_set` | `userId`, `softBytes`, `hardBytes` | 0 = no limit; hard ≥ soft; both ≤ filesystem size. `quotactl(Q_SETQUOTA, USRQUOTA)` through `libc` (already a dependency). |
-| `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project id from the rw gid. Only with D3. |
+| `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project quota (project id = rw gid) when available, otherwise group quota on the rw gid if task 1.3 accepts it (D3). Returns the backend that enforces the limit. |
 | `quota_report` | `userIds`, `shareIds` | At most 10 000 ids; used bytes and limits from `Q_GETQUOTA`. |
 | `home_migrate_scan`, `home_migrate_apply`, `home_migrate_rollback` | `userId`, `username` | Section 8. The scan is read-only with bounded output (counts, plus the first 50 paths per category). |
 | `shares_migrate_scan`, `shares_migrate_apply`, `shares_migrate_rollback` | `shareId`, `container` | Same pattern for shared folders (task 1.3). |
@@ -206,12 +212,38 @@ served to anyone else, or chowned for anyone else.
   group (D6)**, which keeps today's administrator bypass in File Station. The
   server recomputes membership on every rule, group, share or account change
   and calls `share_members_set`.
+- **Consequence of D6:** every app and terminal of an administrator account
+  can open every shared folder with the kernel's permission, not only through
+  File Station. A compromised or misbehaving app in an administrator session
+  reaches all shared data. Administrators should therefore use a non-admin
+  account for everyday app use. Task 1.3 writes this into
+  `docs/NATIVE-LINUX-APPS.md`.
 - Running processes keep the groups they started with. The agent is
   restarted at once, so File Station is right immediately (the server's
   Effective Access check is the first gate anyway). A **revocation** restarts
   the user's session (apps and terminals) after a 60-second warning; a
   **grant** applies at the next session start, and the warning offers
-  "Restart session now" (D7).
+  "Restart session now" (D7, accepted for now).
+- **Alternative to the forced restart, evaluated in task 1.3.** On a
+  revocation the helper adds a named-user ACL entry `u:rast-u<id>:---` to the
+  share's container directory only (not as a default ACL). POSIX ACLs check
+  named-user entries before any group entry, so path lookups through the
+  container fail with `EACCES` at once, although the process still carries
+  the old group. The session then restarts when the user is ready, and the
+  helper removes the entry after the restart (or when access is granted
+  again). Known gaps, to be measured in task 1.3:
+  - a process whose working directory is inside the share keeps resolving
+    relative paths, because lookups from the cwd do not pass the container;
+  - file and directory descriptors opened before the revocation stay usable
+    (including `openat` below an open directory);
+  - hard links that the user made from share files into HOME before the
+    revocation (allowed for rw members by `protected_hardlinks`) keep the
+    inode reachable;
+  - the extra entries need ACL space on the container inode (bounded by the
+    number of pending restarts).
+  If the gaps are acceptable, task 1.3 replaces the 60-second forced restart
+  with this entry plus a "Restart session" prompt; the decision stays with
+  the maintainer.
 - Known limits: an app that creates a file with mode 0600 or 0644 narrows the
   ACL mask, so the group loses write access (as on any Linux file server);
   files keep their creator as owner; with project quota a move between HOME
@@ -239,14 +271,16 @@ served to anyone else, or chowned for anyone else.
 - **Filesystem quota** (user quota enforced on the homes filesystem): the
   limit is the kernel limit of uid `rast-u<id>` and usage is the kernel's
   `curspace`. File Station, Terminal and every app are limited the same way.
-  Shared folders get project quota when it is available (D3).
-- **RAST fallback** (no kernel quota; **this production host today**): the
+  Shared-folder limits use project quota when it is available, otherwise
+  possibly group quota on the rw group (D3, below).
+- **RAST fallback** (no kernel quota; **this production host until the
+  maintainer enables Q-a**, D1): the
   server keeps reserving bytes for File Station writes (as today), and the
   agent scans HOME (allocated bytes, each hard-linked inode once, at most
   every 10 minutes and on demand) to refresh `storage_usage.used_bytes`. File
   Station and App Center refuse writes over quota; **apps, Terminal and
-  launchers are not limited**. `rast doctor` and Control Panel say so. Shared
-  folders have no limit, as today.
+  launchers are not limited**. `rast doctor` and Control Panel say so. A
+  shared-folder limit (D3) is checked by RAST for File Station writes only.
 - `users.quota_bytes` stays the source of truth and `storage_usage` keeps the
   last reading, so `UserDto` and `QuotaDto` keep their shapes.
   Administrators and `quota_bytes = 0` stay unlimited.
@@ -282,10 +316,45 @@ single document, so the 20 GiB default is tight. Therefore:
   runtime.
 - The fallback counts all of HOME too (apps, caches, trash), but not the
   user's files in shared folders.
-- **Host recommendation (D1):** Phase 1 ships with detection and the
-  fallback. The maintainer turns on kernel quota on production before Phase 3
-  puts per-user Flatpak and launchers into HOME: Q-c if `ubuntu-vg` has free
-  space, otherwise Q-a (user quota now, project quota later).
+- **Production host (D1, decided):** Phase 1 ships with detection and the
+  fallback. Q-c is not possible without an extra disk (`ubuntu-vg` has
+  VFree 0), so production runs on the RAST fallback until just before Phase 3
+  reaches production. Then the maintainer enables **Q-a** (journaled user and
+  group quota on `/`, runbook in section 9). Q-c only if a new disk is added
+  later. RAST, its installer and `rast doctor` never change `/etc/fstab` or
+  turn quota on.
+
+**Shared-folder limits (D3, decided).** Migration **0015** adds the column
+`shares.quota_bytes`, nullable; `NULL` = no limit (all existing shares).
+The limit is applied by the strongest backend available, and the UI (shared
+folder settings and the usage view) shows which one enforces it:
+
+| Backend | Enforced by | What is limited |
+| --- | --- | --- |
+| Project quota (Q-b, Q-c) | filesystem | every write into the share, by any process |
+| Group quota on the share's rw group (Q-a), if task 1.3 finds it sufficient | filesystem | files whose group is the rw group |
+| None (fallback) | RAST only | File Station writes into the share |
+
+Production will not have project quota, so **task 1.3 evaluates whether
+group quota on the rw group is enough** under Q-a. The container is setgid
+(2770), so new files and folders inherit the rw group and count against its
+group quota. Known gaps:
+
+- a file moved into the share with `mv` on the same filesystem keeps its old
+  group (for example the user's primary group `rast-u<id>`) and is not
+  counted against the share; a file moved out keeps the rw group and is
+  still counted against the share while it lives in HOME;
+- a member can `chgrp` a file they own to another of their groups (their
+  primary group, another share's rw group);
+- `cp -p`, `rsync -a` and `tar` extraction keep the source group;
+- these files always stay in the **user quota** of their owner, so nothing
+  escapes all accounting; only the share's own limit is bypassed.
+
+Task 1.3 also measures a repair pass (the helper or the agent resets the
+group of foreign-group entries below a container to its rw group, bounded and
+no-follow) and reports whether "filesystem" may be shown for group quota or
+only "filesystem, best effort". `share_quota_set` sets the project or the
+group limit accordingly.
 
 ### 7. App profiles, Terminal, Backup Center and other modules
 
@@ -376,24 +445,79 @@ while the server runs.
   `.trash/<user_id>`, stray `homes/rast-u<id>` folders (D13). Nothing is
   deleted without confirmation.
 
-### Decisions that need the maintainer's approval
+### 9. Runbook: enable Q-a on the production host (maintainer only)
 
-| # | Decision | Recommendation |
+Done by the maintainer as root, just before Phase 3 reaches production, in a
+quiet hour. RAST never runs these steps. Journaled quota (`jqfmt=vfsv1`) needs
+no `quotacheck` after a crash.
+
+Needs: package `quota` (4.09 in the Ubuntu archive: `quotacheck`, `quotaon`,
+`setquota`, `repquota`); kernel modules `quota_v2` and `quota_tree` (in
+`linux-modules-$(uname -r)`, already installed; `CONFIG_QUOTA=y`,
+`CONFIG_QUOTACTL=y` are built in). The systemd units
+`systemd-quotacheck-root.service` and `quotaon-root.service` turn quota on at
+boot once `/etc/fstab` has the options.
+
+1. Preparation: back up `/etc/fstab`; make a RAST backup; check that
+   `/` has some free space for the two quota files.
+
+   ```bash
+   sudo cp -a /etc/fstab /etc/fstab.before-quota
+   sudo apt install quota
+   sudo modprobe quota_v2 quota_tree
+   printf 'quota_v2\nquota_tree\n' | sudo tee /etc/modules-load.d/quota.conf
+   ```
+
+2. Add the options to the `/` line in `/etc/fstab` (keep the device as it is):
+
+   ```text
+   ... / ext4 defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv1 0 1
+   ```
+
+   Check with `sudo findmnt --verify` before going on.
+
+3. Apply without a reboot, create the quota files and turn quota on:
+
+   ```bash
+   sudo mount -o remount /
+   sudo quotacheck -ugcm /     # first scan of all files; -m: no read-only remount
+   sudo quotaon -ug /
+   sudo quotaon -pug /         # both must say "is on"
+   ```
+
+   `quotacheck -m` on a live filesystem can be slightly off for files that
+   change during the scan; run it while the RAST services are idle. Journaled
+   quota stays correct from then on.
+
+4. Verify: `sudo repquota -ug /` lists the `rast-u<id>` users;
+   `sudo -u rast rast doctor` reports user quota `enforced` (from
+   `quota_status`, task 1.4). Reboot once in the maintenance window and check
+   `systemctl status quotaon-root.service` and `quotaon -pug /` again.
+
+5. Limits are set by RAST (`quota_set`, `share_quota_set`), not by hand.
+
+Rollback: `sudo quotaoff -ug /`, restore `/etc/fstab.before-quota`,
+`sudo mount -o remount /`, remove `/aquota.user` and `/aquota.group`; RAST
+falls back on its next `quota_status` check.
+
+### Decisions (taken by the maintainer on 2026-11-16)
+
+| # | Question | Decision |
 | --- | --- | --- |
-| D1 | Production quota: RAST fallback now; the maintainer turns on kernel quota (Q-c dedicated LV, or Q-a journaled user quota on `/`) before Phase 3 reaches production. Needs root, `/etc/fstab` or LVM changes and downtime. | Q-c if `ubuntu-vg` has free space, otherwise Q-a |
-| D2 | Kernel uid quota counts everything the user owns on that filesystem, including apps, Flatpak, caches, the trash and the user's files in shared folders. Today the trash and shared-folder writes do not count. | accept (as on a NAS) |
-| D3 | Shared-folder size limits need a column `shares.quota_bytes` (**migration 0015**), applied as project quota | approve the migration, or defer limits and use project quota only to show share usage |
-| D4 | Soft limit = `quota_bytes`, hard = soft + max(5 %, 1 GiB), 7-day grace; usage = allocated bytes; review the 20 GiB default for new accounts | accept; keep the default unless decided otherwise |
-| D5 | `rast` keeps `rwx` on shared folders (ACL) during the transition and has no access to any HOME | accept |
-| D6 | Administrators are members of every share's rw group, so their apps see every share too | accept |
-| D7 | A revocation restarts the session after a 60-second warning; a grant applies at the next session start | accept |
-| D8 | The on-disk layout of section 1 (HOME owned by `rast-u<id>`, passwd home moves, share containers `root:<rw group> 2770`, XDG Trash, legacy `.trash` emptied); new accounts get one HOME when the helper is available | accept |
-| D9 | `rast migrate home` and `rast migrate shares` need `rast.service` stopped for apply and rollback | accept |
-| D10 | Separate app settings are opt-in through `linux_apps.launcher` JSON (no migration); "Also delete its settings" removes isolated profiles only | accept |
-| D11 | Share group gids come from a range derived from `linux_uid_base`; no new configuration key | accept |
-| D12 | Backup `users` scope through a root reader, keeping owners, modes and ACLs and excluding `~/.cache`, trash and `~/.local/share/flatpak`; the restore guide changes | accept |
-| D13 | Stray `homes/rast-u<id>` folders from the `start_run` bug are removed only after confirmation; whether to fix the bug on 0.18.x separately | fix separately |
-| D14 | Additive API fields `UsageDto.byLocation` and `UsageDto.quotaBackend`; opaque XDG-based trash ids | accept |
+| D1 | How production gets kernel quota | Q-c is not possible without an extra disk (`ubuntu-vg` VFree 0). Production uses the RAST fallback until just before Phase 3 reaches production; then the maintainer enables **Q-a**, journaled user and group quota on `/` (runbook in section 9). Q-c only if a new disk is added later. |
+| D2 | Kernel uid quota counts everything the user owns on that filesystem (apps, Flatpak, caches, trash, the user's files in shared folders) | Accepted, as on a NAS. |
+| D3 | Shared-folder size limits | Accepted: **migration 0015** adds `shares.quota_bytes`, nullable (`NULL` = no limit). The UI shows whether the limit is enforced by the filesystem or only by RAST. Task 1.3 evaluates group quota on the rw group under Q-a, with its gaps (section 6). |
+| D4 | Soft = `quota_bytes`, hard = soft + max(5 %, 1 GiB), 7-day grace; usage = allocated bytes | Accepted. The 20 GiB default stays and is reviewed again in task 3.2. |
+| D5 | `rast` keeps `rwx` on shared folders during the transition, no access to any HOME | Accepted. |
+| D6 | Administrators are in every share's rw group | Accepted, with the consequence in section 4: administrator apps and terminals open every share, so administrators should use a non-admin account for everyday app use (documented in `docs/NATIVE-LINUX-APPS.md` in task 1.3). |
+| D7 | A revocation restarts the session after 60 seconds; a grant applies at the next session start | Accepted for now. Task 1.3 evaluates the per-user deny ACL entry on the container as a restart-free alternative, with its gaps (section 4). |
+| D8 | On-disk layout of section 1; new accounts get one HOME when the helper is available | Accepted. |
+| D9 | `rast migrate home` and `rast migrate shares` need `rast.service` stopped for apply and rollback | Accepted. |
+| D10 | Separate app settings opt-in through `linux_apps.launcher` JSON; "Also delete its settings" removes isolated profiles only | Accepted. |
+| D11 | Share group gids from a range derived from `linux_uid_base`; no new configuration key | Accepted. |
+| D12 | Backup `users` scope through a root reader, keeping owners, modes and ACLs; the restore guide changes | Accepted. |
+| D13 | The `start_run` / Docker → native `rast-u<id>` home bug | Fixed separately on 0.18.x (0.18.3, branch `fix/native-home-username`), together with refusing new usernames of the form `rast-u<digits>`. The maintainer removes the stray `homes/rast-u*` folders on production by hand after the fix is installed; RAST does not delete them. |
+| D14 | Additive `UsageDto.byLocation` and `UsageDto.quotaBackend`; opaque XDG-based trash ids | Accepted. |
 
 ## Consequences
 
@@ -401,9 +525,13 @@ while the server runs.
   `files_agent_start`/`files_agent_stop`, realtime events from the agent,
   the hidden-files toggle. No user is switched yet.
 - **Task 1.3:** share groups, the `share_*` operations, membership sync, the
-  session restart warning, `rast migrate shares`.
+  session restart warning, `rast migrate shares`; the evaluations of group
+  quota for share limits under Q-a (D3) and of the deny ACL entry instead of
+  a forced restart (D7); the administrator note in
+  `docs/NATIVE-LINUX-APPS.md` (D6).
 - **Task 1.4:** XDG Trash, quota backends, the `quota_*` operations, the
-  usage breakdown.
+  usage breakdown, migration 0015 (`shares.quota_bytes`) with the
+  "enforced by" indicator in the UI.
 - **Task 1.5:** `rast migrate home`, the journal, removal of the per-launch
   `setfacl -R` and the `RAST` symlink, the backup reader, an Upgrade note.
 - **Test host:** one HOME needs the helper and a native instance, and only
@@ -415,7 +543,11 @@ while the server runs.
   `docs/ARCHITECTURE.md`, `docs/CONFIGURATION.md`; CHANGELOG Upgrade notes for
   the quota meaning, the trash counting, the layout and the restore steps.
 - **Risks:**
-  - The fallback does not protect the OS filesystem from apps (D1).
+  - The fallback does not protect the OS filesystem from apps (D1). On
+    production this lasts until the maintainer enables Q-a.
+  - Under Q-a, share limits are at best group quota, which `mv`, `chgrp` and
+    group-preserving copies can bypass (D3).
+  - Administrator accounts reach every share from their apps (D6).
   - Group membership of running processes is stale until the session
     restarts (D7).
   - Apps can narrow the ACL mask of files in shared folders.

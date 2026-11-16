@@ -156,6 +156,9 @@ claude --model opus --effort high
 ```text
 Implement shared folders as Linux groups following ADR 0005: one read-write and one read-only group per shared folder, setgid directories with default ACLs, a link under ~/Shared, and membership computed from the current Effective Access rules (src/access/).
 An access change restarts the user's session, with a warning in the UI.
+Implement rast migrate shares --dry-run, rast migrate shares and rast migrate shares --rollback (ADR 0005, section 8): per shared folder, idempotent, with a journal of owners, modes and ACLs before any change; it runs before rast migrate home.
+Evaluate and report, without deciding: (a) whether group quota on each share's rw group is enough to enforce shares.quota_bytes under Q-a, including the gaps (mv, chgrp, group-preserving copies) and a bounded group-repair pass (D3); (b) a per-user deny ACL entry u:rast-u<id>:--- on the share's container as an alternative to the forced session restart, including the gaps (cwd inside the share, open descriptors, hard links) (D7).
+Document in docs/NATIVE-LINUX-APPS.md that administrator apps and terminals can open every shared folder, so administrators should use a non-admin account for everyday app use (D6).
 Add tests for membership, read-only permissions and access revocation.
 ```
 
@@ -276,6 +279,7 @@ claude --model sonnet --effort high
 Add per-user Flatpak to App Center: search and install apps from Flathub with flatpak --user as rast-u<id> (through the agent, not root), plus update and uninstall, with job progress like the existing install flow.
 New UI for the Flatpak section is written in Leptos. .deb stays admin-only.
 Re-enable AppImage only after it passes the app matrix.
+Measure the HOME usage of a few typical per-user Flatpak installs and review the 20 GiB default quota for new accounts (ADR 0005, D4); propose a change, do not make it.
 Add tests and update docs/NATIVE-LINUX-APPS.md.
 ```
 
