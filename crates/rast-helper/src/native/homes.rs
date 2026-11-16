@@ -167,7 +167,95 @@ fn mkdir_at(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
     if unsafe { libc::mkdirat(dir, name.as_ptr(), mode) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    after_mkdir(dir, name.to_str().unwrap_or_default());
     Ok(())
+}
+
+#[cfg(test)]
+type MkdirHook = Box<dyn FnMut(RawFd, &str)>;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook that runs right after `mkdirat`, so a test can rename
+    /// another directory into the place of the one just created.
+    static AFTER_MKDIR: std::cell::RefCell<Option<MkdirHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn after_mkdir(_dir: RawFd, _name: &str) {
+    #[cfg(test)]
+    AFTER_MKDIR.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(_dir, _name);
+        }
+    });
+}
+
+/// Clear `errno`, so a NULL from `readdir` tells the end of a directory
+/// apart from an error (elsewhere a stale value fails closed).
+fn clear_errno() {
+    // SAFETY: errno is thread-local and always writable.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    unsafe {
+        *libc::__errno_location() = 0;
+    }
+    // SAFETY: as above.
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd"))]
+    unsafe {
+        *libc::__error() = 0;
+    }
+}
+
+/// Whether the directory `fd` has no entries besides `.` and `..`.
+fn dir_is_empty(fd: RawFd) -> io::Result<bool> {
+    // A new open file description, so reading it moves no shared offset.
+    let own = open_dir_at(fd, ".")?;
+    // SAFETY: `own` is a valid directory fd; `fdopendir` takes it over and
+    // `closedir` below closes it.
+    let dir = unsafe { libc::fdopendir(own.as_raw_fd()) };
+    if dir.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    std::mem::forget(own);
+    let mut empty = true;
+    loop {
+        clear_errno();
+        // SAFETY: `dir` is a valid, open DIR stream.
+        let entry = unsafe { libc::readdir(dir) };
+        if entry.is_null() {
+            let error = io::Error::last_os_error();
+            // SAFETY: `dir` is valid and closed exactly once.
+            unsafe { libc::closedir(dir) };
+            return match error.raw_os_error() {
+                Some(0) | None => Ok(empty),
+                Some(_) => Err(error),
+            };
+        }
+        // SAFETY: `d_name` of a returned entry is NUL-terminated.
+        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            empty = false;
+        }
+    }
+}
+
+/// Open the directory `name` that this process has just created below
+/// `dir`, and check that it is still that directory: owned by the effective
+/// uid and empty. The parent belongs to someone else (the user's HOME, or
+/// the service's homes root), who may have renamed another directory into
+/// its place after `mkdirat`; root must never chown that one.
+fn open_created_dir(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
+    let fd = open_dir_at(dir, name)?;
+    let stat = fstat(fd.as_raw_fd())?;
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if stat.st_uid != euid || !dir_is_empty(fd.as_raw_fd())? {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "the new folder was replaced before it could be taken over",
+        ));
+    }
+    Ok(fd)
 }
 
 fn fchown(fd: RawFd, uid: u32, gid: u32) -> io::Result<()> {
@@ -304,9 +392,10 @@ fn ensure_skeleton(
                     skipped.push((*relative).to_string());
                     continue;
                 }
-                // Chown through a descriptor of the folder just created; a
-                // swap in between leaves a symlink that open refuses.
-                match open_dir_at(base, name) {
+                // Chown through a descriptor of the folder just created. A
+                // symlink swapped in between is refused by the open, another
+                // directory by the owner and emptiness check.
+                match open_created_dir(base, name) {
                     Ok(fd) => {
                         if !options.is_test_mode() {
                             let _ = fchown(fd.as_raw_fd(), identity.uid, identity.gid);
@@ -345,8 +434,12 @@ pub(crate) async fn home_ensure(
             }
             Err(error) => return Err(failed("inspect", &home, error)),
         };
-        let home_fd = open_dir_at(homes_fd.as_raw_fd(), &op.username)
-            .map_err(|error| failed("open", &home, error))?;
+        let home_fd = if created {
+            open_created_dir(homes_fd.as_raw_fd(), &op.username)
+        } else {
+            open_dir_at(homes_fd.as_raw_fd(), &op.username)
+        }
+        .map_err(|error| failed("open", &home, error))?;
         if created && !options.is_test_mode() {
             fchown(home_fd.as_raw_fd(), identity.uid, identity.gid)
                 .map_err(|error| failed("chown", &home, error))?;
@@ -808,6 +901,93 @@ mod tests {
         // The passwd home is already right: no usermod.
         assert_eq!(reply["passwdUpdated"], false);
         assert!(logged(&fx.dir.path().join("usermod.log")).is_empty());
+    }
+
+    /// Run `swap` right after the helper creates the folder `name`.
+    fn on_mkdir(name: &'static str, swap: impl FnMut() + 'static) {
+        let mut swap = Box::new(swap);
+        AFTER_MKDIR.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_: RawFd, created: &str| {
+                if created == name {
+                    swap();
+                }
+            }));
+        });
+    }
+
+    fn clear_hook() {
+        AFTER_MKDIR.with(|hook| hook.borrow_mut().take());
+    }
+
+    fn strings(value: &Value) -> Vec<String> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_folder_swapped_in_after_mkdir_is_never_taken_over() {
+        // In the HOME: the user renames one of their own folders (with
+        // content) into the place of a skeleton folder the helper just made.
+        let fx = fixture(|root| root.join("storage/homes/alice"));
+        let home = fx.options.homes_dir.join("alice");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(home.join("stash")).unwrap();
+        std::fs::write(home.join("stash/data.txt"), b"x").unwrap();
+        let swap_home = home.clone();
+        on_mkdir(".config", move || {
+            std::fs::rename(swap_home.join(".config"), swap_home.join("made")).unwrap();
+            std::fs::rename(swap_home.join("stash"), swap_home.join(".config")).unwrap();
+        });
+        let reply = home_ensure(&fx.options, op("alice")).await;
+        clear_hook();
+        let reply = reply.unwrap();
+        assert!(strings(&reply["skipped"]).contains(&".config".to_string()));
+        let created = strings(&reply["skeleton"]);
+        assert!(!created.contains(&".config".to_string()), "{created:?}");
+        assert!(created.contains(&".cache".to_string()), "{created:?}");
+        assert!(home.join(".config/data.txt").exists());
+
+        // In the homes root: a folder with content renamed into the place of
+        // the HOME just created is refused, and its mode is left alone.
+        let fx = fixture(|root| root.join("storage/homes/bob"));
+        let homes = fx.options.homes_dir.clone();
+        let decoy = homes.join("decoy");
+        std::fs::create_dir(&decoy).unwrap();
+        std::fs::write(decoy.join("data.txt"), b"x").unwrap();
+        std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let swap_homes = homes.clone();
+        on_mkdir("bob", move || {
+            std::fs::rename(swap_homes.join("bob"), swap_homes.join("made")).unwrap();
+            std::fs::rename(swap_homes.join("decoy"), swap_homes.join("bob")).unwrap();
+        });
+        let error = home_ensure(&fx.options, op("bob")).await;
+        clear_hook();
+        let error = error.unwrap_err();
+        assert_eq!(error.code, "command_failed", "{error:?}");
+        assert_eq!(mode(&homes.join("bob")), 0o755);
+        assert!(!homes.join("bob/.config").exists());
+        assert!(logged(&fx.dir.path().join("usermod.log")).is_empty());
+    }
+
+    #[test]
+    fn only_an_empty_folder_of_this_process_counts_as_just_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = open_dir(dir.path()).unwrap();
+        std::fs::create_dir(dir.path().join("fresh")).unwrap();
+        assert!(open_created_dir(base.as_raw_fd(), "fresh").is_ok());
+        std::fs::create_dir_all(dir.path().join("used/sub")).unwrap();
+        std::fs::create_dir(dir.path().join("files")).unwrap();
+        std::fs::write(dir.path().join("files/a"), b"x").unwrap();
+        for name in ["used", "files"] {
+            let error = open_created_dir(base.as_raw_fd(), name).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{name}");
+        }
+        std::os::unix::fs::symlink(dir.path().join("fresh"), dir.path().join("link")).unwrap();
+        assert!(open_created_dir(base.as_raw_fd(), "link").is_err());
     }
 
     #[tokio::test]
