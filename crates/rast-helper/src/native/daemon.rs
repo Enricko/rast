@@ -327,6 +327,7 @@ fn log_context(op: &NativeOp) -> (Option<i64>, Option<String>) {
         NativeOp::IdentityEnsure(IdentityEnsureOp { user_id, .. }) => (Some(*user_id), None),
         NativeOp::IdentityRemove(IdentityRemoveOp { user_id, .. }) => (Some(*user_id), None),
         NativeOp::HomeEnsure(op) => (Some(op.user_id), None),
+        NativeOp::QuotaSet(op) => (Some(op.user_id), None),
         NativeOp::FilesAgentStart(op) | NativeOp::FilesAgentStop(op) => (Some(op.user_id), None),
         NativeOp::SessionStart(SessionStartOp { user_id, .. })
         | NativeOp::SessionStop(SessionStopOp { user_id, .. }) => {
@@ -421,6 +422,10 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::ShareDirRepair(op) => super::shares::share_dir_repair(options, op).await,
         NativeOp::ShareDenySet(op) => super::shares::share_deny_set(options, op).await,
         NativeOp::ShareSessionGroups(op) => super::shares::share_session_groups(options, op).await,
+        NativeOp::QuotaStatus => super::shares::quota_status(options).await,
+        NativeOp::QuotaSet(op) => super::shares::quota_set(options, op).await,
+        NativeOp::ShareQuotaSet(op) => super::shares::share_quota_set(options, op).await,
+        NativeOp::QuotaReport(op) => super::shares::quota_report(options, op).await,
         NativeOp::SharesMigrateScan(op) => super::shares::shares_migrate_scan(options, op).await,
         NativeOp::SharesMigrateApply(op) => super::shares::shares_migrate_apply(options, op).await,
         NativeOp::SharesMigrateRollback(op) => {

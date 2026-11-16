@@ -33,6 +33,7 @@ pub(crate) mod firewall;
 pub mod homes;
 pub mod identity;
 pub mod protocol;
+pub mod quota;
 pub mod shares;
 
 pub use client::NativeClient;

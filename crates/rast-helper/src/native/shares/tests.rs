@@ -771,6 +771,49 @@ fn a_folder_with_too_many_names_is_refused_before_they_are_all_read() {
     assert_eq!(visited, 0);
 }
 
+#[test]
+fn the_walk_leaves_the_recycle_bins_of_members_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let me = journal_owner();
+    let top = dir.path().join("team");
+    let mine = rast_base::storage::xdg_trash::share_trash_name(me);
+    let other = rast_base::storage::xdg_trash::share_trash_name(me + 1);
+    for folder in [
+        format!("{mine}/files"),
+        format!("{other}/files"),
+        format!("docs/{mine}"),
+    ] {
+        std::fs::create_dir_all(top.join(folder)).unwrap();
+    }
+    std::fs::write(top.join(format!("{mine}/files/x")), b"x").unwrap();
+    let fd = open_dir(&top).unwrap();
+    let owners = Owners {
+        root_uid: u32::MAX - 15,
+        rast_uid: u32::MAX - 16,
+        identity_uids: (me, me),
+    };
+    let mount = fd_mount_id(fd.as_raw_fd()).unwrap();
+    let mut report = TreeReport::default();
+    let mut visited = Vec::new();
+    walk_limited(&fd, mount, &owners, 100, &mut report, |found, _| {
+        visited.push(found.path.to_string());
+        Ok(())
+    })
+    .unwrap();
+    visited.sort();
+    // Only the top `.Trash-<owner>`; a name that is not its owner's and one
+    // deeper down are walked like any folder.
+    assert_eq!(report.user_trash, 1);
+    let mut expected = vec![
+        "docs".to_string(),
+        format!("docs/{mine}"),
+        other.clone(),
+        format!("{other}/files"),
+    ];
+    expected.sort();
+    assert_eq!(visited, expected);
+}
+
 #[tokio::test]
 async fn containers_are_real_folders_in_the_shared_root() {
     let fx = fixture();

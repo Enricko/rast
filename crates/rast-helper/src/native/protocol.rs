@@ -287,6 +287,15 @@ pub enum NativeOp {
     ShareDenySet(ShareDenySetOp),
     /// Which shared folder groups the processes of some users carry.
     ShareSessionGroups(ShareSessionGroupsOp),
+    /// Which quota the homes and shared filesystems keep and enforce.
+    QuotaStatus,
+    /// The kernel block limits of a user's identity on the homes filesystem.
+    QuotaSet(QuotaSetOp),
+    /// The kernel block limits of a shared folder (group quota on its rw
+    /// gid).
+    ShareQuotaSet(ShareQuotaSetOp),
+    /// Kernel usage and limits of users and shared folders.
+    QuotaReport(QuotaReportOp),
     /// `rast migrate shares --dry-run`: what the migration would change.
     SharesMigrateScan(ShareDirOp),
     /// `rast migrate shares`: journal, then the recursive prepare.
@@ -342,6 +351,10 @@ impl NativeOp {
             Self::ShareDirRepair(_) => "share_dir_repair",
             Self::ShareDenySet(_) => "share_deny_set",
             Self::ShareSessionGroups(_) => "share_session_groups",
+            Self::QuotaStatus => "quota_status",
+            Self::QuotaSet(_) => "quota_set",
+            Self::ShareQuotaSet(_) => "share_quota_set",
+            Self::QuotaReport(_) => "quota_report",
             Self::SharesMigrateScan(_) => "shares_migrate_scan",
             Self::SharesMigrateApply(_) => "shares_migrate_apply",
             Self::SharesMigrateRollback(_) => "shares_migrate_rollback",
@@ -414,6 +427,8 @@ impl NativeOp {
                 | Self::PackageInstalledList(_)
                 | Self::PackageFiles(_)
                 | Self::ShareSessionGroups(_)
+                | Self::QuotaStatus
+                | Self::QuotaReport(_)
         )
     }
 
@@ -467,7 +482,14 @@ impl NativeRequest {
             }};
         }
         match &self.op {
-            NativeOp::Ping | NativeOp::UnitsList | NativeOp::RootfsStart | NativeOp::AptUpdate => {}
+            NativeOp::Ping
+            | NativeOp::UnitsList
+            | NativeOp::RootfsStart
+            | NativeOp::AptUpdate
+            | NativeOp::QuotaStatus => {}
+            NativeOp::QuotaSet(op) => merge!(op),
+            NativeOp::ShareQuotaSet(op) => merge!(op),
+            NativeOp::QuotaReport(op) => merge!(op),
             NativeOp::IdentityEnsure(op) => merge!(op),
             NativeOp::IdentityRemove(op) => merge!(op),
             NativeOp::SessionStart(op) => merge!(op),
@@ -621,6 +643,10 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "share_session_groups" => {
             NativeOp::ShareSessionGroups(op_from(rest, "share_session_groups")?)
         }
+        "quota_status" => no_fields(rest, "quota_status").map(|_| NativeOp::QuotaStatus)?,
+        "quota_set" => NativeOp::QuotaSet(op_from(rest, "quota_set")?),
+        "share_quota_set" => NativeOp::ShareQuotaSet(op_from(rest, "share_quota_set")?),
+        "quota_report" => NativeOp::QuotaReport(op_from(rest, "quota_report")?),
         "shares_migrate_scan" => NativeOp::SharesMigrateScan(op_from(rest, "shares_migrate_scan")?),
         "shares_migrate_apply" => {
             NativeOp::SharesMigrateApply(op_from(rest, "shares_migrate_apply")?)
@@ -896,6 +922,41 @@ pub const MAX_SESSION_GROUP_USERS: usize = 200;
 pub struct ShareSessionGroupsOp {
     #[serde(rename = "userIds")]
     pub user_ids: Vec<i64>,
+}
+
+/// The kernel block limits of a user's identity (`quota_set`), in bytes:
+/// both 0 (no limit) or 0 < `softBytes` <= `hardBytes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "QuotaSetOp", deny_unknown_fields)]
+pub struct QuotaSetOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    #[serde(rename = "softBytes")]
+    pub soft_bytes: u64,
+    #[serde(rename = "hardBytes")]
+    pub hard_bytes: u64,
+}
+
+/// The kernel block limits of a shared folder (`share_quota_set`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareQuotaSetOp", deny_unknown_fields)]
+pub struct ShareQuotaSetOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    #[serde(rename = "softBytes")]
+    pub soft_bytes: u64,
+    #[serde(rename = "hardBytes")]
+    pub hard_bytes: u64,
+}
+
+/// The users and shared folders a `quota_report` covers (ids only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "QuotaReportOp", deny_unknown_fields)]
+pub struct QuotaReportOp {
+    #[serde(rename = "userIds", default)]
+    pub user_ids: Vec<i64>,
+    #[serde(rename = "shareIds", default)]
+    pub share_ids: Vec<String>,
 }
 
 /// A share id as the server creates them: a lowercase, hyphenated UUID v4.
@@ -2377,6 +2438,21 @@ mod tests {
                 user_ids: vec![3, 4],
             }),
             NativeOp::ShareSessionGroups(ShareSessionGroupsOp { user_ids: vec![3] }),
+            NativeOp::QuotaStatus,
+            NativeOp::QuotaSet(QuotaSetOp {
+                user_id: 3,
+                soft_bytes: 1 << 30,
+                hard_bytes: 2 << 30,
+            }),
+            NativeOp::ShareQuotaSet(ShareQuotaSetOp {
+                share_id: "0123abcd-4567-4ef0-8123-456789abcdef".into(),
+                soft_bytes: 0,
+                hard_bytes: 0,
+            }),
+            NativeOp::QuotaReport(QuotaReportOp {
+                user_ids: vec![3, 4],
+                share_ids: vec!["0123abcd-4567-4ef0-8123-456789abcdef".into()],
+            }),
         ];
         for (index, op) in requests.into_iter().enumerate() {
             let request = NativeRequest::new(index as u64 + 1, op.clone());
@@ -2422,6 +2498,18 @@ mod tests {
         let groups =
             parse_request_line(br#"{"id":1,"op":"share_session_groups","userIds":[3]}"#).unwrap();
         assert!(!groups.op.is_long_running(), "read-only");
+        for (line, long) in [
+            (r#"{"id":1,"op":"quota_status"}"#, false),
+            (r#"{"id":1,"op":"quota_report","userIds":[3]}"#, false),
+            (
+                r#"{"id":1,"op":"quota_set","userId":3,"softBytes":1,"hardBytes":2}"#,
+                true,
+            ),
+        ] {
+            let parsed = parse_request_line(line.as_bytes()).unwrap();
+            assert_eq!(parsed.op.is_long_running(), long, "{line}");
+            assert_eq!(parsed.op.timeout(), QUICK_OP_TIMEOUT, "{line}");
+        }
         for line in [
             r#"{"id":1,"op":"share_group_ensure","shareId":"S","path":"/etc"}"#,
             r#"{"id":1,"op":"share_group_remove","shareId":"S","container":"team"}"#,
@@ -2436,6 +2524,16 @@ mod tests {
             r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team","userIds":["rast-u3"]}"#,
             r#"{"id":1,"op":"share_session_groups"}"#,
             r#"{"id":1,"op":"share_session_groups","userIds":[3],"pid":1}"#,
+            // Quota: ids only, never a path, a uid or a gid.
+            r#"{"id":1,"op":"quota_status","path":"/"}"#,
+            r#"{"id":1,"op":"quota_set","userId":3,"softBytes":1}"#,
+            r#"{"id":1,"op":"quota_set","userId":3,"softBytes":-1,"hardBytes":1}"#,
+            r#"{"id":1,"op":"quota_set","userId":3,"softBytes":1,"hardBytes":2,"uid":0}"#,
+            r#"{"id":1,"op":"quota_set","userId":3,"softBytes":1,"hardBytes":2,"path":"/"}"#,
+            r#"{"id":1,"op":"share_quota_set","shareId":"S","softBytes":1,"hardBytes":2,"gid":0}"#,
+            r#"{"id":1,"op":"share_quota_set","shareId":"S","softBytes":1,"hardBytes":2,"container":"team"}"#,
+            r#"{"id":1,"op":"quota_report","userIds":["rast-u3"]}"#,
+            r#"{"id":1,"op":"quota_report","userIds":[3],"uids":[1]}"#,
         ] {
             let line = line.replace("\"S\"", &format!("\"{SHARE_ID}\""));
             let error = parse_request_line(line.as_bytes()).unwrap_err();

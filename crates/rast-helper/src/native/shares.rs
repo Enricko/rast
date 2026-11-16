@@ -67,9 +67,9 @@ use crate::native::homes::{clear_errno, fstat, is_dir, is_symlink, open_dir, DIR
 use crate::native::identity::PasswdEntry;
 use crate::native::protocol::{
     identity_ids, username_for, validate_share_container, validate_share_id, NativeError,
-    ShareDenySetOp, ShareDirOp, ShareDirPrepareOp, ShareGroupOp, ShareIdOp, ShareMembersSetOp,
-    ShareSessionGroupsOp, MAX_SESSION_GROUP_USERS, MAX_SHARE_DENIALS, MAX_SHARE_MEMBERS,
-    MAX_USER_ID,
+    QuotaReportOp, QuotaSetOp, ShareDenySetOp, ShareDirOp, ShareDirPrepareOp, ShareGroupOp,
+    ShareIdOp, ShareMembersSetOp, ShareQuotaSetOp, ShareSessionGroupsOp, MAX_SESSION_GROUP_USERS,
+    MAX_SHARE_DENIALS, MAX_SHARE_MEMBERS, MAX_USER_ID,
 };
 use crate::native::{run_command, summarize_command, NativeOptions};
 
@@ -1022,6 +1022,13 @@ impl Owners {
     fn managed(&self, uid: u32) -> bool {
         uid == self.rast_uid || (self.identity_uids.0..=self.identity_uids.1).contains(&uid)
     }
+
+    /// The recycle bin of a RAST identity at the top of a container: the
+    /// folder `.Trash-<uid>` owned by that very uid (ADR 0005, section 5).
+    fn is_user_trash(&self, name: &str, owner: u32) -> bool {
+        (self.identity_uids.0..=self.identity_uids.1).contains(&owner)
+            && name == rast_base::storage::xdg_trash::share_trash_name(owner)
+    }
 }
 
 /// What an entry is now.
@@ -1165,6 +1172,10 @@ pub struct TreeReport {
     /// The container already had (before this run) its target owner,
     /// group, mode and ACLs.
     pub container_prepared: bool,
+    /// Recycle bins of one-HOME members at the top of the container
+    /// (`.Trash-<uid>`, owned by that uid): private to their owner, so the
+    /// walk leaves them (and what is in them) alone.
+    pub user_trash: u64,
 }
 
 /// One entry the walk hands to its visitor: a folder (opened and checked)
@@ -1281,6 +1292,10 @@ fn walk_limited(
                 report.changed_during_walk.add(&path);
                 continue;
             }
+        }
+        if frame.path.is_empty() && is_dir(&stat) && owners.is_user_trash(text, stat.st_uid) {
+            report.user_trash += 1;
+            continue;
         }
         if is_dir(&stat) {
             let dir = match open_at(parent, &name, DIR_FLAGS) {
@@ -2120,6 +2135,130 @@ pub(crate) async fn share_session_groups(
         .map(|(gid, name)| (gid.to_string(), Value::String(name)))
         .collect();
     Ok(json!({"users": users, "groups": groups}))
+}
+
+// ---------------------------------------------------------------------------
+// Quota (ADR 0005, section 6): the kernel side is in `native::quota`; the
+// gids of shared folders are looked up here.
+// ---------------------------------------------------------------------------
+
+/// The rw gids of shared folders whose groups exist (in the share range).
+async fn share_rw_gids(
+    options: &NativeOptions,
+    share_ids: &[String],
+) -> Result<BTreeMap<String, u32>, NativeError> {
+    let range = share_gid_range(options.uid_base)?;
+    let mut by_name = HashMap::new();
+    for share_id in share_ids {
+        by_name.insert(ShareGroups::for_share(share_id)?.rw, share_id.clone());
+    }
+    let names: Vec<String> = by_name.keys().cloned().collect();
+    let mut out = BTreeMap::new();
+    for chunk in names.chunks(GETENT_BATCH) {
+        let mut args = vec![OsString::from("group")];
+        args.extend(chunk.iter().map(OsString::from));
+        let output = run_command(
+            &options.getent_bin,
+            args,
+            &[],
+            ACCOUNT_CMD_TIMEOUT,
+            MAX_ACCOUNT_OUTPUT,
+            64 * 1024,
+        )
+        .await?;
+        for line in output.stdout.lines().filter(|line| !line.trim().is_empty()) {
+            let entry = parse_group_line(line)?;
+            if let Some(share_id) = by_name.get(&entry.name) {
+                if range.contains(&entry.gid) {
+                    out.insert(share_id.clone(), entry.gid);
+                }
+            }
+        }
+        if !output.success && output.stdout.trim().is_empty() && !output.stderr.trim().is_empty() {
+            return Err(NativeError::command_failed(format!(
+                "cannot look up groups: {}",
+                summarize_command(&output)
+            )));
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) async fn quota_status(options: &NativeOptions) -> Result<Value, NativeError> {
+    let options = options.clone();
+    blocking(move || crate::native::quota::status(&options, &crate::native::quota::Kernel)).await
+}
+
+pub(crate) async fn quota_set(
+    options: &NativeOptions,
+    op: QuotaSetOp,
+) -> Result<Value, NativeError> {
+    let options = options.clone();
+    let limits = crate::native::quota::ByteLimits {
+        soft_bytes: op.soft_bytes,
+        hard_bytes: op.hard_bytes,
+    };
+    blocking(move || {
+        crate::native::quota::set_user(&options, &crate::native::quota::Kernel, op.user_id, limits)
+    })
+    .await
+}
+
+pub(crate) async fn share_quota_set(
+    options: &NativeOptions,
+    op: ShareQuotaSetOp,
+) -> Result<Value, NativeError> {
+    let groups = ShareGroups::for_share(&op.share_id)?;
+    let range = share_gid_range(options.uid_base)?;
+    let rw = existing_share_group(options, &groups.rw, &range).await?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
+    let options = options.clone();
+    let limits = crate::native::quota::ByteLimits {
+        soft_bytes: op.soft_bytes,
+        hard_bytes: op.hard_bytes,
+    };
+    blocking(move || {
+        crate::native::quota::set_share(
+            &options,
+            &crate::native::quota::Kernel,
+            &op.share_id,
+            rw.gid,
+            limits,
+        )
+    })
+    .await
+}
+
+pub(crate) async fn quota_report(
+    options: &NativeOptions,
+    op: QuotaReportOp,
+) -> Result<Value, NativeError> {
+    crate::native::quota::validate_report(&op.user_ids, &op.share_ids)?;
+    let gids = if op.share_ids.is_empty() {
+        BTreeMap::new()
+    } else {
+        share_rw_gids(options, &op.share_ids).await?
+    };
+    // Shares without groups yet are left out and listed.
+    let missing: Vec<&String> = op
+        .share_ids
+        .iter()
+        .filter(|id| !gids.contains_key(*id))
+        .collect();
+    let missing = json!(missing);
+    let shares: Vec<(String, u32)> = gids.into_iter().collect();
+    let options = options.clone();
+    let mut value = blocking(move || {
+        crate::native::quota::report(
+            &options,
+            &crate::native::quota::Kernel,
+            &op.user_ids,
+            &shares,
+        )
+    })
+    .await?;
+    value["sharesWithoutGroups"] = missing;
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------
