@@ -29,6 +29,7 @@ pub mod audio;
 pub mod client;
 pub mod daemon;
 pub(crate) mod firewall;
+pub mod homes;
 pub mod identity;
 pub mod protocol;
 
@@ -71,6 +72,7 @@ pub const GETENT_BIN: &str = "/usr/bin/getent";
 pub const SETFACL_BIN: &str = "/usr/bin/setfacl";
 pub const USERADD_CANDIDATES: &[&str] = &["/usr/sbin/useradd", "/usr/bin/useradd"];
 pub const GROUPADD_CANDIDATES: &[&str] = &["/usr/sbin/groupadd", "/usr/bin/groupadd"];
+pub const USERMOD_CANDIDATES: &[&str] = &["/usr/sbin/usermod", "/usr/bin/usermod"];
 pub const USERDEL_CANDIDATES: &[&str] = &["/usr/sbin/userdel", "/usr/bin/userdel"];
 pub const GROUPDEL_CANDIDATES: &[&str] = &["/usr/sbin/groupdel", "/usr/bin/groupdel"];
 pub const NOLOGIN_CANDIDATES: &[&str] = &["/usr/sbin/nologin", "/sbin/nologin", "/bin/false"];
@@ -125,6 +127,8 @@ pub struct NativeOptions {
     pub getent_bin: PathBuf,
     pub useradd_bin: PathBuf,
     pub groupadd_bin: PathBuf,
+    /// `usermod`, which points an identity's passwd home at its one HOME.
+    pub usermod_bin: PathBuf,
     pub userdel_bin: PathBuf,
     pub groupdel_bin: PathBuf,
     /// Present when the host has `setfacl` (package `acl`).
@@ -134,6 +138,10 @@ pub struct NativeOptions {
     /// skips `chown` calls that the test account cannot perform.
     #[cfg(test)]
     pub test_mode: bool,
+    /// Test-only: the uid that stands for every identity when checking who
+    /// owns a HOME (tests cannot chown to the identity).
+    #[cfg(test)]
+    pub test_identity_uid: Option<u32>,
 }
 
 impl NativeOptions {
@@ -191,12 +199,15 @@ impl NativeOptions {
             getent_bin: PathBuf::from(GETENT_BIN),
             useradd_bin: resolve_binary(USERADD_CANDIDATES),
             groupadd_bin: resolve_binary(GROUPADD_CANDIDATES),
+            usermod_bin: resolve_binary(USERMOD_CANDIDATES),
             userdel_bin: resolve_binary(USERDEL_CANDIDATES),
             groupdel_bin: resolve_binary(GROUPDEL_CANDIDATES),
             setfacl_bin: Some(PathBuf::from(SETFACL_BIN)).filter(|path| path.is_file()),
             nologin_shell: resolve_binary(NOLOGIN_CANDIDATES),
             #[cfg(test)]
             test_mode: false,
+            #[cfg(test)]
+            test_identity_uid: None,
         }
     }
 
@@ -234,11 +245,13 @@ impl NativeOptions {
             getent_bin: PathBuf::from("/usr/bin/false"),
             useradd_bin: PathBuf::from("/usr/bin/false"),
             groupadd_bin: PathBuf::from("/usr/bin/false"),
+            usermod_bin: PathBuf::from("/usr/bin/false"),
             userdel_bin: PathBuf::from("/usr/bin/false"),
             groupdel_bin: PathBuf::from("/usr/bin/false"),
             setfacl_bin: None,
             nologin_shell: PathBuf::from("/usr/sbin/nologin"),
             test_mode: true,
+            test_identity_uid: None,
         }
     }
 

@@ -326,6 +326,8 @@ fn log_context(op: &NativeOp) -> (Option<i64>, Option<String>) {
     match op {
         NativeOp::IdentityEnsure(IdentityEnsureOp { user_id, .. }) => (Some(*user_id), None),
         NativeOp::IdentityRemove(IdentityRemoveOp { user_id, .. }) => (Some(*user_id), None),
+        NativeOp::HomeEnsure(op) => (Some(op.user_id), None),
+        NativeOp::FilesAgentStart(op) | NativeOp::FilesAgentStop(op) => (Some(op.user_id), None),
         NativeOp::SessionStart(SessionStartOp { user_id, .. })
         | NativeOp::SessionStop(SessionStopOp { user_id, .. }) => {
             (Some(*user_id), session_unit(*user_id).ok())
@@ -407,6 +409,9 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::UnitsList => units_list(options).await,
         NativeOp::RuntimesDetect(op) => runtimes_detect(op).await,
         NativeOp::RootfsStart => rootfs_start(options).await,
+        NativeOp::HomeEnsure(op) => super::homes::home_ensure(options, op).await,
+        NativeOp::FilesAgentStart(op) => super::homes::files_agent_start(options, op).await,
+        NativeOp::FilesAgentStop(op) => super::homes::files_agent_stop(options, op).await,
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
         NativeOp::TerminalStart(op) => terminal_start(options, op).await,
@@ -948,7 +953,7 @@ fn build_systemd_run_args(
     args
 }
 
-async fn run_systemd_unit(
+pub(crate) async fn run_systemd_unit(
     options: &NativeOptions,
     unit: &str,
     args: Vec<OsString>,
@@ -1106,6 +1111,14 @@ async fn unit_state(options: &NativeOptions, unit: &str) -> Result<UnitInfo, Nat
         .unwrap_or_else(|| UnitInfo::inactive(unit)))
 }
 
+/// Whether a unit with its full name (`x.socket`, `x.service`) is active.
+pub(crate) async fn unit_active(options: &NativeOptions, unit: &str) -> Result<bool, NativeError> {
+    let units = systemctl_show(options, &[unit]).await?;
+    Ok(units
+        .first()
+        .is_some_and(|raw| raw.active_state.as_deref() == Some("active")))
+}
+
 async fn reset_failed(options: &NativeOptions, unit: &str) {
     let _ = run_command(
         &options.systemctl_bin,
@@ -1118,7 +1131,7 @@ async fn reset_failed(options: &NativeOptions, unit: &str) {
     .await;
 }
 
-async fn stop_unit(options: &NativeOptions, unit: &str) -> Result<(), NativeError> {
+pub(crate) async fn stop_unit(options: &NativeOptions, unit: &str) -> Result<(), NativeError> {
     let output = run_command(
         &options.systemctl_bin,
         vec![OsString::from("stop"), OsString::from(unit)],
@@ -1508,6 +1521,11 @@ fn prepare_terminal_session_dir(
         })?;
     }
     Ok(())
+}
+
+/// A fresh 64-hex-digit token for an agent socket.
+pub(crate) fn random_token() -> String {
+    random_terminal_token()
 }
 
 fn random_terminal_token() -> String {

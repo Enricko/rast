@@ -566,6 +566,7 @@ pub async fn remove_identity(
         // Stop all native processes of this identity first; otherwise userdel
         // refuses and, worse, a stray app keeps running without an account.
         stop_units_for_uid(options, identity.uid).await?;
+        crate::native::homes::stop_files_agent(options, identity.uid).await;
         let output = run_command(
             &options.userdel_bin,
             userdel_args(&identity),

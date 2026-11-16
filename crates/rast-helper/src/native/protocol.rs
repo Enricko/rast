@@ -249,6 +249,13 @@ pub enum NativeOp {
     RootfsStart,
     /// Official runtimes in the administrator accounts' home directories.
     RuntimesDetect(RuntimesDetectOp),
+    /// Create or repair the one HOME of a RAST user (ADR 0005).
+    HomeEnsure(HomeEnsureOp),
+    /// Start (or find) the per-user file agent; replies with its socket and
+    /// token.
+    FilesAgentStart(FilesAgentOp),
+    /// Stop the per-user file agent and its socket.
+    FilesAgentStop(FilesAgentOp),
     AppStart(AppStartOp),
     AppStop(AppStopOp),
     TerminalStart(TerminalStartOp),
@@ -286,6 +293,9 @@ impl NativeOp {
             Self::UnitsList => "units_list",
             Self::RootfsStart => "rootfs_start",
             Self::RuntimesDetect(_) => "runtimes_detect",
+            Self::HomeEnsure(_) => "home_ensure",
+            Self::FilesAgentStart(_) => "files_agent_start",
+            Self::FilesAgentStop(_) => "files_agent_stop",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
             Self::TerminalStart(_) => "terminal_start",
@@ -320,7 +330,9 @@ impl NativeOp {
             Self::DebRemove(_) => DEB_REMOVE_TIMEOUT,
             Self::DebDownload(_) => DEB_DOWNLOAD_TIMEOUT,
             Self::AptUpdate => APT_UPDATE_TIMEOUT,
-            Self::IdentityEnsure(_) | Self::IdentityRemove(_) => IDENTITY_OP_TIMEOUT,
+            Self::IdentityEnsure(_) | Self::IdentityRemove(_) | Self::HomeEnsure(_) => {
+                IDENTITY_OP_TIMEOUT
+            }
             Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
         }
@@ -335,6 +347,8 @@ impl NativeOp {
                 | Self::UnitStatus(_)
                 | Self::UnitsList
                 | Self::RootfsStart
+                | Self::FilesAgentStart(_)
+                | Self::FilesAgentStop(_)
                 | Self::PackagePolicy(_)
                 | Self::PathMkdir(_)
                 | Self::PathRemove(_)
@@ -401,6 +415,9 @@ impl NativeRequest {
             NativeOp::SessionStop(op) => merge!(op),
             NativeOp::UnitStatus(op) => merge!(op),
             NativeOp::RuntimesDetect(op) => merge!(op),
+            NativeOp::HomeEnsure(op) => merge!(op),
+            NativeOp::FilesAgentStart(op) => merge!(op),
+            NativeOp::FilesAgentStop(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
             NativeOp::TerminalStart(op) => merge!(op),
@@ -519,6 +536,9 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
         "rootfs_start" => no_fields(rest, "rootfs_start").map(|_| NativeOp::RootfsStart)?,
         "runtimes_detect" => NativeOp::RuntimesDetect(op_from(rest, "runtimes_detect")?),
+        "home_ensure" => NativeOp::HomeEnsure(op_from(rest, "home_ensure")?),
+        "files_agent_start" => NativeOp::FilesAgentStart(op_from(rest, "files_agent_start")?),
+        "files_agent_stop" => NativeOp::FilesAgentStop(op_from(rest, "files_agent_stop")?),
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
         "terminal_start" => NativeOp::TerminalStart(op_from(rest, "terminal_start")?),
@@ -684,6 +704,27 @@ pub struct TerminalStartOp {
 pub struct RuntimesDetectOp {
     #[serde(default)]
     pub skip: Vec<String>,
+}
+
+/// Create or repair the one HOME `<homes>/<username>` of a RAST user, owned
+/// by the identity `rast-u<userId>` (ADR 0005). The helper builds the path
+/// itself; no path field is accepted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "HomeEnsureOp", deny_unknown_fields)]
+pub struct HomeEnsureOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    /// The RAST username, which is the name of the HOME folder.
+    pub username: String,
+}
+
+/// Start or stop the per-user file agent of one RAST user. The helper finds
+/// the HOME through the identity's passwd entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "FilesAgentOp", deny_unknown_fields)]
+pub struct FilesAgentOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
 }
 
 /// Stop a native PTY terminal and remove its runtime directory.
@@ -1078,6 +1119,21 @@ pub fn validate_username(username: &str) -> Result<(), NativeError> {
         return Err(NativeError::invalid(format!(
             "invalid Linux username {username:?}"
         )));
+    }
+    Ok(())
+}
+
+/// The RAST username that names a HOME folder: a valid account name
+/// (`users::validate_username`: letters, digits, `.`, `-`, `_`, one path
+/// component, never `rast-u<digits>`), already trimmed and lowercase, as the
+/// server stores it.
+pub fn validate_home_username(username: &str) -> Result<(), NativeError> {
+    let valid = rast_base::users::validate_username(username)
+        .map_err(|error| NativeError::invalid(format!("invalid username: {error}")))?;
+    if valid != username || username != username.to_ascii_lowercase() {
+        return Err(NativeError::invalid(
+            "username must be trimmed and lowercase",
+        ));
     }
     Ok(())
 }
@@ -2080,6 +2136,12 @@ mod tests {
                 user_id: 7,
             }),
             NativeOp::AptUpdate,
+            NativeOp::HomeEnsure(HomeEnsureOp {
+                user_id: 7,
+                username: "alice".into(),
+            }),
+            NativeOp::FilesAgentStart(FilesAgentOp { user_id: 7 }),
+            NativeOp::FilesAgentStop(FilesAgentOp { user_id: 7 }),
         ];
         for (index, op) in requests.into_iter().enumerate() {
             let request = NativeRequest::new(index as u64 + 1, op.clone());
@@ -2088,6 +2150,65 @@ mod tests {
             assert!(line.ends_with(b"\n"));
             let parsed = parse_request_line(&line[..line.len() - 1]).unwrap();
             assert_eq!(parsed, request, "{:?}", op.name());
+        }
+    }
+
+    #[test]
+    fn home_and_file_agent_requests_take_no_path() {
+        let parsed =
+            parse_request_line(br#"{"id":1,"op":"home_ensure","userId":7,"username":"alice"}"#)
+                .unwrap();
+        assert_eq!(
+            parsed.op,
+            NativeOp::HomeEnsure(HomeEnsureOp {
+                user_id: 7,
+                username: "alice".into()
+            })
+        );
+        assert_eq!(parsed.op.timeout(), IDENTITY_OP_TIMEOUT);
+        assert!(parsed.op.is_long_running());
+        let agent = parse_request_line(br#"{"id":2,"op":"files_agent_start","userId":7}"#).unwrap();
+        assert!(!agent.op.is_long_running());
+        // Every extra field is refused, path-like ones in particular.
+        for line in [
+            r#"{"id":1,"op":"home_ensure","userId":7,"username":"alice","home":"/etc"}"#,
+            r#"{"id":1,"op":"home_ensure","userId":7,"username":"alice","path":"/"}"#,
+            r#"{"id":1,"op":"home_ensure","userId":7}"#,
+            r#"{"id":1,"op":"home_ensure","userId":"7","username":"alice"}"#,
+            r#"{"id":1,"op":"files_agent_start","userId":7,"home":"/srv/rast/homes/bob"}"#,
+            r#"{"id":1,"op":"files_agent_start","userId":7,"socket":"/tmp/x.sock"}"#,
+            r#"{"id":1,"op":"files_agent_stop","userId":7,"unit":"rast-files-u1"}"#,
+            r#"{"id":1,"op":"files_agent_start"}"#,
+        ] {
+            let error = parse_request_line(line.as_bytes()).unwrap_err();
+            assert_eq!(error.code(), "invalid_request", "{line}");
+        }
+    }
+
+    #[test]
+    fn home_usernames_are_one_lowercase_account_name() {
+        for good in ["alice", "bob.smith", "a_b-c", "user1"] {
+            assert!(validate_home_username(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "",
+            "Alice",
+            " alice",
+            "alice ",
+            "a/b",
+            "..",
+            ".",
+            "a.",
+            "rast-u7",
+            "RAST-U7",
+            "@root",
+            "a\0b",
+            "-a",
+            "a b",
+            "../etc",
+            &"x".repeat(33),
+        ] {
+            assert!(validate_home_username(bad).is_err(), "{bad:?}");
         }
     }
 
