@@ -60,6 +60,8 @@ All list endpoints accept `page` and `perPage` (bounded server-side).
 | GET | `/api/auth/sessions` | own sessions `{id, ip, userAgent, createdAt, lastSeenAt, expiresAt, current}` |
 | DELETE | `/api/auth/sessions/{id}` | revoke one session |
 | DELETE | `/api/auth/sessions` | revoke all other sessions |
+| GET | `/api/session/restart` | the session restart the caller was warned about → `{pending: null \| {reason, forced, deadlineMs}}`. `reason` is `access_revoked` (forced at `deadlineMs`) or `access_granted` (only offered). Native backend only; shared folder access changes (ADR 0005, section 4) |
+| POST | `/api/session/restart` | restart the caller's Linux apps and terminals now, so they pick up their current shared folder groups → `{ok}`; publishes `session.restarted` |
 
 While `mustChangePassword` is set (administrator reset or temporary password),
 every protected endpoint except `/api/auth/me`, `/api/auth/password`,

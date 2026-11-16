@@ -309,6 +309,10 @@ pub async fn update_user(
     if let Some((_, level)) = wanted {
         users::set_super_admin(&state.db, id, level).await?;
     }
+    // Role and status decide folder access (and the shared folder groups).
+    if role.is_some() || body.active.is_some() {
+        crate::access::bump_generation();
+    }
     let level = users::is_super_admin(&state.db, id).await
         || (was_super && !updated.active && wanted.is_none());
     // Deactivating an account must not leave its graphical sessions, native
@@ -363,6 +367,7 @@ pub async fn deactivate_user(
     ensure_can_manage(&state, &admin.0, &target).await?;
     users::ensure_not_last_super_admin(&state.db, id).await?;
     users::deactivate(&state.db, id).await?;
+    crate::access::bump_generation();
     // A deactivated account must not keep graphical sessions, apps or its
     // file agent running.
     state.linux_apps.stop_user_sessions(id).await;

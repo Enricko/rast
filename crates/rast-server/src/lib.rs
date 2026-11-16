@@ -5,6 +5,7 @@ pub mod backup;
 pub mod monitor;
 pub mod native_proxy;
 pub mod server;
+pub mod share_groups;
 pub mod state;
 
 // Modules of lower crates keep their `crate::<module>` paths.

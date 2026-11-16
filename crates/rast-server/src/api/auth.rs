@@ -10,6 +10,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
@@ -33,6 +34,23 @@ pub fn routes() -> Router<AppState> {
             get(list_sessions).delete(revoke_all_sessions),
         )
         .route("/api/auth/sessions/{id}", delete(revoke_session))
+        .route(
+            "/api/session/restart",
+            get(pending_restart).post(restart_session),
+        )
+}
+
+/// GET /api/session/restart — the restart the caller was warned about
+/// (`null`: none).
+pub async fn pending_restart(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
+    Json(json!({ "pending": state.session_restarts.pending(user.id) }))
+}
+
+/// POST /api/session/restart — restart the caller's apps and terminals now,
+/// so they pick up a shared folder access change.
+pub async fn restart_session(State(state): State<AppState>, user: AuthUser) -> Json<Value> {
+    state.session_restarts.restart_now(&state, user.id).await;
+    Json(json!({ "ok": true }))
 }
 
 fn peer_ip(peer: PeerAddr) -> std::net::IpAddr {

@@ -358,10 +358,22 @@ fn cache() -> &'static RwLock<CacheMap> {
 /// Invalidate every cached decision. Call after a policy, membership or share
 /// change commits (the same process serves API and SSE, so this is immediate).
 pub fn bump_generation() {
-    GENERATION.fetch_add(1, Ordering::SeqCst);
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     if let Ok(mut map) = cache().write() {
         map.clear();
     }
+    generation_sender().send_replace(generation);
+}
+
+fn generation_sender() -> &'static tokio::sync::watch::Sender<u64> {
+    static SENDER: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+    SENDER.get_or_init(|| tokio::sync::watch::channel(current_generation()).0)
+}
+
+/// Wakes whenever [`bump_generation`] runs: work that follows the rules
+/// (the shared folder groups) recomputes on it.
+pub fn subscribe_generation() -> tokio::sync::watch::Receiver<u64> {
+    generation_sender().subscribe()
 }
 
 fn current_generation() -> u64 {

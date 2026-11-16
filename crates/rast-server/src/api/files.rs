@@ -930,6 +930,9 @@ pub async fn create_share(
     Json(body): Json<shares::CreateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
     let dto = shares::create(&state.db, &state.storage, &admin.0, body).await?;
+    if let Some(record) = shares::find_by_id(&state.db, &dto.id).await? {
+        crate::share_groups::share_created(&state, &record.id, &record.container_path).await;
+    }
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -1005,6 +1008,7 @@ pub async fn delete_share(
         .await
         .unwrap_or_default();
     let record = shares::delete(&state.db, &id).await?;
+    crate::share_groups::share_deleted(&state, &record.id, &record.container_path).await;
     publish_access_changed(&state, &affected, "share_deleted", admin.0.id);
     audit::record_with_events(
         &state.db,

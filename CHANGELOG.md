@@ -99,7 +99,28 @@ this file by `scripts/changelog-section.sh`.
     group, set-uid bits dropped) and restores only entries that are still
     the recorded inode with the recorded owner.
 
-- **File Station: "Show hidden files".** A new toolbar button next to the
+- **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
+  With the native backend, the server recomputes the members of every
+  shared folder's `rast-s<h>-rw` and `rast-s<h>-ro` groups whenever access
+  rules, groups, shares or accounts change (and every five minutes), from
+  Effective Access: write or admin → read-write group, read → read-only
+  group, deny, no access or a deactivated account → neither.
+  Administrators are in every read-write group. Only accounts that have a
+  Linux identity are members.
+  - A new shared folder gets its groups and a `root:rast-s<h>-rw` 2770
+    container; a deleted one gets its container back as `rast:rast` 0700
+    (the data stays) and loses its groups.
+  - On any change the user's file agent restarts at once and the
+    `~/Shared/<name>` links of a one-HOME account are updated by the agent
+    (it only adds or removes links into the shared root; anything else in
+    `~/Shared` is left alone).
+  - Running apps and terminals keep the groups they started with: when
+    access is revoked they restart after a 60-second warning in the
+    desktop; when access is granted the desktop offers "Restart session
+    now". New endpoints `GET` and `POST /api/session/restart`, and the
+    `session.restart` and `session.restarted` events.
+
+ A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
   start with a dot. They are hidden by default (a one-HOME HOME holds
   `~/.config`, `~/.cache` and `~/.local`), and the choice is remembered in

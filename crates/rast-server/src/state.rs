@@ -38,6 +38,9 @@ pub struct AppState {
     pub rootfs: Arc<crate::rootfs::RootFs>,
     /// The per-user file agents of one-HOME accounts.
     pub homefs: Arc<crate::homefs::client::HomeFs>,
+    /// Session restarts that users were warned about (shared folder access
+    /// changed, ADR 0005 section 4).
+    pub session_restarts: crate::share_groups::SessionRestarts,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -167,7 +170,7 @@ impl AppState {
         // Realtime container/application reconciler (external Docker changes).
         crate::docker::reconcile::spawn(&config, db.clone(), docker.clone(), events.clone());
 
-        Ok(Self {
+        let state = Self {
             config,
             db,
             secrets: Arc::new(secrets),
@@ -181,10 +184,14 @@ impl AppState {
             terminal,
             rootfs,
             homefs,
+            session_restarts: Default::default(),
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),
-        })
+        };
+        // Shared folder groups follow the access rules (native backend only).
+        crate::share_groups::spawn(state.clone());
+        Ok(state)
     }
 
     pub fn version(&self) -> &'static str {

@@ -496,6 +496,17 @@ pub async fn update(
 /// Delete a shared folder definition; the data on disk is preserved. Folder
 /// rules reference `shares.id` with `ON DELETE CASCADE`, so they are removed by
 /// the same statement.
+/// Every share, by name.
+pub async fn list_records(pool: &SqlitePool) -> AppResult<Vec<ShareRecord>> {
+    let rows = sqlx::query(
+        "SELECT id, name, description, container_path, created_at FROM shares
+         ORDER BY name COLLATE NOCASE",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(map_share).collect())
+}
+
 pub async fn delete(pool: &SqlitePool, id: &str) -> AppResult<ShareRecord> {
     let record = find_by_id(pool, id)
         .await?

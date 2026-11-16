@@ -53,6 +53,43 @@ struct HelperLog {
     users: Mutex<Vec<i64>>,
     /// The user ids of `files_agent_stop` requests.
     stops: Mutex<Vec<i64>>,
+    /// The members of each share's groups, as `share_members_set` set them:
+    /// share id → (write, read).
+    groups: Mutex<std::collections::HashMap<String, Members>>,
+}
+
+/// The (write, read) members of one share's groups.
+type Members = (Vec<i64>, Vec<i64>);
+
+impl HelperLog {
+    /// Set the groups of a share and answer like the helper does.
+    fn members_set(&self, request: &Value) -> Value {
+        let ids = |key: &str| -> Vec<i64> {
+            request[key]
+                .as_array()
+                .map(|list| list.iter().filter_map(Value::as_i64).collect())
+                .unwrap_or_default()
+        };
+        let (write, read) = (ids("write"), ids("read"));
+        let share = request["shareId"].as_str().unwrap_or_default().to_string();
+        let mut groups = self.groups.lock().unwrap();
+        let (old_write, old_read) = groups.get(&share).cloned().unwrap_or_default();
+        let diff = |old: &[i64], new: &[i64]| {
+            json!({
+                "added": new.iter().filter(|id| !old.contains(id)).collect::<Vec<_>>(),
+                "removed": old.iter().filter(|id| !new.contains(id)).collect::<Vec<_>>(),
+                "removedOther": 0,
+            })
+        };
+        let reply = json!({
+            "shareId": share,
+            "write": diff(&old_write, &write),
+            "read": diff(&old_read, &read),
+            "skipped": [],
+        });
+        groups.insert(share, (write, read));
+        reply
+    }
 }
 
 struct TestServer {
@@ -139,6 +176,12 @@ impl TestServer {
                         json!({"id": request["id"], "ok": true, "data": {
                             "unit": format!("rast-files-u{user_id}"),
                         }})
+                    } else if request["op"] == "share_members_set" {
+                        json!({"id": request["id"], "ok": true, "data": log.members_set(&request)})
+                    } else if ["share_group_ensure", "share_dir_prepare"]
+                        .contains(&request["op"].as_str().unwrap_or_default())
+                    {
+                        json!({"id": request["id"], "ok": true, "data": {}})
                     } else {
                         json!({"id": request["id"], "ok": false, "error": {
                             "code": "invalid_request", "message": "not served by the test helper"
@@ -857,6 +900,103 @@ async fn shared_folders_keep_the_rast_access_rules() {
         let (status, _) = server.get(path, &alice).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+/// Wait (bounded) until `check` holds.
+async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    for _ in 0..500 {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[tokio::test]
+async fn share_groups_and_links_follow_access_and_revocations_restart_the_session() {
+    let (server, alice, bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let (status, share) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Team", "members": [{"userId": alice.id, "perms": "write"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{share}");
+    let share_id = share["id"].as_str().unwrap().to_string();
+    let container: String = sqlx::query_scalar("SELECT container_path FROM shares WHERE id = ?")
+        .bind(&share_id)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let groups = || server.helper.groups.lock().unwrap().get(&share_id).cloned();
+    let link = server.home("alice").join("Shared/Team");
+
+    // Write access: the rw group, and a `~/Shared` link written by the
+    // agent (bob has no Linux identity: in no group).
+    eventually("alice in the rw group", || {
+        groups() == Some((vec![alice.id], vec![]))
+    })
+    .await;
+    eventually("the ~/Shared link", || std::fs::read_link(&link).is_ok()).await;
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::fs::canonicalize(server.state.config.shared_dir())
+            .unwrap()
+            .join(&container)
+    );
+    assert!(server.state.session_restarts.pending(bob.id).is_none());
+
+    // Write → read is a revocation: the agent restarts at once, the
+    // session after the warning; the link stays.
+    let stops_before = server.helper.stops.lock().unwrap().len();
+    let (status, _, body) = server
+        .json(
+            "PATCH",
+            &format!("/api/shares/{share_id}"),
+            Some(&admin),
+            Some(json!({"members": [{"userId": alice.id, "perms": "read"}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    eventually("alice in the ro group", || {
+        groups() == Some((vec![], vec![alice.id]))
+    })
+    .await;
+    eventually("the agent restart", || {
+        server.helper.stops.lock().unwrap()[stops_before..].contains(&alice.id)
+    })
+    .await;
+    let pending = server.state.session_restarts.pending(alice.id).unwrap();
+    assert!(pending.forced, "{pending:?}");
+    assert_eq!(pending.reason, "access_revoked");
+    let (status, body) = server.get("/api/session/restart", &alice).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["pending"]["forced"], true);
+    assert!(std::fs::read_link(&link).is_ok());
+
+    // No access: out of both groups, and the link goes.
+    let (status, _, body) = server
+        .json(
+            "PATCH",
+            &format!("/api/shares/{share_id}"),
+            Some(&admin),
+            Some(json!({"members": []})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    eventually("alice in no group", || groups() == Some((vec![], vec![]))).await;
+    eventually("the link removed", || {
+        std::fs::symlink_metadata(&link).is_err()
+    })
+    .await;
+
+    // "Restart session now".
+    let (status, body) = server.post("/api/session/restart", &alice, json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(server.state.session_restarts.pending(alice.id).is_none());
 }
 
 #[tokio::test]

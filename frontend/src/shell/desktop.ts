@@ -33,6 +33,7 @@ import { WindowManager, type WindowInfo, type WindowRect } from "../core/wm";
 import { LinuxWindows } from "./linux-windows";
 import { NativeLinuxHost } from "./xpra-native";
 import { setFavicon } from "./brand";
+import { restartMessage, restartToastTimeout, type SessionRestart } from "./session-restart";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
   buildClockPanel,
@@ -1431,6 +1432,42 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   disposers.push(() => {
     if (accessRefreshTimer !== undefined) window.clearTimeout(accessRefreshTimer);
   });
+
+  // Shared folder access changed: apps and terminals need a new session.
+  let dismissRestart: (() => void) | undefined;
+  const showRestart = (restart: SessionRestart): void => {
+    dismissRestart?.();
+    const now = Date.now();
+    dismissRestart = toast.show(restartMessage(restart, now), {
+      kind: restart.forced ? "warning" : "info",
+      timeoutMs: restartToastTimeout(restart, now),
+      action: {
+        label: "Restart session now",
+        onClick: () => {
+          deps.api.post("/api/session/restart", {}).catch((error: unknown) => {
+            toast.error(`Could not restart the session: ${errorMessage(error)}`);
+          });
+        },
+      },
+    });
+  };
+  disposers.push(
+    realtime.on<SessionRestart>("session.restart", (data) => {
+      if (!disposed && data) showRestart(data);
+    }),
+    realtime.on<{ reason?: string }>("session.restarted", () => {
+      if (disposed) return;
+      dismissRestart?.();
+      dismissRestart = undefined;
+      toast.info("Your apps and terminals were restarted with your current access.");
+    }),
+  );
+  void deps.api
+    .get<{ pending: SessionRestart | null }>("/api/session/restart")
+    .then((body) => {
+      if (!disposed && body.pending) showRestart(body.pending);
+    })
+    .catch(() => undefined);
 
   // ------------------------------------------------------ global bindings
   const onPointerDown = (event: PointerEvent): void => {
