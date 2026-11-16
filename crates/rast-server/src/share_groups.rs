@@ -281,7 +281,7 @@ pub fn spawn(state: AppState) {
         let repairing = Arc::new(std::sync::atomic::AtomicBool::new(false));
         loop {
             let wait = match sync_once(&state, &native, &mut known).await {
-                Ok(()) => {
+                Ok(complete) => {
                     last_error = None;
                     // The groups exist now: time for the repair pass?
                     let now = std::time::Instant::now();
@@ -298,7 +298,14 @@ pub fn spawn(state: AppState) {
                             repairing.store(false, std::sync::atomic::Ordering::SeqCst);
                         });
                     }
-                    RESYNC_INTERVAL
+                    // A shared folder that failed is tried again as soon
+                    // as after an error (it may be a passing one); the
+                    // others never wait for it.
+                    if complete {
+                        RESYNC_INTERVAL
+                    } else {
+                        RETRY_AFTER
+                    }
                 }
                 Err(error) => {
                     let message = error.to_string();
@@ -435,7 +442,9 @@ async fn sync_share(
         .map_err(|error| ("share_members_set", error))
 }
 
-async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -> AppResult<()> {
+/// One pass. `Ok(false)` when the groups of some shared folder could not
+/// be set (everything else was done); the loop then tries again soon.
+async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -> AppResult<bool> {
     let plan = plan(&state.db).await?;
     let mut changes = Changes::default();
     // A shared folder whose groups the helper refuses (a group name taken
@@ -546,7 +555,7 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     }
     let active: HashSet<i64> = plan.accounts.iter().map(|user| user.id).collect();
     known.links.retain(|id, _| active.contains(id));
-    Ok(())
+    Ok(known.share_errors.is_empty())
 }
 
 /// The users whose running processes carry a share group they are no

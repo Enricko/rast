@@ -563,7 +563,8 @@ async fn a_shared_folder_the_helper_refuses_does_not_hold_up_the_others() {
     });
     let native = native_for(dir.path(), socket);
     let mut known = Known::default();
-    sync_once(&state, &native, &mut known).await.unwrap();
+    // Done, but not complete: the loop retries soon.
+    assert!(!sync_once(&state, &native, &mut known).await.unwrap());
 
     let calls = calls.lock().unwrap().clone();
     let set: BTreeSet<&str> = calls
@@ -579,6 +580,15 @@ async fn a_shared_folder_the_helper_refuses_does_not_hold_up_the_others() {
     assert!(state.session_restarts.pending_forced(3).is_some());
     assert!(known.share_errors.contains_key(BROKEN));
     assert!(!known.share_errors.contains_key(TEAM));
+
+    // Without the failing folder the pass is complete again.
+    sqlx::query("DELETE FROM shares WHERE id = ?")
+        .bind(BROKEN)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    assert!(sync_once(&state, &native, &mut known).await.unwrap());
+    assert!(known.share_errors.is_empty());
 
     // A helper that cannot be reached ends the pass with an error.
     let gone = native_for(dir.path(), dir.path().join("missing.sock"));
