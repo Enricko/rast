@@ -143,38 +143,94 @@ pub async fn serve_path(
     if !meta.is_file() {
         return Err(AppError::bad_request("path is not a regular file"));
     }
-    let len = meta.len();
-    let (status, start, length, content_range) = match parse_range(
+    let Some(part) = requested_part(request_headers, meta.len()) else {
+        return Ok(unsatisfiable(meta.len()));
+    };
+    // Reopen-safe: O_NOFOLLOW (Linux) + inode comparison against the earlier
+    // lstat, so a symlink swapped in after resolution cannot leak data.
+    let file = crate::storage::safe_path::open_read_no_follow_async(physical).await?;
+    let opened_meta = file.metadata().await?;
+    safe_path::verify_same_inode(&opened_meta, &meta)?;
+    respond(file, part, file_name, content_type, disposition, csp).await
+}
+
+/// Stream a regular file that the caller has already opened (and checked)
+/// and whose size is `len`, with optional `Range` support. The per-user file
+/// agent opens files relative to a directory descriptor.
+pub async fn serve_open_file(
+    file: tokio::fs::File,
+    len: u64,
+    file_name: &str,
+    request_headers: &HeaderMap,
+    content_type: &str,
+    disposition: Disposition,
+    csp: Option<&'static str>,
+) -> AppResult<Response> {
+    let Some(part) = requested_part(request_headers, len) else {
+        return Ok(unsatisfiable(len));
+    };
+    respond(file, part, file_name, content_type, disposition, csp).await
+}
+
+/// The part of a file of `len` bytes that a request asks for.
+struct Part {
+    status: StatusCode,
+    start: u64,
+    length: u64,
+    content_range: Option<String>,
+}
+
+/// The part a request's `Range` asks for (`None`: not satisfiable).
+fn requested_part(request_headers: &HeaderMap, len: u64) -> Option<Part> {
+    match parse_range(
         request_headers
             .get(header::RANGE)
             .and_then(|value| value.to_str().ok()),
         len,
     ) {
-        RangeRequest::Full => (StatusCode::OK, 0u64, len, None),
-        RangeRequest::Partial { start, end } => (
-            StatusCode::PARTIAL_CONTENT,
+        RangeRequest::Full => Some(Part {
+            status: StatusCode::OK,
+            start: 0,
+            length: len,
+            content_range: None,
+        }),
+        RangeRequest::Partial { start, end } => Some(Part {
+            status: StatusCode::PARTIAL_CONTENT,
             start,
-            end - start + 1,
-            Some(format!("bytes {start}-{end}/{len}")),
-        ),
-        RangeRequest::Unsatisfiable => {
-            let mut response = Response::new(Body::empty());
-            *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
-            let headers = response.headers_mut();
-            headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-            if let Ok(value) = HeaderValue::from_str(&format!("bytes */{len}")) {
-                headers.insert(header::CONTENT_RANGE, value);
-            }
-            headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-            return Ok(response);
-        }
-    };
+            length: end - start + 1,
+            content_range: Some(format!("bytes {start}-{end}/{len}")),
+        }),
+        RangeRequest::Unsatisfiable => None,
+    }
+}
 
-    // Reopen-safe: O_NOFOLLOW (Linux) + inode comparison against the earlier
-    // lstat, so a symlink swapped in after resolution cannot leak data.
-    let mut file = crate::storage::safe_path::open_read_no_follow_async(physical).await?;
-    let opened_meta = file.metadata().await?;
-    safe_path::verify_same_inode(&opened_meta, &meta)?;
+/// The `416` reply for a file of `len` bytes.
+fn unsatisfiable(len: u64) -> Response {
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+    let headers = response.headers_mut();
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{len}")) {
+        headers.insert(header::CONTENT_RANGE, value);
+    }
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+async fn respond(
+    mut file: tokio::fs::File,
+    part: Part,
+    file_name: &str,
+    content_type: &str,
+    disposition: Disposition,
+    csp: Option<&'static str>,
+) -> AppResult<Response> {
+    let Part {
+        status,
+        start,
+        length,
+        content_range,
+    } = part;
     if start > 0 {
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }

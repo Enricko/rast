@@ -42,26 +42,45 @@ pub trait EntryDtoExt {
 
 impl EntryDtoExt for EntryDto {
     fn new(logical: &LogicalPath, name: &str, meta: &std::fs::Metadata, writable: bool) -> Self {
-        let is_dir = meta.is_dir();
-        Self {
-            name: name.to_string(),
-            path: logical.as_string(),
-            kind: if is_dir { "dir" } else { "file" }.to_string(),
-            size: if is_dir {
-                0
-            } else {
-                i64::try_from(meta.len()).unwrap_or(i64::MAX)
-            },
-            modified_at: modified_ms(meta),
-            mime: if is_dir {
-                String::new()
-            } else {
-                mime_for_name(name)
-            },
-            readable: true,
+        entry_from_parts(
+            logical,
+            name,
+            meta.is_dir(),
+            meta.len(),
+            modified_ms(meta),
             writable,
-            trashed: false,
-        }
+        )
+    }
+}
+
+/// An [`EntryDto`] from the parts of a `stat` (the per-user file agent reads
+/// them relative to a directory descriptor, without `std::fs::Metadata`).
+pub fn entry_from_parts(
+    logical: &LogicalPath,
+    name: &str,
+    is_dir: bool,
+    len: u64,
+    modified_at: i64,
+    writable: bool,
+) -> EntryDto {
+    EntryDto {
+        name: name.to_string(),
+        path: logical.as_string(),
+        kind: if is_dir { "dir" } else { "file" }.to_string(),
+        size: if is_dir {
+            0
+        } else {
+            i64::try_from(len).unwrap_or(i64::MAX)
+        },
+        modified_at,
+        mime: if is_dir {
+            String::new()
+        } else {
+            mime_for_name(name)
+        },
+        readable: true,
+        writable,
+        trashed: false,
     }
 }
 
@@ -182,14 +201,28 @@ pub fn preview_content_type(name: &str, kind: PreviewKind) -> String {
 /// Build the breadcrumb trail. Home paths include the `Home` root crumb
 /// (`/`); shared paths start at the shared folder.
 pub fn breadcrumbs_for(resolved: &ResolvedPath) -> Vec<BreadcrumbDto> {
+    breadcrumbs(
+        &resolved.logical,
+        resolved.in_home,
+        resolved.share_name.as_deref(),
+    )
+}
+
+/// The breadcrumb trail of `logical`, in HOME or in the shared folder
+/// `share_name` (its display name).
+pub fn breadcrumbs(
+    logical: &LogicalPath,
+    in_home: bool,
+    share_name: Option<&str>,
+) -> Vec<BreadcrumbDto> {
     let mut out = Vec::new();
-    if resolved.in_home {
+    if in_home {
         out.push(BreadcrumbDto {
             name: "Home".to_string(),
             path: "/".to_string(),
         });
         let mut current = String::new();
-        for segment in resolved.logical.segments() {
+        for segment in logical.segments() {
             current.push('/');
             current.push_str(segment);
             out.push(BreadcrumbDto {
@@ -197,13 +230,13 @@ pub fn breadcrumbs_for(resolved: &ResolvedPath) -> Vec<BreadcrumbDto> {
                 path: current.clone(),
             });
         }
-    } else if let Some(share_name) = &resolved.share_name {
+    } else if let Some(share_name) = share_name {
         let mut current = format!("/shared/{share_name}");
         out.push(BreadcrumbDto {
-            name: share_name.clone(),
+            name: share_name.to_string(),
             path: current.clone(),
         });
-        for segment in resolved.logical.segments().iter().skip(2) {
+        for segment in logical.segments().iter().skip(2) {
             current.push('/');
             current.push_str(segment);
             out.push(BreadcrumbDto {
@@ -698,16 +731,26 @@ pub async fn text_preview_of(
 ) -> AppResult<TextPreviewDto> {
     ensure_regular_file(resolved).await?;
     let meta = tokio::fs::symlink_metadata(&resolved.physical).await?;
-    let limit = max_bytes
-        .unwrap_or(DEFAULT_TEXT_PREVIEW_BYTES)
-        .clamp(1, MAX_TEXT_PREVIEW_BYTES);
-    let to_read = meta.len().min(limit);
     let file = safe_path::open_read_no_follow_async(&resolved.physical).await?;
     let opened_meta = file.metadata().await?;
     safe_path::verify_same_inode(&opened_meta, &meta)?;
+    text_preview_from(file, meta.len(), max_bytes).await
+}
+
+/// Read at most `max_bytes` of a regular file the caller has already opened
+/// (and checked), whose size is `len`.
+pub async fn text_preview_from(
+    file: tokio::fs::File,
+    len: u64,
+    max_bytes: Option<u64>,
+) -> AppResult<TextPreviewDto> {
+    let limit = max_bytes
+        .unwrap_or(DEFAULT_TEXT_PREVIEW_BYTES)
+        .clamp(1, MAX_TEXT_PREVIEW_BYTES);
+    let to_read = len.min(limit);
     let mut buffer = Vec::with_capacity(to_read.min(1024 * 1024) as usize);
     file.take(to_read).read_to_end(&mut buffer).await?;
-    let truncated = meta.len() > to_read;
+    let truncated = len > to_read;
     if buffer.contains(&0) {
         return Ok(TextPreviewDto {
             content: String::new(),
