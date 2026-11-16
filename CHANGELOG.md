@@ -98,8 +98,10 @@ this file by `scripts/changelog-section.sh`.
     changes entries with `fchown`, `fchmod` and `fsetxattr` on the open
     descriptor, so a member who swaps an entry for a symlink cannot point
     root anywhere else. Symlinks, special files, files with more than one
-    hard link, entries owned by root and other file systems are left
-    unchanged and reported.
+    hard link, entries owned by root, entries owned by any account other
+    than `rast` and the RAST identities (such as a file another account
+    owns that was hard-linked in and whose original was since removed) and
+    other file systems are left unchanged and reported.
   - `shares_migrate_apply` writes a journal of every group, mode and ACL
     to `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl`
     (root, 0700/0600) and syncs it before changing anything; an apply that

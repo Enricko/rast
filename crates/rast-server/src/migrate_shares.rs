@@ -167,6 +167,10 @@ pub fn describe(mode: Mode, outcome: &ShareOutcome) -> Vec<String> {
                 ("hardLinks", "files with several hard links (skipped)"),
                 ("rootOwned", "entries owned by root (left unchanged)"),
                 (
+                    "otherOwner",
+                    "entries owned by other accounts (left unchanged)",
+                ),
+                (
                     "otherDevice",
                     "mount points of other file systems (skipped)",
                 ),
@@ -395,6 +399,7 @@ mod tests {
                     "changes": {"count": 5, "paths": []},
                     "symlinks": {"count": 1, "paths": ["docs/link"]},
                     "hardLinks": {"count": 0, "paths": []},
+                    "otherOwner": {"count": 1, "paths": ["docs/linked-in.txt"]},
                     "foreignAclEntries": {"count": 3, "paths": [
                         "docs: u:1001:rwx, default g:2000:r-x",
                         "docs/plan.txt: u:1001:rw-",
@@ -412,7 +417,11 @@ mod tests {
         );
         assert_eq!(lines[2], "  1 symlinks (left unchanged): docs/link");
         assert_eq!(
-            lines[3..7],
+            lines[3],
+            "  1 entries owned by other accounts (left unchanged): docs/linked-in.txt"
+        );
+        assert_eq!(
+            lines[4..8],
             [
                 "  3 entries with ACL entries that RAST does not manage (removed):",
                 "    docs: u:1001:rwx, default g:2000:r-x",
@@ -420,9 +429,9 @@ mod tests {
                 "    and 1 more (save them first with getfacl -R)",
             ]
         );
-        assert_eq!(lines[7], "  journal: 1763251200");
+        assert_eq!(lines[8], "  journal: 1763251200");
         assert_eq!(
-            describe(Mode::DryRun, &outcome)[3],
+            describe(Mode::DryRun, &outcome)[4],
             "  3 entries with ACL entries that RAST does not manage (they will be removed):"
         );
         let failed = ShareOutcome {

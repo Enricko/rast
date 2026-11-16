@@ -603,6 +603,58 @@ async fn preparing_a_share_applies_the_group_layout_without_following_links() {
 }
 
 #[tokio::test]
+async fn entries_of_other_accounts_are_never_changed() {
+    // A member can hard-link a file of another account into a share (any
+    // file they can reach, with `fs.protected_hardlinks = 0`). Once the
+    // original name is gone the file has one link, and root must still not
+    // give it the share's group, bits and ACL. Tests cannot chown, so the
+    // test user plays that other account: the layout names another uid as
+    // the `rast` service.
+    let fx = fixture();
+    fx.ensure_groups().await;
+    let team = legacy_tree(&fx);
+    if !acls_supported(&team) {
+        return;
+    }
+    let mut layout = Layout::for_share(&fx.options, SHARE).await.unwrap();
+    layout.rast_uid = u32::MAX - 20;
+    assert!(!layout.owners().managed(journal_owner()));
+    let docs_mode = mode(&team.join("docs"));
+    let (fd, stat) = open_container(&fx.options, "team").unwrap();
+    let report = prepare_tree(&layout, &fd, &stat, true, true).unwrap();
+    let mut other = report.other_owner.paths.clone();
+    other.sort();
+    assert_eq!(
+        other,
+        ["docs", "docs/deep", "docs/deep/run.sh", "docs/plan.txt"]
+    );
+    assert_eq!(report.hard_links.paths, ["hard.txt"]);
+    assert_eq!(report.changes.paths, ["."], "only the container");
+    assert_eq!(mode(&team.join("docs")), docs_mode);
+    assert_eq!(mode(&team.join("docs/plan.txt")), 0o644);
+    assert_eq!(mode(&team.join("docs/deep/run.sh")), 0o4755);
+    for path in ["docs", "docs/plan.txt", "docs/deep/run.sh"] {
+        assert_eq!(
+            read_acl(&team.join(path), acl::ACCESS_XATTR),
+            None,
+            "{path}"
+        );
+    }
+    assert_eq!(read_acl(&team.join("docs"), acl::DEFAULT_XATTR), None);
+
+    // The rollback walk leaves them alone too.
+    let mut visited = Vec::new();
+    let mut walked = TreeReport::default();
+    walk(&fd, &layout.owners(), &mut walked, |found, _| {
+        visited.push(found.path.to_string());
+        Ok(())
+    })
+    .unwrap();
+    assert!(visited.is_empty(), "{visited:?}");
+    assert_eq!(walked.other_owner.count, 4);
+}
+
+#[tokio::test]
 async fn containers_are_real_folders_in_the_shared_root() {
     let fx = fixture();
     fx.ensure_groups().await;

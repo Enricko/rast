@@ -32,8 +32,11 @@
 //! against that inode before anything is changed, and changes are made with
 //! `fchown`, `fchmod` and `fsetxattr` on the open descriptor. Walks never
 //! cross into another file system. Symbolic links, special files, files with
-//! more than one hard link and entries owned by root are left unchanged and
-//! reported.
+//! more than one hard link, entries owned by root and entries owned by any
+//! account other than the `rast` service and the RAST identities are left
+//! unchanged and reported: such an entry can only be in a share as a hard
+//! link to a file elsewhere (with `fs.protected_hardlinks = 0`, any file the
+//! member can reach), whose original name may since be gone.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, OsString};
@@ -776,6 +779,40 @@ impl Layout {
     fn is_identity(&self, uid: u32) -> bool {
         (self.identity_uids.0..=self.identity_uids.1).contains(&uid)
     }
+
+    fn owners(&self) -> Owners {
+        Owners {
+            root_uid: self.root_uid,
+            rast_uid: self.rast_uid,
+            identity_uids: self.identity_uids,
+        }
+    }
+}
+
+/// The owners of the entries a walk may hand to its visitor.
+#[derive(Debug, Clone, Copy)]
+struct Owners {
+    /// Root: its entries (and the prepared container) are left alone.
+    root_uid: u32,
+    /// The `rast` service, which owns every entry of a legacy share.
+    rast_uid: u32,
+    identity_uids: (u32, u32),
+}
+
+impl Owners {
+    fn of(options: &NativeOptions) -> Result<Self, NativeError> {
+        let identities = identity_uid_range(options.uid_base);
+        Ok(Self {
+            root_uid: root_uid(options),
+            rast_uid: service_uid(options)?,
+            identity_uids: (*identities.start(), *identities.end()),
+        })
+    }
+
+    /// An entry of RAST's own accounts: the service or a RAST identity.
+    fn managed(&self, uid: u32) -> bool {
+        uid == self.rast_uid || (self.identity_uids.0..=self.identity_uids.1).contains(&uid)
+    }
 }
 
 /// What an entry is now.
@@ -900,6 +937,9 @@ pub struct TreeReport {
     pub symlinks: Sample,
     pub hard_links: Sample,
     pub root_owned: Sample,
+    /// Entries owned by an account other than the `rast` service and the
+    /// RAST identities (left unchanged).
+    pub other_owner: Sample,
     pub other_device: Sample,
     pub special: Sample,
     pub non_utf8: u64,
@@ -919,8 +959,8 @@ pub struct TreeReport {
 }
 
 /// One entry the walk hands to its visitor: a folder (opened and checked)
-/// or a regular file with a single link, not owned by root, on the
-/// container's file system.
+/// or a regular file with a single link, owned by the `rast` service or a
+/// RAST identity, on the container's file system.
 struct Found<'a> {
     parent: RawFd,
     name: &'a CStr,
@@ -934,7 +974,7 @@ struct Found<'a> {
 /// handed to `visit` are counted in `report`.
 fn walk(
     container: &OwnedFd,
-    root_uid: u32,
+    owners: &Owners,
     report: &mut TreeReport,
     mut visit: impl FnMut(&Found<'_>, &mut TreeReport) -> Result<(), NativeError>,
 ) -> Result<(), NativeError> {
@@ -1013,8 +1053,10 @@ fn walk(
                 }
             }
             report.dirs += 1;
-            if stat.st_uid == root_uid {
+            if stat.st_uid == owners.root_uid {
                 report.root_owned.add(&path);
+            } else if !owners.managed(stat.st_uid) {
+                report.other_owner.add(&path);
             } else {
                 visit(
                     &Found {
@@ -1050,8 +1092,12 @@ fn walk(
             report.hard_links.add(&path);
             continue;
         }
-        if stat.st_uid == root_uid {
+        if stat.st_uid == owners.root_uid {
             report.root_owned.add(&path);
+            continue;
+        }
+        if !owners.managed(stat.st_uid) {
+            report.other_owner.add(&path);
             continue;
         }
         visit(
@@ -1068,11 +1114,16 @@ fn walk(
     Ok(())
 }
 
-/// Open the regular file of `found` and check that it is still that file.
+/// Open the regular file of `found` and check that it is still that file,
+/// with one link and the owner the walk checked.
 fn open_found_file(found: &Found<'_>) -> Option<(OwnedFd, libc::stat)> {
     let fd = open_at(found.parent, found.name, FILE_FLAGS).ok()?;
     let stat = fstat(fd.as_raw_fd()).ok()?;
-    (is_regular(&stat) && same_inode(&stat, found.stat) && stat.st_nlink == 1).then_some((fd, stat))
+    (is_regular(&stat)
+        && same_inode(&stat, found.stat)
+        && stat.st_nlink == 1
+        && stat.st_uid == found.stat.st_uid)
+        .then_some((fd, stat))
 }
 
 /// Whether an ACL grants named entries to RAST identities (with
@@ -1184,7 +1235,7 @@ fn prepare_tree(
     if recursive {
         walk(
             container,
-            layout.root_uid,
+            &layout.owners(),
             &mut report,
             |found, report| match found.dir {
                 Some(dir) => handle_entry(
@@ -2110,7 +2161,7 @@ pub(crate) async fn shares_migrate_apply(
                     NativeError::command_failed(format!("cannot record the container: {error}"))
                 })?];
                 let mut scan = TreeReport::default();
-                walk(&fd, layout.root_uid, &mut scan, |found, report| {
+                walk(&fd, &layout.owners(), &mut scan, |found, report| {
                     let record = match found.dir {
                         Some(dir) => record_of(found.path, dir.as_raw_fd(), found.stat).ok(),
                         None => open_found_file(found).and_then(|(file, stat)| {
@@ -2252,7 +2303,7 @@ pub(crate) async fn shares_migrate_rollback(
     let container = op.container.clone();
     let (journal, report) = blocking(move || {
         let rast_uid = service_uid(&options)?;
-        let owner = root_uid(&options);
+        let owners = Owners::of(&options)?;
         let journal_uid = journal_owner();
         let Some((stamp, dir)) = active_journal(&options, &share_id)? else {
             return Err(NativeError::not_found(
@@ -2295,7 +2346,7 @@ pub(crate) async fn shares_migrate_rollback(
             report.note_dropped_bits(record, &mut dropped);
             Ok::<(), NativeError>(())
         };
-        walk(&fd, owner, &mut walked, |found, _| {
+        walk(&fd, &owners, &mut walked, |found, _| {
             let Some(record) = by_path.remove(found.path) else {
                 report.not_recorded.add(found.path);
                 return Ok(());
