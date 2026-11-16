@@ -36,6 +36,8 @@ pub struct AppState {
     pub terminal: Arc<crate::terminal::manager::TerminalManager>,
     /// File Station's root file system (super administrators).
     pub rootfs: Arc<crate::rootfs::RootFs>,
+    /// The per-user file agents of one-HOME accounts.
+    pub homefs: Arc<crate::homefs::client::HomeFs>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -143,6 +145,12 @@ impl AppState {
             config.files_root_enabled,
             crate::native::client::NativeClient::from_config(&config),
         ));
+        let homefs = Arc::new(crate::homefs::client::HomeFs::new(
+            config.native_enabled,
+            crate::native::client::NativeClient::from_config(&config),
+            config.homes_dir(),
+            events.clone(),
+        ));
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -172,6 +180,7 @@ impl AppState {
             linux_apps,
             terminal,
             rootfs,
+            homefs,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

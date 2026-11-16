@@ -17,6 +17,7 @@ pub mod docker;
 pub mod events;
 pub mod files;
 pub mod groups;
+pub mod homefs;
 pub mod jobs;
 pub mod linux_apps;
 pub mod logs;
@@ -38,10 +39,19 @@ pub fn router(state: AppState) -> Router {
         .merge(logs::routes())
         .merge(jobs::routes())
         .merge(system::protected_routes())
-        .merge(files::routes().route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            rootfs::dispatch,
-        )))
+        .merge(
+            files::routes()
+                // Runs second: one-HOME accounts go to their file agent.
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    homefs::dispatch,
+                ))
+                // Runs first: `/@root` goes to the root file agent.
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    rootfs::dispatch,
+                )),
+        )
         .merge(groups::routes())
         .merge(appearance::routes())
         .merge(apps::routes())

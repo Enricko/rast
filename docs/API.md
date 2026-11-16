@@ -120,6 +120,28 @@ recycle bin (delete is permanent). One request cannot mix `/@root` paths
 with storage paths (`400`). Anyone else gets `403`. `@root` is a reserved
 name in Home and shared folders.
 
+**One-HOME accounts** (ADR 0005; an account whose HOME directory belongs to
+its Linux identity, which needs `native_enabled`): their File Station
+requests are answered by their own file agent, which runs as that Linux
+account. The endpoints, JSON shapes and error codes are the same, with these
+differences:
+
+* `writable` in an entry is what the account's Linux user may write.
+* Chunked upload ids start with `usr-`.
+* `/shared/<name>` is reached through the HOME link `~/Shared/<name>`; RAST's
+  access rules still apply (`404` for a hidden folder, `403` for writes to a
+  read-only one).
+* A copy or move into HOME that does not fit the quota fails as a whole
+  (`413` in the job), before anything is written.
+* `503` when the account's file agent cannot be started or reached (the
+  privileged helper is down); the server never serves such an account
+  in-process instead.
+* `POST /api/files/delete`, `/api/files/trash*` and `GET /api/files/usage`
+  answer `503` ("not available for this account yet") until the recycle bin
+  moves to XDG Trash.
+
+No account is switched to one-HOME mode by this version.
+
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |

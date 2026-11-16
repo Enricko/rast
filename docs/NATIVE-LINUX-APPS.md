@@ -214,6 +214,14 @@ Consequences:
   by the person's app identity (for example because it was copied into their
   home), the application can read or upload it wherever the app decides. Treat
   what a native app can read as shared with that app.
+* **One HOME (in progress, ADR 0005).** The helper can already prepare a
+  person's HOME `<storage_dir>/homes/<username>` as their own Linux account's
+  directory (`home_ensure`: 0700, owned by `rast-u<id>`, with `~/.config`,
+  `~/.cache`, `~/.local/…`) and start a per-user file agent for it
+  (`files_agent_start`, unit `rast-files-u<uid>`). File Station then serves
+  that person through the agent instead of the `rast` service. Nothing calls
+  `home_ensure` yet: apps keep the read-only `RAST` link described above until
+  the home migration (`rast migrate home`) ships.
 * Application installs live under `<data_dir>/linux-apps/apps/<id>/<version>/`
   (portable/AppImage, read-only to app users) and per-person profiles under
   `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity).
@@ -356,6 +364,10 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
   (launch, close, install) fail until the helper is back. On start the helper
   reconciles the nftables display-port set against the live `rast-xpra-*`
   units and the server adopts the still-running sessions.
+* **Per-user file agents** (`rast-files-u<uid>`, one-HOME accounts only) are
+  transient units in `rast-linux.slice` too. When the helper is down, a
+  stopped agent cannot be started again and File Station answers `503` for
+  that person until the helper is back.
 * **To actually end everything:** stop `rast-linux.slice` (or the individual
   `rast-xpra-*`/`rast-app-*` units). A reboot also starts from fresh
   processes; profiles and installs stay on disk.

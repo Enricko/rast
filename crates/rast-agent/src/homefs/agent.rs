@@ -669,6 +669,27 @@ struct BatchRequest {
 struct Planned {
     source: PathBuf,
     target: PathBuf,
+    /// Whether the source is in HOME (not in a shared folder).
+    in_home: bool,
+}
+
+/// The free quota the server sent with a copy or move into HOME (absent:
+/// no limit).
+fn quota_budget(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(fileagent::QUOTA_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// Bytes a source occupies, as the server's quota counts them.
+fn tree_size(path: &Path) -> AppResult<u64> {
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok(if meta.is_dir() {
+        crate::storage::quota::dir_used_bytes_blocking(path)
+    } else {
+        meta.len()
+    })
 }
 
 /// The checks of `transfer::plan_batch`, against this namespace.
@@ -716,6 +737,7 @@ fn plan(
             ));
         }
         out.push(Planned {
+            in_home: resolved.kind == RootKind::Home,
             source: resolved.physical,
             target,
         });
@@ -775,21 +797,58 @@ fn copy_tree(source: &Path, target: &Path, cancel: &AtomicBool, bytes: &mut u64)
     Ok(())
 }
 
+/// Copy or move a batch. Bytes that land in HOME are checked against the
+/// budget the server sent, item by item like in-process transfers, and
+/// the reply's additive `homeBytes` says how HOME usage changed (the server
+/// accounts it and removes the field).
 async fn transfer_items(
     agent: Arc<HomeAgent>,
     body: BatchRequest,
+    headers: HeaderMap,
     moving: bool,
 ) -> AppResult<Json<Value>> {
     let cancel = Arc::new(AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let space = agent.space.clone();
+    let budget = quota_budget(&headers);
     blocking(move || {
         let (dest, plan) = plan(&space, &body, moving)?;
-        let mut bytes = 0u64;
-        let mut done = 0usize;
+        let dest_in_home = dest.kind == RootKind::Home;
+        // Sizes first: the whole batch must fit, so a full quota writes
+        // nothing (in-process transfers stop at the item that does not fit).
+        let mut sizes = Vec::with_capacity(plan.len());
+        let mut needed = 0u64;
         for item in &plan {
             check(&cancel)?;
+            let into_home = dest_in_home && (!moving || !item.in_home);
+            let size = if moving || into_home {
+                tree_size(&item.source)?
+            } else {
+                0
+            };
+            if into_home {
+                needed = needed.saturating_add(size);
+            }
+            sizes.push(size);
+        }
+        if budget.is_some_and(|free| needed > free) {
+            return Err(AppError::PayloadTooLarge("storage quota exceeded"));
+        }
+        let mut bytes = 0u64;
+        let mut home_bytes = 0i64;
+        let mut done = 0usize;
+        for (item, size) in plan.iter().zip(sizes) {
+            check(&cancel)?;
+            let into_home = dest_in_home && (!moving || !item.in_home);
+            let out_of_home = moving && item.in_home && !dest_in_home;
+            let delta = i64::try_from(size).unwrap_or(i64::MAX);
+            if into_home {
+                home_bytes = home_bytes.saturating_add(delta);
+            } else if out_of_home {
+                home_bytes = home_bytes.saturating_sub(delta);
+            }
             if moving {
+                bytes = bytes.saturating_add(size);
                 match std::fs::rename(&item.source, &item.target) {
                     Ok(()) => {
                         done += 1;
@@ -800,21 +859,24 @@ async fn transfer_items(
                     Err(error) => return Err(fs_error(error)),
                 }
             }
-            if let Err(error) = copy_tree(&item.source, &item.target, &cancel, &mut bytes) {
+            let mut copied = 0u64;
+            if let Err(error) = copy_tree(&item.source, &item.target, &cancel, &mut copied) {
                 // Do not leave half a copy behind.
                 let _ = transfer::remove_path_blocking(&item.target);
                 return Err(error);
             }
             if moving {
                 transfer::remove_path_blocking(&item.source).map_err(fs_error)?;
+            } else {
+                bytes = bytes.saturating_add(copied);
             }
             done += 1;
         }
         let destination = dest.logical.as_string();
         Ok(Json(if moving {
-            json!({"moved": done, "bytes": bytes, "destination": destination})
+            json!({"moved": done, "bytes": bytes, "destination": destination, "homeBytes": home_bytes})
         } else {
-            json!({"copied": done, "bytes": bytes, "destination": destination})
+            json!({"copied": done, "bytes": bytes, "destination": destination, "homeBytes": home_bytes})
         }))
     })
     .await
@@ -822,16 +884,18 @@ async fn transfer_items(
 
 async fn copy(
     State(agent): State<Arc<HomeAgent>>,
+    headers: HeaderMap,
     Json(body): Json<BatchRequest>,
 ) -> AppResult<Json<Value>> {
-    transfer_items(agent, body, false).await
+    transfer_items(agent, body, headers, false).await
 }
 
 async fn move_items(
     State(agent): State<Arc<HomeAgent>>,
+    headers: HeaderMap,
     Json(body): Json<BatchRequest>,
 ) -> AppResult<Json<Value>> {
-    transfer_items(agent, body, true).await
+    transfer_items(agent, body, headers, true).await
 }
 
 #[cfg(test)]
@@ -922,7 +986,15 @@ mod tests {
         }
 
         async fn post(&self, uri: &str, body: Value) -> (StatusCode, Value) {
-            let mut headers = HeaderMap::new();
+            self.post_with(uri, body, HeaderMap::new()).await
+        }
+
+        async fn post_with(
+            &self,
+            uri: &str,
+            body: Value,
+            mut headers: HeaderMap,
+        ) -> (StatusCode, Value) {
             headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
             let response = self
                 .send(Method::POST, uri, &headers, Body::from(body.to_string()))
@@ -1197,6 +1269,82 @@ mod tests {
         assert_eq!(part.status(), StatusCode::PARTIAL_CONTENT);
         let bytes = axum::body::to_bytes(part.into_body(), 64).await.unwrap();
         assert_eq!(&bytes[..], b"bc");
+    }
+
+    #[tokio::test]
+    async fn transfers_into_home_respect_the_budget_and_report_home_bytes() {
+        let fx = start(None).await;
+        std::fs::create_dir(fx.home.join("docs")).unwrap();
+        std::fs::write(fx.home.join("a.bin"), [0u8; 10]).unwrap();
+        std::fs::create_dir(fx.home.join("tree")).unwrap();
+        std::fs::write(fx.home.join("tree/b.bin"), [0u8; 6]).unwrap();
+        let team = fx.shared.join("team-1");
+        std::fs::create_dir(&team).unwrap();
+        std::fs::create_dir(fx.home.join(SHARED_DIR)).unwrap();
+        std::os::unix::fs::symlink(&team, fx.home.join("Shared/Team")).unwrap();
+        let budget = |bytes: u64| {
+            let mut headers = HeaderMap::new();
+            headers.insert(fileagent::QUOTA_HEADER, bytes.into());
+            headers
+        };
+
+        // A copy that does not fit is refused before anything is written.
+        let (status, error) = fx
+            .post_with(
+                "/api/files/copy",
+                json!({"paths": ["/a.bin"], "destDir": "/docs"}),
+                budget(9),
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{error}");
+        assert!(!fx.home.join("docs/a.bin").exists());
+        let (status, copied) = fx
+            .post_with(
+                "/api/files/copy",
+                json!({"paths": ["/a.bin", "/tree"], "destDir": "/docs"}),
+                budget(16),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{copied}");
+        assert_eq!(copied["copied"], 2);
+        assert_eq!(copied["bytes"], 16);
+        assert_eq!(copied["homeBytes"], 16);
+
+        // Moves inside HOME change nothing; out of HOME they free space,
+        // back into HOME they need it again.
+        let (_, moved) = fx
+            .post(
+                "/api/files/move",
+                json!({"paths": ["/docs/a.bin"], "destDir": "/tree"}),
+            )
+            .await;
+        assert_eq!(moved["homeBytes"], 0, "{moved}");
+        let (status, moved) = fx
+            .post(
+                "/api/files/move",
+                json!({"paths": ["/tree"], "destDir": "/shared/Team"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        assert_eq!(moved["homeBytes"], -16);
+        assert!(team.join("tree/b.bin").exists());
+        let (status, _) = fx
+            .post_with(
+                "/api/files/move",
+                json!({"paths": ["/shared/Team/tree"], "destDir": "/"}),
+                budget(15),
+            )
+            .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        let (_, moved) = fx
+            .post_with(
+                "/api/files/move",
+                json!({"paths": ["/shared/Team/tree"], "destDir": "/"}),
+                budget(16),
+            )
+            .await;
+        assert_eq!(moved["homeBytes"], 16, "{moved}");
+        assert_eq!(moved["bytes"], 16);
     }
 
     /// Lines of a watch stream, as JSON, until `stop` says so or 10 s pass.

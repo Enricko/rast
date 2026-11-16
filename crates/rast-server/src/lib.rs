@@ -8,7 +8,7 @@ pub mod server;
 pub mod state;
 
 // Modules of lower crates keep their `crate::<module>` paths.
-use rast_agent::{rootfs, terminal};
+use rast_agent::{fileagent, homefs, rootfs, terminal};
 use rast_apps::packages;
 use rast_base::{
     access, appearance, audit, auth, config, db, error, events, jobs, realtime, secrets, storage,

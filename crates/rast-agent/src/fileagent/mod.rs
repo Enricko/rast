@@ -44,6 +44,9 @@ pub const TOKEN_HEADER: &str = "x-rast-rootfs-token";
 /// server can account the quota of agent-served homes. Never sent on to the
 /// browser.
 pub const REPLACED_HEADER: &str = "x-rast-replaced-bytes";
+/// Header of a copy or move into HOME: the free quota in bytes, set by the
+/// server only (it removes the header from browser requests).
+pub const QUOTA_HEADER: &str = "x-rast-quota-free";
 
 /// Where a validated upload goes.
 #[derive(Debug, Clone)]

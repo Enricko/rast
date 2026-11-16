@@ -19,6 +19,25 @@ this file by `scripts/changelog-section.sh`.
   from `/ui/` only when the window is first opened. See
   `docs/adr/0003-rast-ui-leptos.md`.
 
+- **Per-user file agent (one HOME, ADR 0005), groundwork.** No account is
+  switched by this version; the HOME migration comes later.
+  - New privileged helper operations: `home_ensure` (prepares
+    `<storage>/homes/<username>` as the person's own Linux account's 0700
+    HOME with `~/.config`, `~/.cache` and `~/.local/…`, and sets it as the
+    account's home), `files_agent_start` and `files_agent_stop` (the
+    socket-activated unit `rast-files-u<uid>`, running as `rast-u<id>`).
+    Removing a Linux identity also stops its file agent.
+  - New hidden subcommand `rast file-agent`: File Station over one HOME,
+    with `/shared/<name>` reached through `~/Shared/<name>` links, the same
+    safe-path checks and JSON shapes, `writable` from the Linux account, and
+    a realtime stream of changes in the visible tree.
+  - File Station forwards the requests of a one-HOME account (HOME owned by
+    its Linux identity, `native_enabled` on) to that account's agent after
+    the usual session, CSRF, path, shared-folder access, quota and audit
+    checks. `503` when the agent cannot be started; deleting, the recycle
+    bin and the usage view answer `503` for such accounts until the recycle
+    bin moves to XDG Trash. Legacy accounts are unchanged.
+
 ### Security
 
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
@@ -52,6 +71,9 @@ this file by `scripts/changelog-section.sh`.
   the binary, its name, its output path and its behaviour are unchanged. See
   `docs/adr/0002-workspace-layout.md`. Run `cargo clippy` and `cargo test` with
   `--workspace`.
+- A full disk quota (`EDQUOT`) in File Station is now the usual `413`
+  "storage quota exceeded", and a full disk (`ENOSPC`) says "not enough disk
+  space on the server", instead of a generic filesystem error.
 - `cargo build --release` now fails when `frontend/dist/index.html` is missing
   or is the build placeholder (build the frontend first:
   `npm --prefix frontend run build`). CI, the release workflow and
