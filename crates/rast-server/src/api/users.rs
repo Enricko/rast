@@ -311,10 +311,12 @@ pub async fn update_user(
     }
     let level = users::is_super_admin(&state.db, id).await
         || (was_super && !updated.active && wanted.is_none());
-    // Deactivating an account must not leave its graphical sessions or native
-    // applications running: there is no way back for that identity.
+    // Deactivating an account must not leave its graphical sessions, native
+    // applications or file agent running: there is no way back for that
+    // identity.
     if !updated.active {
         state.linux_apps.stop_user_sessions(id).await;
+        state.homefs.stop_agent(id).await;
     }
     state.events.publish_admin(
         "user.changed",
@@ -361,8 +363,10 @@ pub async fn deactivate_user(
     ensure_can_manage(&state, &admin.0, &target).await?;
     users::ensure_not_last_super_admin(&state.db, id).await?;
     users::deactivate(&state.db, id).await?;
-    // A deactivated account must not keep graphical sessions/apps running.
+    // A deactivated account must not keep graphical sessions, apps or its
+    // file agent running.
     state.linux_apps.stop_user_sessions(id).await;
+    state.homefs.stop_agent(id).await;
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "deactivated"}),

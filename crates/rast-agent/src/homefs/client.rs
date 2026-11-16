@@ -210,6 +210,29 @@ impl HomeFs {
         *self.slot(user_id).lock().await = Some((socket, token));
     }
 
+    /// Stop the agent of a deactivated account through the helper (ADR
+    /// 0005, section 7) and forget it. The helper derives the unit from the
+    /// user id and tolerates a missing one, so this is safe for accounts
+    /// that never had an agent. A failure is logged: the account can no
+    /// longer sign in either way.
+    pub async fn stop_agent(&self, user_id: i64) {
+        if !self.enabled {
+            return;
+        }
+        if let Err(error) = self
+            .native
+            .call_json("files_agent_stop", json!({ "userId": user_id }))
+            .await
+        {
+            tracing::warn!(
+                user_id,
+                error = %error,
+                "could not stop the file agent of a deactivated account"
+            );
+        }
+        self.forget(user_id).await;
+    }
+
     /// Forget a user's agent (after `files_agent_stop`). It does not wait
     /// for a start that is under way.
     pub async fn forget(&self, user_id: i64) {

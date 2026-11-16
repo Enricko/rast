@@ -51,6 +51,8 @@ fn uid() -> u32 {
 struct HelperLog {
     starts: AtomicUsize,
     users: Mutex<Vec<i64>>,
+    /// The user ids of `files_agent_stop` requests.
+    stops: Mutex<Vec<i64>>,
 }
 
 struct TestServer {
@@ -130,6 +132,12 @@ impl TestServer {
                             "unit": format!("rast-files-u{user_id}"),
                             "socket": dir.join(format!("u{user_id}.sock")),
                             "token": TOKEN_CHAR.to_string().repeat(64),
+                        }})
+                    } else if request["op"] == "files_agent_stop" {
+                        let user_id = request["userId"].as_i64().unwrap_or(0);
+                        log.stops.lock().unwrap().push(user_id);
+                        json!({"id": request["id"], "ok": true, "data": {
+                            "unit": format!("rast-files-u{user_id}"),
                         }})
                     } else {
                         json!({"id": request["id"], "ok": false, "error": {
@@ -849,6 +857,54 @@ async fn shared_folders_keep_the_rast_access_rules() {
         let (status, _) = server.get(path, &alice).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
     }
+}
+
+#[tokio::test]
+async fn deactivating_an_account_stops_its_file_agent() {
+    let (server, alice, bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let carol = server.user("carol", Role::User, 0).await;
+    let stops = || server.helper.stops.lock().unwrap().clone();
+    let (status, _) = server.get("/api/files?path=/", &alice).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // An edit that keeps the account active stops nothing.
+    let (status, _, body) = server
+        .json(
+            "PATCH",
+            &format!("/api/users/{}", carol.id),
+            Some(&admin),
+            Some(json!({"displayName": "Carol"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(stops().is_empty());
+
+    // PATCH with active=false (ADR 0005, section 7).
+    let (status, _, body) = server
+        .json(
+            "PATCH",
+            &format!("/api/users/{}", alice.id),
+            Some(&admin),
+            Some(json!({"active": false})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stops(), vec![alice.id]);
+    let (status, _) = server.get("/api/files?path=/", &alice).await;
+    assert_ne!(status, StatusCode::OK);
+
+    // DELETE deactivates too.
+    let (status, _, body) = server
+        .json(
+            "DELETE",
+            &format!("/api/users/{}", bob.id),
+            Some(&admin),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(stops(), vec![alice.id, bob.id]);
 }
 
 #[tokio::test]

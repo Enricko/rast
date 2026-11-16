@@ -26,7 +26,8 @@ this file by `scripts/changelog-section.sh`.
     HOME with `~/.config`, `~/.cache` and `~/.local/…`, and sets it as the
     account's home), `files_agent_start` and `files_agent_stop` (the
     socket-activated unit `rast-files-u<uid>`, running as `rast-u<id>`).
-    Removing a Linux identity also stops its file agent.
+    Removing a Linux identity, or deactivating the account, also stops its
+    file agent.
   - New hidden subcommand `rast file-agent`: File Station over one HOME,
     with the same safe-path checks and JSON shapes, `writable` from the
     Linux account, and a realtime stream of changes in the visible tree.
