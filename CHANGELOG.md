@@ -171,7 +171,10 @@ this file by `scripts/changelog-section.sh`.
     from HOME, `chgrp`, `cp -p`, or moved in by the legacy in-process File
     Station) get the rw group, group write and the ACL back. It logs each
     shared folder where it changed entries or removed ACL entries that RAST
-    does not manage.
+    does not manage. File permissions inside a shared folder are therefore
+    managed by RAST: a member's `chmod 600` there is undone by the next
+    pass, so private files belong in HOME (documented in
+    `docs/NATIVE-LINUX-APPS.md` and `docs/OPERATIONS.md`).
   - At start-up and every five minutes the server asks the helper which
     share groups the running processes of each account carry. A session
     that still holds a group its account lost (because the server

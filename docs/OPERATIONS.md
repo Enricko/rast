@@ -741,7 +741,10 @@ sudo systemctl start rast
   accounts not yet on one HOME) moved or restored into a migrated folder
   (review finding F4). It also replaces ACL entries that RAST does not
   manage, and logs each share where it changed entries
-  (`journalctl -u rast | grep "shared folder repair"`). Under group quota
+  (`journalctl -u rast | grep "shared folder repair"`). Permission changes
+  that members make inside a shared folder (`chmod 600`, `chgrp`,
+  `setfacl`) are therefore undone by the next pass: tell users to keep
+  private files in their HOME. Under group quota
   (Q-a) a share's limit is therefore **"filesystem, best effort"**: files
   with a foreign group escape it until the next pass, and a member can
   charge files outside the share to it (ADR 0005, D3).

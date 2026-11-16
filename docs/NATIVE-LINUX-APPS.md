@@ -244,9 +244,21 @@ Consequences:
     working directory is already inside, or files that are already open:
     the restart is what ends those. A session that still carries a lost
     group later (after a server restart) is found and restarted again.
-  * Apps that save files with mode 0600 or 0644 narrow the ACL mask, so the
-    group loses write access to that file, as on any Linux file server.
-    Files keep their creator as owner.
+  * **File permissions inside a shared folder are managed by RAST.** A
+    repair pass (when the server starts, then once a day) gives every
+    folder and file the shared folder's layout again: the read-write
+    group, group read and write (and execute where the owner may execute),
+    no access for other accounts, and the RAST ACL. The owner's own bits
+    and the owner stay. A `chmod`, `chgrp` or `setfacl` inside a shared
+    folder, from an app, a terminal or `cp -p`, therefore lasts only until
+    the next pass: a file saved with mode 0600 (many apps do this for
+    files they consider private) is readable and writable by every
+    read-write member afterwards, and readable by read-only members.
+    **Keep private files in HOME, not in a shared folder.** Until the
+    pass, such a file is narrower than the layout (the group loses write
+    access through the ACL mask, as on any Linux file server). The pass
+    never changes symlinks, files with several hard links, entries owned
+    by root or by accounts that are not RAST's, or other file systems.
 * **Administrators reach every shared folder from their apps (D6).** An
   administrator is a member of every shared folder's read-write group, which
   keeps the File Station administrator bypass. The consequence is that
