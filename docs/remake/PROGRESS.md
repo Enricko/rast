@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1 to 1.4 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.5). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; pre-releases are `1.0.1-alpha.N`, each with a `chore(release)` commit; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 - **Test host:** production (`desktop.lufria.tech`) doubles as the test host;
@@ -559,12 +559,52 @@ Update it at the end of every session.
     failed; npm test 156 passed; npm build OK. On-disk layout change
     (ADR 0006, approved); no dependency, migration or deploy change.
 
+- **Task 1.4, XDG Trash and quota** (2026-11-16, ADR 0005 sections 5, 6
+  and 11, D2, D3, D4, D14):
+  - `184002b` feat(base): freedesktop Trash data (`storage::xdg_trash`):
+    `.trashinfo` encoding and strict parsing, `directorysizes`, opaque ids,
+    origins that never leave their root; fixtures written by `gio trash`.
+  - `d760d24` feat(agent): XDG Trash in the file agent (delete, list with
+    retention purge, restore, delete for good, empty) through the
+    descriptor layer; `.trashinfo` untrusted (restore only below HOME or a
+    container the server named, else the top of the trash's root);
+    `.Trash-<uid>` in shared folders (0700, no ACL, hidden, never served);
+    `/internal/usage` scan (allocated bytes, each inode once, one file
+    system, by location and type).
+  - `6143907` feat(server): the delete, trash and usage routes of one-HOME
+    accounts go to the agent (job, write checks, shares header with read or
+    write access, strict reply checks, audit, realtime); the fallback quota
+    follows the HOME scan; additive `UsageDto.byLocation` and
+    `quotaBackend`; `.Trash*` hidden and reserved in process too.
+  - `3eebeff` feat(helper): `quota_status`, `quota_set`,
+    `share_quota_set`, `quota_report` (`quotactl_fd`, ids only, fake behind
+    a trait); the share walk leaves members' `.Trash-<uid>` alone.
+  - `2c7433a` feat(server): backend detection (start, every 10 min, on
+    change), D4 limits for one-HOME accounts, kernel usage, the storage
+    settings summary, `rast doctor`; the weekly recalculation no longer
+    zeroes one-HOME accounts.
+  - `172ee54` feat(storage): migration 0015 (`shares.quota_bytes`,
+    approved as D3), `quotaBytes`/`quotaEnforcedBy` on `/api/shares`, the
+    RAST check for File Station writes into a limited share (uploads,
+    copies, moves; the agent's transfer budget covers share destinations),
+    group limits on the rw gid when group quota is on.
+  - `18ab765` feat(ui): share size limit field and "enforced by" line,
+    quota backend in Control Panel → Storage, usage chips by location.
+  - Deviations (ADR 0005, section 11): no project quota yet (no project
+    ids are set; group quota only), grace times are reported but never set
+    by RAST, the RAST share check does not reserve bytes or see members'
+    trash, legacy recycle-bin rows move with `rast migrate home` (1.5).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 984 passed, 0
+    failed; npm test 159 passed; npm build OK. Migration 0015 (approved,
+    D3); no new dependency; no deploy or config change. No pre-release
+    prepared (it follows task 1.5 and its review).
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
 - [x] Task 1.2: per-user file agent (unit and fake-helper integration tests; the tests below under "Pending on the test host" are still open)
 - [x] Task 1.3: shared folders as Linux groups (unit and fake-helper tests; kernel-level tests under "Pending on the test host")
-- [ ] Task 1.4: XDG Trash and quota
+- [x] Task 1.4: XDG Trash and quota (unit and fake-helper tests; kernel quota and real apps under "Pending on the test host (task 1.4)")
 - [ ] Task 1.5: HOME migration command
   - `rast migrate home` must run per account (the production migration
     starts with the test accounts), and `rast migrate shares` per share
@@ -768,19 +808,46 @@ test user, fake helper).
   user's primary group, then restart `rast.service`: both get the rw group
   and the ACL back, and the journal names the share.
 
+## Pending on the test host (task 1.4)
+
+- XDG Trash with real apps (one-HOME test account, after task 1.5 or a
+  test account switched by hand): delete a file in a GTK app (GIO) and in
+  an Electron app, see it in File Station's recycle bin and restore it;
+  delete in File Station and see it in the app's trash (`gio list
+  trash:///`); delete in a test share and check `.Trash-<uid>` (owner, mode
+  `2700` or `0700`, no ACL with `getfacl`), that other members cannot list
+  it and that the repair pass leaves it as it is.
+- Crafted `.trashinfo` as the test account in a terminal (`Path=/etc/…`,
+  `..`, a link in HOME pointing out): restore goes to the top of HOME, the
+  link is refused, nothing is written outside.
+- The usage view and the fallback: install a Flatpak or write into
+  `~/.cache` and `~/.local/share/Trash`; after a listing (at most 10 min)
+  or opening the usage view the used bytes follow.
+- `rast doctor` on production prints "storage quota" with user quota
+  `off` and the RAST backend (D1).
+- After the maintainer enables Q-a (just before Phase 3): `quota_status`
+  says `enforced`, `repquota -u /` shows the D4 limits of the test
+  accounts (soft = quota, hard = +1 GiB), an app in the test account stops
+  at the hard limit (`EDQUOT`), the usage view says "filesystem", a test
+  share limit appears in `repquota -g /` for its rw group and the share
+  says "filesystem, best effort".
+
 ## Next
 
-1. Task 1.4 (XDG Trash and quota). Under group quota (Q-a) the "enforced
-   by" indicator for a share limit must say **"filesystem, best effort"**
-   (D3 decision), not "filesystem"; `share_quota_set` sets the group limit
-   on the rw gid.
+1. Task 1.5 (HOME migration command): `rast migrate home` per account,
+   including the move of the legacy recycle bin into the XDG Trash
+   (ADR 0005, section 8 step 6) and the PROGRESS items of the checklist.
 2. Task 1.6 (Phase 1 security review): includes the new root helper
    operations of task 1.3 and its follow-up (`share_deny_set`,
    `share_dir_repair`, `share_session_groups`).
-3. First deploy to production (the maintainer): a
+3. First deploy to production (the maintainer), after task 1.5 and its
+   review (maintainer's instruction, 2026-11-16): a
    `chore(release): 1.0.1-alpha.1` commit (see "Pre-release check",
    decision), Claude prepares the deploy checklist, then run the "Pending
-   on the test host" lists on production with test accounts.
+   on the test host" lists on production with test accounts. The
+   checklist must say that migration 0015 makes a binary-only rollback to
+   0.18.x impossible: the rollback restores the pre-upgrade database
+   backup (`/var/lib/rast`), then installs 0.18.x.
 4. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
    PR #2).
@@ -791,6 +858,12 @@ test user, fake helper).
    run `dev-instance.sh up native` here.
 
 ## Open questions
+
+- **Project quota for shared folders (task 1.4):** `share_dir_prepare`
+  does not set project ids yet, so share limits use group quota only
+  ("filesystem, best effort"). Setting project ids (FS_IOC_FSSETXATTR with
+  the inherit flag) is only useful on a host with project quota, which
+  production does not have (D1). Do it when such a host exists?
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user

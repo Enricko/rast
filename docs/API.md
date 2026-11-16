@@ -25,7 +25,7 @@ Responses use this error shape and never leak internals:
 | 403 | authenticated but not allowed (or CSRF mismatch) |
 | 404 | object not found **or** not visible to this user |
 | 409 | conflict (name exists, job cancelled) |
-| 413 | upload too large |
+| 413 | upload too large, storage quota or shared folder size limit exceeded |
 | 429 | rate limited / account locked (`Retry-After` header) |
 | 503 | subsystem unavailable (e.g. Docker worker down) |
 
@@ -140,9 +140,20 @@ differences:
 * `503` when the account's file agent cannot be started or reached (the
   privileged helper is down); the server never serves such an account
   in-process instead.
-* `POST /api/files/delete`, `/api/files/trash*` and `GET /api/files/usage`
-  answer `503` ("not available for this account yet") until the recycle bin
-  moves to XDG Trash.
+* The recycle bin is the freedesktop XDG Trash that the account's Linux
+  apps use too: `~/.local/share/Trash` for HOME and `<container>/.Trash-<uid>`
+  (private to the account) for a shared folder. Trash ids are opaque
+  (`h:…`, `s:<shareId>:…`); entries that apps put there are listed too.
+  Restoring a shared-folder entry needs write access to that folder; an
+  entry whose original place is outside HOME and the account's shared
+  folders is restored to the top of HOME (or of the shared folder whose
+  trash holds it). Names starting with `.Trash` are reserved at the top of
+  a shared folder (`400`), for every account.
+* The recycle bin counts against the quota (it is in HOME).
+* `GET /api/files/usage` scans HOME: `usedBytes` is everything the account
+  owns there (apps, caches and the recycle bin too), or the kernel's number
+  when user quota is on (then files the account owns in shared folders
+  count as well, `byLocation.shared`).
 
 No account is switched to one-HOME mode by this version.
 
@@ -165,7 +176,7 @@ No account is switched to one-HOME mode by this version.
 | POST | `/api/files/move` | `{paths:[], destDir}` → `{jobId}` |
 | POST | `/api/files/delete` | `{paths:[]}` → moves to recycle bin, `{jobId}` |
 | GET | `/api/files/search?q=&path=&type=&page=&hidden=` | recursive search (bounded); `hidden=false` skips dot files and does not descend into dot folders |
-| GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}}` |
+| GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}, byLocation:{files, apps, caches, trash, shared}, quotaBackend:"filesystem|rast"}`; `byLocation` and `quotaBackend` are additive (legacy accounts: `files` and `trash`, `"rast"`); `quotaBackend` says what enforces `quotaBytes`: the kernel for File Station, Terminal and every app, or RAST for File Station and App Center only |
 | GET | `/api/files/trash?page=` | `{items:[{id, originalPath, sizeBytes, kind, deletedAt}], total}` |
 | POST | `/api/files/trash/restore` | `{ids:[]}` |
 | POST | `/api/files/trash/delete` | `{ids:[]}` permanent delete (irreversible) |
@@ -183,9 +194,9 @@ Shared folders (admin CRUD; ACL enforced on every files endpoint):
 
 | Method | Path | Body |
 | --- | --- | --- |
-| GET | `/api/shares` | `[{id,name,path,description,members:[{userId,username,perms}],createdAt}]` |
-| POST | `/api/shares` | `{name, description?, members:[{userId, perms:"read|write|admin"}]}` |
-| PATCH | `/api/shares/{id}` | `{name?, description?, members?}` |
+| GET | `/api/shares` | `[{id,name,path,description,members:[{userId,username,perms}],createdAt,quotaBytes,quotaEnforcedBy?}]`; `quotaBytes` is the size limit in bytes (`null`: none); `quotaEnforcedBy` (only with a limit) is `"filesystem, best effort"` (group quota on the shared filesystem) or `"RAST only"` (File Station writes) |
+| POST | `/api/shares` | `{name, description?, members:[{userId, perms:"read|write|admin"}], quotaBytes?}` (`0` or absent: no limit) |
+| PATCH | `/api/shares/{id}` | `{name?, description?, members?, quotaBytes?}` (`0` removes the limit) |
 | DELETE | `/api/shares/{id}` | removes the share definition, keeps data |
 
 ## Docker (admin; app id `applications`)
@@ -525,7 +536,7 @@ disablement or permission removal eventually closes the shell.
 | GET | `/api/system/components` | component health list (admin) |
 | GET | `/api/settings` | control panel settings |
 | PATCH | `/api/settings` | `{siteName?, loginMessage?, auditRetentionDays?, trashRetentionDays?, defaultQuotaBytes?}` |
-| GET | `/api/settings/storage` | storage dirs, usage, shares |
+| GET | `/api/settings/storage` | storage dirs, usage, shares; additive `quota: {backend:"filesystem|rast", userQuota, groupQuota:"off|accounting|enforced", shareLimits, checkedAt, error}` |
 
 ## Chunked uploads (large files behind proxies)
 

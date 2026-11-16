@@ -774,6 +774,43 @@ sudo systemctl start rast
   warning, is warned and restarted again. Leftover deny entries of an
   earlier run are removed by the first check.
 
+## Recycle bin and quota of one-HOME accounts
+
+One-HOME accounts (ADR 0005; none on production until `rast migrate home`)
+use the freedesktop XDG Trash, shared with their Linux apps:
+`~/.local/share/Trash` in HOME and `<container>/.Trash-<uid>` (mode `0700`,
+owned by the account) at the top of each shared folder they delete from.
+The service account cannot read either; the retention setting
+(`trashRetentionDays`) is applied when the account opens its recycle bin.
+A `.Trash-<uid>` folder in a shared folder is private to its owner: it is
+hidden in File Station, the repair pass leaves it alone, and it holds that
+member's deleted files until they empty it.
+
+**Which quota applies.** `rast doctor` (section "storage quota") and Control
+Panel → Storage say it:
+
+- **filesystem** (kernel user quota enforced on the homes filesystem): the
+  limit of `rast-u<id>` is soft = the account's quota, hard = soft + 5 %
+  (at least 1 GiB) with the filesystem's grace time, and every app,
+  Terminal and File Station are limited. Usage is everything the identity
+  owns on that filesystem: apps, caches, the recycle bin and its files in
+  shared folders.
+- **RAST** (no kernel quota; production until the maintainer enables it,
+  runbook in ADR 0005 section 9): File Station and App Center refuse writes
+  over quota; a scan of HOME (every ten minutes when the account lists
+  files, and when it opens the usage view) refreshes the usage; apps,
+  Terminal and launchers are **not** limited.
+
+RAST never edits `/etc/fstab`, turns quota on or changes grace times. With
+user quota only accounting (not enforcing), `rast doctor` warns.
+
+**Shared-folder size limits** (Control Panel → Shared folders, "Size limit"):
+RAST checks them for File Station uploads, copies and moves into the
+folder ("RAST only"). With group quota on the shared filesystem, the
+folder's read-write group also gets a kernel limit ("filesystem, best
+effort": files moved in with another group, `chgrp` or group-preserving
+copies are not counted against the folder, only against their owner).
+
 ## The private data folder
 
 Since 1.0.1 the database (`rast.db` with its `-wal` and `-shm` files) and

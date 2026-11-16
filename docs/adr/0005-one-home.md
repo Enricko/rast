@@ -554,6 +554,8 @@ boot once `/etc/fstab` has the options.
    sudo quotacheck -ugcm /     # first scan of all files; -m: no read-only remount
    sudo quotaon -ug /
    sudo quotaon -pug /         # both must say "is on"
+   sudo setquota -t -u 604800 604800 /   # D4: 7-day grace for users
+   sudo setquota -t -g 604800 604800 /   # and for groups (shared folders)
    ```
 
    `quotacheck -m` on a live filesystem can be slightly off for files that
@@ -755,6 +757,96 @@ list. The evaluation:
   (`ls .`, expected to work), `ls /proc/<shell pid>/cwd` from a second
   process (expected to work), and the open file.
 
+### 11. Task 1.4: implementation notes
+
+**XDG Trash** (`storage::xdg_trash`, `homefs::agent::trash`).
+
+- The agent writes what GIO writes: `info/<name>.trashinfo` reserved with
+  `O_EXCL` (a taken name gets `.2`, `.3`, …), the payload moved with
+  `RENAME_NOREPLACE` (on `EXDEV` copied, then removed), `Path` absolute and
+  percent-encoded for the home trash, relative to the container for a
+  share's `.Trash-<uid>`, `DeletionDate` in local time, and a
+  `directorysizes` line for folders. A fixture written by `gio trash` is
+  parsed in the tests.
+- **`.trashinfo` is untrusted** (apps and the user write it). `Path` must
+  decode to UTF-8 without control characters; it is mapped to a restore
+  target only when it names plain segments below HOME (relative paths are
+  below `~/.local/share`, as the specification says), below the container
+  of a shared folder the server named in the request (write access needed
+  for a restore), or `~/Shared/<name>/…` of such a folder. Anything else
+  (`/etc/passwd`, `..`, another container, a path into a trash folder, a
+  first segment `shared` or `@root`) is restored to the top of the root
+  that holds the trash, under the entry's name. Folders on the way are made
+  through the descriptor layer (`openat2`, no symlinks), so a link that an
+  app put in the way is refused (`403`) and nothing is written where it
+  points; a payload that is itself a link moves as a link.
+- Ids: `h:<hex name>` and `s:<shareId>:<hex name>`. A restore checks every
+  conflict before it moves anything (`409`). The list purges entries older
+  than `trashRetentionDays` (default 30) when it is read; entries without a
+  payload are not listed, payloads without an info file are removed by
+  "Empty".
+- **Share trash:** `<container>/.Trash-<uid>` is made by the agent, `0700`
+  plus the container's set-gid bit (so its files keep the rw group and stay
+  in the share's group quota), without inherited ACL entries. It is hidden
+  in listings and searches, never served as a path (`404`), and names
+  starting with `.Trash` cannot be created at the top of a shared folder,
+  by the agent or in process. The helper's tree walk (prepare, repair,
+  migration) leaves a top-level `.Trash-<uid>` owned by that identity
+  alone, so the daily repair pass does not open it to the group.
+- The legacy recycle bin of an account is moved into the XDG Trash by
+  `rast migrate home` (task 1.5, section 8 step 6); task 1.4 does not move
+  it.
+
+**Quota.**
+
+- Helper: `quota_status`, `quota_set`, `share_quota_set` and
+  `quota_report` use `quotactl_fd(2)` (Linux 5.14+) on the homes and shared
+  roots opened with `O_NOFOLLOW` (`Q_XGETQSTATV` for the state per type,
+  `Q_GETINFO` for grace times, `Q_GETQUOTA`, and `Q_SETQUOTA` with
+  `QIF_BLIMITS` only). They take ids only. `quota_report` takes at most
+  10 000 ids, of which at most 1 000 shares (one group lookup each), and
+  replies with compact rows `[id, used, soft, hard, graceEnds]`, so 10 000
+  rows fit in one 1 MiB reply.
+- The server checks the backend at start, every ten minutes and after a
+  quota, role or share-limit change. With user quota **on** (accounting or
+  enforced), each one-HOME account gets the D4 limits (set only when they
+  differ, capped at the filesystem's size) and its used bytes come from
+  the kernel; the usage view shows `quotaBackend: "filesystem"` only while
+  user quota is **enforced**, and `byLocation.shared` is the kernel's usage
+  beyond what HOME holds. Without user quota (production, D1), a HOME scan
+  is the usage: on demand in the usage view, and started by listings at
+  most every ten minutes. The weekly in-process recalculation skips homes
+  the service does not own (it used to reset them to zero).
+- Shared-folder limits on the kernel side: group quota on the rw gid
+  (`share_quota_set`, the same D4 margin), shown as "filesystem, best
+  effort". RAST checks every limit for File Station writes (single and
+  chunked uploads, copies and moves from outside the share; the whole
+  batch must fit), against a walk of the container that is kept for a
+  minute.
+
+**Deviations and open items.**
+
+- **Project quota is not used yet.** `share_dir_prepare` does not set
+  project ids (no filesystem here or on production has project quota), so
+  `share_quota_set` uses group quota only; `quota_status` reports the
+  project state. Project ids and project limits come with the first host
+  that has project quota.
+- **Grace times are not set by RAST.** They are global per filesystem, so
+  changing them would affect accounts outside RAST. `rast doctor` reports
+  them and notes when the block grace is not 7 days; the runbook (section
+  9) sets them.
+- The RAST share-limit check does not reserve bytes (two uploads that
+  start together can both pass), does not see members' `.Trash-<uid>`
+  folders (`0700`) or what apps write, and does not cover restores from the
+  recycle bin into the share.
+- Under the fallback a HOME scan that runs while an upload is in progress
+  counts its temporary file on top of the reservation until the next scan.
+- Not tested here (no kernel quota on this host, no root): `quotactl_fd`
+  against real limits. The kernel calls themselves run unprivileged in the
+  tests (`Q_XGETQSTATV` answers "off" on a filesystem without quota).
+  Pending on the test host: section "Pending on the test host" in
+  `docs/remake/PROGRESS.md`.
+
 ### Decisions (taken by the maintainer on 2026-11-16)
 
 | # | Question | Decision |
@@ -784,9 +876,9 @@ list. The evaluation:
   `rast migrate shares`; the evaluations of group quota for share limits
   under Q-a (D3) and of the deny ACL entry instead of a forced restart (D7);
   the administrator note in `docs/NATIVE-LINUX-APPS.md` (D6).
-- **Task 1.4:** XDG Trash, quota backends, the `quota_*` operations, the
-  usage breakdown, migration 0015 (`shares.quota_bytes`) with the
-  "enforced by" indicator in the UI.
+- **Task 1.4 (done 2026-11-16, section 11):** XDG Trash, quota backends,
+  the `quota_*` operations, the usage breakdown, migration 0015
+  (`shares.quota_bytes`) with the "enforced by" indicator in the UI.
 - **Task 1.5:** `rast migrate home`, the journal, removal of the per-launch
   `setfacl -R` and the `RAST` symlink, the backup reader, an Upgrade note.
 - **Test host:** one HOME needs the helper and a native instance, and only

@@ -275,6 +275,21 @@ Consequences:
   Uninstalling with *Also delete its settings* removes only those profiles,
   never files in RAST homes.
 
+### Recycle bin and quota (one-HOME accounts)
+
+For an account with one HOME (ADR 0005), File Station's recycle bin is the
+XDG Trash that its apps use: a file an app moves to the trash (GIO, KDE,
+Electron) appears in File Station's recycle bin and can be restored there,
+and what File Station deletes appears in the apps' trash. Deletions in a
+shared folder stay in that folder (`.Trash-<uid>`, private to the person).
+Entries whose original path points outside HOME or the person's shared
+folders are restored to the top of HOME.
+
+Apps, caches and the trash count against the quota. Without kernel quota
+(the RAST fallback) apps are not stopped at the quota, but File Station and
+App Center are; see "Recycle bin and quota of one-HOME accounts" in
+`docs/OPERATIONS.md`.
+
 ## Windows and the desktop
 
 * Every normal remote top-level window becomes **one RAST window** with its own

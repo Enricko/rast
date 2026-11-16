@@ -38,9 +38,8 @@ this file by `scripts/changelog-section.sh`.
   - File Station forwards the requests of a one-HOME account (HOME owned by
     its Linux identity, `native_enabled` on) to that account's agent after
     the usual session, CSRF, path, shared-folder access, quota and audit
-    checks. `503` when the agent cannot be started; deleting, the recycle
-    bin and the usage view answer `503` for such accounts until the recycle
-    bin moves to XDG Trash. Legacy accounts are unchanged.
+    checks. `503` when the agent cannot be started. Legacy accounts are
+    unchanged.
   - Hardening from the task 1.2 security review: chunked uploads of such
     accounts have the in-process limits (8 at a time per account, 64 in
     all, then `429`); downloads, previews and other streamed agent replies
@@ -199,6 +198,39 @@ this file by `scripts/changelog-section.sh`.
     restarted during the warning, or a process survived the restart, or
     the account was deactivated) is warned and restarted again.
 
+- **XDG Trash for one-HOME accounts (ADR 0005, task 1.4).** File Station's
+  recycle bin of an account with one HOME is the freedesktop Trash its
+  Linux apps use: `~/.local/share/Trash`, and `.Trash-<uid>` (private to
+  the person) at the top of a shared folder for deletions there. Entries
+  that apps trashed are listed and can be restored; what File Station
+  deletes appears in the apps' trash. `.trashinfo` files are treated as
+  untrusted: an entry goes back only to a place below HOME or below a
+  shared folder the person may write, and otherwise to the top of HOME (or
+  of the shared folder whose trash holds it). Names starting with `.Trash`
+  are reserved at the top of a shared folder, and those folders are hidden.
+  The usage view of such an account scans HOME and shows where the space
+  goes (files, apps, caches, recycle bin, shared folders).
+
+- **Quota backends (ADR 0005, task 1.4).** New helper operations
+  `quota_status`, `quota_set`, `share_quota_set` and `quota_report`
+  (`quotactl_fd`, ids only, never a path). When the homes filesystem has
+  user quota, one-HOME accounts get kernel limits (soft = quota, hard =
+  soft + max(5 %, 1 GiB), none for administrators) that limit every app
+  and Terminal too, and their usage comes from the kernel. Without kernel
+  quota RAST keeps its own accounting (File Station and App Center only)
+  and refreshes it from a HOME scan. `GET /api/files/usage` gains the
+  additive `byLocation` and `quotaBackend`, `GET /api/settings/storage` a
+  `quota` summary; `rast doctor` reports the filesystems, quota states,
+  grace times and the backend. RAST never turns quota on.
+
+- **Shared folder size limits (migration 0015).** Control Panel → Shared
+  folders has a "Size limit" (none by default). RAST checks it for File
+  Station uploads, copies and moves into the folder; with group quota on
+  the shared filesystem the folder's read-write group also gets a kernel
+  limit. Each limited folder shows what enforces it: "filesystem, best
+  effort" or "RAST only". `/api/shares` gains the additive `quotaBytes` and
+  `quotaEnforcedBy`.
+
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
   start with a dot. They are hidden by default (a one-HOME HOME holds
@@ -221,6 +253,17 @@ this file by `scripts/changelog-section.sh`.
   `1`, lists files that still wait for the move and fails on a conflict.
 
 ### Upgrade note
+
+- **Migration 0015** (`shares.quota_bytes`, nullable; existing shared
+  folders keep no limit). After it has run, a 0.18.x binary refuses to
+  start ("migration 15 previously applied but missing"): a rollback to
+  0.18.x needs the database backup taken before the upgrade (`rast update`
+  makes one), not only the old binary. See "Rollback" in
+  `docs/OPERATIONS.md`.
+
+- For one-HOME accounts the quota now counts everything in HOME: apps,
+  caches and the recycle bin (ADR 0005, D2). Legacy accounts are unchanged
+  until `rast migrate home` (a later release).
 
 - The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
   `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.
@@ -274,6 +317,10 @@ this file by `scripts/changelog-section.sh`.
   home on its own, so one home it cannot read no longer stops changes in
   other homes from being reported. Homes of one-HOME accounts are left to
   their file agent, so each change is reported once.
+- The weekly storage-usage recalculation no longer resets the usage of an
+  account whose HOME belongs to its Linux identity (one HOME) to zero: it
+  could not read that HOME and counted nothing. Such accounts are skipped;
+  their usage comes from a HOME scan or the kernel.
 
 ## [0.18.3] - 2026-11-16
 
