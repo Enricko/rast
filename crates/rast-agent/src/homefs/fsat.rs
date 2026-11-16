@@ -64,6 +64,10 @@ pub struct Info {
     pub uid: u32,
     pub gid: u32,
     pub mode: u32,
+    /// Hard links to the inode.
+    pub nlink: u64,
+    /// Bytes allocated on disk (`st_blocks` × 512).
+    pub allocated: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +106,8 @@ impl Info {
             uid: stat.st_uid as u32,
             gid: stat.st_gid as u32,
             mode,
+            nlink: stat.st_nlink as u64,
+            allocated: (stat.st_blocks as i64).max(0) as u64 * 512,
         }
     }
 
@@ -487,6 +493,25 @@ pub fn entries(dir: BorrowedFd<'_>) -> io::Result<Vec<(String, Info)>> {
     Ok(out)
 }
 
+/// The names in the folder `dir` (opened for reading), at most `limit`
+/// (`true`: there were more), without `.`, `..` and names that are not
+/// UTF-8.
+pub fn names_limited(dir: BorrowedFd<'_>, limit: usize) -> io::Result<(Vec<String>, bool)> {
+    let reader = Dir::read_from(dir)?;
+    let mut out = Vec::new();
+    for entry in reader {
+        let entry = entry?;
+        let Some(name) = utf8_name(entry.file_name()) else {
+            continue;
+        };
+        if out.len() >= limit {
+            return Ok((out, true));
+        }
+        out.push(name.to_string());
+    }
+    Ok((out, false))
+}
+
 /// A directory entry's name, unless it is `.`, `..` or not UTF-8.
 fn utf8_name(name: &CStr) -> Option<&str> {
     let name = name.to_str().ok()?;
@@ -503,6 +528,126 @@ pub fn mkdir_at(dir: BorrowedFd<'_>, name: &str) -> io::Result<()> {
         return Err(invalid_component());
     }
     Ok(rfs::mkdirat(dir, name, Mode::from_raw_mode(0o777))?)
+}
+
+/// Make the folder `name` in `dir` with `mode` (the umask applies).
+pub fn mkdir_mode_at(dir: BorrowedFd<'_>, name: &str, mode: u32) -> io::Result<()> {
+    if !component_ok(name) {
+        return Err(invalid_component());
+    }
+    Ok(rfs::mkdirat(dir, name, Mode::from_raw_mode(mode))?)
+}
+
+/// The folder `segments` below `root` (resolved as `resolve`), made where
+/// it is missing (with `mode`). Every existing component must be a real
+/// folder (never a link) and, under [`Resolve::SameFs`], on the root's file
+/// system; every folder made is reopened with [`open_created_dir`].
+pub fn ensure_dirs(
+    root: BorrowedFd<'_>,
+    segments: &[String],
+    resolve: Resolve,
+    mode: u32,
+) -> AppResult<OwnedFd> {
+    match open_dir_resolved(root, segments, resolve) {
+        Ok((fd, _)) => return Ok(fd),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(error) => return Err(fs_error(error)),
+    }
+    let device = stat_fd(root).map_err(fs_error)?.dev;
+    let mut current = rfs::openat(root, ".", handle_flags(), Mode::empty()).map_err(errno)?;
+    for name in segments {
+        let next = match stat_at(current.as_fd(), name).map_err(fs_error)? {
+            None => {
+                match mkdir_mode_at(current.as_fd(), name, mode) {
+                    Ok(()) => {}
+                    // Made meanwhile by someone else: checked below like any
+                    // folder that was there.
+                    Err(error) if error.raw_os_error() == Some(libc::EEXIST) => {}
+                    Err(error) => return Err(fs_error(error)),
+                }
+                match stat_at(current.as_fd(), name).map_err(fs_error)? {
+                    Some(info) if info.is_dir() => open_dir_at(current.as_fd(), name, &info)?,
+                    Some(info) if info.kind == Kind::Symlink => {
+                        return Err(AppError::Forbidden("symbolic links are not supported"))
+                    }
+                    _ => return Err(changed()),
+                }
+            }
+            Some(info) if info.kind == Kind::Symlink => {
+                return Err(AppError::Forbidden("symbolic links are not supported"))
+            }
+            Some(info) if info.is_dir() => open_dir_at(current.as_fd(), name, &info)?,
+            Some(_) => return Err(AppError::conflict(format!("\"{name}\" is not a folder"))),
+        };
+        if resolve == Resolve::SameFs && stat_fd(&next).map_err(fs_error)?.dev != device {
+            return Err(AppError::Forbidden(
+                "this folder is on another file system and is not served",
+            ));
+        }
+        current = next;
+    }
+    Ok(current)
+}
+
+/// The contents of the regular file `name` in `dir` (never through a link),
+/// if it is at most `max` bytes. `Ok(None)`: no such entry, not a regular
+/// file, or too large.
+pub fn read_small(dir: BorrowedFd<'_>, name: &str, max: usize) -> io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+    let fd = match open_at(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOCTTY,
+    ) {
+        Ok(fd) => fd,
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOENT) | Some(libc::ELOOP) | Some(libc::ENXIO)
+            ) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let info = stat_fd(&fd)?;
+    if info.kind != Kind::File || info.len > max as u64 {
+        return Ok(None);
+    }
+    let mut out = Vec::with_capacity(info.len as usize);
+    File::from(fd).take(max as u64 + 1).read_to_end(&mut out)?;
+    Ok((out.len() <= max).then_some(out))
+}
+
+/// Replace the file `name` in `dir` with `bytes` (mode 0600): written to a
+/// new temporary file, then renamed over the old one.
+pub fn write_replace(dir: BorrowedFd<'_>, name: &str, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let temp = format!(".{name}.{:016x}", rand::random::<u64>());
+    let mut file = create_at(dir, &temp, 0o600)?;
+    let written = file.write_all(bytes).and_then(|_| file.sync_data());
+    if let Err(error) = written.and_then(|_| rename_over(dir, &temp, dir, name)) {
+        let _ = unlink_at(dir, &temp);
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Remove the access and default ACLs of an open file or folder (missing
+/// ones are fine).
+pub fn remove_acls(fd: BorrowedFd<'_>) -> io::Result<()> {
+    for name in ["system.posix_acl_access", "system.posix_acl_default"] {
+        match rfs::fremovexattr(fd, name) {
+            Ok(()) | Err(Errno::NODATA) | Err(Errno::NOTSUP) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Set the permission bits of an open folder.
+pub fn set_dir_mode(fd: BorrowedFd<'_>, mode: u32) -> io::Result<()> {
+    Ok(rfs::fchmod(fd, Mode::from_raw_mode(mode))?)
 }
 
 /// Open the folder `name` that this process has just made in `dir`. It must

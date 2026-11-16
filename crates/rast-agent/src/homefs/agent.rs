@@ -56,6 +56,11 @@ use super::fsat::{self, fs_error, Info, Kind, Resolve, Step};
 use super::{ShareRoots, UPLOAD_PREFIX};
 use crate::storage::shares::rw_group_name;
 
+mod trash;
+pub mod usage;
+
+pub use trash::MAX_TRASH_ENTRIES;
+
 /// The gid of a group in the system's group database.
 fn group_id(name: &str) -> Option<u32> {
     let name = std::ffi::CString::new(name).ok()?;
@@ -228,6 +233,12 @@ impl HomeSpace {
                 at: None,
             });
         };
+        // The trash folders at the top of a shared folder belong to their
+        // users and are reached through the recycle bin only.
+        let top = parents.first().unwrap_or(name);
+        if root.kind == RootKind::Share && trash::hidden_in_share(top) {
+            return Err(AppError::NotFound("path not found"));
+        }
         let (dir, _) =
             fsat::open_dir_resolved(root.fd.as_fd(), parents, root.resolve()).map_err(fs_error)?;
         let info = fsat::stat_at(dir.as_fd(), name)
@@ -674,6 +685,11 @@ pub fn router(agent: Arc<HomeAgent>) -> Router {
         .route("/api/files/search", get(search))
         .route("/api/files/copy", post(copy))
         .route("/api/files/move", post(move_items))
+        .route("/api/files/delete", post(trash::delete))
+        .route("/api/files/trash", get(trash::list).delete(trash::empty))
+        .route("/api/files/trash/restore", post(trash::restore))
+        .route("/api/files/trash/delete", post(trash::delete_permanent))
+        .route(usage::USAGE_ROUTE, get(usage::usage))
         .route(SHARED_LINKS_ROUTE, post(shared_links))
         .route(fileagent::WATCH_ROUTE, get(super::watch::stream))
         .merge(fileagent::upload_routes::<HomeSpace>())
@@ -742,9 +758,11 @@ async fn list(
         let node = space.node(&logical, &shares)?;
         let dir = node.listing("path is not a directory")?;
         let show_hidden = query.hidden.unwrap_or(true);
+        let share_top = node.is_storage_root() && !node.in_home();
         let mut entries = Vec::new();
         for (name, info) in fsat::entries(dir.as_fd()).map_err(fs_error)? {
             if name.starts_with(TEMP_PREFIX)
+                || (share_top && trash::hidden_in_share(&name))
                 || validate_component(&name).is_err()
                 || (!show_hidden && name.starts_with('.'))
                 || !matches!(info.kind, Kind::File | Kind::Dir)
@@ -847,10 +865,15 @@ async fn search(
         let show_hidden = query.hidden.unwrap_or(true);
         let mut hits: Vec<EntryDto> = Vec::new();
         let mut scanned = 0usize;
+        let share_top = node.is_storage_root() && !node.in_home();
         fsat::walk(dir, MAX_SEARCH_DEPTH, node.root.tree_fs(), |visit| {
             // Links are never followed; dot entries (and what is below
-            // them) are left out unless asked for.
-            if visit.info.kind == Kind::Symlink || (!show_hidden && visit.name.starts_with('.')) {
+            // them) are left out unless asked for, the trash folders of a
+            // shared folder always.
+            if visit.info.kind == Kind::Symlink
+                || (!show_hidden && visit.name.starts_with('.'))
+                || (share_top && visit.depth == 1 && trash::hidden_in_share(visit.name))
+            {
                 return Step::Over;
             }
             scanned += 1;
@@ -1485,7 +1508,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = fx.get("/api/files?path=/shared").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
-        // There is no route for deleting (the recycle bin comes later).
+        // Deleting what is not there.
         let (status, _) = fx.post("/api/files/delete", json!({"paths": ["/x"]})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
@@ -1767,6 +1790,8 @@ mod tests {
             uid,
             gid,
             mode: 0o2770,
+            nlink: 1,
+            allocated: 0,
         };
         // The shared root of an install: rast (uid 900, gid 900).
         let root = info(900, 900, Kind::Dir);
@@ -2290,5 +2315,498 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let (status, _) = fx.get("/api/files").await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // XDG Trash (task 1.4)
+    // -----------------------------------------------------------------------
+
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn trash_dir(home: &Path) -> PathBuf {
+        home.join(".local/share/Trash")
+    }
+
+    fn listed(value: &Value) -> Vec<(String, String)> {
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                (
+                    item["originalPath"].as_str().unwrap().to_string(),
+                    item["id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    fn id_of(value: &Value, path: &str) -> String {
+        listed(value)
+            .into_iter()
+            .find(|(original, _)| original == path)
+            .unwrap_or_else(|| panic!("{path} not in {value}"))
+            .1
+    }
+
+    async fn delete_request(fx: &Fixture, uri: &str) -> (StatusCode, Value) {
+        let response = fx
+            .send(Method::DELETE, uri, &HeaderMap::new(), Body::empty())
+            .await
+            .unwrap();
+        let status = response.status();
+        (
+            status,
+            client::read_json("file agent", response).await.unwrap(),
+        )
+    }
+
+    /// An entry as an app (GIO) would leave it in the home trash.
+    fn plant(home: &Path, name: &str, path: &str, payload: Option<&[u8]>) {
+        let trash = trash_dir(home);
+        std::fs::create_dir_all(trash.join("files")).unwrap();
+        std::fs::create_dir_all(trash.join("info")).unwrap();
+        std::fs::write(
+            trash.join("info").join(format!("{name}.trashinfo")),
+            format!(
+                "[Trash Info]\nPath={}\nDeletionDate=2026-11-16T10:00:00\n",
+                crate::storage::xdg_trash::encode_path(path)
+            ),
+        )
+        .unwrap();
+        if let Some(payload) = payload {
+            std::fs::write(trash.join("files").join(name), payload).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_moves_into_the_xdg_trash_and_restoring_moves_back() {
+        let fx = start(None).await;
+        std::fs::create_dir_all(fx.home.join("docs/d/sub")).unwrap();
+        std::fs::write(fx.home.join("docs/a b.txt"), b"hello").unwrap();
+        std::fs::write(fx.home.join("docs/d/sub/x"), b"12345678").unwrap();
+        let (status, reply) = fx
+            .post(
+                "/api/files/delete",
+                json!({"paths": ["/docs/a b.txt", "/docs/d"]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["deleted"], 2);
+        assert_eq!(reply["bytes"], 13);
+        assert!(!fx.home.join("docs/a b.txt").exists());
+        let trash = trash_dir(&fx.home);
+        assert_eq!(
+            std::fs::read(trash.join("files/a b.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(trash.join("files/d/sub/x").is_file());
+        // The info file is what GIO writes: the absolute path, encoded.
+        let info = std::fs::read_to_string(trash.join("info/a b.txt.trashinfo")).unwrap();
+        let home = std::fs::canonicalize(&fx.home).unwrap();
+        assert!(info.starts_with("[Trash Info]\nPath="), "{info}");
+        let parsed = crate::storage::xdg_trash::parse_info(info.as_bytes()).unwrap();
+        assert_eq!(parsed.path, format!("{}/docs/a b.txt", home.display()));
+        assert!(info.contains("%20"));
+        let sizes = std::fs::read_to_string(trash.join("directorysizes")).unwrap();
+        assert!(
+            sizes.starts_with("8 ") && sizes.trim_end().ends_with(" d"),
+            "{sizes}"
+        );
+        assert_eq!(
+            std::fs::metadata(&trash).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let (status, list) = fx.get("/api/files/trash").await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["total"], 2);
+        assert_eq!(list["bytes"], 13);
+        let file_id = id_of(&list, "/docs/a b.txt");
+        assert!(file_id.starts_with("h:"));
+        let dir_id = id_of(&list, "/docs/d");
+        let dir = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == dir_id.as_str())
+            .unwrap();
+        assert_eq!(dir["kind"], "dir");
+        assert_eq!(dir["sizeBytes"], 8);
+
+        let (status, reply) = fx
+            .post(
+                "/api/files/trash/restore",
+                json!({"ids": [file_id, dir_id]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["restored"].as_array().unwrap().len(), 2);
+        assert_eq!(reply["homeBytes"], 0);
+        assert_eq!(
+            std::fs::read(fx.home.join("docs/a b.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(fx.home.join("docs/d/sub/x").is_file());
+        assert_eq!(std::fs::read_dir(trash.join("info")).unwrap().count(), 0);
+        assert!(!trash.join("directorysizes").exists());
+        let (_, list) = fx.get("/api/files/trash").await;
+        assert_eq!(list["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn names_are_numbered_and_restore_conflicts_change_nothing() {
+        let fx = start(None).await;
+        std::fs::create_dir_all(fx.home.join("docs")).unwrap();
+        for content in [b"one".as_slice(), b"two"] {
+            std::fs::write(fx.home.join("docs/a.txt"), content).unwrap();
+            let (status, _) = fx
+                .post("/api/files/delete", json!({"paths": ["/docs/a.txt"]}))
+                .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let trash = trash_dir(&fx.home);
+        assert_eq!(std::fs::read(trash.join("files/a.txt")).unwrap(), b"one");
+        assert_eq!(std::fs::read(trash.join("files/a.txt.2")).unwrap(), b"two");
+        std::fs::write(fx.home.join("docs/a.txt"), b"new").unwrap();
+        let (_, list) = fx.get("/api/files/trash").await;
+        let ids: Vec<String> = listed(&list).into_iter().map(|(_, id)| id).collect();
+        assert_eq!(ids.len(), 2);
+        let (status, _) = fx
+            .post("/api/files/trash/restore", json!({"ids": ids}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(std::fs::read(fx.home.join("docs/a.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read_dir(trash.join("files")).unwrap().count(), 2);
+        // Unknown and malformed ids.
+        for id in ["h:00", "nope", "s:00000000-0000-4000-8000-000000000009:61"] {
+            let (status, _) = fx
+                .post("/api/files/trash/restore", json!({"ids": [id]}))
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn entries_that_apps_wrote_are_restored_inside_home_only() {
+        let fx = start(None).await;
+        let home = std::fs::canonicalize(&fx.home).unwrap();
+        let outside = fx.dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // An entry GIO left: its folders are made again on restore.
+        plant(
+            &fx.home,
+            "y.txt",
+            &format!("{}/x/deep/y.txt", home.display()),
+            Some(b"y"),
+        );
+        // Crafted origins: outside HOME, through `..`, into the trash.
+        plant(&fx.home, "passwd", "/etc/passwd", Some(b"p"));
+        plant(
+            &fx.home,
+            "esc",
+            &format!("{}/../bob/esc", home.display()),
+            Some(b"e"),
+        );
+        plant(
+            &fx.home,
+            "loop",
+            &format!("{}/.local/share/Trash/info/z", home.display()),
+            Some(b"l"),
+        );
+        // Relative: from ~/.local/share.
+        plant(&fx.home, "n", "notes/n", Some(b"n"));
+        // Through a link in HOME that points outside.
+        std::os::unix::fs::symlink(&outside, fx.home.join("link")).unwrap();
+        plant(
+            &fx.home,
+            "evil",
+            &format!("{}/link/evil", home.display()),
+            Some(b"!"),
+        );
+        // An info file without payload, and a payload without info file.
+        plant(&fx.home, "gone", "/x/gone", None);
+        std::fs::write(trash_dir(&fx.home).join("files/stray"), b"s").unwrap();
+        // A payload that is a link to a file outside HOME.
+        std::fs::write(outside.join("target"), b"keep").unwrap();
+        plant(&fx.home, "ln", &format!("{}/ln", home.display()), None);
+        std::os::unix::fs::symlink(outside.join("target"), trash_dir(&fx.home).join("files/ln"))
+            .unwrap();
+
+        let (status, list) = fx.get("/api/files/trash").await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        let mut paths: Vec<String> = listed(&list).into_iter().map(|(p, _)| p).collect();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [
+                "/.local/share/notes/n",
+                "/esc",
+                "/link/evil",
+                "/ln",
+                "/loop",
+                "/passwd",
+                "/x/deep/y.txt"
+            ]
+        );
+        let fx = &fx;
+        let list = &list;
+        let restore = |path: &str| {
+            let id = id_of(list, path);
+            async move {
+                fx.post("/api/files/trash/restore", json!({"ids": [id]}))
+                    .await
+            }
+        };
+        for (path, file) in [
+            ("/x/deep/y.txt", "x/deep/y.txt"),
+            ("/passwd", "passwd"),
+            ("/esc", "esc"),
+            ("/loop", "loop"),
+            ("/.local/share/notes/n", ".local/share/notes/n"),
+        ] {
+            let (status, reply) = restore(path).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {reply}");
+            assert!(fx.home.join(file).is_file(), "{file}");
+        }
+        // The link in the way is never followed.
+        let (status, _) = restore("/link/evil").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(!outside.join("evil").exists());
+        // A link payload moves as a link; its target is untouched.
+        let (status, _) = restore("/ln").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(std::fs::symlink_metadata(fx.home.join("ln"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(outside.join("target")).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_folder_deletions_stay_in_the_share() {
+        let fx = start(None).await;
+        let container = fx.shared.join("team-1");
+        std::fs::create_dir_all(container.join("plans")).unwrap();
+        std::fs::write(container.join("plans/q4.odt"), b"plan").unwrap();
+        fx.share("team", "team-1");
+        let (status, reply) = fx
+            .post(
+                "/api/files/delete",
+                json!({"paths": ["/shared/team/plans/q4.odt"]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        let trash = container.join(format!(".Trash-{}", euid()));
+        assert_eq!(std::fs::read(trash.join("files/q4.odt")).unwrap(), b"plan");
+        assert_eq!(
+            std::fs::metadata(&trash).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Relative to the container, as the specification asks.
+        let info = std::fs::read_to_string(trash.join("info/q4.odt.trashinfo")).unwrap();
+        assert!(info.contains("\nPath=plans/q4.odt\n"), "{info}");
+        // The trash folder is neither listed nor served.
+        let (_, listing) = fx.get("/api/files?path=/shared/team").await;
+        let names: Vec<&str> = listing["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["plans"]);
+        let (status, _) = fx
+            .get(&format!("/api/files?path=/shared/team/.Trash-{}", euid()))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Nor searched: the deleted file is only in the trash.
+        let (status, found) = fx.get("/api/files/search?path=/shared/team&q=q4").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(found["total"], 0, "{found}");
+
+        // A crafted origin stays in the same share.
+        std::fs::write(trash.join("files/odd"), b"o").unwrap();
+        std::fs::write(
+            trash.join("info/odd.trashinfo"),
+            "[Trash Info]\nPath=../../homes/alice/odd\nDeletionDate=2026-11-16T10:00:00\n",
+        )
+        .unwrap();
+        let (_, list) = fx.get("/api/files/trash").await;
+        let id = id_of(&list, "/shared/team/plans/q4.odt");
+        assert!(id.starts_with(&format!("s:{SHARE_ID}:")), "{id}");
+        let odd = id_of(&list, "/shared/team/odd");
+        let (status, _) = fx
+            .post("/api/files/trash/restore", json!({"ids": [id, odd]}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            std::fs::read(container.join("plans/q4.odt")).unwrap(),
+            b"plan"
+        );
+        assert_eq!(std::fs::read(container.join("odd")).unwrap(), b"o");
+        assert!(!fx.home.join("odd").exists());
+
+        // Without the share in the request its trash is not seen.
+        std::fs::write(container.join("b.txt"), b"b").unwrap();
+        fx.post(
+            "/api/files/delete",
+            json!({"paths": ["/shared/team/b.txt"]}),
+        )
+        .await;
+        *fx.shares.lock().unwrap() = ShareRoots::default();
+        let (_, list) = fx.get("/api/files/trash").await;
+        assert_eq!(list["total"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_home_trash_entry_from_a_share_goes_back_into_the_share() {
+        let fx = start(None).await;
+        let container = fx.shared.join("team-1");
+        std::fs::create_dir_all(&container).unwrap();
+        fx.share("team", "team-1");
+        let shared = std::fs::canonicalize(&fx.shared).unwrap();
+        plant(
+            &fx.home,
+            "r.txt",
+            &format!("{}/team-1/r.txt", shared.display()),
+            Some(b"rr"),
+        );
+        let (_, list) = fx.get("/api/files/trash").await;
+        let id = id_of(&list, "/shared/team/r.txt");
+        let (status, reply) = fx
+            .post("/api/files/trash/restore", json!({"ids": [id]}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["homeBytes"], -2);
+        assert_eq!(std::fs::read(container.join("r.txt")).unwrap(), b"rr");
+        // A container the request does not name: back into HOME.
+        plant(
+            &fx.home,
+            "s.txt",
+            &format!("{}/other/s.txt", shared.display()),
+            Some(b"s"),
+        );
+        let (_, list) = fx.get("/api/files/trash").await;
+        let id = id_of(&list, "/s.txt");
+        let (status, _) = fx
+            .post("/api/files/trash/restore", json!({"ids": [id]}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(fx.home.join("s.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn entries_are_removed_for_good_by_id_by_age_and_all_at_once() {
+        let fx = start(None).await;
+        for name in ["a", "b", "c"] {
+            std::fs::write(fx.home.join(name), b"xyz").unwrap();
+        }
+        let (status, _) = fx
+            .post("/api/files/delete", json!({"paths": ["/a", "/b", "/c"]}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, list) = fx.get("/api/files/trash").await;
+        let (status, reply) = fx
+            .post(
+                "/api/files/trash/delete",
+                json!({"ids": [id_of(&list, "/a")]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["deleted"], 1);
+        assert_eq!(reply["homeBytes"], -3);
+        assert_eq!(reply["originalPaths"], json!(["/a"]));
+        let trash = trash_dir(&fx.home);
+        assert!(!trash.join("files/a").exists());
+        // An old entry goes with the retention setting.
+        std::fs::write(
+            trash.join("info/b.trashinfo"),
+            "[Trash Info]\nPath=/b\nDeletionDate=2001-01-01T00:00:00\n",
+        )
+        .unwrap();
+        let (_, list) = fx.get("/api/files/trash?retentionDays=30").await;
+        assert_eq!(list["purged"], 1);
+        assert_eq!(list["total"], 1);
+        assert!(!trash.join("files/b").exists());
+        // Empty: payloads without info files go too.
+        std::fs::create_dir_all(trash.join("files/stray/inner")).unwrap();
+        let (status, reply) = delete_request(&fx, "/api/files/trash").await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["deleted"], 1);
+        assert_eq!(std::fs::read_dir(trash.join("files")).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(trash.join("info")).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_recycle_bin_is_not_deleted_into_itself() {
+        let fx = start(None).await;
+        std::fs::write(fx.home.join("a"), b"a").unwrap();
+        fx.post("/api/files/delete", json!({"paths": ["/a"]})).await;
+        for path in [
+            "/.local/share/Trash/files/a",
+            "/.local/share/Trash",
+            "/.local",
+        ] {
+            let (status, _) = fx.post("/api/files/delete", json!({"paths": [path]})).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        }
+        let (status, _) = fx.post("/api/files/delete", json!({"paths": ["/"]})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // A trash folder that is a link is refused, and nothing is written
+        // where it points.
+        let other = start(None).await;
+        let elsewhere = other.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::create_dir_all(other.home.join(".local/share")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, other.home.join(".local/share/Trash")).unwrap();
+        std::fs::write(other.home.join("f"), b"f").unwrap();
+        let (status, _) = other
+            .post("/api/files/delete", json!({"paths": ["/f"]}))
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(other.home.join("f").exists());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_usage_scan_counts_each_inode_once_by_location() {
+        let fx = start(None).await;
+        std::fs::create_dir_all(fx.home.join("docs")).unwrap();
+        std::fs::create_dir_all(fx.home.join(".cache/app")).unwrap();
+        std::fs::create_dir_all(fx.home.join(".local/share/flatpak/app")).unwrap();
+        let block = vec![7u8; 64 * 1024];
+        std::fs::write(fx.home.join("docs/a.pdf"), &block).unwrap();
+        std::fs::hard_link(fx.home.join("docs/a.pdf"), fx.home.join("docs/b.pdf")).unwrap();
+        std::fs::write(fx.home.join(".cache/app/c"), &block).unwrap();
+        std::fs::write(fx.home.join(".local/share/flatpak/app/f"), &block).unwrap();
+        std::fs::write(fx.home.join("tool.AppImage"), &block).unwrap();
+        std::fs::write(fx.home.join("t"), &block).unwrap();
+        fx.post("/api/files/delete", json!({"paths": ["/t"]})).await;
+        let (status, usage) = fx.get(usage::USAGE_ROUTE).await;
+        assert_eq!(status, StatusCode::OK, "{usage}");
+        let bytes = |path: &str| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(fx.home.join(path)).unwrap().blocks() * 512
+        };
+        let one = bytes("docs/a.pdf");
+        assert!(one >= 64 * 1024 || one == 0);
+        let location = |key: &str| usage["byLocation"][key].as_u64().unwrap();
+        assert!(location("caches") >= bytes(".cache/app/c"));
+        assert!(location("apps") >= bytes("tool.AppImage") + bytes(".local/share/flatpak/app/f"));
+        assert!(location("trash") >= bytes(".local/share/Trash/files/t"));
+        // The hard link counts once: files hold one copy plus folders.
+        let files = location("files");
+        assert!(files >= one && files < 2 * one + 64 * 1024, "{usage}");
+        let total: u64 = ["files", "apps", "caches", "trash"]
+            .into_iter()
+            .map(location)
+            .sum();
+        assert_eq!(usage["allocatedBytes"].as_u64().unwrap(), total);
+        // Per type: documents outside dot folders, by apparent size, each
+        // inode once.
+        assert_eq!(usage["byType"]["documents"].as_u64().unwrap(), 64 * 1024);
+        assert!(usage["byType"].as_object().unwrap().len() == 1, "{usage}");
+        assert_eq!(usage["trashBytes"].as_u64().unwrap(), location("trash"));
     }
 }
