@@ -52,6 +52,7 @@ import {
   type TrashPage,
   type UsageStats,
 } from "./types";
+import { quotaBackendHint, usageChips } from "./usage";
 
 type Section = "files" | "trash";
 type ViewMode = "list" | "grid";
@@ -640,7 +641,14 @@ export class FileStation {
     const quota = numberOr(data.quotaBytes, fallback?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0);
     const used = numberOr(data.usedBytes, fallback?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0);
     const trash = numberOr(data.trashBytes, fallback?.trashBytes ?? 0);
-    this.usage = { quotaBytes: quota, usedBytes: used, trashBytes: trash, byType: fallback?.byType };
+    this.usage = {
+      quotaBytes: quota,
+      usedBytes: used,
+      trashBytes: trash,
+      byType: fallback?.byType,
+      byLocation: fallback?.byLocation,
+      quotaBackend: fallback?.quotaBackend,
+    };
     this.usageError = null;
     this.renderUsage();
     this.scheduleUsageSync();
@@ -1178,16 +1186,20 @@ export class FileStation {
       this.usageHost.appendChild(h("div", { class: "fs-usage-line muted" }, `${formatBytes(free)} free`));
     }
     if (this.usage) {
+      if (quota > 0 && this.usage.quotaBackend) {
+        bar.title = quotaBackendHint(this.usage.quotaBackend);
+      }
       this.usageHost.appendChild(
         h("div", { class: "fs-usage-line muted" }, `Recycle bin: ${formatBytes(this.usage.trashBytes ?? 0)}`),
       );
-      const byType = Object.entries(this.usage.byType ?? {}).sort((a, b) => b[1] - a[1]);
-      if (byType.length > 0) {
-        const chips = h("div", { class: "fs-type-chips" });
-        for (const [label, bytes] of byType.slice(0, 4)) {
-          chips.appendChild(h("span", { class: "badge", title: label }, `${label} · ${formatBytes(bytes)}`));
+      // One-HOME accounts: where the bytes are (apps and caches count too).
+      const chips = usageChips(this.usage);
+      if (chips.length > 0) {
+        const host = h("div", { class: "fs-type-chips" });
+        for (const [label, bytes] of chips) {
+          host.appendChild(h("span", { class: "badge", title: label }, `${label} · ${formatBytes(bytes)}`));
         }
-        this.usageHost.appendChild(chips);
+        this.usageHost.appendChild(host);
       }
     }
   }

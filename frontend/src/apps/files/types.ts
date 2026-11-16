@@ -72,6 +72,10 @@ export interface UsageStats {
   usedBytes: number;
   trashBytes: number;
   byType?: Record<string, number>;
+  /** Where the used bytes are: files, apps, caches, trash, shared. */
+  byLocation?: Record<string, number>;
+  /** What enforces quotaBytes: the kernel ("filesystem") or RAST ("rast"). */
+  quotaBackend?: "filesystem" | "rast";
 }
 
 /** GET /api/files/trash?page= */

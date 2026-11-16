@@ -260,6 +260,10 @@ export interface Share {
   description: string;
   members: ShareMember[];
   createdAt: number;
+  /** Size limit in bytes; null for none. */
+  quotaBytes?: number | null;
+  /** What enforces the limit, for a share with one. */
+  quotaEnforcedBy?: "filesystem, best effort" | "RAST only";
 }
 
 export interface Job {
@@ -498,6 +502,18 @@ export interface StorageSettings {
   sharedFolders: string[];
   usedBytes: number;
   filesystem: DiskUsage;
+  /** What enforces quotas (ADR 0005). */
+  quota?: QuotaSummary;
+}
+
+/** GET /api/settings/storage → quota */
+export interface QuotaSummary {
+  backend: "filesystem" | "rast";
+  userQuota: "off" | "accounting" | "enforced";
+  groupQuota: "off" | "accounting" | "enforced";
+  shareLimits: "filesystem, best effort" | "RAST only";
+  checkedAt?: number | null;
+  error?: string | null;
 }
 
 /** GET /api/users/{id}/sessions */
@@ -510,4 +526,6 @@ export interface ShareInput {
   name?: string;
   description?: string;
   members?: Array<{ userId: number; perms: ShareMember["perms"] }>;
+  /** Size limit in bytes; 0 removes it. */
+  quotaBytes?: number;
 }
