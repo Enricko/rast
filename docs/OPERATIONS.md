@@ -129,16 +129,16 @@ Never copy a live `rast.db` while the service is running: SQLite WAL means
 
 ```bash
 # preferred: online consistent snapshot (SQLite >= 3.27)
-sudo -u rast sqlite3 /var/lib/rast/rast.db \
+sudo -u rast sqlite3 /var/lib/rast/private/rast.db \
   ".backup '/var/lib/rast/backups/manual-$(date +%Y%m%d-%H%M%S).db'"
 
 # alternative: stop the service, then copy the database and sidecar files
 sudo systemctl stop rast.service
-sudo cp -a /var/lib/rast/rast.db{,,-wal,-shm} /path/to/backup/dir/ 2>/dev/null || true
+sudo cp -a /var/lib/rast/private/rast.db{,-wal,-shm} /path/to/backup/dir/ 2>/dev/null || true
 sudo systemctl start rast.service
 ```
 
-Also back up `/etc/rast/` and `/var/lib/rast/secret.key` (copying the WAL
+Also back up `/etc/rast/` and `/var/lib/rast/private/secret.key` (copying the WAL
 sidecars while the service is stopped is important; `cp` errors for missing
 `-shm` files are expected).
 
@@ -225,7 +225,7 @@ On a fresh host, in this order:
 
 1. Install the **same or newer** RAST version (`install.sh --version X.Y.Z`).
 2. Stop the service.
-3. Restore `/etc/rast/` (config + env), `/var/lib/rast/secret.key` and the
+3. Restore `/etc/rast/` (config + env), `/var/lib/rast/private/secret.key` and the
    database (`rast restore --from … --yes`).
 4. Restore user files into `storage_dir/homes` and `storage_dir/shared` with
    the commands in
@@ -436,7 +436,7 @@ list before swapping the binary.
    ```bash
    sudo journalctl -u rast.service --since '1 hour ago' > /tmp/rast-failed.log
    sudo cp -a /usr/local/bin/rast /usr/local/bin/rast.failed-$(date +%Y%m%d)
-   sudo -u rast sqlite3 /var/lib/rast/rast.db \
+   sudo -u rast sqlite3 /var/lib/rast/private/rast.db \
      ".backup '/var/lib/rast/backups/pre-rollback-$(date +%Y%m%d-%H%M%S).db'"
    ```
 
@@ -769,14 +769,43 @@ sudo systemctl start rast
   warning, is warned and restarted again. Leftover deny entries of an
   earlier run are removed by the first check.
 
+## The private data folder
+
+Since 1.0.1 the database (`rast.db` with its `-wal` and `-shm` files) and
+the master key (`secret.key`) live in `/var/lib/rast/private/` (`0700
+rast:rast`, ADR 0006), and `backups/` is `0700`. The data directory itself
+must stay traversable (`0751`) for native app identities and Package Center
+users, so any account can *name* a file directly in it; with
+`fs.protected_hardlinks = 0` it could then hard-link the database or the key
+into a folder it owns (a shared folder, for example). In `private/` it
+cannot.
+
+- The first `rast serve` of 1.0.1 moves the files of an older release in,
+  under the instance lock (hard link into `private/`, then the old name is
+  replaced by a link in one rename), and logs what it moved. `rast doctor`
+  lists files that still wait for the move.
+- The old names stay as links (`rast.db -> private/rast.db`,
+  `secret.key -> private/secret.key`), so scripts and an older release after
+  a downgrade find the same files. Following a link needs `private/`, so
+  the links give nobody else anything.
+- If a file exists at both places as two different files (an older release
+  restored a backup over the link after a downgrade), the server refuses to
+  start and `rast doctor` reports a failure. Keep the file you need in
+  `private/`, move the other one away, then start RAST.
+- `rast doctor` warns when `fs.protected_hardlinks` is not `1` (the kernel
+  default is `0`; systemd's `50-default.conf` sets `1` on most
+  distributions). Set it with `sysctl -w
+  fs.protected_hardlinks=1` and a file in `/etc/sysctl.d/`.
+
 ## Secrets and key rotation
 
-`/var/lib/rast/secret.key` (0600) is the master key for CSRF derivation and
-application-secret encryption. Rotating it invalidates all sessions and makes
+`/var/lib/rast/private/secret.key` (0600) is the master key for CSRF
+derivation and application-secret encryption. Rotating it invalidates all sessions and makes
 existing encrypted app secrets unreadable. Procedure if rotation is required:
 
 1. Back up the database and config, and take note of managed app secrets.
-2. Stop the service, move `secret.key` aside, start the service (a new key is
+2. Stop the service, move `private/secret.key` aside (and remove the
+   `secret.key` link next to `private/`), start the service (a new key is
    generated on startup).
 3. Re-enter affected application secrets in the UI and re-deploy those apps.
 4. Delete the old key file securely once verified.

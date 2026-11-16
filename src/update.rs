@@ -287,6 +287,7 @@ fn adopt_ownership(cfg: &Config, path: &Path) {
     let (uid, gid) = (owner.uid(), owner.gid());
     for candidate in [
         path.to_path_buf(),
+        cfg.private_dir(),
         PathBuf::from(format!("{}-wal", cfg.db_path().display())),
         PathBuf::from(format!("{}-shm", cfg.db_path().display())),
         cfg.db_path(),

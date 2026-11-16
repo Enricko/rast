@@ -207,8 +207,22 @@ this file by `scripts/changelog-section.sh`.
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
   `script-src` (needed to compile WebAssembly). It does not allow JavaScript
   `eval`, inline scripts or external hosts; everything else is unchanged.
+- The database (`rast.db` and its WAL files) and the master key
+  (`secret.key`) move into `<data_dir>/private` (`0700`), and `backups/` is
+  `0700` (ADR 0006). The data directory stays traversable for native app
+  identities and package users, so any account could name files directly
+  in it and, with `fs.protected_hardlinks = 0`, hard-link them into a
+  folder it owns. `rast doctor` warns when `fs.protected_hardlinks` is not
+  `1`, lists files that still wait for the move and fails on a conflict.
 
 ### Upgrade note
+
+- The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
+  `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.
+  The old names stay as links into `private/`, so scripts and a downgrade
+  keep working. After a downgrade, a restore by the older release replaces
+  the link with a file: the server then refuses to start until you keep one
+  of the two files (see "The private data folder" in `docs/OPERATIONS.md`).
 
 - Packagers and anyone building from source: a release build
   (`cargo build --release`) now also needs the Leptos UI, built with

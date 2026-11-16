@@ -167,7 +167,7 @@ Since the workspace split (ADR 0002) most code lives in `crates/`; module paths 
 | `crates/rast-apps/src/packages/` | App Center: manifest schema and validation (`manifest.rs`), signed catalog fetch/verify with anti-rollback (`catalog.rs`), origin-checked downloads (`net.rs`), safe tar.gz/tar.xz/zip extraction (`archive.rs`), staged install, checks and atomic activation (`install.rs`), the sandbox for version checks (`sandbox.rs`), detection of the runtimes the operating system already has (`system.rs`), the login-shell PATH entry and runtime permissions (`shell.rs`), GitHub release inspection (`github.rs`), host detection, persistence and the `PackageManager` service (jobs, events, audit) |
 | `src/update.rs` | GitHub-Release self-update with checksum verification, DB backup, atomic binary replacement and rollback of the binary |
 | `crates/rast-base/src/audit.rs` | Append-only audit log writer |
-| `crates/rast-base/src/secrets.rs` | Master key at `<data_dir>/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
+| `crates/rast-base/src/secrets.rs` | Master key at `<data_dir>/private/secret.key` and purpose-derived keys (CSRF, app-secret encryption) |
 | `migrations/` | SQLx migrations compiled into the binary and applied at startup |
 
 ## Request flow
@@ -333,10 +333,12 @@ only).
 /usr/local/lib/rast/rast-<version>   previous binaries kept by the installer (rollback)
 /etc/rast/rast.toml                  configuration (0640 root:rast)
 /etc/rast/rast.env                   optional env overrides (0600 root:rast)
-/var/lib/rast/                       data dir (0750 rast:rast; 0751 with packages_shell_path)
-  rast.db  rast.db-wal  rast.db-shm  SQLite database (WAL)
-  secret.key                         master key, 0600, generate-on-first-start
-  backups/                           backup archives + pre-restore copies
+/var/lib/rast/                       data dir (0750 rast:rast; 0751 with packages_shell_path or native apps)
+  private/                           0700: what nobody else may even name (ADR 0006)
+    rast.db  rast.db-wal  rast.db-shm  SQLite database (WAL)
+    secret.key                       master key, 0600, generate-on-first-start
+  rast.db, secret.key                links to private/… for older releases and scripts
+  backups/                           0700: backup archives + pre-restore copies
   apps/<slug>/compose.yaml            managed Docker Compose definitions
   apps/<slug>/.env                    encrypted app secrets (rendered on deploy)
   tmp/                               transient backup/restore work dirs

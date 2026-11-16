@@ -299,8 +299,10 @@ touching the configuration file (useful for troubleshooting).
 | --- | --- | --- |
 | `/etc/rast/rast.toml` | `0640` | `root:rast` (the service can read, other users cannot) |
 | `/etc/rast/rast.env` | `0600` | `root:rast` if created by the operator |
-| `/var/lib/rast/secret.key` | `0600` | `rast:rast`, generated on first start |
-| `/var/lib/rast/` | `0750` | `rast:rast` |
+| `/var/lib/rast/private/secret.key` | `0600` | `rast:rast`, generated on first start |
+| `/var/lib/rast/private/` | `0700` | `rast:rast` (database and master key) |
+| `/var/lib/rast/backups/` | `0700` | `rast:rast` |
+| `/var/lib/rast/` | `0750` (`0751` with native apps or the package shell PATH) | `rast:rast` |
 
 ## Troubleshooting
 

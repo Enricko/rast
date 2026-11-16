@@ -615,8 +615,9 @@ pub async fn restore_database(cfg: &Config, archive: &Path) -> AppResult<Value> 
             std::fs::remove_file(&sidecar)?;
         }
     }
-    // Atomic replacement: same directory, rename over the old file.
-    let staging = cfg.data_dir.join(format!(".rast.db.restore-{stamp}"));
+    // Atomic replacement: same directory, rename over the old file (in the
+    // private folder, where nobody else can name the copy either).
+    let staging = live.with_file_name(format!(".rast.db.restore-{stamp}"));
     std::fs::copy(&extracted, &staging)?;
     std::fs::rename(&staging, &live)?;
     if let Ok(meta) = std::fs::metadata(&live) {

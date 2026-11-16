@@ -95,7 +95,7 @@ Notes:
 | --- | --- | --- | --- |
 | `/usr/local/bin/rast` | `0755` | `root:root` | Binary; the previous version is kept under `/usr/local/lib/rast/` |
 | `/etc/rast/rast.toml` | `0640` | `root:rast` | Created from the packaged template **only if missing** |
-| `/var/lib/rast/` | `0750` | `rast:rast` | Database, `secret.key`, backups, app definitions |
+| `/var/lib/rast/` | `0750` | `rast:rast` | Data: `private/` (`0700`: database, `secret.key`), `backups/` (`0700`), app definitions |
 | `/srv/rast/` | `0755` | `rast:rast` | Storage root |
 | `/srv/rast/homes`, `shared` | `0755` | `rast:rast` | Created in advance; per-user subdirectories enforce `0700` |
 | `/srv/rast/.trash` | `0700` | `rast:rast` | Recycle bin, private to the service account |

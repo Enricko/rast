@@ -1354,6 +1354,25 @@ async fn the_repair_pass_reapplies_the_layout_of_migrated_shares_only() {
     }
     let clean = share_dir_repair(&fx.options, op()).await.unwrap();
     assert_eq!(clean["report"]["changes"]["count"], 0);
+
+    // A file of the rast service hard-linked in (its database, say, with
+    // `fs.protected_hardlinks = 0`): rast is an owner the pass manages, but
+    // a file with a second name is never changed, only reported.
+    std::fs::write(fx.root().join("rast-secret"), b"s").unwrap();
+    std::fs::set_permissions(
+        fx.root().join("rast-secret"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::hard_link(fx.root().join("rast-secret"), team.join("docs/linked")).unwrap();
+    let repaired = share_dir_repair(&fx.options, op()).await.unwrap();
+    assert_eq!(repaired["report"]["changes"]["count"], 0, "{repaired}");
+    assert!(repaired["report"]["hardLinks"]["paths"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("docs/linked")));
+    assert_eq!(mode(&fx.root().join("rast-secret")), 0o600);
+    assert_eq!(read_acl(&team.join("docs/linked"), acl::ACCESS_XATTR), None);
 }
 
 #[test]

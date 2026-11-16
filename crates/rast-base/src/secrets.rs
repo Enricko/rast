@@ -1,7 +1,8 @@
 //! Server secrets: persisted key material used for CSRF tokens, session token
 //! hashing and encryption of application secrets at rest.
 //!
-//! The master key lives in `<data_dir>/secret.key` (mode 0600). It is generated
+//! The master key lives in `<data_dir>/private/secret.key` (mode 0600, in a
+//! 0700 folder: ADR 0006). It is generated
 //! on first start and never leaves the server. Losing it invalidates sessions
 //! and encrypted app secrets, so it is included in backups.
 

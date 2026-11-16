@@ -1014,6 +1014,21 @@ async fn serve(
                 db::InstanceLock::path(&cfg).display()
             )
         })?;
+    // The database and the key of an older release move into the private
+    // folder (ADR 0006) before anything opens them.
+    let moved = db::move_into_private(&cfg, &_instance).map_err(|e| {
+        format!(
+            "cannot move the database and the key into {}: {e}",
+            cfg.private_dir().display()
+        )
+    })?;
+    if !moved.is_empty() {
+        tracing::info!(
+            files = ?moved,
+            dir = %cfg.private_dir().display(),
+            "moved the database and the key into the private data folder"
+        );
+    }
 
     let state = AppState::new(cfg.clone()).await?;
     let app = rast::api::router(state.clone());
@@ -1219,6 +1234,19 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("FAIL: {e}");
         }
     }
+
+    // The private data folder and hard-link protection (ADR 0006).
+    let (lines, private_warnings, private_failures) = db::private_report(
+        &cfg,
+        std::fs::read_to_string("/proc/sys/fs/protected_hardlinks")
+            .ok()
+            .as_deref(),
+    );
+    for line in lines {
+        println!("{line}");
+    }
+    warnings += private_warnings;
+    failures += private_failures;
 
     // Bind availability. If RAST itself is running, the address being in use is
     // the expected state rather than a failure.

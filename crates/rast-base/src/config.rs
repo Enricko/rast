@@ -721,8 +721,30 @@ impl Config {
         })
     }
 
+    /// `<data_dir>/private` (0700): the database and the master key (ADR
+    /// 0006). The data directory itself stays traversable for the native
+    /// app identities and package users, so a file directly in it can be
+    /// named, and hard-linked elsewhere with `fs.protected_hardlinks = 0`.
+    pub fn private_dir(&self) -> PathBuf {
+        self.data_dir.join(PRIVATE_DIR)
+    }
+
+    /// A file of [`private_dir`](Self::private_dir), or its old place
+    /// directly in the data directory while an older release's file there
+    /// has not been moved yet (`rast serve` moves it under the instance
+    /// lock: [`crate::db::move_into_private`]).
+    fn private_file(&self, name: &str) -> PathBuf {
+        let private = self.private_dir().join(name);
+        let legacy = self.data_dir.join(name);
+        if !is_regular_file(&private) && is_regular_file(&legacy) {
+            legacy
+        } else {
+            private
+        }
+    }
+
     pub fn db_path(&self) -> PathBuf {
-        self.data_dir.join("rast.db")
+        self.private_file("rast.db")
     }
     pub fn backup_dir(&self) -> PathBuf {
         self.data_dir.join("backups")
@@ -760,7 +782,47 @@ impl Config {
         self.linux_apps_dir().join("migrations")
     }
     pub fn secret_path(&self) -> PathBuf {
-        self.data_dir.join("secret.key")
+        self.private_file("secret.key")
+    }
+
+    /// Give the database and the master key in `private` a link at their
+    /// old place (`rast.db -> private/rast.db`) when that name is free, so
+    /// an older release (a downgrade) and scripts find them. The link is
+    /// harmless where others can traverse: following it needs `private`.
+    pub fn link_legacy_names(&self) -> std::io::Result<()> {
+        for name in LINKED_FILES {
+            let legacy = self.data_dir.join(name);
+            if !is_regular_file(&self.private_dir().join(name)) || legacy.symlink_metadata().is_ok()
+            {
+                continue;
+            }
+            match std::os::unix::fs::symlink(format!("{PRIVATE_DIR}/{name}"), &legacy) {
+                Ok(()) => self.adopt(&legacy),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// A CLI run as root (`sudo rast update`) gives what it creates in the
+    /// data directory to the directory's owner, the service account, so
+    /// the server can still use it. Best effort, never follows a link.
+    fn adopt(&self, path: &std::path::Path) {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let (Ok(owner), Ok(meta)) = (
+            std::fs::metadata(&self.data_dir),
+            std::fs::symlink_metadata(path),
+        ) else {
+            return;
+        };
+        if owner.uid() != 0 && meta.uid() == 0 {
+            let _ = std::os::unix::fs::lchown(path, Some(owner.uid()), Some(owner.gid()));
+        }
     }
     pub fn homes_dir(&self) -> PathBuf {
         self.storage_dir.join("homes")
@@ -780,6 +842,7 @@ impl Config {
         use std::os::unix::fs::PermissionsExt;
         for dir in [
             self.data_dir.clone(),
+            self.private_dir(),
             self.backup_dir(),
             self.apps_dir(),
             self.homes_dir(),
@@ -805,8 +868,39 @@ impl Config {
             &self.data_dir,
             std::fs::Permissions::from_mode(0o750 | traverse),
         );
-        Ok(())
+        // What others must never name, even with the data directory
+        // traversable: the database and the key, and the backups (which
+        // hold both). The work folders of backups and uploads lose any
+        // access for others too.
+        for dir in [self.private_dir(), self.backup_dir()] {
+            let mode = std::fs::symlink_metadata(&dir)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+            self.adopt(&dir);
+        }
+        let tmp = self.data_dir.join("tmp");
+        if let Ok(meta) = std::fs::symlink_metadata(&tmp) {
+            let mode = meta.permissions().mode();
+            if meta.is_dir() && mode & 0o007 != 0 {
+                std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode & 0o770))?;
+            }
+        }
+        self.link_legacy_names()
     }
+}
+
+/// The folder of the data directory that holds its secret files.
+pub const PRIVATE_DIR: &str = "private";
+/// The files that live in [`PRIVATE_DIR`], in the order a move takes them
+/// (the database's WAL files before the database).
+pub const PRIVATE_FILES: &[&str] = &["rast.db-wal", "rast.db-shm", "rast.db", "secret.key"];
+/// The files that keep a link at their old place.
+pub const LINKED_FILES: &[&str] = &["rast.db", "secret.key"];
+
+fn is_regular_file(path: &std::path::Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_file())
 }
 
 impl FileConfig {
