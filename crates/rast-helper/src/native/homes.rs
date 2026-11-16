@@ -102,20 +102,20 @@ fn service_uid(options: &NativeOptions) -> Result<u32, NativeError> {
 // Directory file descriptors (no symlink is ever followed)
 // ---------------------------------------------------------------------------
 
-fn c_name(name: &str) -> io::Result<CString> {
+pub(crate) fn c_name(name: &str) -> io::Result<CString> {
     CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-fn c_path(path: &Path) -> io::Result<CString> {
+pub(crate) fn c_path(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-const DIR_FLAGS: libc::c_int =
+pub(crate) const DIR_FLAGS: libc::c_int =
     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
 /// Open a configured directory (its last component must not be a symlink).
-fn open_dir(path: &Path) -> io::Result<OwnedFd> {
+pub(crate) fn open_dir(path: &Path) -> io::Result<OwnedFd> {
     let path = c_path(path)?;
     // SAFETY: `path` is NUL-terminated; the returned fd is owned below.
     let fd = unsafe { libc::open(path.as_ptr(), DIR_FLAGS) };
@@ -127,7 +127,7 @@ fn open_dir(path: &Path) -> io::Result<OwnedFd> {
 }
 
 /// Open the directory `name` below `dir`, refusing a symlink.
-fn open_dir_at(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
+pub(crate) fn open_dir_at(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
     let name = c_name(name)?;
     // SAFETY: `dir` is a valid directory fd and `name` is NUL-terminated.
     let fd = unsafe { libc::openat(dir, name.as_ptr(), DIR_FLAGS) };
@@ -139,7 +139,7 @@ fn open_dir_at(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
 }
 
 /// `lstat` of `name` below `dir`.
-fn stat_at(dir: RawFd, name: &str) -> io::Result<libc::stat> {
+pub(crate) fn stat_at(dir: RawFd, name: &str) -> io::Result<libc::stat> {
     let name = c_name(name)?;
     // SAFETY: zeroed `stat` is a valid out parameter.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
@@ -151,7 +151,7 @@ fn stat_at(dir: RawFd, name: &str) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-fn fstat(fd: RawFd) -> io::Result<libc::stat> {
+pub(crate) fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     // SAFETY: zeroed `stat` is a valid out parameter.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: valid fd and out pointer.
@@ -161,7 +161,7 @@ fn fstat(fd: RawFd) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-fn mkdir_at(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
+pub(crate) fn mkdir_at(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result<()> {
     let name = c_name(name)?;
     // SAFETY: valid fd and NUL-terminated name.
     if unsafe { libc::mkdirat(dir, name.as_ptr(), mode) } != 0 {
@@ -193,7 +193,7 @@ fn after_mkdir(_dir: RawFd, _name: &str) {
 
 /// Clear `errno`, so a NULL from `readdir` tells the end of a directory
 /// apart from an error (elsewhere a stale value fails closed).
-fn clear_errno() {
+pub(crate) fn clear_errno() {
     // SAFETY: errno is thread-local and always writable.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     unsafe {
@@ -207,7 +207,7 @@ fn clear_errno() {
 }
 
 /// Whether the directory `fd` has no entries besides `.` and `..`.
-fn dir_is_empty(fd: RawFd) -> io::Result<bool> {
+pub(crate) fn dir_is_empty(fd: RawFd) -> io::Result<bool> {
     // A new open file description, so reading it moves no shared offset.
     let own = open_dir_at(fd, ".")?;
     // SAFETY: `own` is a valid directory fd; `fdopendir` takes it over and
@@ -244,7 +244,7 @@ fn dir_is_empty(fd: RawFd) -> io::Result<bool> {
 /// uid and empty. The parent belongs to someone else (the user's HOME, or
 /// the service's homes root), who may have renamed another directory into
 /// its place after `mkdirat`; root must never chown that one.
-fn open_created_dir(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
+pub(crate) fn open_created_dir(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
     let fd = open_dir_at(dir, name)?;
     let stat = fstat(fd.as_raw_fd())?;
     // SAFETY: geteuid has no preconditions.
@@ -258,7 +258,7 @@ fn open_created_dir(dir: RawFd, name: &str) -> io::Result<OwnedFd> {
     Ok(fd)
 }
 
-fn fchown(fd: RawFd, uid: u32, gid: u32) -> io::Result<()> {
+pub(crate) fn fchown(fd: RawFd, uid: u32, gid: u32) -> io::Result<()> {
     // SAFETY: valid fd.
     if unsafe { libc::fchown(fd, uid, gid) } != 0 {
         return Err(io::Error::last_os_error());
@@ -266,7 +266,7 @@ fn fchown(fd: RawFd, uid: u32, gid: u32) -> io::Result<()> {
     Ok(())
 }
 
-fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
+pub(crate) fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
     // SAFETY: valid fd.
     if unsafe { libc::fchmod(fd, mode) } != 0 {
         return Err(io::Error::last_os_error());
@@ -274,15 +274,15 @@ fn fchmod(fd: RawFd, mode: libc::mode_t) -> io::Result<()> {
     Ok(())
 }
 
-fn is_dir(stat: &libc::stat) -> bool {
+pub(crate) fn is_dir(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFDIR
 }
 
-fn is_symlink(stat: &libc::stat) -> bool {
+pub(crate) fn is_symlink(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFLNK
 }
 
-fn failed(what: &str, path: &Path, error: io::Error) -> NativeError {
+pub(crate) fn failed(what: &str, path: &Path, error: io::Error) -> NativeError {
     NativeError::command_failed(format!("cannot {what} {}: {error}", path.display()))
 }
 
