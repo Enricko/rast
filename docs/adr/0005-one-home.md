@@ -258,6 +258,9 @@ operation is idempotent.
 | `quota_report` | `userIds`, `shareIds` | At most 10 000 ids; used bytes and limits from `Q_GETQUOTA`. |
 | `home_migrate_scan`, `home_migrate_apply`, `home_migrate_rollback` | `userId`, `username` | Section 8. The scan is read-only with bounded output (counts, plus the first 50 paths per category). |
 | `shares_migrate_scan`, `shares_migrate_apply`, `shares_migrate_rollback` | `shareId`, `container` | Same pattern for shared folders (task 1.3). |
+| `share_dir_repair` | `shareId`, `container` | Daily repair pass (D3 decision, 2026-11-16): the recursive `share_dir_prepare` of a container that already has the layout (owned by root); a legacy container is left for `rast migrate shares`. Keeps the container's deny entries. |
+| `share_deny_set` | `shareId`, `container`, `userIds` (at most 256) | D7 decision (2026-11-16): the full set of `u:rast-u<id>:---` entries on the access ACL of a prepared container, the stopgap while a full revocation waits for the user's session restart. Entries of users not listed are removed; the default ACL is not touched. |
+| `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run with the identity's effective uid and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. Lets the server find sessions that still hold a revoked group after a server restart. |
 | `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (same pattern as `rootfs_start`). It only streams tar archives of the fixed homes and shared roots (section 7). |
 
 **Trust assumption.** The helper cannot check the `userId` ↔ `username`

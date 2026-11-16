@@ -16,6 +16,15 @@
 //!   `shares_migrate_rollback` are the root steps of `rast migrate shares`:
 //!   a read-only report, a journal of every group, mode and ACL followed by
 //!   the recursive prepare, and the restore from that journal.
+//! * `share_dir_repair` is the recursive prepare of a container that
+//!   already has the layout (the daily repair pass; legacy containers wait
+//!   for `rast migrate shares`).
+//! * `share_deny_set` sets the per-user deny entries `u:rast-u<id>:---` on
+//!   a container while a revocation waits for the user's session restart
+//!   (D7); every prepare keeps them.
+//! * `share_session_groups` reports which share groups the running
+//!   processes of some users carry, from `/proc/<pid>/status`, so the
+//!   server can find sessions that still hold a revoked group.
 //!
 //! The members of a shared folder can change it while root works on it, so
 //! every tree walk goes through directory descriptors: entries are looked up
@@ -41,8 +50,10 @@ use crate::native::acl::{self, Acl, Entry, Tag};
 use crate::native::homes::{clear_errno, fstat, is_dir, is_symlink, open_dir, DIR_FLAGS};
 use crate::native::identity::PasswdEntry;
 use crate::native::protocol::{
-    username_for, validate_share_container, validate_share_id, NativeError, ShareDirOp,
-    ShareDirPrepareOp, ShareGroupOp, ShareIdOp, ShareMembersSetOp, MAX_SHARE_MEMBERS, MAX_USER_ID,
+    identity_ids, username_for, validate_share_container, validate_share_id, NativeError,
+    ShareDenySetOp, ShareDirOp, ShareDirPrepareOp, ShareGroupOp, ShareIdOp, ShareMembersSetOp,
+    ShareSessionGroupsOp, MAX_SESSION_GROUP_USERS, MAX_SHARE_DENIALS, MAX_SHARE_MEMBERS,
+    MAX_USER_ID,
 };
 use crate::native::{run_command, summarize_command, NativeOptions};
 
@@ -1064,10 +1075,25 @@ fn open_found_file(found: &Found<'_>) -> Option<(OwnedFd, libc::stat)> {
     (is_regular(&stat) && same_inode(&stat, found.stat) && stat.st_nlink == 1).then_some((fd, stat))
 }
 
-/// Whether an ACL grants named entries to RAST identities.
-fn has_identity_entries(layout: &Layout, raw: Option<&[u8]>) -> bool {
-    raw.and_then(Acl::decode)
-        .is_some_and(|acl| acl.named_users().any(|(uid, _)| layout.is_identity(uid)))
+/// Whether an ACL grants named entries to RAST identities (with
+/// `skip_denials`, `---` entries do not count: on a container they are the
+/// deny entries of `share_deny_set`).
+fn has_identity_entries(layout: &Layout, raw: Option<&[u8]>, skip_denials: bool) -> bool {
+    raw.and_then(Acl::decode).is_some_and(|acl| {
+        acl.named_users()
+            .any(|(uid, perm)| layout.is_identity(uid) && !(skip_denials && perm == 0))
+    })
+}
+
+/// The deny entries (`u:<identity>:---`) of an ACL.
+fn denials(layout: &Layout, acl: &Acl) -> Vec<Entry> {
+    acl.0
+        .iter()
+        .filter(|entry| {
+            entry.perm == 0 && matches!(entry.tag, Tag::User(uid) if layout.is_identity(uid))
+        })
+        .copied()
+        .collect()
 }
 
 /// The named entries of an ACL that the layout does not manage, in
@@ -1101,8 +1127,8 @@ fn handle_entry(
     let now = current(fd, stat, dir).map_err(|error| {
         NativeError::command_failed(format!("cannot read the ACL of {}: {error}", show(path)))
     })?;
-    if has_identity_entries(layout, now.access.as_deref())
-        || has_identity_entries(layout, now.default.as_deref())
+    if has_identity_entries(layout, now.access.as_deref(), container)
+        || has_identity_entries(layout, now.default.as_deref(), false)
     {
         report.identity_acl_entries.add(show(path));
     }
@@ -1113,7 +1139,19 @@ fn handle_entry(
             .foreign_acl_entries
             .add(&format!("{}: {}", show(path), foreign.join(", ")));
     }
-    let target = Target::of(layout, stat, container);
+    let mut target = Target::of(layout, stat, container);
+    // The container keeps the deny entries of pending restarts.
+    if container {
+        let kept = now
+            .access
+            .as_deref()
+            .and_then(Acl::decode)
+            .map(|acl| denials(layout, &acl))
+            .unwrap_or_default();
+        if !kept.is_empty() {
+            target.access = Acl::new(target.access.0.iter().copied().chain(kept).collect());
+        }
+    }
     if target.matches(stat, &now, layout.test_mode) {
         return Ok(());
     }
@@ -1383,6 +1421,302 @@ fn remove_contents(dir: &OwnedFd, depth: usize) -> Result<(), NativeError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Repair, deny entries and the groups of running processes
+// ---------------------------------------------------------------------------
+
+/// Whether a container has the group layout: it is owned by root. (Tests
+/// cannot chown: there it carries the read-only group entry.)
+fn is_prepared(layout: &Layout, fd: RawFd, stat: &libc::stat) -> bool {
+    if stat.st_uid == layout.root_uid {
+        return true;
+    }
+    layout.test_mode
+        && acl::read(fd, acl::ACCESS_XATTR)
+            .ok()
+            .flatten()
+            .is_some_and(|acl| acl.named_groups().any(|(gid, _)| gid == layout.ro_gid))
+}
+
+pub(crate) async fn share_dir_repair(
+    options: &NativeOptions,
+    op: ShareDirOp,
+) -> Result<Value, NativeError> {
+    validate_share_container(&op.container)?;
+    let layout = Layout::for_share(options, &op.share_id).await?;
+    let options = options.clone();
+    let container = op.container.clone();
+    let report = blocking(move || {
+        let (fd, stat) = checked_container(&options, &container, &layout)?;
+        if !is_prepared(&layout, fd.as_raw_fd(), &stat) {
+            return Ok(None);
+        }
+        prepare_tree(&layout, &fd, &stat, true, true).map(Some)
+    })
+    .await?;
+    let Some(report) = report else {
+        return Ok(json!({
+            "shareId": op.share_id,
+            "container": op.container,
+            "repaired": false,
+            "reason": "not_migrated",
+        }));
+    };
+    tracing::info!(
+        share = %op.share_id,
+        changes = report.changes.count,
+        foreign_acl = report.foreign_acl_entries.count,
+        "shared folder repaired"
+    );
+    Ok(json!({
+        "shareId": op.share_id,
+        "container": op.container,
+        "repaired": true,
+        "report": report,
+    }))
+}
+
+pub(crate) async fn share_deny_set(
+    options: &NativeOptions,
+    op: ShareDenySetOp,
+) -> Result<Value, NativeError> {
+    validate_share_container(&op.container)?;
+    if op.user_ids.len() > MAX_SHARE_DENIALS {
+        return Err(NativeError::invalid(format!(
+            "`userIds` lists more than {MAX_SHARE_DENIALS} users"
+        )));
+    }
+    let ids = member_list(&op.user_ids, "userIds")?;
+    let ctx = options.validation_context();
+    let uids = ids
+        .iter()
+        .map(|id| identity_ids(&ctx, *id).map(|ids| ids.uid))
+        .collect::<Result<BTreeSet<u32>, _>>()?;
+    let layout = Layout::for_share(options, &op.share_id).await?;
+    let options = options.clone();
+    let container = op.container.clone();
+    let (applied, changed) = blocking(move || {
+        let (fd, stat) = checked_container(&options, &container, &layout)?;
+        if !is_prepared(&layout, fd.as_raw_fd(), &stat) {
+            return Ok((false, false));
+        }
+        let failed = |error: io::Error| {
+            NativeError::command_failed(format!(
+                "cannot set the deny entries of {container}: {error}"
+            ))
+        };
+        let Some(current) = acl::read(fd.as_raw_fd(), acl::ACCESS_XATTR).map_err(failed)? else {
+            return Ok((false, false));
+        };
+        let old: BTreeSet<Entry> = denials(&layout, &current).into_iter().collect();
+        let mut entries: Vec<Entry> = current
+            .0
+            .iter()
+            .filter(|entry| !old.contains(entry))
+            .filter(|entry| !matches!(entry.tag, Tag::User(uid) if uids.contains(&uid)))
+            .copied()
+            .collect();
+        entries.extend(uids.iter().map(|uid| Entry {
+            tag: Tag::User(*uid),
+            perm: 0,
+        }));
+        let wanted = Acl::new(entries);
+        if wanted == current {
+            return Ok((true, false));
+        }
+        acl::write(fd.as_raw_fd(), acl::ACCESS_XATTR, &wanted).map_err(failed)?;
+        Ok((true, true))
+    })
+    .await?;
+    if changed {
+        tracing::info!(share = %op.share_id, users = ?ids, "shared folder deny entries set");
+    }
+    Ok(json!({
+        "shareId": op.share_id,
+        "container": op.container,
+        "applied": applied,
+        "changed": changed,
+        "userIds": ids,
+    }))
+}
+
+/// Processes `share_session_groups` reads at most.
+const MAX_PROCESSES: usize = 1 << 20;
+/// Bytes of one `/proc/<pid>/status` read at most.
+const MAX_STATUS_BYTES: u64 = 64 * 1024;
+
+/// The effective uid and the supplementary groups of a process, from its
+/// `/proc/<pid>/status`.
+pub fn parse_proc_status(text: &str) -> Option<(u32, Vec<u32>)> {
+    let mut euid = None;
+    let mut groups = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            // Real, effective, saved set and file system uid.
+            euid = rest.split_whitespace().nth(1)?.parse().ok();
+        } else if let Some(rest) = line.strip_prefix("Groups:") {
+            groups = rest
+                .split_whitespace()
+                .map(|gid| gid.parse().ok())
+                .collect::<Option<Vec<u32>>>();
+        }
+    }
+    Some((euid?, groups?))
+}
+
+fn proc_dir(options: &NativeOptions) -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = &options.test_proc_dir {
+        return dir.clone();
+    }
+    let _ = options;
+    PathBuf::from("/proc")
+}
+
+/// Per user: how many processes run with the identity's uid, and which gids
+/// from `range` they carry.
+fn scan_processes(
+    proc: &std::path::Path,
+    users: &HashMap<u32, i64>,
+    range: &RangeInclusive<u32>,
+) -> Result<BTreeMap<i64, (u64, BTreeSet<u32>)>, NativeError> {
+    use std::io::Read;
+    let entries = std::fs::read_dir(proc).map_err(|error| {
+        NativeError::command_failed(format!("cannot list {}: {error}", proc.display()))
+    })?;
+    let mut out: BTreeMap<i64, (u64, BTreeSet<u32>)> = BTreeMap::new();
+    for entry in entries.take(MAX_PROCESSES) {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name();
+        let Some(pid) = name.to_str() else { continue };
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // A process that ended meanwhile is skipped.
+        let Ok(file) = std::fs::File::open(entry.path().join("status")) else {
+            continue;
+        };
+        let mut text = String::new();
+        if file
+            .take(MAX_STATUS_BYTES)
+            .read_to_string(&mut text)
+            .is_err()
+        {
+            continue;
+        }
+        let Some((euid, groups)) = parse_proc_status(&text) else {
+            continue;
+        };
+        let Some(user_id) = users.get(&euid) else {
+            continue;
+        };
+        let slot = out.entry(*user_id).or_default();
+        slot.0 += 1;
+        slot.1
+            .extend(groups.into_iter().filter(|gid| range.contains(gid)));
+    }
+    Ok(out)
+}
+
+/// `rast-s<16 hex>-rw` or `rast-s<16 hex>-ro`.
+fn is_share_group_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("rast-s") else {
+        return false;
+    };
+    let Some(hex) = rest
+        .strip_suffix("-rw")
+        .or_else(|| rest.strip_suffix("-ro"))
+    else {
+        return false;
+    };
+    hex.len() == 16
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The share group names of `gids` (gids without a share group are left
+/// out).
+async fn share_group_names(
+    options: &NativeOptions,
+    gids: &BTreeSet<u32>,
+    range: &RangeInclusive<u32>,
+) -> Result<BTreeMap<u32, String>, NativeError> {
+    let mut out = BTreeMap::new();
+    let keys: Vec<String> = gids.iter().map(u32::to_string).collect();
+    for chunk in keys.chunks(GETENT_BATCH) {
+        let mut args = vec![OsString::from("group")];
+        args.extend(chunk.iter().map(OsString::from));
+        let output = run_command(
+            &options.getent_bin,
+            args,
+            &[],
+            ACCOUNT_CMD_TIMEOUT,
+            MAX_ACCOUNT_OUTPUT,
+            64 * 1024,
+        )
+        .await?;
+        for line in output.stdout.lines().filter(|line| !line.trim().is_empty()) {
+            let entry = parse_group_line(line)?;
+            if gids.contains(&entry.gid)
+                && range.contains(&entry.gid)
+                && is_share_group_name(&entry.name)
+            {
+                out.insert(entry.gid, entry.name);
+            }
+        }
+        // Exit status 2: some keys were not found; the others are printed.
+        if !output.success && output.stdout.trim().is_empty() && !output.stderr.trim().is_empty() {
+            return Err(NativeError::command_failed(format!(
+                "cannot look up groups: {}",
+                summarize_command(&output)
+            )));
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) async fn share_session_groups(
+    options: &NativeOptions,
+    op: ShareSessionGroupsOp,
+) -> Result<Value, NativeError> {
+    if op.user_ids.is_empty() || op.user_ids.len() > MAX_SESSION_GROUP_USERS {
+        return Err(NativeError::invalid(format!(
+            "`userIds` must list 1 to {MAX_SESSION_GROUP_USERS} users"
+        )));
+    }
+    let ids = member_list(&op.user_ids, "userIds")?;
+    let ctx = options.validation_context();
+    let mut users = HashMap::new();
+    for id in &ids {
+        users.insert(identity_ids(&ctx, *id)?.uid, *id);
+    }
+    let range = share_gid_range(options.uid_base)?;
+    let proc = proc_dir(options);
+    let scan_range = range.clone();
+    let found = blocking(move || scan_processes(&proc, &users, &scan_range)).await?;
+    let gids: BTreeSet<u32> = found
+        .values()
+        .flat_map(|(_, gids)| gids.iter().copied())
+        .collect();
+    let names = if gids.is_empty() {
+        BTreeMap::new()
+    } else {
+        share_group_names(options, &gids, &range).await?
+    };
+    let users: Vec<Value> = found
+        .into_iter()
+        .map(|(user_id, (processes, gids))| {
+            json!({"userId": user_id, "processes": processes, "gids": gids})
+        })
+        .collect();
+    let groups: serde_json::Map<String, Value> = names
+        .into_iter()
+        .map(|(gid, name)| (gid.to_string(), Value::String(name)))
+        .collect();
+    Ok(json!({"users": users, "groups": groups}))
 }
 
 // ---------------------------------------------------------------------------

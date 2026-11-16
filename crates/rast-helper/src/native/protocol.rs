@@ -124,6 +124,7 @@ pub fn timeout_for_op(name: &str) -> Duration {
         | "share_group_remove" | "share_members_set" => IDENTITY_OP_TIMEOUT,
         "share_dir_prepare"
         | "share_dir_remove"
+        | "share_dir_repair"
         | "shares_migrate_scan"
         | "shares_migrate_apply"
         | "shares_migrate_rollback" => SHARE_TREE_TIMEOUT,
@@ -278,6 +279,14 @@ pub enum NativeOp {
     ShareDirRemove(ShareDirOp),
     /// Give the container of a deleted shared folder back to the service.
     ShareDirRelease(ShareDirOp),
+    /// Apply the group layout again to everything in a prepared container
+    /// (the daily repair pass); legacy containers are left alone.
+    ShareDirRepair(ShareDirOp),
+    /// Set the per-user deny entries (`u:rast-u<id>:---`) on a prepared
+    /// container: the stopgap while a revocation waits for its restart.
+    ShareDenySet(ShareDenySetOp),
+    /// Which shared folder groups the processes of some users carry.
+    ShareSessionGroups(ShareSessionGroupsOp),
     /// `rast migrate shares --dry-run`: what the migration would change.
     SharesMigrateScan(ShareDirOp),
     /// `rast migrate shares`: journal, then the recursive prepare.
@@ -330,6 +339,9 @@ impl NativeOp {
             Self::ShareDirPrepare(_) => "share_dir_prepare",
             Self::ShareDirRemove(_) => "share_dir_remove",
             Self::ShareDirRelease(_) => "share_dir_release",
+            Self::ShareDirRepair(_) => "share_dir_repair",
+            Self::ShareDenySet(_) => "share_deny_set",
+            Self::ShareSessionGroups(_) => "share_session_groups",
             Self::SharesMigrateScan(_) => "shares_migrate_scan",
             Self::SharesMigrateApply(_) => "shares_migrate_apply",
             Self::SharesMigrateRollback(_) => "shares_migrate_rollback",
@@ -375,6 +387,7 @@ impl NativeOp {
             | Self::ShareMembersSet(_) => IDENTITY_OP_TIMEOUT,
             Self::ShareDirPrepare(_)
             | Self::ShareDirRemove(_)
+            | Self::ShareDirRepair(_)
             | Self::SharesMigrateScan(_)
             | Self::SharesMigrateApply(_)
             | Self::SharesMigrateRollback(_) => SHARE_TREE_TIMEOUT,
@@ -400,6 +413,7 @@ impl NativeOp {
                 | Self::PathSymlink(_)
                 | Self::PackageInstalledList(_)
                 | Self::PackageFiles(_)
+                | Self::ShareSessionGroups(_)
         )
     }
 
@@ -467,8 +481,11 @@ impl NativeRequest {
             NativeOp::ShareGroupRemove(op) => merge!(op),
             NativeOp::ShareMembersSet(op) => merge!(op),
             NativeOp::ShareDirPrepare(op) => merge!(op),
+            NativeOp::ShareDenySet(op) => merge!(op),
+            NativeOp::ShareSessionGroups(op) => merge!(op),
             NativeOp::ShareDirRemove(op)
             | NativeOp::ShareDirRelease(op)
+            | NativeOp::ShareDirRepair(op)
             | NativeOp::SharesMigrateScan(op)
             | NativeOp::SharesMigrateApply(op)
             | NativeOp::SharesMigrateRollback(op) => merge!(op),
@@ -599,6 +616,11 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "share_dir_prepare" => NativeOp::ShareDirPrepare(op_from(rest, "share_dir_prepare")?),
         "share_dir_remove" => NativeOp::ShareDirRemove(op_from(rest, "share_dir_remove")?),
         "share_dir_release" => NativeOp::ShareDirRelease(op_from(rest, "share_dir_release")?),
+        "share_dir_repair" => NativeOp::ShareDirRepair(op_from(rest, "share_dir_repair")?),
+        "share_deny_set" => NativeOp::ShareDenySet(op_from(rest, "share_deny_set")?),
+        "share_session_groups" => {
+            NativeOp::ShareSessionGroups(op_from(rest, "share_session_groups")?)
+        }
         "shares_migrate_scan" => NativeOp::SharesMigrateScan(op_from(rest, "shares_migrate_scan")?),
         "shares_migrate_apply" => {
             NativeOp::SharesMigrateApply(op_from(rest, "shares_migrate_apply")?)
@@ -847,6 +869,33 @@ pub struct ShareDirPrepareOp {
     pub share_id: String,
     pub container: String,
     pub recursive: bool,
+}
+
+/// Largest `userIds` list of `share_deny_set`: one ACL entry each, and an
+/// ext4 inode keeps its ACL in one 4 KiB block.
+pub const MAX_SHARE_DENIALS: usize = 256;
+
+/// The users denied on a container while their restart is pending (the
+/// full list: entries of users not listed are removed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareDenySetOp", deny_unknown_fields)]
+pub struct ShareDenySetOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    pub container: String,
+    #[serde(rename = "userIds")]
+    pub user_ids: Vec<i64>,
+}
+
+/// Largest `userIds` list of `share_session_groups`.
+pub const MAX_SESSION_GROUP_USERS: usize = 200;
+
+/// The users whose processes `share_session_groups` inspects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareSessionGroupsOp", deny_unknown_fields)]
+pub struct ShareSessionGroupsOp {
+    #[serde(rename = "userIds")]
+    pub user_ids: Vec<i64>,
 }
 
 /// A share id as the server creates them: a lowercase, hyphenated UUID v4.
@@ -2316,6 +2365,13 @@ mod tests {
             NativeOp::SharesMigrateScan(share_dir()),
             NativeOp::SharesMigrateApply(share_dir()),
             NativeOp::SharesMigrateRollback(share_dir()),
+            NativeOp::ShareDirRepair(share_dir()),
+            NativeOp::ShareDenySet(ShareDenySetOp {
+                share_id: SHARE_ID.into(),
+                container: "team".into(),
+                user_ids: vec![3, 4],
+            }),
+            NativeOp::ShareSessionGroups(ShareSessionGroupsOp { user_ids: vec![3] }),
         ];
         for (index, op) in requests.into_iter().enumerate() {
             let request = NativeRequest::new(index as u64 + 1, op.clone());
@@ -2356,6 +2412,11 @@ mod tests {
         .unwrap();
         assert_eq!(tree.op.timeout(), SHARE_TREE_TIMEOUT);
         assert_eq!(timeout_for_op("share_dir_prepare"), SHARE_TREE_TIMEOUT);
+        assert_eq!(timeout_for_op("share_dir_repair"), SHARE_TREE_TIMEOUT);
+        assert_eq!(timeout_for_op("share_deny_set"), QUICK_OP_TIMEOUT);
+        let groups =
+            parse_request_line(br#"{"id":1,"op":"share_session_groups","userIds":[3]}"#).unwrap();
+        assert!(!groups.op.is_long_running(), "read-only");
         for line in [
             r#"{"id":1,"op":"share_group_ensure","shareId":"S","path":"/etc"}"#,
             r#"{"id":1,"op":"share_group_remove","shareId":"S","container":"team"}"#,
@@ -2364,6 +2425,12 @@ mod tests {
             r#"{"id":1,"op":"share_dir_prepare","shareId":"S","container":"team"}"#,
             r#"{"id":1,"op":"share_dir_remove","shareId":"S","path":"/srv/rast/shared/team"}"#,
             r#"{"id":1,"op":"shares_migrate_rollback","shareId":"S","container":"team","journal":"/tmp/j"}"#,
+            r#"{"id":1,"op":"share_dir_repair","shareId":"S","container":"team","recursive":true}"#,
+            r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team"}"#,
+            r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team","userIds":[3],"uid":0}"#,
+            r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team","userIds":["rast-u3"]}"#,
+            r#"{"id":1,"op":"share_session_groups"}"#,
+            r#"{"id":1,"op":"share_session_groups","userIds":[3],"pid":1}"#,
         ] {
             let line = line.replace("\"S\"", &format!("\"{SHARE_ID}\""));
             let error = parse_request_line(line.as_bytes()).unwrap_err();

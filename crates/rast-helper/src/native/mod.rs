@@ -147,6 +147,10 @@ pub struct NativeOptions {
     /// owns a HOME (tests cannot chown to the identity).
     #[cfg(test)]
     pub test_identity_uid: Option<u32>,
+    /// Test-only: the folder `share_session_groups` reads instead of
+    /// `/proc`.
+    #[cfg(test)]
+    pub test_proc_dir: Option<PathBuf>,
 }
 
 impl NativeOptions {
@@ -214,6 +218,8 @@ impl NativeOptions {
             test_mode: false,
             #[cfg(test)]
             test_identity_uid: None,
+            #[cfg(test)]
+            test_proc_dir: None,
         }
     }
 
@@ -259,6 +265,7 @@ impl NativeOptions {
             nologin_shell: PathBuf::from("/usr/sbin/nologin"),
             test_mode: true,
             test_identity_uid: None,
+            test_proc_dir: None,
         }
     }
 

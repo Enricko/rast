@@ -87,6 +87,13 @@ this file by `scripts/changelog-section.sh`.
     `shares_migrate_apply` and `shares_migrate_rollback` for
     `rast migrate shares`. None takes a path: containers are one folder
     name in `<storage>/shared`.
+  - Further helper operations: `share_dir_repair` (the recursive prepare
+    of a container that already has the layout; legacy containers are
+    left for the migration), `share_deny_set` (the exact set of
+    `u:rast-u<id>:---` entries on a prepared container, at most 256,
+    which every prepare keeps) and the read-only `share_session_groups`
+    (which share groups the running processes of up to 200 users carry,
+    from `/proc/<pid>/status`).
   - The helper walks shared folders through directory descriptors and
     changes entries with `fchown`, `fchmod` and `fsetxattr` on the open
     descriptor, so a member who swaps an entry for a symlink cannot point

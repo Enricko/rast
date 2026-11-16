@@ -979,3 +979,226 @@ async fn removing_a_container_never_follows_links() {
     let meta = std::fs::metadata(fx.shared()).unwrap();
     assert!(meta.is_dir() && meta.nlink() >= 2);
 }
+
+fn denied_uids(path: &Path) -> Vec<u32> {
+    read_acl(path, acl::ACCESS_XATTR)
+        .unwrap()
+        .named_users()
+        .filter(|(_, perm)| *perm == 0)
+        .map(|(uid, _)| uid)
+        .collect()
+}
+
+#[tokio::test]
+async fn deny_entries_are_set_exactly_and_kept_by_every_prepare() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    let team = legacy_tree(&fx);
+    if !acls_supported(&team) {
+        return;
+    }
+    let deny = |ids: Vec<i64>| ShareDenySetOp {
+        share_id: SHARE.into(),
+        container: "team".into(),
+        user_ids: ids,
+    };
+    // A legacy container is left alone: its access is not by group.
+    let legacy = share_deny_set(&fx.options, deny(vec![3])).await.unwrap();
+    assert_eq!(legacy["applied"], false);
+    assert_eq!(read_acl(&team, acl::ACCESS_XATTR), None);
+
+    share_dir_prepare(
+        &fx.options,
+        ShareDirPrepareOp {
+            share_id: SHARE.into(),
+            container: "team".into(),
+            recursive: false,
+        },
+    )
+    .await
+    .unwrap();
+    let uid = |id: i64| {
+        identity_ids(&fx.options.validation_context(), id)
+            .unwrap()
+            .uid
+    };
+    let set = share_deny_set(&fx.options, deny(vec![4, 3])).await.unwrap();
+    assert_eq!(
+        (set["applied"].clone(), set["changed"].clone()),
+        (json!(true), json!(true))
+    );
+    assert_eq!(set["userIds"], json!([3, 4]));
+    assert_eq!(denied_uids(&team), [uid(3), uid(4)]);
+    // Only the access ACL of the container: new entries do not inherit it.
+    assert!(read_acl(&team, acl::DEFAULT_XATTR)
+        .unwrap()
+        .named_users()
+        .all(|(_, perm)| perm != 0));
+    assert_eq!(mode(&team), 0o2770);
+
+    // The recursive prepare (migration, repair) keeps them, and does not
+    // count them as old per-user entries.
+    let again = share_dir_prepare(
+        &fx.options,
+        ShareDirPrepareOp {
+            share_id: SHARE.into(),
+            container: "team".into(),
+            recursive: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(again["report"]["containerPrepared"], true, "{again}");
+    assert_eq!(again["report"]["identityAclEntries"]["count"], 0);
+    assert_eq!(again["report"]["foreignAclEntries"]["count"], 0);
+    assert_eq!(denied_uids(&team), [uid(3), uid(4)]);
+
+    // The list is the whole set: 3 goes, 4 stays.
+    let unchanged = share_deny_set(&fx.options, deny(vec![3, 4])).await.unwrap();
+    assert_eq!(unchanged["changed"], false);
+    share_deny_set(&fx.options, deny(vec![4])).await.unwrap();
+    assert_eq!(denied_uids(&team), [uid(4)]);
+    share_deny_set(&fx.options, deny(vec![])).await.unwrap();
+    assert!(denied_uids(&team).is_empty());
+    let base = read_acl(&team, acl::ACCESS_XATTR).unwrap();
+    assert_eq!(base, read_acl(&team, acl::DEFAULT_XATTR).unwrap());
+
+    for bad in [vec![0], vec![3, 3], (1..=257).collect::<Vec<i64>>()] {
+        let error = share_deny_set(&fx.options, deny(bad)).await.unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+    }
+}
+
+#[tokio::test]
+async fn the_repair_pass_reapplies_the_layout_of_migrated_shares_only() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    let team = legacy_tree(&fx);
+    if !acls_supported(&team) {
+        return;
+    }
+    let op = || ShareDirOp {
+        share_id: SHARE.into(),
+        container: "team".into(),
+    };
+    // Not migrated yet: nothing changes (the migration journals first).
+    let skipped = share_dir_repair(&fx.options, op()).await.unwrap();
+    assert_eq!(skipped["repaired"], false);
+    assert_eq!(skipped["reason"], "not_migrated");
+    assert_eq!(mode(&team), 0o750);
+    assert_eq!(mode(&team.join("docs/plan.txt")), 0o644);
+
+    shares_migrate_apply(&fx.options, op()).await.unwrap();
+    // Since then: a file moved in from elsewhere (legacy File Station, a
+    // rename from HOME) with its own mode and no ACL, and a narrowed one.
+    std::fs::write(team.join("docs/moved.txt"), b"m").unwrap();
+    std::fs::set_permissions(
+        team.join("docs/moved.txt"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        team.join("docs/plan.txt"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    let repaired = share_dir_repair(&fx.options, op()).await.unwrap();
+    assert_eq!(repaired["repaired"], true);
+    assert_eq!(repaired["report"]["changes"]["count"], 2, "{repaired}");
+    for file in ["docs/moved.txt", "docs/plan.txt"] {
+        assert_eq!(mode(&team.join(file)), 0o660, "{file}");
+        assert!(read_acl(&team.join(file), acl::ACCESS_XATTR)
+            .unwrap()
+            .named_groups()
+            .any(|(gid, perm)| gid == 1_200_002 && perm == 4));
+    }
+    let clean = share_dir_repair(&fx.options, op()).await.unwrap();
+    assert_eq!(clean["report"]["changes"]["count"], 0);
+}
+
+#[test]
+fn process_status_gives_the_effective_uid_and_the_groups() {
+    let status = "Name:\tbash\nUid:\t200003\t200004\t200003\t200003\n\
+                  Gid:\t200003\t200003\t200003\t200003\nGroups:\t4 1200001 \n";
+    assert_eq!(
+        parse_proc_status(status),
+        Some((200_004, vec![4, 1_200_001]))
+    );
+    assert_eq!(
+        parse_proc_status("Uid:\t1\t2\t3\t4\nGroups:\n"),
+        Some((2, vec![]))
+    );
+    for bad in [
+        "",
+        "Uid:\t1\n",
+        "Groups:\t1\n",
+        "Uid:\tx\tx\nGroups:\t1\n",
+        "Uid:\t1\t2\nGroups:\tx\n",
+    ] {
+        assert_eq!(parse_proc_status(bad), None, "{bad:?}");
+    }
+    assert!(is_share_group_name(RW) && is_share_group_name(RO));
+    for bad in [
+        "rast-s0123-rw",
+        "rast-s0123abcd45674ef0-rx",
+        "rast-u3",
+        "rast-s0123ABCD45674ef0-rw",
+    ] {
+        assert!(!is_share_group_name(bad), "{bad}");
+    }
+}
+
+#[tokio::test]
+async fn session_groups_name_the_share_groups_processes_carry() {
+    let mut fx = fixture();
+    fx.ensure_groups().await;
+    fx.add_group("rast-other:x:1200003:");
+    let proc = fx.root().join("proc");
+    let uid = |id: i64| {
+        identity_ids(&fx.options.validation_context(), id)
+            .unwrap()
+            .uid
+    };
+    for (pid, euid, groups) in [
+        ("100", uid(3), "4 1200001 1200002"),
+        ("101", uid(3), "1200003 27"),
+        ("102", uid(4), ""),
+        // Not asked about.
+        ("103", uid(5), "1200001"),
+        ("104", 1000, "1200001"),
+    ] {
+        std::fs::create_dir_all(proc.join(pid)).unwrap();
+        std::fs::write(
+            proc.join(pid).join("status"),
+            format!("Name:\tx\nUid:\t{euid}\t{euid}\t{euid}\t{euid}\nGroups:\t{groups}\n"),
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(proc.join("105")).unwrap();
+    std::fs::write(proc.join("105/status"), "garbage").unwrap();
+    std::fs::create_dir_all(proc.join("sys")).unwrap();
+    symlink("100", proc.join("self")).unwrap();
+    fx.options.test_proc_dir = Some(proc);
+
+    let op = |ids: Vec<i64>| ShareSessionGroupsOp { user_ids: ids };
+    let reply = share_session_groups(&fx.options, op(vec![3, 4, 9]))
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        json!({
+            "users": [
+                {"userId": 3, "processes": 2, "gids": [1_200_001, 1_200_002, 1_200_003]},
+                {"userId": 4, "processes": 1, "gids": []},
+            ],
+            // A gid of the range without a share group has no name.
+            "groups": {"1200001": RW, "1200002": RO},
+        })
+    );
+    for bad in [vec![], vec![0], vec![3, 3], (1..=201).collect::<Vec<i64>>()] {
+        let error = share_session_groups(&fx.options, op(bad))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_request");
+    }
+}
