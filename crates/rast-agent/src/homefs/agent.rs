@@ -1190,10 +1190,11 @@ fn source(node: &Node) -> AppResult<(std::os::fd::BorrowedFd<'_>, String)> {
         .ok_or_else(|| AppError::internal("a source is a namespace root"))
 }
 
-/// Copy or move a batch. Bytes that land in HOME are checked against the
-/// budget the server sent, item by item like in-process transfers, and
-/// the reply's additive `homeBytes` says how HOME usage changed (the server
-/// accounts it and removes the field).
+/// Copy or move a batch. Bytes that land in the destination's root from
+/// outside it (HOME, or a shared folder with a size limit) are checked
+/// against the budget the server sent, and the reply's additive
+/// `homeBytes` says how HOME usage changed (the server accounts it and
+/// removes the field).
 async fn transfer_items(
     agent: Arc<HomeAgent>,
     body: BatchRequest,
@@ -1215,19 +1216,26 @@ async fn transfer_items(
         for node in &plan {
             check(&cancel)?;
             let into_home = dest_in_home && (!moving || !node.in_home());
-            let size = if moving || into_home {
+            // Into the destination's root from outside it.
+            let into_dest = !moving || !node.root.info.same_inode(&dest.root.info);
+            let counted = budget.is_some() && into_dest;
+            let size = if moving || into_home || counted {
                 let (dir, name) = source(node)?;
                 fsat::tree_bytes(dir, &name, &node.info, TEMP_PREFIX, node.root.tree_fs())
             } else {
                 0
             };
-            if into_home {
+            if counted {
                 needed = needed.saturating_add(size);
             }
             sizes.push(size);
         }
         if budget.is_some_and(|free| needed > free) {
-            return Err(AppError::PayloadTooLarge("storage quota exceeded"));
+            return Err(AppError::PayloadTooLarge(if dest_in_home {
+                "storage quota exceeded"
+            } else {
+                "the shared folder's size limit would be exceeded"
+            }));
         }
         let mut bytes = 0u64;
         let mut home_bytes = 0i64;

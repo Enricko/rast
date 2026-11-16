@@ -30,6 +30,8 @@ pub struct ShareRecord {
     pub description: String,
     pub container_path: String,
     pub created_at: i64,
+    /// Size limit in bytes; `None` for none (D3).
+    pub quota_bytes: Option<i64>,
 }
 
 /// A share member as exposed by the API.
@@ -51,6 +53,12 @@ pub struct ShareDto {
     pub description: String,
     pub members: Vec<MemberDto>,
     pub created_at: i64,
+    /// Size limit in bytes, `null` for none (additive, ADR 0005 D3).
+    pub quota_bytes: Option<i64>,
+    /// What enforces the limit (set by the server for a share with one):
+    /// `"filesystem, best effort"` or `"RAST only"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_enforced_by: Option<&'static str>,
 }
 
 /// Member entry accepted by create/update requests.
@@ -71,6 +79,9 @@ pub struct CreateShareInput {
     pub description: Option<String>,
     #[serde(default)]
     pub members: Option<Vec<MemberInput>>,
+    /// Size limit in bytes; absent or 0 for none.
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
 }
 
 /// `PATCH /api/shares/{id}` body.
@@ -83,6 +94,9 @@ pub struct UpdateShareInput {
     pub description: Option<String>,
     #[serde(default)]
     pub members: Option<Vec<MemberInput>>,
+    /// Size limit in bytes; absent keeps it, 0 removes it.
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
 }
 
 /// Validate a shared-folder / container name. Returns the trimmed name.
@@ -128,7 +142,7 @@ fn group_name(share_id: &str, kind: &str) -> Option<String> {
 /// Find a share by display name (case-insensitive, matches the UNIQUE index).
 pub async fn find_by_name(pool: &SqlitePool, name: &str) -> AppResult<Option<ShareRecord>> {
     let row = sqlx::query(
-        "SELECT id, name, description, container_path, created_at FROM shares WHERE name = ?",
+        "SELECT id, name, description, container_path, created_at, quota_bytes FROM shares WHERE name = ?",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -138,7 +152,7 @@ pub async fn find_by_name(pool: &SqlitePool, name: &str) -> AppResult<Option<Sha
 
 pub async fn find_by_id(pool: &SqlitePool, id: &str) -> AppResult<Option<ShareRecord>> {
     let row = sqlx::query(
-        "SELECT id, name, description, container_path, created_at FROM shares WHERE id = ?",
+        "SELECT id, name, description, container_path, created_at, quota_bytes FROM shares WHERE id = ?",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -261,6 +275,8 @@ fn dto(record: ShareRecord, members: Vec<MemberDto>) -> ShareDto {
         description: record.description,
         members,
         created_at: record.created_at,
+        quota_bytes: record.quota_bytes,
+        quota_enforced_by: None,
     }
 }
 
@@ -277,7 +293,7 @@ pub async fn list_for_user_with_levels(
     user: &AuthUser,
 ) -> AppResult<Vec<(ShareDto, Perm)>> {
     let rows = sqlx::query(
-        "SELECT id, name, description, container_path, created_at
+        "SELECT id, name, description, container_path, created_at, quota_bytes
          FROM shares ORDER BY name COLLATE NOCASE",
     )
     .fetch_all(pool)
@@ -358,6 +374,7 @@ pub async fn create(
     let name = validate_share_name(&input.name)?;
     let description = normalize_description(input.description)?;
     let members = normalize_members(pool, input.members.as_deref().unwrap_or(&[])).await?;
+    let quota_bytes = crate::storage::share_quota::normalize(input.quota_bytes)?;
     let container = name.clone();
     let container_dir = storage.shared_container_dir(&container);
     let existed = container_dir.exists();
@@ -367,8 +384,9 @@ pub async fn create(
     let now = db::now_ms();
     let mut tx = pool.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO shares (id, name, description, container_path, created_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO shares (id, name, description, container_path, created_by, created_at,
+                             updated_at, quota_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&name)
@@ -377,6 +395,7 @@ pub async fn create(
     .bind(actor.id)
     .bind(now)
     .bind(now)
+    .bind(quota_bytes)
     .execute(&mut *tx)
     .await;
     match inserted {
@@ -446,16 +465,23 @@ pub async fn update(
         Some(list) => Some(normalize_members(pool, &list).await?),
         None => None,
     };
+    let quota_bytes = match input.quota_bytes {
+        Some(raw) => crate::storage::share_quota::normalize(Some(raw))?,
+        None => current.quota_bytes,
+    };
 
     let mut tx = pool.begin().await?;
-    let result =
-        sqlx::query("UPDATE shares SET name = ?, description = ?, updated_at = ? WHERE id = ?")
-            .bind(&name)
-            .bind(&description)
-            .bind(now)
-            .bind(id)
-            .execute(&mut *tx)
-            .await;
+    let result = sqlx::query(
+        "UPDATE shares SET name = ?, description = ?, quota_bytes = ?, updated_at = ?
+             WHERE id = ?",
+    )
+    .bind(&name)
+    .bind(&description)
+    .bind(quota_bytes)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await;
     match result {
         Ok(_) => {}
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -499,7 +525,7 @@ pub async fn update(
 /// Every share, by name.
 pub async fn list_records(pool: &SqlitePool) -> AppResult<Vec<ShareRecord>> {
     let rows = sqlx::query(
-        "SELECT id, name, description, container_path, created_at FROM shares
+        "SELECT id, name, description, container_path, created_at, quota_bytes FROM shares
          ORDER BY name COLLATE NOCASE",
     )
     .fetch_all(pool)
@@ -526,6 +552,7 @@ fn map_share(row: sqlx::sqlite::SqliteRow) -> ShareRecord {
         description: row.get("description"),
         container_path: row.get("container_path"),
         created_at: row.get("created_at"),
+        quota_bytes: row.get("quota_bytes"),
     }
 }
 
@@ -572,6 +599,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn size_limits_are_optional_and_validated() {
+        let (_d, storage, pool, admin) = setup().await;
+        let input = |name: &str, quota_bytes| CreateShareInput {
+            name: name.into(),
+            description: None,
+            members: None,
+            quota_bytes,
+        };
+        let plain = create(&pool, &storage, &admin, input("plain", None))
+            .await
+            .unwrap();
+        assert_eq!(plain.quota_bytes, None);
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap()["quotaBytes"],
+            serde_json::Value::Null
+        );
+        let limited = create(&pool, &storage, &admin, input("limited", Some(1 << 30)))
+            .await
+            .unwrap();
+        assert_eq!(limited.quota_bytes, Some(1 << 30));
+        assert!(create(&pool, &storage, &admin, input("bad", Some(-1)))
+            .await
+            .is_err());
+        let update_quota = |quota_bytes| UpdateShareInput {
+            name: None,
+            description: None,
+            members: None,
+            quota_bytes,
+        };
+        // Absent keeps the limit; 0 removes it.
+        let kept = update(&pool, &storage, &limited.id, update_quota(None))
+            .await
+            .unwrap();
+        assert_eq!(kept.quota_bytes, Some(1 << 30));
+        let cleared = update(&pool, &storage, &limited.id, update_quota(Some(0)))
+            .await
+            .unwrap();
+        assert_eq!(cleared.quota_bytes, None);
+        let stored: Option<i64> = sqlx::query_scalar("SELECT quota_bytes FROM shares WHERE id = ?")
+            .bind(&limited.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+        // The column refuses what the API would not write.
+        assert!(
+            sqlx::query("UPDATE shares SET quota_bytes = 0 WHERE id = ?")
+                .bind(&limited.id)
+                .execute(&pool)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn create_list_and_acls() {
         let (_d, storage, pool, admin) = setup().await;
         let share = create(
@@ -591,6 +673,7 @@ mod tests {
                         perms: Some("read".into()),
                     },
                 ]),
+                quota_bytes: None,
             },
         )
         .await
@@ -648,6 +731,7 @@ mod tests {
                         perms: Some("write".into()),
                     },
                 ]),
+                quota_bytes: None,
             },
         )
         .await
@@ -669,6 +753,7 @@ mod tests {
                 name: "audience-team".into(),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await
@@ -700,6 +785,7 @@ mod tests {
             name: name.into(),
             description: None,
             members: None,
+            quota_bytes: None,
         };
         create(&pool, &storage, &admin, input("Team"))
             .await
@@ -728,6 +814,7 @@ mod tests {
                 name: "docs".into(),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await
@@ -746,6 +833,7 @@ mod tests {
                     user_id: 2,
                     perms: Some("read".into()),
                 }]),
+                quota_bytes: None,
             },
         )
         .await
@@ -778,6 +866,7 @@ mod tests {
                     user_id: 999,
                     perms: None,
                 }]),
+                quota_bytes: None,
             },
         )
         .await
@@ -794,6 +883,7 @@ mod tests {
                     user_id: 2,
                     perms: Some("owner".into()),
                 }]),
+                quota_bytes: None,
             },
         )
         .await
@@ -881,6 +971,7 @@ mod tests {
                 name: "alice-share".into(),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await
@@ -931,6 +1022,7 @@ mod tests {
                         perms: Some("write".into()),
                     },
                 ]),
+                quota_bytes: None,
             },
         )
         .await
@@ -955,6 +1047,7 @@ mod tests {
                 name: "team-grp".into(),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await
@@ -1012,6 +1105,7 @@ mod tests {
                     user_id: 2,
                     perms: Some("read".into()),
                 }]),
+                quota_bytes: None,
             },
         )
         .await
@@ -1031,6 +1125,7 @@ mod tests {
                 name: Some("documents".into()),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await
@@ -1423,6 +1518,7 @@ mod tests {
                 name: Some("Mig5 Renamed".into()),
                 description: None,
                 members: None,
+                quota_bytes: None,
             },
         )
         .await

@@ -70,6 +70,9 @@ struct Kernel {
     used: std::collections::HashMap<i64, u64>,
     limits: std::collections::HashMap<i64, (u64, u64)>,
     sets: Vec<(i64, u64, u64)>,
+    /// Group limits per share id, and every `share_quota_set`.
+    share_limits: std::collections::HashMap<String, (u64, u64)>,
+    share_sets: Vec<(String, u64, u64)>,
 }
 
 /// Size of the fake filesystem.
@@ -92,8 +95,10 @@ impl HelperLog {
             "quota_status" => json!({"homes": root(kernel.group), "shared": root(kernel.group),
                                      "sameFilesystem": true}),
             "quota_report" => {
+                let no_ids = Vec::new();
                 let rows: Vec<Value> = request["userIds"]
-                    .as_array()?
+                    .as_array()
+                    .unwrap_or(&no_ids)
                     .iter()
                     .filter_map(Value::as_i64)
                     .map(|id| {
@@ -107,7 +112,29 @@ impl HelperLog {
                         ])
                     })
                     .collect();
-                json!({"users": rows, "shares": [], "userQuota": kernel.user})
+                let shares: Vec<Value> = request["shareIds"]
+                    .as_array()
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .map(|id| {
+                                let (soft, hard) =
+                                    kernel.share_limits.get(id).copied().unwrap_or_default();
+                                json!([id, 0, soft, hard, 0])
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                json!({"users": rows, "shares": shares, "userQuota": kernel.user,
+                       "groupQuota": kernel.group})
+            }
+            "share_quota_set" => {
+                let id = request["shareId"].as_str()?.to_string();
+                let soft = request["softBytes"].as_u64()?;
+                let hard = request["hardBytes"].as_u64()?;
+                kernel.share_limits.insert(id.clone(), (soft, hard));
+                kernel.share_sets.push((id.clone(), soft, hard));
+                json!({"shareId": id, "backend": "group"})
             }
             "quota_set" => {
                 let id = request["userId"].as_i64()?;
@@ -1171,6 +1198,127 @@ async fn kernel_user_quota_sets_d4_limits_and_counts_everything_the_identity_own
     assert_eq!(storage["quota"]["backend"], "filesystem");
     assert_eq!(storage["quota"]["userQuota"], "enforced");
     assert_eq!(storage["quota"]["shareLimits"], "filesystem, best effort");
+}
+
+#[tokio::test]
+async fn shared_folder_size_limits_apply_to_file_station_writes() {
+    let (server, alice, _bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let (status, share) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Team", "quotaBytes": 10,
+                   "members": [{"userId": alice.id, "perms": "write"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{share}");
+    assert_eq!(share["quotaBytes"], 10);
+    assert_eq!(share["quotaEnforcedBy"], "RAST only");
+    let (status, _) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Bad", "quotaBytes": -1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A one-HOME account (agent) and a legacy one (in process).
+    let (status, _) = server
+        .upload(&alice, "dir=/shared/Team&name=big.txt", b"0123456789ab")
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let (status, _) = server
+        .upload(&admin, "dir=/shared/Team&name=big.txt", b"0123456789ab")
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    let (status, entry) = server
+        .upload(&alice, "dir=/shared/Team&name=a.txt", b"012345")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{entry}");
+    // 6 of 10 bytes used: a chunked upload of 5 does not fit any more.
+    let (status, _) = server
+        .post(
+            "/api/files/upload/init",
+            &alice,
+            json!({"dir": "/shared/Team", "name": "c.txt", "size": 5}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // A copy from HOME: the whole batch must fit, nothing is written.
+    std::fs::write(server.home("alice").join("five.txt"), b"01234").unwrap();
+    let (status, job) = server
+        .post(
+            "/api/files/copy",
+            &alice,
+            json!({"paths": ["/five.txt"], "destDir": "/shared/Team"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    let failed = server.wait_job(&alice, &job).await;
+    assert_eq!(failed["status"], "failed", "{failed}");
+    let shared = server.state.config.shared_dir();
+    assert!(!shared.join("Team/five.txt").exists());
+    // Removing the limit lets it through.
+    let (status, _, updated) = server
+        .json(
+            "PATCH",
+            &format!("/api/shares/{}", share["id"].as_str().unwrap()),
+            Some(&admin),
+            Some(json!({"quotaBytes": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["quotaBytes"], Value::Null);
+    assert!(updated.get("quotaEnforcedBy").is_none());
+    let (_, job) = server
+        .post(
+            "/api/files/copy",
+            &alice,
+            json!({"paths": ["/five.txt"], "destDir": "/shared/Team"}),
+        )
+        .await;
+    assert_eq!(server.wait_job(&alice, &job).await["status"], "done");
+
+    // Group quota on the shared filesystem: the rw group gets the limit,
+    // and the label says "filesystem, best effort".
+    let (_, _, _) = server
+        .json(
+            "PATCH",
+            &format!("/api/shares/{}", share["id"].as_str().unwrap()),
+            Some(&admin),
+            Some(json!({"quotaBytes": 1 << 30})),
+        )
+        .await;
+    *server.helper.kernel.lock().unwrap() = Some(Kernel {
+        user: "off",
+        group: "enforced",
+        ..Default::default()
+    });
+    let native = rast::native::client::NativeClient::from_config(&server.state.config);
+    let summary = rast::quota_sync::sync_once(&server.state, &native)
+        .await
+        .unwrap();
+    assert_eq!(summary.share_limits_set, 1);
+    let sets = server
+        .helper
+        .kernel
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .share_sets
+        .clone();
+    assert_eq!(
+        sets,
+        vec![(share["id"].as_str().unwrap().to_string(), 1 << 30, 2 << 30)]
+    );
+    let (_, list) = server.get("/api/shares", &admin).await;
+    assert_eq!(list[0]["quotaEnforcedBy"], "filesystem, best effort");
+    // The accounts keep RAST's accounting: user quota is off.
+    let (_, usage) = server.get("/api/files/usage", &alice).await;
+    assert_eq!(usage["quotaBackend"], "rast");
 }
 
 #[tokio::test]

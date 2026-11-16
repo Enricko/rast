@@ -24,6 +24,7 @@ pub mod ops;
 pub mod quota;
 pub mod safe_path;
 pub mod serve;
+pub mod share_quota;
 pub mod shares;
 pub mod transfer;
 pub mod trash;

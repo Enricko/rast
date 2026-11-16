@@ -39,6 +39,8 @@ pub struct PlannedSource {
     pub name: String,
     pub in_home: bool,
     pub is_dir: bool,
+    /// The shared folder the source is in.
+    pub share_id: Option<String>,
 }
 
 /// A validated copy/move request.
@@ -48,6 +50,8 @@ pub struct BatchPlan {
     pub dest_root_physical: PathBuf,
     pub dest_logical: LogicalPath,
     pub dest_in_home: bool,
+    /// The shared folder of the destination (its size limit applies).
+    pub dest_share_id: Option<String>,
     pub sources: Vec<PlannedSource>,
 }
 
@@ -113,6 +117,7 @@ pub async fn plan_batch(
             name,
             in_home: resolved.in_home,
             is_dir: meta.is_dir(),
+            share_id: resolved.share_id,
         });
     }
     Ok(BatchPlan {
@@ -120,6 +125,7 @@ pub async fn plan_batch(
         dest_root_physical: dest.root_physical,
         dest_logical: dest.logical,
         dest_in_home: dest.in_home,
+        dest_share_id: dest.share_id,
         sources,
     })
 }
@@ -322,6 +328,32 @@ async fn copy_file_raw(src: &Path, dst: &Path) -> AppResult<u64> {
         let _ = tokio::fs::remove_file(&temp).await;
     }
     result
+}
+
+/// Check the size limit of a destination shared folder for the bytes a
+/// batch brings in from outside it (a move inside the share adds nothing).
+async fn check_share_limit(
+    pool: &SqlitePool,
+    storage: &Storage,
+    plan: &BatchPlan,
+    moving: bool,
+) -> AppResult<()> {
+    let Some(share_id) = plan.dest_share_id.as_deref() else {
+        return Ok(());
+    };
+    let mut incoming = 0u64;
+    for source in &plan.sources {
+        if moving && source.share_id.as_deref() == Some(share_id) {
+            continue;
+        }
+        let size = if source.is_dir {
+            tree_size(&source.physical).await?
+        } else {
+            tokio::fs::symlink_metadata(&source.physical).await?.len()
+        };
+        incoming = incoming.saturating_add(size);
+    }
+    crate::storage::share_quota::check(pool, storage, share_id, incoming).await
 }
 
 /// Copy one file, enforcing the destination quota when it lands in a home.
@@ -574,6 +606,7 @@ async fn copy_job_inner(
     let actor = revalidate_actor(pool, user).await?;
     let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, false).await?;
+    check_share_limit(pool, storage, &plan, false).await?;
     // Enumerate sources first: gives an accurate progress total and keeps the
     // copy loop simple.
     let mut trees: Vec<(usize, Vec<TreeEntry>)> = Vec::with_capacity(plan.sources.len());
@@ -717,6 +750,7 @@ async fn move_job_inner(
     let actor = revalidate_actor(pool, user).await?;
     let user = &actor;
     let plan = plan_batch(pool, storage, user, paths, dest_dir, true).await?;
+    check_share_limit(pool, storage, &plan, true).await?;
     let total = (plan.sources.len() as u64).max(1);
     let mut done: u64 = 0;
     let mut bytes: u64 = 0;

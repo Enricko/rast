@@ -195,6 +195,75 @@ pub fn parse_rows(value: &Value) -> AppResult<Vec<Row>> {
         .collect()
 }
 
+/// One reported shared folder: its rw group's usage and limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareRow {
+    pub share_id: String,
+    pub used: u64,
+    pub soft: u64,
+    pub hard: u64,
+}
+
+pub fn parse_share_rows(value: &Value) -> AppResult<Vec<ShareRow>> {
+    let bad = || AppError::unavailable("unexpected quota_report reply");
+    let rows = value
+        .get("shares")
+        .and_then(Value::as_array)
+        .ok_or_else(bad)?;
+    rows.iter()
+        .map(|row| {
+            let field = |index: usize| row.get(index).and_then(Value::as_u64).ok_or_else(bad);
+            let share_id = row.get(0).and_then(Value::as_str).ok_or_else(bad)?;
+            crate::native::protocol::validate_share_id(share_id).map_err(|_| bad())?;
+            Ok(ShareRow {
+                share_id: share_id.to_string(),
+                used: field(1)?,
+                soft: field(2)?,
+                hard: field(3)?,
+            })
+        })
+        .collect()
+}
+
+/// Set the group limits of the shared folders that differ from D3/D4
+/// (`share_quota_set`). Returns how many were set.
+async fn sync_shares(state: &AppState, native: &NativeClient, total: u64) -> AppResult<(u64, u64)> {
+    let records = crate::storage::shares::list_records(&state.db).await?;
+    let (mut set, mut failed) = (0, 0);
+    for chunk in records.chunks(crate::native::quota::MAX_REPORT_SHARES) {
+        let ids: Vec<&str> = chunk.iter().map(|record| record.id.as_str()).collect();
+        let reply = native
+            .call_json("quota_report", json!({ "shareIds": ids }))
+            .await
+            .map_err(|error| AppError::unavailable(format!("quota report: {error}")))?;
+        let rows = parse_share_rows(&reply)?;
+        for record in chunk {
+            // Groups not made yet: the next pass.
+            let Some(row) = rows.iter().find(|row| row.share_id == record.id) else {
+                continue;
+            };
+            let (soft, hard) = d4_limits(record.quota_bytes.unwrap_or(0), false, total);
+            if (row.soft, row.hard) == (soft, hard) {
+                continue;
+            }
+            match native
+                .call_json(
+                    "share_quota_set",
+                    json!({"shareId": record.id, "softBytes": soft, "hardBytes": hard}),
+                )
+                .await
+            {
+                Ok(_) => set += 1,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(share = %record.id, error = %error, "cannot set the shared folder's group quota");
+                }
+            }
+        }
+    }
+    Ok((set, failed))
+}
+
 /// The kernel's usage of some accounts.
 pub async fn report(native: &NativeClient, user_ids: &[i64]) -> AppResult<Vec<Row>> {
     let mut out = Vec::with_capacity(user_ids.len());
@@ -272,6 +341,8 @@ pub async fn sync_once(state: &AppState, native: &NativeClient) -> AppResult<Syn
     };
     let user_state = homes.user;
     let total = homes.total_bytes;
+    let group_state = shared.group;
+    let shared_total = shared.total_bytes;
     detected.homes = Some(homes);
     detected.shared = Some(shared);
     state.quota.store(detected);
@@ -279,6 +350,11 @@ pub async fn sync_once(state: &AppState, native: &NativeClient) -> AppResult<Syn
         user_quota: user_state,
         ..Default::default()
     };
+    if group_state != QuotaState::Off {
+        let (set, failed) = sync_shares(state, native, shared_total).await?;
+        summary.share_limits_set = set;
+        summary.failed += failed;
+    }
     if user_state == QuotaState::Off {
         return Ok(summary);
     }
@@ -322,6 +398,7 @@ pub struct SyncSummary {
     pub user_quota: QuotaState,
     pub accounts: u64,
     pub limits_set: u64,
+    pub share_limits_set: u64,
     pub failed: u64,
 }
 

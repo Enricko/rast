@@ -913,12 +913,20 @@ pub async fn trash_empty(
 // Shared folders (admin)
 // ---------------------------------------------------------------------------
 
+/// What enforces a shared folder's size limit (ADR 0005, D3).
+fn label_share_quota(state: &AppState, share: &mut shares::ShareDto) {
+    share.quota_enforced_by = share.quota_bytes.map(|_| state.quota.share_enforced_by());
+}
+
 /// GET /api/shares
 pub async fn list_shares(
     State(state): State<AppState>,
     admin: AdminUser,
 ) -> AppResult<Json<Value>> {
-    let shares = shares::list_for_user(&state.db, &admin.0).await?;
+    let mut shares = shares::list_for_user(&state.db, &admin.0).await?;
+    for share in &mut shares {
+        label_share_quota(&state, share);
+    }
     Ok(Json(json!(shares)))
 }
 
@@ -929,7 +937,9 @@ pub async fn create_share(
     ip: ClientIp,
     Json(body): Json<shares::CreateShareInput>,
 ) -> AppResult<Json<shares::ShareDto>> {
-    let dto = shares::create(&state.db, &state.storage, &admin.0, body).await?;
+    let mut dto = shares::create(&state.db, &state.storage, &admin.0, body).await?;
+    label_share_quota(&state, &mut dto);
+    state.quota.poke();
     if let Some(record) = shares::find_by_id(&state.db, &dto.id).await? {
         crate::share_groups::share_created(&state, &record.id, &record.container_path).await;
     }
@@ -965,7 +975,10 @@ pub async fn update_share(
     let mut affected = crate::access::affected_users_for_share(&state.db, &before.name)
         .await
         .unwrap_or_default();
-    let dto = shares::update(&state.db, &state.storage, &id, body).await?;
+    let mut dto = shares::update(&state.db, &state.storage, &id, body).await?;
+    label_share_quota(&state, &mut dto);
+    crate::storage::share_quota::forget(&dto.id);
+    state.quota.poke();
     let renamed = dto.name != before.name;
     if renamed {
         if let Ok(extra) = crate::access::affected_users_for_share(&state.db, &dto.name).await {

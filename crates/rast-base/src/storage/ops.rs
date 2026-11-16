@@ -888,6 +888,10 @@ pub async fn plan_upload(
     } else {
         0
     };
+    if let Some(share_id) = parent.share_id.as_deref() {
+        let growth = length.saturating_sub(old_size).max(0) as u64;
+        crate::storage::share_quota::check(pool, storage, share_id, growth).await?;
+    }
     if reserved > 0 && !quota::reserve(pool, user.id, reserved).await? {
         return Err(AppError::PayloadTooLarge("storage quota exceeded"));
     }

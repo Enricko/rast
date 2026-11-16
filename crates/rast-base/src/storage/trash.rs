@@ -725,6 +725,7 @@ mod tests {
                     user_id: 2,
                     perms: Some("write".into()),
                 }]),
+                quota_bytes: None,
             },
         )
         .await
@@ -754,6 +755,7 @@ mod tests {
                     user_id: 2,
                     perms: Some("read".into()),
                 }]),
+                quota_bytes: None,
             },
         )
         .await

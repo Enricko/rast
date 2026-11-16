@@ -248,6 +248,12 @@ impl Storage {
         } else {
             0
         };
+        if let Some(share_id) = parent.share_id.as_deref() {
+            let growth = (i64::try_from(size).unwrap_or(i64::MAX))
+                .saturating_sub(old_size)
+                .max(0) as u64;
+            crate::storage::share_quota::check(pool, self, share_id, growth).await?;
+        }
         if reserved > 0 && !quota::reserve(pool, user.id, reserved).await? {
             return Err(AppError::PayloadTooLarge("storage quota exceeded"));
         }

@@ -151,6 +151,12 @@ fn agent_headers(roots: &ShareRoots) -> AppResult<HeaderMap> {
     Ok(headers)
 }
 
+/// The id of the shared folder a checked path is in.
+fn share_id_of(roots: &ShareRoots, logical: &LogicalPath) -> Option<String> {
+    let (name, _) = logical.shared_parts()?;
+    roots.get(name).map(|root| root.id.clone())
+}
+
 /// Whether a logical path is in HOME (where the quota applies).
 fn in_home(logical: &LogicalPath) -> bool {
     logical.segments().first().map(String::as_str) != Some("shared")
@@ -289,6 +295,9 @@ async fn forward(
                 return Err(AppError::PayloadTooLarge("storage quota exceeded"));
             }
             reserved = bytes;
+        } else if let Some(share_id) = share_id_of(&roots, &logical) {
+            crate::storage::share_quota::check(&state.db, &state.storage, &share_id, length)
+                .await?;
         }
     }
 
@@ -565,6 +574,8 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
             return Err(AppError::PayloadTooLarge("storage quota exceeded"));
         }
         reserved = bytes;
+    } else if let Some(share_id) = share_id_of(&roots, &logical) {
+        crate::storage::share_quota::check(&state.db, &state.storage, &share_id, size).await?;
     }
     let reply = state
         .homefs
@@ -657,7 +668,14 @@ async fn transfer(
         }
     }
     let mut headers = agent_headers(&roots)?;
-    if in_home(&dest) {
+    if let Some(share_id) = share_id_of(&roots, &dest) {
+        // A shared folder with a size limit (D3): what is still free.
+        if let Some(free) =
+            crate::storage::share_quota::free(&state.db, &state.storage, &share_id).await?
+        {
+            headers.insert(QUOTA_HEADER, HeaderValue::from(free));
+        }
+    } else if in_home(&dest) {
         let info = quota::info(&state.db, user.id).await?;
         // The rule of `quota::reserve`: administrators are unlimited.
         let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = ?")
