@@ -349,7 +349,15 @@ fn find(probe: &Probe, search: &Search, own: &Path) -> Option<Found> {
 /// tree and the system directories, no network, a private scratch home.
 fn read_version(probe: &Probe, f: &Found, scratch: &Path) -> Result<(String, String), String> {
     let home = scratch.join(format!("detect-{}", uuid::Uuid::new_v4()));
-    fs::create_dir_all(&home).map_err(|e| format!("cannot create a scratch directory: {e}"))?;
+    // Not `create_dir_all`: recreate a missing scratch directory, but never
+    // its parents, so a tree removed under a background probe (a test data
+    // directory torn down meanwhile) is not resurrected.
+    match fs::create_dir(scratch) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("cannot create a scratch directory: {e}")),
+    }
+    fs::create_dir(&home).map_err(|e| format!("cannot create a scratch directory: {e}"))?;
     if let Some(text) = version_from_files(probe.id, &f.real) {
         let line = text.trim().to_string();
         return parse_version(probe.id, &text)

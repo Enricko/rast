@@ -2398,6 +2398,17 @@ mod tests {
         stale_xauthority: StdMutex<bool>,
         upstreams: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
         port: StdMutex<Option<u16>>,
+        /// Fake identity homes and profile trees; removed with the helper.
+        scratch: Scratch,
+    }
+
+    /// A private temp directory per fake helper (removed on drop).
+    struct Scratch(tempfile::TempDir);
+
+    impl Default for Scratch {
+        fn default() -> Self {
+            Self(tempfile::tempdir().expect("scratch dir"))
+        }
     }
 
     impl FakeHelper {
@@ -2486,7 +2497,7 @@ mod tests {
                 "identity_ensure" => {
                     let user_id = params["userId"].as_i64().unwrap_or(0);
                     let uid = 200_000 + user_id as u32;
-                    let home = fake_identity_home(user_id);
+                    let home = self.scratch.0.path().join(format!("homes/{user_id}"));
                     let _ = std::fs::create_dir_all(&home);
                     Ok(json!({
                         "username": format!("rast-u{user_id}"),
@@ -2506,14 +2517,17 @@ mod tests {
                         // Simulate a helper whose profile setup silently did
                         // not create the directory.
                         return Ok(json!({
-                            "home": std::env::temp_dir()
-                                .join(format!("rast-native-missing-profile/{app_id}/{user_id}/home"))
+                            "home": self.scratch.0.path()
+                                .join(format!("missing-profile/{app_id}/{user_id}/home"))
                                 .display()
                                 .to_string(),
                         }));
                     }
-                    let profile = std::env::temp_dir()
-                        .join(format!("rast-native-test-profiles/{app_id}/{user_id}"));
+                    let profile = self
+                        .scratch
+                        .0
+                        .path()
+                        .join(format!("profiles/{app_id}/{user_id}"));
                     let _ = std::fs::create_dir_all(profile.join("home"));
                     Ok(json!({
                         "home": profile.join("home").display().to_string(),
@@ -2598,11 +2612,6 @@ mod tests {
                 }),
             }
         }
-    }
-
-    /// A stable, per-user fake identity home (the warm-cache check stats it).
-    fn fake_identity_home(user_id: i64) -> PathBuf {
-        std::env::temp_dir().join(format!("rast-native-test-homes/{user_id}"))
     }
 
     async fn test_db() -> (tempfile::TempDir, SqlitePool) {
