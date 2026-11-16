@@ -159,7 +159,11 @@ needed. Installs with some users in each mode work. Hosts without the helper
   `PrivateNetwork=yes`, `RestrictAddressFamilies=AF_UNIX`, an empty
   capability set, `MemoryMax=512M`, `TasksMax=64`. It exits after 900 s
   without requests, but never while the user has a session, app or terminal
-  unit.
+  unit. Further hardening (`ProtectKernelTunables`, `ProtectKernelModules`,
+  `ProtectKernelLogs`, `ProtectControlGroups`, `RestrictNamespaces`,
+  `RestrictSUIDSGID`, `LockPersonality`, `SystemCallFilter=@system-service`
+  and similar) is added once it has been verified under real systemd on the
+  test host. Deactivating the account stops the agent (section 7).
 - **Server.** A new `api/homefs.rs` next to `api/rootfs.rs` puts a dispatch
   middleware in front of `/api/files/*`, including trash and usage. For a
   one-HOME user the server still does every check it does today (session and
@@ -168,9 +172,23 @@ needed. Installs with some users in each mode work. Hosts without the helper
   delete), then forwards path, query and body unchanged and streams the
   response back (client generalised from `RootFs::send`). `/@root` still goes
   to the root agent; legacy users stay in-process. Upload ids of the agent
-  start with `usr-` (the root agent uses `sys-`). Agent replies are size
-  bounded and treated as untrusted input. When the helper is down a one-HOME
-  user gets 503; the server never falls back to in-process access.
+  start with `usr-` (the root agent uses `sys-`). Agent replies are untrusted
+  input (see the invariant below). When the helper is down a one-HOME user
+  gets 503; the server never falls back to in-process access. When an agent
+  refuses the token (its socket unit was restarted with a new one), the
+  server asks the helper again and sends the request once more; a request
+  with a streamed body cannot be replayed and gets 503.
+- **Invariant: agent output is untrusted.** The agent runs with the same uid
+  as every app and terminal of its user, so any of them may have taken it
+  over. The server therefore treats everything an agent sends as untrusted
+  input: JSON replies are read with a size limit and parsed strictly
+  (entries must carry valid logical paths, upload ids the `usr-` prefix);
+  error statuses keep their meaning but static messages come from the
+  server's own list and other messages are bounded; streamed replies pass
+  only file headers, the server sets `nosniff` and the sandboxing CSP
+  itself, and a 401 or redirect becomes 502. What the agent must not decide
+  travels the other way, in headers that only the server sets: the free
+  quota and the share containers.
 - **Same JSON shapes:** `EntryDto`, `ListingDto`, `QuotaDto`, `UsageDto`,
   `TrashEntryDto`. `writable` comes from `access(W_OK)` as the user. A kernel
   `EDQUOT` becomes the existing 413 "storage quota exceeded".

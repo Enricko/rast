@@ -196,6 +196,12 @@ still `crates/rast-base/src/config.rs`.
 - Per-user isolation is enforced by Linux uids. Agents, sessions and apps of a
   user run as `rast-u<id>` only. Cross-user access must fail (`EACCES`/403) and
   must stay covered by tests.
+- A per-user agent runs with the same uid as every app of that user, so the
+  server treats all agent output as untrusted input: strict parsing, size
+  limits, and headers the server sets itself (only file headers of a reply
+  pass; share containers and quota go to the agent in server-only headers).
+  Agent file operations work on directory descriptors (`openat2` with
+  `RESOLVE_BENEATH`, no symlinks followed), never on re-resolved paths.
 - Mutating HTTP requests require session + CSRF. Display WebSockets keep the
   5-second login revalidation and same-origin checks.
 - All path handling, including inside agents, goes through the safe-path layer:

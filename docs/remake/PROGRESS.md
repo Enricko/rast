@@ -329,6 +329,7 @@ Update it at the end of every session.
   - Deviations and notes:
     - Shared folders of one-HOME accounts work only through `~/Shared`
       links; nothing creates them yet (task 1.3 adds the groups and links).
+      Superseded by `da39cc6`: the server names the containers.
     - Delete, the recycle bin and `GET /api/files/usage` answer `503` for
       one-HOME accounts until task 1.4 (XDG Trash).
     - Quota stays the RAST fallback (`storage_usage`). If a copy fails half
@@ -356,7 +357,42 @@ Update it at the end of every session.
     in-process limits (8 per account, 64 in all, `429`).
   - Gates after the review: fmt and clippy clean; `cargo test --workspace`
     867 passed, 0 failed; npm test 154 passed; npm build OK.
-  - Open findings for the maintainer: see "Open questions".
+- **Task 1.2 review follow-up** (2026-11-16, the maintainer's answers to the
+  open findings; done before task 1.3):
+  - `164ba06` refactor(base): file serving and text previews can take an
+    open file (`serve_open_file`, `text_preview_from`, `entry_from_parts`,
+    `breadcrumbs`); no behaviour change.
+  - `2e10625` fix(agent): every file operation of the per-user agent runs on
+    directory descriptors (`homefs::fsat`): `openat2` with
+    `RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS` below
+    the namespace root (an `O_NOFOLLOW` walk without `openat2`), `*at`
+    calls by single names, `O_CREAT | O_EXCL | O_NOFOLLOW`,
+    `RENAME_NOREPLACE`; copy, move and upload keep their folders open and
+    compare inodes. Race tests swap entries of a share for links in the
+    middle of a copy and an upload (source and destination side). The
+    race claim of ADR 0005 is corrected. `rustix` 1.1.6 becomes a direct
+    dependency of `rast-agent` (already in `Cargo.lock`, Apache-2.0 OR
+    MIT, no new crates; the third-party list is unchanged).
+  - `da39cc6` fix(agent,server): the server sends the containers of the
+    shares a request names (`x-rast-shares`, server-only); the agent opens
+    them directly below the shared root, checks owner and group (the
+    shared root's, or root with `rast-s<h>-rw`), and never follows or
+    lists `~/Shared/<name>`. ADR 0005 section 2 rewritten.
+  - `58770a2` fix(server): one lock per account while its agent starts.
+  - `ccdb04c` fix(server): agent errors keep 403, 404, 413, 415 and 429,
+    with static messages from a known list and bounded free text; a 401 or
+    redirect from an agent becomes 502.
+  - `3f507b0` fix(server): a refused token is read again from the helper
+    once; a streamed upload body cannot be replayed and gets 503.
+  - `dc6f5b2` fix(server): deactivating an account stops its file agent.
+  - docs: the "agent output is untrusted" invariant in CLAUDE.md and ADR
+    0005; the extra unit hardening moved to "Pending on the test host".
+  - Gates: fmt and clippy clean; `cargo test --workspace` 886 passed, 0
+    failed; npm test 154 passed; npm build OK.
+  - Not changed: the root agent's client (`RootFs`) has no token retry. The
+    root agent creates its own socket (it is not socket-activated), so a
+    restarted root agent normally leaves no socket behind and the server
+    starts it again; see "Open questions".
 
 ## Phase 1 checklist
 
@@ -406,11 +442,28 @@ fake helper).
 - Native e2e: a one-HOME account opens File Station, uploads, downloads,
   copies, renames; `503` when `rast-native.service` is stopped and the agent
   has exited.
+- Directory-descriptor layer on the real kernel: `openat2` is used (not the
+  fallback walk), and a share container `root:rast-s<h>-rw` 2770 passes the
+  agent's owner and group check through the real group database, while a
+  container owned by a member is refused.
+- Extra unit hardening for `rast-files-u<uid>` (from the review): try
+  `ProtectKernelTunables`, `ProtectKernelModules`, `ProtectKernelLogs`,
+  `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`,
+  `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`,
+  `LockPersonality`, `MemoryDenyWriteExecute`,
+  `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`
+  (check that `openat2`, `renameat2` and `getgrnam_r` still work), then
+  add those that pass to `files_agent_start`, its tests and ADR 0005.
+- A restarted socket unit: stop `rast-files-u<uid>` outside RAST, start it
+  again through File Station, and check that the server reads the new
+  token once (no `403` loop); deactivating the account stops the unit.
 
 ## Next
 
 1. Task 1.3 (shared folders as Linux groups); it also creates the
-   `~/Shared/<name>` links the agent already resolves.
+   `~/Shared/<name>` links for apps (the agent never uses them) and sets
+   containers to `root:rast-s<h>-rw` 2770, which the agent's container check
+   already accepts (`shares::rw_group_name`).
 2. Run the "Pending on the test host" list above on the test host.
 3. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
@@ -423,35 +476,11 @@ fake helper).
 
 ## Open questions
 
-- **From the task 1.2 security review (need a decision before task 1.3
-  creates `~/Shared` links or gives members kernel access to shares):**
-  - The server checks Effective Access by share *name*, but the agent
-    resolves `/shared/<name>` through `~/Shared/<name>`, a link the user can
-    repoint to any container of the shared root. The kernel still bounds
-    access, but audit entries and realtime audiences then name the wrong
-    share. Proposal: the server sends the share's container from the
-    database (a server-only header, like the quota header) and the agent
-    accepts the link only when it points there, or uses the container
-    directly. Touches ADR 0005, section 2.
-  - Copy, move and upload in the agent use path-based calls
-    (`std::fs::copy` follows a symlink at the target; intermediate folders
-    are looked up again on every call). Once other members can write a
-    share, they can redirect user A's agent with planted links, for example
-    copying A's `~/.ssh` key into a share they read, or writing files into
-    A's `~/.config/autostart`. ADR 0005 says a race only reaches what the
-    agent's uid can reach, which is true but misses this confused-deputy
-    case. Proposal: `openat`/`O_NOFOLLOW`/`O_EXCL` operations on directory
-    descriptors for everything in shared folders, before task 1.3.
-  - Lower priority: the server holds one lock for all accounts while the
-    helper starts an agent (one slow start stalls every one-HOME account);
-    agent errors on mkdir, rename and copy come back as `400` instead of
-    `403`/`404`; a socket unit restarted outside RAST leaves the server
-    with a stale token (`403` until the server restarts); deactivating an
-    account does not stop its agent yet (ADR 0005, section 7); extra unit
-    hardening beyond the ADR (`ProtectKernelTunables`,
-    `ProtectKernelModules`, `ProtectControlGroups`, `RestrictNamespaces`,
-    `LockPersonality`, `RestrictSUIDSGID`, `SystemCallFilter=@system-service`)
-    to be tried on the test host.
+- **Root agent token (from the task 1.2 review follow-up):** should
+  `RootFs` get the same "ask the helper again once" retry as the per-user
+  agents? Its stale-token case is narrower (only when something other than
+  this server starts a new root agent on the same socket path), so it was
+  left out of this round.
 - Task 1.3 results for the maintainer: group quota as the share limit under
   Q-a (D3) and the deny ACL entry instead of a forced restart (D7).
 - **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for

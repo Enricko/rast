@@ -56,6 +56,12 @@ this file by `scripts/changelog-section.sh`.
     checked open. A symlink that another member of a shared folder swaps in
     during an operation can no longer make the agent copy the account's own
     files (`~/.ssh`) into the share or write into `~/.config/autostart`.
+  - Starting one account's file agent no longer holds up the File Station
+    requests of other accounts. Copy and move jobs and other forwarded
+    requests report the agent's `403`, `404`, `413`, `415` and `429` as
+    such (they were `400`). When an agent's socket unit was restarted with a
+    new token, the server asks the helper again once instead of answering
+    `403` until it restarts; an upload interrupted this way gets `503`.
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
