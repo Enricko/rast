@@ -13,10 +13,10 @@ Update it at the end of every session.
 - [x] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs` (task 0.3)
 - [x] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
 - [x] Record the current compressed JS bundle size as the baseline
-- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/` (task 0.6, waiting for a separate test host; see Next)
+- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/` (task 0.6, **deferred** by the maintainer: it runs on a separate test host with RAST 0.18.2 before the Phase 1 results are tested there)
 - [x] Create `docs/remake/PROGRESS.md` and the first ADRs
 - [x] Fix the README: duplicated "Linux apps" row and stale status line (task 0.5)
-- [ ] **Exit:** CI green, still a single release binary, no behaviour change
+- [x] **Exit:** CI green, still a single release binary, no behaviour change (accepted by the maintainer on 2026-11-16, with 0.6 deferred)
 
 ## Done
 
@@ -176,18 +176,41 @@ Update it at the end of every session.
   maintainer's decision (its code equals `7663996`; its doc draft was
   superseded by `cc274e1`).
 
+- **Maintainer decisions, 2026-11-16 (Phase 0 closed):**
+  - Manual check on the disposable instance in docker mode: login, File
+    Station, Terminal, App Center and the "About RAST (Leptos)" window work
+    normally.
+  - Phase 0 exit accepted with task 0.6 deferred. 0.6 runs on a separate test
+    host with RAST 0.18.2, before the Phase 1 results are tested on that host.
+  - WASM budget baseline confirmed: the wallpapers stay excluded (399745 B
+    gzip), because they keep being served as static files. In Phase 5 the WASM
+    size is measured together with the remaining JS (for example xterm.js).
+  - Preferences for ADR 0004, to be confirmed again in tasks 2.1 and 3.5 (the
+    ADR itself is not changed now):
+    - One mechanism for every systemd version: the subreaper wrapper. The
+      systemd minimum does not rise and Ubuntu 22.04 stays supported.
+      `ExitType=cgroup` is used only if task 2.1 finds a strong reason.
+    - Per-app `MemoryHigh` with a per-session `MemoryMax`: agreed. The
+      `linux_app_*` key names stay; their new meaning is explained in the
+      CHANGELOG upgrade notes.
+    - `NoNewPrivileges=yes`: not used unless tests on the test host prove
+      that the Chrome and Flatpak sandboxes still work.
+    - ArtCraft Launcher: AlternativeTo lists Debian, Flatpak and AppImage
+      builds; verify in task 3.6.
+  - Development host: Ubuntu 26.04.1 LTS, systemd 259 (259.9-0ubuntu0.1).
+
 ## In progress
 
 - Nothing.
 
 ## Next
 
-1. Phase 0.6 — baseline app matrix. **Waiting for a separate test host:**
+1. Phase 1, task 1.1.
+2. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
+   0.18.2, before the Phase 1 results are tested there.
    `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
    (systemd unit names are keyed by user id), and production uses it on this
    host. Do not run `dev-instance.sh up native` here.
-2. Then the Phase 0 exit check (CI green, single release binary, no behaviour
-   change).
 
 ## Open questions
 
@@ -211,23 +234,10 @@ Update it at the end of every session.
   the maintainer).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
-- **WASM budget baseline:** the 1.5x budget uses the gzip size of
-  `frontend/dist` without the four wallpaper JPEGs (399745 B, not 1142560 B),
-  because they are images, not code. Confirm with the maintainer.
 - **Tests need a short `TMPDIR`:** with a long `TMPDIR` (for example a
   per-session scratch path) four `rast-agent` tests fail because unix-socket
   paths exceed ~108 bytes. When `/tmp` is nearly full, use a short directory on
   disk such as `TMPDIR=~/.cache/rast-tmp`.
-- **Nested launchers (ADR 0004), to decide in the implementing tasks:**
-  - Raise the systemd minimum from 249 to 250 instead of the subreaper
-    fallback? It would drop Ubuntu 22.04 (task 2.1).
-  - New meaning of the `linux_app_*` keys (per-app `MemoryHigh` instead of
-    `MemoryMax`, `TasksMax` raised) is a config change and needs approval
-    (task 2.1).
-  - `NoNewPrivileges=yes` for app units: evaluate against Chromium's setuid
-    sandbox fallback, then ask (task 3.5).
-  - How ArtCraft Launcher is distributed (AppImage, archive) is not recorded
-    yet; check before writing the e2e scenario (task 3.6).
 - **ADR numbers in `docs/remake/PROMPTS.md` are stale:** tasks 1.1–1.5 name
   `0003-one-home.md` / "ADR 0003" (0003 is `rast-ui-leptos`), 4.2 names
   `0005-wayland.md` and Phase 7 `0006-display-research.md`. Task 2.1 now says
