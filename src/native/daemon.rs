@@ -3669,17 +3669,11 @@ async fn profile_install(
     validate_app_id(&op.app_id)?;
     let ids = identity_ids(&options.validation_context(), op.user_id)?;
     let expected_home = options.linux_users_dir().join(op.user_id.to_string());
-    let username = crate::native::protocol::username_for(op.user_id);
-    let rast_home = options.homes_dir.join(&username);
-    if !rast_home.is_dir() {
-        std::fs::create_dir_all(&rast_home).map_err(|error| {
-            NativeError::command_failed(format!("cannot create {}: {error}", rast_home.display()))
-        })?;
-        if let Ok((uid, gid)) = crate::native::data_dir_owner(options, ids.gid) {
-            let _ = std::os::unix::fs::chown(&rast_home, Some(uid), Some(gid));
-        }
-    }
-    let prepared = profile_prepare(
+    // The helper does not know the person's RAST username (it lives in the
+    // database), so it must not invent a RAST home: building one from the
+    // Linux account name created stray `<homes>/rast-u<id>` folders. The
+    // profile tree itself does not need the RAST home.
+    let prepared = prepare_profile_tree(
         options,
         ProfilePrepareOp {
             app_id: op.app_id.clone(),
@@ -3687,8 +3681,9 @@ async fn profile_install(
             uid: ids.uid,
             gid: ids.gid,
             home: path_string(&expected_home),
-            rast_home: path_string(&rast_home),
+            rast_home: String::new(),
         },
+        RastHomeCheck::Skip,
     )
     .await?;
     let profile = prepared
@@ -3805,6 +3800,46 @@ async fn profile_prepare(
     options: &NativeOptions,
     op: ProfilePrepareOp,
 ) -> Result<Value, NativeError> {
+    prepare_profile_tree(options, op, RastHomeCheck::Require).await
+}
+
+/// `rastHome` must be an existing directory inside the RAST homes root.
+fn validate_rast_home(options: &NativeOptions, rast_home: &str) -> Result<(), NativeError> {
+    let rast_home = validate_absolute_path(rast_home)?;
+    let homes_root = std::fs::canonicalize(&options.homes_dir).map_err(|error| {
+        NativeError::forbidden(format!(
+            "the RAST homes directory {} is not available: {error}",
+            options.homes_dir.display()
+        ))
+    })?;
+    let canonical_rast_home = std::fs::canonicalize(&rast_home).map_err(|error| {
+        NativeError::invalid(format!(
+            "cannot resolve rastHome {}: {error}",
+            rast_home.display()
+        ))
+    })?;
+    if !canonical_rast_home.starts_with(&homes_root) {
+        return Err(NativeError::forbidden(
+            "rastHome must be inside the RAST homes directory",
+        ));
+    }
+    require_existing_dir(&canonical_rast_home)
+}
+
+/// Whether [`prepare_profile_tree`] validates `rastHome`. Only the
+/// `profile_prepare` operation carries a RAST home chosen by the server;
+/// `profile_install` has none and skips the check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RastHomeCheck {
+    Require,
+    Skip,
+}
+
+async fn prepare_profile_tree(
+    options: &NativeOptions,
+    op: ProfilePrepareOp,
+    rast_home_check: RastHomeCheck,
+) -> Result<Value, NativeError> {
     let ctx = options.validation_context();
     validate_app_id(&op.app_id)?;
     let ids = identity_ids(&ctx, op.user_id)?;
@@ -3825,25 +3860,9 @@ async fn profile_prepare(
             expected_home.display()
         )));
     }
-    let rast_home = validate_absolute_path(&op.rast_home)?;
-    let homes_root = std::fs::canonicalize(&options.homes_dir).map_err(|error| {
-        NativeError::forbidden(format!(
-            "the RAST homes directory {} is not available: {error}",
-            options.homes_dir.display()
-        ))
-    })?;
-    let canonical_rast_home = std::fs::canonicalize(&rast_home).map_err(|error| {
-        NativeError::invalid(format!(
-            "cannot resolve rastHome {}: {error}",
-            rast_home.display()
-        ))
-    })?;
-    if !canonical_rast_home.starts_with(&homes_root) {
-        return Err(NativeError::forbidden(
-            "rastHome must be inside the RAST homes directory",
-        ));
+    if rast_home_check == RastHomeCheck::Require {
+        validate_rast_home(options, &op.rast_home)?;
     }
-    require_existing_dir(&canonical_rast_home)?;
 
     let identity = Identity {
         user_id: ids.user_id,
@@ -5105,6 +5124,43 @@ exit 1
             .await
             .unwrap_err();
         assert_eq!(bad_uid.code, "forbidden");
+    }
+
+    /// Regression: `profile_install` (Docker -> native migration) created and
+    /// passed `<homes>/rast-u<id>`, a stray folder named after the Linux
+    /// account. The helper does not know the RAST username, so it must not
+    /// create any RAST home.
+    #[tokio::test]
+    async fn profile_install_does_not_create_an_identity_named_home() {
+        let helper = TestHelper::start(|options, dir| {
+            configure_identity(options, dir);
+        })
+        .await;
+        std::fs::create_dir_all(helper.options.linux_users_dir().join("7")).unwrap();
+        let source = helper
+            .options
+            .linux_apps_dir()
+            .join("migrations/demo/7/mapped");
+        std::fs::create_dir_all(source.join("config/demo")).unwrap();
+        std::fs::write(source.join("config/demo/settings.json"), b"{}").unwrap();
+        let installed = helper
+            .call(NativeOp::ProfileInstall(ProfileInstallOp {
+                app_id: "demo".into(),
+                user_id: 7,
+                source: source.to_string_lossy().into_owned(),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(installed["files"], 1);
+        let profile = helper.options.profiles_dir().join("demo/7");
+        assert!(profile.join("config/demo/settings.json").is_file());
+        assert!(!helper.options.homes_dir.join("rast-u7").exists());
+        // Only the fixture home of the test helper is there.
+        let names: Vec<String> = std::fs::read_dir(&helper.options.homes_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["alice"], "profile_install must not create a home");
     }
 
     #[tokio::test]

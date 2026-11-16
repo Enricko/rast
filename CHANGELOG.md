@@ -9,6 +9,32 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [0.18.3] - Unreleased
+
+### Fixed
+
+- **Native Linux apps could not see the person's own files.** Opening an
+  app, and moving a Docker app to the native backend, linked and granted read
+  access to `homes/rast-u<id>` (named after the app's Linux account) instead
+  of the person's home `homes/<username>`. The folder was created empty, so
+  apps never saw the person's files. Apps now get the person's own home, as
+  `docs/NATIVE-LINUX-APPS.md` describes, and RAST no longer creates
+  `homes/rast-u<id>` folders.
+- **An app could read another account's home.** Because of the bug above,
+  an app of user id 5 was granted read access to the home of an account
+  named `rast-u5`, if one existed. New usernames of the form
+  `rast-u<number>` are now refused, so such a name cannot be chosen again.
+
+### Upgrade notes
+
+- After upgrading, empty `homes/rast-u<id>` folders left by earlier versions
+  can be removed by an administrator; RAST does not delete them. An existing
+  account whose username has the form `rast-u<number>` keeps working, and
+  apps of other users no longer reach its home.
+- The first app start after the upgrade grants the app's Linux account
+  read access to the person's home (recursive `rx` ACL), as documented. Apps
+  still save into their own profile.
+
 ## [0.18.2] - 2026-11-15
 
 ### Fixed

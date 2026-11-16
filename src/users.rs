@@ -59,7 +59,22 @@ pub fn validate_username(username: &str) -> AppResult<String> {
     if trimmed == "." || trimmed == ".." || trimmed.ends_with('.') {
         return Err(AppError::bad_request("invalid username"));
     }
+    if is_identity_name(trimmed) {
+        return Err(AppError::bad_request(
+            "usernames of the form rast-u<number> are reserved for the Linux accounts of native apps",
+        ));
+    }
     Ok(trimmed.to_string())
+}
+
+/// `rast-u` followed only by digits, in any letter case: the form of the
+/// Linux account names of native apps (`rast-u<id>`). A RAST user with such a
+/// name would share a name with another user's app identity.
+fn is_identity_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower
+        .strip_prefix("rast-u")
+        .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Account options, group membership and direct rules stored together with a
@@ -263,6 +278,23 @@ pub async fn find_by_id(pool: &SqlitePool, id: i64) -> AppResult<Option<UserReco
     .fetch_optional(pool)
     .await?;
     Ok(row.map(map_user))
+}
+
+/// The RAST home folder of the user with this id,
+/// `<storage>/homes/<username>` (the folder File Station serves).
+///
+/// Native Linux app code must use this and never build a home from the Linux
+/// account name `rast-u<id>`: that name only identifies the app identity, and
+/// a RAST account may even be called like another user's identity.
+pub async fn home_dir_by_id(
+    pool: &SqlitePool,
+    cfg: &Config,
+    id: i64,
+) -> AppResult<std::path::PathBuf> {
+    let user = find_by_id(pool, id)
+        .await?
+        .ok_or(AppError::NotFound("user not found"))?;
+    Ok(cfg.home_for(&user.username.to_ascii_lowercase()))
 }
 
 /// Account status filter for [`list_filtered`].
@@ -786,6 +818,72 @@ mod tests {
         ] {
             assert!(validate_username(bad).is_err(), "{bad:?} accepted");
         }
+    }
+
+    #[test]
+    fn username_validation_rejects_native_identity_names() {
+        for bad in [
+            "rast-u5",
+            "rast-u0",
+            "RAST-U12",
+            "Rast-u999999",
+            " rast-u7 ",
+        ] {
+            assert!(validate_username(bad).is_err(), "{bad:?} accepted");
+        }
+        for ok in [
+            "rast",
+            "rast-u",
+            "rast-user",
+            "rast-u5a",
+            "rast-u-5",
+            "rast_u5",
+            "myrast-u5",
+        ] {
+            assert!(validate_username(ok).is_ok(), "{ok:?} refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_refuses_a_native_identity_name() {
+        let (_d, cfg, pool) = setup().await;
+        let error = create(
+            &pool,
+            &cfg,
+            "rast-u5",
+            "Sup3r-Secret-1!",
+            Role::User,
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::BadRequest(_)), "{error:?}");
+        assert!(find_by_username(&pool, "rast-u5").await.unwrap().is_none());
+        assert!(!cfg.home_for("rast-u5").exists());
+    }
+
+    #[tokio::test]
+    async fn home_dir_by_id_uses_the_rast_username() {
+        let (_d, cfg, pool) = setup().await;
+        let user = create(
+            &pool,
+            &cfg,
+            "Alice",
+            "Sup3r-Secret-1!",
+            Role::User,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let home = home_dir_by_id(&pool, &cfg, user.id).await.unwrap();
+        assert_eq!(home, cfg.home_for("alice"));
+        assert_ne!(home, cfg.home_for(&format!("rast-u{}", user.id)));
+        assert!(matches!(
+            home_dir_by_id(&pool, &cfg, user.id + 1000).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
