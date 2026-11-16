@@ -130,7 +130,7 @@ claude --model opus --effort xhigh --permission-mode plan
 ```text
 Phase 1: design "one user = one Linux account = one HOME" following CLAUDE.md.
 First study src/storage/, src/rootfs/, src/terminal/, src/native/identity.rs, src/native/daemon.rs (path_acl, profile_prepare), src/linux_apps/native_session.rs (start_run) and docs/NATIVE-LINUX-APPS.md. If the workspace has been split, look in crates/.
-Draft the content of docs/adr/0003-one-home.md as a plan: file ownership model, how File Station forwards Home requests to the per-user file agent, new helper operations (name, fields, validation), shared folders as Linux groups, XDG Trash, quota, per-app profile changes, the migration plan (dry-run, permission backup, rollback), impact on Backup Center, and the test list (including cross-user access).
+Draft the content of docs/adr/0005-one-home.md as a plan: file ownership model, how File Station forwards Home requests to the per-user file agent, new helper operations (name, fields, validation), shared folders as Linux groups, XDG Trash, quota, per-app profile changes, the migration plan (dry-run, permission backup, rollback), impact on Backup Center, and the test list (including cross-user access).
 Mark every decision that needs my approval, for example a database migration. After I approve the plan, write the ADR only; do not change code.
 ```
 
@@ -141,7 +141,7 @@ claude --model opus --effort xhigh
 ```
 
 ```text
-Implement the per-user file agent following docs/adr/0003-one-home.md.
+Implement the per-user file agent following docs/adr/0005-one-home.md.
 Generalise src/rootfs/agent.rs so it can run as rast-u<id> with its root at the user's HOME, started by the helper through a new, strictly validated operation. /api/files requests for Home are forwarded to the agent with the same JSON shapes.
 Add tests: cross-user access fails, traversal and symlink escape are rejected, chunked upload still works.
 Follow the Security invariants in CLAUDE.md. Commit in small steps and update PROGRESS.md.
@@ -154,7 +154,7 @@ claude --model opus --effort high
 ```
 
 ```text
-Implement shared folders as Linux groups following ADR 0003: one read-write and one read-only group per shared folder, setgid directories with default ACLs, a link under ~/Shared, and membership computed from the current Effective Access rules (src/access/).
+Implement shared folders as Linux groups following ADR 0005: one read-write and one read-only group per shared folder, setgid directories with default ACLs, a link under ~/Shared, and membership computed from the current Effective Access rules (src/access/).
 An access change restarts the user's session, with a warning in the UI.
 Add tests for membership, read-only permissions and access revocation.
 ```
@@ -167,7 +167,7 @@ claude --model sonnet --effort high
 
 ```text
 Replace the File Station recycle bin for Home with XDG Trash (~/.local/share/Trash, per the freedesktop Trash spec) managed by the file agent, so Linux apps and File Station share one trash.
-Replace Home quota accounting with per-uid filesystem quota (project quota for shared folders) following ADR 0003, falling back to the old accounting when the filesystem does not support quota.
+Replace Home quota accounting with per-uid filesystem quota (project quota for shared folders) following ADR 0005, falling back to the old accounting when the filesystem does not support quota.
 Keep the current API shapes. Add tests, then update docs and PROGRESS.md.
 ```
 
@@ -178,7 +178,7 @@ claude --model opus --effort xhigh
 ```
 
 ```text
-Implement rast migrate home --dry-run, rast migrate home and rast migrate home --rollback following ADR 0003: per user, idempotent, and always taking a backup of the owner/mode list before changing anything.
+Implement rast migrate home --dry-run, rast migrate home and rast migrate home --rollback following ADR 0005: per user, idempotent, and always taking a backup of the owner/mode list before changing anything.
 The dry-run report covers data size, files that change owner, app profiles that get merged, and conflicts.
 Remove the per-launch setfacl -R in start_run and the read-only RAST symlink in app profiles.
 Test on the disposable instance (scripts/e2e/dev-instance.sh); ask me before running native mode. Write an Upgrade note in CHANGELOG.md.
@@ -354,7 +354,7 @@ claude --model opus --effort high
 
 ```text
 Replace the pinned DPI 96 with a per-user scale that follows the browser's devicePixelRatio (session DPI + canvas size), then test on a HiDPI screen.
-Try the Wayland server in Xpra 6.5 for Wayland-native apps, with X11/XWayland as the fallback. Write the test results in docs/adr/0005-wayland.md, including the decision to adopt or defer.
+Try the Wayland server in Xpra 6.5 for Wayland-native apps, with X11/XWayland as the fallback. Write the test results in a new ADR docs/adr/NNNN-wayland.md (NNNN = the next free ADR number), including the decision to adopt or defer.
 ```
 
 ### 4.3 Tray and clipboard paste
@@ -456,7 +456,7 @@ claude --model opus --effort max
 
 ```text
 Research the feasibility of two options: (1) our own Xpra client in Rust/WASM using WebCodecs to replace the iframe and shim, (2) our own Wayland compositor with Smithay that streams each window to the browser.
-Compare effort, risk, performance and license impact (Xpra GPL/MPL). Write the recommendation in docs/adr/0006-display-research.md. Do not write production code.
+Compare effort, risk, performance and license impact (Xpra GPL/MPL). Write the recommendation in a new ADR docs/adr/NNNN-display-research.md (NNNN = the next free ADR number). Do not write production code.
 ```
 
 ---

@@ -238,10 +238,6 @@ Update it at the end of every session.
   per-session scratch path) four `rast-agent` tests fail because unix-socket
   paths exceed ~108 bytes. When `/tmp` is nearly full, use a short directory on
   disk such as `TMPDIR=~/.cache/rast-tmp`.
-- **ADR numbers in `docs/remake/PROMPTS.md` are stale:** tasks 1.1–1.5 name
-  `0003-one-home.md` / "ADR 0003" (0003 is `rast-ui-leptos`), 4.2 names
-  `0005-wayland.md` and Phase 7 `0006-display-research.md`. Task 2.1 now says
-  "next free number"; fix the others when those tasks start.
 - `yamllint` is not installed for the default `python3` on this host (a
   RAST-managed Python comes first in `PATH`), so the workflow files were not
   linted locally.

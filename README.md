@@ -94,12 +94,17 @@ and `/srv/rast/`, installs a `rast.service` systemd unit and starts it bound to
 
 Requirements: Rust stable (pinned in `rust-toolchain.toml`), Node.js 22+ and
 npm **for the frontend build only**. The installed server never needs Node.js.
+The Leptos UI (`crates/rast-ui`) also needs the `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`) and Trunk 0.22
+(`cargo install trunk --locked --version '~0.22'`); a release build fails
+without `crates/rast-ui/dist`.
 
 ```bash
 git clone https://github.com/Enricko/rast.git
 cd rast
 npm --prefix frontend ci
 npm --prefix frontend run build
+scripts/build-ui.sh    # Trunk build into crates/rast-ui/dist
 cargo build --release
 ./target/release/rast version
 ```
