@@ -201,6 +201,32 @@ pub fn describe(mode: Mode, outcome: &ShareOutcome) -> Vec<String> {
                 count("notRecorded"),
                 count("missing"),
             ));
+            // Every entry that lost set-uid (or set-gid on a file).
+            let dropped = report["droppedBitsCount"].as_u64().unwrap_or(0);
+            if dropped > 0 {
+                lines.push(format!(
+                    "  {dropped} entries restored without set-uid, or without set-gid on a file:"
+                ));
+                for entry in report["droppedBits"].as_array().into_iter().flatten() {
+                    lines.push(format!(
+                        "    {} (recorded {}, now {})",
+                        entry["path"].as_str().unwrap_or("?"),
+                        entry["recorded"].as_str().unwrap_or("?"),
+                        entry["restored"].as_str().unwrap_or("?"),
+                    ));
+                }
+                let listed = report["droppedBits"].as_array().map_or(0, Vec::len) as u64;
+                if let Some(file) = report["droppedBitsFile"].as_str() {
+                    lines.push(format!(
+                        "    {}full list: <data_dir>/migrations/shares/{file}",
+                        if listed < dropped {
+                            format!("{} more; ", dropped - listed)
+                        } else {
+                            String::new()
+                        }
+                    ));
+                }
+            }
         }
     }
     lines
@@ -365,6 +391,46 @@ mod tests {
         assert_eq!(
             describe(Mode::Apply, &failed),
             ["Team (team): FAILED: shares_migrate_apply: forbidden"]
+        );
+    }
+
+    #[test]
+    fn a_rollback_lists_every_entry_that_lost_a_bit() {
+        let outcome = ShareOutcome {
+            share_id: "id".into(),
+            name: "Team".into(),
+            container: "team".into(),
+            ok: true,
+            report: json!({
+                "journal": "001763251200",
+                "report": {
+                    "restored": 4,
+                    "changedSince": {"count": 0, "paths": []},
+                    "notRecorded": {"count": 1, "paths": ["new.txt"]},
+                    "missing": {"count": 0, "paths": []},
+                    "droppedBitsCount": 3,
+                    "droppedBits": [
+                        {"path": "bin/tool", "recorded": "4755", "restored": "0755"},
+                        {"path": "bin/group", "recorded": "2750", "restored": "0750"},
+                    ],
+                    "droppedBitsFile": "id/001763251200.rolled-back/dropped-bits.txt",
+                }
+            }),
+            members: Value::Null,
+            error: None,
+        };
+        assert_eq!(
+            describe(Mode::Rollback, &outcome),
+            [
+                "Team (team): rolled back",
+                "  4 entries restored; 0 changed since (left as they are), 1 created after the \
+                 migration, 0 missing",
+                "  3 entries restored without set-uid, or without set-gid on a file:",
+                "    bin/tool (recorded 4755, now 0755)",
+                "    bin/group (recorded 2750, now 0750)",
+                "    1 more; full list: <data_dir>/migrations/shares/id/001763251200.rolled-back/\
+                 dropped-bits.txt",
+            ]
         );
     }
 }

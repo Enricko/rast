@@ -665,18 +665,36 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
     ]);
     acl::write(docs.as_raw_fd(), acl::ACCESS_XATTR, &granted).unwrap();
     drop(docs);
-    let before: Vec<(PathBuf, u32, Option<Acl>)> =
-        ["", "docs", "docs/plan.txt", "docs/deep/run.sh"]
-            .iter()
-            .map(|path| {
-                let full = team.join(path);
-                (
-                    full.clone(),
-                    mode(&full),
-                    read_acl(&full, acl::ACCESS_XATTR),
-                )
-            })
-            .collect();
+    // A set-gid folder keeps the bit on rollback; a set-gid file loses it.
+    std::fs::set_permissions(
+        team.join("docs/deep"),
+        std::fs::Permissions::from_mode(0o2755),
+    )
+    .unwrap();
+    std::fs::write(team.join("docs/sgid.bin"), b"x").unwrap();
+    std::fs::set_permissions(
+        team.join("docs/sgid.bin"),
+        std::fs::Permissions::from_mode(0o2750),
+    )
+    .unwrap();
+    let before: Vec<(PathBuf, u32, Option<Acl>)> = [
+        "",
+        "docs",
+        "docs/deep",
+        "docs/plan.txt",
+        "docs/sgid.bin",
+        "docs/deep/run.sh",
+    ]
+    .iter()
+    .map(|path| {
+        let full = team.join(path);
+        (
+            full.clone(),
+            mode(&full),
+            read_acl(&full, acl::ACCESS_XATTR),
+        )
+    })
+    .collect();
     let op = || ShareDirOp {
         share_id: SHARE.into(),
         container: "team".into(),
@@ -684,7 +702,7 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
 
     let scan = shares_migrate_scan(&fx.options, op()).await.unwrap();
     assert_eq!(scan["journal"], Value::Null);
-    assert_eq!(scan["report"]["changes"]["count"], 5);
+    assert_eq!(scan["report"]["changes"]["count"], 6);
     assert_eq!(
         scan["report"]["identityAclEntries"]["paths"],
         json!(["docs"])
@@ -714,7 +732,37 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
     // A file created after the migration is left alone by the rollback.
     std::fs::write(team.join("docs/new.txt"), b"new").unwrap();
     let rolled = shares_migrate_rollback(&fx.options, op()).await.unwrap();
-    assert_eq!(rolled["report"]["restored"], 5, "{rolled}");
+    assert_eq!(rolled["report"]["restored"], 6, "{rolled}");
+    // Every entry that lost a bit is reported, and listed next to the
+    // journal.
+    assert_eq!(rolled["report"]["droppedBitsCount"], 2);
+    let mut dropped: Vec<Value> = rolled["report"]["droppedBits"].as_array().unwrap().clone();
+    dropped.sort_by_key(|entry| entry["path"].as_str().unwrap().to_string());
+    assert_eq!(
+        dropped,
+        [
+            json!({"path": "docs/deep/run.sh", "recorded": "4755", "restored": "0755"}),
+            json!({"path": "docs/sgid.bin", "recorded": "2750", "restored": "0750"}),
+        ]
+    );
+    let list = journal_dir
+        .join(format!("{stamp}{ROLLED_BACK_SUFFIX}"))
+        .join(DROPPED_BITS_FILE);
+    assert_eq!(mode(&list), 0o600);
+    let mut lines: Vec<String> = std::fs::read_to_string(&list)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.sort();
+    assert_eq!(
+        lines,
+        ["2750 0750 docs/sgid.bin", "4755 0755 docs/deep/run.sh"]
+    );
+    assert_eq!(
+        rolled["report"]["droppedBitsFile"],
+        format!("{SHARE}/{stamp}{ROLLED_BACK_SUFFIX}/{DROPPED_BITS_FILE}")
+    );
     assert_eq!(
         rolled["report"]["notRecorded"]["paths"],
         json!(["docs/new.txt"])

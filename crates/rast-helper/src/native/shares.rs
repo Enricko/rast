@@ -1782,17 +1782,100 @@ pub(crate) async fn shares_migrate_apply(
     }))
 }
 
+/// Entries of a rollback's `droppedBits` listed in its reply; the full list
+/// is written next to the journal.
+pub const DROPPED_BITS_LISTED: usize = 2_000;
+/// File name of the full list in the rolled-back journal folder.
+pub const DROPPED_BITS_FILE: &str = "dropped-bits.txt";
+
+/// An entry that a rollback restored without its set-uid bit, or without
+/// the set-gid bit of a regular file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DroppedBits {
+    pub path: String,
+    /// The recorded mode and the mode set, in octal.
+    pub recorded: String,
+    pub restored: String,
+}
+
 /// What a rollback did.
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RollbackReport {
     pub restored: u64,
+    /// How many entries lost set-uid or set-gid bits, and the first
+    /// [`DROPPED_BITS_LISTED`] of them (all of them are in
+    /// `droppedBitsFile`).
+    pub dropped_bits_count: u64,
+    pub dropped_bits: Vec<DroppedBits>,
+    /// The file in the journal folder that lists every one of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dropped_bits_file: Option<String>,
     /// Recorded entries that now are another inode or have another owner.
     pub changed_since: Sample,
     /// Entries created after the migration (left as they are).
     pub not_recorded: Sample,
     /// Recorded entries that no longer exist.
     pub missing: Sample,
+}
+
+impl RollbackReport {
+    /// Count (and list) `record` when its restored mode lost bits.
+    fn note_dropped_bits(&mut self, record: &Record, all: &mut Vec<DroppedBits>) {
+        let restored = record.restored_mode();
+        if restored == record.mode {
+            return;
+        }
+        let entry = DroppedBits {
+            path: show(&record.p).to_string(),
+            recorded: format!("{:04o}", record.mode),
+            restored: format!("{restored:04o}"),
+        };
+        self.dropped_bits_count += 1;
+        if self.dropped_bits.len() < DROPPED_BITS_LISTED {
+            self.dropped_bits.push(entry.clone());
+        }
+        all.push(entry);
+    }
+}
+
+/// Write the full list of entries that lost bits into the journal folder
+/// (`<recorded> <restored> <path>` per line, root-only like the journal).
+fn write_dropped_bits(dir: &OwnedFd, dropped: &[DroppedBits]) -> Result<(), NativeError> {
+    let name = c_name(DROPPED_BITS_FILE).expect("name");
+    // SAFETY: valid fd and NUL-terminated name; the fd is owned below.
+    let fd = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    let failed = |error: io::Error| {
+        NativeError::command_failed(format!(
+            "the folder was restored, but the list of dropped set-uid and set-gid bits could \
+             not be written: {error}"
+        ))
+    };
+    if fd < 0 {
+        return Err(failed(io::Error::last_os_error()));
+    }
+    // SAFETY: `fd` is a fresh, valid descriptor.
+    let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let mut writer = io::BufWriter::new(file);
+    for entry in dropped {
+        writeln!(
+            writer,
+            "{} {} {}",
+            entry.recorded, entry.restored, entry.path
+        )
+        .map_err(failed)?;
+    }
+    let file = writer
+        .into_inner()
+        .map_err(|error| failed(error.into_error()))?;
+    file.sync_all().map_err(failed)
 }
 
 pub(crate) async fn shares_migrate_rollback(
@@ -1826,13 +1909,14 @@ pub(crate) async fn shares_migrate_rollback(
             .map(|record| (record.p.as_str(), record))
             .collect();
         let mut report = RollbackReport::default();
+        let mut dropped = Vec::new();
         let mut walked = TreeReport::default();
         let test_mode = options.is_test_mode();
-        let restore = |record: &Record,
-                       fd: RawFd,
-                       stat: &libc::stat,
-                       path: &str,
-                       report: &mut RollbackReport| {
+        let mut restore = |record: &Record,
+                           fd: RawFd,
+                           stat: &libc::stat,
+                           path: &str,
+                           report: &mut RollbackReport| {
             let same = dev_of(stat) == record.dev
                 && ino_of(stat) == record.ino
                 && stat.st_uid == record.uid
@@ -1845,6 +1929,7 @@ pub(crate) async fn shares_migrate_rollback(
                 NativeError::command_failed(format!("cannot restore {}: {error}", show(path)))
             })?;
             report.restored += 1;
+            report.note_dropped_bits(record, &mut dropped);
             Ok::<(), NativeError>(())
         };
         walk(&fd, owner, &mut walked, |found, _| {
@@ -1875,6 +1960,14 @@ pub(crate) async fn shares_migrate_rollback(
                 NativeError::command_failed(format!("cannot restore the container: {error}"))
             })?;
         report.restored += 1;
+        report.note_dropped_bits(container_record, &mut dropped);
+        if !dropped.is_empty() {
+            write_dropped_bits(&dir, &dropped)?;
+            report.dropped_bits_file = Some(format!(
+                "{}/{stamp}{ROLLED_BACK_SUFFIX}/{DROPPED_BITS_FILE}",
+                share_id
+            ));
+        }
         // Mark the journal as rolled back, so the next apply starts over.
         let root = open_journal_root(&options, &share_id, false)?.expect("exists");
         let from = c_name(&stamp).expect("digits");

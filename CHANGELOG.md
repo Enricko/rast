@@ -110,6 +110,10 @@ this file by `scripts/changelog-section.sh`.
   Each shared folder is migrated on its own and a failure does not stop the
   others (exit code 1). The apply writes a journal first and resumes an
   interrupted run; the rollback restores owners, modes and ACLs from it.
+  The rollback never restores set-uid bits, nor set-gid bits of regular
+  files (set-gid on folders is restored), and lists every entry that lost
+  a bit; the full list is kept next to the journal
+  (`<stamp>.rolled-back/dropped-bits.txt`).
 
 - **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
   With the native backend, the server recomputes the members of every

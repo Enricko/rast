@@ -714,7 +714,11 @@ sudo systemctl start rast
 - `sudo -u rast rast migrate shares --rollback` (server stopped) restores
   the journal: only entries that are still the recorded inode with the
   recorded owner; entries changed since are reported and left. The groups
-  stay; they give nothing without the container layout.
+  stay; they give nothing without the container layout. Set-uid bits, and
+  set-gid bits of regular files, are never restored (set-gid on folders
+  is); the rollback output lists every entry that lost a bit, and the full
+  list is kept next to the journal in
+  `<stamp>.rolled-back/dropped-bits.txt` (`<recorded> <restored> <path>`).
 - `--json` prints a machine-readable report; the exit code is 1 when any
   shared folder failed (the others are still done).
 - Running apps and terminals keep the groups they started with. A
