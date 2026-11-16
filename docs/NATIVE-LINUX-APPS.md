@@ -195,6 +195,15 @@ Consequences:
   exposes the home read-only). Files an app saves itself go into its own
   profile/session storage, which File Station does not browse (it belongs to
   the app identity, not the `rast` service account).
+* The grant runs in the background each time an app opens, so opening an app
+  never waits for it; at most one grant runs per person at a time. It also
+  sets a default ACL entry on every folder, so files and folders created in
+  the home later are readable by the app at once. Files *moved* into the home
+  (chunked uploads, restores from the recycle bin, moves from a shared folder)
+  become readable when the next app opens. On the first app start the
+  person's files can appear a few seconds after the window opens. The helper
+  stops a grant after 13 seconds, so a home with more than about 1.5 million
+  files and folders is only partly granted.
 * **Shared folders are not mapped into native app profiles.** Only the
   person's own RAST home is exposed. To open a file from a shared folder in a
   native app, first copy it through File Station into the person's own RAST

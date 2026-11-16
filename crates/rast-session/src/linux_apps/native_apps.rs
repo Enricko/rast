@@ -3180,8 +3180,9 @@ impl NativeApps {
             // so the server cannot create the profile itself. Ask the helper to
             // create the canonical profile tree owned by the identity.
             let identity_home = self.config.linux_users_dir().join(user_id.to_string());
-            let username = format!("rast-u{user_id}");
-            let rast_home = self.config.homes_dir().join(&username);
+            // The RAST home is named after the RAST username, never after the
+            // Linux account name `rast-u<id>`.
+            let rast_home = crate::users::home_dir_by_id(&self.db, &self.config, *user_id).await?;
             if !rast_home.is_dir() {
                 if let Err(error) = std::fs::create_dir_all(&rast_home) {
                     tracing::warn!(
@@ -5588,12 +5589,32 @@ mod tests {
         fs::write(&source, b"FAKE DEB").unwrap();
         fs::copy(&source, &legacy_package).unwrap();
         insert_docker_row(&env, "demo", LinuxFormat::Deb, Some("apt")).await;
+        // A legacy account named like the Linux identity of user 1, with its
+        // own home: the migration of user 1 must never use it.
+        sqlx::query(
+            "INSERT INTO users (username, display_name, password_hash, role, created_at, updated_at)
+             VALUES ('rast-u1', 'Other', 'x', 'user', 0, 0)",
+        )
+        .execute(&env.db)
+        .await
+        .unwrap();
+        let homes = env.config.homes_dir();
+        fs::create_dir_all(homes.join("rast-u1")).unwrap();
 
         let app = in_job(&env, "linuxapps.migrate", move |apps, ctx| async move {
             apps.migrate_legacy(1, "demo", None, None, &ctx).await
         })
         .await
         .expect("migration");
+        // Regression: the RAST home passed to the helper is the person's own
+        // home (`homes/<username>`), not `homes/rast-u<id>`.
+        let prepares = env.helper.calls("profile_prepare");
+        assert_eq!(prepares.len(), 1);
+        assert_eq!(
+            prepares[0]["rastHome"],
+            homes.join("admin").display().to_string()
+        );
+        assert!(homes.join("admin").is_dir());
         assert_eq!(app["backend"], "native");
         assert_eq!(app["status"], "ready");
         assert_eq!(app["native"]["migration"]["state"], "migrated");

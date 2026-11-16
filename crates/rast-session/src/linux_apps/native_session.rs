@@ -385,6 +385,9 @@ pub struct NativeSessions {
     user_locks: Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
     /// Serialises display and TCP port allocation across users.
     allocation: AsyncMutex<()>,
+    /// Users whose background home ACL grant is still running (see
+    /// [`NativeSessions::spawn_home_grant`]). At most one per user.
+    home_grants: Mutex<HashSet<i64>>,
     started: AtomicBool,
     /// Enforce that an identity home is a 0700 directory owned by the identity.
     ///
@@ -392,6 +395,19 @@ pub struct NativeSessions {
     /// owned by `linux_uid_base + userId`, so the mock constructor disables it;
     /// the decision logic itself is unit-tested via [`identity_home_is_healthy`].
     strict_identity_health: bool,
+}
+
+/// Releases a user's home grant slot when the grant task ends, also when it
+/// panics or is cancelled.
+struct HomeGrantSlot {
+    sessions: Arc<NativeSessions>,
+    user_id: i64,
+}
+
+impl Drop for HomeGrantSlot {
+    fn drop(&mut self) {
+        self.sessions.home_grants().remove(&self.user_id);
+    }
 }
 
 #[derive(Default)]
@@ -439,6 +455,7 @@ impl NativeSessions {
             inner: Mutex::new(Inner::default()),
             user_locks: Mutex::new(HashMap::new()),
             allocation: AsyncMutex::new(()),
+            home_grants: Mutex::new(HashSet::new()),
             started: AtomicBool::new(false),
             strict_identity_health,
         })
@@ -705,6 +722,12 @@ impl NativeSessions {
     /// A session by its secret key (used by the proxy).
     pub fn find_session(&self, key: &str) -> Option<Arc<NativeSession>> {
         self.inner().by_key.get(key).cloned()
+    }
+
+    fn home_grants(&self) -> MutexGuard<'_, HashSet<i64>> {
+        self.home_grants
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn inner(&self) -> MutexGuard<'_, Inner> {
@@ -1195,6 +1218,58 @@ impl NativeSessions {
     // Application start
     // -----------------------------------------------------------------------
 
+    /// Grant the app identity recursive read access to the person's RAST home
+    /// in the background, so a launch never waits for a walk of a large home.
+    ///
+    /// The helper also sets the matching default ACL entry on every folder, so
+    /// files created later are readable at once; files moved in (chunked
+    /// uploads, restores, moves from shared folders) are covered by the next
+    /// grant. At most one grant runs per user: a launch while one is still
+    /// running starts none. The helper keeps its own time limit, so a very
+    /// large home may end up with a partial grant.
+    fn spawn_home_grant(self: &Arc<Self>, user_id: i64, uid: u32, rast_home: &Path) {
+        if !self.home_grants().insert(user_id) {
+            tracing::debug!(
+                user_id,
+                "a home access grant is still running; not starting another"
+            );
+            return;
+        }
+        let slot = HomeGrantSlot {
+            sessions: self.clone(),
+            user_id,
+        };
+        let path = rast_home.display().to_string();
+        tokio::spawn(async move {
+            let started = Instant::now();
+            let result = slot
+                .sessions
+                .helper
+                .call(
+                    "path_acl",
+                    json!({
+                        "path": path,
+                        "uid": uid,
+                        "perms": "rx",
+                        "recursive": true,
+                    }),
+                )
+                .await;
+            match result {
+                Ok(_) => tracing::debug!(
+                    user_id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "granted the app identity access to the RAST home"
+                ),
+                Err(error) => tracing::warn!(
+                    user_id,
+                    "could not grant the app identity access to the RAST home: {error}"
+                ),
+            }
+            drop(slot);
+        });
+    }
+
     async fn start_run(
         self: &Arc<Self>,
         session: &Arc<NativeSession>,
@@ -1214,7 +1289,9 @@ impl NativeSessions {
         // per-app profile; it returns the profile HOME the app must use.
         let identity_home = identity.home.display().to_string();
         let profile_home = profile_root.join("home");
-        let rast_home = self.config.homes_dir().join(&identity.username);
+        // The person's RAST home is named after their RAST username, never
+        // after the Linux account name `rast-u<id>` (`identity.username`).
+        let rast_home = crate::users::home_dir_by_id(&self.db, &self.config, user_id).await?;
         // The helper only accepts an existing RAST home; create the person's
         // home folder when it has none yet (the server owns the homes root).
         if !rast_home.is_dir() {
@@ -1298,24 +1375,7 @@ impl NativeSessions {
             );
         }
         if rast_home.is_dir() {
-            if let Err(error) = self
-                .helper
-                .call(
-                    "path_acl",
-                    json!({
-                        "path": rast_home.display().to_string(),
-                        "uid": identity.uid,
-                        "perms": "rx",
-                        "recursive": true,
-                    }),
-                )
-                .await
-            {
-                tracing::warn!(
-                    user_id,
-                    "could not grant the app identity access to the RAST home: {error}"
-                );
-            }
+            self.spawn_home_grant(user_id, identity.uid, &rast_home);
         }
 
         // The helper's cwd allow-list covers the managed app trees, not the
@@ -2398,6 +2458,8 @@ mod tests {
         stale_xauthority: StdMutex<bool>,
         upstreams: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
         port: StdMutex<Option<u16>>,
+        /// When set, `path_acl` waits for a permit (a slow home grant).
+        acl_gate: StdMutex<Option<Arc<tokio::sync::Semaphore>>>,
         /// Fake identity homes and profile trees; removed with the helper.
         scratch: Scratch,
     }
@@ -2507,7 +2569,14 @@ mod tests {
                         "created": false,
                     }))
                 }
-                "path_mkdir" | "path_acl" | "path_symlink" => Ok(json!({"ok": true})),
+                "path_acl" => {
+                    let gate = self.acl_gate.lock().unwrap().clone();
+                    if let Some(gate) = gate {
+                        gate.acquire().await.unwrap().forget();
+                    }
+                    Ok(json!({"ok": true}))
+                }
+                "path_mkdir" | "path_symlink" => Ok(json!({"ok": true})),
                 "profile_prepare" => {
                     let app_id = params["appId"].as_str().unwrap_or_default();
                     let user_id = params["userId"].as_i64().unwrap_or(0);
@@ -2672,6 +2741,17 @@ mod tests {
         (dir, helper, sessions, config)
     }
 
+    /// Wait until every background home grant has ended.
+    async fn wait_for_home_grants(sessions: &NativeSessions) {
+        for _ in 0..500 {
+            if sessions.home_grants().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("a home grant is still running");
+    }
+
     fn launch_request(app_id: &str) -> LaunchRequest {
         LaunchRequest {
             app_id: app_id.into(),
@@ -2815,6 +2895,130 @@ mod tests {
         assert_eq!(pulse_mkdir.1["uid"], 200_001);
         assert_eq!(pulse_mkdir.1["gid"], 200_001);
         assert_eq!(pulse_mkdir.1["mode"], 0o700);
+    }
+
+    /// Regression: `start_run` built the RAST home from the Linux account name
+    /// (`<homes>/rast-u<id>`), so it linked and ACL-granted an empty folder of
+    /// its own, or the home of a RAST user who happened to be called like the
+    /// identity, instead of the person's own home.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launch_uses_the_rast_username_for_the_home_not_the_identity_name() {
+        let (dir, db) = test_db().await;
+        // A legacy account (created before such names were refused) whose
+        // username is the Linux account name of user 2.
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (3, 'rast-u2', 'x', 'user', 1, 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let file = crate::config::FileConfig {
+            data_dir: Some(dir.path().join("data")),
+            storage_dir: Some(dir.path().join("storage")),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        let homes = config.homes_dir();
+        std::fs::create_dir_all(homes.join("rast-u2")).unwrap();
+        std::fs::write(homes.join("rast-u2/secret.txt"), b"not for user 2").unwrap();
+        let helper = Arc::new(FakeHelper::default());
+        let sessions =
+            NativeSessions::with_helper(config.clone(), db, helper.clone(), EventBus::new());
+
+        sessions
+            .launch(&test_user(2), launch_request("one"))
+            .await
+            .unwrap();
+        wait_for_home_grants(&sessions).await;
+
+        let bob_home = homes.join("bob").display().to_string();
+        let calls = helper.calls();
+        let (_, prepare) = calls
+            .iter()
+            .find(|(name, _)| name == "profile_prepare")
+            .unwrap();
+        assert_eq!(prepare["rastHome"], bob_home);
+        let (_, link) = calls
+            .iter()
+            .find(|(name, _)| name == "path_symlink")
+            .unwrap();
+        assert_eq!(link["target"], bob_home);
+        let (_, acl) = calls.iter().find(|(name, _)| name == "path_acl").unwrap();
+        assert_eq!(acl["path"], bob_home);
+        assert_eq!(acl["uid"], 200_002);
+        for (name, params) in &calls {
+            assert!(
+                !params.to_string().contains("homes/rast-u"),
+                "{name} reached an identity-named home: {params}"
+            );
+        }
+        // The person's home was created; no folder named after the identity.
+        let mut names: Vec<String> = std::fs::read_dir(&homes)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["bob", "rast-u2"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launches_do_not_wait_for_the_home_grant_and_run_one_grant_per_user() {
+        let (dir, db) = test_db().await;
+        let file = crate::config::FileConfig {
+            data_dir: Some(dir.path().join("data")),
+            storage_dir: Some(dir.path().join("storage")),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        let helper = Arc::new(FakeHelper::default());
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        *helper.acl_gate.lock().unwrap() = Some(gate.clone());
+        let sessions = NativeSessions::with_helper(config, db, helper.clone(), EventBus::new());
+        let launch = |user: i64, app: &'static str| {
+            let sessions = sessions.clone();
+            async move {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    sessions.launch(&test_user(user), launch_request(app)),
+                )
+                .await
+                .expect("the launch waited for the home grant")
+                .unwrap()
+            }
+        };
+
+        // The grant blocks, yet both launches of user 1 return, and the
+        // second one starts no grant of its own.
+        launch(1, "one").await;
+        launch(1, "two").await;
+        assert_eq!(helper.call_count("app_start"), 2);
+        assert_eq!(helper.call_count("path_acl"), 1);
+        assert!(sessions.home_grants().contains(&1));
+
+        // Another person gets a grant of their own.
+        launch(2, "one").await;
+        assert_eq!(helper.call_count("path_acl"), 2);
+
+        // Once the grants end, the next launch grants again (files moved into
+        // the home since then get read access too).
+        gate.add_permits(2);
+        wait_for_home_grants(&sessions).await;
+        launch(1, "code").await;
+        assert_eq!(helper.call_count("path_acl"), 3);
+        gate.add_permits(1);
+        wait_for_home_grants(&sessions).await;
+        let alice_home = dir.path().join("storage/homes/alice").display().to_string();
+        let grants: Vec<Value> = helper
+            .calls()
+            .into_iter()
+            .filter(|(name, _)| name == "path_acl")
+            .map(|(_, params)| params)
+            .collect();
+        assert_eq!(grants[0]["path"], alice_home);
+        assert_eq!(grants[0]["recursive"], true);
+        assert_eq!(grants[0]["perms"], "rx");
+        assert_eq!(grants[2]["path"], alice_home);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
