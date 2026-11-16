@@ -38,6 +38,14 @@ this file by `scripts/changelog-section.sh`.
     bin and the usage view answer `503` for such accounts until the recycle
     bin moves to XDG Trash. Legacy accounts are unchanged.
 
+- **File Station: "Show hidden files".** A new toolbar button next to the
+  list and grid view buttons shows or hides files and folders whose names
+  start with a dot. They are hidden by default (a one-HOME HOME holds
+  `~/.config`, `~/.cache` and `~/.local`), and the choice is remembered in
+  the browser. The folder picker always hides them. The API gained an
+  optional `hidden=false` parameter on `GET /api/files` and
+  `GET /api/files/search`; without it responses are unchanged.
+
 ### Security
 
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in

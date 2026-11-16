@@ -399,6 +399,8 @@ struct ListQuery {
     q: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// `false` leaves out dot files.
+    hidden: Option<bool>,
 }
 
 fn page_params(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
@@ -449,7 +451,9 @@ async fn list(
     let resolved = space.resolve(&path, Access::Read)?;
     let sort = query.sort.as_deref().unwrap_or("name");
     let order = query.order.as_deref().unwrap_or("asc");
-    let mut entries = ops::read_entries(&resolved, query.q.as_deref(), sort, order).await?;
+    let show_hidden = query.hidden.unwrap_or(true);
+    let mut entries =
+        ops::read_entries(&resolved, query.q.as_deref(), sort, order, show_hidden).await?;
     for entry in &mut entries {
         entry.writable = writable(&resolved.physical.join(&entry.name));
     }
@@ -516,7 +520,15 @@ async fn search(
     let base = agent
         .space
         .resolve(query.path.as_deref().unwrap_or("/"), Access::Read)?;
-    let mut found = ops::search_in(&base, q, query.kind.as_deref(), page, per_page).await?;
+    let mut found = ops::search_in(
+        &base,
+        q,
+        query.kind.as_deref(),
+        query.hidden.unwrap_or(true),
+        page,
+        per_page,
+    )
+    .await?;
     for entry in &mut found.items {
         if let Ok(logical) = LogicalPath::parse(&entry.path) {
             if let Ok(physical) =
@@ -1054,6 +1066,37 @@ mod tests {
         // There is no route for deleting (the recycle bin comes later).
         let (status, _) = fx.post("/api/files/delete", json!({"paths": ["/x"]})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn dot_files_are_left_out_only_when_asked() {
+        let fx = start(None).await;
+        std::fs::write(fx.home.join(".bashrc"), b"x").unwrap();
+        std::fs::create_dir_all(fx.home.join(".cache/app")).unwrap();
+        std::fs::write(fx.home.join(".cache/app/report.txt"), b"x").unwrap();
+        std::fs::write(fx.home.join("report.txt"), b"x").unwrap();
+        let names = |listing: &Value| -> Vec<String> {
+            listing["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["name"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let (status, all) = fx.get("/api/files?path=/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(names(&all), [".bashrc", ".cache", "report.txt"]);
+        let (_, visible) = fx.get("/api/files?path=/&hidden=false").await;
+        assert_eq!(names(&visible), ["report.txt"]);
+
+        let (_, found) = fx.get("/api/files/search?path=/&q=report").await;
+        assert_eq!(found["total"], 2);
+        let (_, found) = fx
+            .get("/api/files/search?path=/&q=report&hidden=false")
+            .await;
+        assert_eq!(found["total"], 1);
+        assert_eq!(found["items"][0]["path"], "/report.txt");
     }
 
     #[tokio::test]

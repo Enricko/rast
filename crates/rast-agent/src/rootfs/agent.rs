@@ -255,11 +255,14 @@ struct ListQuery {
     q: Option<String>,
     #[serde(rename = "type")]
     kind: Option<String>,
+    /// `false` leaves out names that start with a dot.
+    hidden: Option<bool>,
 }
 
 async fn list(Query(query): Query<ListQuery>) -> AppResult<Json<ListingDto>> {
     let dir = physical(query.path.as_deref().unwrap_or(super::PREFIX))?;
     let (page, per_page) = page_params(query.page, query.per_page);
+    let show_hidden = query.hidden.unwrap_or(true);
     blocking(move || {
         require_dir(&dir)?;
         let needle = query
@@ -275,7 +278,7 @@ async fn list(Query(query): Query<ListQuery>) -> AppResult<Json<ListingDto>> {
             let Some(name) = item.file_name().to_str().map(str::to_string) else {
                 continue;
             };
-            if name.starts_with(TEMP_PREFIX) {
+            if name.starts_with(TEMP_PREFIX) || (!show_hidden && name.starts_with('.')) {
                 continue;
             }
             if needle
@@ -343,6 +346,7 @@ async fn search(Query(query): Query<ListQuery>) -> AppResult<Json<SearchDto>> {
         .map(str::to_lowercase)
         .ok_or_else(|| AppError::bad_request("q is required"))?;
     let kind = query.kind.map(|kind| kind.trim().to_ascii_lowercase());
+    let show_hidden = query.hidden.unwrap_or(true);
     blocking(move || {
         require_dir(&base)?;
         let started = Instant::now();
@@ -352,9 +356,14 @@ async fn search(Query(query): Query<ListQuery>) -> AppResult<Json<SearchDto>> {
             .follow_links(false)
             .into_iter()
             .filter_entry(|item| {
-                !SEARCH_SKIP
-                    .iter()
-                    .any(|skip| item.path() == Path::new(skip) && base != Path::new(skip))
+                let dotted = item
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with('.'));
+                (show_hidden || !dotted)
+                    && !SEARCH_SKIP
+                        .iter()
+                        .any(|skip| item.path() == Path::new(skip) && base != Path::new(skip))
             });
         let mut scanned = 0usize;
         let mut truncated = false;
@@ -813,6 +822,40 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
         let mode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn dot_files_are_left_out_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/needle"), b"x").unwrap();
+        std::fs::write(dir.path().join(".env"), b"x").unwrap();
+        std::fs::write(dir.path().join("needle"), b"x").unwrap();
+        let query = |hidden: Option<bool>, q: Option<&str>| ListQuery {
+            path: Some(super::super::logical(dir.path())),
+            page: None,
+            per_page: None,
+            sort: None,
+            order: None,
+            q: q.map(str::to_string),
+            kind: None,
+            hidden,
+        };
+        let names = |listing: &ListingDto| -> Vec<String> {
+            listing.items.iter().map(|item| item.name.clone()).collect()
+        };
+
+        let Json(all) = list(Query(query(None, None))).await.unwrap();
+        assert_eq!(names(&all), [".git", ".env", "needle"]);
+        let Json(visible) = list(Query(query(Some(false), None))).await.unwrap();
+        assert_eq!(names(&visible), ["needle"]);
+
+        let Json(found) = search(Query(query(None, Some("needle")))).await.unwrap();
+        assert_eq!(found.total, 2);
+        let Json(found) = search(Query(query(Some(false), Some("needle"))))
+            .await
+            .unwrap();
+        assert_eq!(found.total, 1);
     }
 
     #[test]

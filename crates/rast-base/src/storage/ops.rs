@@ -265,11 +265,12 @@ pub async fn list(
     q: Option<&str>,
     sort: &str,
     order: &str,
+    show_hidden: bool,
     page: i64,
     per_page: i64,
 ) -> AppResult<ListingDto> {
     let resolved = storage.resolve(pool, user, path, Access::Read).await?;
-    let entries = read_entries(&resolved, q, sort, order).await?;
+    let entries = read_entries(&resolved, q, sort, order, show_hidden).await?;
     let (items, page, per_page, total) = paginate(entries, page, per_page);
     let quota = quota::info(pool, user.id).await?;
     Ok(ListingDto {
@@ -289,11 +290,13 @@ pub async fn list(
 
 /// Every listable entry of a resolved directory (no symlinks, no temporary
 /// files, no names the API cannot address), filtered by `q` and sorted.
+/// `show_hidden` false also leaves out names that start with a dot.
 pub async fn read_entries(
     resolved: &ResolvedPath,
     q: Option<&str>,
     sort: &str,
     order: &str,
+    show_hidden: bool,
 ) -> AppResult<Vec<EntryDto>> {
     if !resolved.physical.is_dir() {
         return Err(AppError::bad_request("path is not a directory"));
@@ -306,6 +309,9 @@ pub async fn read_entries(
             continue; // non-UTF-8 names are not addressable over the API
         };
         if name.starts_with(TEMP_PREFIX) || safe_path::validate_component(name).is_err() {
+            continue;
+        }
+        if !show_hidden && name.starts_with('.') {
             continue;
         }
         let file_type = match entry.file_type().await {
@@ -501,12 +507,13 @@ pub async fn search(
     path: &str,
     query: &str,
     kind: Option<&str>,
+    show_hidden: bool,
     page: i64,
     per_page: i64,
 ) -> AppResult<SearchDto> {
     validate_search_query(query)?;
     let base = storage.resolve(pool, user, path, Access::Read).await?;
-    search_in(&base, query, kind, page, per_page).await
+    search_in(&base, query, kind, show_hidden, page, per_page).await
 }
 
 fn validate_search_query(query: &str) -> AppResult<&str> {
@@ -521,11 +528,13 @@ fn validate_search_query(query: &str) -> AppResult<&str> {
 }
 
 /// Search below a resolved directory (bounded depth, results and entries;
-/// symlinks are never followed).
+/// symlinks are never followed). `show_hidden` false skips names that start
+/// with a dot, and everything below such folders.
 pub async fn search_in(
     base: &ResolvedPath,
     query: &str,
     kind: Option<&str>,
+    show_hidden: bool,
     page: i64,
     per_page: i64,
 ) -> AppResult<SearchDto> {
@@ -546,7 +555,14 @@ pub async fn search_in(
                 .max_depth(MAX_SEARCH_DEPTH)
                 .follow_links(false)
                 .into_iter()
-                .filter_entry(|entry| !entry.file_type().is_symlink());
+                .filter_entry(move |entry| {
+                    let dotted = entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with('.'));
+                    !entry.file_type().is_symlink()
+                        && (show_hidden || entry.depth() == 0 || !dotted)
+                });
             for entry in walker {
                 let Ok(entry) = entry else { continue };
                 if entry.depth() == 0 {
@@ -969,6 +985,7 @@ mod tests {
             None,
             "name",
             "asc",
+            true,
             1,
             DEFAULT_PAGE_SIZE,
         )
@@ -1015,6 +1032,7 @@ mod tests {
             None,
             "name",
             "asc",
+            true,
             1,
             2,
         )
@@ -1032,6 +1050,7 @@ mod tests {
             None,
             "name",
             "asc",
+            true,
             2,
             2,
         )
@@ -1046,6 +1065,7 @@ mod tests {
             None,
             "name",
             "asc",
+            true,
             3,
             2,
         )
@@ -1063,6 +1083,7 @@ mod tests {
             None,
             "size",
             "desc",
+            true,
             1,
             10,
         )
@@ -1077,6 +1098,7 @@ mod tests {
             Some("B."),
             "name",
             "asc",
+            true,
             1,
             10,
         )
@@ -1135,6 +1157,7 @@ mod tests {
             "/",
             "report",
             None,
+            true,
             1,
             10,
         )
@@ -1150,6 +1173,7 @@ mod tests {
             "/",
             "report",
             Some("documents"),
+            true,
             1,
             10,
         )
@@ -1168,6 +1192,7 @@ mod tests {
             "/",
             "photo",
             Some("file"),
+            true,
             1,
             10,
         )
@@ -1182,14 +1207,134 @@ mod tests {
             "/",
             "b",
             Some("dir"),
+            true,
             1,
             10,
         )
         .await
         .unwrap();
         assert!(dirs.items.iter().all(|item| item.kind == "dir"));
-        let empty = search(&ctx.pool, &ctx.storage, &ctx.user, "/", "  ", None, 1, 10).await;
+        let empty = search(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/",
+            "  ",
+            None,
+            true,
+            1,
+            10,
+        )
+        .await;
         assert!(empty.is_err());
+    }
+
+    #[tokio::test]
+    async fn dot_files_are_left_out_only_when_asked() {
+        let ctx = setup().await;
+        let home = ctx.storage.home_dir("alice");
+        std::fs::write(home.join(".profile"), b"x").unwrap();
+        std::fs::create_dir_all(home.join(".config/app")).unwrap();
+        std::fs::write(home.join(".config/app/notes.txt"), b"x").unwrap();
+        std::fs::write(home.join("notes.txt"), b"x").unwrap();
+
+        let names = |listing: &ListingDto| -> Vec<String> {
+            listing.items.iter().map(|item| item.name.clone()).collect()
+        };
+        let all = list(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/",
+            None,
+            "name",
+            "asc",
+            true,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(names(&all), [".config", ".profile", "notes.txt"]);
+        let visible = list(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/",
+            None,
+            "name",
+            "asc",
+            false,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(names(&visible), ["notes.txt"]);
+        assert_eq!(visible.total, 1);
+        // Inside a dot folder its own entries are shown.
+        let inside = list(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/.config",
+            None,
+            "name",
+            "asc",
+            false,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(names(&inside), ["app"]);
+
+        let found = search(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/",
+            "notes",
+            None,
+            true,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        let mut paths: Vec<String> = found.items.iter().map(|item| item.path.clone()).collect();
+        paths.sort();
+        assert_eq!(paths, ["/.config/app/notes.txt", "/notes.txt"]);
+        let found = search(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/",
+            "notes",
+            None,
+            false,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        let paths: Vec<String> = found.items.iter().map(|item| item.path.clone()).collect();
+        assert_eq!(paths, ["/notes.txt"]);
+        // A search that starts in a dot folder still searches it.
+        let found = search(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            "/.config",
+            "notes",
+            None,
+            false,
+            1,
+            50,
+        )
+        .await
+        .unwrap();
+        assert_eq!(found.total, 1);
     }
 
     #[tokio::test]

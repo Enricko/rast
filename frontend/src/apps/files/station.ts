@@ -36,11 +36,14 @@ import {
   ACCESS_CHANGED_ITEM_MESSAGE,
   ACCESS_CHANGED_MESSAGE,
   friendlyFileError,
+  hiddenParam,
+  HIDDEN_KEY,
   isAccessError,
   joinPath,
   listingItems,
   parentPath,
   previewKind,
+  readHiddenPreference,
   sortEntries,
   isSystemPath,
   systemPathLabel,
@@ -99,6 +102,7 @@ export class FileStation {
   private readonly searchInput: HTMLInputElement;
   private readonly listViewButton: HTMLButtonElement;
   private readonly gridViewButton: HTMLButtonElement;
+  private readonly hiddenButton: HTMLButtonElement;
   private readonly fileInput: HTMLInputElement;
   private readonly rootsNav: HTMLElement;
   private readonly trashNav: HTMLButtonElement;
@@ -133,6 +137,8 @@ export class FileStation {
   private perPage = PER_PAGE_DEFAULT;
   private total = 0;
   private view: ViewMode;
+  /** "Show hidden files": dot files are left out of listings unless on. */
+  private showHidden: boolean;
   private selection = new Set<string>();
   private anchorPath: string | null = null;
   private rowEls = new Map<string, HTMLElement>();
@@ -177,6 +183,7 @@ export class FileStation {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
     this.view = readViewPreference();
+    this.showHidden = readHiddenPreference(safeLocalStorage());
     this.jobBar = progressBar();
     this.realtime = getRealtime(ctx.events);
     this.notice = new NoticeBar(this.lc);
@@ -263,6 +270,7 @@ export class FileStation {
       void this.loadListing();
     });
 
+    this.hiddenButton = viewButton("eyeOff", "Show hidden files", () => this.toggleHidden());
     this.listViewButton = viewButton("list", "List view", () => this.setView("list"));
     this.gridViewButton = viewButton("grid", "Grid view", () => this.setView("grid"));
 
@@ -274,6 +282,7 @@ export class FileStation {
       this.trashGroup,
       h("div", { class: "app-toolbar-spacer" }),
       this.searchInput,
+      this.hiddenButton,
       this.listViewButton,
       this.gridViewButton,
     );
@@ -367,6 +376,7 @@ export class FileStation {
     this.registerInteractions();
     this.subscribeRealtime();
     this.setView(this.view, false);
+    this.renderHiddenButton();
     this.renderChrome();
   }
 
@@ -830,6 +840,7 @@ export class FileStation {
           sort: this.sort,
           order: this.order,
           q: this.query || undefined,
+          hidden: hiddenParam(this.showHidden),
         },
         { signal: request.signal },
       );
@@ -1720,6 +1731,30 @@ export class FileStation {
     }
   }
 
+  private toggleHidden(): void {
+    this.showHidden = !this.showHidden;
+    try {
+      window.localStorage.setItem(HIDDEN_KEY, this.showHidden ? "1" : "0");
+    } catch {
+      /* storage disabled */
+    }
+    this.renderHiddenButton();
+    if (this.section !== "files") return;
+    this.page = 1;
+    this.selection.clear();
+    void this.loadListing();
+  }
+
+  private renderHiddenButton(): void {
+    const label = this.showHidden ? "Hide hidden files" : "Show hidden files";
+    clear(this.hiddenButton);
+    this.hiddenButton.appendChild(iconSvg(this.showHidden ? "eye" : "eyeOff", 17));
+    this.hiddenButton.title = label;
+    this.hiddenButton.setAttribute("aria-label", label);
+    this.hiddenButton.setAttribute("aria-pressed", String(this.showHidden));
+    this.hiddenButton.classList.toggle("is-active", this.showHidden);
+  }
+
   private setView(view: ViewMode, rerender = true): void {
     this.view = view;
     try {
@@ -2140,6 +2175,14 @@ function hasFileDrag(event: DragEvent): boolean {
     if (types[i] === "Files") return true;
   }
   return false;
+}
+
+function safeLocalStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null; // storage disabled
+  }
 }
 
 function readViewPreference(): ViewMode {

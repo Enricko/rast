@@ -144,7 +144,7 @@ No account is switched to one-HOME mode by this version.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |
+| GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=&hidden=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}`; `hidden=false` leaves out names that start with a dot (default: all names) |
 | GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]`; super administrators also get `{name:"Root file system", path:"/@root", kind:"system"}` |
 | GET | `/api/files/stat?path=` | single entry |
 | POST | `/api/files/mkdir` | `{path}` (parent + name) |
@@ -160,7 +160,7 @@ No account is switched to one-HOME mode by this version.
 | POST | `/api/files/copy` | `{paths:[], destDir}` → `{jobId}` |
 | POST | `/api/files/move` | `{paths:[], destDir}` → `{jobId}` |
 | POST | `/api/files/delete` | `{paths:[]}` → moves to recycle bin, `{jobId}` |
-| GET | `/api/files/search?q=&path=&type=&page=` | recursive search (bounded) |
+| GET | `/api/files/search?q=&path=&type=&page=&hidden=` | recursive search (bounded); `hidden=false` skips dot files and does not descend into dot folders |
 | GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}}` |
 | GET | `/api/files/trash?page=` | `{items:[{id, originalPath, sizeBytes, kind, deletedAt}], total}` |
 | POST | `/api/files/trash/restore` | `{ids:[]}` |

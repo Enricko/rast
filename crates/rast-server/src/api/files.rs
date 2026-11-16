@@ -77,6 +77,8 @@ pub struct ListQuery {
     pub sort: Option<String>,
     pub order: Option<String>,
     pub q: Option<String>,
+    /// `false` leaves out dot files (File Station's default view).
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +95,8 @@ pub struct SearchQuery {
     pub page: Option<i64>,
     #[serde(rename = "perPage")]
     pub per_page: Option<i64>,
+    /// `false` skips dot files and dot folders.
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +282,7 @@ pub async fn list_files(
         query.q.as_deref(),
         query.sort.as_deref().unwrap_or("name"),
         query.order.as_deref().unwrap_or("asc"),
+        query.hidden.unwrap_or(true),
         page,
         per_page,
     )
@@ -787,6 +792,7 @@ pub async fn search(
             path,
             &q,
             query.kind.as_deref(),
+            query.hidden.unwrap_or(true),
             page,
             per_page,
         )
