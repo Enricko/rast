@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
 
-use super::{QUOTA_HEADER, SHARES_HEADER, TOKEN_HEADER};
+use super::{QUOTA_HEADER, SHARES_HEADER, TOKEN_HEADER, TOKEN_REFUSED};
 
 /// Largest JSON reply read completely from an agent.
 pub const MAX_JSON_REPLY: usize = 4 * 1024 * 1024;
@@ -133,6 +133,13 @@ pub fn error_message(body: &Value) -> Option<String> {
     body.pointer("/error/message")
         .and_then(Value::as_str)
         .map(bounded)
+}
+
+/// Whether an agent's JSON reply says that it refused the token (its
+/// socket unit was restarted with a new one).
+pub fn token_refused(status: StatusCode, body: &Value) -> bool {
+    status == StatusCode::FORBIDDEN
+        && body.pointer("/error/message").and_then(Value::as_str) == Some(TOKEN_REFUSED)
 }
 
 /// Rebuild an agent's error for the caller of a background job, with the

@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderValue, Method, Response};
+use axum::body::{Body, Bytes, HttpBody};
+use axum::http::{header, HeaderMap, HeaderValue, Method, Response, StatusCode};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
@@ -173,14 +173,24 @@ impl HomeFs {
             .clone()
     }
 
-    async fn connect(&self, user_id: i64) -> AppResult<(tokio::net::UnixStream, String)> {
+    /// Connect to the agent of `user_id`, starting it through the helper
+    /// when it is not known or not listening. `refused` is a token that the
+    /// agent refused: it is not used again, the helper is asked for the
+    /// current one (unless another request already did).
+    async fn connect(
+        &self,
+        user_id: i64,
+        refused: Option<&str>,
+    ) -> AppResult<(tokio::net::UnixStream, String)> {
         let slot = self.slot(user_id);
         let mut agent = slot.lock().await;
         if let Some((socket, token)) = agent.as_ref() {
-            if let Ok(stream) = tokio::net::UnixStream::connect(socket).await {
-                let token = token.clone();
-                self.ensure_watch(user_id, socket.clone(), token.clone());
-                return Ok((stream, token));
+            if Some(token.as_str()) != refused {
+                if let Ok(stream) = tokio::net::UnixStream::connect(socket).await {
+                    let token = token.clone();
+                    self.ensure_watch(user_id, socket.clone(), token.clone());
+                    return Ok((stream, token));
+                }
             }
         }
         *agent = None;
@@ -210,6 +220,8 @@ impl HomeFs {
     }
 
     /// Send one request to the user's agent and stream its response back.
+    /// A request without a body is sent again once when the agent refuses
+    /// the token; one with a streamed body cannot be, and gets 503.
     pub async fn send(
         &self,
         user_id: i64,
@@ -218,8 +230,63 @@ impl HomeFs {
         headers: &HeaderMap,
         body: Body,
     ) -> AppResult<Response<Body>> {
-        let (stream, token) = self.connect(user_id).await?;
-        client::send(AGENT, stream, &token, method, path_and_query, headers, body).await
+        let replay = (body.size_hint().exact() == Some(0)).then(Bytes::new);
+        self.exchange(user_id, method, path_and_query, headers, body, replay)
+            .await
+    }
+
+    /// One request, and once more with `replay` as its body when the agent
+    /// refused the token: its socket unit was restarted (the agent exited
+    /// or was stopped), and the helper wrote a new token. Only a 403 reply
+    /// is read here (it is small); others stream through.
+    async fn exchange(
+        &self,
+        user_id: i64,
+        method: Method,
+        path_and_query: &str,
+        headers: &HeaderMap,
+        body: Body,
+        replay: Option<Bytes>,
+    ) -> AppResult<Response<Body>> {
+        let (stream, token) = self.connect(user_id, None).await?;
+        let response = client::send(
+            AGENT,
+            stream,
+            &token,
+            method.clone(),
+            path_and_query,
+            headers,
+            body,
+        )
+        .await?;
+        if response.status() != StatusCode::FORBIDDEN {
+            return Ok(response);
+        }
+        let (parts, body) = response.into_parts();
+        let bytes = axum::body::to_bytes(body, client::MAX_JSON_REPLY)
+            .await
+            .map_err(|error| AppError::unavailable(format!("{AGENT} reply: {error}")))?;
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        if !client::token_refused(parts.status, &value) {
+            return Ok(Response::from_parts(parts, Body::from(bytes)));
+        }
+        let (stream, token) = self.connect(user_id, Some(&token)).await?;
+        let Some(replay) = replay else {
+            drop(stream);
+            return Err(AppError::unavailable(
+                "your file agent was restarted; please try again",
+            ));
+        };
+        client::send(
+            AGENT,
+            stream,
+            &token,
+            method,
+            path_and_query,
+            headers,
+            Body::from(replay),
+        )
+        .await
     }
 
     /// A JSON request whose JSON reply is read completely. `headers` are
@@ -235,13 +302,15 @@ impl HomeFs {
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
+        let body = Bytes::from(body.to_string());
         let response = self
-            .send(
+            .exchange(
                 user_id,
                 Method::POST,
                 path,
                 &headers,
-                Body::from(body.to_string()),
+                Body::from(body.clone()),
+                Some(body),
             )
             .await?;
         let status = response.status();
@@ -491,12 +560,12 @@ mod tests {
         ));
         let slow = {
             let fs = fs.clone();
-            tokio::spawn(async move { fs.connect(1).await.map(|_| ()) })
+            tokio::spawn(async move { fs.connect(1, None).await.map(|_| ()) })
         };
         // Let user 1 take its lock and wait for the helper.
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!slow.is_finished());
-        let (_, token) = tokio::time::timeout(Duration::from_secs(5), fs.connect(2))
+        let (_, token) = tokio::time::timeout(Duration::from_secs(5), fs.connect(2, None))
             .await
             .expect("user 2 waited for user 1's agent start")
             .unwrap();
@@ -506,6 +575,179 @@ mod tests {
             .await
             .unwrap();
         slow.abort();
+    }
+
+    /// A helper that answers every `files_agent_start` with `socket` and
+    /// `token`, counting the calls.
+    fn counting_helper(
+        dir: &std::path::Path,
+        socket: PathBuf,
+        token: String,
+    ) -> (PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
+        let helper = dir.join("h.sock");
+        let listener = tokio::net::UnixListener::bind(&helper).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                let mut reader = tokio::io::BufReader::new(read);
+                if reader.read_line(&mut line).await.is_err() {
+                    continue;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+                let reply = json!({"id": request["id"], "ok": true, "data": {
+                    "unit": "rast-files-u1", "socket": socket, "token": token,
+                }});
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                let _ = write.write_all(&bytes).await;
+            }
+        });
+        (helper, calls)
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_is_read_again_from_the_helper_once() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let dir = crate::test_support::socket_tempdir();
+        let home = dir.path().join("homes/alice");
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        // The agent's socket unit was restarted: it has a new token.
+        let socket = dir.path().join("a.sock");
+        let current = "n".repeat(64);
+        tokio::spawn(super::super::agent::run(super::super::agent::RunOptions {
+            home: home.clone(),
+            shared_root: shared,
+            listen: super::super::agent::Listen::Path(socket.clone()),
+            token: current.clone(),
+            peer_uid: None,
+            idle: Duration::from_secs(600),
+            stay_while_user_runs: false,
+        }));
+        for _ in 0..100 {
+            if socket.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (helper, calls) = counting_helper(dir.path(), socket.clone(), current);
+        let fs = HomeFs::new(
+            true,
+            NativeClient::new(helper),
+            dir.path().join("homes"),
+            EventBus::new(),
+        );
+        let stale = "o".repeat(64);
+
+        // A JSON call is sent again with the new token.
+        fs.set_agent(1, socket.clone(), stale.clone()).await;
+        let entry = fs
+            .call(
+                1,
+                "/api/files/mkdir",
+                &json!({"path": "/docs"}),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(entry["path"], "/docs");
+        assert!(home.join("docs").is_dir());
+        assert_eq!(calls.load(SeqCst), 1);
+
+        // So is a request without a body.
+        fs.set_agent(1, socket.clone(), stale.clone()).await;
+        let response = fs
+            .send(
+                1,
+                Method::GET,
+                "/api/files?path=/",
+                &HeaderMap::new(),
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(SeqCst), 2);
+
+        // A streamed body cannot be sent again: 503, and the next request
+        // has the new token without asking the helper.
+        fs.set_agent(1, socket.clone(), stale.clone()).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from(3));
+        let body = Body::from_stream(futures::stream::iter([Ok::<_, std::io::Error>(
+            Bytes::from_static(b"abc"),
+        )]));
+        let error = fs
+            .send(
+                1,
+                Method::POST,
+                "/api/files/upload?dir=/&name=a.txt",
+                &headers,
+                body,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Unavailable(_)), "{error:?}");
+        assert!(!home.join("a.txt").exists());
+        assert_eq!(calls.load(SeqCst), 3);
+        let response = fs
+            .send(
+                1,
+                Method::GET,
+                "/api/files?path=/",
+                &HeaderMap::new(),
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(calls.load(SeqCst), 3);
+
+        // Other refusals pass through untouched, without asking the helper.
+        std::os::unix::fs::symlink("/", home.join("up")).unwrap();
+        let response = fs
+            .send(
+                1,
+                Method::GET,
+                "/api/files?path=/up",
+                &HeaderMap::new(),
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let value = client::read_json(AGENT, response).await.unwrap();
+        assert_eq!(
+            value["error"]["message"],
+            "symbolic links are not supported"
+        );
+        // A token the helper still hands out but the agent refuses is
+        // tried once, not in a loop.
+        let (lying, lies) = counting_helper(&dir.path().join("homes"), socket, stale);
+        let liar = HomeFs::new(
+            true,
+            NativeClient::new(lying),
+            dir.path().join("homes"),
+            EventBus::new(),
+        );
+        let error = liar
+            .call(
+                1,
+                "/api/files/mkdir",
+                &json!({"path": "/x"}),
+                HeaderMap::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+        assert_eq!(lies.load(SeqCst), 2);
+        assert!(!home.join("x").exists());
     }
 
     #[test]

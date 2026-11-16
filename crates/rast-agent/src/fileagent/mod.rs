@@ -41,6 +41,8 @@ pub const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
 pub const UPLOAD_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Header carrying the agent token.
 pub const TOKEN_HEADER: &str = "x-rast-rootfs-token";
+/// The message of the 403 an agent answers to a wrong token.
+pub const TOKEN_REFUSED: &str = "invalid agent token";
 /// Response header with the size of the file an upload replaced, so the
 /// server can account the quota of agent-served homes. Never sent on to the
 /// browser.
@@ -242,7 +244,7 @@ pub async fn guard<S: UploadSpace>(
         .map(|value| value.as_bytes())
         .unwrap_or_default();
     if !bool::from(presented.ct_eq(agent.token.as_bytes())) {
-        return AppError::Forbidden("invalid agent token").into_response();
+        return AppError::Forbidden(TOKEN_REFUSED).into_response();
     }
     if request.uri().path() == WATCH_ROUTE {
         return next.run(request).await;
