@@ -264,9 +264,12 @@ Update it at the end of every session.
     apps (into `docs/NATIVE-LINUX-APPS.md` in task 1.3).
   - D7: accepted for now; task 1.3 evaluates a per-user deny ACL entry on the
     share's container instead of a forced restart.
-  - D13: fixed on 0.18.x (0.18.3, branch `fix/native-home-username`, PR to
-    `main`); the maintainer removes the stray `homes/rast-u*` folders on
-    production by hand after the fix is installed.
+  - D13: fixed and released as 0.18.3 (2026-11-16, PR #2, merged into
+    `Remake`); the maintainer removes the stray `homes/rast-u*` folders on
+    production by hand after the fix is installed. 0.18.3 also runs the
+    recursive home grant in the background (at most one per user, helper
+    limit 13 s) and adds a default ACL entry `d:u:rast-u<id>:rx` to every
+    folder in the home.
   - D2, D4, D5, D8–D12, D14 as recommended; the 20 GiB default stays and is
     reviewed in task 3.2.
   - `rast migrate shares` added to `CLAUDE.md` (Phase 1) and
@@ -283,6 +286,10 @@ Update it at the end of every session.
 - [ ] Task 1.3: shared folders as Linux groups
 - [ ] Task 1.4: XDG Trash and quota
 - [ ] Task 1.5: HOME migration command
+  - `rast migrate home` must also remove the default ACL entries
+    (`d:u:rast-u<id>`) that 0.18.3 adds to every folder in the person's home,
+    together with the access entries `u:rast-u<id>:rx`, and `--rollback` must
+    restore both.
 - [ ] Task 1.6: Phase 1 security review
 - [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on the disposable instance
 
@@ -293,9 +300,9 @@ Update it at the end of every session.
 ## Next
 
 1. Task 1.2 (per-user file agent), following the accepted ADR 0005.
-2. 0.18.3 (D13): the maintainer reviews the PR from `fix/native-home-username`
-   to `main` and decides on merge, tag and release; then removes the stray
-   `homes/rast-u*` folders on production.
+2. 0.18.3 (D13) is released: the maintainer installs it on production, then
+   removes the stray `homes/rast-u*` folders (read-only listing script in
+   PR #2).
 3. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
    0.18.2, before the Phase 1 results are tested there.
    `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
