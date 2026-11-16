@@ -808,6 +808,23 @@ pub(crate) async fn run_command(
     run_command_in(binary, args, None, env, limit, max_stdout, max_stderr).await
 }
 
+/// Spawn `command`. Unit tests write fake binaries while other test threads
+/// fork, and a child forked in between holds the script's write descriptor
+/// until it execs, so a fresh script is briefly busy (`ETXTBSY`). Tests wait
+/// that out; production spawns once.
+async fn spawn(command: &mut Command) -> std::io::Result<tokio::process::Child> {
+    #[cfg(test)]
+    for _ in 0..100 {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            other => return other,
+        }
+    }
+    command.spawn()
+}
+
 /// [`run_command`] with an explicit working directory.
 pub(crate) async fn run_command_in(
     binary: &Path,
@@ -829,7 +846,7 @@ pub(crate) async fn run_command_in(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = spawn(&mut command).await.map_err(|error| {
         NativeError::unavailable(format!("cannot execute {}: {error}", binary.display()))
     })?;
     let stdout = child.stdout.take();
