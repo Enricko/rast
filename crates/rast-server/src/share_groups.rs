@@ -258,6 +258,9 @@ struct Known {
     /// The last error of each shared folder whose groups could not be set
     /// (a warning when it changes, then at debug level).
     share_errors: HashMap<String, String>,
+    /// Per shared folder, the accounts the helper left out because their
+    /// uid is not the identity's (logged when the list changes).
+    conflicts: HashMap<String, Value>,
     /// Shares whose groups exist.
     ensured: HashSet<String>,
     /// The `~/Shared` links last sent to each one-HOME agent.
@@ -411,6 +414,31 @@ pub struct RepairSummary {
     pub changed: u64,
 }
 
+/// Log the accounts that `share_members_set` left out of a shared folder
+/// because their uid is not the identity's (once per change).
+fn note_conflicts(known: &mut Known, share: &ShareInfo, reply: &Value) {
+    let conflicts = reply["conflicts"].clone();
+    let empty = conflicts.as_array().is_none_or(Vec::is_empty);
+    let before = known.conflicts.get(&share.id);
+    if empty {
+        if before.is_some() {
+            tracing::info!(share = %share.id, name = %share.name, "shared folder groups: no identity conflicts any more");
+            known.conflicts.remove(&share.id);
+        }
+        return;
+    }
+    if before != Some(&conflicts) {
+        tracing::warn!(
+            share = %share.id,
+            name = %share.name,
+            conflicts = %conflicts,
+            "shared folder groups: accounts named like a RAST identity have another uid and are \
+             left out of the groups; see `rast doctor`"
+        );
+        known.conflicts.insert(share.id.clone(), conflicts);
+    }
+}
+
 /// Ensure the groups of one shared folder (once) and set their members.
 async fn sync_share(
     native: &NativeClient,
@@ -457,6 +485,7 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
         match sync_share(native, known, share, &plan).await {
             Ok(reply) => {
                 known.share_errors.remove(&share.id);
+                note_conflicts(known, share, &reply);
                 changes.record(&reply);
             }
             Err((op, error)) if error.code == "unavailable" => {
@@ -482,6 +511,9 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     let current: HashSet<&str> = plan.shares.iter().map(|share| share.id.as_str()).collect();
     known
         .share_errors
+        .retain(|id, _| current.contains(id.as_str()));
+    known
+        .conflicts
         .retain(|id, _| current.contains(id.as_str()));
     // Changes the helper already made are acted on even when it went away
     // half way through.

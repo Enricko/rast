@@ -748,6 +748,12 @@ sudo systemctl start rast
   (Q-a) a share's limit is therefore **"filesystem, best effort"**: files
   with a foreign group escape it until the next pass, and a member can
   charge files outside the share to it (ADR 0005, D3).
+- **Identity conflicts.** An account named `rast-u<id>` whose uid is not
+  `linux_uid_base + <id>` (created by hand, or left from another
+  `linux_uid_base`) is never added to a shared folder group and is taken
+  out of the groups it is in; the other members are still updated. The
+  server logs it and `rast doctor` lists it. RAST never changes or removes
+  that account: find out where it comes from, then fix or remove it.
 - Running apps and terminals keep the groups they started with. A
   revocation restarts the person's apps and terminals after a 60-second
   warning; a grant is offered as *Restart session now*. When the person

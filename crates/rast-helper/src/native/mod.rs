@@ -1021,6 +1021,51 @@ pub struct DoctorReport {
     pub failures: usize,
 }
 
+/// `rast doctor`: accounts named like the identity of a RAST user
+/// (`rast-u<id>`) whose uid is not the one RAST derives. Such an account is
+/// never added to shared folder groups (and is taken out of them) until it
+/// is fixed. Needs no root: it only reads the account database.
+pub async fn doctor_identities(
+    cfg: &Config,
+    user_ids: &std::collections::BTreeSet<i64>,
+) -> DoctorReport {
+    doctor_identities_with(&NativeOptions::from_config(cfg), user_ids).await
+}
+
+pub(crate) async fn doctor_identities_with(
+    options: &NativeOptions,
+    user_ids: &std::collections::BTreeSet<i64>,
+) -> DoctorReport {
+    let mut report = DoctorReport::default();
+    match shares::identity_conflicts(options, user_ids).await {
+        Ok(conflicts) if conflicts.is_empty() => report.lines.push(format!(
+            "[    ] Linux identities ... ok ({} users checked)",
+            user_ids.len()
+        )),
+        Ok(conflicts) => {
+            for conflict in conflicts {
+                report.warnings += 1;
+                report.lines.push(format!(
+                    "[WARN] the account {} has uid {}, but RAST expects uid {} for user {}: it is \
+                     left out of every shared folder group (and taken out of them) until that \
+                     account is fixed; RAST never changes it",
+                    protocol::username_for(conflict.user_id),
+                    conflict.uid,
+                    conflict.expected_uid,
+                    conflict.user_id
+                ));
+            }
+        }
+        Err(error) => {
+            report.warnings += 1;
+            report
+                .lines
+                .push(format!("[WARN] cannot check the Linux identities: {error}"));
+        }
+    }
+    report
+}
+
 /// Build the `rast doctor` lines for the native helper. Never reports a
 /// *failure*: the native backend is optional, and a broken helper must not make
 /// the whole installation look unhealthy.

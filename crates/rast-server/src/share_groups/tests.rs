@@ -597,3 +597,46 @@ async fn a_shared_folder_the_helper_refuses_does_not_hold_up_the_others() {
         .unwrap_err();
     assert!(error.to_string().contains("share_group_ensure"), "{error}");
 }
+
+#[tokio::test]
+async fn identity_conflicts_are_remembered_until_they_are_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(test_config(dir.path())).await.unwrap();
+    seed(&state.db).await;
+    let socket = dir.path().join("h.sock");
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static CONFLICT: AtomicBool = AtomicBool::new(true);
+    let _calls = recording_helper_with(&socket, |request| {
+        let share = request["shareId"].as_str().unwrap_or_default();
+        let unchanged = json!({"added": [], "removed": []});
+        match request["op"].as_str() {
+            Some("share_members_set") => {
+                let conflicts = if share == SALES && CONFLICT.load(Ordering::SeqCst) {
+                    json!([{"userId": 3, "uid": 999, "expectedUid": 200_003}])
+                } else {
+                    json!([])
+                };
+                Some(json!({
+                    "shareId": share,
+                    "write": unchanged,
+                    "read": unchanged,
+                    "conflicts": conflicts,
+                }))
+            }
+            Some("share_session_groups") => Some(json!({"users": [], "groups": {}})),
+            _ => Some(json!({"applied": true})),
+        }
+    });
+    let native = native_for(dir.path(), socket);
+    let mut known = Known::default();
+    // A conflict is no failure: the pass is complete.
+    assert!(sync_once(&state, &native, &mut known).await.unwrap());
+    assert_eq!(
+        known.conflicts.get(SALES),
+        Some(&json!([{"userId": 3, "uid": 999, "expectedUid": 200_003}]))
+    );
+    assert!(!known.conflicts.contains_key(TEAM));
+    CONFLICT.store(false, Ordering::SeqCst);
+    assert!(sync_once(&state, &native, &mut known).await.unwrap());
+    assert!(known.conflicts.is_empty());
+}

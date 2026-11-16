@@ -416,6 +416,42 @@ async fn passwd_entries(
     Ok(out)
 }
 
+/// An account named like the identity of a RAST user (`rast-u<id>`) whose
+/// uid is not the one RAST derives for it: someone else's account, or a
+/// leftover of another `linux_uid_base`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityConflict {
+    pub user_id: i64,
+    pub uid: u32,
+    pub expected_uid: u32,
+}
+
+/// The accounts of `user_ids` (when they exist) whose uid is not the
+/// identity uid RAST derives. Users without an account are not conflicts.
+pub async fn identity_conflicts(
+    options: &NativeOptions,
+    user_ids: &BTreeSet<i64>,
+) -> Result<Vec<IdentityConflict>, NativeError> {
+    let names: Vec<String> = user_ids.iter().map(|id| username_for(*id)).collect();
+    let entries = passwd_entries(options, &names).await?;
+    let ctx = options.validation_context();
+    let mut out = Vec::new();
+    for id in user_ids {
+        let expected = identity_ids(&ctx, *id)?.uid;
+        if let Some(entry) = entries.get(&username_for(*id)) {
+            if entry.uid != expected {
+                out.push(IdentityConflict {
+                    user_id: *id,
+                    uid: entry.uid,
+                    expected_uid: expected,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// The RAST user id of an identity name (`rast-u<id>`).
 fn user_id_of(name: &str) -> Option<i64> {
     let digits = name.strip_prefix("rast-u")?;
@@ -446,7 +482,10 @@ pub(crate) async fn share_members_set(
 
     // Users without their Linux account yet cannot be members: they are
     // left out and reported, and added once the account exists. An account
-    // with another uid than RAST derives is a conflict.
+    // with another uid than RAST derives is never added (it is not the
+    // user's identity) and is reported as a conflict; the others are still
+    // set, and the conflicting account is taken out of the groups like any
+    // revoked member (less access is always safe).
     let names: Vec<String> = write
         .iter()
         .chain(&read)
@@ -454,29 +493,37 @@ pub(crate) async fn share_members_set(
         .collect();
     let entries = passwd_entries(options, &names).await?;
     let mut skipped = Vec::new();
+    let mut conflicts = Vec::new();
+    let ctx = options.validation_context();
     for id in write.iter().chain(&read) {
         let name = username_for(*id);
-        let expected = crate::native::protocol::identity_ids(&options.validation_context(), *id)?;
+        let expected = identity_ids(&ctx, *id)?;
         match entries.get(&name) {
             None => skipped.push(*id),
             Some(entry) if entry.uid != expected.uid => {
-                return Err(NativeError::identity_conflict(format!(
-                    "user {name} has uid {}, RAST expects {}",
-                    entry.uid, expected.uid
-                )))
+                tracing::warn!(
+                    share = %op.share_id,
+                    user = %name,
+                    uid = entry.uid,
+                    expected = expected.uid,
+                    "an account named like a RAST identity has another uid; left out of the \
+                     shared folder groups"
+                );
+                conflicts.push(IdentityConflict {
+                    user_id: *id,
+                    uid: entry.uid,
+                    expected_uid: expected.uid,
+                });
             }
             Some(_) => {}
         }
     }
-    let write: BTreeSet<i64> = write
-        .into_iter()
-        .filter(|id| !skipped.contains(id))
-        .collect();
-    let read: BTreeSet<i64> = read
-        .into_iter()
-        .filter(|id| !skipped.contains(id))
-        .collect();
+    let left_out =
+        |id: &i64| skipped.contains(id) || conflicts.iter().any(|conflict| conflict.user_id == *id);
+    let write: BTreeSet<i64> = write.into_iter().filter(|id| !left_out(id)).collect();
+    let read: BTreeSet<i64> = read.into_iter().filter(|id| !left_out(id)).collect();
     skipped.sort_unstable();
+    conflicts.sort_by_key(|conflict| conflict.user_id);
 
     let mut report = serde_json::Map::new();
     for (key, group, wanted) in [("write", &rw, &write), ("read", &ro, &read)] {
@@ -528,6 +575,7 @@ pub(crate) async fn share_members_set(
         );
     }
     report.insert("skipped".into(), json!(skipped));
+    report.insert("conflicts".into(), json!(conflicts));
     report.insert("shareId".into(), Value::String(op.share_id));
     Ok(Value::Object(report))
 }

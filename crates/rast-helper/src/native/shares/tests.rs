@@ -416,7 +416,6 @@ async fn member_lists_are_validated_before_anything_changes() {
         (vec![0], vec![], "invalid_request"),
         (vec![MAX_USER_ID + 1], vec![], "invalid_request"),
         (too_many, vec![], "invalid_request"),
-        (vec![], vec![2], "identity_conflict"),
     ] {
         let error = share_members_set(
             &fx.options,
@@ -467,6 +466,80 @@ async fn users_without_their_linux_account_are_left_out_and_reported() {
     assert_eq!(value["read"]["added"], json!([]));
     assert!(fx.groups().contains(&format!("{RW}:x:1200001:rast-u1\n")));
     assert!(fx.groups().contains(&format!("{RO}:x:1200002:\n")));
+}
+
+#[tokio::test]
+async fn accounts_with_an_unexpected_uid_are_never_added_and_always_removed() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    fx.add_identity(1, 200_001);
+    fx.add_identity(3, 200_003);
+    // `rast-u2` exists with someone else's uid, and is already a member of
+    // the read-only group (added by hand, or before the uid changed).
+    fx.add_identity(2, 999);
+    let text = fx.groups().replace(
+        &format!("{RO}:x:1200002:"),
+        &format!("{RO}:x:1200002:rast-u2"),
+    );
+    std::fs::write(fx.root().join("group.db"), text).unwrap();
+    let op = |write: Vec<i64>, read: Vec<i64>| ShareMembersSetOp {
+        share_id: SHARE.into(),
+        write,
+        read,
+    };
+
+    // Granting it write access: the others still change, it is left out
+    // and taken out of the group it was in.
+    let value = share_members_set(&fx.options, op(vec![1, 2], vec![3]))
+        .await
+        .unwrap();
+    assert_eq!(
+        value["conflicts"],
+        json!([{"userId": 2, "uid": 999, "expectedUid": 200_002}])
+    );
+    assert_eq!(value["write"]["added"], json!([1]));
+    assert_eq!(value["read"]["added"], json!([3]));
+    assert_eq!(value["read"]["removed"], json!([2]));
+    assert!(fx.groups().contains(&format!("{RW}:x:1200001:rast-u1\n")));
+    assert!(fx.groups().contains(&format!("{RO}:x:1200002:rast-u3\n")));
+
+    // Revoking everyone still works while the conflict lasts.
+    let value = share_members_set(&fx.options, op(vec![], vec![2]))
+        .await
+        .unwrap();
+    assert_eq!(value["write"]["removed"], json!([1]));
+    assert_eq!(value["read"]["removed"], json!([3]));
+    assert!(fx.groups().contains(&format!("{RW}:x:1200001:\n")));
+    assert!(fx.groups().contains(&format!("{RO}:x:1200002:\n")));
+
+    // The same check for `rast doctor`.
+    let conflicts = identity_conflicts(&fx.options, &BTreeSet::from([1, 2, 3, 4]))
+        .await
+        .unwrap();
+    assert_eq!(
+        conflicts,
+        vec![IdentityConflict {
+            user_id: 2,
+            uid: 999,
+            expected_uid: 200_002
+        }]
+    );
+    let report =
+        crate::native::doctor_identities_with(&fx.options, &BTreeSet::from([1, 2, 3])).await;
+    assert_eq!(report.warnings, 1);
+    assert!(
+        report.lines[0].starts_with(
+            "[WARN] the account rast-u2 has uid 999, but RAST expects uid 200002 for user 2"
+        ),
+        "{:?}",
+        report.lines
+    );
+    let report = crate::native::doctor_identities_with(&fx.options, &BTreeSet::from([1, 3])).await;
+    assert_eq!(report.warnings, 0);
+    assert_eq!(
+        report.lines,
+        vec!["[    ] Linux identities ... ok (2 users checked)"]
+    );
 }
 
 /// A legacy container with folders, files, a link, a hard-linked file and a

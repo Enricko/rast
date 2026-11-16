@@ -81,7 +81,10 @@ this file by `scripts/changelog-section.sh`.
     `rast-s<h>-rw` and one read-only group `rast-s<h>-ro` per shared
     folder, with gids from `linux_uid_base + 1000001` to
     `linux_uid_base + 1999999`; members are replaced as a whole with
-    `gpasswd -M`, at most 8 000 per group); `share_dir_prepare` (the
+    `gpasswd -M`, at most 8 000 per group; an account `rast-u<id>` whose
+    uid is not the identity's is never added, is taken out of the groups
+    and is reported, while the other members are still set, and
+    `rast doctor` lists such accounts); `share_dir_prepare` (the
     container becomes `root:rast-s<h>-rw` 2770 with the ACL
     `g:rast-s<h>-ro:r-x`, `u:rast:rwx` and the same default ACL, and with
     `recursive` every folder and file in it gets the group, group write

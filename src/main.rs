@@ -1190,8 +1190,15 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Database
     print!("[    ] database ... ");
+    let mut user_ids = std::collections::BTreeSet::new();
     match db::init(&cfg).await {
         Ok(pool) => {
+            user_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM users")
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
             let version = db::schema_version(&pool).await;
             println!("ok (schema v{version}, {})", cfg.db_path().display());
             let snapshot = sqlx::query("PRAGMA journal_mode")
@@ -1301,6 +1308,13 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     warnings += native_report.warnings;
     failures += native_report.failures;
+    if cfg.native_enabled && !user_ids.is_empty() {
+        let identities = rast::native::doctor_identities(&cfg, &user_ids).await;
+        for line in &identities.lines {
+            println!("{line}");
+        }
+        warnings += identities.warnings;
+    }
 
     print!("[    ] time drift (system clock) ... ");
     println!(
