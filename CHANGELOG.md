@@ -62,6 +62,14 @@ this file by `scripts/changelog-section.sh`.
     such (they were `400`). When an agent's socket unit was restarted with a
     new token, the server asks the helper again once instead of answering
     `403` until it restarts; an upload interrupted this way gets `503`.
+  - Files that the agent uploads or copies into a shared folder are
+    read-write for the folder's members (0660, 0770 for executables)
+    instead of keeping 0644 or the source's bits, which would have taken
+    write access away from the other members once shared folders use Linux
+    groups. A move between HOME and a shared folder, or between two shared
+    folders, is a copy followed by a delete, so the moved files get the
+    destination's group and permissions; moves inside one folder tree are
+    still renames.
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names

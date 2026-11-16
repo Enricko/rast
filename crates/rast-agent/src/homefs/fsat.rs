@@ -676,13 +676,15 @@ pub struct Copied {
 /// `name` in `dst`. Folders are copied through descriptors; links, special
 /// files and names that start with `skip_prefix` inside them are left out.
 /// `created` is set once the top entry exists, so the caller can remove a
-/// partial copy (and nothing it did not create).
+/// partial copy (and nothing it did not create). `dst_in_share` chooses the
+/// permission bits of the new files ([`new_file_mode`]).
 #[allow(clippy::too_many_arguments)]
 pub fn copy_at(
     src: BorrowedFd<'_>,
     name: &str,
     info: &Info,
     dst: BorrowedFd<'_>,
+    dst_in_share: bool,
     cancel: &AtomicBool,
     skip_prefix: &str,
     totals: &mut Copied,
@@ -698,10 +700,20 @@ pub fn copy_at(
         Kind::File => {
             let name = std::ffi::CString::new(name)
                 .map_err(|_| AppError::bad_request("invalid path component"))?;
-            totals.bytes += copy_file(src, &name, info, dst, &name, created)?;
+            totals.bytes += copy_file(src, &name, info, dst, &name, dst_in_share, created)?;
             Ok(())
         }
-        Kind::Dir => copy_tree(src, name, info, dst, cancel, skip_prefix, totals, created),
+        Kind::Dir => copy_tree(
+            src,
+            name,
+            info,
+            dst,
+            dst_in_share,
+            cancel,
+            skip_prefix,
+            totals,
+            created,
+        ),
     }
 }
 
@@ -711,6 +723,7 @@ fn copy_tree(
     name: &str,
     info: &Info,
     dst: BorrowedFd<'_>,
+    dst_in_share: bool,
     cancel: &AtomicBool,
     skip_prefix: &str,
     totals: &mut Copied,
@@ -753,7 +766,15 @@ fn copy_tree(
         let target = target.as_fd();
         match child_info.kind {
             Kind::File => {
-                totals.bytes += copy_file(at, child, &child_info, target, child, &mut None)?;
+                totals.bytes += copy_file(
+                    at,
+                    child,
+                    &child_info,
+                    target,
+                    child,
+                    dst_in_share,
+                    &mut None,
+                )?;
             }
             Kind::Dir => {
                 if depth >= MAX_DEPTH {
@@ -782,13 +803,14 @@ fn copy_tree(
 }
 
 /// Copy the regular file `name` of `src` (still `expected`) to the new file
-/// `to` in `dst`, with its permission bits (never set-uid or set-gid).
+/// `to` in `dst`, with the bits of [`new_file_mode`].
 fn copy_file(
     src: BorrowedFd<'_>,
     name: &CStr,
     expected: &Info,
     dst: BorrowedFd<'_>,
     to: &CStr,
+    dst_in_share: bool,
     created: &mut Option<Info>,
 ) -> AppResult<u64> {
     reach(Point::OpenSource, name.to_bytes());
@@ -822,7 +844,8 @@ fn copy_file(
     let mut input = File::from(input);
     let mut output = File::from(output);
     let bytes = io::copy(&mut input, &mut output).map_err(fs_error)?;
-    rfs::fchmod(&output, Mode::from_raw_mode(info.mode & 0o777)).map_err(errno)?;
+    let mode = new_file_mode(Some(info.mode), dst_in_share);
+    rfs::fchmod(&output, Mode::from_raw_mode(mode)).map_err(errno)?;
     Ok(bytes)
 }
 
@@ -904,6 +927,21 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
 pub fn remove_created(dir: BorrowedFd<'_>, name: &str, created: &Info) {
     if matches!(stat_at(dir, name), Ok(Some(info)) if info.same_inode(created)) {
         let _ = remove_at(dir, name);
+    }
+}
+
+/// Permission bits of a file the agent creates (ADR 0005, section 1). In
+/// HOME a copy keeps the bits of its source (never set-uid or set-gid) and a
+/// new file gets 0644. In a shared folder the file is read-write for the
+/// share's group and closed to others, like the folder (2770): `fchmod`
+/// sets the ACL mask from the group bits, so narrower bits would take write
+/// access away from the other members.
+pub fn new_file_mode(source_mode: Option<u32>, in_share: bool) -> u32 {
+    if in_share {
+        let exec = source_mode.is_some_and(|mode| mode & 0o100 != 0);
+        0o660 | if exec { 0o110 } else { 0 }
+    } else {
+        source_mode.map_or(0o644, |mode| mode & 0o777)
     }
 }
 
@@ -1036,6 +1074,7 @@ mod tests {
             "docs",
             &docs_info,
             copy.as_fd(),
+            false,
             &AtomicBool::new(false),
             ".rast-tmp-",
             &mut totals,

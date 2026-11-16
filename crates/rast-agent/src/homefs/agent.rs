@@ -343,6 +343,8 @@ pub struct HomeTarget {
     dir: Arc<OwnedFd>,
     name: String,
     logical: LogicalPath,
+    /// The folder is in a shared folder (decides the new file's bits).
+    in_share: bool,
 }
 
 /// The temporary file of an upload. It stays open: chunks are written
@@ -400,6 +402,7 @@ impl UploadSpace for HomeSpace {
             dir: Arc::new(folder),
             name: name.to_string(),
             logical,
+            in_share: !parent.in_home(),
         })
     }
 
@@ -445,14 +448,14 @@ impl UploadSpace for HomeSpace {
         let dir = target.dir.as_fd();
         let exists = || AppError::conflict(format!("\"{}\" already exists", target.name));
         // Keep the permission bits of a replaced file (never set-uid or
-        // set-gid); a new file gets the usual 0644.
+        // set-gid); a new file gets 0644 in HOME and 0660 in a shared folder.
         let (replaced, mode) = match fsat::stat_at(dir, &target.name).map_err(fs_error)? {
             Some(info) if info.is_dir() => {
                 return Err(AppError::conflict("a folder with that name already exists"))
             }
             Some(_) if !overwrite => return Err(exists()),
             Some(info) if info.kind == Kind::File => (info.len, info.mode & 0o777),
-            _ => (0, 0o644),
+            _ => (0, fsat::new_file_mode(None, target.in_share)),
         };
         fsat::set_mode(&temp.file, mode).map_err(fs_error)?;
         let renamed = if overwrite {
@@ -1151,7 +1154,12 @@ async fn transfer_items(
                 home_bytes = home_bytes.saturating_sub(delta);
             }
             let in_destination = || format!("\"{name}\" already exists in the destination");
-            if moving {
+            // A rename keeps the group, bits and ACL an entry had in its old
+            // folder, so between HOME and a share, or two shares, it would
+            // stay closed to the new folder's members (and outside a share's
+            // group quota). Only moves inside one namespace rename.
+            let same_root = node.root.info.same_inode(&dest.root.info);
+            if moving && same_root {
                 bytes = bytes.saturating_add(size);
                 match fsat::rename_noreplace(dir, &name, dest_dir.as_fd(), &name) {
                     Ok(()) => {
@@ -1170,6 +1178,7 @@ async fn transfer_items(
                 &name,
                 &node.info,
                 dest_dir.as_fd(),
+                !dest_in_home,
                 &cancel,
                 TEMP_PREFIX,
                 &mut copied,
@@ -1184,6 +1193,9 @@ async fn transfer_items(
                     AppError::Conflict(_) => AppError::conflict(in_destination()),
                     other => other,
                 });
+            }
+            if moving && !same_root {
+                bytes = bytes.saturating_add(size);
             }
             if moving {
                 // Only the entry that was copied.
@@ -1616,6 +1628,86 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn files_written_into_a_share_stay_writable_for_its_group() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let fx = start(None).await;
+        let team = fx.shared.join("team-1");
+        std::fs::create_dir(&team).unwrap();
+        fx.share("team", "team-1");
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+
+        // An upload into a share is 0660, into HOME 0644.
+        let response = fx
+            .upload("/api/files/upload?dir=/shared/team&name=a.txt", b"a")
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mode(&team.join("a.txt")), 0o660);
+        let response = fx.upload("/api/files/upload?dir=/&name=h.txt", b"h").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(mode(&fx.home.join("h.txt")), 0o644);
+
+        // A copy into a share is group-writable (executables stay so);
+        // a copy into HOME keeps the source's bits.
+        std::fs::create_dir(fx.home.join("tools")).unwrap();
+        std::fs::write(fx.home.join("tools/run.sh"), b"#!/bin/sh").unwrap();
+        std::fs::set_permissions(
+            fx.home.join("tools/run.sh"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let (status, body) = fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/h.txt", "/tools"], "destDir": "/shared/team"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(mode(&team.join("h.txt")), 0o660);
+        assert_eq!(mode(&team.join("tools/run.sh")), 0o770);
+        let (status, body) = fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/shared/team/a.txt"], "destDir": "/tools"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(mode(&fx.home.join("tools/a.txt")), 0o660);
+
+        // A move from HOME into a share is a copy: a new inode with the
+        // share's bits, and the original is gone.
+        std::fs::write(fx.home.join("m.txt"), b"m").unwrap();
+        let inode = std::fs::metadata(fx.home.join("m.txt")).unwrap().ino();
+        let (status, body) = fx
+            .post(
+                "/api/files/move",
+                json!({"paths": ["/m.txt"], "destDir": "/shared/team"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["moved"], 1);
+        assert_eq!(body["bytes"], 1);
+        assert_eq!(body["homeBytes"], -1);
+        assert!(!fx.home.join("m.txt").exists());
+        let moved = std::fs::metadata(team.join("m.txt")).unwrap();
+        assert_ne!(moved.ino(), inode);
+        assert_eq!(moved.permissions().mode() & 0o7777, 0o660);
+        // A move inside one namespace is still a rename.
+        let inode = moved.ino();
+        std::fs::create_dir(team.join("sub")).unwrap();
+        let (status, body) = fx
+            .post(
+                "/api/files/move",
+                json!({"paths": ["/shared/team/m.txt"], "destDir": "/shared/team/sub"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            std::fs::metadata(team.join("sub/m.txt")).unwrap().ino(),
+            inode
+        );
     }
 
     #[test]
