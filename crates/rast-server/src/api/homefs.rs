@@ -211,7 +211,8 @@ const PASSED_HEADERS: [header::HeaderName; 6] = [
 /// (ADR 0005): only [`PASSED_HEADERS`] pass (no cookie, no redirect, no
 /// security header of its own), and the server sets `nosniff` and the
 /// sandboxing preview CSP itself, so no reply can run script on the RAST
-/// origin.
+/// origin. A status the browser would act on (401) or a redirect becomes
+/// 502.
 fn untrusted(response: Response<Body>) -> Response {
     let (mut parts, body) = response.into_parts();
     let mut headers = HeaderMap::new();
@@ -229,6 +230,7 @@ fn untrusted(response: Response<Body>) -> Response {
         HeaderValue::from_static(PREVIEW_CSP),
     );
     parts.headers = headers;
+    parts.status = client::passed_status(parts.status);
     Response::from_parts(parts, body)
 }
 
@@ -782,6 +784,14 @@ mod tests {
         }
         assert!(!headers.contains_key(REPLACED_HEADER));
         assert_eq!(headers.len(), 5);
+        // An agent cannot sign the browser out or redirect it.
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FOUND] {
+            let response = Response::builder()
+                .status(status)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(untrusted(response).status(), StatusCode::BAD_GATEWAY);
+        }
     }
 
     #[test]

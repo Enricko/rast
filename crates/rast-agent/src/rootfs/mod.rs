@@ -266,7 +266,7 @@ mod tests {
         let bytes = axum::body::to_bytes(part.into_body(), 1024).await.unwrap();
         assert_eq!(&bytes[..], b"world");
 
-        // The agent's errors come back as errors, with its message.
+        // The agent's errors come back as errors, with its status and message.
         let error = client
             .call(
                 "/api/files/delete",
@@ -274,7 +274,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, AppError::BadRequest(_)), "{error}");
+        assert!(
+            matches!(error, AppError::NotFound("file not found")),
+            "{error}"
+        );
 
         // A wrong token is refused; a dead agent with no helper is reported.
         let stranger = RootFs::with_agent(
