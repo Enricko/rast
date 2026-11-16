@@ -207,7 +207,11 @@ claude --model opus --effort xhigh --permission-mode plan
 ```text
 Phase 2: run the Xpra session, agent and apps under rast-u<id>'s own systemd user manager following CLAUDE.md.
 Plan: the helper operation for linger, how to start user units (systemd-run --user --machine=rast-u<id>@.host), the cgroup limits that must keep applying, one D-Bus session bus and XDG_RUNTIME_DIR for all apps, per-user PipeWire/PulseAudio, and how RAST adopts an already-running session after a restart.
-After I approve the plan, implement it with tests, record it in docs/adr/0004-systemd-user-session.md, and update docs/NATIVE-LINUX-APPS.md.
+Apps that open other apps (docs/adr/0004-nested-launchers.md, decisions 1 and 2):
+- App units get ExitType=cgroup on systemd 250+ and keep KillMode=control-group. For systemd < 250 (Ubuntu 22.04 ships 249), plan the subreaper wrapper from the ADR (hidden internal subcommand of the rast binary, PR_SET_CHILD_SUBREAPER, reaps all descendants, forwards SIGTERM). The helper detects the systemd version; native-helper --check and rast doctor report the mode.
+- Contract tests for both paths: the unit stays active while a detached grandchild runs after the main process exits, becomes inactive after the last process exits, and stop kills all processes.
+- The main CPU/RAM limit moves to one per-user slice that holds the session, the agent and every app (the linux_session_* values). Per-app limits must never make an app opened from a launcher run out of memory; the ADR proposes per-app MemoryHigh, OOMPolicy=continue, per-app CPUQuota, and TasksMax raised to the session value. Ask me before changing the meaning of any linux_app_* key, and write an Upgrade note if it changes.
+After I approve the plan, implement it with tests, record it in a new ADR with the next free number (docs/adr/NNNN-systemd-user-session.md; 0004 is taken), and update docs/NATIVE-LINUX-APPS.md (unit lifetime, limits, the End application row of the lifecycle table).
 ```
 
 ### 2.2 Keyring unlocked at login
@@ -256,9 +260,9 @@ claude --model sonnet --effort high
 ```
 
 ```text
-Build an app index from .desktop files in all the locations CLAUDE.md names (Phase 3) with freedesktop-desktop-entry, watch for changes with notify, honour NoDisplay/Hidden/OnlyShowIn, and take icons from icon themes.
+Build an app index from .desktop files in all the locations CLAUDE.md names (Phase 3) with freedesktop-desktop-entry, watch for changes with notify, honour NoDisplay/Hidden/OnlyShowIn, and take icons from icon themes, including ~/.local/share/icons.
 Serve it through the API (types in rast-api) and push updates over SSE.
-Port the launcher (frontend/src/apps/launcher) to Leptos as the first consumer of this index. An app installed with apt from the Terminal must appear without a reload.
+Port the launcher (frontend/src/apps/launcher) to Leptos as the first consumer of this index. An app installed with apt from the Terminal must appear without a reload, and so must a .desktop file that an app writes into ~/.local/share/applications (as a launcher such as JetBrains Toolbox does; see docs/adr/0004-nested-launchers.md). Add a test for both.
 Dependency I approve: freedesktop-desktop-entry.
 ```
 
@@ -286,7 +290,36 @@ Add "Open with" to File Station: read MIME associations from mimeapps.list (syst
 Required examples: .docx opens in LibreOffice, .png opens in GIMP.
 ```
 
-### 3.4 Beta gate
+### 3.4 Windows of apps opened by a launcher, and Pin to launcher
+
+```bash
+claude --model sonnet --effort high
+```
+
+```text
+Implement decisions 3 and 5 of docs/adr/0004-nested-launchers.md.
+- Match every top-level Xpra window to an entry of the .desktop index from task 3.1 (StartupWMClass, then desktop file id or Exec name against WM_CLASS, then _GTK_APPLICATION_ID), not only to apps that RAST installed. A window without a match uses its own title and _NET_WM_ICON; it must never borrow the name or icon of the app launched last (today's fallback in resolveSlug, frontend/src/shell/xpra-native.ts). The taskbar groups windows by the matched app.
+- End application on a run whose unit also holds other apps asks for confirmation and names the apps that will close with it.
+- A "Pin to launcher" window action for windows without a match: the agent, as rast-u<id>, writes ~/.local/share/applications/rast-pinned-<slug>.desktop through the safe-path layer (Name, Exec from the window's process via _NET_WM_PID only when it belongs to the same uid, Icon from _NET_WM_ICON under ~/.local/share/icons/hicolor/, StartupWMClass). Unpin removes only rast-pinned-* files.
+New UI is written in Leptos. Add unit tests for the matching and for the .desktop file the agent writes (quoting, a process of another uid is refused), and an e2e check that the pinned app appears in the launcher.
+```
+
+### 3.5 Root requests from apps, and AppImages in launched apps
+
+```bash
+claude --model opus --effort xhigh
+```
+
+```text
+Implement decisions 4 and 6 of docs/adr/0004-nested-launchers.md. This touches the root helper's unit environment, so follow the Security invariants in CLAUDE.md.
+- Apps installed from inside a launcher go into the user's HOME: check that HOME is writable and executable by rast-u<id> and that ~/.local/bin is on the session PATH.
+- sudo, pkexec, apt and apt-get from an app fail at once with a clear message that installing system packages needs an administrator, who can install the app from App Center: stubs in a RAST directory placed first on the session PATH, which also raise a RAST notification and exit non-zero. The stubs never call anything privileged. No sudoers entry, no polkit rule and no helper operation is reachable from an app.
+- Evaluate NoNewPrivileges=yes for app units (it can break Chromium's setuid sandbox fallback when unprivileged user namespaces are blocked). Report the result and ask me before adopting it.
+- App units get APPIMAGE_EXTRACT_AND_RUN=1, so a type-2 AppImage that a launcher downloads runs without FUSE; units get no /dev/fuse. Document that type-1 AppImages are not supported.
+Add tests: the generated unit environment, each stub's message and exit status, an AppImage started without FUSE, and that the account still has no way to root. Update docs/NATIVE-LINUX-APPS.md.
+```
+
+### 3.6 Beta gate
 
 ```bash
 claude --model sonnet --effort medium
@@ -294,8 +327,9 @@ claude --model sonnet --effort medium
 
 ```text
 Run the app matrix for the Beta gate (Chrome, Firefox, VS Code, LibreOffice) on the disposable instance; ask me before native mode.
+Also create (if missing) and run the "launcher in a launcher" scenario from CLAUDE.md (App matrix) with ArtCraft Launcher and JetBrains Toolbox: each launcher passes the five checks, then installs one app through it. The scenario passes when that app opens as a RAST window, keeps running after the launcher is closed, and its shortcut appears in the RAST launcher.
 For every failing check, find the cause and write the list of fixes in PROGRESS.md. Fix small ones directly; turn big ones into separate tasks.
-Beta passes only when all four apps pass all five checks.
+Beta passes only when all four apps pass all five checks and both launchers pass the launcher scenario.
 ```
 
 ## Phase 4 — Compatibility and display

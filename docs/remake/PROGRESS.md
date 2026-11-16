@@ -5,7 +5,7 @@ Update it at the end of every session.
 
 - **Current phase:** Phase 0 — Foundation
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
-- **Last updated:** 2026-11-15
+- **Last updated:** 2026-11-16
 
 ## Phase 0 checklist
 
@@ -150,6 +150,28 @@ Update it at the end of every session.
 - **Task 0.5, README** (`79f0116`): removed the truncated duplicate
   "Linux apps" row; the Status line now says v1.0.1, unreleased on `Remake`
   (latest release v0.18.2).
+- **Plan: apps that launch other apps** (2026-11-16, docs only; ADR 0004
+  `docs/adr/0004-nested-launchers.md`). Launchers such as ArtCraft Launcher
+  and JetBrains Toolbox install apps into HOME and open them as child
+  processes. Today `build_systemd_run_args`
+  (`crates/rast-helper/src/native/daemon.rs`) starts app units with
+  `Type=exec`, `KillMode=control-group` and no `ExitType=`, so closing the
+  launcher kills the apps it opened, and they share its `linux_app_*` limits;
+  `resolveSlug` (`frontend/src/shell/xpra-native.ts`) gives their windows the
+  launcher's name. Planned:
+  - Phase 2 (task 2.1): `ExitType=cgroup` on systemd 250+, a subreaper wrapper
+    as the fallback for older systemd; main CPU/RAM limit per user session,
+    per-app limits that cannot OOM-kill apps opened by a launcher.
+  - Phase 3: the index watches `~/.local/share/applications` (task 3.1); own
+    name and icon per window, End application warning, Pin to launcher (new
+    task 3.4); clear message for `sudo`/`pkexec`/`apt`, no shortcut to root,
+    AppImage via `APPIMAGE_EXTRACT_AND_RUN` (new task 3.5); Beta gate moves to
+    task 3.6.
+  - App matrix: "launcher in a launcher" scenario (ArtCraft Launcher,
+    JetBrains Toolbox), part of the Phase 3 exit (Beta gate) on the
+    maintainer's decision.
+  - Updated: `CLAUDE.md` (Phase 2, Phase 3, app matrix) and
+    `docs/remake/PROMPTS.md` (tasks 2.1, 3.1, 3.4–3.6).
 - **Housekeeping:** `stash@{0}` (`docker-move-wip`) dropped on the
   maintainer's decision (its code equals `7663996`; its doc draft was
   superseded by `cc274e1`).
@@ -196,6 +218,20 @@ Update it at the end of every session.
   per-session scratch path) four `rast-agent` tests fail because unix-socket
   paths exceed ~108 bytes. When `/tmp` is nearly full, use a short directory on
   disk such as `TMPDIR=~/.cache/rast-tmp`.
+- **Nested launchers (ADR 0004), to decide in the implementing tasks:**
+  - Raise the systemd minimum from 249 to 250 instead of the subreaper
+    fallback? It would drop Ubuntu 22.04 (task 2.1).
+  - New meaning of the `linux_app_*` keys (per-app `MemoryHigh` instead of
+    `MemoryMax`, `TasksMax` raised) is a config change and needs approval
+    (task 2.1).
+  - `NoNewPrivileges=yes` for app units: evaluate against Chromium's setuid
+    sandbox fallback, then ask (task 3.5).
+  - How ArtCraft Launcher is distributed (AppImage, archive) is not recorded
+    yet; check before writing the e2e scenario (task 3.6).
+- **ADR numbers in `docs/remake/PROMPTS.md` are stale:** tasks 1.1–1.5 name
+  `0003-one-home.md` / "ADR 0003" (0003 is `rast-ui-leptos`), 4.2 names
+  `0005-wayland.md` and Phase 7 `0006-display-research.md`. Task 2.1 now says
+  "next free number"; fix the others when those tasks start.
 - `yamllint` is not installed for the default `python3` on this host (a
   RAST-managed Python comes first in `PATH`), so the workflow files were not
   linted locally.

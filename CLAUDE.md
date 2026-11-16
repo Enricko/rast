@@ -300,6 +300,16 @@ Do phases in order. Week numbers are estimates for one full-time developer.
 
 - Enable linger for `rast-u<id>`. Run the session, agent and apps as user units
   (`systemd-run --user --machine=rast-u<id>@.host`), keeping the cgroup limits.
+- App units live as long as they have processes (ADR 0004): `ExitType=cgroup`
+  on systemd 250+, and on older systemd a RAST subreaper wrapper as the main
+  process, with the same contract tests. `KillMode=control-group` stays, so
+  closing a launcher such as JetBrains Toolbox no longer kills the apps it
+  opened, while End application still stops everything in the unit.
+- Resource limits: the main CPU and RAM limit applies per user session (one
+  per-user slice holding the session, the agent and every app). Per-app limits
+  may stay, but must never make an app opened from a launcher run out of
+  memory (proposed: per-app `MemoryHigh` and `OOMPolicy=continue`). Changing
+  the meaning of the `linux_app_*` keys needs the maintainer's approval.
 - One D-Bus session bus and `XDG_RUNTIME_DIR` for all apps; PipeWire or
   PulseAudio per user.
 - Keyring: at login, `gnome-keyring-daemon --unlock` receives the password via
@@ -318,14 +328,26 @@ Do phases in order. Week numbers are estimates for one full-time developer.
 - Index `.desktop` files from `/usr/share/applications`,
   `/usr/local/share/applications`, `~/.local/share/applications` and the
   Flatpak exports (system and user) with `freedesktop-desktop-entry`. Watch
-  them with `notify`. Honour `NoDisplay`, `Hidden` and `OnlyShowIn`; take icons
-  from icon themes.
+  them with `notify`, so a shortcut that a launcher app writes to
+  `~/.local/share/applications` appears at once. Honour `NoDisplay`, `Hidden`
+  and `OnlyShowIn`; take icons from icon themes (including
+  `~/.local/share/icons`).
+- Apps opened by a launcher app (ADR 0004): each window is matched to its own
+  `.desktop` entry and shows its own name and icon in the taskbar, never the
+  launcher's. End application on a launcher warns that the apps it opened
+  close too. A "Pin to launcher" window action writes a `.desktop` file in the
+  user's HOME for a window that has no shortcut.
+- Apps installed from inside a launcher go into the user's HOME and need no
+  root. `sudo`, `pkexec` and `apt` from an app fail at once with a clear
+  message that points to an administrator and App Center. No shortcut to root.
 - Flatpak per user (Flathub, `flatpak --user`) in App Center. `.deb` stays
-  admin-only. Re-enable AppImage after it passes the matrix.
+  admin-only. Re-enable AppImage after it passes the matrix. AppImages that a
+  launcher downloads run without FUSE (`APPIMAGE_EXTRACT_AND_RUN=1`).
 - "Open with" in File Station via `mimeapps.list`.
 - From this phase on, **all new UI is written in Leptos.**
 - **Exit (Beta gate):** Chrome, Firefox, VS Code and LibreOffice pass the app
-  matrix.
+  matrix, and ArtCraft Launcher and JetBrains Toolbox pass the "launcher in a
+  launcher" scenario.
 
 ### Phase 4 — Compatibility and display (weeks 12–14)
 
@@ -374,6 +396,13 @@ File Station immediately, and it closes normally.
 | Google Chrome | `.deb` | 1 |
 | Firefox, VS Code, LibreOffice, GIMP, Inkscape, Thunderbird | Flatpak or `.deb`/`apt` | 3 |
 | Discord, Slack (Electron), Telegram (Qt) | Flatpak | 4 |
+| ArtCraft Launcher, JetBrains Toolbox ("launcher in a launcher") | Vendor download into HOME | 3 |
+
+**Launcher in a launcher.** For apps that install and open other apps (ADR
+0004). The launcher itself must pass the five checks above. The scenario then
+installs one app through the launcher and passes when that app opens as a
+RAST window, keeps running after the launcher is closed, and its shortcut
+appears in the RAST launcher.
 
 Not targeted: 3D games and video editors (GPU and latency), webcam, microphone,
 USB and printers, and apps that modify the system (drivers, kernel modules).
