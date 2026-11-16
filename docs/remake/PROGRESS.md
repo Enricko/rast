@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (next task: 1.1). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (task 1.1 done; next task 1.2, after the maintainer's decisions on ADR 0005). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 
@@ -215,9 +215,51 @@ Update it at the end of every session.
 - **Docs** (`de69f17`): one-HOME ADR is `docs/adr/0005-one-home.md` in tasks
   1.1–1.5; tasks 4.2 and 7 use the next free ADR number. README lists Trunk
   0.22 and the `wasm32-unknown-unknown` target as build requirements.
+- **Task 1.1, one-HOME design** (2026-11-16, docs only; ADR 0005
+  `docs/adr/0005-one-home.md`, status proposed):
+  - Ownership: HOME `<storage>/homes/<username>` owned by `rast-u<id>` 0700
+    and used as the passwd home; a user's mode (one HOME or legacy) is derived
+    from the owner of the HOME directory, no database column.
+  - Per-user file agent `rast file-agent` (generalised root agent) in a
+    socket-activated unit `rast-files-u<uid>`; `api/homefs.rs` forwards
+    `/api/files/*` with the same JSON shapes after the usual RAST checks.
+  - New helper operations: `home_ensure`, `files_agent_start`/`_stop`,
+    `share_group_ensure`/`_remove`, `share_members_set`,
+    `share_dir_prepare`/`_remove`, `quota_status`, `quota_set`,
+    `share_quota_set`, `quota_report`, `home_migrate_*`, `shares_migrate_*`,
+    `backup_reader_start`. None takes a raw path.
+  - Shared folders: one rw and one ro group per share, setgid 2770 with
+    default ACLs, `~/Shared/<name>` symlinks; membership from Effective
+    Access.
+  - XDG Trash in HOME and `<share>/.Trash-<uid>`.
+  - Quota: kernel uid quota when enforced, RAST fallback otherwise. Apps
+    installed by launchers (ADR 0004) and per-user Flatpak (Phase 3) live in
+    HOME and count.
+  - Production host (read-only `findmnt -T /srv/rast`): `/srv/rast` is on the
+    root ext4 filesystem (`rw,relatime`, effective option `noquota`), shared
+    with `/var/lib/rast` and the OS; no user or project quota is active, so
+    production uses the RAST fallback until the maintainer enables kernel
+    quota (D1). The ext4 `quota`/`project` features and the free space in
+    `ubuntu-vg` need root to confirm (commands in the ADR).
+  - **Bug found (0.18.x):** `start_run` (`native_session.rs`) and the
+    Docker → native migration (`native_apps.rs`) build the RAST home from the
+    Linux account name `rast-u<id>`, so they link and ACL-grant an empty
+    `<homes>/rast-u<id>` instead of the person's home. Production has such
+    folders (`rast-u1`, `rast-u97` … `rast-u104`, `rast-u999999`). Native
+    apps never saw the person's files. Fix and cleanup: D13.
 - **Gates at the end of Phase 0:** fmt and clippy clean; `cargo test
   --workspace`: 819 passed, 0 failed; npm test 152 passed; npm build OK;
   third-party licenses up to date.
+
+## Phase 1 checklist
+
+- [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (status proposed)
+- [ ] Task 1.2: per-user file agent
+- [ ] Task 1.3: shared folders as Linux groups
+- [ ] Task 1.4: XDG Trash and quota
+- [ ] Task 1.5: HOME migration command
+- [ ] Task 1.6: Phase 1 security review
+- [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on the disposable instance
 
 ## In progress
 
@@ -225,7 +267,8 @@ Update it at the end of every session.
 
 ## Next
 
-1. Phase 1, task 1.1.
+1. Maintainer decisions D1–D14 of ADR 0005 (see Open questions), then task
+   1.2.
 2. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
    0.18.2, before the Phase 1 results are tested there.
    `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
@@ -234,6 +277,16 @@ Update it at the end of every session.
 
 ## Open questions
 
+- **ADR 0005 decisions D1–D14** (`docs/adr/0005-one-home.md`, table
+  "Decisions that need the maintainer's approval"). The ones that change the
+  most: D1 (how to enable kernel quota on production), D2 (what the quota
+  counts), D3 (migration 0015 for shared-folder limits), D8 (on-disk layout)
+  and D13 (fix the `rast-u<id>` home bug on 0.18.x).
+- Confirm with root, read-only: `sudo dumpe2fs -h
+  /dev/mapper/ubuntu--vg-ubuntu--lv | grep -iE 'features|inode size'` and
+  `sudo vgs ubuntu-vg` (ext4 quota features and free LVM space for D1).
+- Task 1.3 also needs a `rast migrate shares` command (ADR 0005, section 8);
+  `docs/remake/PROMPTS.md` and `CLAUDE.md` do not mention it yet.
 - **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for
   `wasm32` yet — `storage::safe_path` still uses `AppError` and the filesystem.
   Create the crate when the pure parts (logical paths, name validation, access
