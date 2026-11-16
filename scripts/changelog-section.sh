@@ -10,6 +10,10 @@
 #   scripts/changelog-section.sh unreleased       # the [Unreleased] section
 #   scripts/changelog-section.sh 0.1.0 FILE       # custom changelog path
 #
+# A pre-release version (X.Y.Z-suffix, such as 1.0.1-alpha.2) uses its own
+# `## [X.Y.Z-suffix]` section when there is one, and otherwise the
+# `## [X.Y.Z]` section, so every pre-release of a version shares one section.
+#
 # Exits 1 when the section does not exist, so a release cannot be published
 # with empty notes.
 
@@ -18,7 +22,7 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "$0")/.." && pwd)
 
 usage() {
-    sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+    awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"
 }
 
 case "${1:-}" in
@@ -53,22 +57,41 @@ awk -v target="$TARGET" '
         sub(/^[vV]/, "", v)
         return v
     }
-    BEGIN { print_version = normalize(target); in_section = 0; found = 0; n = 0 }
+    BEGIN {
+        print_version = normalize(target)
+        # X.Y.Z of a pre-release version (X.Y.Z-suffix), or "" for any other.
+        base_version = ""
+        if (print_version ~ /^[0-9]+\.[0-9]+\.[0-9]+-/) {
+            base_version = print_version
+            sub(/-.*$/, "", base_version)
+        }
+        in_section = ""; found = 0; n = 0; m = 0
+    }
     {
         if ($0 ~ /^##[[:space:]]/) {
-            if (in_section) { in_section = 0 }
+            in_section = ""
             version = section_version($0)
             if (version != "" && normalize(version) == print_version) {
-                in_section = 1
+                in_section = "exact"
                 found = 1
+            } else if (version != "" && base_version != "" && normalize(version) == base_version) {
+                in_section = "base"
             }
             next
         }
-        if (in_section) {
+        if (in_section == "exact") {
             body[++n] = $0
+        } else if (in_section == "base") {
+            base_body[++m] = $0
+            found_base = 1
         }
     }
     END {
+        if (!found && found_base) {
+            for (i = 1; i <= m; i++) body[i] = base_body[i]
+            n = m
+            found = 1
+        }
         if (!found) {
             printf "changelog-section: no section for \"%s\" in the changelog\n", target > "/dev/stderr"
             exit 1

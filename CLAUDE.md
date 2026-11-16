@@ -72,14 +72,24 @@ host**: there is no separate VM or VPS (maintainer's decision, 2026-11-16).
 
 - The whole remake uses version **1.0.1** on the `Remake` branch. Do not bump
   the version per phase or per task.
-- Any GitHub release cut from this branch **must be marked pre-release** until
+- **Pre-releases are `1.0.1-alpha.N`** (maintainer's decision, 2026-11-16).
+  Each one gets its own commit `chore(release): 1.0.1-alpha.N` that sets the
+  version in `Cargo.toml` and `Cargo.lock` to `1.0.1-alpha.N`, so
+  `rast version` on production always shows which build is installed. That
+  commit is the only exception to "do not bump". Plain `1.0.1` (no suffix)
+  is used only for the final release, after the final remake gate.
+- Any GitHub release cut from this branch **must be a pre-release** until
   the final remake gate passes. `rast update` (`src/update.rs`,
   `/releases/latest`) offers the newest non-pre-release to every installed
   server, production included.
-- Release check (2026-11-16, see `docs/remake/PROGRESS.md`, "Pre-release
-  check"): publish a pre-release only through the Release workflow's manual
-  run with `prerelease` ticked. A pushed tag is always published as a normal
-  release, which `rast update` would offer to every server.
+- The Release workflow enforces this through `scripts/release-check.sh`
+  (tests in `tests/release_scripts.rs`): a version with a `-suffix` is
+  always published as a pre-release, from a pushed tag or a manual run; a
+  version without a suffix is refused unless its commit is on `main`, even
+  with `prerelease` ticked.
+- `CHANGELOG.md` keeps one `## [1.0.1]` section for every pre-release:
+  `scripts/changelog-section.sh` maps `1.0.1-alpha.N` to it (a section of
+  its own wins if there is one). Do not add `[1.0.1-alpha.N]` headings.
 - Record all remake changes under `## [1.0.1] - Unreleased` in `CHANGELOG.md`
   until the maintainer releases it. Never tag, push or publish without being
   asked.

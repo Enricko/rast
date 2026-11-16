@@ -249,6 +249,12 @@ this file by `scripts/changelog-section.sh`.
   bumped per phase. Remake instructions and the prompt pack are in
   `CLAUDE.md` and `docs/remake/PROMPTS.md`. Releases from this branch must be
   marked pre-release until the final remake gate passes.
+- Release workflow: a version with a `-suffix` (such as `1.0.1-alpha.1`) is
+  always published as a pre-release, also from a pushed tag, and never
+  becomes the latest release; a version without a suffix is refused unless
+  its commit is on `main` (`scripts/release-check.sh`). Release notes for an
+  `X.Y.Z-suffix` version come from the `[X.Y.Z]` section when it has no
+  section of its own. Pre-releases of the remake are `1.0.1-alpha.N`.
 - The code is split into a Cargo workspace (`crates/rast-base`, `rast-docker`,
   `rast-apps`, `rast-helper`, `rast-agent`, `rast-session`, `rast-server`);
   the binary, its name, its output path and its behaviour are unchanged. See

@@ -4,7 +4,7 @@ Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-r
 Update it at the end of every session.
 
 - **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
-- **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
+- **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; pre-releases are `1.0.1-alpha.N`, each with a `chore(release)` commit; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 - **Test host:** production (`desktop.lufria.tech`) doubles as the test host;
   there is no separate VM or VPS (maintainer's decision, 2026-11-16). See
@@ -652,6 +652,27 @@ installed with `rast update --version`. No tag was made.
   `rast migrate shares` or `rast migrate home`; run their `--rollback` with
   the 1.0.1 binary first.
 
+**Decision (maintainer, 2026-11-16): options (a) and (b) together, and
+`prerelease` derived from the version.**
+
+- Every pre-release is `1.0.1-alpha.N` and gets its own commit
+  `chore(release): 1.0.1-alpha.N` that sets `Cargo.toml` and `Cargo.lock` to
+  that version, so the exact-match checks (workflow, binary, installer,
+  `rast update`) pass and `rast version` shows the installed build. Plain
+  `1.0.1` is only the final release, after the final remake gate.
+- `CHANGELOG.md` keeps one `## [1.0.1]` section. `scripts/changelog-section.sh`
+  uses the `## [X.Y.Z]` section for an `X.Y.Z-suffix` version that has no
+  section of its own.
+- The Release workflow's "Determine version" step runs
+  `scripts/release-check.sh`: a version with a `-suffix` is always published
+  as a pre-release (pushed tag or manual run) and never made latest; a
+  version without a suffix is refused unless its commit is on `origin/main`
+  (the prepare job now checks out the full history), with or without the
+  `prerelease` box. The "Risk, tag push" above no longer applies to suffixed
+  versions. Tests: `tests/release_scripts.rs`.
+- The "Version order" note above still holds: moving between pre-releases
+  needs `rast update --version`.
+
 ## Pending on the test host (task 1.2)
 
 These need root, real `rast-u<id>` accounts or a native RAST instance, so
@@ -756,10 +777,10 @@ test user, fake helper).
 2. Task 1.6 (Phase 1 security review): includes the new root helper
    operations of task 1.3 and its follow-up (`share_deny_set`,
    `share_dir_repair`, `share_session_groups`).
-3. First deploy to production (the maintainer): decide the pre-release
-   version format (see "Pre-release check"), Claude prepares the deploy
-   checklist, then run the "Pending on the test host" lists on production
-   with test accounts.
+3. First deploy to production (the maintainer): a
+   `chore(release): 1.0.1-alpha.1` commit (see "Pre-release check",
+   decision), Claude prepares the deploy checklist, then run the "Pending
+   on the test host" lists on production with test accounts.
 4. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
    PR #2).
@@ -770,10 +791,6 @@ test user, fake helper).
    run `dev-instance.sh up native` here.
 
 ## Open questions
-
-- **Pre-release version format (2026-11-16):** which option from
-  "Pre-release check" (a, b or c)? And should the Release workflow set
-  `prerelease` automatically for a version with a `-suffix`?
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user
@@ -799,8 +816,10 @@ test user, fake helper).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
 - `yamllint` is not installed for the default `python3` on this host (a
-  RAST-managed Python comes first in `PATH`), so the workflow files were not
-  linted locally.
+  RAST-managed Python comes first in `PATH`). Lint locally without
+  installing anything system-wide:
+  `uvx yamllint -c .github/yamllint.yml .github/workflows` and
+  `uvx --from actionlint-py actionlint` (both clean on 2026-11-16).
 
 ## Repository map
 
