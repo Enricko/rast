@@ -25,6 +25,7 @@
 //! Run `rast native-helper --check` to validate the environment (root, systemd,
 //! Xpra, required binaries, socket group) without binding the socket.
 
+pub mod acl;
 pub mod audio;
 pub mod client;
 pub mod daemon;
@@ -32,6 +33,7 @@ pub(crate) mod firewall;
 pub mod homes;
 pub mod identity;
 pub mod protocol;
+pub mod shares;
 
 pub use client::NativeClient;
 pub use protocol::{
@@ -75,6 +77,7 @@ pub const GROUPADD_CANDIDATES: &[&str] = &["/usr/sbin/groupadd", "/usr/bin/group
 pub const USERMOD_CANDIDATES: &[&str] = &["/usr/sbin/usermod", "/usr/bin/usermod"];
 pub const USERDEL_CANDIDATES: &[&str] = &["/usr/sbin/userdel", "/usr/bin/userdel"];
 pub const GROUPDEL_CANDIDATES: &[&str] = &["/usr/sbin/groupdel", "/usr/bin/groupdel"];
+pub const GPASSWD_CANDIDATES: &[&str] = &["/usr/bin/gpasswd", "/usr/sbin/gpasswd"];
 pub const NOLOGIN_CANDIDATES: &[&str] = &["/usr/sbin/nologin", "/sbin/nologin", "/bin/false"];
 
 /// systemd slice that holds every transient native unit.
@@ -131,6 +134,8 @@ pub struct NativeOptions {
     pub usermod_bin: PathBuf,
     pub userdel_bin: PathBuf,
     pub groupdel_bin: PathBuf,
+    /// `gpasswd`, which sets the members of shared folder groups.
+    pub gpasswd_bin: PathBuf,
     /// Present when the host has `setfacl` (package `acl`).
     pub setfacl_bin: Option<PathBuf>,
     pub nologin_shell: PathBuf,
@@ -202,6 +207,7 @@ impl NativeOptions {
             usermod_bin: resolve_binary(USERMOD_CANDIDATES),
             userdel_bin: resolve_binary(USERDEL_CANDIDATES),
             groupdel_bin: resolve_binary(GROUPDEL_CANDIDATES),
+            gpasswd_bin: resolve_binary(GPASSWD_CANDIDATES),
             setfacl_bin: Some(PathBuf::from(SETFACL_BIN)).filter(|path| path.is_file()),
             nologin_shell: resolve_binary(NOLOGIN_CANDIDATES),
             #[cfg(test)]
@@ -248,6 +254,7 @@ impl NativeOptions {
             usermod_bin: PathBuf::from("/usr/bin/false"),
             userdel_bin: PathBuf::from("/usr/bin/false"),
             groupdel_bin: PathBuf::from("/usr/bin/false"),
+            gpasswd_bin: PathBuf::from("/usr/bin/false"),
             setfacl_bin: None,
             nologin_shell: PathBuf::from("/usr/sbin/nologin"),
             test_mode: true,

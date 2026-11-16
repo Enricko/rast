@@ -71,6 +71,34 @@ this file by `scripts/changelog-section.sh`.
     destination's group and permissions; moves inside one folder tree are
     still renames.
 
+- **Shared folders as Linux groups (ADR 0005, task 1.3).**
+  - New privileged helper operations: `share_group_ensure`,
+    `share_group_remove` and `share_members_set` (one read-write group
+    `rast-s<h>-rw` and one read-only group `rast-s<h>-ro` per shared
+    folder, with gids from `linux_uid_base + 1000001` to
+    `linux_uid_base + 1999999`; members are replaced as a whole with
+    `gpasswd -M`, at most 8 000 per group); `share_dir_prepare` (the
+    container becomes `root:rast-s<h>-rw` 2770 with the ACL
+    `g:rast-s<h>-ro:r-x`, `u:rast:rwx` and the same default ACL, and with
+    `recursive` every folder and file in it gets the group, group write
+    and the ACL); `share_dir_remove`; and `shares_migrate_scan`,
+    `shares_migrate_apply` and `shares_migrate_rollback` for
+    `rast migrate shares`. None takes a path: containers are one folder
+    name in `<storage>/shared`.
+  - The helper walks shared folders through directory descriptors and
+    changes entries with `fchown`, `fchmod` and `fsetxattr` on the open
+    descriptor, so a member who swaps an entry for a symlink cannot point
+    root anywhere else. Symlinks, special files, files with more than one
+    hard link, entries owned by root and other file systems are left
+    unchanged and reported.
+  - `shares_migrate_apply` writes a journal of every group, mode and ACL
+    to `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl`
+    (root, 0700/0600) and syncs it before changing anything; an apply that
+    stopped half way resumes with that journal. The rollback reads the
+    journal as untrusted input (root-owned folders only, no root owner or
+    group, set-uid bits dropped) and restores only entries that are still
+    the recorded inode with the recorded owner.
+
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
   start with a dot. They are hidden by default (a one-HOME HOME holds

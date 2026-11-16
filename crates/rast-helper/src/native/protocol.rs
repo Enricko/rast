@@ -108,6 +108,9 @@ pub const DEB_REMOVE_TIMEOUT: Duration = Duration::from_secs(300);
 pub const DEB_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// Client-side deadline for `apt_update` (server runs it with 180 s).
 pub const APT_UPDATE_TIMEOUT: Duration = Duration::from_secs(190);
+/// Client-side deadline for operations that walk a whole shared folder
+/// (`share_dir_prepare` with `recursive`, `shares_migrate_*`).
+pub const SHARE_TREE_TIMEOUT: Duration = Duration::from_secs(3600);
 
 /// Client-side deadline for an operation name (used by generic JSON calls).
 pub fn timeout_for_op(name: &str) -> Duration {
@@ -117,7 +120,13 @@ pub fn timeout_for_op(name: &str) -> Duration {
         "deb_remove" => DEB_REMOVE_TIMEOUT,
         "deb_download" => DEB_DOWNLOAD_TIMEOUT,
         "apt_update" => APT_UPDATE_TIMEOUT,
-        "identity_ensure" | "identity_remove" => IDENTITY_OP_TIMEOUT,
+        "identity_ensure" | "identity_remove" | "home_ensure" | "share_group_ensure"
+        | "share_group_remove" | "share_members_set" => IDENTITY_OP_TIMEOUT,
+        "share_dir_prepare"
+        | "share_dir_remove"
+        | "shares_migrate_scan"
+        | "shares_migrate_apply"
+        | "shares_migrate_rollback" => SHARE_TREE_TIMEOUT,
         _ => QUICK_OP_TIMEOUT,
     }
 }
@@ -256,6 +265,23 @@ pub enum NativeOp {
     FilesAgentStart(FilesAgentOp),
     /// Stop the per-user file agent and its socket.
     FilesAgentStop(FilesAgentOp),
+    /// Create the read-write and read-only Linux groups of a shared folder.
+    ShareGroupEnsure(ShareGroupOp),
+    /// Remove both groups of a shared folder.
+    ShareGroupRemove(ShareIdOp),
+    /// Replace the members of both groups of a shared folder.
+    ShareMembersSet(ShareMembersSetOp),
+    /// Apply the owner, mode and ACLs of a shared folder to its container
+    /// (and, with `recursive`, to everything in it).
+    ShareDirPrepare(ShareDirPrepareOp),
+    /// Remove the container of a deleted shared folder.
+    ShareDirRemove(ShareDirOp),
+    /// `rast migrate shares --dry-run`: what the migration would change.
+    SharesMigrateScan(ShareDirOp),
+    /// `rast migrate shares`: journal, then the recursive prepare.
+    SharesMigrateApply(ShareDirOp),
+    /// `rast migrate shares --rollback`: restore from the journal.
+    SharesMigrateRollback(ShareDirOp),
     AppStart(AppStartOp),
     AppStop(AppStopOp),
     TerminalStart(TerminalStartOp),
@@ -296,6 +322,14 @@ impl NativeOp {
             Self::HomeEnsure(_) => "home_ensure",
             Self::FilesAgentStart(_) => "files_agent_start",
             Self::FilesAgentStop(_) => "files_agent_stop",
+            Self::ShareGroupEnsure(_) => "share_group_ensure",
+            Self::ShareGroupRemove(_) => "share_group_remove",
+            Self::ShareMembersSet(_) => "share_members_set",
+            Self::ShareDirPrepare(_) => "share_dir_prepare",
+            Self::ShareDirRemove(_) => "share_dir_remove",
+            Self::SharesMigrateScan(_) => "shares_migrate_scan",
+            Self::SharesMigrateApply(_) => "shares_migrate_apply",
+            Self::SharesMigrateRollback(_) => "shares_migrate_rollback",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
             Self::TerminalStart(_) => "terminal_start",
@@ -330,9 +364,17 @@ impl NativeOp {
             Self::DebRemove(_) => DEB_REMOVE_TIMEOUT,
             Self::DebDownload(_) => DEB_DOWNLOAD_TIMEOUT,
             Self::AptUpdate => APT_UPDATE_TIMEOUT,
-            Self::IdentityEnsure(_) | Self::IdentityRemove(_) | Self::HomeEnsure(_) => {
-                IDENTITY_OP_TIMEOUT
-            }
+            Self::IdentityEnsure(_)
+            | Self::IdentityRemove(_)
+            | Self::HomeEnsure(_)
+            | Self::ShareGroupEnsure(_)
+            | Self::ShareGroupRemove(_)
+            | Self::ShareMembersSet(_) => IDENTITY_OP_TIMEOUT,
+            Self::ShareDirPrepare(_)
+            | Self::ShareDirRemove(_)
+            | Self::SharesMigrateScan(_)
+            | Self::SharesMigrateApply(_)
+            | Self::SharesMigrateRollback(_) => SHARE_TREE_TIMEOUT,
             Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
         }
@@ -418,6 +460,14 @@ impl NativeRequest {
             NativeOp::HomeEnsure(op) => merge!(op),
             NativeOp::FilesAgentStart(op) => merge!(op),
             NativeOp::FilesAgentStop(op) => merge!(op),
+            NativeOp::ShareGroupEnsure(op) => merge!(op),
+            NativeOp::ShareGroupRemove(op) => merge!(op),
+            NativeOp::ShareMembersSet(op) => merge!(op),
+            NativeOp::ShareDirPrepare(op) => merge!(op),
+            NativeOp::ShareDirRemove(op)
+            | NativeOp::SharesMigrateScan(op)
+            | NativeOp::SharesMigrateApply(op)
+            | NativeOp::SharesMigrateRollback(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
             NativeOp::TerminalStart(op) => merge!(op),
@@ -539,6 +589,18 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "home_ensure" => NativeOp::HomeEnsure(op_from(rest, "home_ensure")?),
         "files_agent_start" => NativeOp::FilesAgentStart(op_from(rest, "files_agent_start")?),
         "files_agent_stop" => NativeOp::FilesAgentStop(op_from(rest, "files_agent_stop")?),
+        "share_group_ensure" => NativeOp::ShareGroupEnsure(op_from(rest, "share_group_ensure")?),
+        "share_group_remove" => NativeOp::ShareGroupRemove(op_from(rest, "share_group_remove")?),
+        "share_members_set" => NativeOp::ShareMembersSet(op_from(rest, "share_members_set")?),
+        "share_dir_prepare" => NativeOp::ShareDirPrepare(op_from(rest, "share_dir_prepare")?),
+        "share_dir_remove" => NativeOp::ShareDirRemove(op_from(rest, "share_dir_remove")?),
+        "shares_migrate_scan" => NativeOp::SharesMigrateScan(op_from(rest, "shares_migrate_scan")?),
+        "shares_migrate_apply" => {
+            NativeOp::SharesMigrateApply(op_from(rest, "shares_migrate_apply")?)
+        }
+        "shares_migrate_rollback" => {
+            NativeOp::SharesMigrateRollback(op_from(rest, "shares_migrate_rollback")?)
+        }
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
         "terminal_start" => NativeOp::TerminalStart(op_from(rest, "terminal_start")?),
@@ -725,6 +787,87 @@ pub struct HomeEnsureOp {
 pub struct FilesAgentOp {
     #[serde(rename = "userId")]
     pub user_id: i64,
+}
+
+/// Largest member list of one group in `share_members_set`. `gpasswd -M`
+/// takes the whole list as one argument, and Linux limits one argument to
+/// 128 KiB (`MAX_ARG_STRLEN`): 8 000 names of up to 13 characters fit.
+pub const MAX_SHARE_MEMBERS: usize = 8_000;
+
+/// One shared folder, by id. The id must be a lowercase UUID v4, as the
+/// server creates them; it names the share's Linux groups.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareIdOp", deny_unknown_fields)]
+pub struct ShareIdOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+}
+
+/// Create the groups of a shared folder. With `container`, gids that its
+/// container still carries are reused when they are free (a restore on a
+/// new host).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareGroupOp", deny_unknown_fields)]
+pub struct ShareGroupOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+}
+
+/// The full member lists of a shared folder's groups, as RAST user ids.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareMembersSetOp", deny_unknown_fields)]
+pub struct ShareMembersSetOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    pub write: Vec<i64>,
+    pub read: Vec<i64>,
+}
+
+/// A shared folder and its container: one folder name directly in
+/// `<storage>/shared` (never a path).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareDirOp", deny_unknown_fields)]
+pub struct ShareDirOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    pub container: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "ShareDirPrepareOp", deny_unknown_fields)]
+pub struct ShareDirPrepareOp {
+    #[serde(rename = "shareId")]
+    pub share_id: String,
+    pub container: String,
+    pub recursive: bool,
+}
+
+/// A share id as the server creates them: a lowercase, hyphenated UUID v4.
+pub fn validate_share_id(share_id: &str) -> Result<(), NativeError> {
+    let bytes = share_id.as_bytes();
+    let hyphen = |index: usize| matches!(index, 8 | 13 | 18 | 23);
+    let shape = bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if hyphen(index) {
+                *byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+            }
+        });
+    if !shape || bytes[14] != b'4' || !matches!(bytes[19], b'8' | b'9' | b'a' | b'b') {
+        return Err(NativeError::invalid("shareId must be a lowercase UUID v4"));
+    }
+    Ok(())
+}
+
+/// A share container: one folder name, as `shares::validated_container`
+/// accepts it (no `/`, `.`, `..`, NUL, at most 255 bytes).
+pub fn validate_share_container(container: &str) -> Result<(), NativeError> {
+    rast_base::storage::shares::validated_container(container)
+        .map(|_| ())
+        .map_err(|_| NativeError::invalid("container must be one folder name"))
 }
 
 /// Stop a native PTY terminal and remove its runtime directory.
@@ -2142,6 +2285,31 @@ mod tests {
             }),
             NativeOp::FilesAgentStart(FilesAgentOp { user_id: 7 }),
             NativeOp::FilesAgentStop(FilesAgentOp { user_id: 7 }),
+            NativeOp::ShareGroupEnsure(ShareGroupOp {
+                share_id: SHARE_ID.into(),
+                container: Some("team".into()),
+            }),
+            NativeOp::ShareGroupEnsure(ShareGroupOp {
+                share_id: SHARE_ID.into(),
+                container: None,
+            }),
+            NativeOp::ShareGroupRemove(ShareIdOp {
+                share_id: SHARE_ID.into(),
+            }),
+            NativeOp::ShareMembersSet(ShareMembersSetOp {
+                share_id: SHARE_ID.into(),
+                write: vec![1, 2],
+                read: vec![3],
+            }),
+            NativeOp::ShareDirPrepare(ShareDirPrepareOp {
+                share_id: SHARE_ID.into(),
+                container: "team".into(),
+                recursive: true,
+            }),
+            NativeOp::ShareDirRemove(share_dir()),
+            NativeOp::SharesMigrateScan(share_dir()),
+            NativeOp::SharesMigrateApply(share_dir()),
+            NativeOp::SharesMigrateRollback(share_dir()),
         ];
         for (index, op) in requests.into_iter().enumerate() {
             let request = NativeRequest::new(index as u64 + 1, op.clone());
@@ -2150,6 +2318,65 @@ mod tests {
             assert!(line.ends_with(b"\n"));
             let parsed = parse_request_line(&line[..line.len() - 1]).unwrap();
             assert_eq!(parsed, request, "{:?}", op.name());
+        }
+    }
+
+    const SHARE_ID: &str = "0123abcd-4567-4ef0-8123-456789abcdef";
+
+    fn share_dir() -> ShareDirOp {
+        ShareDirOp {
+            share_id: SHARE_ID.into(),
+            container: "team".into(),
+        }
+    }
+
+    #[test]
+    fn shared_folder_requests_take_ids_and_one_folder_name() {
+        let parsed = parse_request_line(
+            format!(
+                r#"{{"id":1,"op":"share_members_set","shareId":"{SHARE_ID}","write":[1],"read":[]}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(parsed.op.timeout(), IDENTITY_OP_TIMEOUT);
+        assert!(parsed.op.is_long_running());
+        let tree = parse_request_line(
+            format!(
+                r#"{{"id":1,"op":"shares_migrate_apply","shareId":"{SHARE_ID}","container":"team"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(tree.op.timeout(), SHARE_TREE_TIMEOUT);
+        assert_eq!(timeout_for_op("share_dir_prepare"), SHARE_TREE_TIMEOUT);
+        for line in [
+            r#"{"id":1,"op":"share_group_ensure","shareId":"S","path":"/etc"}"#,
+            r#"{"id":1,"op":"share_group_remove","shareId":"S","container":"team"}"#,
+            r#"{"id":1,"op":"share_members_set","shareId":"S","write":[1]}"#,
+            r#"{"id":1,"op":"share_members_set","shareId":"S","write":["rast-u1"],"read":[]}"#,
+            r#"{"id":1,"op":"share_dir_prepare","shareId":"S","container":"team"}"#,
+            r#"{"id":1,"op":"share_dir_remove","shareId":"S","path":"/srv/rast/shared/team"}"#,
+            r#"{"id":1,"op":"shares_migrate_rollback","shareId":"S","container":"team","journal":"/tmp/j"}"#,
+        ] {
+            let line = line.replace("\"S\"", &format!("\"{SHARE_ID}\""));
+            let error = parse_request_line(line.as_bytes()).unwrap_err();
+            assert_eq!(error.code(), "invalid_request", "{line}");
+        }
+        assert!(validate_share_id(SHARE_ID).is_ok());
+        for bad in [
+            "",
+            "0123ABCD-4567-4ef0-8123-456789abcdef",
+            "0123abcd-4567-3ef0-8123-456789abcdef",
+            "0123abcd-4567-4ef0-7123-456789abcdef",
+            "0123abcd_4567_4ef0_8123_456789abcdef",
+            "0123abcd-4567-4ef0-8123-456789abcdef0",
+        ] {
+            assert!(validate_share_id(bad).is_err(), "{bad}");
+        }
+        assert!(validate_share_container("team").is_ok());
+        for bad in ["", ".", "..", "a/b", "a\0b"] {
+            assert!(validate_share_container(bad).is_err(), "{bad:?}");
         }
     }
 

@@ -112,8 +112,17 @@ pub fn validated_container(container_path: &str) -> AppResult<String> {
 /// `rast-s<h>-rw`, where `<h>` is the first 16 hex digits of the share
 /// UUID. `None` when `share_id` is not a UUID.
 pub fn rw_group_name(share_id: &str) -> Option<String> {
+    group_name(share_id, "rw")
+}
+
+/// The Linux group of a share's read-only members: `rast-s<h>-ro`.
+pub fn ro_group_name(share_id: &str) -> Option<String> {
+    group_name(share_id, "ro")
+}
+
+fn group_name(share_id: &str, kind: &str) -> Option<String> {
     let simple = Uuid::parse_str(share_id).ok()?.simple().to_string();
-    Some(format!("rast-s{}-rw", &simple[..16]))
+    Some(format!("rast-s{}-{kind}", &simple[..16]))
 }
 
 /// Find a share by display name (case-insensitive, matches the UNIQUE index).

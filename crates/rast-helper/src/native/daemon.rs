@@ -412,6 +412,16 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::HomeEnsure(op) => super::homes::home_ensure(options, op).await,
         NativeOp::FilesAgentStart(op) => super::homes::files_agent_start(options, op).await,
         NativeOp::FilesAgentStop(op) => super::homes::files_agent_stop(options, op).await,
+        NativeOp::ShareGroupEnsure(op) => super::shares::share_group_ensure(options, op).await,
+        NativeOp::ShareGroupRemove(op) => super::shares::share_group_remove(options, op).await,
+        NativeOp::ShareMembersSet(op) => super::shares::share_members_set(options, op).await,
+        NativeOp::ShareDirPrepare(op) => super::shares::share_dir_prepare(options, op).await,
+        NativeOp::ShareDirRemove(op) => super::shares::share_dir_remove(options, op).await,
+        NativeOp::SharesMigrateScan(op) => super::shares::shares_migrate_scan(options, op).await,
+        NativeOp::SharesMigrateApply(op) => super::shares::shares_migrate_apply(options, op).await,
+        NativeOp::SharesMigrateRollback(op) => {
+            super::shares::shares_migrate_rollback(options, op).await
+        }
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
         NativeOp::TerminalStart(op) => terminal_start(options, op).await,
