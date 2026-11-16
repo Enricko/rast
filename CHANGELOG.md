@@ -99,6 +99,18 @@ this file by `scripts/changelog-section.sh`.
     group, set-uid bits dropped) and restores only entries that are still
     the recorded inode with the recorded owner.
 
+- **`rast migrate shares` (ADR 0005, section 8).** Moves the shared folders
+  of an existing install to the group layout, before `rast migrate home`.
+  Run it as the service user: `sudo -u rast rast migrate shares --dry-run`
+  reports per shared folder what would change (entries, skipped symlinks,
+  hard-linked files, root-owned entries, old per-user ACL entries) and may
+  run while the server runs; `rast migrate shares` (apply) and
+  `rast migrate shares --rollback` need the server stopped. `--share <name>`
+  limits it to one shared folder, `--json` gives a machine-readable report.
+  Each shared folder is migrated on its own and a failure does not stop the
+  others (exit code 1). The apply writes a journal first and resumes an
+  interrupted run; the rollback restores owners, modes and ACLs from it.
+
 - **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
   With the native backend, the server recomputes the members of every
   shared folder's `rast-s<h>-rw` and `rast-s<h>-ro` groups whenever access

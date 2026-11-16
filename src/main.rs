@@ -160,6 +160,11 @@ enum Command {
         #[arg(long = "idle-seconds", default_value_t = 900)]
         idle_seconds: u64,
     },
+    /// Move existing data to the one-HOME layout (ADR 0005)
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCommand,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -392,6 +397,27 @@ enum PathCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum MigrateCommand {
+    /// Shared folders: Linux groups, group-owned containers and ACLs. Run
+    /// as the `rast` user, before `rast migrate home`; apply and rollback
+    /// need the server stopped.
+    Shares {
+        /// Only this shared folder (by name)
+        #[arg(long, value_name = "NAME")]
+        share: Option<String>,
+        /// Report what would change, change nothing
+        #[arg(long, conflicts_with = "rollback")]
+        dry_run: bool,
+        /// Restore owners, modes and ACLs from the migration journal
+        #[arg(long)]
+        rollback: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum UserCommand {
     /// Create the first administrator account
     CreateAdmin {
@@ -567,6 +593,7 @@ async fn run(
                     Ok(ExitCode::SUCCESS)
                 }
                 Command::Restore { from, dry_run, yes } => restore(cfg, from, dry_run, yes).await,
+                Command::Migrate { cmd } => migrate_command(cfg, cmd).await,
                 Command::Update { version, check } => {
                     rast::update::run(cfg, version.as_deref(), check).await
                 }
@@ -1301,6 +1328,74 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
         println!("doctor: ok, {warnings} warning(s)");
         Ok(ExitCode::SUCCESS)
     }
+}
+
+async fn migrate_command(
+    cfg: Config,
+    cmd: MigrateCommand,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::migrate_shares::{self, Mode};
+    let MigrateCommand::Shares {
+        share,
+        dry_run,
+        rollback,
+        json,
+    } = cmd;
+    let mode = match (dry_run, rollback) {
+        (true, _) => Mode::DryRun,
+        (_, true) => Mode::Rollback,
+        _ => Mode::Apply,
+    };
+    if !cfg.native_enabled {
+        return Err("shared folder groups need the native backend (native_enabled = true)".into());
+    }
+    // Apply and rollback change permissions under a running server's feet
+    // (D9): they need the server stopped.
+    let _instance = if mode == Mode::DryRun {
+        None
+    } else {
+        Some(db::InstanceLock::try_acquire(&cfg)?.ok_or_else(|| {
+            format!(
+                "the RAST server is running on {}; stop it first (systemctl stop rast)",
+                cfg.data_dir.display()
+            )
+        })?)
+    };
+    let pool = db::init(&cfg).await?;
+    let native = rast::native::client::NativeClient::from_config(&cfg);
+    let outcomes = migrate_shares::run(&pool, &native, mode, share.as_deref()).await?;
+    let failed = outcomes.iter().filter(|outcome| !outcome.ok).count();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": match mode {
+                    Mode::DryRun => "dry-run",
+                    Mode::Apply => "apply",
+                    Mode::Rollback => "rollback",
+                },
+                "shares": outcomes,
+                "failed": failed,
+            }))?
+        );
+    } else {
+        if outcomes.is_empty() {
+            println!("There are no shared folders.");
+        }
+        for outcome in &outcomes {
+            for line in migrate_shares::describe(mode, outcome) {
+                println!("{line}");
+            }
+        }
+        if failed > 0 {
+            eprintln!("rast: {failed} shared folder(s) failed; the others are done");
+        }
+    }
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 async fn user_command(
