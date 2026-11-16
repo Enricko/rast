@@ -688,6 +688,41 @@ journalctl -u rast-native -n 100        # helper log (no credentials are logged)
   the Xpra port binds to loopback only and is never exposed. Session keys are
   not written to the access log or to application logs.
 
+## Shared folders as Linux groups (`rast migrate shares`)
+
+With the native backend, every shared folder gets two Linux groups
+(`rast-s<h>-rw`, `rast-s<h>-ro`) whose members follow Effective Access (ADR
+0005, section 4). New shared folders get the group layout when they are
+created. Existing ones are moved with `rast migrate shares`, before
+`rast migrate home`:
+
+```bash
+sudo -u rast rast migrate shares --dry-run          # read-only report; the server may run
+sudo systemctl stop rast
+sudo -u rast rast migrate shares                    # apply (all shares, or --share <name>)
+sudo systemctl start rast
+```
+
+- The apply first writes a journal of every entry's group, mode and ACLs to
+  `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl` (root,
+  0700/0600) and syncs it, then gives the container `root:rast-s<h>-rw`
+  2770 and every folder and file the group, group write and the ACL.
+  Set-uid bits are dropped. Symlinks, files with several hard links,
+  root-owned entries, special files and other file systems are left
+  unchanged and listed in the report. An apply that stopped half way
+  resumes with its journal when run again.
+- `sudo -u rast rast migrate shares --rollback` (server stopped) restores
+  the journal: only entries that are still the recorded inode with the
+  recorded owner; entries changed since are reported and left. The groups
+  stay; they give nothing without the container layout.
+- `--json` prints a machine-readable report; the exit code is 1 when any
+  shared folder failed (the others are still done).
+- Running apps and terminals keep the groups they started with. A
+  revocation restarts the person's apps and terminals after a 60-second
+  warning; a grant is offered as *Restart session now*. A server restart
+  forgets pending restarts (the person keeps the old groups until their
+  next session).
+
 ## Secrets and key rotation
 
 `/var/lib/rast/secret.key` (0600) is the master key for CSRF derivation and
@@ -717,6 +752,7 @@ existing encrypted app secrets unreadable. Procedure if rotation is required:
 | Restore after accidental deletion | [Restore](#restore) |
 | Upgrade / downgrade | [Updates](#updates), [Rollback](#rollback) |
 | Disk full | [Monitoring and alerting](#monitoring-and-alerting), then free space and run `rast doctor` |
+| Move shared folders to Linux groups | [Shared folders as Linux groups](#shared-folders-as-linux-groups-rast-migrate-shares) |
 | Compromised admin account | [User and session operations](#user-and-session-operations), rotate passwords/keys, review audit logs, see [SECURITY.md](../SECURITY.md) |
 
 ## Troubleshooting

@@ -243,11 +243,12 @@ operation is idempotent.
 | --- | --- | --- |
 | `home_ensure` | `userId`, `username` | Identity from `identity_ids`. `username` must pass `users::validate_username`, be lowercase, one path component and not reserved. Missing HOME: create it 0700 with the skeleton. Owned by the identity: repair mode and skeleton. Owned by `rast`: error `legacy_home` (needs the migration). Any other owner, or a symlink: `identity_conflict`. Sets the passwd home with `usermod --home` (never `--move-home`). |
 | `files_agent_start`, `files_agent_stop` | `userId` | HOME must be owned by the identity. Start returns `{unit, socket, token}`. |
-| `share_group_ensure` | `shareId` | UUID v4 only. Groups `rast-s<16 hex>-rw` and `-ro` (25 characters) created with `groupadd -K GID_MIN=… -K GID_MAX=…` in `[linux_uid_base + 1 000 001, linux_uid_base + 1 999 999]`. Reuses the gid of the container's group when it is free (restore on a new host). A group with that name outside the range is a conflict. |
+| `share_group_ensure` | `shareId`, `container` (optional) | UUID v4 only. Groups `rast-s<16 hex>-rw` and `-ro` (25 characters) created with `groupadd -K GID_MIN=… -K GID_MAX=…` in `[linux_uid_base + 1 000 001, linux_uid_base + 1 999 999]`. Reuses the gid of the container's group (and of its named read-only ACL group) when it is free and in the range (restore on a new host); that is what the optional `container` is for. A group with that name outside the range is a conflict. |
 | `share_group_remove` | `shareId` | `groupdel`, groups in the RAST range only. |
-| `share_members_set` | `shareId`, `write`, `read` (lists of user ids) | At most 10 000 ids each, unique, disjoint, each with an existing identity. `gpasswd -M` per group (full replacement). Returns the user ids whose membership changed. |
+| `share_members_set` | `shareId`, `write`, `read` (lists of user ids) | At most 8 000 ids each (task 1.3: `gpasswd -M` takes the list as one argument, and Linux caps one argument at 128 KiB), unique, disjoint. Users without their `rast-u<id>` account yet are left out and returned as `skipped`; an account with another uid is a conflict. `gpasswd -M` per group (full replacement), only when it changes. Returns, per group, the user ids added and removed. |
 | `share_dir_prepare` | `shareId`, `container`, `recursive` | `container` passes `shares::validated_container`; must be a real directory on the storage filesystem. Applies owner, mode, ACL and default ACL from section 1; sets project id = rw gid with the inherit flag when project quota is on. A recursive run also removes named-user ACL entries of RAST identities. |
-| `share_dir_remove` | `shareId`, `container` | Removes the container tree (no-follow, one device). |
+| `share_dir_remove` | `shareId`, `container` | Removes the container tree (no-follow, one device); only a container owned by `rast` or root. |
+| `share_dir_release` | `shareId`, `container` | Task 1.3: the container of a deleted shared folder (whose data RAST keeps) goes back to `rast:rast` 0700 without ACLs before its groups are removed, so a later share that gets the freed gid cannot open it. |
 | `quota_status` | none | Device and filesystem type of the homes and shared roots; user and project quota each `off`, `accounting` or `enforced`; grace times. |
 | `quota_set` | `userId`, `softBytes`, `hardBytes` | 0 = no limit; hard ≥ soft; both ≤ filesystem size. `quotactl(Q_SETQUOTA, USRQUOTA)` through `libc` (already a dependency). |
 | `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project quota (project id = rw gid) when available, otherwise group quota on the rw gid if task 1.3 accepts it (D3). Returns the backend that enforces the limit. |
@@ -559,6 +560,134 @@ Rollback: `sudo quotaoff -ug /`, restore `/etc/fstab.before-quota`,
 `sudo mount -o remount /`, remove `/aquota.user` and `/aquota.group`; RAST
 falls back on its next `quota_status` check.
 
+### 10. Task 1.3: implementation notes and evaluations
+
+**Implemented** (helper, server, agent, CLI, desktop):
+
+- Helper: the operations of section 3 for shared folders, plus
+  `share_dir_release`. Trees are walked through no-follow directory
+  descriptors and changed with `fchown`, `fchmod` and `fsetxattr` on the
+  checked descriptor (a small POSIX ACL codec, `native::acl`); symlinks,
+  special files, files with more than one hard link, root-owned entries and
+  other file systems are left unchanged and reported.
+- Server: a syncer recomputes membership on every `access::bump_generation`
+  (now also on role and status changes of accounts) and every five minutes,
+  for the active accounts that have a Linux identity, and calls
+  `share_members_set`. A change restarts the file agent at once and updates
+  the `~/Shared` links; a revocation (any group lost, write → read
+  included) restarts apps and terminals after 60 seconds, a grant offers
+  the restart (`GET`/`POST /api/session/restart`, events
+  `session.restart` and `session.restarted`). Creating a share runs
+  `share_group_ensure` and `share_dir_prepare`; deleting one runs
+  `share_dir_release`, then `share_group_remove`.
+- `~/Shared/<name>` links are kept by the **user's own file agent**
+  (internal route `/internal/shared-links`, the shares in the usual
+  `x-rast-shares` header). It only adds or removes symlinks whose target is
+  a direct child of the shared root; a file, a folder or a foreign link
+  with a share's name is a reported conflict, left alone.
+- `rast migrate shares` as in section 8.
+
+**Deviations from this ADR** (to confirm):
+
+- At most 8 000 members per group instead of 10 000 (see the table).
+- The shares journal is plain JSON lines, not gzip: the helper needs no new
+  crate. One line per entry: relative path, type, device, inode, uid, gid,
+  mode, access and default ACL (hex of the xattr). The home journal of
+  task 1.5 may follow the same format.
+- The recursive `share_dir_prepare` replaces the whole access ACL of every
+  entry (and the default ACL of folders) with the layout of section 1, so
+  every other named entry goes, not only those of RAST identities. The
+  dry-run lists entries with identity entries separately.
+- Rollback drops set-uid bits (and set-gid on files) instead of refusing a
+  journal that records them: legacy shares may hold such files, and a
+  rollback must not fail for them.
+- Pending restarts live in the server's memory. A server restart during the
+  60-second warning forgets the restart: the person keeps the old groups
+  until their next session. The agent was already restarted.
+- The first sync after an upgrade adds every member at once: every account
+  with an identity gets its agent restarted and a "Restart session now"
+  offer.
+
+**Evaluation (a): group quota on the rw group for `shares.quota_bytes`
+under Q-a (D3).** Not decided here.
+
+- What works: the container and every folder below it are set-gid, so every
+  new file and folder, whoever creates it (agent, app, terminal, legacy
+  File Station as `rast`), gets the rw gid and counts against the rw
+  group's quota. File Station moves between HOME and a share are now copy
+  plus delete (fix of 2026-11-16), so they are counted too.
+- Gaps, all reachable by any rw member without root:
+  - `rename(2)` into a share from HOME on the same filesystem (terminal
+    `mv`, apps that write a temporary file in HOME and rename it into
+    place) keeps the old gid: not counted against the share.
+  - `chgrp` by the owner to any group they belong to: their primary group
+    (escape the share limit) or **another share's rw group** (move usage
+    onto another share).
+  - `cp -p`, `rsync -a`, `tar -p` keep the source gid when the user is in
+    that group.
+  - The limit follows the gid, not the place: a member can `chgrp` files in
+    HOME to the rw group and fill the share's quota from outside (a
+    denial of service against the other members); files moved out of the
+    share stay counted.
+  - Hard links from the share into HOME keep one inode and one gid.
+  - Everything stays in the owner's uid quota (D2), so nothing escapes all
+    accounting; only the share's own limit is bypassed.
+- Repair pass, measured: the walker of `share_dir_prepare` (no-follow,
+  one device, descriptor-based) over 100 000 files in 200 folders takes
+  **0.85 s when nothing changes and 1.4 s when every entry changes**
+  (release build, warm cache, NVMe, this host, 2026-11-16; a cold cache is
+  slower). A repair that only resets foreign gids below a container to its
+  rw gid would cost about the same: affordable every few minutes for
+  shares up to a few hundred thousand entries, and bounded by
+  `MAX_TREE_ENTRIES` (1 000 000). It closes the `mv`, `chgrp` and `cp -p`
+  gaps inside the share between passes, but not the gid of files outside
+  the share (the denial of service above).
+- Assessment: group quota limits normal use (apps and File Station saving
+  new files), but a member who wants to can bypass it or misuse it. If it
+  is used, the UI should say **"filesystem, best effort"**, not
+  "filesystem", and the repair pass should run after every agent session
+  and on a timer.
+
+**Evaluation (b): a per-user deny ACL entry `u:rast-u<id>:---` on the
+container instead of the forced restart (D7).** Not decided here.
+
+- What works: the kernel checks named-user entries before any group entry,
+  so every new path lookup through the container fails with `EACCES` at
+  once, although the process still carries the old group.
+- Gaps:
+  - A process whose working directory is inside the share keeps resolving
+    relative paths (common: a terminal after `cd ~/Shared/Team`, an IDE
+    with a project there).
+  - Open file and directory descriptors stay usable, including `openat`
+    below an open directory and inotify watches.
+  - **`/proc/<pid>/cwd` and `/proc/<pid>/fd/<n>`**: every process of the
+    same uid can follow these links of another of its processes, so one
+    process with its cwd or a directory open in the share reopens the whole
+    share to all of the user's processes, bypassing the container.
+  - Hard links made from share files into HOME before the revocation.
+  - **A downgrade (write → read) cannot be expressed** by an entry on the
+    container: `u:<id>:r-x` lets lookups through, and the files below still
+    grant write to the stale rw gid. Only `---` works, which also removes
+    read access until the restart.
+  - It needs its own reconciliation: the entries must go after the restart
+    or when access is granted again (a lost entry blocks a user who has
+    access), and the recursive `share_dir_prepare` must keep them, since it
+    replaces the container ACL. One entry per pending restart on the
+    container inode (ext4: about 500 entries in a 4 KiB block).
+  - Grants still need a restart.
+- Assessment: it closes the common path (new opens by path) instantly but
+  leaves several practical ways in, and does not cover downgrades. Options
+  for the maintainer: keep the forced restart (current implementation), or
+  add the entry as an immediate stopgap **during** the 60-second warning,
+  together with the restart.
+- Not measured: this host has no second uid to test with and no unprivileged
+  user namespaces (`kernel.apparmor_restrict_unprivileged_userns = 1`, no
+  `newuidmap`). On the test host, as root: create a share with one member,
+  have the member `cd` into it and open a file in an app, add the entry,
+  then check a new `ls ~/Shared/Team` (expect `EACCES`), the open shell
+  (`ls .`, expected to work), `ls /proc/<shell pid>/cwd` from a second
+  process (expected to work), and the open file.
+
 ### Decisions (taken by the maintainer on 2026-11-16)
 
 | # | Question | Decision |
@@ -583,11 +712,11 @@ falls back on its next `quota_status` check.
 - **Task 1.2:** `rast file-agent`, `api/homefs.rs`, `home_ensure`,
   `files_agent_start`/`files_agent_stop`, realtime events from the agent,
   the hidden-files toggle. No user is switched yet.
-- **Task 1.3:** share groups, the `share_*` operations, membership sync, the
-  session restart warning, `rast migrate shares`; the evaluations of group
-  quota for share limits under Q-a (D3) and of the deny ACL entry instead of
-  a forced restart (D7); the administrator note in
-  `docs/NATIVE-LINUX-APPS.md` (D6).
+- **Task 1.3 (done 2026-11-16, section 10):** share groups, the `share_*`
+  operations, membership sync, the session restart warning,
+  `rast migrate shares`; the evaluations of group quota for share limits
+  under Q-a (D3) and of the deny ACL entry instead of a forced restart (D7);
+  the administrator note in `docs/NATIVE-LINUX-APPS.md` (D6).
 - **Task 1.4:** XDG Trash, quota backends, the `quota_*` operations, the
   usage breakdown, migration 0015 (`shares.quota_bytes`) with the
   "enforced by" indicator in the UI.

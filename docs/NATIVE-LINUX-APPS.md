@@ -222,6 +222,35 @@ Consequences:
   that person through the agent instead of the `rast` service. Nothing calls
   `home_ensure` yet: apps keep the read-only `RAST` link described above until
   the home migration (`rast migrate home`) ships.
+* **Shared folders as Linux groups (ADR 0005, section 4).** Every shared
+  folder has two Linux groups, `rast-s<h>-rw` (read-write) and
+  `rast-s<h>-ro` (read-only), where `<h>` is the first 16 hex digits of the
+  share id. The server keeps their members in line with Effective Access:
+  write or admin → `-rw`, read → `-ro`, deny, no access or a deactivated
+  account → neither. A migrated container is `root:rast-s<h>-rw` 2770 with
+  the ACL `g:rast-s<h>-ro:r-x` and `u:rast:rwx` (also as default ACL), so
+  apps and terminals of members reach it with the kernel's own checks, and
+  a one-HOME account finds it as `~/Shared/<name>` (a link its file agent
+  keeps). Existing shared folders move to this layout with
+  `rast migrate shares` (dry-run, apply, rollback; see
+  [OPERATIONS.md](OPERATIONS.md)).
+  * Running apps and terminals keep the groups they started with. When an
+    administrator revokes access, the person sees a warning and their apps
+    and terminals restart after 60 seconds; when access is granted, the
+    desktop offers *Restart session now*. File Station is right at once
+    (its agent restarts immediately).
+  * Apps that save files with mode 0600 or 0644 narrow the ACL mask, so the
+    group loses write access to that file, as on any Linux file server.
+    Files keep their creator as owner.
+* **Administrators reach every shared folder from their apps (D6).** An
+  administrator is a member of every shared folder's read-write group, which
+  keeps the File Station administrator bypass. The consequence is that
+  *every* app and terminal of an administrator account can open every
+  shared folder with the kernel's permission, not only File Station: a
+  compromised or misbehaving app in an administrator session reaches all
+  shared data. **Use a non-admin account for everyday app use** (browsing,
+  mail, chat, downloaded tools), and keep the administrator account for
+  administration.
 * Application installs live under `<data_dir>/linux-apps/apps/<id>/<version>/`
   (portable/AppImage, read-only to app users) and per-person profiles under
   `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity).

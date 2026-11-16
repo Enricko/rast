@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1 and 1.2 done, cross-user and native e2e tests of 1.2 pending on the test host; next task 1.3). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done; their kernel-level and native tests are pending on the test host; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 
@@ -394,11 +394,69 @@ Update it at the end of every session.
     restarted root agent normally leaves no socket behind and the server
     starts it again; see "Open questions".
 
+- **Review of the directory-descriptor layer and ADR 0005 §2** (2026-11-16,
+  before task 1.3):
+  - F1, fixed in `175b98f`: files the agent wrote into a share got mode
+    0644/0755 from the source, which narrowed the ACL mask under the
+    default ACL, so the group lost write access. Files written into a
+    share are now 0660 (0770 for executables).
+  - F2, fixed in `175b98f`: a File Station move between HOME and a share
+    was a rename and kept the old group and ACL. It is now copy plus
+    delete, so the entry gets the share's group, ACL and (later) quota.
+  - F3, open (low): the agent's `openat2` has no `RESOLVE_NO_XDEV`, so it
+    follows the user's own mounts (FUSE) below HOME. Only a self-DoS: the
+    agent has the user's uid anyway.
+  - F4, open (low): legacy in-process moves and recycle-bin restores into a
+    prepared share keep group `rast` and no share ACL; the recursive
+    `share_dir_prepare` (or a second `rast migrate shares`) repairs them.
+  - The `x-rast-shares` header and the agent's container check were found
+    sound.
+- **Task 1.3, shared folders as Linux groups** (2026-11-16, ADR 0005
+  sections 4, 8 and the new section 10):
+  - `fcc8e62` refactor(helper): the descriptor helpers of `homes` become
+    `pub(crate)`.
+  - `6fc48ff` feat(helper): `share_group_ensure`, `share_group_remove`,
+    `share_members_set`, `share_dir_prepare`, `share_dir_remove`,
+    `shares_migrate_scan`/`_apply`/`_rollback`; `native::acl` (POSIX ACL
+    xattr codec on descriptors); journal under
+    `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl`.
+  - `81214ed` feat(helper): `share_members_set` skips (and reports) users
+    without a Linux account; `share_dir_release` for deleted shares.
+  - `e81eb59` feat(agent): `/internal/shared-links` keeps `~/Shared/<name>`.
+  - `940c44e` feat(server): `share_groups` syncer (Effective Access →
+    groups), agent restart, `~/Shared` links, 60-second forced restart on
+    revocation and "Restart session now" offer on grant
+    (`/api/session/restart`, events `session.restart`/`session.restarted`,
+    desktop toast); share create/delete hooks; role and status changes bump
+    the access generation.
+  - `01aa950` feat(cli): `rast migrate shares [--share] [--dry-run |
+    --rollback] [--json]`, instance lock for apply and rollback (D9).
+  - docs: ADR 0005 section 10 (implementation notes, deviations, the D3 and
+    D7 evaluations), section 3 table; `docs/NATIVE-LINUX-APPS.md` (groups
+    and the D6 administrator note); `docs/OPERATIONS.md` runbook;
+    `docs/API.md`; `docs/REALTIME.md`; CHANGELOG.
+  - Tests: helper (fake `getent`/`groupadd`/`gpasswd`/`groupdel` over a
+    text group database: names, gid range, reuse, conflicts, membership
+    replacement, validation, skipped users; prepare with modes and ACLs,
+    no link followed, hard links skipped; migrate journal, resume,
+    rollback, tampered journals refused, set-uid dropped; release; remove),
+    protocol strictness, agent link maintenance, server membership from
+    Effective Access (admin, legacy read, rule write, deny over legacy
+    write, deactivated, no identity), revocation vs grant, restart timer,
+    the CLI's per-share order, and `tests/homefs_e2e.rs` (real router and
+    agent, fake helper: groups and links follow a write → read → none
+    change, the agent restarts, the restart is forced and reported by
+    `GET /api/session/restart`).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 912 passed, 0
+    failed; npm test 156 passed; npm build OK.
+  - Measured: the helper's walker takes 0.85 s for 100 000 files when
+    nothing changes, 1.4 s when everything changes (release, warm cache).
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
 - [x] Task 1.2: per-user file agent (unit and fake-helper integration tests; the tests below under "Pending on the test host" are still open)
-- [ ] Task 1.3: shared folders as Linux groups
+- [x] Task 1.3: shared folders as Linux groups (unit and fake-helper tests; kernel-level tests under "Pending on the test host")
 - [ ] Task 1.4: XDG Trash and quota
 - [ ] Task 1.5: HOME migration command
   - `rast migrate home` must also remove the default ACL entries
@@ -458,13 +516,33 @@ fake helper).
   again through File Station, and check that the server reads the new
   token once (no `403` loop); deactivating the account stops the unit.
 
+## Pending on the test host (task 1.3)
+
+- Real groups: `groupadd -K` picks gids in the range; `gpasswd -M` with
+  many members; `getent` batches; `share_group_remove` refuses groups
+  outside the range.
+- Read-only permissions with the kernel: a `-ro` member can list and read
+  the container and files but `touch`, `rm` and `mkdir` fail with
+  `EACCES`; a `-rw` member can write, and new files get the rw group and
+  stay writable for the group; a non-member gets `EACCES`; `rast` still
+  reads and writes (D5).
+- Revocation: after write → read the restarted agent can no longer write,
+  apps and terminals restart after 60 s, and afterwards `id` shows the new
+  groups; "Restart session now" works.
+- `rast migrate shares` on a copy of a production-like share
+  (`rast:rast` 0750, files 0644): dry-run report, apply, resume after
+  killing the helper half way, rollback back to the same owners, modes and
+  ACLs (compare `getfacl -R` before and after).
+- The deny ACL measurements of ADR 0005 section 10 (D7), if the maintainer
+  wants them.
+
 ## Next
 
-1. Task 1.3 (shared folders as Linux groups); it also creates the
-   `~/Shared/<name>` links for apps (the agent never uses them) and sets
-   containers to `root:rast-s<h>-rw` 2770, which the agent's container check
-   already accepts (`shares::rw_group_name`).
-2. Run the "Pending on the test host" list above on the test host.
+1. The maintainer decides D3 (group quota, "best effort") and D7 (deny ACL
+   entry) from ADR 0005 section 10, and confirms the deviations listed
+   there.
+2. Task 1.4 (XDG Trash and quota).
+3. Run the "Pending on the test host" lists above on the test host.
 3. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
    PR #2).
@@ -481,8 +559,17 @@ fake helper).
   agents? Its stale-token case is narrower (only when something other than
   this server starts a new root agent on the same socket path), so it was
   left out of this round.
-- Task 1.3 results for the maintainer: group quota as the share limit under
-  Q-a (D3) and the deny ACL entry instead of a forced restart (D7).
+- Task 1.3 results for the maintainer (ADR 0005 section 10): group quota as
+  the share limit under Q-a (D3: limits normal use, bypassable by members,
+  "filesystem, best effort" at most) and the deny ACL entry instead of a
+  forced restart (D7: closes new path lookups only; cwd, open descriptors,
+  `/proc/<pid>/cwd` and hard links stay open, and downgrades cannot be
+  expressed). Also the deviations: 8 000 members per group, plain JSONL
+  journal, full ACL replacement in the recursive prepare, set-uid dropped
+  on rollback, pending restarts forgotten on a server restart, and every
+  account offered a restart on the first sync after the upgrade.
+- F3 and F4 from the review before task 1.3 (`RESOLVE_NO_XDEV` for the
+  agent; legacy moves into prepared shares): fix now or with task 1.5?
 - **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for
   `wasm32` yet — `storage::safe_path` still uses `AppError` and the filesystem.
   Create the crate when the pure parts (logical paths, name validation, access
