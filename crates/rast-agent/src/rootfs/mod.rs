@@ -249,7 +249,7 @@ mod tests {
     /// The whole path the API layer uses: client, socket, token, agent.
     #[tokio::test]
     async fn requests_reach_the_agent_and_stream_back() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_support::socket_tempdir();
         let socket = dir.path().join("agent.sock");
         let token = "t".repeat(64);
         let token_file = dir.path().join("token");

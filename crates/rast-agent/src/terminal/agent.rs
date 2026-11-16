@@ -568,7 +568,7 @@ mod tests {
     /// A real PTY agent: start `sh`, type commands, resize and close it.
     #[tokio::test]
     async fn agent_runs_a_shell_on_a_pty() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::socket_tempdir();
         let socket = test_socket_path(temp.path());
         let token_file = temp.path().join("token");
         std::fs::write(&token_file, test_token()).unwrap();
@@ -647,7 +647,7 @@ mod tests {
     /// A wrong token must be rejected and the shell never started.
     #[tokio::test]
     async fn agent_rejects_a_wrong_token() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::socket_tempdir();
         let socket = test_socket_path(temp.path());
         let token_file = temp.path().join("token");
         std::fs::write(&token_file, test_token()).unwrap();
@@ -672,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn agent_strips_service_secrets_from_the_shell_environment() {
         std::env::set_var("RAST_CONFIG", "/etc/rast/secret-config");
-        let temp = tempfile::tempdir().unwrap();
+        let temp = crate::test_support::socket_tempdir();
         let socket = test_socket_path(temp.path());
         let token_file = temp.path().join("token");
         std::fs::write(&token_file, test_token()).unwrap();
