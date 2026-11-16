@@ -1547,3 +1547,67 @@ async fn session_groups_name_the_share_groups_processes_carry() {
         assert_eq!(error.code, "invalid_request");
     }
 }
+
+#[tokio::test]
+async fn operations_on_one_shared_folder_never_overlap() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    let team = legacy_tree(&fx);
+    let op = || ShareDirOp {
+        share_id: SHARE.into(),
+        container: "team".into(),
+    };
+    // While one operation works on the share, the others are refused with
+    // `share_busy` (the server tries again); other shares are not held up.
+    let held = ShareLock::acquire(&fx.options, SHARE, SHARE_LOCK_WAIT)
+        .await
+        .unwrap();
+    let busy = |result: Result<Value, NativeError>| {
+        let error = result.unwrap_err();
+        assert_eq!(error.code, "share_busy", "{error:?}");
+    };
+    busy(share_dir_repair(&fx.options, op()).await);
+    busy(shares_migrate_apply(&fx.options, op()).await);
+    busy(share_dir_release(&fx.options, op()).await);
+    busy(
+        share_deny_set(
+            &fx.options,
+            ShareDenySetOp {
+                share_id: SHARE.into(),
+                container: "team".into(),
+                user_ids: vec![3],
+            },
+        )
+        .await,
+    );
+    let other = ShareLock::acquire(
+        &fx.options,
+        "33333333-4444-4555-8666-777777777777",
+        SHARE_LOCK_WAIT,
+    )
+    .await;
+    assert!(other.is_ok());
+    drop(held);
+    assert_eq!(mode(&team), 0o750, "nothing changed meanwhile");
+
+    // Apply and rollback also hold a `flock` in the journal folder: a
+    // second helper process (here: a descriptor of the test) holding it
+    // keeps both out, the in-process lock notwithstanding.
+    let root = open_journal_root(&fx.options, SHARE, true)
+        .unwrap()
+        .unwrap();
+    let foreign = MigrationLock::acquire(&root, SHARE).unwrap();
+    busy(shares_migrate_apply(&fx.options, op()).await);
+    drop(foreign);
+    shares_migrate_apply(&fx.options, op()).await.unwrap();
+    let foreign = MigrationLock::acquire(&root, SHARE).unwrap();
+    busy(shares_migrate_rollback(&fx.options, op()).await);
+    assert!(
+        MigrationLock::acquire(&root, SHARE).is_err(),
+        "the lock is exclusive"
+    );
+    drop(foreign);
+    shares_migrate_rollback(&fx.options, op()).await.unwrap();
+    // The lock file is no journal.
+    assert!(active_journal(&fx.options, SHARE).unwrap().is_none());
+}

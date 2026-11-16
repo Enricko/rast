@@ -28,6 +28,14 @@
 //!   processes in that user's own units (`/proc/<pid>/cgroup`) whose real
 //!   and effective uid are the identity count.
 //!
+//! Operations on one share's container (prepare, repair, remove, release,
+//! deny entries, migration apply and rollback) never overlap: each holds
+//! that share's lock in the helper ([`ShareLock`]), and apply and rollback
+//! also hold a `flock` on `<journal root>/<shareId>/lock`, so the journal
+//! is never written and restored at once, even by two helper processes.
+//! An operation that cannot get the lock within [`SHARE_LOCK_WAIT`] fails
+//! with `share_busy`; the server retries on its next pass.
+//!
 //! The members of a shared folder can change it while root works on it, so
 //! every tree walk goes through directory descriptors: entries are looked up
 //! with `fstatat(AT_SYMLINK_NOFOLLOW)`, opened with `O_NOFOLLOW` and checked
@@ -81,6 +89,92 @@ pub const JOURNAL_FILE: &str = "journal.jsonl";
 pub const ROLLED_BACK_SUFFIX: &str = ".rolled-back";
 
 const ACCOUNT_CMD_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// How long an operation waits for another one on the same share.
+pub const SHARE_LOCK_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
+/// File name of the migration lock in a share's journal folder.
+pub const MIGRATION_LOCK_FILE: &str = "lock";
+
+/// The per-share locks of this helper process.
+static SHARE_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Held while an operation works on one share's container.
+pub struct ShareLock {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl ShareLock {
+    /// Wait up to `wait` for the lock of `share_id` (in the storage
+    /// directory of `options`: one helper serves one).
+    pub async fn acquire(
+        options: &NativeOptions,
+        share_id: &str,
+        wait: Duration,
+    ) -> Result<Self, NativeError> {
+        validate_share_id(share_id)?;
+        let key = format!("{}\0{share_id}", options.storage_dir.display());
+        let lock = {
+            let mut locks = SHARE_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+            // Locks nobody holds or waits for are dropped, so the map stays
+            // as small as the shares in use.
+            locks.retain(|_, lock| std::sync::Arc::strong_count(lock) > 1);
+            locks.entry(key).or_default().clone()
+        };
+        match tokio::time::timeout(wait, lock.lock_owned()).await {
+            Ok(guard) => Ok(Self { _guard: guard }),
+            Err(_) => Err(NativeError::share_busy(format!(
+                "another operation is running on shared folder {share_id}; try again later"
+            ))),
+        }
+    }
+}
+
+/// The `flock` of a share's migration journal folder, held by apply and
+/// rollback for their whole run.
+struct MigrationLock {
+    _file: std::fs::File,
+}
+
+impl MigrationLock {
+    fn acquire(journal_root: &OwnedFd, share_id: &str) -> Result<Self, NativeError> {
+        let name = c_name(MIGRATION_LOCK_FILE).expect("name");
+        // SAFETY: valid fd and NUL-terminated name; the fd is owned below.
+        let fd = unsafe {
+            libc::openat(
+                journal_root.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            return Err(NativeError::command_failed(format!(
+                "cannot open the migration lock: {}",
+                io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: `fd` is a fresh, valid descriptor.
+        let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+        // SAFETY: valid fd.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let error = io::Error::last_os_error();
+            return Err(if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                NativeError::share_busy(format!(
+                    "a migration or rollback of shared folder {share_id} is still running"
+                ))
+            } else {
+                NativeError::command_failed(format!("cannot lock the migration: {error}"))
+            });
+        }
+        Ok(Self { _file: file })
+    }
+}
 const MAX_ACCOUNT_OUTPUT: usize = 1024 * 1024;
 /// Names per `getent passwd` call.
 const GETENT_BATCH: usize = 500;
@@ -1465,6 +1559,7 @@ pub(crate) async fn share_dir_prepare(
     op: ShareDirPrepareOp,
 ) -> Result<Value, NativeError> {
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let layout = Layout::for_share(options, &op.share_id).await?;
     let options = options.clone();
     let container = op.container.clone();
@@ -1494,6 +1589,7 @@ pub(crate) async fn share_dir_remove(
 ) -> Result<Value, NativeError> {
     validate_share_id(&op.share_id)?;
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let options = options.clone();
     let container = op.container.clone();
     let removed = blocking(move || {
@@ -1545,6 +1641,7 @@ pub(crate) async fn share_dir_release(
 ) -> Result<Value, NativeError> {
     validate_share_id(&op.share_id)?;
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let rast_uid = service_uid(options)?;
     let rast_gid = options.effective_rast_gid()?;
     let options = options.clone();
@@ -1683,6 +1780,7 @@ pub(crate) async fn share_dir_repair(
     op: ShareDirOp,
 ) -> Result<Value, NativeError> {
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let layout = Layout::for_share(options, &op.share_id).await?;
     let options = options.clone();
     let container = op.container.clone();
@@ -1721,6 +1819,7 @@ pub(crate) async fn share_deny_set(
     op: ShareDenySetOp,
 ) -> Result<Value, NativeError> {
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     if op.user_ids.len() > MAX_SHARE_DENIALS {
         return Err(NativeError::invalid(format!(
             "`userIds` lists more than {MAX_SHARE_DENIALS} users"
@@ -2394,12 +2493,15 @@ pub(crate) async fn shares_migrate_apply(
     op: ShareDirOp,
 ) -> Result<Value, NativeError> {
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let layout = Layout::for_share(options, &op.share_id).await?;
     let options = options.clone();
     let share_id = op.share_id.clone();
     let container = op.container.clone();
     let (report, journal, resumed) = blocking(move || {
         let (fd, stat) = checked_container(&options, &container, &layout)?;
+        let root = open_journal_root(&options, &share_id, true)?.expect("created");
+        let _migration = MigrationLock::acquire(&root, &share_id)?;
         // A journal that was not rolled back is the state before the
         // migration: an earlier run that stopped half way resumes with it.
         let (journal, resumed) = match active_journal(&options, &share_id)? {
@@ -2551,6 +2653,7 @@ pub(crate) async fn shares_migrate_rollback(
 ) -> Result<Value, NativeError> {
     validate_share_id(&op.share_id)?;
     validate_share_container(&op.container)?;
+    let _share = ShareLock::acquire(options, &op.share_id, SHARE_LOCK_WAIT).await?;
     let options = options.clone();
     let share_id = op.share_id.clone();
     let container = op.container.clone();
@@ -2558,6 +2661,12 @@ pub(crate) async fn shares_migrate_rollback(
         let rast_uid = service_uid(&options)?;
         let owners = Owners::of(&options)?;
         let journal_uid = journal_owner();
+        let Some(root) = open_journal_root(&options, &share_id, false)? else {
+            return Err(NativeError::not_found(
+                "this shared folder has no migration journal to roll back",
+            ));
+        };
+        let _migration = MigrationLock::acquire(&root, &share_id)?;
         let Some((stamp, dir)) = active_journal(&options, &share_id)? else {
             return Err(NativeError::not_found(
                 "this shared folder has no migration journal to roll back",

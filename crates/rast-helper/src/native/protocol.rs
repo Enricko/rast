@@ -1211,6 +1211,11 @@ impl NativeError {
     pub fn insufficient_memory(message: impl Into<String>) -> Self {
         Self::new("insufficient_memory", message)
     }
+    /// Another operation works on the same shared folder (retry later).
+    pub fn share_busy(message: impl Into<String>) -> Self {
+        Self::new("share_busy", message)
+    }
+
     pub fn unit_conflict(message: impl Into<String>) -> Self {
         Self::new("unit_conflict", message)
     }

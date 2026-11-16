@@ -731,6 +731,11 @@ sudo systemctl start rast
   `<stamp>.rolled-back/dropped-bits.txt` (`<recorded> <restored> <path>`).
 - `--json` prints a machine-readable report; the exit code is 1 when any
   shared folder failed (the others are still done).
+- An apply or rollback that is still running in the helper (for example
+  after its terminal was closed) keeps the share locked: a second run of
+  either fails for that share with `share_busy` ("still running") until
+  the first one ends. Wait for `journalctl -u rast-native` to log
+  "shared folder migrated" or "rolled back", then run it again.
 - **Repair pass.** The server applies the group layout again to every
   migrated shared folder when it starts (so right after every
   `rast migrate shares`, whose apply needs it stopped) and then once a day

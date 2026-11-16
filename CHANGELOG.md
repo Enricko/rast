@@ -116,7 +116,12 @@ this file by `scripts/changelog-section.sh`.
     are told apart by mount id (`statx`, Linux 5.8 or later), so a bind
     mount on the same file system inside a shared folder is never entered
     or emptied, a container that is itself a mount point is refused, and
-    removing a shared folder stops at a mount point inside it. A walk holds at
+    removing a shared folder stops at a mount point inside it. Operations
+    on one shared folder's container never overlap: each holds a per-share
+    lock in the helper (`share_busy` after 10 seconds, retried by the
+    server), and the migration apply and rollback also hold a `flock` in
+    the share's journal folder, so a rollback never runs beside an apply
+    whose CLI was killed. A walk holds at
     most 1 000 000 names at a time: a member's folder with more names is
     refused before they fill the helper's memory.
   - `shares_migrate_apply` writes a journal of every group, mode and ACL

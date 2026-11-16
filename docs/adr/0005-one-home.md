@@ -590,7 +590,15 @@ falls back on its next `quota_status` check.
   only by `st_dev`, so a bind mount on the same file system is never
   entered, changed or emptied either; a container that is itself a mount
   point is refused, and `share_dir_remove` stops at a mount point inside
-  (review follow-up).
+  (review follow-up). Operations on one share's container (prepare,
+  repair, remove, release, `share_deny_set`, migration apply and rollback)
+  hold that share's lock in the helper and fail with `share_busy` after
+  10 seconds of waiting (the server retries on its next pass; a deny set
+  no longer races the repair pass's rewrite of the container ACL). Apply
+  and rollback also hold a `flock` on
+  `<data_dir>/migrations/shares/<shareId>/lock`, so a rollback can never
+  run beside an apply, even when the CLI that started the apply was
+  killed or a second helper process runs.
 - Server: a syncer recomputes membership on every `access::bump_generation`
   (now also on role and status changes of accounts) and every five minutes,
   for the active accounts that have a Linux identity, and calls
