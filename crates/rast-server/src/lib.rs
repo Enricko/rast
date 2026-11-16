@@ -5,6 +5,7 @@ pub mod backup;
 pub mod migrate_shares;
 pub mod monitor;
 pub mod native_proxy;
+pub mod quota_sync;
 pub mod server;
 pub mod share_groups;
 pub mod state;

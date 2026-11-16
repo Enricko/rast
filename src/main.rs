@@ -1336,6 +1336,11 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     warnings += native_report.warnings;
     failures += native_report.failures;
+    let (quota_lines, quota_warnings) = rast::quota_sync::doctor_report(&cfg).await;
+    for line in &quota_lines {
+        println!("{line}");
+    }
+    warnings += quota_warnings;
     if cfg.native_enabled && !user_ids.is_empty() {
         let identities = rast::native::doctor_identities(&cfg, &user_ids).await;
         for line in &identities.lines {

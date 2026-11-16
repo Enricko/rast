@@ -202,6 +202,8 @@ pub async fn storage_settings(
         "sharedFolders": shared,
         "usedBytes": total_size,
         "filesystem": filesystem_usage(&cfg.storage_dir),
+        // What enforces quotas (ADR 0005, section 6).
+        "quota": state.quota.summary(),
     })))
 }
 

@@ -56,12 +56,71 @@ struct HelperLog {
     /// The members of each share's groups, as `share_members_set` set them:
     /// share id → (write, read).
     groups: Mutex<std::collections::HashMap<String, Members>>,
+    /// Kernel quota as the fake helper reports it (`None`: the quota
+    /// operations fail, like an older helper).
+    kernel: Mutex<Option<Kernel>>,
 }
+
+/// What the fake kernel keeps: user quota state, used bytes and limits per
+/// user id, and every `quota_set`.
+#[derive(Default, Clone)]
+struct Kernel {
+    user: &'static str,
+    group: &'static str,
+    used: std::collections::HashMap<i64, u64>,
+    limits: std::collections::HashMap<i64, (u64, u64)>,
+    sets: Vec<(i64, u64, u64)>,
+}
+
+/// Size of the fake filesystem.
+const KERNEL_TOTAL: u64 = 1 << 40;
 
 /// The (write, read) members of one share's groups.
 type Members = (Vec<i64>, Vec<i64>);
 
 impl HelperLog {
+    /// Answer a quota operation from the fake kernel.
+    fn quota(&self, request: &Value) -> Option<Value> {
+        let mut kernel = self.kernel.lock().unwrap();
+        let kernel = kernel.as_mut()?;
+        let root = |group: &str| {
+            json!({"device": "8:2", "fsType": "ext4", "totalBytes": KERNEL_TOTAL,
+                   "user": kernel.user, "group": group, "project": "off",
+                   "userGraceSecs": 604_800})
+        };
+        Some(match request["op"].as_str()? {
+            "quota_status" => json!({"homes": root(kernel.group), "shared": root(kernel.group),
+                                     "sameFilesystem": true}),
+            "quota_report" => {
+                let rows: Vec<Value> = request["userIds"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_i64)
+                    .map(|id| {
+                        let (soft, hard) = kernel.limits.get(&id).copied().unwrap_or_default();
+                        json!([
+                            id,
+                            kernel.used.get(&id).copied().unwrap_or(0),
+                            soft,
+                            hard,
+                            0
+                        ])
+                    })
+                    .collect();
+                json!({"users": rows, "shares": [], "userQuota": kernel.user})
+            }
+            "quota_set" => {
+                let id = request["userId"].as_i64()?;
+                let soft = request["softBytes"].as_u64()?;
+                let hard = request["hardBytes"].as_u64()?;
+                kernel.limits.insert(id, (soft, hard));
+                kernel.sets.push((id, soft, hard));
+                json!({"userId": id})
+            }
+            _ => return None,
+        })
+    }
+
     /// Set the groups of a share and answer like the helper does.
     fn members_set(&self, request: &Value) -> Value {
         let ids = |key: &str| -> Vec<i64> {
@@ -176,6 +235,8 @@ impl TestServer {
                         json!({"id": request["id"], "ok": true, "data": {
                             "unit": format!("rast-files-u{user_id}"),
                         }})
+                    } else if let Some(data) = log.quota(&request) {
+                        json!({"id": request["id"], "ok": true, "data": data})
                     } else if request["op"] == "share_members_set" {
                         json!({"id": request["id"], "ok": true, "data": log.members_set(&request)})
                     } else if ["share_group_ensure", "share_dir_prepare"]
@@ -1007,6 +1068,109 @@ async fn the_usage_view_and_the_fallback_quota_follow_a_home_scan() {
     assert_eq!(status, StatusCode::OK, "{usage}");
     assert_eq!(usage["quotaBackend"], "rast");
     assert!(usage["byLocation"]["files"].is_i64(), "{usage}");
+}
+
+#[tokio::test]
+async fn kernel_user_quota_sets_d4_limits_and_counts_everything_the_identity_owns() {
+    let (server, alice, bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let native = rast::native::client::NativeClient::from_config(&server.state.config);
+    // An older helper (no quota operations): RAST accounting applies.
+    assert!(rast::quota_sync::sync_once(&server.state, &native)
+        .await
+        .is_err());
+    let (_, usage) = server.get("/api/files/usage", &alice).await;
+    assert_eq!(usage["quotaBackend"], "rast");
+
+    *server.helper.kernel.lock().unwrap() = Some(Kernel {
+        user: "enforced",
+        group: "enforced",
+        used: [(alice.id, 10 << 20)].into_iter().collect(),
+        ..Default::default()
+    });
+    let summary = rast::quota_sync::sync_once(&server.state, &native)
+        .await
+        .unwrap();
+    assert_eq!(summary.accounts, 1, "only the one-HOME account");
+    let sets = server
+        .helper
+        .kernel
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .sets
+        .clone();
+    // D4: soft = quota, hard = soft + max(5 %, 1 GiB).
+    assert_eq!(sets, vec![(alice.id, 100, 100 + (1 << 30))]);
+    assert_eq!(server.used(alice.id).await.0, 10 << 20);
+    // Nothing changes: no second set.
+    rast::quota_sync::sync_once(&server.state, &native)
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .helper
+            .kernel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .sets
+            .len(),
+        1
+    );
+
+    // The usage view: the kernel's number, and what HOME does not hold is
+    // in shared folders.
+    let (status, usage) = server.get("/api/files/usage", &alice).await;
+    assert_eq!(status, StatusCode::OK, "{usage}");
+    assert_eq!(usage["quotaBackend"], "filesystem");
+    assert_eq!(usage["usedBytes"], 10 << 20);
+    let home: i64 = ["files", "apps", "caches", "trash"]
+        .iter()
+        .map(|key| usage["byLocation"][key].as_i64().unwrap_or(0))
+        .sum();
+    assert_eq!(
+        usage["byLocation"]["shared"].as_i64().unwrap(),
+        (10 << 20) - home
+    );
+    // Over quota: File Station refuses.
+    let (status, _) = server.upload(&alice, "dir=/&name=x.txt", b"x").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // A legacy account keeps RAST's accounting.
+    let (_, usage) = server.get("/api/files/usage", &bob).await;
+    assert_eq!(usage["quotaBackend"], "rast");
+
+    // A quota change reaches the kernel; an administrator is unlimited.
+    let (status, _, _) = server
+        .json(
+            "PATCH",
+            &format!("/api/users/{}", alice.id),
+            Some(&admin),
+            Some(json!({"quotaBytes": 0})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    rast::quota_sync::sync_once(&server.state, &native)
+        .await
+        .unwrap();
+    let sets = server
+        .helper
+        .kernel
+        .lock()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .sets
+        .clone();
+    assert_eq!(sets.last(), Some(&(alice.id, 0, 0)));
+
+    let (status, storage) = server.get("/api/settings/storage", &admin).await;
+    assert_eq!(status, StatusCode::OK, "{storage}");
+    assert_eq!(storage["quota"]["backend"], "filesystem");
+    assert_eq!(storage["quota"]["userQuota"], "enforced");
+    assert_eq!(storage["quota"]["shareLimits"], "filesystem, best effort");
 }
 
 #[tokio::test]

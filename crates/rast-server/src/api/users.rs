@@ -313,6 +313,10 @@ pub async fn update_user(
     if role.is_some() || body.active.is_some() {
         crate::access::bump_generation();
     }
+    // Role and quota decide the kernel limits of a one-HOME account (D4).
+    if role.is_some() || body.quota_bytes.is_some() {
+        state.quota.poke();
+    }
     let level = users::is_super_admin(&state.db, id).await
         || (was_super && !updated.active && wanted.is_none());
     // Deactivating an account must not leave its graphical sessions, native

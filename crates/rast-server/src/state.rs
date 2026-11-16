@@ -38,6 +38,8 @@ pub struct AppState {
     pub rootfs: Arc<crate::rootfs::RootFs>,
     /// The per-user file agents of one-HOME accounts.
     pub homefs: Arc<crate::homefs::client::HomeFs>,
+    /// Which quota backend applies (ADR 0005, section 6).
+    pub quota: Arc<crate::quota_sync::QuotaBackend>,
     /// Session restarts that users were warned about (shared folder access
     /// changed, ADR 0005 section 4).
     pub session_restarts: crate::share_groups::SessionRestarts,
@@ -184,6 +186,7 @@ impl AppState {
             terminal,
             rootfs,
             homefs,
+            quota: crate::quota_sync::new_backend(),
             session_restarts: Default::default(),
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
@@ -191,6 +194,8 @@ impl AppState {
         };
         // Shared folder groups follow the access rules (native backend only).
         crate::share_groups::spawn(state.clone());
+        // Kernel quota of one-HOME accounts (native backend only).
+        crate::quota_sync::spawn(state.clone());
         Ok(state)
     }
 

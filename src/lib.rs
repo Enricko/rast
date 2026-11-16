@@ -24,5 +24,5 @@ pub use rast_agent::{fileagent, homefs, rootfs, terminal};
 pub use rast_session::linux_apps;
 
 pub use rast_server::{
-    api, backup, migrate_shares, monitor, native_proxy, server, share_groups, state,
+    api, backup, migrate_shares, monitor, native_proxy, quota_sync, server, share_groups, state,
 };

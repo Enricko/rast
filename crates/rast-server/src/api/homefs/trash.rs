@@ -27,7 +27,7 @@ use crate::homefs::client::AGENT;
 use crate::homefs::{ShareRoot, ShareRoots};
 use crate::jobs::JobSpec;
 use crate::state::AppState;
-use crate::storage::ops::{UsageDto, QUOTA_BACKEND_RAST, USAGE_LOCATIONS, USAGE_TYPES};
+use crate::storage::ops::{UsageDto, USAGE_LOCATIONS, USAGE_TYPES};
 use crate::storage::trash::TrashEntryDto;
 use crate::storage::xdg_trash::TrashId;
 use crate::storage::{quota, shares, LogicalPath, MAX_BATCH_PATHS};
@@ -181,12 +181,23 @@ pub(super) async fn refresh_usage(state: &AppState, user: &AuthUser) -> AppResul
         .await?;
     let allocated = count(&value, "allocatedBytes")?;
     let trash_bytes = count(&value, "trashBytes")?;
-    let by_location = known(
+    let mut by_location = known(
         &USAGE_LOCATIONS,
         value.get("byLocation").unwrap_or(&Value::Null),
     );
+    by_location.remove("shared");
     let by_type = known(&USAGE_TYPES, value.get("byType").unwrap_or(&Value::Null));
-    quota::set_used(&state.db, user.id, allocated).await?;
+    // With kernel user quota the kernel's number counts (everything the
+    // identity owns on the filesystem, its files in shared folders too):
+    // what HOME does not hold is in shared folders. Without it, the scan.
+    let used = match kernel_used(state, user.id).await {
+        Some(kernel) => {
+            by_location.insert("shared", kernel.saturating_sub(allocated).max(0));
+            kernel
+        }
+        None => allocated,
+    };
+    quota::set_used(&state.db, user.id, used).await?;
     state.homefs.note_trash_bytes(user.id, trash_bytes);
     let info = quota::info(&state.db, user.id).await?;
     Ok(UsageDto {
@@ -195,8 +206,26 @@ pub(super) async fn refresh_usage(state: &AppState, user: &AuthUser) -> AppResul
         trash_bytes,
         by_type,
         by_location,
-        quota_backend: QUOTA_BACKEND_RAST,
+        quota_backend: state.quota.one_home_backend(),
     })
+}
+
+/// The kernel's used bytes of an identity, when user quota is on.
+async fn kernel_used(state: &AppState, user_id: i64) -> Option<i64> {
+    if !state.quota.kernel_usage() {
+        return None;
+    }
+    let native = crate::native::client::NativeClient::from_config(&state.config);
+    match crate::quota_sync::report(&native, &[user_id]).await {
+        Ok(rows) => rows
+            .first()
+            .filter(|row| row.user_id == user_id)
+            .map(|row| i64::try_from(row.used).unwrap_or(i64::MAX).min(MAX_BYTES)),
+        Err(error) => {
+            tracing::debug!(user_id, error = %error, "kernel quota report failed; using the HOME scan");
+            None
+        }
+    }
 }
 
 /// Start a background HOME scan when the last one is older than

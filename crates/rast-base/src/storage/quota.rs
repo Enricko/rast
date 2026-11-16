@@ -243,7 +243,18 @@ pub async fn recalculate(
     Ok(used)
 }
 
-/// Recalculate usage for every user (doctor / maintenance helper).
+/// Whether a home is missing or owned by this process's user (a legacy
+/// home).
+fn owned_by_service(home: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(home) {
+        // SAFETY: geteuid has no preconditions.
+        Ok(meta) => meta.uid() == unsafe { libc::geteuid() },
+        Err(_) => true,
+    }
+}
+
+/// Recalculate usage for every legacy user (maintenance helper).
 pub async fn recalculate_all(pool: &SqlitePool, storage: &Storage) -> AppResult<u64> {
     use sqlx::Row;
     let rows = sqlx::query("SELECT id, username FROM users")
@@ -253,6 +264,12 @@ pub async fn recalculate_all(pool: &SqlitePool, storage: &Storage) -> AppResult<
     for row in rows {
         let id: i64 = row.get("id");
         let username: String = row.get("username");
+        // A one-HOME account's HOME belongs to its identity (0700): the
+        // service cannot read it, and its usage comes from a HOME scan or
+        // the kernel (ADR 0005, section 6).
+        if !owned_by_service(&storage.home_dir(&username)) {
+            continue;
+        }
         if recalculate(pool, storage, id, &username).await.is_ok() {
             count += 1;
         }
