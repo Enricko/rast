@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
@@ -88,6 +88,11 @@ impl Drop for UploadSlot<'_> {
     }
 }
 
+/// Where one account's agent listens and its token, once known. Each
+/// account has its own lock, so starting one account's agent through the
+/// helper never holds up the requests of another account.
+type AgentSlot = Arc<Mutex<Option<(PathBuf, String)>>>;
+
 /// Connections to the per-user file agents.
 pub struct HomeFs {
     /// `native_enabled` on Linux: without the helper every account is legacy.
@@ -95,7 +100,7 @@ pub struct HomeFs {
     native: NativeClient,
     homes_root: PathBuf,
     events: EventBus,
-    agents: Mutex<HashMap<i64, (PathBuf, String)>>,
+    agents: std::sync::Mutex<HashMap<i64, AgentSlot>>,
     watching: Arc<std::sync::Mutex<HashSet<i64>>>,
     uploads: std::sync::Mutex<Uploads>,
 }
@@ -107,7 +112,7 @@ impl HomeFs {
             native,
             homes_root,
             events,
-            agents: Mutex::new(HashMap::new()),
+            agents: std::sync::Mutex::new(HashMap::new()),
             watching: Arc::new(std::sync::Mutex::new(HashSet::new())),
             uploads: std::sync::Mutex::new(Uploads::default()),
         }
@@ -158,35 +163,50 @@ impl HomeFs {
         }
     }
 
+    /// The agent slot of one account.
+    fn slot(&self, user_id: i64) -> AgentSlot {
+        self.agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(user_id)
+            .or_default()
+            .clone()
+    }
+
     async fn connect(&self, user_id: i64) -> AppResult<(tokio::net::UnixStream, String)> {
-        let mut agents = self.agents.lock().await;
-        if let Some((socket, token)) = agents.get(&user_id) {
+        let slot = self.slot(user_id);
+        let mut agent = slot.lock().await;
+        if let Some((socket, token)) = agent.as_ref() {
             if let Ok(stream) = tokio::net::UnixStream::connect(socket).await {
                 let token = token.clone();
                 self.ensure_watch(user_id, socket.clone(), token.clone());
                 return Ok((stream, token));
             }
         }
-        agents.remove(&user_id);
+        *agent = None;
         let (socket, token) = self.start(user_id).await?;
         let stream = tokio::net::UnixStream::connect(&socket)
             .await
             .map_err(|error| {
                 AppError::unavailable(format!("cannot reach your file agent: {error}"))
             })?;
-        agents.insert(user_id, (socket.clone(), token.clone()));
+        *agent = Some((socket.clone(), token.clone()));
         self.ensure_watch(user_id, socket, token.clone());
         Ok((stream, token))
     }
 
     /// Use an agent that is already listening (tests).
     pub async fn set_agent(&self, user_id: i64, socket: PathBuf, token: String) {
-        self.agents.lock().await.insert(user_id, (socket, token));
+        *self.slot(user_id).lock().await = Some((socket, token));
     }
 
-    /// Forget a user's agent (after `files_agent_stop`).
+    /// Forget a user's agent (after `files_agent_stop`). It does not wait
+    /// for a start that is under way.
     pub async fn forget(&self, user_id: i64) {
-        self.agents.lock().await.remove(&user_id);
+        self.agents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&user_id);
     }
 
     /// Send one request to the user's agent and stream its response back.
@@ -421,6 +441,71 @@ mod tests {
             PathBuf::from("/nonexistent/homes"),
             EventBus::new(),
         )
+    }
+
+    /// A helper that answers `files_agent_start` for user 2 at once and
+    /// never for user 1.
+    fn slow_helper(dir: &std::path::Path) -> PathBuf {
+        let helper = dir.join("h.sock");
+        let listener = tokio::net::UnixListener::bind(&helper).unwrap();
+        let agent = dir.join("u2.sock");
+        // Listening is enough for `connect`; requests are not needed.
+        let agent_listener = std::os::unix::net::UnixListener::bind(&agent).unwrap();
+        tokio::spawn(async move {
+            let _agent_listener = agent_listener;
+            while let Ok((stream, _)) = listener.accept().await {
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+                    let (read, mut write) = stream.into_split();
+                    let mut line = String::new();
+                    let mut reader = tokio::io::BufReader::new(read);
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let request: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+                    if request["userId"] == 1 {
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        return;
+                    }
+                    let reply = json!({"id": request["id"], "ok": true, "data": {
+                        "unit": "rast-files-u2", "socket": agent, "token": "k".repeat(64),
+                    }});
+                    let mut bytes = serde_json::to_vec(&reply).unwrap();
+                    bytes.push(b'\n');
+                    let _ = write.write_all(&bytes).await;
+                });
+            }
+        });
+        helper
+    }
+
+    #[tokio::test]
+    async fn a_slow_agent_start_holds_up_only_its_own_account() {
+        let dir = crate::test_support::socket_tempdir();
+        let fs = Arc::new(HomeFs::new(
+            true,
+            NativeClient::new(slow_helper(dir.path())),
+            dir.path().join("homes"),
+            EventBus::new(),
+        ));
+        let slow = {
+            let fs = fs.clone();
+            tokio::spawn(async move { fs.connect(1).await.map(|_| ()) })
+        };
+        // Let user 1 take its lock and wait for the helper.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!slow.is_finished());
+        let (_, token) = tokio::time::timeout(Duration::from_secs(5), fs.connect(2))
+            .await
+            .expect("user 2 waited for user 1's agent start")
+            .unwrap();
+        assert_eq!(token, "k".repeat(64));
+        // Forgetting an account does not wait for its start either.
+        tokio::time::timeout(Duration::from_secs(5), fs.forget(1))
+            .await
+            .unwrap();
+        slow.abort();
     }
 
     #[test]
