@@ -128,7 +128,11 @@ this file by `scripts/changelog-section.sh`.
   The rollback never restores set-uid bits, nor set-gid bits of regular
   files (set-gid on folders is restored), and lists every entry that lost
   a bit; the full list is kept next to the journal
-  (`<stamp>.rolled-back/dropped-bits.txt`).
+  (`<stamp>.rolled-back/dropped-bits.txt`). The command and the server's
+  repair pass wait up to an hour per shared folder for the helper (they
+  gave up after 15 seconds while the helper went on working, so a large
+  share was reported as failed in the middle of its apply).
+  Creating groups and setting their members waits up to two minutes.
 
 - **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
   With the native backend, the server recomputes the members of every

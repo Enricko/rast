@@ -141,7 +141,12 @@ impl NativeClient {
             "deb_download" => self.timeouts.download,
             "apt_update" => self.timeouts.update,
             "identity_ensure" | "identity_remove" => self.timeouts.identity,
-            _ => self.timeouts.quick,
+            // Every other operation has the deadline of the protocol
+            // contract: the shared folder walks may take many minutes.
+            _ => match crate::native::protocol::timeout_for_op(op) {
+                deadline if deadline == QUICK_OP_TIMEOUT => self.timeouts.quick,
+                deadline => deadline,
+            },
         }
     }
 
@@ -561,6 +566,44 @@ mod tests {
             timeout_for_op("session_start"),
             crate::native::protocol::QUICK_OP_TIMEOUT
         );
+        // Generic JSON calls of the shared folder and HOME operations wait
+        // as long as the contract says, not the quick deadline: a repair
+        // pass or a migration of a large share takes minutes, and a client
+        // that gave up early let the operator start a rollback while the
+        // helper was still applying.
+        for op in [
+            "share_dir_prepare",
+            "share_dir_remove",
+            "share_dir_repair",
+            "shares_migrate_scan",
+            "shares_migrate_apply",
+            "shares_migrate_rollback",
+        ] {
+            assert_eq!(
+                client.timeout_for(op),
+                crate::native::protocol::SHARE_TREE_TIMEOUT,
+                "{op}"
+            );
+        }
+        for op in [
+            "home_ensure",
+            "share_group_ensure",
+            "share_group_remove",
+            "share_members_set",
+        ] {
+            assert_eq!(
+                client.timeout_for(op),
+                crate::native::protocol::IDENTITY_OP_TIMEOUT,
+                "{op}"
+            );
+        }
+        for op in [
+            "share_deny_set",
+            "share_session_groups",
+            "share_dir_release",
+        ] {
+            assert_eq!(client.timeout_for(op), QUICK_OP_TIMEOUT, "{op}");
+        }
     }
 
     #[test]
