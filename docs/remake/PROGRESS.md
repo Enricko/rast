@@ -3,9 +3,12 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
+- **Test host:** production (`desktop.lufria.tech`) doubles as the test host;
+  there is no separate VM or VPS (maintainer's decision, 2026-11-16). See
+  "Testing on production" below and Production safety in `CLAUDE.md`.
 
 ## Phase 0 checklist
 
@@ -13,7 +16,7 @@ Update it at the end of every session.
 - [x] Create `rast-api` with `EntryDto` and `ListingDto` (from `crates/rast-base/src/storage/ops.rs`) and generate TypeScript types with `ts-rs` (task 0.3)
 - [x] Create `rast-ui` with one Leptos component mounted in a RAST window, built with Trunk, embedded with `rust-embed`
 - [x] Record the current compressed JS bundle size as the baseline
-- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/` (task 0.6, **deferred** by the maintainer: it runs on a separate test host with RAST 0.18.2 before the Phase 1 results are tested there)
+- [ ] Run the app matrix on 0.18.x and store results in `tests/e2e/results/` (task 0.6, **deferred** by the maintainer: it runs on production with a test account while production still runs 0.18.x, before the first 1.0.1 pre-release is deployed)
 - [x] Create `docs/remake/PROGRESS.md` and the first ADRs
 - [x] Fix the README: duplicated "Linux apps" row and stale status line (task 0.5)
 - [x] **Exit:** CI green, still a single release binary, no behaviour change (accepted by the maintainer on 2026-11-16, with 0.6 deferred)
@@ -563,24 +566,99 @@ Update it at the end of every session.
 - [x] Task 1.3: shared folders as Linux groups (unit and fake-helper tests; kernel-level tests under "Pending on the test host")
 - [ ] Task 1.4: XDG Trash and quota
 - [ ] Task 1.5: HOME migration command
+  - `rast migrate home` must run per account (the production migration
+    starts with the test accounts), and `rast migrate shares` per share
+    (`--share <name>` exists, with tests for dry-run, rollback and an
+    unknown name).
   - `rast migrate home` must also remove the default ACL entries
     (`d:u:rast-u<id>`) that 0.18.3 adds to every folder in the person's home,
     together with the access entries `u:rast-u<id>:rx`, and `--rollback` must
     restore both.
 - [ ] Task 1.6: Phase 1 security review
-- [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on the disposable instance
+- [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
 
 ## In progress
 
 - Nothing.
 
+## Testing on production
+
+Since 2026-11-16 production (`desktop.lufria.tech`) is the test host. The
+rules (full text in `CLAUDE.md`, Production safety):
+
+- Only the maintainer deploys: a pre-release from `Remake`, then
+  `sudo rast update --version <version>`. Claude never stops, restarts or
+  reconfigures the production services.
+- Before every deploy Claude prepares a checklist: backup of `/etc/rast`,
+  `/var/lib/rast` and `/srv/rast`, the rollback version, and the rollback
+  steps (migration `--rollback` for test accounts with the new binary, then
+  `sudo rast update --version <rollback version>`, then a health check).
+- Tests use test accounts (prefix `t-`) and test shared folders only.
+  `rast migrate shares` and `rast migrate home` run only for those until the
+  maintainer approves migrating real accounts. Apply and rollback of
+  `rast migrate shares` need `rast.service` stopped, so the maintainer runs
+  them.
+- One native instance per host: no second native instance; native tests use
+  the production instance with test accounts. The dev instance in docker
+  mode is still allowed.
+- The "Pending on the test host" lists below mean: tests on production with
+  test accounts, after the deploy that contains the change.
+
+## Pre-release check (2026-11-16)
+
+Checked whether a pre-release such as `1.0.1-alpha.1` can be published and
+installed with `rast update --version`. No tag was made.
+
+- **Workflow version format:** `.github/workflows/release.yml` and
+  `installer/install.sh` (`normalize_version`) accept `X.Y.Z-suffix`, so
+  `1.0.1-alpha.1` passes the format check.
+- **Blocker, exact version match:** the workflow then requires the release
+  version to equal `Cargo.toml` ("Cross-check Cargo.toml version") and the
+  built binary's `rast version`, and `scripts/changelog-section.sh` needs a
+  `## [1.0.1-alpha.1]` section. With `Cargo.toml` at `1.0.1` (the remake
+  rule says do not bump), a `v1.0.1-alpha.1` release fails in the prepare
+  job. The release installer and `rast update` also check that the binary
+  reports exactly the release version. Options (maintainer's decision):
+  (a) set `Cargo.toml` to `1.0.1-alpha.N` in a release commit for each
+  pre-release, with a matching CHANGELOG heading, as an exception to the
+  "no bump" rule; (b) let the workflow and `changelog-section.sh` map a
+  `-suffix` release to the `[1.0.1]` section, which still needs (a) for the
+  binary version; (c) publish only `v1.0.1` itself as a pre-release, which
+  allows a single test deploy (a second one needs the tag and release
+  deleted and recreated).
+- **Risk, tag push:** `prerelease: ${{ inputs.prerelease || false }}` is
+  `false` for a pushed tag, so `git push origin v1.0.1-alpha.1` publishes a
+  **normal** release. GitHub then reports it as `/releases/latest`, and
+  `rast update` (and the update notice) offers it to every server. Until the
+  workflow derives `prerelease` from a `-` in the version, publish
+  pre-releases only through the manual run (`workflow_dispatch`) with
+  `prerelease` ticked.
+- **`rast update --version <v>`** (`src/update.rs`): fetches
+  `/releases/tags/v<v>`, which also returns pre-releases, and skips the
+  "is it newer" check when `--version` is given, so it installs a
+  pre-release and can go back to an older version (rollback). Without
+  `--version` it uses `/releases/latest`, which never returns a
+  pre-release, so other servers are not offered one.
+- **Version order:** `version_is_newer` compares only `X.Y.Z` and ignores
+  the suffix, so `1.0.1-alpha.2` and `1.0.1` count as equal to
+  `1.0.1-alpha.1`. A server on a pre-release must move to the next
+  pre-release or to the final `1.0.1` with `--version`; plain
+  `rast update` reports "already up to date".
+- **Rollback to 0.18.x:** `Remake` adds no migration (still `0014`, schema
+  v14), so a 0.18.x binary opens the database. The move of `rast.db` and
+  `secret.key` into `private/` keeps links an older binary follows (still
+  to be verified on production, see "Pending on the test host (task 1.3)").
+  A binary rollback does not undo groups, ACLs or owners set by
+  `rast migrate shares` or `rast migrate home`; run their `--rollback` with
+  the 1.0.1 binary first.
+
 ## Pending on the test host (task 1.2)
 
 These need root, real `rast-u<id>` accounts or a native RAST instance, so
-they run on the separate test host (only one native RAST per host, and this
-host runs production). Until then 1.2 is covered by unit tests and
-`tests/homefs_e2e.rs` (real router, real agent running as the test user,
-fake helper).
+they run on production with test accounts after the deploy that contains
+task 1.2 (only one native RAST per host). Until then 1.2 is covered by unit
+tests and `tests/homefs_e2e.rs` (real router, real agent running as the
+test user, fake helper).
 
 - Kernel-level cross-user isolation: an agent of `rast-u<a>` gets `EACCES`
   on the HOME of `rast-u<b>` and on shared containers it is not a member
@@ -633,8 +711,8 @@ fake helper).
 - Revocation: after write → read the restarted agent can no longer write,
   apps and terminals restart after 60 s, and afterwards `id` shows the new
   groups; "Restart session now" works.
-- `rast migrate shares` on a copy of a production-like share
-  (`rast:rast` 0750, files 0644): dry-run report, apply, resume after
+- `rast migrate shares --share <test share>` on a test share set up like
+  the production shares (`rast:rast` 0750, files 0644): dry-run report, apply, resume after
   killing the helper half way, rollback back to the same owners, modes and
   ACLs (compare `getfacl -R` before and after).
 - The deny entry of D7 (decided: stopgap during the warning). As root:
@@ -655,14 +733,15 @@ fake helper).
 - Task 1.3 decisions: a bind mount (`mount --bind`) inside a share is
   left alone by the repair pass and stops `share_dir_remove`; a session
   restart is not triggered by a set-uid program of the user run by another
-  account; the first start of 1.0.1 on a copy of production data moves
+  account; the first start of 1.0.1 on production (after the maintainer's
+  deploy and backup) moves
   `rast.db` and `secret.key` into `private/` (and an older binary still
   starts through the links).
 - Task 1.3 review: a FUSE mount by a member inside a share (for example
   `sshfs` or `squashfuse`) is left out of File Station search, size, copy
-  and delete (delete answers 403); a hard link (with
-  `fs.protected_hardlinks = 0` on a throwaway VM only) to a file of
-  another account stays unchanged after the repair pass.
+  and delete (delete answers 403). The hard-link case needs
+  `fs.protected_hardlinks = 0`, which must not be set on production; it
+  stays covered by unit tests only (no throwaway VM any more).
 - The repair pass: after `rast migrate shares`, `mv` a file from HOME into
   the share in a terminal (keeps the user's group), `chgrp` one to the
   user's primary group, then restart `rast.service`: both get the rw group
@@ -677,17 +756,24 @@ fake helper).
 2. Task 1.6 (Phase 1 security review): includes the new root helper
    operations of task 1.3 and its follow-up (`share_deny_set`,
    `share_dir_repair`, `share_session_groups`).
-3. Run the "Pending on the test host" lists above on the test host.
-3. 0.18.3 (D13) is released: the maintainer installs it on production, then
+3. First deploy to production (the maintainer): decide the pre-release
+   version format (see "Pre-release check"), Claude prepares the deploy
+   checklist, then run the "Pending on the test host" lists on production
+   with test accounts.
+4. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
    PR #2).
-4. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
-   0.18.2, before the Phase 1 results are tested there.
-   `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
-   (systemd unit names are keyed by user id), and production uses it on this
-   host. Do not run `dev-instance.sh up native` here.
+5. Task 0.6 (deferred): baseline app matrix on production with a test
+   account while it still runs 0.18.x, before the first 1.0.1 pre-release
+   is deployed. `docs/NATIVE-LINUX-APPS.md` allows only one native RAST
+   instance per host (systemd unit names are keyed by user id), so never
+   run `dev-instance.sh up native` here.
 
 ## Open questions
+
+- **Pre-release version format (2026-11-16):** which option from
+  "Pre-release check" (a, b or c)? And should the Release workflow set
+  `prerelease` automatically for a version with a `-suffix`?
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user

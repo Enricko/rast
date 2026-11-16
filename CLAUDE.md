@@ -32,18 +32,39 @@ RAST must keep working, and the existing tests must stay green, at every commit.
 
 ## Production safety (read first)
 
-The development host may also run the **production** RAST (`127.0.0.1:8720`,
-behind nginx on `8721`).
+The development host runs the **production** RAST, `desktop.lufria.tech`
+(`127.0.0.1:8720`, behind nginx on `8721`). **Production is also the test
+host**: there is no separate VM or VPS (maintainer's decision, 2026-11-16).
 
 - Never stop, restart, reconfigure, upgrade or reinstall it. Never touch
   `rast.service`, `rast-worker.service`, `rast-native.service`,
   `rast-linux.slice`, `/etc/rast`, `/var/lib/rast` or `/srv/rast`.
-- Test only with the disposable instance from `scripts/e2e/dev-instance.sh`
-  (`/tmp/rast-e2e`, port `8731`).
+- **Only the maintainer deploys to production**: a pre-release cut from
+  `Remake`, installed with `sudo rast update --version <version>`. Never run
+  `rast update`, the installer or a release yourself.
+- **Before every deploy**, prepare a checklist for the maintainer: a backup
+  of `/etc/rast`, `/var/lib/rast` and `/srv/rast` (commands and target
+  location), the rollback version (the version production runs before the
+  deploy), and the rollback steps (first `--rollback` of every migration
+  that ran for test accounts, with the new binary; then
+  `sudo rast update --version <rollback version>`; then a health check).
+- **Tests on production use test accounts only** (usernames starting with
+  `t-`) and test shared folders. Never log in as, change, or read the files
+  of a real account, and never change a real shared folder.
+- On production, `rast migrate shares` and `rast migrate home` run **only
+  for test accounts and test shares** (always with `--share <name>` or the
+  per-account option, never for all) until the maintainer approves the
+  migration of real accounts. Steps that need `rast.service` stopped are
+  run by the maintainer.
+- Disposable instance: `scripts/e2e/dev-instance.sh` (`/tmp/rast-e2e`, port
+  `8731`) in **docker mode only**.
 - **Only one native RAST instance may run per host**: systemd unit names are
-  keyed by user id (`rast-xpra-u<id>`, `rast-app-u<uid>-…`). Ask before running
-  `scripts/e2e/dev-instance.sh up native` or anything that starts
-  `rast native-helper`.
+  keyed by user id (`rast-xpra-u<id>`, `rast-app-u<uid>-…`). Never run
+  `scripts/e2e/dev-instance.sh up native` or start a second
+  `rast native-helper`. Native tests use the production instance with test
+  accounts, after the maintainer has deployed the build under test.
+- "Pending on the test host" in `docs/remake/PROGRESS.md` means: tests on
+  production with test accounts, after a deploy.
 - Never run the installer (`installer/install.sh`) on this host. Use
   `scripts/test-installer-clean.sh`, which runs in containers.
 
@@ -55,6 +76,10 @@ behind nginx on `8721`).
   the final remake gate passes. `rast update` (`src/update.rs`,
   `/releases/latest`) offers the newest non-pre-release to every installed
   server, production included.
+- Release check (2026-11-16, see `docs/remake/PROGRESS.md`, "Pre-release
+  check"): publish a pre-release only through the Release workflow's manual
+  run with `prerelease` ticked. A pushed tag is always published as a normal
+  release, which `rast update` would offer to every server.
 - Record all remake changes under `## [1.0.1] - Unreleased` in `CHANGELOG.md`
   until the maintainer releases it. Never tag, push or publish without being
   asked.
@@ -151,7 +176,7 @@ On the production host, use the disposable e2e instance instead:
 
 ```bash
 scripts/e2e/dev-instance.sh build              # snapshot binary + frontend
-scripts/e2e/dev-instance.sh up docker          # `up native` only with approval (see Production safety)
+scripts/e2e/dev-instance.sh up docker          # never `up native` here (see Production safety)
 (cd tests/e2e && npm install && npx playwright install chromium)
 node tests/e2e/run.mjs --list
 node tests/e2e/run.mjs --mode=docker --scenario=all
@@ -302,7 +327,8 @@ Do phases in order. Week numbers are estimates for one full-time developer.
 - `rast migrate home --dry-run` and `--rollback`, per user and idempotent, with
   a backup of owners and modes. Backup Center reads homes through the helper.
 - **Exit:** a file saved by Chrome appears in File Station and vice versa;
-  cross-user tests pass; dry-run and rollback tested on the disposable instance.
+  cross-user tests pass; dry-run and rollback tested on production with test
+  accounts and test shares (see Production safety).
 
 ### Phase 2 — Desktop session (weeks 7–9)
 

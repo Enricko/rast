@@ -19,6 +19,14 @@ Code, with the model and effort for each task. Keep this file as
 5. Work in order. Do not move to the next phase before the previous phase's
    "Exit" criteria pass (see `CLAUDE.md`).
 6. Replace text inside `<…>` before sending a prompt.
+7. Production (`desktop.lufria.tech`) is also the test host; there is no
+   separate VM or VPS. Native tests run there with test accounts (prefix
+   `t-`) and test shared folders, after the maintainer has deployed a
+   pre-release with `sudo rast update --version <version>`. Claude prepares
+   the deploy checklist (backup of `/etc/rast`, `/var/lib/rast` and
+   `/srv/rast`, rollback version, rollback steps) and never deploys, stops
+   or restarts production itself. The dev instance runs in docker mode
+   only. See Production safety in `CLAUDE.md`.
 
 ## Choosing model and effort
 
@@ -116,7 +124,7 @@ claude --model sonnet --effort medium
 ```text
 Create an "app matrix" e2e scenario in tests/e2e with the five checks from CLAUDE.md (appears in the launcher, opens as a RAST window, accepts typing, a saved file is visible in File Station, closes normally) for Chrome, Firefox, VS Code and LibreOffice.
 Checks that 0.18 does not support yet (for example a file from an app not yet visible in File Station) are marked "expected fail" with the reason.
-Ask me before running the native instance (see Production safety). Store the results in tests/e2e/results/ and the summary in PROGRESS.md.
+Native runs use the production instance with a test account (prefix t-) while production still runs 0.18.x; never start a second native instance (see Production safety). Tell me what you will run before you run it. Store the results in tests/e2e/results/ and the summary in PROGRESS.md.
 ```
 
 ## Phase 1 — One HOME
@@ -182,9 +190,11 @@ claude --model opus --effort xhigh
 
 ```text
 Implement rast migrate home --dry-run, rast migrate home and rast migrate home --rollback following ADR 0005: per user, idempotent, and always taking a backup of the owner/mode list before changing anything.
+It must run for one account at a time (an option such as --user <name>, for every mode), because the migration on production starts with the test accounts (prefix t-) and real accounts follow only after my approval. Propose how "all accounts" is selected (for example an explicit --all) and ask me before changing the CLI output of rast migrate shares.
+Make sure rast migrate shares also works per share (--share <name>) for dry-run, apply and rollback, with tests for each mode.
 The dry-run report covers data size, files that change owner, app profiles that get merged, and conflicts.
 Remove the per-launch setfacl -R in start_run and the read-only RAST symlink in app profiles.
-Test on the disposable instance (scripts/e2e/dev-instance.sh); ask me before running native mode. Write an Upgrade note in CHANGELOG.md.
+Test with unit and fake-helper tests, and the dev instance in docker mode. Native tests run on production with test accounts and test shares after I deploy the pre-release: write them in PROGRESS.md under "Pending on the test host", together with the deploy checklist (backup of /etc/rast, /var/lib/rast and /srv/rast, rollback version, rollback steps). Write an Upgrade note in CHANGELOG.md.
 ```
 
 ### 1.6 Phase 1 security review
@@ -330,7 +340,7 @@ claude --model sonnet --effort medium
 ```
 
 ```text
-Run the app matrix for the Beta gate (Chrome, Firefox, VS Code, LibreOffice) on the disposable instance; ask me before native mode.
+Run the app matrix for the Beta gate (Chrome, Firefox, VS Code, LibreOffice) on production with a test account after I deploy the pre-release (see Production safety); the dev instance stays in docker mode.
 Also create (if missing) and run the "launcher in a launcher" scenario from CLAUDE.md (App matrix) with ArtCraft Launcher and JetBrains Toolbox: each launcher passes the five checks, then installs one app through it. The scenario passes when that app opens as a RAST window, keeps running after the launcher is closed, and its shortcut appears in the RAST launcher.
 For every failing check, find the cause and write the list of fixes in PROGRESS.md. Fix small ones directly; turn big ones into separate tasks.
 Beta passes only when all four apps pass all five checks and both launchers pass the launcher scenario.
