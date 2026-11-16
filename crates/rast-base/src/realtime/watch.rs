@@ -1,6 +1,10 @@
 //! Bounded recursive filesystem watcher for File Station realtime updates.
 //!
-//! Only `<storage>/homes` and `<storage>/shared` are watched, recursively.
+//! Only `<storage>/homes` and `<storage>/shared` are watched, recursively;
+//! each home has its own recursive watch, so a home the service cannot read
+//! is skipped without ending the others. One-HOME homes (ADR 0005: owned by
+//! the account's Linux identity) are never mapped: their file agent reports
+//! their changes.
 //! Raw `notify` events are debounced (~400 ms), deduplicated and rate-limited;
 //! physical paths are mapped to logical File Station paths and scoped audiences
 //! (home owner, or the shared folder's id — whose current readers are decided
@@ -45,6 +49,9 @@ pub const MAX_PENDING_PATHS: usize = 4096;
 pub const CHANNEL_CAPACITY: usize = 4096;
 /// How often the async loop checks debounce/overflow state.
 const TICK: Duration = Duration::from_millis(100);
+/// How long the one-HOME check of an account is trusted (after a HOME
+/// changes owner, the server may report its changes for this long).
+pub const ONE_HOME_TTL: Duration = Duration::from_secs(2);
 /// Paths per `file.changed` payload (keeps SSE frames bounded).
 const MAX_PATHS_PER_EVENT: usize = 100;
 
@@ -52,8 +59,10 @@ const MAX_PATHS_PER_EVENT: usize = 100;
 pub fn spawn(cfg: &Config, db: SqlitePool, events: EventBus) {
     let homes = cfg.homes_dir();
     let shared = cfg.shared_dir();
+    // One-HOME accounts exist only with the native helper (as in `HomeFs`).
+    let skip_one_home = cfg.native_enabled && cfg!(target_os = "linux");
     tokio::spawn(async move {
-        if let Err(error) = run(homes, shared, db, events).await {
+        if let Err(error) = run(homes, shared, skip_one_home, db, events).await {
             tracing::warn!(error = %error, "filesystem watcher stopped");
         }
     });
@@ -62,6 +71,7 @@ pub fn spawn(cfg: &Config, db: SqlitePool, events: EventBus) {
 async fn run(
     homes: PathBuf,
     shared: PathBuf,
+    skip_one_home: bool,
     db: SqlitePool,
     events: EventBus,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -92,14 +102,18 @@ async fn run(
         }
     })?;
 
-    if let Err(error) = watcher.watch(&homes, RecursiveMode::Recursive) {
+    if let Err(error) = watcher.watch(&homes, RecursiveMode::NonRecursive) {
         tracing::warn!(path = %homes.display(), error = %error, "cannot watch homes directory");
     }
+    watch_each_home(&mut watcher, &homes);
     if let Err(error) = watcher.watch(&shared, RecursiveMode::Recursive) {
         tracing::warn!(path = %shared.display(), error = %error, "cannot watch shared directory");
     }
 
-    let mut mapper = PathMapper::default();
+    let mut mapper = PathMapper {
+        skip_one_home,
+        ..PathMapper::default()
+    };
     let mut debouncer = Debouncer::default();
     let mut rate = RateWindow::new(Instant::now());
     let mut resync = ResyncThrottle::default();
@@ -111,6 +125,15 @@ async fn run(
         tokio::select! {
             maybe_event = rx.recv() => {
                 let Some(event) = maybe_event else { return Ok(()) };
+                if matches!(event.kind, notify::EventKind::Create(_)) {
+                    // A new home gets its own recursive watch.
+                    for path in &event.paths {
+                        let is_dir = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+                        if is_dir && path.parent() == Some(homes.as_path()) {
+                            watch_home(&mut watcher, path);
+                        }
+                    }
+                }
                 for path in event.paths {
                     debouncer.record(path);
                 }
@@ -143,6 +166,31 @@ async fn run(
                 )
                 .await;
             }
+        }
+    }
+}
+
+/// Watch every home below `homes` on its own. `notify` ends a recursive
+/// watch at the first directory it cannot watch, so one home the service
+/// cannot read (a one-HOME account's 0700 HOME) must not stop the others.
+/// Returns how many homes are watched.
+fn watch_each_home(watcher: &mut impl Watcher, homes: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(homes) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| watch_home(watcher, &entry.path()))
+        .count()
+}
+
+fn watch_home(watcher: &mut impl Watcher, home: &Path) -> bool {
+    match watcher.watch(home, RecursiveMode::Recursive) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::debug!(path = %home.display(), error = %error, "home not watched");
+            false
         }
     }
 }
@@ -183,6 +231,7 @@ async fn flush_batch(
             return;
         }
         mapper.ensure_fresh(db).await;
+        mapper.check_one_home(db, homes, &paths).await;
         let mut groups: BTreeMap<String, Group> = BTreeMap::new();
         let mut unmapped: Vec<PathBuf> = Vec::new();
         for path in &paths {
@@ -192,6 +241,7 @@ async fn flush_batch(
             // A new user or share may have appeared after the last cache load:
             // refresh once before skipping the path ("skip unknown mappings").
             if mapper.refresh(db).await.is_ok() {
+                mapper.check_one_home(db, homes, &unmapped).await;
                 let retry = std::mem::take(&mut unmapped);
                 for path in retry {
                     collect_mapped(mapper, &path, homes, shared, &mut groups, &mut unmapped);
@@ -380,6 +430,10 @@ struct PathMapper {
     users: HashMap<String, i64>,
     /// `shares.container_path` -> cached share + audience
     shares: HashMap<String, CachedShare>,
+    /// Whether an account's HOME belongs to its Linux identity (one-HOME),
+    /// and when that was checked. Only accounts with events are checked.
+    one_home: HashMap<i64, (bool, Instant)>,
+    skip_one_home: bool,
     loaded_at: Option<Instant>,
 }
 
@@ -431,6 +485,52 @@ impl PathMapper {
         Ok(())
     }
 
+    /// Check (again, after [`ONE_HOME_TTL`]) whether the accounts that own
+    /// home paths in `paths` are one-HOME accounts.
+    async fn check_one_home(&mut self, pool: &SqlitePool, homes: &Path, paths: &[PathBuf]) {
+        if !self.skip_one_home {
+            return;
+        }
+        let mut owners: BTreeMap<i64, String> = BTreeMap::new();
+        for path in paths {
+            let Ok(relative) = path.strip_prefix(homes) else {
+                continue;
+            };
+            let Some(Component::Normal(first)) = relative.components().next() else {
+                continue;
+            };
+            let Some(username) = first.to_str().map(str::to_ascii_lowercase) else {
+                continue;
+            };
+            if let Some(user_id) = self.users.get(&username) {
+                owners.insert(*user_id, username);
+            }
+        }
+        for (user_id, username) in owners {
+            let fresh = self
+                .one_home
+                .get(&user_id)
+                .is_some_and(|(_, checked)| checked.elapsed() < ONE_HOME_TTL);
+            if fresh {
+                continue;
+            }
+            let uid: Option<i64> =
+                match sqlx::query_scalar("SELECT uid FROM linux_identities WHERE user_id = ?")
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await
+                {
+                    Ok(uid) => uid,
+                    Err(error) => {
+                        tracing::debug!(error = %error, "cannot read Linux identities");
+                        continue;
+                    }
+                };
+            let one_home = uid.is_some_and(|uid| home_owned_by(&homes.join(&username), uid));
+            self.one_home.insert(user_id, (one_home, Instant::now()));
+        }
+    }
+
     fn map(&self, physical: &Path, homes: &Path, shared: &Path) -> Option<MappedPath> {
         if let Ok(relative) = physical.strip_prefix(homes) {
             return self.map_home(relative);
@@ -448,6 +548,13 @@ impl PathMapper {
         };
         let username = first.to_str()?.to_ascii_lowercase();
         let user_id = *self.users.get(&username)?;
+        if self
+            .one_home
+            .get(&user_id)
+            .is_some_and(|(one_home, _)| *one_home)
+        {
+            return None;
+        }
         let rest = normal_components(components)?;
         if rest.is_empty() || rest.iter().any(|name| should_ignore_name(name)) {
             return None;
@@ -482,6 +589,17 @@ impl PathMapper {
     }
 }
 
+#[cfg(unix)]
+fn home_owned_by(home: &Path, uid: i64) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(home).is_ok_and(|meta| meta.is_dir() && i64::from(meta.uid()) == uid)
+}
+
+#[cfg(not(unix))]
+fn home_owned_by(_home: &Path, _uid: i64) -> bool {
+    false
+}
+
 fn normal_components<'a>(components: impl Iterator<Item = Component<'a>>) -> Option<Vec<&'a str>> {
     let mut parts = Vec::new();
     for component in components {
@@ -514,7 +632,44 @@ mod tests {
             users,
             shares,
             loaded_at: Some(Instant::now()),
+            ..PathMapper::default()
         }
+    }
+
+    #[test]
+    fn one_home_accounts_are_not_mapped() {
+        let mut mapper = mapper();
+        mapper.one_home.insert(1, (true, Instant::now()));
+        mapper.one_home.insert(2, (false, Instant::now()));
+        let homes = Path::new("/srv/rast/homes");
+        let shared = Path::new("/srv/rast/shared");
+        assert!(mapper
+            .map(&homes.join("alice/docs/a.txt"), homes, shared)
+            .is_none());
+        assert!(mapper
+            .map(&homes.join("bob/docs/a.txt"), homes, shared)
+            .is_some());
+    }
+
+    #[test]
+    fn an_unreadable_home_does_not_stop_the_other_watches() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root reads every directory
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::create_dir_all(dir.path().join(name).join("docs")).unwrap();
+        }
+        std::fs::write(dir.path().join("file"), b"not a home").unwrap();
+        let locked = dir.path().join("b");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let mut watcher =
+            notify::recommended_watcher(|_: notify::Result<notify::Event>| {}).unwrap();
+        let watched = watch_each_home(&mut watcher, dir.path());
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(watched, 2);
     }
 
     #[test]

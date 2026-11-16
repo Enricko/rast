@@ -804,3 +804,82 @@ async fn a_home_owned_by_another_uid_stays_legacy() {
     assert_eq!(server.starts(), 0);
     assert!(Path::new(&server.home("carol")).join("docs").exists());
 }
+
+/// Wait up to `limit` for `file.changed` events of an external change, and
+/// return the paths of those addressed to `user_id`.
+async fn external_paths(
+    events: &mut tokio::sync::broadcast::Receiver<rast::events::Event>,
+    user_id: i64,
+    limit: Duration,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + limit;
+    while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, events.recv()).await {
+        let mine = matches!(event.scope, rast::events::EventScope::User(id) if id == user_id);
+        if event.kind == "file.changed" && mine && event.data["source"] == "external" {
+            out.push(event.data["path"].as_str().unwrap_or_default().to_string());
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn external_changes_reach_their_account_once() {
+    let (server, alice, bob) = setup().await;
+    let mut events = server.state.events.subscribe();
+    // A first request starts the agent and the server follows its stream.
+    let (status, _) = server.get("/api/files?path=/", &alice).await;
+    assert_eq!(status, StatusCode::OK);
+    for _ in 0..200 {
+        if server.state.homefs.is_watching(alice.id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(server.state.homefs.is_watching(alice.id));
+
+    // The server's watcher re-checks an account's mode after this long; the
+    // setup made alice one-HOME only just now.
+    tokio::time::sleep(rast::realtime::watch::ONE_HOME_TTL + Duration::from_millis(500)).await;
+
+    // Hidden folders are reported by nobody: the agent does not watch them
+    // and the server's watcher skips the whole one-HOME home.
+    std::fs::create_dir_all(server.home("alice").join(".cache")).unwrap();
+    std::fs::write(server.home("alice").join(".cache/blob"), b"x").unwrap();
+    let paths = external_paths(&mut events, alice.id, Duration::from_millis(1500)).await;
+    assert!(paths.is_empty(), "{paths:?}");
+
+    // The agent sets its watches up after it answers: write until one shows.
+    let mut seen = None;
+    for attempt in 0..20 {
+        let name = format!("/note-{attempt}.txt");
+        std::fs::write(server.home("alice").join(&name[1..]), b"x").unwrap();
+        let paths = external_paths(&mut events, alice.id, Duration::from_millis(1500)).await;
+        if paths.contains(&name) {
+            // Exactly once: the server's own watcher skips one-HOME homes.
+            assert_eq!(
+                paths.iter().filter(|path| **path == name).count(),
+                1,
+                "{paths:?}"
+            );
+            seen = Some(name);
+            break;
+        }
+    }
+    assert!(seen.is_some(), "no event for a change in a one-HOME home");
+
+    // A legacy home is still watched by the server.
+    let mut seen_bob = false;
+    for attempt in 0..10 {
+        let name = format!("/bob-{attempt}.txt");
+        std::fs::write(server.home("bob").join(&name[1..]), b"x").unwrap();
+        if external_paths(&mut events, bob.id, Duration::from_millis(1500))
+            .await
+            .contains(&name)
+        {
+            seen_bob = true;
+            break;
+        }
+    }
+    assert!(seen_bob, "no event for a change in a legacy home");
+}
