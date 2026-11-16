@@ -407,9 +407,9 @@ Update it at the end of every session.
     agent's `openat2` had no `RESOLVE_NO_XDEV`. Paths below a share
     container now use it (the fallback walk compares devices) and an entry
     on another file system is refused; HOME is unchanged, so the user's own
-    mounts there stay reachable. Not changed: the agent's tree walks
-    (search, copy, size, remove) below a share still descend by name and
-    do not compare devices.
+    mounts there stay reachable. The agent's tree walks (search, copy,
+    size, remove) below a share were completed in `10116ce` (task 1.3
+    security review).
   - F4, covered by the daily repair pass (`bfe360e`): legacy in-process
     moves and recycle-bin restores into a prepared share keep group `rast`
     and no share ACL until the next pass; recorded in the runbook.
@@ -483,6 +483,50 @@ Update it at the end of every session.
   - Gates: fmt and clippy clean; `cargo test --workspace` 923 passed, 0
     failed; npm test 156 passed; npm build OK. No dependency, migration or
     deploy change.
+- **Task 1.3 security review** (2026-11-16, independent review of
+  `036b7bf..4be92ae` against ADR 0005). Fixed:
+  - `898421f` fix(helper): the shared folder walk (prepare, repair,
+    migration apply and rollback) skipped only root-owned entries and
+    changed group, bits and ACL of entries owned by any other account.
+    With `fs.protected_hardlinks = 0` a member could hard-link a file of
+    another service into a share; once its original name was gone (nlink
+    back to 1), the next repair pass made it group read-write. Now only
+    entries of `rast` and RAST identities are changed; others are reported
+    as `otherOwner`.
+  - `3da3267` fix(helper): `dir_names` read a whole folder into memory
+    before the 1 000 000-entry limit counted it; a member's folder with
+    tens of millions of empty files made the root helper allocate
+    gigabytes on the repair pass. Reads are now capped by the remaining
+    budget.
+  - `602cdac` fix(native): `NativeClient::call_json` gave the shared
+    folder walks the 15-second quick deadline instead of the protocol's
+    hour (and two minutes to the group operations). `rast migrate shares`
+    reported a large share as failed while the helper went on applying,
+    and released the instance lock, so a rollback could run next to it.
+  - `7c9d9eb` fix(server) and `32de67b` fix(server): `sync_once` stopped at
+    the first share whose groups failed: later shares never got their
+    members set (revoked members kept the groups for new sessions), the
+    revocations already applied never restarted sessions or set deny
+    entries, and stale-session checks and the repair pass never ran. Each
+    share is now synced on its own; a failing one is retried after 30 s.
+  - `10116ce` fix(agent): F3 completed, see above.
+  - `558d339` docs: file permissions inside shared folders are managed by
+    RAST (the repair pass undoes `chmod 600`; private files belong in
+    HOME). File Station has no in-app help.
+  - Found sound: protocol validation of the new operations (share id and
+    container only, `deny_unknown_fields`, bounded user lists); the
+    journal as untrusted input (no uid or gid 0, container owner must be
+    `rast`, set-uid and set-gid on files never restored, changes only
+    through the walk inside the container); deny entries (named user
+    before groups, removed after the restart or a grant, leftovers cleaned
+    on the first pass); `share_session_groups` against pid reuse (one read
+    of `status`, nothing acts on the pid); `/api/session/restart` (session,
+    CSRF and origin on POST, only the caller's own session); `~/Shared`
+    link maintenance (creates with `symlinkat`, never replaces, removes
+    only links that point into the shared root).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 928 passed, 0
+    failed; npm test 156 passed; npm build OK. No dependency, migration,
+    protocol or deploy change.
 
 ## Phase 1 checklist
 
@@ -580,6 +624,11 @@ fake helper).
   session restarts (`share_session_groups` sees the old gid in
   `/proc/<pid>/status`); leftover deny entries from before the stop are
   removed by the first pass.
+- Task 1.3 review: a FUSE mount by a member inside a share (for example
+  `sshfs` or `squashfuse`) is left out of File Station search, size, copy
+  and delete (delete answers 403); a hard link (with
+  `fs.protected_hardlinks = 0` on a throwaway VM only) to a file of
+  another account stays unchanged after the repair pass.
 - The repair pass: after `rast migrate shares`, `mv` a file from HOME into
   the share in a terminal (keeps the user's group), `chgrp` one to the
   user's primary group, then restart `rast.service`: both get the rw group
@@ -605,6 +654,31 @@ fake helper).
    host. Do not run `dev-instance.sh up native` here.
 
 ## Open questions
+
+- **Task 1.3 security review, for the maintainer** (design, protocol or
+  ADR; not changed):
+  1. `share_session_groups` counts every process whose effective uid is
+     the identity, not only the processes in that user's units. A set-uid
+     program of user X run by user Y carries Y's groups, so X's session is
+     restarted again and again. Options: filter by `/proc/<pid>/cgroup`
+     (the user's units) or require real uid == effective uid.
+  2. One identity with an unexpected uid makes `share_members_set` fail
+     for the whole share (no revocation for that share until it is
+     fixed). Option: skip and report it, like accounts without a Linux
+     identity.
+  3. A bind mount on the same file system inside a share (root only) has
+     the container's `st_dev`, so the helper walk and `share_dir_remove`
+     do not see it. Option: `statx` `STATX_MNT_ID` or `openat2`
+     `RESOLVE_NO_XDEV` in the helper.
+  4. `/var/lib/rast` is 0751. With `fs.protected_hardlinks = 0`, `rast`'s
+     own files there can be hard-linked into a share and are regrouped by
+     the repair pass once the original is replaced (`rast` is an allowed
+     owner). Options: 0750, and a `rast doctor` check for
+     `fs.protected_hardlinks = 1` (production has 1).
+  5. No per-share lock in the helper: apply, rollback, repair and
+     `share_deny_set` on one share can overlap (apply and rollback only if
+     the CLI is killed; repair vs. deny set is a read-modify-write of the
+     container ACL).
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user
