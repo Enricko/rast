@@ -16,7 +16,7 @@ pub mod agent;
 use std::path::{Path, PathBuf};
 
 use axum::body::Body;
-use axum::http::{header, HeaderMap, HeaderName, Method, Request, Response, StatusCode};
+use axum::http::{header, HeaderMap, Method, Response, StatusCode};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -30,7 +30,9 @@ pub use crate::storage::safe_path::RESERVED_NAME;
 /// Prefix of chunked upload ids that belong to the agent.
 pub const UPLOAD_PREFIX: &str = "sys-";
 /// Header carrying the agent token.
-pub const TOKEN_HEADER: &str = "x-rast-rootfs-token";
+pub use crate::fileagent::TOKEN_HEADER;
+/// How the agent is named in error messages.
+const AGENT: &str = "root file agent";
 
 /// Whether a logical path names the root file system.
 pub fn is_root_path(path: &str) -> bool {
@@ -147,33 +149,8 @@ impl RootFs {
             ));
         }
         let (stream, token) = self.connect().await?;
-        let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-                .await
-                .map_err(agent_error)?;
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path_and_query)
-            .header(header::HOST, "rootfs")
-            .header(TOKEN_HEADER, token);
-        for name in [header::CONTENT_TYPE, header::CONTENT_LENGTH, header::RANGE] {
-            if let Some(value) = headers.get(&name) {
-                request = request.header(name, value);
-            }
-        }
-        let request = request
-            .body(body)
-            .map_err(|error| AppError::internal(format!("cannot build agent request: {error}")))?;
-        let response = sender.send_request(request).await.map_err(agent_error)?;
-        let (mut parts, incoming) = response.into_parts();
-        for name in [header::CONNECTION, header::TRANSFER_ENCODING] {
-            parts.headers.remove(name);
-        }
-        parts.headers.remove(HeaderName::from_static("keep-alive"));
-        Ok(Response::from_parts(parts, Body::new(incoming)))
+        crate::fileagent::client::send(AGENT, stream, &token, method, path_and_query, headers, body)
+            .await
     }
 
     /// A JSON request whose JSON reply is read completely (small bodies).
@@ -196,31 +173,14 @@ impl RootFs {
     }
 }
 
-fn agent_error(error: hyper::Error) -> AppError {
-    AppError::unavailable(format!("the root file agent did not answer: {error}"))
-}
-
 /// Read a (bounded) JSON body from an agent response.
 pub async fn read_json(response: Response<Body>) -> AppResult<Value> {
-    let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
-        .await
-        .map_err(|error| AppError::unavailable(format!("root file agent reply: {error}")))?;
-    Ok(serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    crate::fileagent::client::read_json(AGENT, response).await
 }
 
 /// Rebuild the agent's error for the caller of a background job.
 pub fn error_from(status: StatusCode, body: &Value) -> AppError {
-    let message = body
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or("the root file agent failed")
-        .to_string();
-    match status {
-        StatusCode::CONFLICT => AppError::Conflict(message),
-        StatusCode::SERVICE_UNAVAILABLE => AppError::Unavailable(message),
-        status if status.is_server_error() => AppError::Internal(message),
-        _ => AppError::BadRequest(message),
-    }
+    crate::fileagent::client::error_from(AGENT, status, body)
 }
 
 #[cfg(test)]

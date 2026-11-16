@@ -10,41 +10,34 @@
 //! the JSON shapes are those of `/api/files`, so the API layer forwards
 //! requests and responses unchanged.
 
-use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::body::Body;
-use axum::extract::{Query, Request, State};
-use axum::http::{header, HeaderMap};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::extract::Query;
+use axum::http::HeaderMap;
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::io::AsyncReadExt;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::chunked::{ChunkResponse, InitUploadResponse};
+use crate::fileagent::{
+    self, adopt_parent_owner, blocking, check, file_name, io_error, prepare_replacement,
+    read_token, Agent, CancelOnDrop, PeerListener, UploadSpace,
+};
 use crate::storage::ops::{
     self, BreadcrumbDto, EntryDto, ListingDto, QuotaDto, SearchDto, TextPreviewDto,
 };
 use crate::storage::serve::{serve_path, Disposition, PREVIEW_CSP};
 
-use super::{logical, physical, TOKEN_HEADER, UPLOAD_PREFIX};
+use super::{logical, physical, UPLOAD_PREFIX};
 
-/// Chunk size offered to the browser for resumable uploads.
-const CHUNK_SIZE: u64 = 8 * 1024 * 1024;
-/// An unfinished chunked upload is dropped after this long without a chunk.
-const UPLOAD_TTL: Duration = Duration::from_secs(24 * 3600);
 /// Temporary upload files (`.rast-upload-<id>` in the destination folder).
 const TEMP_PREFIX: &str = ".rast-upload-";
 /// A search stops after this many entries or this long.
@@ -54,67 +47,49 @@ const SEARCH_TIME_LIMIT: Duration = Duration::from_secs(10);
 /// Kernel and runtime trees a search from higher up does not descend into.
 const SEARCH_SKIP: &[&str] = &["/proc", "/sys", "/dev", "/run"];
 
-struct Upload {
-    temp: PathBuf,
-    dest: PathBuf,
-    size: u64,
-    offset: u64,
-    overwrite: bool,
-    touched: Instant,
-}
+/// Uploads of the root agent: anywhere on the file system, owned by the
+/// owner of the folder they land in.
+struct RootSpace;
 
-struct Agent {
-    token: String,
-    started: Instant,
-    /// Seconds since `started` of the last request.
-    last_request: AtomicU64,
-    active: AtomicUsize,
-    uploads: Mutex<HashMap<String, Upload>>,
+impl UploadSpace for RootSpace {
+    const ID_PREFIX: &'static str = UPLOAD_PREFIX;
+    const TEMP_PREFIX: &'static str = TEMP_PREFIX;
+    const DEFAULT_DIR: &'static str = super::PREFIX;
+    const REPORTS_REPLACED: bool = false;
+
+    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<PathBuf> {
+        upload_target(dir, name, overwrite)
+    }
+
+    fn commit(&self, temp: &Path, dest: &Path, overwrite: bool) -> AppResult<(EntryDto, u64)> {
+        commit(temp, dest, overwrite).map(|entry| (entry, 0))
+    }
 }
 
 /// Run the agent until it has been idle for `idle`.
 pub async fn run(socket: PathBuf, token_file: PathBuf, idle: Duration) -> io::Result<()> {
-    let token = std::fs::read_to_string(&token_file)?.trim().to_string();
-    if token.len() < 32 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "the agent token is missing or too short",
-        ));
-    }
+    let token = read_token(&token_file)?;
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket)?;
     // The directory (root:rast, setgid, 0750) already limits who can reach
     // the socket; the group needs write access to connect.
     std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660))?;
-    let agent = Arc::new(Agent {
-        token,
-        started: Instant::now(),
-        last_request: AtomicU64::new(0),
-        active: AtomicUsize::new(0),
-        uploads: Mutex::new(HashMap::new()),
-    });
+    let agent = Agent::new(token, RootSpace);
     let app = router(agent.clone());
-    let watcher = agent.clone();
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(async move { watcher.wait_idle(idle).await })
-        .await;
-    for (_, upload) in agent.uploads.lock().await.drain() {
-        let _ = std::fs::remove_file(&upload.temp);
-    }
+    let result = fileagent::serve(PeerListener::new(listener, None), app, agent, idle, || {
+        false
+    })
+    .await;
     let _ = std::fs::remove_file(&socket);
     result
 }
 
-fn router(agent: Arc<Agent>) -> Router {
+fn router(agent: Arc<Agent<RootSpace>>) -> Router {
     Router::new()
         .route("/api/files", get(list))
         .route("/api/files/stat", get(stat))
         .route("/api/files/mkdir", post(mkdir))
         .route("/api/files/rename", post(rename))
-        .route("/api/files/upload", post(upload).delete(upload_cancel))
-        .route("/api/files/upload/init", post(upload_init))
-        .route("/api/files/upload/chunk", post(upload_chunk))
-        .route("/api/files/upload/complete", post(upload_complete))
         .route("/api/files/download", get(download))
         .route("/api/files/preview", get(preview))
         .route("/api/files/text", get(text))
@@ -122,96 +97,18 @@ fn router(agent: Arc<Agent>) -> Router {
         .route("/api/files/copy", post(copy))
         .route("/api/files/move", post(move_items))
         .route("/api/files/delete", post(delete))
+        .merge(fileagent::upload_routes::<RootSpace>())
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .layer(axum::middleware::from_fn_with_state(agent.clone(), guard))
+        .layer(axum::middleware::from_fn_with_state(
+            agent.clone(),
+            fileagent::guard::<RootSpace>,
+        ))
         .with_state(agent)
-}
-
-impl Agent {
-    fn touch(&self) {
-        self.last_request
-            .store(self.started.elapsed().as_secs(), Ordering::Relaxed);
-    }
-
-    async fn wait_idle(&self, idle: Duration) {
-        loop {
-            tokio::time::sleep(Duration::from_secs(15)).await;
-            let mut uploads = self.uploads.lock().await;
-            uploads.retain(|_, upload| {
-                let keep = upload.touched.elapsed() < UPLOAD_TTL;
-                if !keep {
-                    let _ = std::fs::remove_file(&upload.temp);
-                }
-                keep
-            });
-            let quiet = self
-                .started
-                .elapsed()
-                .as_secs()
-                .saturating_sub(self.last_request.load(Ordering::Relaxed));
-            if uploads.is_empty()
-                && self.active.load(Ordering::Relaxed) == 0
-                && quiet >= idle.as_secs()
-            {
-                return;
-            }
-        }
-    }
-}
-
-/// Counts a request as running until it is dropped.
-struct Active(Arc<Agent>);
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        self.0.touch();
-        self.0.active.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-/// Token check and idle bookkeeping for every request.
-async fn guard(State(agent): State<Arc<Agent>>, request: Request, next: Next) -> Response {
-    let presented = request
-        .headers()
-        .get(TOKEN_HEADER)
-        .map(|value| value.as_bytes())
-        .unwrap_or_default();
-    if !bool::from(presented.ct_eq(agent.token.as_bytes())) {
-        return AppError::Forbidden("invalid agent token").into_response();
-    }
-    agent.touch();
-    agent.active.fetch_add(1, Ordering::Relaxed);
-    let _active = Active(agent.clone());
-    next.run(request).await
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// An I/O error as a message the administrator can act on.
-fn io_error(what: &str, path: &Path, error: io::Error) -> AppError {
-    let message = format!("cannot {what} {}: {error}", path.display());
-    match error.kind() {
-        io::ErrorKind::NotFound => AppError::NotFound("file not found"),
-        io::ErrorKind::AlreadyExists => AppError::Conflict(message),
-        _ => AppError::BadRequest(message),
-    }
-}
-
-async fn blocking<T, F>(work: F) -> AppResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce() -> AppResult<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(work).await?
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/".to_string())
-}
 
 /// Metadata of what a path leads to (a symbolic link's target when it
 /// resolves, the link itself otherwise).
@@ -271,17 +168,6 @@ fn require_dir(path: &Path) -> AppResult<()> {
             path.display()
         ))),
         Err(error) => Err(io_error("open", path, error)),
-    }
-}
-
-/// New entries belong to the owner of the folder they are created in, so a
-/// file uploaded into someone's home is theirs, not root's.
-fn adopt_parent_owner(path: &Path) {
-    if let Some(meta) = path
-        .parent()
-        .and_then(|parent| std::fs::metadata(parent).ok())
-    {
-        let _ = std::os::unix::fs::lchown(path, Some(meta.uid()), Some(meta.gid()));
     }
 }
 
@@ -559,15 +445,8 @@ async fn rename(Json(body): Json<RenameRequest>) -> AppResult<Json<EntryDto>> {
 }
 
 // ---------------------------------------------------------------------------
-// Uploads
+// Uploads (the handlers are shared, see `crate::fileagent`)
 // ---------------------------------------------------------------------------
-
-fn random_id() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
-}
 
 /// Where an upload goes, refusing what it may not replace.
 fn upload_target(dir: &str, name: &str, overwrite: bool) -> AppResult<PathBuf> {
@@ -583,43 +462,12 @@ fn upload_target(dir: &str, name: &str, overwrite: bool) -> AppResult<PathBuf> {
     }
 }
 
-async fn create_temp(dest: &Path, id: &str) -> AppResult<(PathBuf, tokio::fs::File)> {
-    let temp = dest
-        .parent()
-        .unwrap_or(Path::new("/"))
-        .join(format!("{TEMP_PREFIX}{id}"));
-    let file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&temp)
-        .await
-        .map_err(|error| io_error("write in", dest.parent().unwrap_or(dest), error))?;
-    Ok((temp, file))
-}
-
 /// Move a finished upload into place. A replaced file keeps its owner and
 /// mode; a new one gets the folder's owner and the usual 0644.
 fn commit(temp: &Path, dest: &Path, overwrite: bool) -> AppResult<EntryDto> {
     let result = (|| {
-        match std::fs::symlink_metadata(dest) {
-            Ok(meta) if meta.is_dir() => {
-                return Err(AppError::conflict("a folder with that name already exists"))
-            }
-            Ok(_) if !overwrite => {
-                return Err(AppError::conflict(format!(
-                    "\"{}\" already exists",
-                    file_name(dest)
-                )))
-            }
-            Ok(meta) if meta.is_file() => {
-                let _ = std::fs::set_permissions(temp, meta.permissions());
-                let _ = std::os::unix::fs::chown(temp, Some(meta.uid()), Some(meta.gid()));
-            }
-            _ => {
-                let _ = std::fs::set_permissions(temp, std::fs::Permissions::from_mode(0o644));
-                adopt_parent_owner(temp);
-            }
+        if prepare_replacement(temp, dest, overwrite)?.is_none() {
+            adopt_parent_owner(temp);
         }
         std::fs::rename(temp, dest).map_err(|error| io_error("write", dest, error))?;
         stat_entry(dest)
@@ -628,216 +476,6 @@ fn commit(temp: &Path, dest: &Path, overwrite: bool) -> AppResult<EntryDto> {
         let _ = std::fs::remove_file(temp);
     }
     result
-}
-
-/// Append a request body to `file`, at most `limit` bytes.
-async fn receive(file: &mut tokio::fs::File, body: Body, limit: u64) -> AppResult<u64> {
-    let mut stream = body.into_data_stream();
-    let mut written = 0u64;
-    while let Some(frame) = stream.next().await {
-        let bytes = frame
-            .map_err(|error| AppError::bad_request(format!("upload stream failed: {error}")))?;
-        written += bytes.len() as u64;
-        if written > limit {
-            return Err(AppError::PayloadTooLarge(
-                "upload is larger than its declared size",
-            ));
-        }
-        file.write_all(&bytes)
-            .await
-            .map_err(|error| AppError::bad_request(format!("cannot write the upload: {error}")))?;
-    }
-    file.flush()
-        .await
-        .map_err(|error| AppError::bad_request(format!("cannot write the upload: {error}")))?;
-    Ok(written)
-}
-
-#[derive(Debug, Deserialize)]
-struct UploadQuery {
-    dir: Option<String>,
-    name: Option<String>,
-    overwrite: Option<bool>,
-    #[serde(rename = "uploadId", alias = "upload_id")]
-    upload_id: Option<String>,
-    offset: Option<u64>,
-}
-
-fn content_length(headers: &HeaderMap) -> Option<u64> {
-    headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse().ok())
-}
-
-/// POST /api/files/upload: one request, one file.
-async fn upload(
-    Query(query): Query<UploadQuery>,
-    headers: HeaderMap,
-    body: Body,
-) -> AppResult<Json<EntryDto>> {
-    let name = query
-        .name
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| AppError::bad_request("name is required"))?;
-    let overwrite = query.overwrite.unwrap_or(false);
-    let length = content_length(&headers)
-        .ok_or_else(|| AppError::bad_request("Content-Length is required for uploads"))?;
-    let dest = upload_target(
-        query.dir.as_deref().unwrap_or(super::PREFIX),
-        &name,
-        overwrite,
-    )?;
-    let (temp, mut file) = create_temp(&dest, &random_id()).await?;
-    let received = receive(&mut file, body, length).await;
-    drop(file);
-    match received {
-        Ok(written) if written == length => {
-            blocking(move || commit(&temp, &dest, overwrite).map(Json)).await
-        }
-        Ok(_) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(AppError::bad_request(
-                "upload ended before the complete body was received",
-            ))
-        }
-        Err(error) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(error)
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct InitUploadRequest {
-    dir: Option<String>,
-    name: String,
-    size: u64,
-    overwrite: Option<bool>,
-}
-
-async fn upload_init(
-    State(agent): State<Arc<Agent>>,
-    Json(body): Json<InitUploadRequest>,
-) -> AppResult<Json<InitUploadResponse>> {
-    let overwrite = body.overwrite.unwrap_or(false);
-    let dest = upload_target(
-        body.dir.as_deref().unwrap_or(super::PREFIX),
-        &body.name,
-        overwrite,
-    )?;
-    let id = format!("{UPLOAD_PREFIX}{}", random_id());
-    let (temp, _file) = create_temp(&dest, &id).await?;
-    agent.uploads.lock().await.insert(
-        id.clone(),
-        Upload {
-            temp,
-            dest,
-            size: body.size,
-            offset: 0,
-            overwrite,
-            touched: Instant::now(),
-        },
-    );
-    Ok(Json(InitUploadResponse {
-        upload_id: id,
-        chunk_size: CHUNK_SIZE,
-        offset: 0,
-        size: body.size,
-        expires_at: crate::db::now_ms() + UPLOAD_TTL.as_millis() as i64,
-    }))
-}
-
-fn upload_id(query: &UploadQuery) -> AppResult<String> {
-    query
-        .upload_id
-        .clone()
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| AppError::bad_request("uploadId is required"))
-}
-
-async fn upload_chunk(
-    State(agent): State<Arc<Agent>>,
-    Query(query): Query<UploadQuery>,
-    body: Body,
-) -> AppResult<Json<ChunkResponse>> {
-    let id = upload_id(&query)?;
-    let offset = query
-        .offset
-        .ok_or_else(|| AppError::bad_request("offset is required"))?;
-    // The upload leaves the table while a chunk is written: a second chunk
-    // for it at the same time finds nothing instead of interleaving.
-    let mut upload = agent
-        .uploads
-        .lock()
-        .await
-        .remove(&id)
-        .ok_or(AppError::NotFound("upload not found"))?;
-    let result = async {
-        if offset != upload.offset {
-            return Err(AppError::conflict(format!(
-                "unexpected offset {offset}; the upload is at {}",
-                upload.offset
-            )));
-        }
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open(&upload.temp)
-            .await
-            .map_err(|error| io_error("write", &upload.temp, error))?;
-        // A chunk that failed half way is overwritten by its retry.
-        file.set_len(upload.offset)
-            .await
-            .map_err(|error| io_error("write", &upload.temp, error))?;
-        tokio::io::AsyncSeekExt::seek(&mut file, io::SeekFrom::Start(upload.offset))
-            .await
-            .map_err(|error| io_error("write", &upload.temp, error))?;
-        receive(&mut file, body, upload.size - upload.offset).await
-    }
-    .await;
-    upload.touched = Instant::now();
-    if let Ok(written) = result {
-        upload.offset += written;
-    }
-    let response = ChunkResponse {
-        upload_id: id.clone(),
-        received: upload.offset,
-        size: upload.size,
-        offset: upload.offset,
-    };
-    agent.uploads.lock().await.insert(id, upload);
-    result.map(|_| Json(response))
-}
-
-async fn upload_complete(
-    State(agent): State<Arc<Agent>>,
-    Query(query): Query<UploadQuery>,
-) -> AppResult<Json<EntryDto>> {
-    let id = upload_id(&query)?;
-    let mut uploads = agent.uploads.lock().await;
-    let upload = uploads
-        .get(&id)
-        .ok_or(AppError::NotFound("upload not found"))?;
-    if upload.offset != upload.size {
-        return Err(AppError::bad_request(format!(
-            "upload is incomplete: {} of {} bytes received",
-            upload.offset, upload.size
-        )));
-    }
-    let upload = uploads.remove(&id).expect("upload present");
-    drop(uploads);
-    blocking(move || commit(&upload.temp, &upload.dest, upload.overwrite).map(Json)).await
-}
-
-async fn upload_cancel(
-    State(agent): State<Arc<Agent>>,
-    Query(query): Query<UploadQuery>,
-) -> AppResult<Json<Value>> {
-    let id = upload_id(&query)?;
-    if let Some(upload) = agent.uploads.lock().await.remove(&id) {
-        let _ = std::fs::remove_file(&upload.temp);
-    }
-    Ok(Json(json!({"ok": true})))
 }
 
 // ---------------------------------------------------------------------------
@@ -938,24 +576,6 @@ struct BatchRequest {
     paths: Vec<String>,
     #[serde(rename = "destDir", alias = "dest_dir", default)]
     dest_dir: Option<String>,
-}
-
-/// Set when the request is dropped (the caller cancelled the job by closing
-/// the connection), so the blocking work stops at the next entry.
-struct CancelOnDrop(Arc<AtomicBool>);
-
-impl Drop for CancelOnDrop {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-}
-
-fn check(cancel: &AtomicBool) -> AppResult<()> {
-    if cancel.load(Ordering::Relaxed) {
-        Err(AppError::Cancelled)
-    } else {
-        Ok(())
-    }
 }
 
 fn sources(paths: &[String]) -> AppResult<Vec<PathBuf>> {

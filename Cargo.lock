@@ -2390,6 +2390,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
+ "tracing",
  "walkdir",
 ]
 
