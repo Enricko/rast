@@ -101,7 +101,9 @@ this file by `scripts/changelog-section.sh`.
     hard link, entries owned by root, entries owned by any account other
     than `rast` and the RAST identities (such as a file another account
     owns that was hard-linked in and whose original was since removed) and
-    other file systems are left unchanged and reported.
+    other file systems are left unchanged and reported. A walk holds at
+    most 1 000 000 names at a time: a member's folder with more names is
+    refused before they fill the helper's memory.
   - `shares_migrate_apply` writes a journal of every group, mode and ACL
     to `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl`
     (root, 0700/0600) and syncs it before changing anything; an apply that

@@ -654,6 +654,49 @@ async fn entries_of_other_accounts_are_never_changed() {
     assert_eq!(walked.other_owner.count, 4);
 }
 
+#[test]
+fn a_folder_with_too_many_names_is_refused_before_they_are_all_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big");
+    std::fs::create_dir_all(big.join("sub")).unwrap();
+    for index in 0..20 {
+        std::fs::write(big.join(format!("f{index}")), b"").unwrap();
+    }
+    for index in 0..5 {
+        std::fs::write(big.join(format!("sub/g{index}")), b"").unwrap();
+    }
+    let fd = open_dir(&big).unwrap();
+
+    // One folder: never more names in memory than the limit.
+    assert_eq!(dir_names(fd.as_raw_fd(), 21).unwrap().unwrap().len(), 21);
+    assert!(dir_names(fd.as_raw_fd(), 20).unwrap().is_none());
+
+    // A walk counts the names it has read in every open folder.
+    let owners = Owners {
+        root_uid: u32::MAX - 15,
+        rast_uid: journal_owner(),
+        identity_uids: (1, 0),
+    };
+    let walk_with = |limit: u64| {
+        let mut report = TreeReport::default();
+        walk_limited(&fd, &owners, limit, &mut report, |_, _| Ok(()))
+    };
+    assert!(walk_with(26).is_ok());
+    let error = walk_with(25).unwrap_err();
+    assert_eq!(error.code, "forbidden");
+    assert!(error.message.contains("more than 25 entries"), "{error:?}");
+    // Refused before the walk got anywhere: the top folder alone is over.
+    let mut visited = 0;
+    let mut report = TreeReport::default();
+    let error = walk_limited(&fd, &owners, 10, &mut report, |_, _| {
+        visited += 1;
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(error.code, "forbidden");
+    assert_eq!(visited, 0);
+}
+
 #[tokio::test]
 async fn containers_are_real_folders_in_the_shared_root() {
     let fx = fixture();

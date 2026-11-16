@@ -586,8 +586,10 @@ fn is_regular(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
-/// The names in the folder `dir` (without `.` and `..`).
-fn dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
+/// The names in the folder `dir` (without `.` and `..`); `None` when it
+/// holds more than `limit`. Members fill shared folders, so a folder with
+/// millions of names is refused before they fill root's memory.
+fn dir_names(dir: RawFd, limit: u64) -> io::Result<Option<Vec<CString>>> {
     // A new open file description, so reading moves no shared offset.
     let own = open_at(dir, c".", DIR_FLAGS)?;
     // SAFETY: `own` is a valid directory fd; `fdopendir` takes it over and
@@ -607,16 +609,25 @@ fn dir_names(dir: RawFd) -> io::Result<Vec<CString>> {
             // SAFETY: `stream` is valid and closed exactly once.
             unsafe { libc::closedir(stream) };
             return match error.raw_os_error() {
-                Some(0) | None => Ok(names),
+                Some(0) | None => Ok(Some(names)),
                 Some(_) => Err(error),
             };
         }
         // SAFETY: `d_name` of a returned entry is NUL-terminated.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
         if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            if names.len() as u64 >= limit {
+                // SAFETY: `stream` is valid and closed exactly once.
+                unsafe { libc::closedir(stream) };
+                return Ok(None);
+            }
             names.push(name.to_owned());
         }
     }
+}
+
+fn too_many_entries(limit: u64) -> NativeError {
+    NativeError::forbidden(format!("the shared folder has more than {limit} entries"))
 }
 
 /// The owner of prepared containers, whose other entries walks leave
@@ -976,6 +987,19 @@ fn walk(
     container: &OwnedFd,
     owners: &Owners,
     report: &mut TreeReport,
+    visit: impl FnMut(&Found<'_>, &mut TreeReport) -> Result<(), NativeError>,
+) -> Result<(), NativeError> {
+    walk_limited(container, owners, MAX_TREE_ENTRIES, report, visit)
+}
+
+/// [`walk`] of at most `limit` entries. Every name read is visited or
+/// counted, so the names read so far (visited plus waiting in the open
+/// folders) never exceed `limit` either.
+fn walk_limited(
+    container: &OwnedFd,
+    owners: &Owners,
+    limit: u64,
+    report: &mut TreeReport,
     mut visit: impl FnMut(&Found<'_>, &mut TreeReport) -> Result<(), NativeError>,
 ) -> Result<(), NativeError> {
     let device = fstat(container.as_raw_fd())
@@ -988,9 +1012,13 @@ fn walk(
         path: String,
         names: std::vec::IntoIter<CString>,
     }
-    let names = |fd: &OwnedFd| {
-        dir_names(fd.as_raw_fd())
-            .map_err(|error| NativeError::command_failed(format!("cannot read a folder: {error}")))
+    let mut read = 0u64;
+    let mut names = |fd: &OwnedFd| {
+        let names = dir_names(fd.as_raw_fd(), limit.saturating_sub(read))
+            .map_err(|error| NativeError::command_failed(format!("cannot read a folder: {error}")))?
+            .ok_or_else(|| too_many_entries(limit))?;
+        read += names.len() as u64;
+        Ok::<_, NativeError>(names)
     };
     let first = open_at(container.as_raw_fd(), c".", DIR_FLAGS).map_err(|error| {
         NativeError::command_failed(format!("cannot open the container: {error}"))
@@ -1007,10 +1035,8 @@ fn walk(
             continue;
         };
         seen += 1;
-        if seen > MAX_TREE_ENTRIES {
-            return Err(NativeError::forbidden(format!(
-                "the shared folder has more than {MAX_TREE_ENTRIES} entries"
-            )));
+        if seen > limit {
+            return Err(too_many_entries(limit));
         }
         let Ok(text) = name.to_str() else {
             report.non_utf8 += 1;
@@ -1354,7 +1380,7 @@ pub(crate) async fn share_dir_remove(
                         stat.st_uid
                     )));
                 }
-                remove_contents(&fd, 0)?;
+                remove_contents(&fd, 0, &mut 0)?;
                 drop(fd);
                 // SAFETY: valid fd and NUL-terminated name.
                 if unsafe { libc::unlinkat(root.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
@@ -1424,8 +1450,9 @@ pub(crate) async fn share_dir_release(
 }
 
 /// Remove everything in the folder `dir`, never following a link and never
-/// leaving its file system.
-fn remove_contents(dir: &OwnedFd, depth: usize) -> Result<(), NativeError> {
+/// leaving its file system. `pending` counts the names read but not yet
+/// removed in the folders above (at most [`MAX_TREE_ENTRIES`] in all).
+fn remove_contents(dir: &OwnedFd, depth: usize, pending: &mut u64) -> Result<(), NativeError> {
     if depth >= MAX_DEPTH {
         return Err(NativeError::forbidden(
             "the shared folder is nested too deeply",
@@ -1434,9 +1461,12 @@ fn remove_contents(dir: &OwnedFd, depth: usize) -> Result<(), NativeError> {
     let device = fstat(dir.as_raw_fd())
         .map_err(|error| NativeError::command_failed(format!("cannot inspect a folder: {error}")))?
         .st_dev;
-    let names = dir_names(dir.as_raw_fd())
-        .map_err(|error| NativeError::command_failed(format!("cannot read a folder: {error}")))?;
+    let names = dir_names(dir.as_raw_fd(), MAX_TREE_ENTRIES.saturating_sub(*pending))
+        .map_err(|error| NativeError::command_failed(format!("cannot read a folder: {error}")))?
+        .ok_or_else(|| too_many_entries(MAX_TREE_ENTRIES))?;
+    *pending += names.len() as u64;
     for name in names {
+        *pending -= 1;
         let Ok(stat) = lstat_at(dir.as_raw_fd(), &name) else {
             continue;
         };
@@ -1456,7 +1486,7 @@ fn remove_contents(dir: &OwnedFd, depth: usize) -> Result<(), NativeError> {
                     "a folder changed while it was removed",
                 ));
             }
-            remove_contents(&child, depth + 1)?;
+            remove_contents(&child, depth + 1, pending)?;
             libc::AT_REMOVEDIR
         } else {
             0
@@ -1952,9 +1982,9 @@ fn active_journal(
     let Some(root) = open_journal_root(options, share_id, false)? else {
         return Ok(None);
     };
-    let names = dir_names(root.as_raw_fd()).map_err(|error| {
-        NativeError::command_failed(format!("cannot read the journals: {error}"))
-    })?;
+    let names = dir_names(root.as_raw_fd(), MAX_TREE_ENTRIES)
+        .map_err(|error| NativeError::command_failed(format!("cannot read the journals: {error}")))?
+        .ok_or_else(|| NativeError::forbidden("too many shares journals"))?;
     let mut stamps: Vec<String> = names
         .into_iter()
         .filter_map(|name| name.into_string().ok())
