@@ -87,6 +87,13 @@ this file by `scripts/changelog-section.sh`.
   `npm --prefix frontend run build`). CI, the release workflow and
   `scripts/build-release.sh` also check the finished binary.
 
+### Fixed
+
+- File Station live updates: the server's file watcher now watches each
+  home on its own, so one home it cannot read no longer stops changes in
+  other homes from being reported. Homes of one-HOME accounts are left to
+  their file agent, so each change is reported once.
+
 ## [0.18.3] - 2026-11-16
 
 ### Fixed

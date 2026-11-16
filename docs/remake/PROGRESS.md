@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (task 1.1 done, ADR 0005 accepted; next task 1.2). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1 and 1.2 done, cross-user and native e2e tests of 1.2 pending on the test host; next task 1.3). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 
@@ -278,11 +278,69 @@ Update it at the end of every session.
 - **Gates at the end of Phase 0:** fmt and clippy clean; `cargo test
   --workspace`: 819 passed, 0 failed; npm test 152 passed; npm build OK;
   third-party licenses up to date.
+- **Docs fix outside 1.2** (`be5d688`): `docs/native-linux-apps-handoff.md`
+  said restarting `rast-native.service` stops every session. The code says
+  otherwise: the helper starts sessions and apps as transient units in
+  `rast-linux.slice` through `systemd-run`, never as its own children, and
+  neither its shutdown nor its start-up stops them (start-up only reconciles
+  the nftables display-port set). `docs/OPERATIONS.md` was right; the
+  handoff doc now says the same.
+- **Task 1.2, per-user file agent** (2026-11-16, ADR 0005):
+  - `8b986d8` refactor(storage): safe-path resolution
+    (`StorageRoot::resolve`, `ResolvedPath::child_target`) and database-free
+    file operations (`read_entries`, `mkdir_in`, `rename_in`, `search_in`,
+    `text_preview_of`, `paginate`), so the agent can use them; no behaviour
+    change.
+  - `ebd1f2d` feat(helper): `home_ensure`, `files_agent_start`,
+    `files_agent_stop` (strict JSON, user id only, no paths). The agent unit
+    `rast-files-u<uid>` runs as `rast-u<id>`, socket-activated on
+    `/run/rast/files/u<uid>.sock` (`root:rast` 0660 in a `root:rast` 0750
+    directory), token by `LoadCredential`, hardened (no capabilities,
+    `NoNewPrivileges`, `PrivateNetwork`, `AF_UNIX` only,
+    `ProtectSystem=strict` with HOME and the shared root writable, 512M,
+    64 tasks). A running agent is reused; `identity_remove` also stops it.
+  - `da0dc58` refactor(agent): the shared core of the root and per-user
+    agents (`fileagent`: token and peer-uid guard, upload sessions, client,
+    idle stop) moved out of `rootfs`; no behaviour change.
+  - `08f7ef0` feat(agent): `rast file-agent` (hidden subcommand,
+    `homefs::agent`): File Station over one HOME with the safe-path layer,
+    `O_NOFOLLOW` on chunk reopen, `/shared/<name>` only through
+    `~/Shared/<name>` links to a direct child of the shared root, `writable`
+    from `faccessat`, `EDQUOT` → 413. No delete route (recycle bin in 1.4).
+  - `d1e7c57` feat(agent): a realtime watch stream (NDJSON) from the agent;
+    dot folders are not watched.
+  - `d8a0898` test(helper): the peer-uid test accepts a connection reset as
+    a dropped connection (flaky under parallel load; 30/30 runs pass).
+  - `8b81ebd` feat(server): `api/homefs.rs` forwards `/api/files/*` of a
+    one-HOME account (HOME owned by its Linux identity, `native_enabled` on
+    Linux) to its agent after session, CSRF, path, shared-folder access
+    (Effective Access), quota reservation and audit; same JSON shapes; `503`
+    without the helper, never an in-process fallback. Copy and move run as
+    jobs with a quota budget header the browser cannot set.
+    `tests/homefs_e2e.rs`: real router and agent, fake helper.
+  - `a77ccf2` fix(realtime): the server watcher watches each home on its own
+    (one unreadable HOME no longer ends the recursive watch for the others)
+    and skips one-HOME homes, which their agent reports.
+  - `e3d6da1` feat(files): "Show hidden files" toggle; `hidden=false`
+    on listing and search (in process, per-user agent and root agent).
+  - Gates at the end of task 1.2: fmt and clippy clean; `cargo test
+    --workspace`: 861 passed, 0 failed; npm test 154 passed; npm build OK.
+    No dependency added.
+  - Deviations and notes:
+    - Shared folders of one-HOME accounts work only through `~/Shared`
+      links; nothing creates them yet (task 1.3 adds the groups and links).
+    - Delete, the recycle bin and `GET /api/files/usage` answer `503` for
+      one-HOME accounts until task 1.4 (XDG Trash).
+    - Quota stays the RAST fallback (`storage_usage`). If a copy fails half
+      way, the bytes already written are not counted; task 1.4's HOME scan
+      corrects it. `quota::recalculate` cannot read a one-HOME HOME (0700).
+    - Nothing calls `home_ensure` yet: no account becomes one-HOME before
+      `rast migrate home` (task 1.5).
 
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
-- [ ] Task 1.2: per-user file agent
+- [x] Task 1.2: per-user file agent (unit and fake-helper integration tests; the tests below under "Pending on the test host" are still open)
 - [ ] Task 1.3: shared folders as Linux groups
 - [ ] Task 1.4: XDG Trash and quota
 - [ ] Task 1.5: HOME migration command
@@ -297,13 +355,46 @@ Update it at the end of every session.
 
 - Nothing.
 
+## Pending on the test host (task 1.2)
+
+These need root, real `rast-u<id>` accounts or a native RAST instance, so
+they run on the separate test host (only one native RAST per host, and this
+host runs production). Until then 1.2 is covered by unit tests and
+`tests/homefs_e2e.rs` (real router, real agent running as the test user,
+fake helper).
+
+- Kernel-level cross-user isolation: an agent of `rast-u<a>` gets `EACCES`
+  on the HOME of `rast-u<b>` and on shared containers it is not a member
+  of; File Station of user A cannot reach B's files by any path, upload id
+  or job.
+- The user's own processes cannot connect to or replace
+  `/run/rast/files/u<uid>.sock` (directory `root:rast` 0750, socket 0660),
+  and a connection from a uid other than `rast` is dropped (`SO_PEERCRED`).
+- `files_agent_start` under real systemd: socket activation (`LISTEN_FDS`),
+  `LoadCredential=token`, the unit properties (`ProtectSystem=strict`,
+  `ReadWritePaths`, `PrivateNetwork`, `RestrictAddressFamilies`, empty
+  capability set, `MemoryMax`, `TasksMax`), reuse of a running agent, idle
+  exit after 900 s, staying up while the user has a session, app or
+  terminal, and `files_agent_stop` / `identity_remove` stopping it.
+- `home_ensure` on a real account: owner, mode 0700, skeleton,
+  `usermod --home`, refusal of a `rast`-owned (legacy) HOME and of
+  symlinks.
+- Realtime from a real agent: changes made by an app or Terminal as
+  `rast-u<id>` appear in File Station; the server watcher does not watch the
+  0700 HOME.
+- Native e2e: a one-HOME account opens File Station, uploads, downloads,
+  copies, renames; `503` when `rast-native.service` is stopped and the agent
+  has exited.
+
 ## Next
 
-1. Task 1.2 (per-user file agent), following the accepted ADR 0005.
-2. 0.18.3 (D13) is released: the maintainer installs it on production, then
+1. Task 1.3 (shared folders as Linux groups); it also creates the
+   `~/Shared/<name>` links the agent already resolves.
+2. Run the "Pending on the test host" list above on the test host.
+3. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
    PR #2).
-3. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
+4. Task 0.6 (deferred): baseline app matrix on a separate test host with RAST
    0.18.2, before the Phase 1 results are tested there.
    `docs/NATIVE-LINUX-APPS.md` allows only one native RAST instance per host
    (systemd unit names are keyed by user id), and production uses it on this
