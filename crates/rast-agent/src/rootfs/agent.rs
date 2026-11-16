@@ -29,7 +29,7 @@ use tokio::io::AsyncReadExt;
 use crate::error::{AppError, AppResult};
 use crate::fileagent::{
     self, adopt_parent_owner, blocking, check, file_name, io_error, prepare_replacement,
-    read_token, Agent, CancelOnDrop, PeerListener, UploadSpace,
+    read_token, Agent, CancelOnDrop, PeerListener, Target, UploadSpace,
 };
 use crate::storage::ops::{
     self, BreadcrumbDto, EntryDto, ListingDto, QuotaDto, SearchDto, TextPreviewDto,
@@ -57,12 +57,16 @@ impl UploadSpace for RootSpace {
     const DEFAULT_DIR: &'static str = super::PREFIX;
     const REPORTS_REPLACED: bool = false;
 
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<PathBuf> {
-        upload_target(dir, name, overwrite)
+    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target> {
+        let dest = upload_target(dir, name, overwrite)?;
+        Ok(Target {
+            logical: logical(&dest),
+            dest,
+        })
     }
 
-    fn commit(&self, temp: &Path, dest: &Path, overwrite: bool) -> AppResult<(EntryDto, u64)> {
-        commit(temp, dest, overwrite).map(|entry| (entry, 0))
+    fn commit(&self, temp: &Path, target: &Target, overwrite: bool) -> AppResult<(EntryDto, u64)> {
+        commit(temp, &target.dest, overwrite).map(|entry| (entry, 0))
     }
 }
 

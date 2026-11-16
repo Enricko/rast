@@ -1,6 +1,7 @@
 //! Per-user and root agents: the File Station file agent, the PTY agent and the terminal manager.
 
 pub mod fileagent;
+pub mod homefs;
 pub mod rootfs;
 pub mod terminal;
 

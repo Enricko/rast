@@ -150,6 +150,16 @@ impl From<sqlx::Error> for AppError {
 impl From<std::io::Error> for AppError {
     fn from(e: std::io::Error) -> Self {
         use std::io::ErrorKind;
+        // A full kernel quota (one-HOME accounts) is the same 413 as File
+        // Station's own quota; a full disk says so.
+        #[cfg(unix)]
+        match e.raw_os_error() {
+            Some(libc::EDQUOT) => return Self::PayloadTooLarge("storage quota exceeded"),
+            Some(libc::ENOSPC) => {
+                return Self::Internal("not enough disk space on the server".into())
+            }
+            _ => {}
+        }
         match e.kind() {
             ErrorKind::NotFound => Self::NotFound("file not found"),
             ErrorKind::PermissionDenied => Self::Forbidden("permission denied"),

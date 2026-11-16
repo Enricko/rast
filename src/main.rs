@@ -138,6 +138,28 @@ enum Command {
         #[arg(long = "idle-seconds", default_value_t = 900)]
         idle_seconds: u64,
     },
+    /// Internal: per-user file agent (File Station for one HOME, ADR 0005)
+    #[command(hide = true)]
+    FileAgent {
+        /// The HOME to serve (`/` in File Station).
+        #[arg(long)]
+        home: PathBuf,
+        /// Root of the shared folders (`~/Shared/<name>` must point there).
+        #[arg(long = "shared-root")]
+        shared_root: PathBuf,
+        /// Only this uid may connect (the RAST service).
+        #[arg(long = "peer-uid")]
+        peer_uid: Option<u32>,
+        /// Bind this socket instead of the one systemd passes (development).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Token file (default: the systemd credential `token`).
+        #[arg(long = "token-file")]
+        token_file: Option<PathBuf>,
+        /// Exit after this many seconds without a request.
+        #[arg(long = "idle-seconds", default_value_t = 900)]
+        idle_seconds: u64,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -456,6 +478,36 @@ async fn run(
             let _ = std::io::stdout().write_all(banner.as_bytes());
             Ok(ExitCode::SUCCESS)
         }
+        // The per-user file agent runs as the user's Linux account, which
+        // cannot read the server configuration; it needs none.
+        Command::FileAgent {
+            home,
+            shared_root,
+            peer_uid,
+            socket,
+            token_file,
+            idle_seconds,
+        } => {
+            init_tracing(log_level.as_deref().unwrap_or("info"));
+            let token = rast::homefs::agent::token_from(token_file.as_deref())?;
+            rast::homefs::agent::run(rast::homefs::agent::RunOptions {
+                home,
+                shared_root,
+                listen: match socket {
+                    Some(path) => rast::homefs::agent::Listen::Path(path),
+                    None => rast::homefs::agent::Listen::Systemd,
+                },
+                token,
+                peer_uid,
+                idle: std::time::Duration::from_secs(idle_seconds.max(30)),
+                stay_while_user_runs: true,
+            })
+            .await
+            .map(|_| ExitCode::SUCCESS)
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                format!("file agent failed: {error}").into()
+            })
+        }
         other => {
             let mut cfg = Config::load(config_path.as_deref())?;
             if let Some(level) = log_level {
@@ -545,6 +597,7 @@ async fn run(
                     format!("root file agent failed: {error}").into()
                 }),
                 Command::Serve { .. }
+                | Command::FileAgent { .. }
                 | Command::Version
                 | Command::Package { .. }
                 | Command::Catalog { .. } => unreachable!(),

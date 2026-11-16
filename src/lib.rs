@@ -19,7 +19,7 @@ pub use rast_docker::{docker, worker};
 
 pub use rast_helper::native;
 
-pub use rast_agent::{rootfs, terminal};
+pub use rast_agent::{fileagent, homefs, rootfs, terminal};
 
 pub use rast_session::linux_apps;
 

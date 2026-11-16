@@ -45,6 +45,15 @@ pub const TOKEN_HEADER: &str = "x-rast-rootfs-token";
 /// browser.
 pub const REPLACED_HEADER: &str = "x-rast-replaced-bytes";
 
+/// Where a validated upload goes.
+#[derive(Debug, Clone)]
+pub struct Target {
+    /// The physical destination file.
+    pub dest: PathBuf,
+    /// Its logical File Station path.
+    pub logical: String,
+}
+
 /// Where uploads of one agent go. The agent owns the namespace rules: which
 /// logical folders exist, what may be replaced, and who owns new files.
 pub trait UploadSpace: Send + Sync + 'static {
@@ -59,11 +68,11 @@ pub trait UploadSpace: Send + Sync + 'static {
     const REPORTS_REPLACED: bool;
 
     /// Validate where an upload goes, refusing what it may not replace.
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<PathBuf>;
+    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target>;
 
     /// Move a finished upload into place. Returns the new entry and the size
     /// of the file it replaced (0 for a new file).
-    fn commit(&self, temp: &Path, dest: &Path, overwrite: bool) -> AppResult<(EntryDto, u64)>;
+    fn commit(&self, temp: &Path, target: &Target, overwrite: bool) -> AppResult<(EntryDto, u64)>;
 
     /// Map an I/O error while writing an upload; `fallback` is the generic
     /// mapping. The per-user agent turns a full quota into 413 first.
@@ -74,7 +83,7 @@ pub trait UploadSpace: Send + Sync + 'static {
 
 pub struct Upload {
     pub temp: PathBuf,
-    pub dest: PathBuf,
+    pub target: Target,
     pub size: u64,
     pub offset: u64,
     pub overwrite: bool,
@@ -399,11 +408,11 @@ fn entry_reply<S: UploadSpace>(entry: EntryDto, replaced: u64) -> Response {
 async fn commit<S: UploadSpace>(
     agent: Arc<Agent<S>>,
     temp: PathBuf,
-    dest: PathBuf,
+    target: Target,
     overwrite: bool,
 ) -> AppResult<Response> {
     let (entry, replaced) = blocking(move || {
-        let result = agent.space.commit(&temp, &dest, overwrite);
+        let result = agent.space.commit(&temp, &target, overwrite);
         if result.is_err() {
             let _ = std::fs::remove_file(&temp);
         }
@@ -437,16 +446,16 @@ async fn upload<S: UploadSpace>(
     let overwrite = query.overwrite.unwrap_or(false);
     let length = content_length(&headers)
         .ok_or_else(|| AppError::bad_request("Content-Length is required for uploads"))?;
-    let dest = agent.space.target(
+    let target = agent.space.target(
         query.dir.as_deref().unwrap_or(S::DEFAULT_DIR),
         &name,
         overwrite,
     )?;
-    let (temp, mut file) = create_temp(&agent.space, &dest, &random_id()).await?;
+    let (temp, mut file) = create_temp(&agent.space, &target.dest, &random_id()).await?;
     let received = receive(&agent.space, &mut file, body, length).await;
     drop(file);
     match received {
-        Ok(written) if written == length => commit(agent, temp, dest, overwrite).await,
+        Ok(written) if written == length => commit(agent, temp, target, overwrite).await,
         Ok(_) => {
             let _ = std::fs::remove_file(&temp);
             Err(AppError::bad_request(
@@ -473,18 +482,18 @@ async fn upload_init<S: UploadSpace>(
     Json(body): Json<InitUploadRequest>,
 ) -> AppResult<Json<InitUploadResponse>> {
     let overwrite = body.overwrite.unwrap_or(false);
-    let dest = agent.space.target(
+    let target = agent.space.target(
         body.dir.as_deref().unwrap_or(S::DEFAULT_DIR),
         &body.name,
         overwrite,
     )?;
     let id = format!("{}{}", S::ID_PREFIX, random_id());
-    let (temp, _file) = create_temp(&agent.space, &dest, &id).await?;
+    let (temp, _file) = create_temp(&agent.space, &target.dest, &id).await?;
     agent.uploads.lock().await.insert(
         id.clone(),
         Upload {
             temp,
-            dest,
+            target,
             size: body.size,
             offset: 0,
             overwrite,
@@ -537,8 +546,11 @@ async fn upload_chunk<S: UploadSpace>(
                 .space
                 .map_io(error, |error| io_error("write", &upload.temp, error))
         };
+        // The agent created the temporary file; never follow a link that
+        // replaced it.
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(&upload.temp)
             .await
             .map_err(temp_error)?;
@@ -581,7 +593,7 @@ async fn upload_complete<S: UploadSpace>(
     }
     let upload = uploads.remove(&id).expect("upload present");
     drop(uploads);
-    commit(agent.clone(), upload.temp, upload.dest, upload.overwrite).await
+    commit(agent.clone(), upload.temp, upload.target, upload.overwrite).await
 }
 
 async fn upload_cancel<S: UploadSpace>(
