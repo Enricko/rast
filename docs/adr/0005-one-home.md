@@ -159,11 +159,37 @@ needed. Installs with some users in each mode work. Hosts without the helper
 - **Same JSON shapes:** `EntryDto`, `ListingDto`, `QuotaDto`, `UsageDto`,
   `TrashEntryDto`. `writable` comes from `access(W_OK)` as the user. A kernel
   `EDQUOT` becomes the existing 413 "storage quota exceeded".
-- **Security.** The agent's uid is the hard boundary: a bug or a symlink race
-  in the agent can only reach what `rast-u<id>` can reach. The safe-path layer
-  stays (no traversal, symlinks never followed, `O_NOFOLLOW` on the last
-  component). Listings keep skipping symlinks, except `~/Shared/*`, which are
-  shown as folders whose `path` is `/shared/<name>`.
+- **Security.** The agent runs with the uid of every app and terminal of its
+  user, so that uid is no boundary between the agent and the user's own
+  files. A path-based agent would be a confused deputy: when another member
+  of a shared folder swaps an entry of the share for a symlink between the
+  agent's check and its use, the agent would copy the user's `~/.ssh` into
+  the share or write into `~/.config/autostart`. Every file operation of the
+  agent therefore goes through one directory-descriptor layer
+  (`homefs::fsat`):
+  - a path is opened below a descriptor of its namespace root (HOME or a
+    share container) with `openat2` and `RESOLVE_BENEATH |
+    RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS` (on kernels without
+    `openat2`, a walk of `openat` calls with `O_NOFOLLOW`); no symlink is
+    followed anywhere, also not one that stays inside the root;
+  - the operation then works with `*at` calls, by single names, on folders
+    it holds open, and compares what it opens with the inode it checked;
+  - new files are created with `O_CREAT | O_EXCL | O_NOFOLLOW`; a new folder
+    is opened after `mkdirat` and must be empty and owned by the agent;
+    renames use `RENAME_NOREPLACE`;
+  - copy, move and upload work through descriptors: tree walks open each
+    folder with `O_NOFOLLOW` below the folder that held it, an upload keeps
+    its temporary file and its destination folder open from init to
+    completion, a failed copy removes only what it created, and a move
+    removes its source only while it is still the entry that was copied.
+
+  An entry swapped for a link while the agent works is refused (403); a
+  folder that is moved away keeps receiving the operation it was checked
+  for, wherever it now is, and never redirects it. The safe-path layer still
+  validates every name first. Tests swap entries for links at points in the
+  middle of a copy and an upload, on the source and the destination side.
+  Listings keep skipping symlinks, except `~/Shared/*`, which are shown as
+  folders whose `path` is `/shared/<name>`.
 - **Realtime.** The agent watches the visible tree of HOME (not dot
   directories) and `~/Shared/*`, and streams logical paths to the server,
   which keeps the existing debounce and audience logic. The server's own

@@ -79,6 +79,8 @@ ring = "0.17"
 async-trait = "0.1"
 socket2 = "0.6"
 libc = "0.2"
+# Directory-descriptor file operations of the per-user file agent (openat2).
+rustix = { version = "1.1.6", features = ["fs"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 notify = "8.2.2"
 httparse = "1.10"

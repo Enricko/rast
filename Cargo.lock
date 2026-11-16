@@ -2385,6 +2385,7 @@ dependencies = [
  "rast-apps",
  "rast-base",
  "rast-helper",
+ "rustix",
  "serde",
  "serde_json",
  "sqlx",

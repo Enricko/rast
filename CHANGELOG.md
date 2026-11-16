@@ -45,6 +45,13 @@ this file by `scripts/changelog-section.sh`.
     agent cannot be traced by the account's other processes; `home_ensure`
     never takes over a folder that was swapped in while it was being
     created.
+  - The file agent works through directory descriptors: every path is
+    opened below HOME or the shared folder with `openat2`
+    (`RESOLVE_BENEATH`, no symlinks), new files are created with
+    `O_EXCL | O_NOFOLLOW`, and copy, move and upload keep the folders they
+    checked open. A symlink that another member of a shared folder swaps in
+    during an operation can no longer make the agent copy the account's own
+    files (`~/.ssh`) into the share or write into `~/.config/autostart`.
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names

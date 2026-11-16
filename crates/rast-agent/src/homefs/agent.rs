@@ -9,16 +9,23 @@
 //!   target must be a direct child of the shared root;
 //! * `/@root` is never served here.
 //!
-//! Every path goes through the safe-path layer of `rast-base` (no traversal,
-//! symlinks refused on every component, `O_NOFOLLOW` on the last one), and
-//! the operations are the same database-free cores the server runs for
-//! legacy homes, so the JSON shapes are identical. The agent's uid is the
-//! hard boundary: a bug or a symlink race here only reaches what the user
-//! can reach anyway. The server has already checked the session, CSRF and
-//! the RAST access rules before it forwards a request.
+//! The agent runs as the user: every app and terminal of the user shares its
+//! uid, and the other members of a shared folder can change entries in it
+//! while the agent works. Every operation therefore goes through
+//! [`super::fsat`]: paths are opened below a descriptor of the namespace
+//! root, no symbolic link is followed, and the work is done relative to
+//! folders the agent holds open, so a link or a folder that someone else
+//! swaps in cannot point the agent at other files of its user. The JSON
+//! shapes are those of the in-process handlers. The server has already
+//! checked the session, CSRF and the RAST access rules before it forwards a
+//! request.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::fs::File;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -34,17 +41,17 @@ use serde_json::{json, Value};
 
 use crate::error::{AppError, AppResult};
 use crate::fileagent::{
-    self, blocking, check, prepare_replacement, read_token, Agent, CancelOnDrop, PeerListener,
-    Target, UploadSpace,
+    self, blocking, check, read_token, Agent, CancelOnDrop, PeerListener, UploadSpace,
 };
 use crate::storage::ops::{self, EntryDto, ListingDto, QuotaDto, SearchDto, TextPreviewDto};
 use crate::storage::safe_path::{self, validate_component, validate_new_name};
-use crate::storage::serve::{serve_file, Disposition, PREVIEW_CSP};
+use crate::storage::serve::{serve_open_file, Disposition, PREVIEW_CSP};
 use crate::storage::{
-    transfer, Access, LogicalPath, Perm, ResolvedPath, RootKind, StorageRoot, MAX_BATCH_PATHS,
-    MAX_TREE_ENTRIES, TEMP_PREFIX,
+    LogicalPath, RootKind, MAX_BATCH_PATHS, MAX_SEARCH_DEPTH, MAX_SEARCH_RESULTS, MAX_TREE_ENTRIES,
+    TEMP_PREFIX,
 };
 
+use super::fsat::{self, fs_error, Info, Kind, Step};
 use super::{SHARED_DIR, UPLOAD_PREFIX};
 
 /// Where `~/Shared/<name>` links may point.
@@ -57,16 +64,41 @@ fn share_target_ok(shared_root: &Path, target: &Path) -> bool {
             .is_some_and(|name| validate_component(name).is_ok())
 }
 
-/// The namespace of one HOME.
+/// The namespace of one HOME. Both roots are opened once; every lookup
+/// starts from those descriptors.
 #[derive(Debug, Clone)]
 pub struct HomeSpace {
     home: PathBuf,
+    home_root: Arc<OwnedFd>,
+    home_info: Info,
     shared_root: PathBuf,
+    shared_dir: Arc<OwnedFd>,
+}
+
+/// The root of one namespace: HOME, or the container of a shared folder.
+#[derive(Debug, Clone)]
+struct NsRoot {
+    fd: Arc<OwnedFd>,
+    info: Info,
+    kind: RootKind,
+    /// The shared folder's name.
+    share_name: Option<String>,
+}
+
+/// An existing entry of the namespace, reached through descriptors.
+#[derive(Debug)]
+struct Node {
+    logical: LogicalPath,
+    root: NsRoot,
+    /// The folder that holds the entry, and its name (`None`: a namespace
+    /// root).
+    at: Option<(OwnedFd, String)>,
+    info: Info,
 }
 
 impl HomeSpace {
-    /// Both roots must be real directories; they are canonicalised once so
-    /// containment checks compare resolved paths.
+    /// Both roots must be real directories; they are canonicalised and
+    /// opened once.
     pub fn new(home: &Path, shared_root: &Path) -> io::Result<Self> {
         for root in [home, shared_root] {
             let meta = std::fs::symlink_metadata(root)?;
@@ -77,9 +109,16 @@ impl HomeSpace {
                 ));
             }
         }
+        let home = std::fs::canonicalize(home)?;
+        let shared_root = std::fs::canonicalize(shared_root)?;
+        let (home_root, home_info) = fsat::open_root(&home)?;
+        let (shared_dir, _) = fsat::open_root(&shared_root)?;
         Ok(Self {
-            home: std::fs::canonicalize(home)?,
-            shared_root: std::fs::canonicalize(shared_root)?,
+            home,
+            home_root: Arc::new(home_root),
+            home_info,
+            shared_root,
+            shared_dir: Arc::new(shared_dir),
         })
     }
 
@@ -88,46 +127,37 @@ impl HomeSpace {
         &self.home
     }
 
-    fn home_root(&self) -> StorageRoot {
-        StorageRoot {
-            physical: self.home.clone(),
-            kind: RootKind::Home,
-            perm: Perm::Admin,
-            in_home: true,
-            share_id: None,
-            share_name: None,
-        }
-    }
-
-    /// The target of `~/Shared/<name>`, when it is a valid share link.
-    fn share_link(&self, name: &str) -> Option<PathBuf> {
+    /// The container that `~/Shared/<name>` points to, when it is a valid
+    /// share link. The link is read, never followed.
+    fn share_container(&self, name: &str) -> Option<String> {
         validate_component(name).ok()?;
-        let shared = self.home.join(SHARED_DIR);
-        let meta = std::fs::symlink_metadata(&shared).ok()?;
-        if !meta.is_dir() {
-            return None;
-        }
-        let link = shared.join(name);
-        if !std::fs::symlink_metadata(&link)
-            .ok()?
-            .file_type()
-            .is_symlink()
-        {
-            return None;
-        }
-        let target = std::fs::read_link(&link).ok()?;
+        let (links, _) = fsat::open_dir(self.home_root.as_fd(), &[SHARED_DIR.to_string()]).ok()?;
+        let target = rustix::fs::readlinkat(&links, name, Vec::new()).ok()?;
+        let target = PathBuf::from(OsString::from_vec(target.into_bytes()));
         if !share_target_ok(&self.shared_root, &target) {
             return None;
         }
-        // The container itself must be a real directory, not another link.
-        std::fs::symlink_metadata(&target)
-            .ok()
-            .filter(|meta| meta.is_dir())
-            .map(|_| target)
+        target.file_name()?.to_str().map(str::to_string)
+    }
+
+    /// The root of the shared folder `name`: its container, a real folder
+    /// directly in the shared root.
+    fn share_root(&self, name: &str) -> AppResult<NsRoot> {
+        let container = self
+            .share_container(name)
+            .ok_or(AppError::NotFound("path not found"))?;
+        let (fd, info) = fsat::open_dir(self.shared_dir.as_fd(), &[container])
+            .map_err(|_| AppError::NotFound("path not found"))?;
+        Ok(NsRoot {
+            fd: Arc::new(fd),
+            info,
+            kind: RootKind::Share,
+            share_name: Some(name.to_string()),
+        })
     }
 
     /// The namespace root of a logical path.
-    fn root_for(&self, logical: &LogicalPath) -> AppResult<StorageRoot> {
+    fn root_for(&self, logical: &LogicalPath) -> AppResult<NsRoot> {
         let first = logical.segments().first().map(String::as_str);
         if first == Some(safe_path::RESERVED_NAME) {
             return Err(AppError::bad_request(
@@ -135,49 +165,169 @@ impl HomeSpace {
             ));
         }
         if let Some((name, _)) = logical.shared_parts() {
-            let physical = self
-                .share_link(name)
-                .ok_or(AppError::NotFound("path not found"))?;
-            return Ok(StorageRoot {
-                physical,
-                kind: RootKind::Share,
-                // The kernel decides what the user may write; the server has
-                // already applied the RAST access rules.
-                perm: Perm::Write,
-                in_home: false,
-                share_id: None,
-                share_name: Some(name.to_string()),
-            });
+            return self.share_root(name);
         }
         if first == Some("shared") {
             return Err(AppError::NotFound("path not found"));
         }
-        Ok(self.home_root())
+        Ok(NsRoot {
+            fd: self.home_root.clone(),
+            info: self.home_info,
+            kind: RootKind::Home,
+            share_name: None,
+        })
     }
 
-    /// Resolve an existing logical path.
-    pub fn resolve(&self, path: &str, access: Access) -> AppResult<ResolvedPath> {
-        let logical = LogicalPath::parse(path)?;
-        self.resolve_logical(&logical, access)
+    /// An existing entry: its folder is opened below the namespace root
+    /// (no link followed), the entry itself is a name in that folder.
+    fn node(&self, logical: &LogicalPath) -> AppResult<Node> {
+        let root = self.root_for(logical)?;
+        let Some((name, parents)) = logical.relative_segments().split_last() else {
+            return Ok(Node {
+                logical: logical.clone(),
+                info: root.info,
+                root,
+                at: None,
+            });
+        };
+        let (dir, _) = fsat::open_dir(root.fd.as_fd(), parents).map_err(fs_error)?;
+        let info = fsat::stat_at(dir.as_fd(), name)
+            .map_err(fs_error)?
+            .ok_or(AppError::NotFound("path not found"))?;
+        if info.kind == Kind::Symlink {
+            return Err(AppError::Forbidden("symbolic links are not supported"));
+        }
+        Ok(Node {
+            logical: logical.clone(),
+            root,
+            at: Some((dir, name.clone())),
+            info,
+        })
     }
 
-    fn resolve_logical(&self, logical: &LogicalPath, access: Access) -> AppResult<ResolvedPath> {
-        self.root_for(logical)?.resolve(logical, access)
+    fn node_at(&self, path: &str) -> AppResult<Node> {
+        self.node(&LogicalPath::parse(path)?)
     }
 }
 
-/// Whether this process may write `path` (`access(W_OK)`, effective ids).
-fn writable(path: &Path) -> bool {
-    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return false;
-    };
-    // SAFETY: `path` is a valid NUL-terminated string.
-    unsafe { libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
+impl Node {
+    fn is_storage_root(&self) -> bool {
+        self.at.is_none()
+    }
+
+    fn in_home(&self) -> bool {
+        self.root.kind == RootKind::Home
+    }
+
+    fn name(&self) -> &str {
+        self.at.as_ref().map_or("", |(_, name)| name)
+    }
+
+    /// `Home` for HOME, the shared folder's name for its root.
+    fn display_name(&self) -> String {
+        match &self.at {
+            Some((_, name)) => name.clone(),
+            None if self.in_home() => "Home".to_string(),
+            None => self.root.share_name.clone().unwrap_or_default(),
+        }
+    }
+
+    fn writable(&self) -> bool {
+        match &self.at {
+            Some((dir, name)) => fsat::writable_at(dir.as_fd(), name),
+            None => fsat::writable_at(self.root.fd.as_fd(), "."),
+        }
+    }
+
+    fn entry(&self) -> EntryDto {
+        entry_of(
+            &self.logical,
+            &self.display_name(),
+            &self.info,
+            self.writable(),
+        )
+    }
+
+    /// A handle on this folder, for `*at` calls.
+    fn folder(&self, not_a_folder: &'static str) -> AppResult<OwnedFd> {
+        if !self.info.is_dir() {
+            return Err(AppError::bad_request(not_a_folder));
+        }
+        match &self.at {
+            Some((dir, name)) => fsat::open_dir_at(dir.as_fd(), name, &self.info),
+            None => fsat::open_dir(self.root.fd.as_fd(), &[])
+                .map(|(fd, _)| fd)
+                .map_err(fs_error),
+        }
+    }
+
+    /// This folder, opened to read its entries.
+    fn listing(&self, not_a_folder: &'static str) -> AppResult<OwnedFd> {
+        if !self.info.is_dir() {
+            return Err(AppError::bad_request(not_a_folder));
+        }
+        match &self.at {
+            Some((dir, name)) => fsat::open_listing(dir.as_fd(), Some(name), &self.info),
+            None => fsat::open_listing(self.root.fd.as_fd(), None, &self.info),
+        }
+    }
+
+    /// This regular file, opened for reading.
+    fn file(&self) -> AppResult<File> {
+        match (&self.at, self.info.kind) {
+            (_, Kind::Dir) => Err(AppError::bad_request("path is a directory")),
+            (Some((dir, name)), Kind::File) => fsat::open_file_at(dir.as_fd(), name, &self.info),
+            _ => Err(AppError::bad_request("path is not a regular file")),
+        }
+    }
 }
 
-/// An I/O error of the agent (a full quota is 413, see `AppError::from`).
-fn fs_error(error: io::Error) -> AppError {
-    error.into()
+fn entry_of(logical: &LogicalPath, name: &str, info: &Info, writable: bool) -> EntryDto {
+    ops::entry_from_parts(
+        logical,
+        name,
+        info.is_dir(),
+        info.len,
+        info.modified_ms,
+        writable,
+    )
+}
+
+/// `EEXIST` as a conflict with `message`, any other error as usual.
+fn exists_as(message: String) -> impl FnOnce(io::Error) -> AppError {
+    move |error| {
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            AppError::Conflict(message)
+        } else {
+            fs_error(error)
+        }
+    }
+}
+
+/// Where an upload goes: a name in a folder the agent holds open.
+pub struct HomeTarget {
+    dir: Arc<OwnedFd>,
+    name: String,
+    logical: LogicalPath,
+}
+
+/// The temporary file of an upload. It stays open: chunks are written
+/// through this descriptor, never through its name.
+pub struct HomeTemp {
+    dir: Arc<OwnedFd>,
+    name: String,
+    file: File,
+    info: Info,
+}
+
+impl HomeTemp {
+    /// Whether the temporary name still is this upload's file.
+    fn still_mine(&self) -> bool {
+        matches!(
+            fsat::stat_at(self.dir.as_fd(), &self.name),
+            Ok(Some(info)) if info.same_inode(&self.info)
+        )
+    }
 }
 
 impl UploadSpace for HomeSpace {
@@ -186,39 +336,104 @@ impl UploadSpace for HomeSpace {
     const DEFAULT_DIR: &'static str = "/";
     const REPORTS_REPLACED: bool = true;
 
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target> {
+    type Target = HomeTarget;
+    type Temp = HomeTemp;
+
+    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<HomeTarget> {
         validate_new_name(name)?;
-        let parent = self.resolve(dir, Access::Write)?;
-        if !parent.physical.is_dir() {
-            return Err(AppError::bad_request(
-                "upload destination is not a directory",
-            ));
-        }
-        let (logical, dest, exists) = parent.child_target(name)?;
-        if exists {
-            let meta = std::fs::symlink_metadata(&dest)?;
-            if meta.is_dir() {
-                return Err(AppError::conflict("a folder with that name already exists"));
+        let parent = self.node_at(dir)?;
+        let folder = parent.folder("upload destination is not a directory")?;
+        let logical = parent.logical.child(name)?;
+        match fsat::stat_at(folder.as_fd(), name).map_err(fs_error)? {
+            Some(info) if info.kind == Kind::Symlink => {
+                return Err(AppError::Forbidden("symbolic links are not supported"))
             }
-            if !overwrite {
-                return Err(AppError::conflict("a file with that name already exists"));
+            Some(info) if info.is_dir() => {
+                return Err(AppError::conflict("a folder with that name already exists"))
             }
+            Some(_) if !overwrite => {
+                return Err(AppError::conflict("a file with that name already exists"))
+            }
+            _ => {}
         }
-        Ok(Target {
-            dest,
-            logical: logical.as_string(),
+        Ok(HomeTarget {
+            dir: Arc::new(folder),
+            name: name.to_string(),
+            logical,
         })
     }
 
-    fn commit(&self, temp: &Path, target: &Target, overwrite: bool) -> AppResult<(EntryDto, u64)> {
-        let replaced = prepare_replacement(temp, &target.dest, overwrite)?.unwrap_or(0);
-        // `rename` replaces a link planted at the destination, never follows it.
-        std::fs::rename(temp, &target.dest).map_err(fs_error)?;
-        let logical = LogicalPath::parse(&target.logical)?;
-        let meta = std::fs::symlink_metadata(&target.dest)?;
-        let name = logical.name().unwrap_or_default().to_string();
-        let mut entry = <EntryDto as ops::EntryDtoExt>::new(&logical, &name, &meta, true);
-        entry.writable = writable(&target.dest);
+    fn create_temp(&self, target: &HomeTarget, id: &str) -> AppResult<(HomeTemp, File)> {
+        let name = format!("{TEMP_PREFIX}{id}");
+        let file = fsat::create_at(target.dir.as_fd(), &name, 0o600)
+            .map_err(|error| self.map_io(error, fs_error))?;
+        let info = fsat::stat_fd(&file).map_err(fs_error)?;
+        let kept = file.try_clone().map_err(fs_error)?;
+        Ok((
+            HomeTemp {
+                dir: target.dir.clone(),
+                name,
+                file: kept,
+                info,
+            },
+            file,
+        ))
+    }
+
+    fn open_temp(&self, temp: &HomeTemp) -> AppResult<File> {
+        temp.file.try_clone().map_err(fs_error)
+    }
+
+    fn remove_temp(&self, temp: &HomeTemp) {
+        // Never a file that someone else put under the temporary name.
+        if temp.still_mine() {
+            let _ = fsat::unlink_at(temp.dir.as_fd(), &temp.name);
+        }
+    }
+
+    fn commit(
+        &self,
+        temp: &HomeTemp,
+        target: &HomeTarget,
+        overwrite: bool,
+    ) -> AppResult<(EntryDto, u64)> {
+        if !temp.still_mine() {
+            return Err(AppError::conflict(
+                "the upload's temporary file was replaced",
+            ));
+        }
+        let dir = target.dir.as_fd();
+        let exists = || AppError::conflict(format!("\"{}\" already exists", target.name));
+        // Keep the permission bits of a replaced file (never set-uid or
+        // set-gid); a new file gets the usual 0644.
+        let (replaced, mode) = match fsat::stat_at(dir, &target.name).map_err(fs_error)? {
+            Some(info) if info.is_dir() => {
+                return Err(AppError::conflict("a folder with that name already exists"))
+            }
+            Some(_) if !overwrite => return Err(exists()),
+            Some(info) if info.kind == Kind::File => (info.len, info.mode & 0o777),
+            _ => (0, 0o644),
+        };
+        fsat::set_mode(&temp.file, mode).map_err(fs_error)?;
+        let renamed = if overwrite {
+            fsat::rename_over(temp.dir.as_fd(), &temp.name, dir, &target.name)
+        } else {
+            fsat::rename_noreplace(temp.dir.as_fd(), &temp.name, dir, &target.name)
+        };
+        renamed.map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                exists()
+            } else {
+                fs_error(error)
+            }
+        })?;
+        let info = fsat::stat_fd(&temp.file).map_err(fs_error)?;
+        let entry = entry_of(
+            &target.logical,
+            &target.name,
+            &info,
+            fsat::writable_at(dir, &target.name),
+        );
         Ok((entry, replaced))
     }
 
@@ -428,29 +643,33 @@ fn page_params(page: Option<i64>, per_page: Option<i64>) -> (i64, i64) {
 
 /// Valid share links in `~/Shared`, as folders named `/shared/<name>`.
 fn share_link_entries(space: &HomeSpace, needle: Option<&str>) -> Vec<EntryDto> {
-    let Ok(reader) = std::fs::read_dir(space.home.join(SHARED_DIR)) else {
+    let Ok((links, info)) = fsat::open_dir(space.home_root.as_fd(), &[SHARED_DIR.to_string()])
+    else {
+        return Vec::new();
+    };
+    let Ok(items) = fsat::open_listing(links.as_fd(), None, &info)
+        .ok()
+        .map(|listing| fsat::entries(listing.as_fd()))
+        .transpose()
+    else {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for item in reader.flatten() {
-        let Some(name) = item.file_name().to_str().map(str::to_string) else {
+    for (name, item) in items.unwrap_or_default() {
+        if item.kind != Kind::Symlink {
             continue;
-        };
+        }
         if needle.is_some_and(|needle| !name.to_lowercase().contains(needle)) {
             continue;
         }
-        let Some(target) = space.share_link(&name) else {
-            continue;
-        };
-        let Ok(meta) = std::fs::symlink_metadata(&target) else {
+        let Ok(root) = space.share_root(&name) else {
             continue;
         };
         let Ok(logical) = LogicalPath::parse(&format!("/shared/{name}")) else {
             continue;
         };
-        let mut entry = <EntryDto as ops::EntryDtoExt>::new(&logical, &name, &meta, true);
-        entry.writable = writable(&target);
-        out.push(entry);
+        let writable = fsat::writable_at(root.fd.as_fd(), ".");
+        out.push(entry_of(&logical, &name, &root.info, writable));
     }
     out
 }
@@ -460,42 +679,66 @@ async fn list(
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<ListingDto>> {
     let space = agent.space.clone();
-    let path = query.path.clone().unwrap_or_else(|| "/".to_string());
-    let (page, per_page) = page_params(query.page, query.per_page);
-    let resolved = space.resolve(&path, Access::Read)?;
-    let sort = query.sort.as_deref().unwrap_or("name");
-    let order = query.order.as_deref().unwrap_or("asc");
-    let show_hidden = query.hidden.unwrap_or(true);
-    let mut entries =
-        ops::read_entries(&resolved, query.q.as_deref(), sort, order, show_hidden).await?;
-    for entry in &mut entries {
-        entry.writable = writable(&resolved.physical.join(&entry.name));
-    }
-    if resolved.kind == RootKind::Home && resolved.logical.segments() == [SHARED_DIR] {
+    blocking(move || {
+        let logical = LogicalPath::parse(query.path.as_deref().unwrap_or("/"))?;
+        let (page, per_page) = page_params(query.page, query.per_page);
+        let node = space.node(&logical)?;
+        let dir = node.listing("path is not a directory")?;
+        let show_hidden = query.hidden.unwrap_or(true);
+        let mut entries = Vec::new();
+        for (name, info) in fsat::entries(dir.as_fd()).map_err(fs_error)? {
+            if name.starts_with(TEMP_PREFIX)
+                || validate_component(&name).is_err()
+                || (!show_hidden && name.starts_with('.'))
+                || !matches!(info.kind, Kind::File | Kind::Dir)
+            {
+                continue;
+            }
+            let Ok(child) = logical.child(&name) else {
+                continue;
+            };
+            let writable = fsat::writable_at(dir.as_fd(), &name);
+            entries.push(entry_of(&child, &name, &info, writable));
+        }
         let needle = query
             .q
             .as_deref()
             .map(str::trim)
             .filter(|q| !q.is_empty())
             .map(str::to_lowercase);
-        entries.extend(share_link_entries(&space, needle.as_deref()));
-        ops::sort_entries(&mut entries, sort, order);
-    }
-    let (items, page, per_page, total) = ops::paginate(entries, page, per_page);
-    Ok(Json(ListingDto {
-        path: resolved.logical.as_string(),
-        breadcrumbs: ops::breadcrumbs_for(&resolved),
-        items,
-        page,
-        per_page,
-        total,
-        // The server fills in the quota it accounts.
-        quota: QuotaDto {
-            quota_bytes: 0,
-            used_bytes: 0,
-            free_bytes: 0,
-        },
-    }))
+        if let Some(needle) = &needle {
+            entries.retain(|entry| entry.name.to_lowercase().contains(needle));
+        }
+        if node.in_home() && logical.segments() == [SHARED_DIR] {
+            entries.extend(share_link_entries(&space, needle.as_deref()));
+        }
+        ops::sort_entries(
+            &mut entries,
+            query.sort.as_deref().unwrap_or("name"),
+            query.order.as_deref().unwrap_or("asc"),
+        );
+        let (items, page, per_page, total) = ops::paginate(entries, page, per_page);
+        Ok(ListingDto {
+            path: logical.as_string(),
+            breadcrumbs: ops::breadcrumbs(
+                &logical,
+                node.in_home(),
+                node.root.share_name.as_deref(),
+            ),
+            items,
+            page,
+            per_page,
+            total,
+            // The server fills in the quota it accounts.
+            quota: QuotaDto {
+                quota_bytes: 0,
+                used_bytes: 0,
+                free_bytes: 0,
+            },
+        })
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,9 +748,10 @@ struct PathQuery {
     max_bytes: Option<u64>,
 }
 
-fn required(path: &Option<String>) -> AppResult<&str> {
+fn required(path: &Option<String>) -> AppResult<String> {
     path.as_deref()
         .filter(|path| !path.is_empty())
+        .map(str::to_string)
         .ok_or_else(|| AppError::bad_request("path is required"))
 }
 
@@ -515,10 +759,11 @@ async fn stat(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<PathQuery>,
 ) -> AppResult<Json<EntryDto>> {
-    let resolved = agent.space.resolve(required(&query.path)?, Access::Read)?;
-    let mut entry = ops::entry_for_resolved(&resolved).await?;
-    entry.writable = writable(&resolved.physical);
-    Ok(Json(entry))
+    let space = agent.space.clone();
+    let path = required(&query.path)?;
+    blocking(move || Ok(space.node_at(&path)?.entry()))
+        .await
+        .map(Json)
 }
 
 async fn search(
@@ -529,30 +774,70 @@ async fn search(
     let q = query
         .q
         .as_deref()
-        .filter(|q| !q.trim().is_empty())
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
         .ok_or_else(|| AppError::bad_request("q is required"))?;
-    let base = agent
-        .space
-        .resolve(query.path.as_deref().unwrap_or("/"), Access::Read)?;
-    let mut found = ops::search_in(
-        &base,
-        q,
-        query.kind.as_deref(),
-        query.hidden.unwrap_or(true),
-        page,
-        per_page,
-    )
-    .await?;
-    for entry in &mut found.items {
-        if let Ok(logical) = LogicalPath::parse(&entry.path) {
-            if let Ok(physical) =
-                safe_path::physical_path(&base.root_physical, logical.relative_segments())
-            {
-                entry.writable = writable(&physical);
-            }
-        }
+    if q.chars().count() > 128 {
+        return Err(AppError::bad_request("search query is too long"));
     }
-    Ok(Json(found))
+    let needle = q.to_lowercase();
+    let space = agent.space.clone();
+    blocking(move || {
+        let node = space.node_at(query.path.as_deref().unwrap_or("/"))?;
+        let dir = node.listing("search path is not a directory")?;
+        let kind = query.kind.as_deref().map(|k| k.trim().to_ascii_lowercase());
+        let show_hidden = query.hidden.unwrap_or(true);
+        let mut hits: Vec<EntryDto> = Vec::new();
+        let mut scanned = 0usize;
+        fsat::walk(dir, MAX_SEARCH_DEPTH, |visit| {
+            // Links are never followed; dot entries (and what is below
+            // them) are left out unless asked for.
+            if visit.info.kind == Kind::Symlink || (!show_hidden && visit.name.starts_with('.')) {
+                return Step::Over;
+            }
+            scanned += 1;
+            if scanned > MAX_TREE_ENTRIES {
+                return Step::Stop;
+            }
+            let is_dir = visit.info.is_dir();
+            if !is_dir && visit.info.kind != Kind::File {
+                return Step::Over;
+            }
+            if visit.name.starts_with(TEMP_PREFIX) || !visit.name.to_lowercase().contains(&needle) {
+                return Step::Into;
+            }
+            if kind
+                .as_deref()
+                .is_some_and(|filter| !ops::kind_matches(filter, is_dir, visit.name))
+            {
+                return Step::Into;
+            }
+            let Ok(logical) = node.logical.with_segments(visit.path) else {
+                return Step::Into;
+            };
+            let writable = fsat::writable_at(visit.dir, visit.name);
+            hits.push(entry_of(&logical, visit.name, visit.info, writable));
+            if hits.len() > MAX_SEARCH_RESULTS {
+                return Step::Stop;
+            }
+            Step::Into
+        })
+        .map_err(fs_error)?;
+        let truncated = hits.len() > MAX_SEARCH_RESULTS;
+        hits.truncate(MAX_SEARCH_RESULTS);
+        ops::sort_entries(&mut hits, "name", "asc");
+        let (items, page, per_page, total) = ops::paginate(hits, page, per_page);
+        Ok(SearchDto {
+            items,
+            page,
+            per_page,
+            total,
+            truncated,
+            scanned,
+        })
+    })
+    .await
+    .map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -581,13 +866,24 @@ async fn mkdir(
     let parent_logical = logical
         .parent()
         .ok_or_else(|| AppError::bad_request("invalid path"))?;
-    let parent = agent
-        .space
-        .resolve_logical(&parent_logical, Access::Write)?;
     let name = logical
         .name()
-        .ok_or_else(|| AppError::bad_request("invalid path"))?;
-    ops::mkdir_in(&parent, name).await.map(Json)
+        .ok_or_else(|| AppError::bad_request("invalid path"))?
+        .to_string();
+    let space = agent.space.clone();
+    blocking(move || {
+        let parent = space.node(&parent_logical)?;
+        let dir = parent.folder("parent is not a directory")?;
+        fsat::mkdir_at(dir.as_fd(), &name).map_err(exists_as(
+            "a file or folder with that name already exists".to_string(),
+        ))?;
+        let info = fsat::stat_at(dir.as_fd(), &name)
+            .map_err(fs_error)?
+            .ok_or(AppError::NotFound("path not found"))?;
+        Ok(entry_of(&logical, &name, &info, true))
+    })
+    .await
+    .map(Json)
 }
 
 #[derive(Debug, Deserialize)]
@@ -601,33 +897,48 @@ async fn rename(
     State(agent): State<Arc<HomeAgent>>,
     Json(body): Json<RenameRequest>,
 ) -> AppResult<Json<EntryDto>> {
-    let resolved = agent.space.resolve(&body.path, Access::Write)?;
-    if resolved.is_storage_root() {
-        return Err(AppError::bad_request("cannot rename a storage root"));
-    }
-    let parent_logical = resolved
-        .logical
-        .parent()
-        .ok_or_else(|| AppError::bad_request("invalid path"))?;
-    let new_name = body.new_name.trim();
-    validate_new_name(new_name)?;
-    if new_name == resolved.name() {
-        return ops::entry_for_resolved(&resolved).await.map(Json);
-    }
-    let parent = agent
-        .space
-        .resolve_logical(&parent_logical, Access::Write)?;
-    ops::rename_in(&resolved, &parent, new_name).await.map(Json)
+    let space = agent.space.clone();
+    blocking(move || {
+        let node = space.node_at(&body.path)?;
+        let Some((dir, old)) = &node.at else {
+            return Err(AppError::bad_request("cannot rename a storage root"));
+        };
+        let new_name = body.new_name.trim();
+        validate_new_name(new_name)?;
+        if new_name == old {
+            return Ok(node.entry());
+        }
+        let logical = node
+            .logical
+            .parent()
+            .ok_or_else(|| AppError::bad_request("invalid path"))?
+            .child(new_name)?;
+        fsat::rename_noreplace(dir.as_fd(), old, dir.as_fd(), new_name).map_err(exists_as(
+            "a file or folder with that name already exists".to_string(),
+        ))?;
+        let info = fsat::stat_at(dir.as_fd(), new_name)
+            .map_err(fs_error)?
+            .ok_or(AppError::NotFound("path not found"))?;
+        Ok(entry_of(&logical, new_name, &info, true))
+    })
+    .await
+    .map(Json)
 }
 
 // ---------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------
 
-async fn regular_file(agent: &HomeAgent, query: &PathQuery) -> AppResult<ResolvedPath> {
-    let resolved = agent.space.resolve(required(&query.path)?, Access::Read)?;
-    ops::ensure_regular_file(&resolved).await?;
-    Ok(resolved)
+/// The regular file of a query, opened (the inode checked) for reading.
+async fn regular_file(agent: &HomeAgent, query: &PathQuery) -> AppResult<(tokio::fs::File, Node)> {
+    let space = agent.space.clone();
+    let path = required(&query.path)?;
+    blocking(move || {
+        let node = space.node_at(&path)?;
+        let file = node.file()?;
+        Ok((tokio::fs::File::from_std(file), node))
+    })
+    .await
 }
 
 async fn download(
@@ -635,10 +946,12 @@ async fn download(
     Query(query): Query<PathQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let resolved = regular_file(&agent, &query).await?;
-    let content_type = ops::mime_for_name(resolved.name());
-    serve_file(
-        &resolved,
+    let (file, node) = regular_file(&agent, &query).await?;
+    let content_type = ops::mime_for_name(node.name());
+    serve_open_file(
+        file,
+        node.info.len,
+        node.name(),
         &headers,
         &content_type,
         Disposition::Attachment,
@@ -652,14 +965,16 @@ async fn preview(
     Query(query): Query<PathQuery>,
     headers: HeaderMap,
 ) -> AppResult<Response> {
-    let resolved = regular_file(&agent, &query).await?;
-    let name = resolved.name().to_string();
-    let kind = ops::preview_kind(&name).ok_or(AppError::UnsupportedMediaType(
+    let (file, node) = regular_file(&agent, &query).await?;
+    let name = node.name();
+    let kind = ops::preview_kind(name).ok_or(AppError::UnsupportedMediaType(
         "preview is not supported for this file type",
     ))?;
-    let content_type = ops::preview_content_type(&name, kind);
-    serve_file(
-        &resolved,
+    let content_type = ops::preview_content_type(name, kind);
+    serve_open_file(
+        file,
+        node.info.len,
+        name,
         &headers,
         &content_type,
         Disposition::Inline,
@@ -672,12 +987,14 @@ async fn text(
     State(agent): State<Arc<HomeAgent>>,
     Query(query): Query<PathQuery>,
 ) -> AppResult<Json<TextPreviewDto>> {
-    let resolved = regular_file(&agent, &query).await?;
+    let (file, node) = regular_file(&agent, &query).await?;
     let limit = query
         .max_bytes
         .unwrap_or(crate::storage::DEFAULT_TEXT_PREVIEW_BYTES)
         .clamp(1, crate::storage::MAX_TEXT_PREVIEW_BYTES);
-    ops::text_preview_of(&resolved, Some(limit)).await.map(Json)
+    ops::text_preview_from(file, node.info.len, Some(limit))
+        .await
+        .map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -691,14 +1008,6 @@ struct BatchRequest {
     dest_dir: String,
 }
 
-/// One planned source and where it lands.
-struct Planned {
-    source: PathBuf,
-    target: PathBuf,
-    /// Whether the source is in HOME (not in a shared folder).
-    in_home: bool,
-}
-
 /// The free quota the server sent with a copy or move into HOME (absent:
 /// no limit).
 fn quota_budget(headers: &HeaderMap) -> Option<u64> {
@@ -708,119 +1017,60 @@ fn quota_budget(headers: &HeaderMap) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
-/// Bytes a source occupies, as the server's quota counts them.
-fn tree_size(path: &Path) -> AppResult<u64> {
-    let meta = std::fs::symlink_metadata(path)?;
-    Ok(if meta.is_dir() {
-        crate::storage::quota::dir_used_bytes_blocking(path)
-    } else {
-        meta.len()
-    })
-}
-
-/// The checks of `transfer::plan_batch`, against this namespace.
-fn plan(
-    space: &HomeSpace,
-    body: &BatchRequest,
-    moving: bool,
-) -> AppResult<(ResolvedPath, Vec<Planned>)> {
+/// The checks of `transfer::plan_batch`, against this namespace: the
+/// destination folder (held open) and the sources (never namespace roots).
+fn plan(space: &HomeSpace, body: &BatchRequest) -> AppResult<(Node, OwnedFd, Vec<Node>)> {
     if body.paths.is_empty() {
         return Err(AppError::bad_request("at least one path is required"));
     }
     if body.paths.len() > MAX_BATCH_PATHS {
         return Err(AppError::bad_request("too many paths in one request"));
     }
-    let dest = space.resolve(&body.dest_dir, Access::Write)?;
-    if !dest.physical.is_dir() {
-        return Err(AppError::bad_request("destination is not a directory"));
-    }
-    let access = if moving { Access::Write } else { Access::Read };
-    let mut seen = std::collections::HashSet::new();
+    let dest = space.node_at(&body.dest_dir)?;
+    let dest_dir = dest.folder("destination is not a directory")?;
+    let mut seen = HashSet::new();
     let mut out = Vec::with_capacity(body.paths.len());
     for raw in &body.paths {
-        let resolved = space.resolve(raw, access)?;
-        if resolved.is_storage_root() {
+        let node = space.node_at(raw)?;
+        if node.is_storage_root() {
             return Err(AppError::bad_request(
                 "storage roots cannot be copied, moved or deleted",
             ));
         }
-        if !seen.insert(resolved.physical.clone()) {
+        if !seen.insert(node.logical.as_string()) {
             return Err(AppError::bad_request("duplicate paths in request"));
         }
-        let name = resolved.name().to_string();
-        let (_, target, exists) = dest.child_target(&name)?;
-        if exists {
-            return Err(AppError::conflict(format!(
-                "\"{name}\" already exists in the destination"
-            )));
+        let name = node.name();
+        match fsat::stat_at(dest_dir.as_fd(), name).map_err(fs_error)? {
+            Some(info) if info.kind == Kind::Symlink => {
+                return Err(AppError::Forbidden("symbolic links are not supported"))
+            }
+            Some(_) => {
+                return Err(AppError::conflict(format!(
+                    "\"{name}\" already exists in the destination"
+                )))
+            }
+            None => {}
         }
-        if target == resolved.physical {
-            return Err(AppError::conflict("source and destination are the same"));
-        }
-        if resolved.physical.is_dir() && target.starts_with(&resolved.physical) {
+        if node.info.is_dir()
+            && fsat::is_within(dest_dir.as_fd(), &node.info, &dest.root.info).map_err(fs_error)?
+        {
             return Err(AppError::bad_request(
                 "a folder cannot be copied or moved into itself",
             ));
         }
-        out.push(Planned {
-            in_home: resolved.kind == RootKind::Home,
-            source: resolved.physical,
-            target,
-        });
+        out.push(node);
     }
-    Ok((dest, out))
+    Ok((dest, dest_dir, out))
 }
 
-/// Copy a tree without following links: symlinks, temporary files and
-/// special files are left out, as in-process copies do.
-fn copy_tree(source: &Path, target: &Path, cancel: &AtomicBool, bytes: &mut u64) -> AppResult<()> {
-    let meta = std::fs::symlink_metadata(source)?;
-    if meta.file_type().is_symlink() {
-        return Err(AppError::Forbidden("symbolic links are not supported"));
-    }
-    if !meta.is_dir() {
-        check(cancel)?;
-        *bytes += std::fs::copy(source, target).map_err(fs_error)?;
-        return Ok(());
-    }
-    let mut entries = 0usize;
-    for item in walkdir::WalkDir::new(source)
-        .follow_links(false)
-        .into_iter()
-        .filter_entry(|item| !item.file_type().is_symlink())
-    {
-        check(cancel)?;
-        let item = item.map_err(|error| {
-            error
-                .into_io_error()
-                .map(AppError::from)
-                .unwrap_or_else(|| AppError::internal("cannot traverse directory tree"))
-        })?;
-        if item
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(TEMP_PREFIX))
-        {
-            continue;
-        }
-        entries += 1;
-        if entries > MAX_TREE_ENTRIES {
-            return Err(AppError::bad_request(
-                "folder is too large for a single copy or move operation",
-            ));
-        }
-        let relative = item
-            .path()
-            .strip_prefix(source)
-            .map_err(|_| AppError::internal("path escaped its tree root"))?;
-        let destination = target.join(relative);
-        if item.file_type().is_dir() {
-            std::fs::create_dir(&destination).map_err(fs_error)?;
-        } else if item.file_type().is_file() {
-            *bytes += std::fs::copy(item.path(), &destination).map_err(fs_error)?;
-        }
-    }
-    Ok(())
+/// The folder that holds a source, and its name (sources are never
+/// namespace roots).
+fn source(node: &Node) -> AppResult<(std::os::fd::BorrowedFd<'_>, String)> {
+    node.at
+        .as_ref()
+        .map(|(dir, name)| (dir.as_fd(), name.clone()))
+        .ok_or_else(|| AppError::internal("a source is a namespace root"))
 }
 
 /// Copy or move a batch. Bytes that land in HOME are checked against the
@@ -838,17 +1088,18 @@ async fn transfer_items(
     let space = agent.space.clone();
     let budget = quota_budget(&headers);
     blocking(move || {
-        let (dest, plan) = plan(&space, &body, moving)?;
-        let dest_in_home = dest.kind == RootKind::Home;
+        let (dest, dest_dir, plan) = plan(&space, &body)?;
+        let dest_in_home = dest.in_home();
         // Sizes first: the whole batch must fit, so a full quota writes
         // nothing (in-process transfers stop at the item that does not fit).
         let mut sizes = Vec::with_capacity(plan.len());
         let mut needed = 0u64;
-        for item in &plan {
+        for node in &plan {
             check(&cancel)?;
-            let into_home = dest_in_home && (!moving || !item.in_home);
+            let into_home = dest_in_home && (!moving || !node.in_home());
             let size = if moving || into_home {
-                tree_size(&item.source)?
+                let (dir, name) = source(node)?;
+                fsat::tree_bytes(dir, &name, &node.info, TEMP_PREFIX)
             } else {
                 0
             };
@@ -863,38 +1114,60 @@ async fn transfer_items(
         let mut bytes = 0u64;
         let mut home_bytes = 0i64;
         let mut done = 0usize;
-        for (item, size) in plan.iter().zip(sizes) {
+        for (node, size) in plan.iter().zip(sizes) {
             check(&cancel)?;
-            let into_home = dest_in_home && (!moving || !item.in_home);
-            let out_of_home = moving && item.in_home && !dest_in_home;
+            let (dir, name) = source(node)?;
+            let into_home = dest_in_home && (!moving || !node.in_home());
+            let out_of_home = moving && node.in_home() && !dest_in_home;
             let delta = i64::try_from(size).unwrap_or(i64::MAX);
             if into_home {
                 home_bytes = home_bytes.saturating_add(delta);
             } else if out_of_home {
                 home_bytes = home_bytes.saturating_sub(delta);
             }
+            let in_destination = || format!("\"{name}\" already exists in the destination");
             if moving {
                 bytes = bytes.saturating_add(size);
-                match std::fs::rename(&item.source, &item.target) {
+                match fsat::rename_noreplace(dir, &name, dest_dir.as_fd(), &name) {
                     Ok(()) => {
                         done += 1;
                         continue;
                     }
                     // Another file system: copy, then remove the original.
                     Err(error) if error.raw_os_error() == Some(libc::EXDEV) => {}
-                    Err(error) => return Err(fs_error(error)),
+                    Err(error) => return Err(exists_as(in_destination())(error)),
                 }
             }
-            let mut copied = 0u64;
-            if let Err(error) = copy_tree(&item.source, &item.target, &cancel, &mut copied) {
-                // Do not leave half a copy behind.
-                let _ = transfer::remove_path_blocking(&item.target);
-                return Err(error);
+            let mut copied = fsat::Copied::default();
+            let mut created = None;
+            let result = fsat::copy_at(
+                dir,
+                &name,
+                &node.info,
+                dest_dir.as_fd(),
+                &cancel,
+                TEMP_PREFIX,
+                &mut copied,
+                &mut created,
+            );
+            if let Err(error) = result {
+                // Do not leave half a copy behind (and remove nothing else).
+                if let Some(made) = created {
+                    fsat::remove_created(dest_dir.as_fd(), &name, &made);
+                }
+                return Err(match error {
+                    AppError::Conflict(_) => AppError::conflict(in_destination()),
+                    other => other,
+                });
             }
             if moving {
-                transfer::remove_path_blocking(&item.source).map_err(fs_error)?;
+                // Only the entry that was copied.
+                if matches!(fsat::stat_at(dir, &name), Ok(Some(info)) if info.same_inode(&node.info))
+                {
+                    fsat::remove_at(dir, &name)?;
+                }
             } else {
-                bytes = bytes.saturating_add(copied);
+                bytes = bytes.saturating_add(copied.bytes);
             }
             done += 1;
         }
@@ -1510,6 +1783,228 @@ mod tests {
             has_path(value, "/projects/b.txt")
         })
         .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Races in shared folders: another member changes the tree while the
+    // agent works (ADR 0005, section 2). The test plays that member at a
+    // point in the middle of the operation.
+    // -----------------------------------------------------------------------
+
+    use super::fsat::{race, Point};
+
+    /// A shared folder `Team` that alice reaches, alice's private key and
+    /// her autostart folder (what another member would like to reach).
+    struct RaceFixture {
+        fx: Fixture,
+        team: PathBuf,
+        key: PathBuf,
+        autostart: PathBuf,
+    }
+
+    async fn race_fixture() -> RaceFixture {
+        let fx = start(None).await;
+        let team = fx.shared.join("team-1");
+        std::fs::create_dir(&team).unwrap();
+        std::fs::create_dir(fx.home.join(SHARED_DIR)).unwrap();
+        std::os::unix::fs::symlink(&team, fx.home.join("Shared/Team")).unwrap();
+        std::fs::create_dir_all(fx.home.join(".ssh")).unwrap();
+        let key = fx.home.join(".ssh/id_ed25519");
+        std::fs::write(&key, b"PRIVATE KEY").unwrap();
+        let autostart = fx.home.join(".config/autostart");
+        std::fs::create_dir_all(&autostart).unwrap();
+        RaceFixture {
+            fx,
+            team,
+            key,
+            autostart,
+        }
+    }
+
+    /// Replace `path` by a link to `target`, keeping the original as
+    /// `<path>-moved`.
+    fn swap_for_link(path: &Path, target: &Path) {
+        let moved = PathBuf::from(format!("{}-moved", path.display()));
+        std::fs::rename(path, moved).unwrap();
+        std::os::unix::fs::symlink(target, path).unwrap();
+    }
+
+    /// Every file below `dir` whose content is `needle`.
+    fn files_with(dir: &Path, needle: &[u8]) -> Vec<PathBuf> {
+        walkdir::WalkDir::new(dir)
+            .follow_links(false)
+            .into_iter()
+            .flatten()
+            .filter(|item| item.file_type().is_file())
+            .filter(|item| std::fs::read(item.path()).is_ok_and(|bytes| bytes == needle))
+            .map(|item| item.path().to_path_buf())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_source_file_swapped_for_a_link_is_never_read() {
+        let rx = race_fixture().await;
+        let source = rx.team.join("race-report.txt");
+        std::fs::write(&source, b"report").unwrap();
+        std::fs::create_dir(rx.team.join("out")).unwrap();
+        // Checked as a regular file, then a link to alice's key.
+        let key = rx.key.clone();
+        race::at(Point::OpenSource, "race-report.txt", move || {
+            swap_for_link(&source, &key)
+        });
+        let (status, body) = rx
+            .fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/shared/Team/race-report.txt"], "destDir": "/shared/Team/out"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(files_with(&rx.team, b"PRIVATE KEY").is_empty());
+        assert!(!rx.team.join("out/race-report.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn a_source_folder_swapped_for_a_link_is_never_walked() {
+        let rx = race_fixture().await;
+        let docs = rx.team.join("race-docs");
+        std::fs::create_dir(&docs).unwrap();
+        std::fs::write(docs.join("a.txt"), b"a").unwrap();
+        std::fs::create_dir(rx.team.join("out")).unwrap();
+        let ssh = rx.key.parent().unwrap().to_path_buf();
+        race::at(Point::OpenSource, "race-docs", move || {
+            swap_for_link(&docs, &ssh)
+        });
+        let (status, body) = rx
+            .fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/shared/Team/race-docs"], "destDir": "/shared/Team/out"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(files_with(&rx.team, b"PRIVATE KEY").is_empty());
+        assert!(!rx.team.join("out/race-docs").exists());
+    }
+
+    #[tokio::test]
+    async fn a_folder_swapped_for_a_link_inside_a_copied_tree_is_never_walked() {
+        let rx = race_fixture().await;
+        let tree = rx.team.join("race-tree");
+        std::fs::create_dir_all(tree.join("race-sub")).unwrap();
+        std::fs::write(tree.join("race-sub/b.txt"), b"b").unwrap();
+        std::fs::create_dir(rx.team.join("out")).unwrap();
+        let (sub, ssh) = (
+            tree.join("race-sub"),
+            rx.key.parent().unwrap().to_path_buf(),
+        );
+        race::at(Point::OpenSource, "race-sub", move || {
+            swap_for_link(&sub, &ssh)
+        });
+        let (status, body) = rx
+            .fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/shared/Team/race-tree"], "destDir": "/shared/Team/out"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(files_with(&rx.team, b"PRIVATE KEY").is_empty());
+        // The partial copy is gone.
+        assert!(!rx.team.join("out/race-tree").exists());
+    }
+
+    #[tokio::test]
+    async fn a_destination_folder_swapped_for_a_link_is_never_written_through() {
+        let rx = race_fixture().await;
+        std::fs::write(rx.fx.home.join("race-notes.txt"), b"notes").unwrap();
+        let inbox = rx.team.join("race-inbox");
+        std::fs::create_dir(&inbox).unwrap();
+        let autostart = rx.autostart.clone();
+        race::at(Point::CreateTarget, "race-notes.txt", move || {
+            swap_for_link(&inbox, &autostart)
+        });
+        let (status, body) = rx
+            .fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/race-notes.txt"], "destDir": "/shared/Team/race-inbox"}),
+            )
+            .await;
+        // The copy lands in the folder that was checked, wherever it is now.
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            std::fs::read(rx.team.join("race-inbox-moved/race-notes.txt")).unwrap(),
+            b"notes"
+        );
+        assert_eq!(std::fs::read_dir(&rx.autostart).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_folder_swapped_for_a_link_is_never_written_into() {
+        let rx = race_fixture().await;
+        let project = rx.fx.home.join("race-proj");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("run.desktop"), b"[Desktop Entry]").unwrap();
+        std::fs::create_dir(rx.team.join("out")).unwrap();
+        let (made, autostart) = (rx.team.join("out/race-proj"), rx.autostart.clone());
+        race::at(Point::MadeDir, "race-proj", move || {
+            swap_for_link(&made, &autostart)
+        });
+        let (status, body) = rx
+            .fx
+            .post(
+                "/api/files/copy",
+                json!({"paths": ["/race-proj"], "destDir": "/shared/Team/out"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(std::fs::read_dir(&rx.autostart).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_upload_lands_in_the_folder_it_was_started_in() {
+        let rx = race_fixture().await;
+        let inbox = rx.team.join("race-up");
+        std::fs::create_dir(&inbox).unwrap();
+        let (status, init) = rx
+            .fx
+            .post(
+                "/api/files/upload/init",
+                json!({"dir": "/shared/Team/race-up", "name": "run.desktop", "size": 3}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{init}");
+        let id = init["uploadId"].as_str().unwrap().to_string();
+        // Between two requests, the folder becomes a link to autostart.
+        swap_for_link(&inbox, &rx.autostart);
+        let response = rx
+            .fx
+            .send(
+                Method::POST,
+                &format!("/api/files/upload/chunk?uploadId={id}&offset=0"),
+                &HeaderMap::new(),
+                Body::from("abc"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = rx
+            .fx
+            .send(
+                Method::POST,
+                &format!("/api/files/upload/complete?uploadId={id}"),
+                &HeaderMap::new(),
+                Body::empty(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            std::fs::read(rx.team.join("race-up-moved/run.desktop")).unwrap(),
+            b"abc"
+        );
+        assert_eq!(std::fs::read_dir(&rx.autostart).unwrap().count(), 0);
     }
 
     #[tokio::test]

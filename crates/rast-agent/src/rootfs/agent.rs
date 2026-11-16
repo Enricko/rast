@@ -57,6 +57,9 @@ impl UploadSpace for RootSpace {
     const DEFAULT_DIR: &'static str = super::PREFIX;
     const REPORTS_REPLACED: bool = false;
 
+    type Target = Target;
+    type Temp = PathBuf;
+
     fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target> {
         let dest = upload_target(dir, name, overwrite)?;
         Ok(Target {
@@ -65,7 +68,24 @@ impl UploadSpace for RootSpace {
         })
     }
 
-    fn commit(&self, temp: &Path, target: &Target, overwrite: bool) -> AppResult<(EntryDto, u64)> {
+    fn create_temp(&self, target: &Target, id: &str) -> AppResult<(PathBuf, std::fs::File)> {
+        fileagent::create_temp_path(&target.dest, Self::TEMP_PREFIX, id)
+    }
+
+    fn open_temp(&self, temp: &PathBuf) -> AppResult<std::fs::File> {
+        fileagent::open_temp_path(temp)
+    }
+
+    fn remove_temp(&self, temp: &PathBuf) {
+        let _ = std::fs::remove_file(temp);
+    }
+
+    fn commit(
+        &self,
+        temp: &PathBuf,
+        target: &Target,
+        overwrite: bool,
+    ) -> AppResult<(EntryDto, u64)> {
         commit(temp, &target.dest, overwrite).map(|entry| (entry, 0))
     }
 }

@@ -9,6 +9,7 @@
 
 pub mod agent;
 pub mod client;
+pub mod fsat;
 pub mod watch;
 
 /// Prefix of chunked upload ids that belong to a per-user agent (the root

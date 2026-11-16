@@ -9,8 +9,9 @@
 pub mod client;
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -48,7 +49,7 @@ pub const REPLACED_HEADER: &str = "x-rast-replaced-bytes";
 /// server only (it removes the header from browser requests).
 pub const QUOTA_HEADER: &str = "x-rast-quota-free";
 
-/// Where a validated upload goes.
+/// Where a validated upload of the root agent goes.
 #[derive(Debug, Clone)]
 pub struct Target {
     /// The physical destination file.
@@ -58,7 +59,8 @@ pub struct Target {
 }
 
 /// Where uploads of one agent go. The agent owns the namespace rules: which
-/// logical folders exist, what may be replaced, and who owns new files.
+/// logical folders exist, what may be replaced, who owns new files, and how
+/// the temporary file of an upload is created, found again and removed.
 pub trait UploadSpace: Send + Sync + 'static {
     /// Prefix of chunked upload ids (`sys-` for the root agent, `usr-` for
     /// the per-user agent), so the server knows where an id belongs.
@@ -70,12 +72,32 @@ pub trait UploadSpace: Send + Sync + 'static {
     /// Whether replies carry [`REPLACED_HEADER`].
     const REPORTS_REPLACED: bool;
 
+    /// Where a validated upload goes.
+    type Target: Send + Sync + 'static;
+    /// The temporary file of an upload, as the space finds it again.
+    type Temp: Send + Sync + 'static;
+
     /// Validate where an upload goes, refusing what it may not replace.
-    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Target>;
+    fn target(&self, dir: &str, name: &str, overwrite: bool) -> AppResult<Self::Target>;
+
+    /// Create the temporary file of upload `id` next to its destination
+    /// (`TEMP_PREFIX` + `id`, a new file with mode 0600).
+    fn create_temp(&self, target: &Self::Target, id: &str) -> AppResult<(Self::Temp, File)>;
+
+    /// The temporary file again, to write the next chunk into.
+    fn open_temp(&self, temp: &Self::Temp) -> AppResult<File>;
+
+    /// Remove the temporary file (a cancelled, failed or expired upload).
+    fn remove_temp(&self, temp: &Self::Temp);
 
     /// Move a finished upload into place. Returns the new entry and the size
     /// of the file it replaced (0 for a new file).
-    fn commit(&self, temp: &Path, target: &Target, overwrite: bool) -> AppResult<(EntryDto, u64)>;
+    fn commit(
+        &self,
+        temp: &Self::Temp,
+        target: &Self::Target,
+        overwrite: bool,
+    ) -> AppResult<(EntryDto, u64)>;
 
     /// Map an I/O error while writing an upload; `fallback` is the generic
     /// mapping. The per-user agent turns a full quota into 413 first.
@@ -84,9 +106,9 @@ pub trait UploadSpace: Send + Sync + 'static {
     }
 }
 
-pub struct Upload {
-    pub temp: PathBuf,
-    pub target: Target,
+pub struct Upload<S: UploadSpace> {
+    pub temp: S::Temp,
+    pub target: S::Target,
     pub size: u64,
     pub offset: u64,
     pub overwrite: bool,
@@ -94,13 +116,13 @@ pub struct Upload {
 }
 
 /// Token, idle bookkeeping and chunked uploads of one agent.
-pub struct Agent<S> {
+pub struct Agent<S: UploadSpace> {
     token: String,
     started: Instant,
     /// Seconds since `started` of the last request.
     last_request: AtomicU64,
     active: AtomicUsize,
-    uploads: Mutex<HashMap<String, Upload>>,
+    uploads: Mutex<HashMap<String, Upload<S>>>,
     /// Becomes true when the agent stops, so long-lived streams end and the
     /// graceful shutdown does not wait for them.
     stop: tokio::sync::watch::Sender<bool>,
@@ -135,7 +157,7 @@ impl<S: UploadSpace> Agent<S> {
             uploads.retain(|_, upload| {
                 let keep = upload.touched.elapsed() < UPLOAD_TTL;
                 if !keep {
-                    let _ = std::fs::remove_file(&upload.temp);
+                    self.space.remove_temp(&upload.temp);
                 }
                 keep
             });
@@ -170,7 +192,7 @@ impl<S: UploadSpace> Agent<S> {
     /// Remove the temporary files of unfinished uploads (on exit).
     pub async fn drop_uploads(&self) {
         for (_, upload) in self.uploads.lock().await.drain() {
-            let _ = std::fs::remove_file(&upload.temp);
+            self.space.remove_temp(&upload.temp);
         }
     }
 }
@@ -363,21 +385,28 @@ pub fn prepare_replacement(temp: &Path, dest: &Path, overwrite: bool) -> AppResu
 // Uploads
 // ---------------------------------------------------------------------------
 
-async fn create_temp<S: UploadSpace>(
-    space: &S,
-    dest: &Path,
-    id: &str,
-) -> AppResult<(PathBuf, tokio::fs::File)> {
+/// The temporary file of upload `id` for the destination `dest`, by path
+/// (the root agent): `create_new`, mode 0600.
+pub fn create_temp_path(dest: &Path, prefix: &str, id: &str) -> AppResult<(PathBuf, File)> {
     let dir = dest.parent().unwrap_or(Path::new("/"));
-    let temp = dir.join(format!("{}{id}", S::TEMP_PREFIX));
-    let file = tokio::fs::OpenOptions::new()
+    let temp = dir.join(format!("{prefix}{id}"));
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&temp)
-        .await
-        .map_err(|error| space.map_io(error, |error| io_error("write in", dir, error)))?;
+        .map_err(|error| io_error("write in", dir, error))?;
     Ok((temp, file))
+}
+
+/// Open a temporary file created by [`create_temp_path`] again; never follow
+/// a link that replaced it.
+pub fn open_temp_path(temp: &Path) -> AppResult<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(temp)
+        .map_err(|error| io_error("write", temp, error))
 }
 
 /// Append a request body to `file`, at most `limit` bytes.
@@ -427,14 +456,14 @@ fn entry_reply<S: UploadSpace>(entry: EntryDto, replaced: u64) -> Response {
 
 async fn commit<S: UploadSpace>(
     agent: Arc<Agent<S>>,
-    temp: PathBuf,
-    target: Target,
+    temp: S::Temp,
+    target: S::Target,
     overwrite: bool,
 ) -> AppResult<Response> {
     let (entry, replaced) = blocking(move || {
         let result = agent.space.commit(&temp, &target, overwrite);
         if result.is_err() {
-            let _ = std::fs::remove_file(&temp);
+            agent.space.remove_temp(&temp);
         }
         result
     })
@@ -471,19 +500,20 @@ async fn upload<S: UploadSpace>(
         &name,
         overwrite,
     )?;
-    let (temp, mut file) = create_temp(&agent.space, &target.dest, &random_id()).await?;
+    let (temp, file) = agent.space.create_temp(&target, &random_id())?;
+    let mut file = tokio::fs::File::from_std(file);
     let received = receive(&agent.space, &mut file, body, length).await;
     drop(file);
     match received {
         Ok(written) if written == length => commit(agent, temp, target, overwrite).await,
         Ok(_) => {
-            let _ = std::fs::remove_file(&temp);
+            agent.space.remove_temp(&temp);
             Err(AppError::bad_request(
                 "upload ended before the complete body was received",
             ))
         }
         Err(error) => {
-            let _ = std::fs::remove_file(&temp);
+            agent.space.remove_temp(&temp);
             Err(error)
         }
     }
@@ -508,7 +538,7 @@ async fn upload_init<S: UploadSpace>(
         overwrite,
     )?;
     let id = format!("{}{}", S::ID_PREFIX, random_id());
-    let (temp, _file) = create_temp(&agent.space, &target.dest, &id).await?;
+    let (temp, _file) = agent.space.create_temp(&target, &id)?;
     agent.uploads.lock().await.insert(
         id.clone(),
         Upload {
@@ -561,19 +591,8 @@ async fn upload_chunk<S: UploadSpace>(
                 upload.offset
             )));
         }
-        let temp_error = |error| {
-            agent
-                .space
-                .map_io(error, |error| io_error("write", &upload.temp, error))
-        };
-        // The agent created the temporary file; never follow a link that
-        // replaced it.
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&upload.temp)
-            .await
-            .map_err(temp_error)?;
+        let temp_error = |error| agent.space.map_io(error, write_failed);
+        let mut file = tokio::fs::File::from_std(agent.space.open_temp(&upload.temp)?);
         // A chunk that failed half way is overwritten by its retry.
         file.set_len(upload.offset).await.map_err(temp_error)?;
         tokio::io::AsyncSeekExt::seek(&mut file, io::SeekFrom::Start(upload.offset))
@@ -622,7 +641,7 @@ async fn upload_cancel<S: UploadSpace>(
 ) -> AppResult<Json<Value>> {
     let id = upload_id(&query)?;
     if let Some(upload) = agent.uploads.lock().await.remove(&id) {
-        let _ = std::fs::remove_file(&upload.temp);
+        agent.space.remove_temp(&upload.temp);
     }
     Ok(Json(json!({"ok": true})))
 }
