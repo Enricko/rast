@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 0 — Foundation
+- **Current phase:** Phase 1 — One HOME (next task: 1.1). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 
@@ -199,6 +199,26 @@ Update it at the end of every session.
       builds; verify in task 3.6.
   - Development host: Ubuntu 26.04.1 LTS, systemd 259 (259.9-0ubuntu0.1).
 
+- **Test hygiene** (2026-11-16):
+  - `d439b68`: no more `.tmp*` folders left in `TMPDIR`. The background
+    runtime probe that `AppState` starts (`packages::system::read_version`)
+    recreated `<data>/packages/.staging` with `create_dir_all` after a test had
+    removed its data directory (28 leaked trees per full run, from
+    `tests/api_e2e.rs` and `tests/native_linux_e2e.rs`). It now recreates only a
+    missing scratch directory, never its parents, so production still heals a
+    deleted `.staging`. The `FakeHelper` in the `native_session.rs` tests keeps
+    its fake homes and profiles in its own `TempDir` instead of fixed folders.
+    Two full runs with an empty `TMPDIR` leave nothing behind.
+  - `0ab47a6`: the four `rast-agent` unix-socket tests use
+    `test_support::socket_tempdir()`, which falls back to `/tmp` when `TMPDIR`
+    is too long; they pass with a 110-character `TMPDIR`.
+- **Docs** (`de69f17`): one-HOME ADR is `docs/adr/0005-one-home.md` in tasks
+  1.1–1.5; tasks 4.2 and 7 use the next free ADR number. README lists Trunk
+  0.22 and the `wasm32-unknown-unknown` target as build requirements.
+- **Gates at the end of Phase 0:** fmt and clippy clean; `cargo test
+  --workspace`: 819 passed, 0 failed; npm test 152 passed; npm build OK;
+  third-party licenses up to date.
+
 ## In progress
 
 - Nothing.
@@ -222,10 +242,6 @@ Update it at the end of every session.
   `rast-base`; separate `native_apps`/`native_archive` (now in `rast-session`)
   from the session code, and the terminal manager from the PTY agent; drop the
   workspace dependencies that the root package no longer uses directly.
-- **Leftover `.tmp*` folders in `/tmp`** (3,718 found on 2026-11-15, some of
-  them from this host's earlier runs): find which test leaves them behind and
-  fix it after 0.2. A full `/tmp` (tmpfs, 16 GB) made every SQLite test fail
-  with `disk I/O error` and blocked the shell.
 - **Timing-sensitive tests:** the two known flaky tests were fixed in
   `2b9b8a5` (see Done). Any other test that holds a `flock` while sibling tests
   fork processes has the same risk; keep such tests in their own binary.
@@ -234,10 +250,6 @@ Update it at the end of every session.
   the maintainer).
 - Which release is the cut-off for removing the legacy Docker/Selkies Linux-app
   backend (Phase 4)?
-- **Tests need a short `TMPDIR`:** with a long `TMPDIR` (for example a
-  per-session scratch path) four `rast-agent` tests fail because unix-socket
-  paths exceed ~108 bytes. When `/tmp` is nearly full, use a short directory on
-  disk such as `TMPDIR=~/.cache/rast-tmp`.
 - `yamllint` is not installed for the default `python3` on this host (a
   RAST-managed Python comes first in `PATH`), so the workflow files were not
   linted locally.
