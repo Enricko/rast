@@ -85,7 +85,7 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `settings.changed` | Admin | `{keys:[...]}` |
 | `group.changed` | Admin | `{reason, groupId}` (group list/editor refresh) |
 | `access.changed` | User | `{reason, groupId?, userId, changedBy}` (launcher/File Station/apps reauthorize) |
-| `session.restart` | User | `{reason, forced, deadlineMs, seconds}`: shared folder access changed. `access_revoked` restarts the user's Linux apps and terminals at `deadlineMs` (60 s); `access_granted` only offers the restart |
+| `session.restart` | User | `{reason, forced, deadlineMs, seconds}`: shared folder access changed. `access_revoked` restarts the user's Linux apps and terminals at `deadlineMs` (60 s); `access_granted` only offers the restart. `access_revoked` is also sent when a running session is found to still carry a group its user lost (for example after a server restart during a warning) |
 | `session.restarted` | User | `{reason}` (`access_revoked` or `requested`): the user's apps and terminals were stopped and start again with the current groups |
 | `appearance.changed` | User | `{reason, originSessionId, appearance?}` (a change that only moves widgets is applied silently in other tabs) |
 | `session.revoked` | stream-local | `{reason}` (connection closes afterwards) |

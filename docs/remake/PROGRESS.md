@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done; their kernel-level and native tests are pending on the test host; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1, 1.2 and 1.3 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host; next task 1.4). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-16
 
@@ -403,12 +403,16 @@ Update it at the end of every session.
   - F2, fixed in `175b98f`: a File Station move between HOME and a share
     was a rename and kept the old group and ACL. It is now copy plus
     delete, so the entry gets the share's group, ACL and (later) quota.
-  - F3, open (low): the agent's `openat2` has no `RESOLVE_NO_XDEV`, so it
-    follows the user's own mounts (FUSE) below HOME. Only a self-DoS: the
-    agent has the user's uid anyway.
-  - F4, open (low): legacy in-process moves and recycle-bin restores into a
-    prepared share keep group `rast` and no share ACL; the recursive
-    `share_dir_prepare` (or a second `rast migrate shares`) repairs them.
+  - F3, fixed in `a44bc5d` (maintainer: below share containers only): the
+    agent's `openat2` had no `RESOLVE_NO_XDEV`. Paths below a share
+    container now use it (the fallback walk compares devices) and an entry
+    on another file system is refused; HOME is unchanged, so the user's own
+    mounts there stay reachable. Not changed: the agent's tree walks
+    (search, copy, size, remove) below a share still descend by name and
+    do not compare devices.
+  - F4, covered by the daily repair pass (`bfe360e`): legacy in-process
+    moves and recycle-bin restores into a prepared share keep group `rast`
+    and no share ACL until the next pass; recorded in the runbook.
   - The `x-rast-shares` header and the agent's container check were found
     sound.
 - **Task 1.3, shared folders as Linux groups** (2026-11-16, ADR 0005
@@ -451,6 +455,34 @@ Update it at the end of every session.
     failed; npm test 156 passed; npm build OK.
   - Measured: the helper's walker takes 0.85 s for 100 000 files when
     nothing changes, 1.4 s when everything changes (release, warm cache).
+- **Task 1.3 follow-up: the maintainer's decisions** (2026-11-16; the
+  1.3 commits were pushed to `Remake` first):
+  - `0e82a2d` docs(changelog): the heading of the "Show hidden files"
+    entry, cut by an edit in `940c44e`, is back.
+  - `58e5e74` fix(helper): the rollback reports every entry restored
+    without set-uid, or without set-gid on a regular file (set-gid on
+    folders stays): `droppedBits` in the reply (first 2 000) and
+    `dropped-bits.txt` in the rolled-back journal folder; the CLI prints
+    them.
+  - `f05ddd9` feat(helper): the dry run lists every entry whose ACL holds
+    entries RAST does not manage, with the entries (`foreignAclEntries`);
+    runbook note to read it and save them with `getfacl -R` first.
+  - `a44bc5d` fix(agent): F3, `RESOLVE_NO_XDEV` below share containers.
+  - `4ca2d47` feat(helper): `share_dir_repair`, `share_deny_set` (at most
+    256 users; every prepare keeps the entries) and the read-only
+    `share_session_groups` (`Groups:` of `/proc/<pid>/status`, at most 200
+    users per call).
+  - `cec3297` feat(server): D7, `u:rast-u<id>:---` on the container of
+    every share lost entirely, for the warning, lifted after the restart
+    or a new grant; every pass finds sessions that still carry a lost
+    group (also after a server restart, and for deactivated accounts) and
+    warns and restarts them again; a read → write move is no longer a
+    revocation.
+  - `bfe360e` feat(server): D3, the repair pass at start-up (after every
+    `rast migrate shares`) and daily.
+  - Gates: fmt and clippy clean; `cargo test --workspace` 923 passed, 0
+    failed; npm test 156 passed; npm build OK. No dependency, migration or
+    deploy change.
 
 ## Phase 1 checklist
 
@@ -533,15 +565,35 @@ fake helper).
   (`rast:rast` 0750, files 0644): dry-run report, apply, resume after
   killing the helper half way, rollback back to the same owners, modes and
   ACLs (compare `getfacl -R` before and after).
-- The deny ACL measurements of ADR 0005 section 10 (D7), if the maintainer
-  wants them.
+- The deny entry of D7 (decided: stopgap during the warning). As root:
+  create a share with one member, have the member `cd` into it in a
+  terminal and open a file in an app, revoke the member's access, then
+  within the 60 seconds check `getfacl` of the container
+  (`user:rast-u<id>:---`), a new `ls ~/Shared/<name>` (expect `EACCES`),
+  the open shell (`ls .`, expected to still work), `ls /proc/<shell
+  pid>/cwd` from a second process (expected to still work) and the open
+  file; after the restart the entry is gone and `id` shows no share
+  group. Grant access again during a warning: the entry goes at once.
+  A move from write to read gets no entry.
+- Stale sessions: revoke a member, stop `rast.service` within the 60
+  seconds, start it again: the member gets the warning again and the
+  session restarts (`share_session_groups` sees the old gid in
+  `/proc/<pid>/status`); leftover deny entries from before the stop are
+  removed by the first pass.
+- The repair pass: after `rast migrate shares`, `mv` a file from HOME into
+  the share in a terminal (keeps the user's group), `chgrp` one to the
+  user's primary group, then restart `rast.service`: both get the rw group
+  and the ACL back, and the journal names the share.
 
 ## Next
 
-1. The maintainer decides D3 (group quota, "best effort") and D7 (deny ACL
-   entry) from ADR 0005 section 10, and confirms the deviations listed
-   there.
-2. Task 1.4 (XDG Trash and quota).
+1. Task 1.4 (XDG Trash and quota). Under group quota (Q-a) the "enforced
+   by" indicator for a share limit must say **"filesystem, best effort"**
+   (D3 decision), not "filesystem"; `share_quota_set` sets the group limit
+   on the rw gid.
+2. Task 1.6 (Phase 1 security review): includes the new root helper
+   operations of task 1.3 and its follow-up (`share_deny_set`,
+   `share_dir_repair`, `share_session_groups`).
 3. Run the "Pending on the test host" lists above on the test host.
 3. 0.18.3 (D13) is released: the maintainer installs it on production, then
    removes the stray `homes/rast-u*` folders (read-only listing script in
@@ -559,17 +611,8 @@ fake helper).
   agents? Its stale-token case is narrower (only when something other than
   this server starts a new root agent on the same socket path), so it was
   left out of this round.
-- Task 1.3 results for the maintainer (ADR 0005 section 10): group quota as
-  the share limit under Q-a (D3: limits normal use, bypassable by members,
-  "filesystem, best effort" at most) and the deny ACL entry instead of a
-  forced restart (D7: closes new path lookups only; cwd, open descriptors,
-  `/proc/<pid>/cwd` and hard links stay open, and downgrades cannot be
-  expressed). Also the deviations: 8 000 members per group, plain JSONL
-  journal, full ACL replacement in the recursive prepare, set-uid dropped
-  on rollback, pending restarts forgotten on a server restart, and every
-  account offered a restart on the first sync after the upgrade.
-- F3 and F4 from the review before task 1.3 (`RESOLVE_NO_XDEV` for the
-  agent; legacy moves into prepared shares): fix now or with task 1.5?
+- The root agent token question above stays open on purpose (maintainer,
+  2026-11-16: no change now).
 - **`rast-core` (deferred in 0.2):** nothing in the code is pure enough for
   `wasm32` yet — `storage::safe_path` still uses `AppError` and the filesystem.
   Create the crate when the pure parts (logical paths, name validation, access

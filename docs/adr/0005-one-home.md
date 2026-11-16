@@ -309,7 +309,8 @@ served to anyone else, or chowned for anyone else.
     number of pending restarts).
   If the gaps are acceptable, task 1.3 replaces the 60-second forced restart
   with this entry plus a "Restart session" prompt; the decision stays with
-  the maintainer.
+  the maintainer. **Decided (2026-11-16, section 10):** the forced restart
+  stays, and the entry is added as a stopgap during the warning.
 - Known limits: an app that creates a file with mode 0600 or 0644 narrows the
   ACL mask, so the group loses write access (as on any Linux file server);
   files keep their creator as owner; with project quota a move between HOME
@@ -581,7 +582,8 @@ falls back on its next `quota_status` check.
   for the active accounts that have a Linux identity, and calls
   `share_members_set`. A change restarts the file agent at once and updates
   the `~/Shared` links; a revocation (any group lost, write → read
-  included) restarts apps and terminals after 60 seconds, a grant offers
+  included; since the follow-up, read → write is not one) restarts apps
+  and terminals after 60 seconds, a grant offers
   the restart (`GET`/`POST /api/session/restart`, events
   `session.restart` and `session.restarted`). Creating a share runs
   `share_group_ensure` and `share_dir_prepare`; deleting one runs
@@ -593,29 +595,55 @@ falls back on its next `quota_status` check.
   with a share's name is a reported conflict, left alone.
 - `rast migrate shares` as in section 8.
 
-**Deviations from this ADR** (to confirm):
+**Deviations from this ADR** (answered by the maintainer on 2026-11-16):
 
 - At most 8 000 members per group instead of 10 000 (see the table).
+  **Accepted.**
 - The shares journal is plain JSON lines, not gzip: the helper needs no new
   crate. One line per entry: relative path, type, device, inode, uid, gid,
   mode, access and default ACL (hex of the xattr). The home journal of
-  task 1.5 may follow the same format.
+  task 1.5 may follow the same format. **Accepted.**
 - The recursive `share_dir_prepare` replaces the whole access ACL of every
   entry (and the default ACL of folders) with the layout of section 1, so
-  every other named entry goes, not only those of RAST identities. The
-  dry-run lists entries with identity entries separately.
+  every other named entry goes, not only those of RAST identities.
+  **Accepted, on condition** that the dry run shows what is lost: it lists
+  every entry whose ACL holds named entries other than `u:rast`, the
+  read-only group and RAST identities, with those entries
+  (`foreignAclEntries`), and the runbook in `docs/OPERATIONS.md` says so.
+  Entries with identity entries are still listed separately.
 - Rollback drops set-uid bits (and set-gid on files) instead of refusing a
   journal that records them: legacy shares may hold such files, and a
-  rollback must not fail for them.
-- Pending restarts live in the server's memory. A server restart during the
-  60-second warning forgets the restart: the person keeps the old groups
-  until their next session. The agent was already restarted.
+  rollback must not fail for them. **Accepted, on condition** that only
+  set-uid, and set-gid on regular files, are dropped (set-gid on folders is
+  restored) and every such entry is reported: `droppedBits` in the reply
+  (the first 2 000, with `droppedBitsCount`) and the full list in
+  `<stamp>.rolled-back/dropped-bits.txt` (root, 0600); the CLI prints them.
+- ~~Pending restarts live in the server's memory; a server restart during
+  the warning forgets the restart.~~ **Not accepted.** Pending restarts
+  still live in memory, but every pass of the syncer (start-up, every
+  change, every five minutes) asks the helper which share groups the
+  running processes of every identity carry (`share_session_groups`, the
+  `Groups:` line of `/proc/<pid>/status`). A session that holds a group its
+  user is no longer in (rw of a share it may now only read, or any group of
+  a share it lost; deactivated accounts included) gets the warning and the
+  forced restart again, and its agent is restarted. Sessions restarted less
+  than 30 seconds ago are skipped while their processes exit. A gid of the
+  range without a share group (a deleted share, its container closed)
+  counts as nothing; a gid that a new share reused does count.
 - The first sync after an upgrade adds every member at once: every account
   with an identity gets its agent restarted and a "Restart session now"
-  offer.
+  offer. **Accepted.**
+- New, not in the deviations above: a move from the read-only to the
+  read-write group is no longer a revocation (the read-only group gives
+  nothing the read-write group does not), so it only offers the restart.
 
 **Evaluation (a): group quota on the rw group for `shares.quota_bytes`
-under Q-a (D3).** Not decided here.
+under Q-a (D3).** Decided by the maintainer on 2026-11-16: group quota may
+be used, and the UI shows it as **"filesystem, best effort"** (task 1.4).
+A repair pass (`share_dir_repair`, the recursive prepare of a migrated
+container) runs when the server starts, which follows every
+`rast migrate shares`, and then daily; it also covers review finding F4.
+The evaluation:
 
 - What works: the container and every folder below it are set-gid, so every
   new file and folder, whoever creates it (agent, app, terminal, legacy
@@ -655,7 +683,14 @@ under Q-a (D3).** Not decided here.
   and on a timer.
 
 **Evaluation (b): a per-user deny ACL entry `u:rast-u<id>:---` on the
-container instead of the forced restart (D7).** Not decided here.
+container instead of the forced restart (D7).** Decided by the maintainer
+on 2026-11-16: the forced restart stays. When access is revoked entirely
+(not on a move from write to read), the container gets the entry for the
+60-second warning (`share_deny_set`); it goes after the user's session
+restarts, or at once when the share is granted again. Every prepare and
+repair keeps the entries; the first pass after a server start sets every
+share, which removes leftovers. The verification is on the test host
+list. The evaluation:
 
 - What works: the kernel checks named-user entries before any group entry,
   so every new path lookup through the container fails with `EACCES` at
@@ -700,11 +735,11 @@ container instead of the forced restart (D7).** Not decided here.
 | --- | --- | --- |
 | D1 | How production gets kernel quota | Q-c is not possible without an extra disk (`ubuntu-vg` VFree 0). Production uses the RAST fallback until just before Phase 3 reaches production; then the maintainer enables **Q-a**, journaled user and group quota on `/` (runbook in section 9). Q-c only if a new disk is added later. |
 | D2 | Kernel uid quota counts everything the user owns on that filesystem (apps, Flatpak, caches, trash, the user's files in shared folders) | Accepted, as on a NAS. |
-| D3 | Shared-folder size limits | Accepted: **migration 0015** adds `shares.quota_bytes`, nullable (`NULL` = no limit). The UI shows whether the limit is enforced by the filesystem or only by RAST. Task 1.3 evaluates group quota on the rw group under Q-a, with its gaps (section 6). |
+| D3 | Shared-folder size limits | Accepted: **migration 0015** adds `shares.quota_bytes`, nullable (`NULL` = no limit). The UI shows whether the limit is enforced by the filesystem or only by RAST. Task 1.3 evaluates group quota on the rw group under Q-a, with its gaps (section 6). **Decided after task 1.3 (2026-11-16):** group quota is shown as "filesystem, best effort"; a repair pass runs at server start (after every `rast migrate shares`) and daily (section 10). |
 | D4 | Soft = `quota_bytes`, hard = soft + max(5 %, 1 GiB), 7-day grace; usage = allocated bytes | Accepted. The 20 GiB default stays and is reviewed again in task 3.2. |
 | D5 | `rast` keeps `rwx` on shared folders during the transition, no access to any HOME | Accepted. |
 | D6 | Administrators are in every share's rw group | Accepted, with the consequence in section 4: administrator apps and terminals open every share, so administrators should use a non-admin account for everyday app use (documented in `docs/NATIVE-LINUX-APPS.md` in task 1.3). |
-| D7 | A revocation restarts the session after 60 seconds; a grant applies at the next session start | Accepted for now. Task 1.3 evaluates the per-user deny ACL entry on the container as a restart-free alternative, with its gaps (section 4). |
+| D7 | A revocation restarts the session after 60 seconds; a grant applies at the next session start | Accepted for now. Task 1.3 evaluates the per-user deny ACL entry on the container as a restart-free alternative, with its gaps (section 4). **Decided after task 1.3 (2026-11-16):** the forced restart stays; on a full revocation the container also gets `u:rast-u<id>:---` during the warning, removed after the restart (section 10). |
 | D8 | On-disk layout of section 1; new accounts get one HOME when the helper is available | Accepted. |
 | D9 | `rast migrate home` and `rast migrate shares` need `rast.service` stopped for apply and rollback | Accepted. |
 | D10 | Separate app settings opt-in through `linux_apps.launcher` JSON; "Also delete its settings" removes isolated profiles only | Accepted. |
