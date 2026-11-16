@@ -53,7 +53,9 @@ this file by `scripts/changelog-section.sh`.
     opened below HOME or the shared folder with `openat2`
     (`RESOLVE_BENEATH`, no symlinks; below a shared folder also
     `RESOLVE_NO_XDEV`, so a mount inside a shared folder, such as a
-    member's FUSE mount, is never entered), new files are created with
+    member's FUSE mount, is never entered; searches, sizes, copies and
+    removals below a shared folder also leave out every entry on another
+    file system), new files are created with
     `O_EXCL | O_NOFOLLOW`, and copy, move and upload keep the folders they
     checked open. A symlink that another member of a shared folder swaps in
     during an operation can no longer make the agent copy the account's own

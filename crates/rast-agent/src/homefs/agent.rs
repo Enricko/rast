@@ -264,6 +264,12 @@ impl NsRoot {
             RootKind::Home => Resolve::Beneath,
         }
     }
+
+    /// The file system that tree walks below this root keep to: the
+    /// container's below a share (F3), any in HOME.
+    fn tree_fs(&self) -> Option<u64> {
+        (self.kind == RootKind::Share).then_some(self.info.dev)
+    }
 }
 
 impl Node {
@@ -841,7 +847,7 @@ async fn search(
         let show_hidden = query.hidden.unwrap_or(true);
         let mut hits: Vec<EntryDto> = Vec::new();
         let mut scanned = 0usize;
-        fsat::walk(dir, MAX_SEARCH_DEPTH, |visit| {
+        fsat::walk(dir, MAX_SEARCH_DEPTH, node.root.tree_fs(), |visit| {
             // Links are never followed; dot entries (and what is below
             // them) are left out unless asked for.
             if visit.info.kind == Kind::Symlink || (!show_hidden && visit.name.starts_with('.')) {
@@ -1166,7 +1172,7 @@ async fn transfer_items(
             let into_home = dest_in_home && (!moving || !node.in_home());
             let size = if moving || into_home {
                 let (dir, name) = source(node)?;
-                fsat::tree_bytes(dir, &name, &node.info, TEMP_PREFIX)
+                fsat::tree_bytes(dir, &name, &node.info, TEMP_PREFIX, node.root.tree_fs())
             } else {
                 0
             };
@@ -1216,6 +1222,7 @@ async fn transfer_items(
                 dir,
                 &name,
                 &node.info,
+                node.root.tree_fs(),
                 dest_dir.as_fd(),
                 !dest_in_home,
                 &cancel,
@@ -1226,7 +1233,7 @@ async fn transfer_items(
             if let Err(error) = result {
                 // Do not leave half a copy behind (and remove nothing else).
                 if let Some(made) = created {
-                    fsat::remove_created(dest_dir.as_fd(), &name, &made);
+                    fsat::remove_created(dest_dir.as_fd(), &name, &made, dest.root.tree_fs());
                 }
                 return Err(match error {
                     AppError::Conflict(_) => AppError::conflict(in_destination()),
@@ -1240,7 +1247,7 @@ async fn transfer_items(
                 // Only the entry that was copied.
                 if matches!(fsat::stat_at(dir, &name), Ok(Some(info)) if info.same_inode(&node.info))
                 {
-                    fsat::remove_at(dir, &name)?;
+                    fsat::remove_at(dir, &name, node.root.tree_fs())?;
                 }
             } else {
                 bytes = bytes.saturating_add(copied.bytes);

@@ -207,7 +207,11 @@ needed. Installs with some users in each mode work. Hosts without the helper
     followed anywhere, also not one that stays inside the root; below a
     share container also `RESOLVE_NO_XDEV` (the walk compares devices),
     and an entry on another file system is refused, so a mount inside a
-    shared folder is never entered; HOME keeps the user's own mounts;
+    shared folder is never entered; the tree walks below a container
+    (search, size, copy, the removal after a move) compare every entry's
+    `st_dev` with the container's and leave other file systems out (a
+    removal that meets one stops with `403` and keeps the folder); HOME
+    keeps the user's own mounts;
   - the operation then works with `*at` calls, by single names, on folders
     it holds open, and compares what it opens with the inode it checked;
   - new files are created with `O_CREAT | O_EXCL | O_NOFOLLOW`; a new folder

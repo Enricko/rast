@@ -24,7 +24,10 @@
 //! * new files are created with `O_CREAT | O_EXCL | O_NOFOLLOW`, new folders
 //!   with `mkdirat` and then used only while they are still the empty folder
 //!   just made, and renames that must not replace use `RENAME_NOREPLACE`;
-//! * copies, moves, sizes and removals walk trees through descriptors.
+//! * copies, moves, sizes, searches and removals walk trees through
+//!   descriptors; below a share container they also leave out every entry
+//!   whose device is not the container's (a member's FUSE mount: its
+//!   server could stall the agent, or feed it a tree without end).
 //!
 //! A member can still change entries in folders they may write themselves;
 //! the agent then acts on what is there, never on anything elsewhere.
@@ -613,6 +616,13 @@ pub fn is_within(dir: BorrowedFd<'_>, ancestor: &Info, root: &Info) -> io::Resul
 // Trees
 // ---------------------------------------------------------------------------
 
+/// Whether `info` is on the file system `fs` a tree operation keeps to:
+/// the device of a share container, or `None` (HOME, where the user's own
+/// mounts stay reachable) for any.
+fn on_fs(info: &Info, fs: Option<u64>) -> bool {
+    fs.is_none_or(|dev| info.dev == dev)
+}
+
 /// What a walk does after visiting an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -639,10 +649,13 @@ pub struct Visit<'a> {
 /// Walk the tree below the folder `base` (opened for reading) depth first,
 /// parents before their entries, through descriptors and never through a
 /// link. Entries are visited up to `max_depth`. Names that are not UTF-8,
-/// entries that vanish and folders that cannot be opened are left out.
+/// entries that vanish, entries that are not on the file system `fs` (see
+/// [`on_fs`]) and folders that cannot be opened (or changed before they
+/// were) are left out.
 pub fn walk(
     base: OwnedFd,
     max_depth: usize,
+    fs: Option<u64>,
     mut visit: impl FnMut(&Visit<'_>) -> Step,
 ) -> io::Result<()> {
     struct Frame {
@@ -674,6 +687,9 @@ pub fn walk(
         let Ok(Some(info)) = stat_at(dir, name) else {
             continue;
         };
+        if !on_fs(&info, fs) {
+            continue;
+        }
         let mut path = frame.path.clone();
         path.push(name.to_string());
         let depth = frame.depth + 1;
@@ -688,8 +704,11 @@ pub fn walk(
             Step::Stop => return Ok(()),
             Step::Over => {}
             Step::Into if info.is_dir() && depth < max_depth => {
+                // Still the folder that was visited: not a mount put on
+                // top of it, nor another folder renamed into its place.
                 let opened = open_at(dir, name, OFlags::RDONLY | OFlags::DIRECTORY)
                     .ok()
+                    .filter(|fd| stat_fd(fd).is_ok_and(|now| now.same_inode(&info)))
                     .and_then(|fd| Dir::new(fd).ok());
                 if let Some(dir) = opened {
                     stack.push(Frame { dir, path, depth });
@@ -703,8 +722,15 @@ pub fn walk(
 
 /// Bytes `name` in `dir` occupies as the server's quota counts them
 /// (`quota::dir_used_bytes_blocking`): the regular files of a folder, 64
-/// levels deep, without links and names that start with `skip_prefix`.
-pub fn tree_bytes(dir: BorrowedFd<'_>, name: &str, info: &Info, skip_prefix: &str) -> u64 {
+/// levels deep, without links and names that start with `skip_prefix`,
+/// and only on the file system `fs` ([`on_fs`]).
+pub fn tree_bytes(
+    dir: BorrowedFd<'_>,
+    name: &str,
+    info: &Info,
+    skip_prefix: &str,
+    fs: Option<u64>,
+) -> u64 {
     match info.kind {
         Kind::File => info.len,
         Kind::Dir => {
@@ -712,7 +738,7 @@ pub fn tree_bytes(dir: BorrowedFd<'_>, name: &str, info: &Info, skip_prefix: &st
                 return 0;
             };
             let mut total = 0u64;
-            let _ = walk(fd, 64, |visit| {
+            let _ = walk(fd, 64, fs, |visit| {
                 if visit.info.kind == Kind::File && !visit.name.starts_with(skip_prefix) {
                     total = total.saturating_add(visit.info.len);
                 }
@@ -733,15 +759,18 @@ pub struct Copied {
 
 /// Copy the entry `name` of `src`, whose `stat` was `info`, to the new entry
 /// `name` in `dst`. Folders are copied through descriptors; links, special
-/// files and names that start with `skip_prefix` inside them are left out.
-/// `created` is set once the top entry exists, so the caller can remove a
-/// partial copy (and nothing it did not create). `dst_in_share` chooses the
-/// permission bits of the new files ([`new_file_mode`]).
+/// files, names that start with `skip_prefix` and entries that are not on
+/// the source's file system `src_fs` ([`on_fs`]) inside them are left out
+/// (the caller checked the top entry). `created` is set once the top entry
+/// exists, so the caller can remove a partial copy (and nothing it did not
+/// create). `dst_in_share` chooses the permission bits of the new files
+/// ([`new_file_mode`]).
 #[allow(clippy::too_many_arguments)]
 pub fn copy_at(
     src: BorrowedFd<'_>,
     name: &str,
     info: &Info,
+    src_fs: Option<u64>,
     dst: BorrowedFd<'_>,
     dst_in_share: bool,
     cancel: &AtomicBool,
@@ -766,6 +795,7 @@ pub fn copy_at(
             src,
             name,
             info,
+            src_fs,
             dst,
             dst_in_share,
             cancel,
@@ -781,6 +811,7 @@ fn copy_tree(
     src: BorrowedFd<'_>,
     name: &str,
     info: &Info,
+    src_fs: Option<u64>,
     dst: BorrowedFd<'_>,
     dst_in_share: bool,
     cancel: &AtomicBool,
@@ -822,6 +853,10 @@ fn copy_tree(
             Err(Errno::NOENT) => continue,
             Err(error) => return Err(errno(error)),
         };
+        // A mount inside a shared folder is left out, like a link.
+        if !on_fs(&child_info, src_fs) {
+            continue;
+        }
         let target = target.as_fd();
         match child_info.kind {
             Kind::File => {
@@ -909,8 +944,11 @@ fn copy_file(
 }
 
 /// Remove `name` from `dir`, a folder with everything in it, never following
-/// a link. A missing entry is not an error.
-pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
+/// a link. A missing entry is not an error. Inside the folder, nothing that
+/// is not on the file system `fs` ([`on_fs`]) is entered or removed (the
+/// caller checked `name` itself); a folder that still holds such an entry
+/// is refused at the end.
+pub fn remove_at(dir: BorrowedFd<'_>, name: &str, fs: Option<u64>) -> AppResult<()> {
     let Some(info) = stat_at(dir, name).map_err(fs_error)? else {
         return Ok(());
     };
@@ -925,6 +963,8 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
         name: std::ffi::CString,
     }
     let top = open_listing(dir, Some(name), &info)?;
+    // Entries of another file system were left in place.
+    let mut kept = false;
     let mut stack = vec![Frame {
         dir: Dir::new(top).map_err(errno)?,
         name: std::ffi::CString::new(name)
@@ -943,6 +983,11 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
             };
             match rfs::unlinkat(parent, done.name.as_c_str(), AtFlags::REMOVEDIR) {
                 Ok(()) | Err(Errno::NOENT) => {}
+                Err(Errno::NOTEMPTY | Errno::BUSY) if kept => {
+                    return Err(AppError::Forbidden(
+                        "the folder holds another file system (a mount point) and was not removed",
+                    ))
+                }
                 Err(error) => return Err(errno(error)),
             }
             continue;
@@ -958,6 +1003,10 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
             Err(Errno::NOENT) => continue,
             Err(error) => return Err(errno(error)),
         };
+        if !on_fs(&child_info, fs) {
+            kept = true;
+            continue;
+        }
         if child_info.is_dir() {
             if depth >= MAX_DEPTH {
                 return Err(AppError::bad_request(
@@ -966,6 +1015,10 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
             }
             let fd = openat_nofollow(at, child, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())
                 .map_err(errno)?;
+            // Not a mount put on top of it since, nor another folder.
+            if !stat_fd(&fd).map_err(fs_error)?.same_inode(&child_info) {
+                return Err(changed());
+            }
             let frame = Frame {
                 dir: Dir::new(fd).map_err(errno)?,
                 name: child.to_owned(),
@@ -981,11 +1034,11 @@ pub fn remove_at(dir: BorrowedFd<'_>, name: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Remove what a failed copy created at `name` in `dir`, if it is still
-/// that entry.
-pub fn remove_created(dir: BorrowedFd<'_>, name: &str, created: &Info) {
+/// Remove what a failed copy created at `name` in `dir` (on the file
+/// system `fs`), if it is still that entry.
+pub fn remove_created(dir: BorrowedFd<'_>, name: &str, created: &Info, fs: Option<u64>) {
     if matches!(stat_at(dir, name), Ok(Some(info)) if info.same_inode(created)) {
-        let _ = remove_at(dir, name);
+        let _ = remove_at(dir, name, fs);
     }
 }
 
@@ -1166,7 +1219,7 @@ mod tests {
         );
         // Sizes count regular files only (not links, not temporary files).
         assert_eq!(
-            tree_bytes(root.as_fd(), "docs", &docs_info, ".rast-tmp-"),
+            tree_bytes(root.as_fd(), "docs", &docs_info, ".rast-tmp-", None),
             3
         );
         // A copy leaves links and temporary files out.
@@ -1177,6 +1230,7 @@ mod tests {
             root.as_fd(),
             "docs",
             &docs_info,
+            None,
             copy.as_fd(),
             false,
             &AtomicBool::new(false),
@@ -1202,11 +1256,96 @@ mod tests {
         assert!(is_within(sub.as_fd(), &docs_info, &root_info).unwrap());
         assert!(!is_within(copy.as_fd(), &docs_info, &root_info).unwrap());
         // Removing a tree removes links, never what they point to.
-        remove_at(root.as_fd(), "docs").unwrap();
+        remove_at(root.as_fd(), "docs", None).unwrap();
         assert!(!root_path.join("docs").exists());
         assert_eq!(
             std::fs::read(dir.path().join("outside/secret.txt")).unwrap(),
             b"secret"
         );
+    }
+
+    #[test]
+    fn walks_below_a_share_never_enter_a_mount_point() {
+        // Tests cannot mount; `/proc` is a mount point below `/` on Linux.
+        let (Ok(root_meta), Ok(proc_meta)) = (
+            std::fs::symlink_metadata("/"),
+            std::fs::symlink_metadata("/proc"),
+        ) else {
+            return;
+        };
+        let dev = std::os::unix::fs::MetadataExt::dev(&root_meta);
+        if dev == std::os::unix::fs::MetadataExt::dev(&proc_meta) {
+            return;
+        }
+        let names = |fs: Option<u64>| {
+            let (root, info) = open_root(Path::new("/")).unwrap();
+            let listing = open_listing(root.as_fd(), None, &info).unwrap();
+            let mut names = Vec::new();
+            walk(listing, 1, fs, |visit| {
+                names.push(visit.name.to_string());
+                Step::Over
+            })
+            .unwrap();
+            names
+        };
+        assert!(names(None).iter().any(|name| name == "proc"));
+        let same = names(Some(dev));
+        assert!(!same.iter().any(|name| name == "proc"), "{same:?}");
+        assert!(!same.is_empty(), "the root file system's own folders stay");
+    }
+
+    #[test]
+    fn copies_sizes_and_removals_below_a_share_leave_other_file_systems_alone() {
+        // Tests cannot mount: a device that no entry has makes every entry
+        // inside the folder one of another file system.
+        let (dir, root) = tree();
+        let root_path = dir.path().join("root");
+        std::fs::create_dir_all(root_path.join("docs/sub")).unwrap();
+        std::fs::write(root_path.join("docs/sub/b.txt"), b"bb").unwrap();
+        let docs_info = stat_at(root.as_fd(), "docs").unwrap().unwrap();
+        let own = Some(docs_info.dev);
+        let other = Some(docs_info.dev.wrapping_add(1));
+        assert_eq!(tree_bytes(root.as_fd(), "docs", &docs_info, ".x-", own), 3);
+        assert_eq!(
+            tree_bytes(root.as_fd(), "docs", &docs_info, ".x-", other),
+            0
+        );
+
+        // A copy leaves them out, like links.
+        mkdir_at(root.as_fd(), "copy").unwrap();
+        let (copy, _) = open_dir(root.as_fd(), &segments("copy")).unwrap();
+        let (mut totals, mut created) = (Copied::default(), None);
+        copy_at(
+            root.as_fd(),
+            "docs",
+            &docs_info,
+            other,
+            copy.as_fd(),
+            false,
+            &AtomicBool::new(false),
+            ".x-",
+            &mut totals,
+            &mut created,
+        )
+        .unwrap();
+        assert_eq!(totals.bytes, 0);
+        assert_eq!(
+            std::fs::read_dir(root_path.join("copy/docs"))
+                .unwrap()
+                .count(),
+            0
+        );
+
+        // A removal neither enters nor removes them, and says why the
+        // folder stays.
+        let error = remove_at(root.as_fd(), "docs", other).unwrap_err();
+        assert!(matches!(error, AppError::Forbidden(_)), "{error:?}");
+        assert_eq!(
+            std::fs::read(root_path.join("docs/sub/b.txt")).unwrap(),
+            b"bb"
+        );
+        assert!(root_path.join("docs/a.txt").exists());
+        remove_at(root.as_fd(), "docs", own).unwrap();
+        assert!(!root_path.join("docs").exists());
     }
 }
