@@ -9,7 +9,7 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-## [0.18.3] - Unreleased
+## [0.18.3] - 2026-11-16
 
 ### Fixed
 
