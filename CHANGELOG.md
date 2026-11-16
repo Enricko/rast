@@ -132,7 +132,7 @@ this file by `scripts/changelog-section.sh`.
     now". New endpoints `GET` and `POST /api/session/restart`, and the
     `session.restart` and `session.restarted` events.
 
- A new toolbar button next to the
+- **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
   start with a dot. They are hidden by default (a one-HOME HOME holds
   `~/.config`, `~/.cache` and `~/.local`), and the choice is remembered in
