@@ -750,9 +750,10 @@ fn a_folder_with_too_many_names_is_refused_before_they_are_all_read() {
         rast_uid: journal_owner(),
         identity_uids: (1, 0),
     };
+    let mount = fd_mount_id(fd.as_raw_fd()).unwrap();
     let walk_with = |limit: u64| {
         let mut report = TreeReport::default();
-        walk_limited(&fd, &owners, limit, &mut report, |_, _| Ok(()))
+        walk_limited(&fd, mount, &owners, limit, &mut report, |_, _| Ok(()))
     };
     assert!(walk_with(26).is_ok());
     let error = walk_with(25).unwrap_err();
@@ -761,7 +762,7 @@ fn a_folder_with_too_many_names_is_refused_before_they_are_all_read() {
     // Refused before the walk got anywhere: the top folder alone is over.
     let mut visited = 0;
     let mut report = TreeReport::default();
-    let error = walk_limited(&fd, &owners, 10, &mut report, |_, _| {
+    let error = walk_limited(&fd, mount, &owners, 10, &mut report, |_, _| {
         visited += 1;
         Ok(())
     })
@@ -1146,6 +1147,77 @@ async fn removing_a_container_never_follows_links() {
     assert_eq!(again["removed"], false);
     let meta = std::fs::metadata(fx.shared()).unwrap();
     assert!(meta.is_dir() && meta.nlink() >= 2);
+}
+
+#[test]
+fn mount_ids_tell_mount_points_apart() {
+    // Tests cannot mount; `/proc` is a mount point below `/` on Linux.
+    let root = open_dir(Path::new("/")).unwrap();
+    let root_mount = fd_mount_id(root.as_raw_fd()).unwrap();
+    if let Ok(proc_mount) = mount_id(root.as_raw_fd(), c"proc") {
+        assert_ne!(
+            proc_mount, root_mount,
+            "a mount point reports the mount on top"
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("file"), b"x").unwrap();
+    symlink("nowhere", dir.path().join("link")).unwrap();
+    let fd = open_dir(dir.path()).unwrap();
+    let own = fd_mount_id(fd.as_raw_fd()).unwrap();
+    for name in [c"sub", c"file", c"link"] {
+        assert_eq!(mount_id(fd.as_raw_fd(), name).unwrap(), own, "{name:?}");
+    }
+}
+
+#[tokio::test]
+async fn walks_and_removals_never_enter_another_mount() {
+    // A bind mount on the same file system keeps `st_dev`; only its mount
+    // id differs. Tests cannot mount, so the container's mount id is
+    // replaced by one no entry has: every entry is then "another mount".
+    let fx = fixture();
+    let team = legacy_tree(&fx);
+    let (fd, _) = open_container(&fx.options, "team").unwrap();
+    let own = fd_mount_id(fd.as_raw_fd()).unwrap();
+    let owners = Owners::of(&fx.options).unwrap();
+    let mut visited = Vec::new();
+    let mut report = TreeReport::default();
+    walk_limited(
+        &fd,
+        own.wrapping_add(1),
+        &owners,
+        MAX_TREE_ENTRIES,
+        &mut report,
+        |found, _| {
+            visited.push(found.path.to_string());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(visited.is_empty(), "{visited:?}");
+    assert_eq!(report.dirs + report.files, 0, "nothing was entered");
+    assert!(
+        report.other_device.paths.contains(&"docs".to_string()),
+        "{report:?}"
+    );
+    // With the right mount id the same walk visits the tree.
+    let mut report = TreeReport::default();
+    walk_limited(&fd, own, &owners, MAX_TREE_ENTRIES, &mut report, |_, _| {
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        report.dirs > 0 && report.other_device.count == 0,
+        "{report:?}"
+    );
+
+    // A removal stops before it touches anything below a mount point.
+    let error = remove_contents(&fd, own.wrapping_add(1), 0, &mut 0).unwrap_err();
+    assert_eq!(error.code, "forbidden");
+    assert!(error.message.contains("mount"), "{error:?}");
+    assert_eq!(std::fs::read(team.join("docs/plan.txt")).unwrap(), b"plan");
+    assert!(team.join("docs/deep").is_dir());
 }
 
 fn denied_uids(path: &Path) -> Vec<u32> {

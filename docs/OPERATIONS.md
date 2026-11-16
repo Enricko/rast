@@ -709,8 +709,8 @@ sudo systemctl start rast
   2770 and every folder and file the group, group write and the ACL.
   Set-uid bits are dropped. Symlinks, files with several hard links,
   root-owned entries, entries owned by any account other than `rast` and
-  the RAST identities (`otherOwner`), special files and other file systems
-  are left unchanged and listed in the report; the repair pass skips the
+  the RAST identities (`otherOwner`), special files, other file systems
+  and bind mounts (`otherDevice`) are left unchanged and listed in the report; the repair pass skips the
   same entries. An apply that stopped half way
   resumes with its journal when run again.
 - The apply **replaces the whole ACL** of every entry with the RAST

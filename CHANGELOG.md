@@ -112,7 +112,11 @@ this file by `scripts/changelog-section.sh`.
     hard link, entries owned by root, entries owned by any account other
     than `rast` and the RAST identities (such as a file another account
     owns that was hard-linked in and whose original was since removed) and
-    other file systems are left unchanged and reported. A walk holds at
+    other file systems and mounts are left unchanged and reported. Mounts
+    are told apart by mount id (`statx`, Linux 5.8 or later), so a bind
+    mount on the same file system inside a shared folder is never entered
+    or emptied, a container that is itself a mount point is refused, and
+    removing a shared folder stops at a mount point inside it. A walk holds at
     most 1 000 000 names at a time: a member's folder with more names is
     refused before they fill the helper's memory.
   - `shares_migrate_apply` writes a journal of every group, mode and ACL

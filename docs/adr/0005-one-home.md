@@ -581,10 +581,16 @@ falls back on its next `quota_status` check.
   checked descriptor (a small POSIX ACL codec, `native::acl`); symlinks,
   special files, files with more than one hard link, root-owned entries,
   entries owned by any account other than `rast` and the RAST identities,
-  and other file systems are left unchanged and reported. (The owner check
-  came with the review of 2026-11-16: with `fs.protected_hardlinks = 0` a
-  member can hard-link any file it can reach into a share, and once the
-  original name is gone that file has a single link.)
+  and other file systems and mounts are left unchanged and reported. (The
+  owner check came with the review of 2026-11-16: with
+  `fs.protected_hardlinks = 0` a member can hard-link any file it can
+  reach into a share, and once the original name is gone that file has a
+  single link.) Mounts are told apart by mount id (`statx` with
+  `STATX_MNT_ID`, Linux 5.8, which every supported distribution has), not
+  only by `st_dev`, so a bind mount on the same file system is never
+  entered, changed or emptied either; a container that is itself a mount
+  point is refused, and `share_dir_remove` stops at a mount point inside
+  (review follow-up).
 - Server: a syncer recomputes membership on every `access::bump_generation`
   (now also on role and status changes of accounts) and every five minutes,
   for the active accounts that have a Linux identity, and calls

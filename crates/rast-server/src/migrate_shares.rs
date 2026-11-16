@@ -172,7 +172,7 @@ pub fn describe(mode: Mode, outcome: &ShareOutcome) -> Vec<String> {
                 ),
                 (
                     "otherDevice",
-                    "mount points of other file systems (skipped)",
+                    "mount points of other file systems and bind mounts (skipped)",
                 ),
                 ("special", "special files (skipped)"),
                 ("nonUtf8", "names that are not UTF-8 (skipped)"),

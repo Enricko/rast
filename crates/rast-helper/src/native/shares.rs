@@ -33,7 +33,10 @@
 //! with `fstatat(AT_SYMLINK_NOFOLLOW)`, opened with `O_NOFOLLOW` and checked
 //! against that inode before anything is changed, and changes are made with
 //! `fchown`, `fchmod` and `fsetxattr` on the open descriptor. Walks never
-//! cross into another file system. Symbolic links, special files, files with
+//! cross into another file system or another mount: every entry's mount id
+//! (`statx` with `STATX_MNT_ID`) must be the container's, so a bind mount
+//! on the same file system (same `st_dev`) is left alone too, and a
+//! container that is itself a mount point is refused. Symbolic links, special files, files with
 //! more than one hard link, entries owned by root and entries owned by any
 //! account other than the `rast` service and the RAST identities are left
 //! unchanged and reported: such an entry can only be in a share as a hard
@@ -628,6 +631,45 @@ fn ino_of(stat: &libc::stat) -> u64 {
     stat.st_ino as u64
 }
 
+/// The mount id of the entry `name` in `dir`, or of `dir` itself when
+/// `name` is empty (`statx` with `STATX_MNT_ID`, Linux 5.8). A mount point
+/// reports the mount on top of it. Two entries with one `st_dev` can still
+/// be on two mounts (a bind mount); their mount ids differ.
+fn mount_id(dir: RawFd, name: &CStr) -> io::Result<u64> {
+    // SAFETY: zeroed `statx` is a valid out parameter.
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    let flags = if name.is_empty() {
+        libc::AT_EMPTY_PATH
+    } else {
+        libc::AT_SYMLINK_NOFOLLOW
+    };
+    // SAFETY: valid fd, NUL-terminated name, valid out pointer.
+    let rc = unsafe {
+        libc::statx(
+            dir,
+            name.as_ptr(),
+            flags | libc::AT_STATX_SYNC_AS_STAT,
+            libc::STATX_MNT_ID,
+            &mut stx,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if stx.stx_mask & libc::STATX_MNT_ID == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the kernel does not report mount ids (Linux 5.8 or later is needed)",
+        ));
+    }
+    Ok(stx.stx_mnt_id)
+}
+
+/// The mount id of the open descriptor `fd`.
+fn fd_mount_id(fd: RawFd) -> io::Result<u64> {
+    mount_id(fd, c"")
+}
+
 fn same_inode(a: &libc::stat, b: &libc::stat) -> bool {
     a.st_dev == b.st_dev && a.st_ino == b.st_ino
 }
@@ -741,6 +783,18 @@ fn open_container(
         return Err(NativeError::forbidden(format!(
             "{} changed while it was opened, or is on another file system",
             path.display()
+        )));
+    }
+    // Not a mount point either (a bind mount of a folder elsewhere on the
+    // same file system has its `st_dev`).
+    let root_mount =
+        fd_mount_id(root.as_raw_fd()).map_err(|error| tree_error("inspect", &root_path, error))?;
+    let mount = fd_mount_id(fd.as_raw_fd()).map_err(|error| tree_error("inspect", &path, error))?;
+    if mount != root_mount {
+        return Err(NativeError::forbidden(format!(
+            "{} is a mount point; a shared folder container must be a plain folder in {}",
+            path.display(),
+            root_path.display()
         )));
     }
     Ok((fd, opened))
@@ -1029,6 +1083,8 @@ struct Found<'a> {
     stat: &'a libc::stat,
     /// The open folder (folders only).
     dir: Option<&'a OwnedFd>,
+    /// The container's mount id, which the entry's must be.
+    mount: u64,
 }
 
 /// Walk the tree below `container` depth first. Entries that are not
@@ -1039,7 +1095,10 @@ fn walk(
     report: &mut TreeReport,
     visit: impl FnMut(&Found<'_>, &mut TreeReport) -> Result<(), NativeError>,
 ) -> Result<(), NativeError> {
-    walk_limited(container, owners, MAX_TREE_ENTRIES, report, visit)
+    let mount = fd_mount_id(container.as_raw_fd()).map_err(|error| {
+        NativeError::command_failed(format!("cannot inspect the container: {error}"))
+    })?;
+    walk_limited(container, mount, owners, MAX_TREE_ENTRIES, report, visit)
 }
 
 /// [`walk`] of at most `limit` entries. Every name read is visited or
@@ -1047,6 +1106,7 @@ fn walk(
 /// folders) never exceed `limit` either.
 fn walk_limited(
     container: &OwnedFd,
+    mount: u64,
     owners: &Owners,
     limit: u64,
     report: &mut TreeReport,
@@ -1113,6 +1173,21 @@ fn walk_limited(
             report.other_device.add(&path);
             continue;
         }
+        // A mount point on the same file system (a bind mount).
+        match mount_id(parent, &name) {
+            Ok(id) if id == mount => {}
+            Ok(_) => {
+                report.other_device.add(&path);
+                continue;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+                return Err(NativeError::unavailable(error.to_string()));
+            }
+            Err(_) => {
+                report.changed_during_walk.add(&path);
+                continue;
+            }
+        }
         if is_dir(&stat) {
             let dir = match open_at(parent, &name, DIR_FLAGS) {
                 Ok(dir) => dir,
@@ -1121,8 +1196,9 @@ fn walk_limited(
                     continue;
                 }
             };
-            match fstat(dir.as_raw_fd()) {
-                Ok(opened) if same_inode(&opened, &stat) => {}
+            // Still that folder, and no mount put on top of it since.
+            match (fstat(dir.as_raw_fd()), fd_mount_id(dir.as_raw_fd())) {
+                (Ok(opened), Ok(id)) if same_inode(&opened, &stat) && id == mount => {}
                 _ => {
                     report.changed_during_walk.add(&path);
                     continue;
@@ -1141,6 +1217,7 @@ fn walk_limited(
                         path: &path,
                         stat: &stat,
                         dir: Some(&dir),
+                        mount,
                     },
                     report,
                 )?;
@@ -1183,6 +1260,7 @@ fn walk_limited(
                 path: &path,
                 stat: &stat,
                 dir: None,
+                mount,
             },
             report,
         )?;
@@ -1191,15 +1269,17 @@ fn walk_limited(
 }
 
 /// Open the regular file of `found` and check that it is still that file,
-/// with one link and the owner the walk checked.
+/// with one link, the owner the walk checked and on the container's mount
+/// (a file can be a bind mount too).
 fn open_found_file(found: &Found<'_>) -> Option<(OwnedFd, libc::stat)> {
     let fd = open_at(found.parent, found.name, FILE_FLAGS).ok()?;
     let stat = fstat(fd.as_raw_fd()).ok()?;
     (is_regular(&stat)
         && same_inode(&stat, found.stat)
         && stat.st_nlink == 1
-        && stat.st_uid == found.stat.st_uid)
-        .then_some((fd, stat))
+        && stat.st_uid == found.stat.st_uid
+        && fd_mount_id(fd.as_raw_fd()).ok() == Some(found.mount))
+    .then_some((fd, stat))
 }
 
 /// Whether an ACL grants named entries to RAST identities (with
@@ -1430,7 +1510,10 @@ pub(crate) async fn share_dir_remove(
                         stat.st_uid
                     )));
                 }
-                remove_contents(&fd, 0, &mut 0)?;
+                let mount = fd_mount_id(fd.as_raw_fd()).map_err(|error| {
+                    NativeError::command_failed(format!("cannot inspect the container: {error}"))
+                })?;
+                remove_contents(&fd, mount, 0, &mut 0)?;
                 drop(fd);
                 // SAFETY: valid fd and NUL-terminated name.
                 if unsafe { libc::unlinkat(root.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) }
@@ -1500,9 +1583,16 @@ pub(crate) async fn share_dir_release(
 }
 
 /// Remove everything in the folder `dir`, never following a link and never
-/// leaving its file system. `pending` counts the names read but not yet
+/// leaving its file system or the container's mount `mount`: a mount point
+/// inside (another file system, or a bind mount) stops the removal before
+/// anything in it is touched. `pending` counts the names read but not yet
 /// removed in the folders above (at most [`MAX_TREE_ENTRIES`] in all).
-fn remove_contents(dir: &OwnedFd, depth: usize, pending: &mut u64) -> Result<(), NativeError> {
+fn remove_contents(
+    dir: &OwnedFd,
+    mount: u64,
+    depth: usize,
+    pending: &mut u64,
+) -> Result<(), NativeError> {
     if depth >= MAX_DEPTH {
         return Err(NativeError::forbidden(
             "the shared folder is nested too deeply",
@@ -1520,12 +1610,26 @@ fn remove_contents(dir: &OwnedFd, depth: usize, pending: &mut u64) -> Result<(),
         let Ok(stat) = lstat_at(dir.as_raw_fd(), &name) else {
             continue;
         };
-        let flags = if is_dir(&stat) {
-            if stat.st_dev != device {
-                return Err(NativeError::forbidden(
-                    "the shared folder contains another file system; unmount it first",
-                ));
+        let another_mount = || {
+            NativeError::forbidden(
+                "the shared folder contains another file system or mount; unmount it first",
+            )
+        };
+        if !is_symlink(&stat) {
+            let id = match mount_id(dir.as_raw_fd(), &name) {
+                Ok(id) => id,
+                Err(error) if error.raw_os_error() == Some(libc::ENOENT) => continue,
+                Err(error) => {
+                    return Err(NativeError::command_failed(format!(
+                        "cannot inspect an entry of the shared folder: {error}"
+                    )))
+                }
+            };
+            if stat.st_dev != device || id != mount {
+                return Err(another_mount());
             }
+        }
+        let flags = if is_dir(&stat) {
             let child = open_at(dir.as_raw_fd(), &name, DIR_FLAGS).map_err(|error| {
                 NativeError::command_failed(format!("cannot open a folder: {error}"))
             })?;
@@ -1536,7 +1640,10 @@ fn remove_contents(dir: &OwnedFd, depth: usize, pending: &mut u64) -> Result<(),
                     "a folder changed while it was removed",
                 ));
             }
-            remove_contents(&child, depth + 1, pending)?;
+            if fd_mount_id(child.as_raw_fd()).ok() != Some(mount) {
+                return Err(another_mount());
+            }
+            remove_contents(&child, mount, depth + 1, pending)?;
             libc::AT_REMOVEDIR
         } else {
             0

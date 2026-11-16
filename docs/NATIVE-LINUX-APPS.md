@@ -258,7 +258,8 @@ Consequences:
     pass, such a file is narrower than the layout (the group loses write
     access through the ACL mask, as on any Linux file server). The pass
     never changes symlinks, files with several hard links, entries owned
-    by root or by accounts that are not RAST's, or other file systems.
+    by root or by accounts that are not RAST's, or other file systems and
+    mounts.
 * **Administrators reach every shared folder from their apps (D6).** An
   administrator is a member of every shared folder's read-write group, which
   keeps the File Station administrator bypass. The consequence is that
