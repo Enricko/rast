@@ -1214,7 +1214,9 @@ impl NativeSessions {
         // per-app profile; it returns the profile HOME the app must use.
         let identity_home = identity.home.display().to_string();
         let profile_home = profile_root.join("home");
-        let rast_home = self.config.homes_dir().join(&identity.username);
+        // The person's RAST home is named after their RAST username, never
+        // after the Linux account name `rast-u<id>` (`identity.username`).
+        let rast_home = crate::users::home_dir_by_id(&self.db, &self.config, user_id).await?;
         // The helper only accepts an existing RAST home; create the person's
         // home folder when it has none yet (the server owns the homes root).
         if !rast_home.is_dir() {
@@ -2806,6 +2808,70 @@ mod tests {
         assert_eq!(pulse_mkdir.1["uid"], 200_001);
         assert_eq!(pulse_mkdir.1["gid"], 200_001);
         assert_eq!(pulse_mkdir.1["mode"], 0o700);
+    }
+
+    /// Regression: `start_run` built the RAST home from the Linux account name
+    /// (`<homes>/rast-u<id>`), so it linked and ACL-granted an empty folder of
+    /// its own, or the home of a RAST user who happened to be called like the
+    /// identity, instead of the person's own home.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn launch_uses_the_rast_username_for_the_home_not_the_identity_name() {
+        let (dir, db) = test_db().await;
+        // A legacy account (created before such names were refused) whose
+        // username is the Linux account name of user 2.
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (3, 'rast-u2', 'x', 'user', 1, 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let file = crate::config::FileConfig {
+            data_dir: Some(dir.path().join("data")),
+            storage_dir: Some(dir.path().join("storage")),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        let homes = config.homes_dir();
+        std::fs::create_dir_all(homes.join("rast-u2")).unwrap();
+        std::fs::write(homes.join("rast-u2/secret.txt"), b"not for user 2").unwrap();
+        let helper = Arc::new(FakeHelper::default());
+        let sessions =
+            NativeSessions::with_helper(config.clone(), db, helper.clone(), EventBus::new());
+
+        sessions
+            .launch(&test_user(2), launch_request("one"))
+            .await
+            .unwrap();
+
+        let bob_home = homes.join("bob").display().to_string();
+        let calls = helper.calls();
+        let (_, prepare) = calls
+            .iter()
+            .find(|(name, _)| name == "profile_prepare")
+            .unwrap();
+        assert_eq!(prepare["rastHome"], bob_home);
+        let (_, link) = calls
+            .iter()
+            .find(|(name, _)| name == "path_symlink")
+            .unwrap();
+        assert_eq!(link["target"], bob_home);
+        let (_, acl) = calls.iter().find(|(name, _)| name == "path_acl").unwrap();
+        assert_eq!(acl["path"], bob_home);
+        assert_eq!(acl["uid"], 200_002);
+        for (name, params) in &calls {
+            assert!(
+                !params.to_string().contains("homes/rast-u"),
+                "{name} reached an identity-named home: {params}"
+            );
+        }
+        // The person's home was created; no folder named after the identity.
+        let mut names: Vec<String> = std::fs::read_dir(&homes)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["bob", "rast-u2"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

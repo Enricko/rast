@@ -88,6 +88,12 @@ active super administrator cannot be demoted or disabled (`400`).
 Rules enforced server-side: cannot demote/deactivate the last active admin,
 cannot deactivate yourself.
 
+A username has 1–32 characters (letters, digits, dot, dash, underscore),
+starts with a letter or digit and is stored in lower case. Names of the form
+`rast-u<digits>` (any letter case) are reserved for the Linux accounts of
+native apps and answer `400` on `POST /api/users` and `POST /api/setup`;
+existing accounts keep working.
+
 `POST /api/users` can set up the whole account in one request. `active`
 defaults to `true` and `mustChangePassword` to `false`. `groupIds`,
 `folderRules` (`[{shareId? | shareName, rule}]`, rule `inherit|none|read|write`)
