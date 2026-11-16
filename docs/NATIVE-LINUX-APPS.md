@@ -238,7 +238,12 @@ Consequences:
     administrator revokes access, the person sees a warning and their apps
     and terminals restart after 60 seconds; when access is granted, the
     desktop offers *Restart session now*. File Station is right at once
-    (its agent restarts immediately).
+    (its agent restarts immediately). During the warning, a shared folder
+    the person lost entirely denies them by name (`u:rast-u<id>:---` on
+    its container), which stops new paths into it but not a shell whose
+    working directory is already inside, or files that are already open:
+    the restart is what ends those. A session that still carries a lost
+    group later (after a server restart) is found and restarted again.
   * Apps that save files with mode 0600 or 0644 narrow the ACL mask, so the
     group loses write access to that file, as on any Linux file server.
     Files keep their creator as owner.

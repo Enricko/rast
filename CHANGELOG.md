@@ -146,6 +146,17 @@ this file by `scripts/changelog-section.sh`.
     desktop; when access is granted the desktop offers "Restart session
     now". New endpoints `GET` and `POST /api/session/restart`, and the
     `session.restart` and `session.restarted` events.
+  - While a revocation waits for its restart, every shared folder the
+    person lost entirely denies them by name (`u:rast-u<id>:---` on its
+    container), so new paths into it fail at once; the entry goes after
+    the restart or when access is granted again. A move from write to read
+    gets no entry; a move from read to write is no longer treated as a
+    revocation.
+  - At start-up and every five minutes the server asks the helper which
+    share groups the running processes of each account carry. A session
+    that still holds a group its account lost (because the server
+    restarted during the warning, or a process survived the restart, or
+    the account was deactivated) is warned and restarted again.
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names

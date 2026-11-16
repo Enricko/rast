@@ -730,9 +730,16 @@ sudo systemctl start rast
   shared folder failed (the others are still done).
 - Running apps and terminals keep the groups they started with. A
   revocation restarts the person's apps and terminals after a 60-second
-  warning; a grant is offered as *Restart session now*. A server restart
-  forgets pending restarts (the person keeps the old groups until their
-  next session).
+  warning; a grant is offered as *Restart session now*. When the person
+  lost a shared folder entirely (not a move from write to read), its
+  container also gets the entry `u:rast-u<id>:---` during the warning, so
+  new paths into it fail at once; the entry goes after the restart, or
+  when access is granted again. At start-up and every five minutes the
+  server checks which share groups running processes carry
+  (`/proc/<pid>/status`, through the helper): a session that still holds a
+  group its user lost, for example because the server restarted during a
+  warning, is warned and restarted again. Leftover deny entries of an
+  earlier run are removed by the first check.
 
 ## Secrets and key rotation
 

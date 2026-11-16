@@ -18,8 +18,20 @@
 //! user's apps and terminals after a [`RESTART_WARNING`] warning; a **grant**
 //! applies at the next session start, and the warning offers "Restart
 //! session now" (D7).
+//!
+//! While a user waits for that restart, every shared folder they lost
+//! entirely gets the deny entry `u:rast-u<id>:---` on its container
+//! (`share_deny_set`), which stops new lookups at once; it goes when the
+//! session restarts or access is granted again. A move from write to read
+//! gets no entry (it cannot be expressed on the container).
+//!
+//! Pending restarts live in memory, so every pass also asks the helper
+//! which share groups the running processes carry (`share_session_groups`):
+//! a session that still holds a group its user lost (after a server
+//! restart, or one that survived its restart) is warned and restarted
+//! again.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -45,6 +57,13 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 const RESYNC_INTERVAL: Duration = Duration::from_secs(300);
 /// After a failed pass (helper down), wait this long before the next one.
 const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// Processes of a session that was just restarted may still be exiting:
+/// they are not taken for a session that kept a revoked group.
+const RESTART_GRACE: Duration = Duration::from_secs(30);
+/// Users per `share_session_groups` call (the helper accepts 200).
+const SESSION_GROUPS_BATCH: usize = 100;
+/// Users with deny entries on one container (the helper accepts 256).
+const MAX_DENIALS: usize = 256;
 
 /// The members of one shared folder's two groups (RAST user ids, sorted).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -71,6 +90,32 @@ pub struct Plan {
     pub roots: BTreeMap<i64, ShareRoots>,
     /// The accounts the plan covers (active, with a Linux identity).
     pub accounts: Vec<AuthUser>,
+    /// Every account with a Linux identity, deactivated ones included
+    /// (their processes must carry no share group either).
+    pub identities: Vec<i64>,
+}
+
+impl Plan {
+    /// Which group of which share a group name is.
+    fn group_index(&self) -> HashMap<String, (&ShareInfo, bool)> {
+        let mut out = HashMap::new();
+        for share in &self.shares {
+            if let Some(rw) = shares::rw_group_name(&share.id) {
+                out.insert(rw, (share, true));
+            }
+            if let Some(ro) = shares::ro_group_name(&share.id) {
+                out.insert(ro, (share, false));
+            }
+        }
+        out
+    }
+
+    fn container(&self, share_id: &str) -> Option<&str> {
+        self.shares
+            .iter()
+            .find(|share| share.id == share_id)
+            .map(|share| share.container.as_str())
+    }
 }
 
 /// Compute the groups of every shared folder from Effective Access.
@@ -108,6 +153,9 @@ pub async fn plan(pool: &SqlitePool) -> AppResult<Plan> {
             must_change_password: false,
         });
     }
+    plan.identities = sqlx::query_scalar("SELECT user_id FROM linux_identities ORDER BY user_id")
+        .fetch_all(pool)
+        .await?;
     for share in &plan.shares {
         let mut membership = Membership::default();
         for user in &plan.accounts {
@@ -139,21 +187,48 @@ pub async fn plan(pool: &SqlitePool) -> AppResult<Plan> {
 pub struct Changes {
     pub granted: HashSet<i64>,
     pub revoked: HashSet<i64>,
+    /// Per user, the shares they lost entirely (in neither group now).
+    pub lost: HashMap<i64, BTreeSet<String>>,
+    /// Per user, the shares they gained a group of.
+    pub gained: HashMap<i64, BTreeSet<String>>,
 }
 
 impl Changes {
     /// Read one `share_members_set` reply. A user moved from the rw to the
     /// ro group is a revocation: their processes still carry the rw group.
+    /// A move from the ro to the rw group is not: the ro group gives
+    /// nothing that the rw group does not.
     pub fn record(&mut self, reply: &Value) {
-        for key in ["write", "read"] {
-            let ids = |field: &str| -> Vec<i64> {
-                reply[key][field]
-                    .as_array()
-                    .map(|list| list.iter().filter_map(Value::as_i64).collect())
-                    .unwrap_or_default()
-            };
-            self.granted.extend(ids("added"));
-            self.revoked.extend(ids("removed"));
+        let ids = |key: &str, field: &str| -> HashSet<i64> {
+            reply[key][field]
+                .as_array()
+                .map(|list| list.iter().filter_map(Value::as_i64).collect())
+                .unwrap_or_default()
+        };
+        let (write_added, write_removed) = (ids("write", "added"), ids("write", "removed"));
+        let (read_added, read_removed) = (ids("read", "added"), ids("read", "removed"));
+        let upgraded: HashSet<i64> = read_removed.intersection(&write_added).copied().collect();
+        let lost: HashSet<i64> = write_removed
+            .difference(&read_added)
+            .chain(read_removed.difference(&write_added))
+            .copied()
+            .collect();
+        self.granted.extend(write_added.iter().chain(&read_added));
+        self.revoked.extend(
+            write_removed
+                .iter()
+                .chain(read_removed.difference(&upgraded)),
+        );
+        if let Some(share) = reply["shareId"].as_str() {
+            for user in lost {
+                self.lost.entry(user).or_default().insert(share.to_string());
+            }
+            for user in write_added.iter().chain(&read_added) {
+                self.gained
+                    .entry(*user)
+                    .or_default()
+                    .insert(share.to_string());
+            }
         }
     }
 
@@ -165,6 +240,8 @@ impl Changes {
 /// What the syncer remembers between passes.
 #[derive(Default)]
 struct Known {
+    /// The last `share_session_groups` call failed (logged once).
+    stale_check_failed: bool,
     /// Shares whose groups exist.
     ensured: HashSet<String>,
     /// The `~/Shared` links last sent to each one-HOME agent.
@@ -247,7 +324,38 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
             })?;
         changes.record(&reply);
     }
-    apply_changes(state, &changes).await;
+    apply_changes(state, &changes, &plan).await;
+    // Sessions that still carry a group their user lost.
+    match stale_sessions(native, &plan).await {
+        Ok(stale) => {
+            known.stale_check_failed = false;
+            for (user_id, lost) in stale {
+                if state.session_restarts.recently_restarted(user_id) {
+                    continue;
+                }
+                if state.session_restarts.pending_forced(user_id).is_none() {
+                    tracing::info!(
+                        user_id,
+                        "a session still carries shared folder groups its user lost; restarting it"
+                    );
+                    state.homefs.stop_agent(user_id).await;
+                }
+                state.session_restarts.revoked(state, user_id, lost);
+            }
+        }
+        Err(error) => {
+            if !known.stale_check_failed {
+                tracing::warn!(error = %error, "shared folder groups: cannot inspect running sessions");
+            }
+            known.stale_check_failed = true;
+        }
+    }
+    // Deny entries of pending restarts (on the first pass also every
+    // leftover entry of an earlier run is removed).
+    state
+        .session_restarts
+        .sync_denials(native, &plan.shares)
+        .await;
     // `~/Shared` links of one-HOME accounts whose shares changed.
     for user in &plan.accounts {
         let roots = plan.roots.get(&user.id).cloned().unwrap_or_default();
@@ -286,6 +394,74 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     Ok(())
 }
 
+/// The users whose running processes carry a share group they are no
+/// longer a member of, with the shares they lost entirely (a session that
+/// holds the rw group of a share it may now only read has lost nothing
+/// entirely).
+async fn stale_sessions(
+    native: &NativeClient,
+    plan: &Plan,
+) -> AppResult<BTreeMap<i64, BTreeMap<String, String>>> {
+    let index = plan.group_index();
+    let mut out = BTreeMap::new();
+    for batch in plan.identities.chunks(SESSION_GROUPS_BATCH) {
+        let reply = native
+            .call_json("share_session_groups", json!({ "userIds": batch }))
+            .await
+            .map_err(|error| {
+                crate::error::AppError::unavailable(format!("share_session_groups: {error}"))
+            })?;
+        for (user_id, lost) in stale_in_reply(&reply, plan, &index) {
+            out.insert(user_id, lost);
+        }
+    }
+    Ok(out)
+}
+
+/// [`stale_sessions`] for one `share_session_groups` reply.
+fn stale_in_reply(
+    reply: &Value,
+    plan: &Plan,
+    index: &HashMap<String, (&ShareInfo, bool)>,
+) -> Vec<(i64, BTreeMap<String, String>)> {
+    let mut out = Vec::new();
+    for user in reply["users"].as_array().into_iter().flatten() {
+        let Some(user_id) = user["userId"].as_i64() else {
+            continue;
+        };
+        let mut stale = false;
+        let mut lost = BTreeMap::new();
+        for gid in user["gids"].as_array().into_iter().flatten() {
+            let Some(name) = gid
+                .as_u64()
+                .and_then(|gid| reply["groups"][gid.to_string()].as_str())
+            else {
+                // A gid without a share group: its share is gone and its
+                // container closed.
+                continue;
+            };
+            let Some((share, rw)) = index.get(name) else {
+                continue;
+            };
+            let membership = plan.members.get(&share.id);
+            let writes = membership.is_some_and(|m| m.write.contains(&user_id));
+            let reads = membership.is_some_and(|m| m.read.contains(&user_id));
+            let allowed = if *rw { writes } else { writes || reads };
+            if allowed {
+                continue;
+            }
+            stale = true;
+            if !writes && !reads {
+                lost.insert(share.id.clone(), share.container.clone());
+            }
+        }
+        if stale {
+            out.push((user_id, lost));
+        }
+    }
+    out
+}
+
 /// Ask the user's agent to bring `~/Shared` in line with `roots`.
 async fn sync_links(state: &AppState, user_id: i64, roots: &ShareRoots) -> AppResult<Value> {
     let mut headers = HeaderMap::new();
@@ -302,13 +478,23 @@ async fn sync_links(state: &AppState, user_id: i64, roots: &ShareRoots) -> AppRe
 }
 
 /// Restart agents at once; warn and schedule session restarts.
-async fn apply_changes(state: &AppState, changes: &Changes) {
+async fn apply_changes(state: &AppState, changes: &Changes, plan: &Plan) {
     let mut changed: Vec<i64> = changes.changed().into_iter().collect();
     changed.sort_unstable();
     for user_id in changed {
         state.homefs.stop_agent(user_id).await;
+        if let Some(gained) = changes.gained.get(&user_id) {
+            state.session_restarts.regained(user_id, gained);
+        }
         if changes.revoked.contains(&user_id) {
-            state.session_restarts.revoked(state, user_id);
+            let lost = changes
+                .lost
+                .get(&user_id)
+                .into_iter()
+                .flatten()
+                .filter_map(|share| Some((share.clone(), plan.container(share)?.to_string())))
+                .collect();
+            state.session_restarts.revoked(state, user_id, lost);
         } else {
             state.session_restarts.granted(state, user_id);
         }
@@ -331,6 +517,10 @@ pub struct PendingRestart {
     pub deadline_ms: Option<i64>,
     #[serde(skip)]
     token: u64,
+    /// Shares lost entirely (id → container): their containers deny the
+    /// user until the restart.
+    #[serde(skip)]
+    denied: BTreeMap<String, String>,
 }
 
 /// The restarts users were warned about, by user id.
@@ -339,6 +529,11 @@ pub struct SessionRestarts {
     pending: Arc<Mutex<HashMap<i64, PendingRestart>>>,
     next_token: Arc<std::sync::atomic::AtomicU64>,
     warning: Duration,
+    /// When each user's session was last restarted.
+    restarted: Arc<Mutex<HashMap<i64, std::time::Instant>>>,
+    /// The deny entries the helper last set, by share id. A share missing
+    /// here is set (and so cleaned) on the next sync.
+    denials: Arc<tokio::sync::Mutex<HashMap<String, BTreeSet<i64>>>>,
 }
 
 impl Default for SessionRestarts {
@@ -354,6 +549,8 @@ impl SessionRestarts {
             pending: Arc::default(),
             next_token: Arc::default(),
             warning,
+            restarted: Arc::default(),
+            denials: Arc::default(),
         }
     }
 
@@ -372,25 +569,55 @@ impl SessionRestarts {
         self.lock().get(&user_id).cloned()
     }
 
-    /// Access was revoked: restart after the warning. A forced restart that
-    /// is already scheduled keeps its deadline.
-    pub fn revoked(&self, state: &AppState, user_id: i64) {
+    /// The forced restart `user_id` waits for, if any.
+    pub fn pending_forced(&self, user_id: i64) -> Option<PendingRestart> {
+        self.pending(user_id).filter(|pending| pending.forced)
+    }
+
+    /// Whether the user's session was restarted less than
+    /// [`RESTART_GRACE`] ago.
+    pub fn recently_restarted(&self, user_id: i64) -> bool {
+        self.restarted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&user_id)
+            .is_some_and(|at| at.elapsed() < RESTART_GRACE)
+    }
+
+    /// The shares whose containers deny `user_id` now.
+    pub fn denied(&self, user_id: i64) -> BTreeMap<String, String> {
+        self.pending(user_id)
+            .map(|pending| pending.denied)
+            .unwrap_or_default()
+    }
+
+    /// Access was revoked (`lost`: the shares lost entirely, id →
+    /// container): restart after the warning. A forced restart that is
+    /// already scheduled keeps its deadline and adds the shares.
+    pub fn revoked(&self, state: &AppState, user_id: i64, lost: BTreeMap<String, String>) {
         let (pending, new) = {
             let mut map = self.lock();
-            match map.get(&user_id) {
-                Some(pending) if pending.forced => (pending.clone(), false),
+            match map.get_mut(&user_id) {
+                Some(pending) if pending.forced => {
+                    pending.denied.extend(lost);
+                    (pending.clone(), false)
+                }
                 _ => {
                     let pending = PendingRestart {
                         reason: "access_revoked",
                         forced: true,
                         deadline_ms: Some(now_ms() + self.warning.as_millis() as i64),
                         token: self.token(),
+                        denied: lost,
                     };
                     map.insert(user_id, pending.clone());
                     (pending, true)
                 }
             }
         };
+        if !pending.denied.is_empty() {
+            self.spawn_denials(state, pending.denied.clone());
+        }
         if !new {
             return;
         }
@@ -402,17 +629,26 @@ impl SessionRestarts {
             let due = {
                 let mut map = state.session_restarts.lock();
                 match map.get(&user_id) {
-                    Some(current) if current.token == pending.token => {
-                        map.remove(&user_id);
-                        true
-                    }
-                    _ => false,
+                    Some(current) if current.token == pending.token => map.remove(&user_id),
+                    _ => None,
                 }
             };
-            if due {
+            if let Some(current) = due {
                 restart(&state, user_id, "access_revoked").await;
+                state
+                    .session_restarts
+                    .after_restart(&state, user_id, current.denied)
+                    .await;
             }
         });
+    }
+
+    /// Access to `shares` was granted again: their containers stop denying
+    /// the user (a pending forced restart still happens).
+    pub fn regained(&self, user_id: i64, shares: &BTreeSet<String>) {
+        if let Some(pending) = self.lock().get_mut(&user_id) {
+            pending.denied.retain(|share, _| !shares.contains(share));
+        }
     }
 
     /// Access was granted: offer a restart (never forced).
@@ -427,6 +663,7 @@ impl SessionRestarts {
                 forced: false,
                 deadline_ms: None,
                 token: self.token(),
+                denied: BTreeMap::new(),
             };
             map.insert(user_id, pending.clone());
             pending
@@ -436,8 +673,113 @@ impl SessionRestarts {
 
     /// The user asked for the restart now.
     pub async fn restart_now(&self, state: &AppState, user_id: i64) {
-        self.lock().remove(&user_id);
+        let denied = self
+            .lock()
+            .remove(&user_id)
+            .map(|pending| pending.denied)
+            .unwrap_or_default();
         restart(state, user_id, "requested").await;
+        self.after_restart(state, user_id, denied).await;
+    }
+
+    /// After a restart: remember when, and lift the user's deny entries.
+    async fn after_restart(
+        &self,
+        state: &AppState,
+        user_id: i64,
+        denied: BTreeMap<String, String>,
+    ) {
+        self.restarted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(user_id, std::time::Instant::now());
+        if denied.is_empty() || !state.config.native_enabled {
+            return;
+        }
+        let native = NativeClient::from_config(&state.config);
+        let shares: Vec<ShareInfo> = denied
+            .into_iter()
+            .map(|(id, container)| ShareInfo {
+                id,
+                name: String::new(),
+                container,
+            })
+            .collect();
+        self.sync_denials(&native, &shares).await;
+    }
+
+    fn spawn_denials(&self, state: &AppState, shares: BTreeMap<String, String>) {
+        if !state.config.native_enabled {
+            return;
+        }
+        let state = state.clone();
+        tokio::spawn(async move {
+            let native = NativeClient::from_config(&state.config);
+            let shares: Vec<ShareInfo> = shares
+                .into_iter()
+                .map(|(id, container)| ShareInfo {
+                    id,
+                    name: String::new(),
+                    container,
+                })
+                .collect();
+            state.session_restarts.sync_denials(&native, &shares).await;
+        });
+    }
+
+    /// The users each share must deny now: those with a pending forced
+    /// restart who lost it entirely (at most [`MAX_DENIALS`]).
+    pub fn wanted_denials(&self, share_id: &str) -> BTreeSet<i64> {
+        let wanted: BTreeSet<i64> = self
+            .lock()
+            .iter()
+            .filter(|(_, pending)| pending.forced && pending.denied.contains_key(share_id))
+            .map(|(user_id, _)| *user_id)
+            .collect();
+        if wanted.len() > MAX_DENIALS {
+            tracing::warn!(
+                share = share_id,
+                users = wanted.len(),
+                "more pending revocations than deny entries; the rest wait for their restart"
+            );
+        }
+        wanted.into_iter().take(MAX_DENIALS).collect()
+    }
+
+    /// Bring the deny entries of `shares` in line with the pending
+    /// restarts. Calls are serialized, and only made when the set differs
+    /// from the one last set (or is not known yet).
+    pub async fn sync_denials(&self, native: &NativeClient, shares: &[ShareInfo]) {
+        let mut applied = self.denials.lock().await;
+        for share in shares {
+            let wanted = self.wanted_denials(&share.id);
+            if applied.get(&share.id) == Some(&wanted) {
+                continue;
+            }
+            match native
+                .call_json(
+                    "share_deny_set",
+                    json!({
+                        "shareId": share.id,
+                        "container": share.container,
+                        "userIds": wanted,
+                    }),
+                )
+                .await
+            {
+                Ok(_) => {
+                    applied.insert(share.id.clone(), wanted);
+                }
+                Err(error) => {
+                    applied.remove(&share.id);
+                    tracing::warn!(
+                        share = %share.id,
+                        error = %error,
+                        "cannot set the deny entries of a shared folder"
+                    );
+                }
+            }
+        }
     }
 }
 
