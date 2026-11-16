@@ -428,22 +428,21 @@ pub(crate) async fn share_members_set(
     let rw = existing_share_group(options, &groups.rw, &range).await?;
     let ro = existing_share_group(options, &groups.ro, &range).await?;
 
-    // Every member needs its identity, with the derived uid.
+    // Users without their Linux account yet cannot be members: they are
+    // left out and reported, and added once the account exists. An account
+    // with another uid than RAST derives is a conflict.
     let names: Vec<String> = write
         .iter()
         .chain(&read)
         .map(|id| username_for(*id))
         .collect();
     let entries = passwd_entries(options, &names).await?;
+    let mut skipped = Vec::new();
     for id in write.iter().chain(&read) {
         let name = username_for(*id);
         let expected = crate::native::protocol::identity_ids(&options.validation_context(), *id)?;
         match entries.get(&name) {
-            None => {
-                return Err(NativeError::not_found(format!(
-                    "the Linux account {name} does not exist; run identity_ensure first"
-                )))
-            }
+            None => skipped.push(*id),
             Some(entry) if entry.uid != expected.uid => {
                 return Err(NativeError::identity_conflict(format!(
                     "user {name} has uid {}, RAST expects {}",
@@ -453,6 +452,15 @@ pub(crate) async fn share_members_set(
             Some(_) => {}
         }
     }
+    let write: BTreeSet<i64> = write
+        .into_iter()
+        .filter(|id| !skipped.contains(id))
+        .collect();
+    let read: BTreeSet<i64> = read
+        .into_iter()
+        .filter(|id| !skipped.contains(id))
+        .collect();
+    skipped.sort_unstable();
 
     let mut report = serde_json::Map::new();
     for (key, group, wanted) in [("write", &rw, &write), ("read", &ro, &read)] {
@@ -503,6 +511,7 @@ pub(crate) async fn share_members_set(
             }),
         );
     }
+    report.insert("skipped".into(), json!(skipped));
     report.insert("shareId".into(), Value::String(op.share_id));
     Ok(Value::Object(report))
 }
@@ -1246,6 +1255,54 @@ pub(crate) async fn share_dir_remove(
     })
     .await?;
     Ok(json!({"shareId": op.share_id, "container": op.container, "removed": removed}))
+}
+
+/// Close the container of a deleted shared folder (whose data RAST keeps)
+/// before its groups are removed: back to the service (`rast:rast` 0700, no
+/// ACL). Otherwise a later share whose group gets the freed gid would open
+/// it. Only the container changes; nothing below it can be reached without
+/// passing it.
+pub(crate) async fn share_dir_release(
+    options: &NativeOptions,
+    op: ShareDirOp,
+) -> Result<Value, NativeError> {
+    validate_share_id(&op.share_id)?;
+    validate_share_container(&op.container)?;
+    let rast_uid = service_uid(options)?;
+    let rast_gid = options.effective_rast_gid()?;
+    let options = options.clone();
+    let container = op.container.clone();
+    let released = blocking(move || {
+        let (fd, stat) = match open_container(&options, &container) {
+            Ok(found) => found,
+            Err(error) if error.code == "not_found" => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if stat.st_uid != rast_uid && stat.st_uid != root_uid(&options) {
+            return Err(NativeError::identity_conflict(format!(
+                "the container {container} is owned by uid {}, not by the RAST service or root",
+                stat.st_uid
+            )));
+        }
+        let failed = |error: io::Error| {
+            NativeError::command_failed(format!("cannot close the container {container}: {error}"))
+        };
+        if !options.is_test_mode() {
+            // SAFETY: valid fd.
+            if unsafe { libc::fchown(fd.as_raw_fd(), rast_uid, rast_gid) } != 0 {
+                return Err(failed(io::Error::last_os_error()));
+            }
+        }
+        acl::remove(fd.as_raw_fd(), acl::DEFAULT_XATTR).map_err(failed)?;
+        acl::remove(fd.as_raw_fd(), acl::ACCESS_XATTR).map_err(failed)?;
+        // SAFETY: valid fd.
+        if unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) } != 0 {
+            return Err(failed(io::Error::last_os_error()));
+        }
+        Ok(true)
+    })
+    .await?;
+    Ok(json!({"shareId": op.share_id, "container": op.container, "released": released}))
 }
 
 /// Remove everything in the folder `dir`, never following a link and never

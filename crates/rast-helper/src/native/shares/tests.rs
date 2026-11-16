@@ -416,7 +416,6 @@ async fn member_lists_are_validated_before_anything_changes() {
         (vec![0], vec![], "invalid_request"),
         (vec![MAX_USER_ID + 1], vec![], "invalid_request"),
         (too_many, vec![], "invalid_request"),
-        (vec![4], vec![], "not_found"),
         (vec![], vec![2], "identity_conflict"),
     ] {
         let error = share_members_set(
@@ -446,6 +445,28 @@ async fn member_lists_are_validated_before_anything_changes() {
     .await
     .unwrap_err();
     assert_eq!(error.code, "not_found");
+}
+
+#[tokio::test]
+async fn users_without_their_linux_account_are_left_out_and_reported() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    fx.add_identity(1, 200_001);
+    let value = share_members_set(
+        &fx.options,
+        ShareMembersSetOp {
+            share_id: SHARE.into(),
+            write: vec![1, 4],
+            read: vec![5],
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(value["skipped"], json!([4, 5]));
+    assert_eq!(value["write"]["added"], json!([1]));
+    assert_eq!(value["read"]["added"], json!([]));
+    assert!(fx.groups().contains(&format!("{RW}:x:1200001:rast-u1\n")));
+    assert!(fx.groups().contains(&format!("{RO}:x:1200002:\n")));
 }
 
 /// A legacy container with folders, files, a link, a hard-linked file and a
@@ -794,6 +815,40 @@ async fn a_tampered_journal_is_refused() {
     assert!(shares_migrate_rollback(&fx.options, op()).await.is_ok());
     assert_eq!(mode(&team), 0o750);
     assert_eq!(mode(&team.join("docs/plan.txt")), 0o755);
+}
+
+#[tokio::test]
+async fn a_released_container_is_closed_to_the_old_groups() {
+    let fx = fixture();
+    fx.ensure_groups().await;
+    let team = legacy_tree(&fx);
+    if !acls_supported(&team) {
+        return;
+    }
+    let op = || ShareDirOp {
+        share_id: SHARE.into(),
+        container: "team".into(),
+    };
+    share_dir_prepare(
+        &fx.options,
+        ShareDirPrepareOp {
+            share_id: SHARE.into(),
+            container: "team".into(),
+            recursive: true,
+        },
+    )
+    .await
+    .unwrap();
+    let value = share_dir_release(&fx.options, op()).await.unwrap();
+    assert_eq!(value["released"], true);
+    assert_eq!(mode(&team), 0o700);
+    assert_eq!(read_acl(&team, acl::ACCESS_XATTR), None);
+    assert_eq!(read_acl(&team, acl::DEFAULT_XATTR), None);
+    // The data stays as it was.
+    assert_eq!(std::fs::read(team.join("docs/plan.txt")).unwrap(), b"plan");
+    std::fs::remove_dir_all(&team).unwrap();
+    let value = share_dir_release(&fx.options, op()).await.unwrap();
+    assert_eq!(value["released"], false);
 }
 
 #[tokio::test]

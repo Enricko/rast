@@ -274,8 +274,10 @@ pub enum NativeOp {
     /// Apply the owner, mode and ACLs of a shared folder to its container
     /// (and, with `recursive`, to everything in it).
     ShareDirPrepare(ShareDirPrepareOp),
-    /// Remove the container of a deleted shared folder.
+    /// Remove the container of a shared folder.
     ShareDirRemove(ShareDirOp),
+    /// Give the container of a deleted shared folder back to the service.
+    ShareDirRelease(ShareDirOp),
     /// `rast migrate shares --dry-run`: what the migration would change.
     SharesMigrateScan(ShareDirOp),
     /// `rast migrate shares`: journal, then the recursive prepare.
@@ -327,6 +329,7 @@ impl NativeOp {
             Self::ShareMembersSet(_) => "share_members_set",
             Self::ShareDirPrepare(_) => "share_dir_prepare",
             Self::ShareDirRemove(_) => "share_dir_remove",
+            Self::ShareDirRelease(_) => "share_dir_release",
             Self::SharesMigrateScan(_) => "shares_migrate_scan",
             Self::SharesMigrateApply(_) => "shares_migrate_apply",
             Self::SharesMigrateRollback(_) => "shares_migrate_rollback",
@@ -465,6 +468,7 @@ impl NativeRequest {
             NativeOp::ShareMembersSet(op) => merge!(op),
             NativeOp::ShareDirPrepare(op) => merge!(op),
             NativeOp::ShareDirRemove(op)
+            | NativeOp::ShareDirRelease(op)
             | NativeOp::SharesMigrateScan(op)
             | NativeOp::SharesMigrateApply(op)
             | NativeOp::SharesMigrateRollback(op) => merge!(op),
@@ -594,6 +598,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "share_members_set" => NativeOp::ShareMembersSet(op_from(rest, "share_members_set")?),
         "share_dir_prepare" => NativeOp::ShareDirPrepare(op_from(rest, "share_dir_prepare")?),
         "share_dir_remove" => NativeOp::ShareDirRemove(op_from(rest, "share_dir_remove")?),
+        "share_dir_release" => NativeOp::ShareDirRelease(op_from(rest, "share_dir_release")?),
         "shares_migrate_scan" => NativeOp::SharesMigrateScan(op_from(rest, "shares_migrate_scan")?),
         "shares_migrate_apply" => {
             NativeOp::SharesMigrateApply(op_from(rest, "shares_migrate_apply")?)
@@ -2307,6 +2312,7 @@ mod tests {
                 recursive: true,
             }),
             NativeOp::ShareDirRemove(share_dir()),
+            NativeOp::ShareDirRelease(share_dir()),
             NativeOp::SharesMigrateScan(share_dir()),
             NativeOp::SharesMigrateApply(share_dir()),
             NativeOp::SharesMigrateRollback(share_dir()),
