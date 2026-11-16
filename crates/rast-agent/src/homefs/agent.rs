@@ -286,6 +286,20 @@ pub fn token_from(token_file: Option<&Path>) -> io::Result<String> {
     }
 }
 
+/// Make this process non-dumpable. The agent runs as the user, so every app
+/// and terminal of the user shares its uid; without this they could ptrace
+/// it or read and write its memory through `/proc/<pid>/mem` (wherever
+/// Yama's `ptrace_scope` is 0) and answer the server in its name. Call it
+/// once at start-up; it also turns off core dumps.
+pub fn forbid_tracing() -> io::Result<()> {
+    // SAFETY: PR_SET_DUMPABLE takes plain integer arguments.
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Whether another process of this account is running (a session, app or
 /// terminal): the agent then stays up so realtime events keep flowing.
 fn user_has_other_processes() -> bool {
@@ -1026,6 +1040,36 @@ mod tests {
                 .await
                 .unwrap()
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_agent_cannot_be_traced_by_the_users_other_processes() {
+        const CHILD: &str = "RAST_TEST_FORBID_TRACING";
+        const NAME: &str =
+            "homefs::agent::tests::the_agent_cannot_be_traced_by_the_users_other_processes";
+        let dumpable = || {
+            // SAFETY: PR_GET_DUMPABLE takes no pointer arguments.
+            unsafe { libc::prctl(libc::PR_GET_DUMPABLE) }
+        };
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(dumpable(), 1);
+            forbid_tracing().unwrap();
+            assert_eq!(dumpable(), 0);
+            return;
+        }
+        // In a child process, so this test binary itself stays dumpable.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

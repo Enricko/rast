@@ -489,6 +489,10 @@ async fn run(
             idle_seconds,
         } => {
             init_tracing(log_level.as_deref().unwrap_or("info"));
+            // Before the token is read: the user's own processes must not
+            // be able to trace the agent and take it over.
+            rast::homefs::agent::forbid_tracing()
+                .map_err(|error| format!("file agent cannot protect itself: {error}"))?;
             let token = rast::homefs::agent::token_from(token_file.as_deref())?;
             rast::homefs::agent::run(rast::homefs::agent::RunOptions {
                 home,
