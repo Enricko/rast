@@ -14,7 +14,10 @@
 //! * paths below a root are opened with `openat2` and `RESOLVE_BENEATH |
 //!   RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS` (on kernels without
 //!   `openat2`, one component at a time with `O_NOFOLLOW`), so no symbolic
-//!   link is followed and nothing outside the root is reached;
+//!   link is followed and nothing outside the root is reached; below a
+//!   share container also with `RESOLVE_NO_XDEV` ([`Resolve::SameFs`]), so
+//!   a mount inside a shared folder (a member's FUSE mount) is never
+//!   entered;
 //! * everything else acts on one name in a folder the agent holds open
 //!   (`*at` calls with `AT_SYMLINK_NOFOLLOW` or `O_NOFOLLOW`), so a renamed
 //!   or replaced ancestor cannot redirect it;
@@ -212,6 +215,17 @@ pub fn open_root(path: &Path) -> io::Result<(OwnedFd, Info)> {
     Ok((fd, info))
 }
 
+/// How a path below a root is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolve {
+    /// Below the root, no symbolic link followed (HOME: the user's own
+    /// mounts in it stay reachable).
+    Beneath,
+    /// The same, and never across a mount point (`RESOLVE_NO_XDEV`): every
+    /// component stays on the root's file system (share containers).
+    SameFs,
+}
+
 /// Open `segments` below `root` with `flags` (`O_NOFOLLOW` and `O_CLOEXEC`
 /// added), following no symbolic link on the way or at the end, and return
 /// the descriptor with its `stat`. No segments opens the root itself.
@@ -220,10 +234,22 @@ pub fn open_beneath(
     segments: &[String],
     flags: OFlags,
 ) -> io::Result<(OwnedFd, Info)> {
+    open_resolved(root, segments, flags, Resolve::Beneath)
+}
+
+/// [`open_beneath`] with the resolution `resolve`. A path that crosses a
+/// mount point under [`Resolve::SameFs`] fails with `EXDEV`.
+pub fn open_resolved(
+    root: BorrowedFd<'_>,
+    segments: &[String],
+    flags: OFlags,
+    resolve: Resolve,
+) -> io::Result<(OwnedFd, Info)> {
     if !segments.iter().all(|segment| component_ok(segment)) {
         return Err(invalid_component());
     }
-    let fd = match open_path(root, segments, flags | OFlags::NOFOLLOW | OFlags::CLOEXEC) {
+    let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = match open_path(root, segments, flags, resolve) {
         Ok(fd) => fd,
         // `O_DIRECTORY` on a final link fails with `ENOTDIR`.
         Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => {
@@ -248,13 +274,18 @@ fn last_is_link(root: BorrowedFd<'_>, segments: &[String]) -> bool {
     let Some((last, parents)) = segments.split_last() else {
         return false;
     };
-    let Ok(parent) = open_path(root, parents, handle_flags()) else {
+    let Ok(parent) = open_path(root, parents, handle_flags(), Resolve::Beneath) else {
         return false;
     };
     matches!(stat_at(parent.as_fd(), last), Ok(Some(info)) if info.kind == Kind::Symlink)
 }
 
-fn open_path(root: BorrowedFd<'_>, segments: &[String], flags: OFlags) -> io::Result<OwnedFd> {
+fn open_path(
+    root: BorrowedFd<'_>,
+    segments: &[String],
+    flags: OFlags,
+    resolve: Resolve,
+) -> io::Result<OwnedFd> {
     #[cfg(target_os = "linux")]
     if OPENAT2.load(std::sync::atomic::Ordering::Relaxed) {
         let path = if segments.is_empty() {
@@ -262,12 +293,15 @@ fn open_path(root: BorrowedFd<'_>, segments: &[String], flags: OFlags) -> io::Re
         } else {
             segments.join("/")
         };
-        let resolve = rfs::ResolveFlags::BENEATH
+        let mut how = rfs::ResolveFlags::BENEATH
             | rfs::ResolveFlags::NO_MAGICLINKS
             | rfs::ResolveFlags::NO_SYMLINKS;
+        if resolve == Resolve::SameFs {
+            how |= rfs::ResolveFlags::NO_XDEV;
+        }
         let mut attempts = 0;
         loop {
-            match rfs::openat2(root, path.as_str(), flags, Mode::empty(), resolve) {
+            match rfs::openat2(root, path.as_str(), flags, Mode::empty(), how) {
                 // A rename elsewhere on the system raced the lookup.
                 Err(Errno::AGAIN) if attempts < 16 => attempts += 1,
                 Err(Errno::NOSYS) => {
@@ -278,27 +312,43 @@ fn open_path(root: BorrowedFd<'_>, segments: &[String], flags: OFlags) -> io::Re
             }
         }
     }
-    open_walk(root, segments, flags)
+    open_walk(root, segments, flags, resolve)
 }
 
 /// [`open_path`] one component at a time (kernels without `openat2`): every
-/// component is opened with `O_NOFOLLOW` relative to the one before.
-fn open_walk(root: BorrowedFd<'_>, segments: &[String], flags: OFlags) -> io::Result<OwnedFd> {
+/// component is opened with `O_NOFOLLOW` relative to the one before, and
+/// under [`Resolve::SameFs`] must be on the root's file system.
+fn open_walk(
+    root: BorrowedFd<'_>,
+    segments: &[String],
+    flags: OFlags,
+    resolve: Resolve,
+) -> io::Result<OwnedFd> {
+    let device = match resolve {
+        Resolve::SameFs => Some(stat_fd(root)?.dev),
+        Resolve::Beneath => None,
+    };
+    let same_fs = |fd: OwnedFd| -> io::Result<OwnedFd> {
+        match device {
+            Some(device) if stat_fd(&fd)?.dev != device => Err(Errno::XDEV.into()),
+            _ => Ok(fd),
+        }
+    };
     let Some((last, parents)) = segments.split_last() else {
         return Ok(rfs::openat(root, ".", flags, Mode::empty())?);
     };
     let mut dir: Option<OwnedFd> = None;
     for name in parents {
         let at = dir.as_ref().map_or(root, |fd| fd.as_fd());
-        dir = Some(openat_nofollow(
+        dir = Some(same_fs(openat_nofollow(
             at,
             name.as_str(),
             handle_flags(),
             Mode::empty(),
-        )?);
+        )?)?);
     }
     let at = dir.as_ref().map_or(root, |fd| fd.as_fd());
-    Ok(openat_nofollow(at, last.as_str(), flags, Mode::empty())?)
+    same_fs(openat_nofollow(at, last.as_str(), flags, Mode::empty())?)
 }
 
 /// `openat` of one name with `O_NOFOLLOW | O_CLOEXEC` added. `O_DIRECTORY`
@@ -327,6 +377,15 @@ fn openat_nofollow<P: rustix::path::Arg + Copy>(
 /// A handle on the folder `segments` below `root`, for `*at` calls.
 pub fn open_dir(root: BorrowedFd<'_>, segments: &[String]) -> io::Result<(OwnedFd, Info)> {
     open_beneath(root, segments, handle_flags())
+}
+
+/// [`open_dir`] with the resolution `resolve`.
+pub fn open_dir_resolved(
+    root: BorrowedFd<'_>,
+    segments: &[String],
+    resolve: Resolve,
+) -> io::Result<(OwnedFd, Info)> {
+    open_resolved(root, segments, handle_flags(), resolve)
 }
 
 pub fn stat_fd(fd: impl AsFd) -> io::Result<Info> {
@@ -1006,14 +1065,19 @@ mod tests {
                 path,
             );
             // The same without openat2.
-            let walked =
-                open_walk(root, &segments(path), flags | OFlags::NOFOLLOW).and_then(|fd| {
-                    let info = stat_fd(&fd)?;
-                    if info.kind == Kind::Symlink {
-                        return Err(Errno::LOOP.into());
-                    }
-                    Ok((fd, info))
-                });
+            let walked = open_walk(
+                root,
+                &segments(path),
+                flags | OFlags::NOFOLLOW,
+                Resolve::Beneath,
+            )
+            .and_then(|fd| {
+                let info = stat_fd(&fd)?;
+                if info.kind == Kind::Symlink {
+                    return Err(Errno::LOOP.into());
+                }
+                Ok((fd, info))
+            });
             assert_refused(walked, libc::ELOOP, path);
         }
         for path in ["..", "docs/../..", "/etc", "docs//a.txt", "."] {
@@ -1025,6 +1089,46 @@ mod tests {
             fs_error(Errno::LOOP.into()),
             AppError::Forbidden("symbolic links are not supported")
         ));
+    }
+
+    #[test]
+    fn share_resolution_never_crosses_a_mount_point() {
+        // Tests cannot mount; `/proc` is a mount point below `/` on Linux.
+        let (Ok(root_meta), Ok(proc_meta)) = (
+            std::fs::symlink_metadata("/"),
+            std::fs::symlink_metadata("/proc/self"),
+        ) else {
+            return;
+        };
+        if std::os::unix::fs::MetadataExt::dev(&root_meta)
+            == std::os::unix::fs::MetadataExt::dev(&proc_meta)
+        {
+            return;
+        }
+        let (root, _) = open_root(Path::new("/")).unwrap();
+        let root = root.as_fd();
+        // HOME resolution may enter it; share resolution may not.
+        assert!(open_dir_resolved(root, &segments("proc/sys"), Resolve::Beneath).is_ok());
+        for path in ["proc", "proc/sys"] {
+            assert_refused(
+                open_dir_resolved(root, &segments(path), Resolve::SameFs),
+                libc::EXDEV,
+                path,
+            );
+            assert_refused(
+                open_walk(root, &segments(path), handle_flags(), Resolve::SameFs)
+                    .map(|fd| (fd, stat_fd(root).unwrap())),
+                libc::EXDEV,
+                path,
+            );
+        }
+        assert!(open_walk(
+            root,
+            &segments("proc/sys"),
+            handle_flags(),
+            Resolve::Beneath
+        )
+        .is_ok());
     }
 
     #[test]

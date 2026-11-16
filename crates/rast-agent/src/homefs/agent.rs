@@ -52,7 +52,7 @@ use crate::storage::{
     TEMP_PREFIX,
 };
 
-use super::fsat::{self, fs_error, Info, Kind, Step};
+use super::fsat::{self, fs_error, Info, Kind, Resolve, Step};
 use super::{ShareRoots, UPLOAD_PREFIX};
 use crate::storage::shares::rw_group_name;
 
@@ -164,9 +164,10 @@ impl HomeSpace {
         let share = shares
             .get(name)
             .ok_or(AppError::NotFound("path not found"))?;
-        let (fd, info) = fsat::open_dir(
+        let (fd, info) = fsat::open_dir_resolved(
             self.shared_dir.as_fd(),
             std::slice::from_ref(&share.container),
+            Resolve::SameFs,
         )
         .map_err(fs_error)?;
         let rw_gid = if info.gid == self.shared_info.gid {
@@ -227,12 +228,19 @@ impl HomeSpace {
                 at: None,
             });
         };
-        let (dir, _) = fsat::open_dir(root.fd.as_fd(), parents).map_err(fs_error)?;
+        let (dir, _) =
+            fsat::open_dir_resolved(root.fd.as_fd(), parents, root.resolve()).map_err(fs_error)?;
         let info = fsat::stat_at(dir.as_fd(), name)
             .map_err(fs_error)?
             .ok_or(AppError::NotFound("path not found"))?;
         if info.kind == Kind::Symlink {
             return Err(AppError::Forbidden("symbolic links are not supported"));
+        }
+        // A mount point in a shared folder is not entered (F3).
+        if root.resolve() == Resolve::SameFs && info.dev != root.info.dev {
+            return Err(AppError::Forbidden(
+                "this folder is on another file system and is not served",
+            ));
         }
         Ok(Node {
             logical: logical.clone(),
@@ -244,6 +252,17 @@ impl HomeSpace {
 
     fn node_at(&self, path: &str, shares: &ShareRoots) -> AppResult<Node> {
         self.node(&LogicalPath::parse(path)?, shares)
+    }
+}
+
+impl NsRoot {
+    /// Shares are resolved on their container's file system only; HOME
+    /// keeps the user's own mounts reachable.
+    fn resolve(&self) -> Resolve {
+        match self.kind {
+            RootKind::Share => Resolve::SameFs,
+            RootKind::Home => Resolve::Beneath,
+        }
     }
 }
 

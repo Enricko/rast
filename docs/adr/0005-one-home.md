@@ -204,7 +204,10 @@ needed. Installs with some users in each mode work. Hosts without the helper
     share container) with `openat2` and `RESOLVE_BENEATH |
     RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS` (on kernels without
     `openat2`, a walk of `openat` calls with `O_NOFOLLOW`); no symlink is
-    followed anywhere, also not one that stays inside the root;
+    followed anywhere, also not one that stays inside the root; below a
+    share container also `RESOLVE_NO_XDEV` (the walk compares devices),
+    and an entry on another file system is refused, so a mount inside a
+    shared folder is never entered; HOME keeps the user's own mounts;
   - the operation then works with `*at` calls, by single names, on folders
     it holds open, and compares what it opens with the inode it checked;
   - new files are created with `O_CREAT | O_EXCL | O_NOFOLLOW`; a new folder
