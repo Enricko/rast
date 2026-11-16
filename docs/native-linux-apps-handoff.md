@@ -89,8 +89,10 @@ rast-native.service (root: `rast native-helper`)
   running session; a restart of `rast.service` adopts the still-running units
   (state is persisted in `linux_sessions`/`linux_runs`, and systemd units are
   adopted by name), so a web-server restart does not kill applications.
-  Restarting `rast-native.service` stops all sessions (they are restarted
-  lazily).
+  Restarting `rast-native.service` does not stop sessions or apps either:
+  they are transient units in `rast-linux.slice`, not children of the helper
+  (see Recovery). Only helper-backed actions (launch, close, install) fail
+  while it is down.
 * **Limits**: session and application units get `MemoryMax`, `CPUQuota`,
   `TasksMax` from `linux_session_*`/`linux_app_*` inside `rast-linux.slice`.
   Admission checks `/proc/meminfo` `MemAvailable` against the app limit plus
