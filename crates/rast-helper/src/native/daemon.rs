@@ -4312,8 +4312,15 @@ exit 0
         let _ = stream.write_all(b"{\"id\":1,\"op\":\"ping\"}\n").await;
         let mut buffer = [0u8; 64];
         let read = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buffer)).await;
+        // Dropped without a byte of response: an end of stream, or a reset
+        // when the helper closed before reading the request already sent.
+        let dropped = match &read {
+            Ok(Ok(0)) => true,
+            Ok(Err(error)) => error.kind() == std::io::ErrorKind::ConnectionReset,
+            _ => false,
+        };
         assert!(
-            matches!(read, Ok(Ok(0))),
+            dropped,
             "connection must be dropped before any response: {read:?}"
         );
     }
