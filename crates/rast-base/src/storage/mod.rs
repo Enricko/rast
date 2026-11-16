@@ -27,6 +27,7 @@ pub mod serve;
 pub mod shares;
 pub mod transfer;
 pub mod trash;
+pub mod xdg_trash;
 
 use std::{
     collections::HashMap,
