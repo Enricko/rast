@@ -33,6 +33,7 @@ use crate::homefs::client::AGENT;
 use crate::jobs::JobSpec;
 use crate::state::AppState;
 use crate::storage::ops::{EntryDto, QuotaDto};
+use crate::storage::serve::PREVIEW_CSP;
 use crate::storage::{quota, shares, LogicalPath, MAX_BATCH_PATHS};
 
 /// JSON bodies of File Station requests are small (paths and names).
@@ -166,6 +167,43 @@ fn json_response(status: StatusCode, value: Value) -> Response {
     (status, Json(value)).into_response()
 }
 
+/// Headers of a streamed agent reply that reach the browser: those of a
+/// file or JSON reply (see `storage::serve::serve_file`).
+const PASSED_HEADERS: [header::HeaderName; 6] = [
+    header::CONTENT_TYPE,
+    header::CONTENT_LENGTH,
+    header::CONTENT_RANGE,
+    header::ACCEPT_RANGES,
+    header::CONTENT_DISPOSITION,
+    header::CACHE_CONTROL,
+];
+
+/// A streamed agent reply as it goes to the browser. The agent runs as the
+/// user, whose other processes share its uid, so its replies are untrusted
+/// (ADR 0005): only [`PASSED_HEADERS`] pass (no cookie, no redirect, no
+/// security header of its own), and the server sets `nosniff` and the
+/// sandboxing preview CSP itself, so no reply can run script on the RAST
+/// origin.
+fn untrusted(response: Response<Body>) -> Response {
+    let (mut parts, body) = response.into_parts();
+    let mut headers = HeaderMap::new();
+    for name in PASSED_HEADERS {
+        for value in parts.headers.get_all(&name) {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(PREVIEW_CSP),
+    );
+    parts.headers = headers;
+    Response::from_parts(parts, body)
+}
+
 async fn publish(
     state: &AppState,
     user: &AuthUser,
@@ -283,7 +321,7 @@ async fn forward(
                 let path = query.get("path").cloned().unwrap_or_default();
                 audit_file(state, &user, &ip, "file.download", &path, String::new()).await;
             }
-            Ok(response)
+            Ok(untrusted(response))
         }
         ("/api/files/upload", "POST") => finish_upload(state, &user, &ip, response, reserved).await,
         ("/api/files/upload/complete", "POST") => {
@@ -300,9 +338,9 @@ async fn forward(
             if let Some(reservation) = state.homefs.take(&upload_id, user.id) {
                 let _ = quota::rollback(&state.db, user.id, reservation.bytes).await;
             }
-            Ok(response)
+            Ok(untrusted(response))
         }
-        _ => Ok(response),
+        _ => Ok(untrusted(response)),
     }
 }
 
@@ -655,6 +693,53 @@ mod tests {
         assert!(!in_home(&LogicalPath::parse("/shared/team/a").unwrap()));
         // A folder that merely looks similar is in HOME.
         assert!(in_home(&LogicalPath::parse("/sharedx").unwrap()));
+    }
+
+    #[test]
+    fn streamed_agent_replies_keep_only_file_headers() {
+        // What an agent taken over by another process of the user might send.
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .header(header::CONTENT_LENGTH, "4")
+            .header(header::CONTENT_DISPOSITION, "inline")
+            .header(header::SET_COOKIE, "rast_session=planted; Path=/")
+            .header(header::LOCATION, "https://example.test/")
+            .header(
+                header::CONTENT_SECURITY_POLICY,
+                "script-src 'unsafe-inline'",
+            )
+            .header(header::X_CONTENT_TYPE_OPTIONS, "sniff")
+            .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+            .header(REPLACED_HEADER, "9")
+            .body(Body::from("<b/>"))
+            .unwrap();
+        let response = untrusted(response);
+        let headers = response.headers();
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html");
+        assert_eq!(headers[header::CONTENT_LENGTH], "4");
+        assert_eq!(headers[header::CONTENT_DISPOSITION], "inline");
+        // The server's own policy: sandboxed, no script, no sniffing.
+        assert!(PREVIEW_CSP.starts_with("sandbox"));
+        let csp: Vec<_> = headers
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .collect();
+        assert_eq!(csp, [PREVIEW_CSP]);
+        let nosniff: Vec<_> = headers
+            .get_all(header::X_CONTENT_TYPE_OPTIONS)
+            .iter()
+            .collect();
+        assert_eq!(nosniff, ["nosniff"]);
+        for name in [
+            header::SET_COOKIE,
+            header::LOCATION,
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        ] {
+            assert!(!headers.contains_key(&name), "{name}");
+        }
+        assert!(!headers.contains_key(REPLACED_HEADER));
+        assert_eq!(headers.len(), 5);
     }
 
     #[test]

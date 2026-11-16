@@ -396,6 +396,16 @@ async fn one_home_accounts_are_served_by_their_agent_and_legacy_ones_in_process(
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(bytes, b"ello");
     assert_eq!(headers[header::CONTENT_RANGE], "bytes 1-4/5");
+    // The agent's file headers pass; the security headers are the server's.
+    assert!(headers[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .starts_with("attachment"));
+    assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+    assert_eq!(
+        headers[header::CONTENT_SECURITY_POLICY],
+        rast::storage::serve::PREVIEW_CSP
+    );
     let (status, found) = server.get("/api/files/search?q=note", &alice).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(found["total"], 1);
