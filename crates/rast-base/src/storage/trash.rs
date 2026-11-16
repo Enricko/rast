@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
@@ -22,9 +22,10 @@ use crate::{
 /// Default number of expired entries physically removed per maintenance pass.
 const EXPIRED_BATCH: i64 = 50;
 
-/// A recycle-bin entry as exposed by the API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// A recycle-bin entry as exposed by the API (and as a per-user file agent
+/// reports it, read strictly).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrashEntryDto {
     pub id: String,
     pub original_path: String,

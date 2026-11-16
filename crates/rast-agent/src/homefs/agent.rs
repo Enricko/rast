@@ -355,6 +355,17 @@ impl Node {
     }
 }
 
+/// A new name in the folder `parent`: never a trash folder name at the top
+/// of a shared folder (those belong to the members' recycle bins).
+fn new_name_allowed(parent: &Node, name: &str) -> AppResult<()> {
+    if parent.is_storage_root() && !parent.in_home() && trash::hidden_in_share(name) {
+        return Err(AppError::bad_request(
+            "names starting with .Trash are reserved at the top of a shared folder",
+        ));
+    }
+    Ok(())
+}
+
 fn entry_of(logical: &LogicalPath, name: &str, info: &Info, writable: bool) -> EntryDto {
     ops::entry_from_parts(
         logical,
@@ -423,6 +434,7 @@ impl UploadSpace for HomeSpace {
     ) -> AppResult<HomeTarget> {
         validate_new_name(name)?;
         let parent = self.node_at(dir, &ShareRoots::from_headers(headers)?)?;
+        new_name_allowed(&parent, name)?;
         let folder = parent.folder("upload destination is not a directory")?;
         let logical = parent.logical.child(name)?;
         match fsat::stat_at(folder.as_fd(), name).map_err(fs_error)? {
@@ -956,6 +968,7 @@ async fn mkdir(
     let space = agent.space.clone();
     blocking(move || {
         let parent = space.node(&parent_logical, &shares)?;
+        new_name_allowed(&parent, &name)?;
         let dir = parent.folder("parent is not a directory")?;
         fsat::mkdir_at(dir.as_fd(), &name).map_err(exists_as(
             "a file or folder with that name already exists".to_string(),
@@ -990,6 +1003,14 @@ async fn rename(
         };
         let new_name = body.new_name.trim();
         validate_new_name(new_name)?;
+        if node.root.kind == RootKind::Share
+            && node.logical.relative_segments().len() == 1
+            && trash::hidden_in_share(new_name)
+        {
+            return Err(AppError::bad_request(
+                "names starting with .Trash are reserved at the top of a shared folder",
+            ));
+        }
         if new_name == old {
             return Ok(node.entry());
         }
@@ -1136,6 +1157,7 @@ fn plan(
             return Err(AppError::bad_request("duplicate paths in request"));
         }
         let name = node.name();
+        new_name_allowed(&dest, name)?;
         match fsat::stat_at(dest_dir.as_fd(), name).map_err(fs_error)? {
             Some(info) if info.kind == Kind::Symlink => {
                 return Err(AppError::Forbidden("symbolic links are not supported"))

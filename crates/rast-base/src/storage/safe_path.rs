@@ -293,6 +293,17 @@ impl StorageRoot {
         if access == Access::Write && !self.perm.allows_write() {
             return Err(AppError::Forbidden("write permission required"));
         }
+        // The recycle bin folders of one-HOME accounts at the top of a
+        // shared folder (`.Trash-<uid>`) belong to their users and are never
+        // served as paths (ADR 0005, section 5).
+        if self.kind == RootKind::Share
+            && logical
+                .relative_segments()
+                .first()
+                .is_some_and(|name| crate::storage::xdg_trash::is_trash_dir_name(name))
+        {
+            return Err(AppError::NotFound("path not found"));
+        }
         let physical = physical_path(&self.physical, logical.relative_segments())?;
         let exists = verify_no_symlinks(&self.physical, &physical)?;
         if !exists {
@@ -317,6 +328,14 @@ impl ResolvedPath {
     /// directory. Returns the logical path, physical path and whether an
     /// object currently exists at that location.
     pub fn child_target(&self, name: &str) -> AppResult<(LogicalPath, PathBuf, bool)> {
+        if self.is_storage_root()
+            && self.kind == RootKind::Share
+            && crate::storage::xdg_trash::is_trash_dir_name(name)
+        {
+            return Err(AppError::bad_request(
+                "names starting with .Trash are reserved at the top of a shared folder",
+            ));
+        }
         let logical = self.logical.child(name)?;
         let physical = self.physical.join(name);
         let exists = verify_no_symlinks(&self.root_physical, &physical)?;

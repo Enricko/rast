@@ -486,20 +486,11 @@ async fn one_home_accounts_are_served_by_their_agent_and_legacy_ones_in_process(
     // A ranged download that does not start at 0 is not a new download.
     assert_eq!(actions, vec!["file.mkdir", "file.rename"]);
 
-    // Not available for one-HOME accounts yet (task 1.4).
-    for (method, path, body) in [
-        (
-            "POST",
-            "/api/files/delete",
-            Some(json!({"paths": ["/hello.txt"]})),
-        ),
-        ("GET", "/api/files/trash", None),
-        ("GET", "/api/files/usage", None),
-    ] {
-        let (status, _, body) = server.json(method, path, Some(&alice), body).await;
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}: {body}");
-    }
-    assert!(server.home("alice").join("hello.txt").exists());
+    // Deleting, the recycle bin and the usage view are answered by the
+    // agent too (task 1.4).
+    let (status, trash) = server.get("/api/files/trash", &alice).await;
+    assert_eq!(status, StatusCode::OK, "{trash}");
+    assert_eq!(trash["total"], 0);
     // Other routes keep their in-process handlers.
     let (status, roots) = server.get("/api/files/roots", &alice).await;
     assert_eq!(status, StatusCode::OK);
@@ -785,6 +776,240 @@ async fn copy_and_move_run_as_jobs_and_account_home_bytes() {
 }
 
 #[tokio::test]
+async fn the_recycle_bin_is_the_xdg_trash_of_home_and_of_each_shared_folder() {
+    let (server, alice, bob) = setup().await;
+    let home = server.home("alice");
+    std::fs::create_dir(home.join("docs")).unwrap();
+    std::fs::write(home.join("docs/a.txt"), b"alpha").unwrap();
+    std::fs::write(home.join("b.txt"), b"beta").unwrap();
+
+    let (status, job) = server
+        .post(
+            "/api/files/delete",
+            &alice,
+            json!({"paths": ["/docs/a.txt", "/b.txt"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{job}");
+    assert_eq!(job["items"], 2);
+    let done = server.wait_job(&alice, &job).await;
+    assert_eq!(done["status"], "done", "{done}");
+    assert_eq!(done["result"]["deleted"], 2);
+    assert_eq!(done["result"]["trashed"], true);
+    let trash = home.join(".local/share/Trash");
+    assert_eq!(std::fs::read(trash.join("files/a.txt")).unwrap(), b"alpha");
+    assert!(trash.join("info/b.txt.trashinfo").is_file());
+    // Nothing lands in the legacy recycle bin.
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trash")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    // Storage roots are refused before a job starts.
+    let (status, _) = server
+        .post("/api/files/delete", &alice, json!({"paths": ["/"]}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, list) = server.get("/api/files/trash?perPage=1", &alice).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["total"], 2);
+    assert_eq!(list["perPage"], 1);
+    assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    let (_, list) = server.get("/api/files/trash", &alice).await;
+    let id_of = |path: &str| {
+        list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["originalPath"] == path)
+            .unwrap_or_else(|| panic!("{path} not in {list}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let a = id_of("/docs/a.txt");
+    let b = id_of("/b.txt");
+    assert!(a.starts_with("h:"), "{a}");
+
+    let (status, restored) = server
+        .post("/api/files/trash/restore", &alice, json!({"ids": [a]}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{restored}");
+    assert_eq!(restored["restored"][0]["path"], "/docs/a.txt");
+    assert_eq!(std::fs::read(home.join("docs/a.txt")).unwrap(), b"alpha");
+    let (status, removed) = server
+        .post("/api/files/trash/delete", &alice, json!({"ids": [b]}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{removed}");
+    assert_eq!(removed["deleted"], 1);
+    assert_eq!(removed["bytes"], 4);
+    assert!(!trash.join("files/b.txt").exists());
+    for id in ["../x", "h:zz"] {
+        let (status, _) = server
+            .post("/api/files/trash/restore", &alice, json!({"ids": [id]}))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{id}");
+    }
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM audit_logs WHERE user_id = ? AND action LIKE 'file.%' ORDER BY id",
+    )
+    .bind(alice.id)
+    .fetch_all(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        actions,
+        vec!["file.delete", "file.restore", "file.trash_delete"]
+    );
+
+    // Shared folders: the entry stays in the folder's own trash, which is
+    // hidden; a read-only folder refuses, a hidden one is 404.
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    for (name, perms) in [("Team", "write"), ("Board", "read")] {
+        let (status, share) = server
+            .post(
+                "/api/shares",
+                &admin,
+                json!({"name": name, "members": [{"userId": alice.id, "perms": perms}]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{share}");
+    }
+    let shared = server.state.config.shared_dir();
+    for name in ["Team", "Board"] {
+        std::fs::write(shared.join(name).join("r.txt"), name).unwrap();
+    }
+    let (status, _) = server
+        .post(
+            "/api/files/delete",
+            &alice,
+            json!({"paths": ["/shared/Board/r.txt"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = server
+        .post(
+            "/api/files/delete",
+            &alice,
+            json!({"paths": ["/shared/Team"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, job) = server
+        .post(
+            "/api/files/delete",
+            &alice,
+            json!({"paths": ["/shared/Team/r.txt"]}),
+        )
+        .await;
+    let done = server.wait_job(&alice, &job).await;
+    assert_eq!(done["status"], "done", "{done}");
+    let share_trash = shared.join("Team").join(format!(".Trash-{}", uid()));
+    assert_eq!(
+        std::fs::read(share_trash.join("files/r.txt")).unwrap(),
+        b"Team"
+    );
+    for viewer in [&alice, &admin] {
+        let (status, listing) = server.get("/api/files?path=/shared/Team", viewer).await;
+        assert_eq!(status, StatusCode::OK, "{listing}");
+        assert!(names(&listing).is_empty(), "{listing}");
+    }
+    // In process (the admin is a legacy account) the folder is no path
+    // either, and its name cannot be taken.
+    let trash_path = format!("/api/files?path=/shared/Team/.Trash-{}", uid());
+    let (status, _) = server.get(&trash_path, &admin).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = server
+        .post(
+            "/api/files/mkdir",
+            &admin,
+            json!({"path": "/shared/Team/.Trash-1"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = server
+        .post(
+            "/api/files/mkdir",
+            &alice,
+            json!({"path": "/shared/Team/.Trash"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (_, list) = server.get("/api/files/trash", &alice).await;
+    assert_eq!(list["total"], 1, "{list}");
+    let item = &list["items"][0];
+    assert_eq!(item["originalPath"], "/shared/Team/r.txt");
+    let id = item["id"].as_str().unwrap().to_string();
+    assert!(id.starts_with("s:"), "{id}");
+    // Without write access to the folder, the entry cannot be restored.
+    let team = sqlx::query_scalar::<_, String>("SELECT id FROM shares WHERE name = 'Team'")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    let (status, _, _) = server
+        .json(
+            "PATCH",
+            &format!("/api/shares/{team}"),
+            Some(&admin),
+            Some(json!({"members": [{"userId": alice.id, "perms": "read"}]})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server
+        .post("/api/files/trash/restore", &alice, json!({"ids": [id]}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Emptying still removes it.
+    let (status, _, emptied) = server
+        .json("DELETE", "/api/files/trash", Some(&alice), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{emptied}");
+    assert_eq!(emptied["deleted"], 1);
+    assert!(!share_trash.join("files/r.txt").exists());
+
+    // A legacy account keeps the in-process recycle bin.
+    std::fs::write(server.home("bob").join("c.txt"), b"c").unwrap();
+    let (_, job) = server
+        .post("/api/files/delete", &bob, json!({"paths": ["/c.txt"]}))
+        .await;
+    assert_eq!(server.wait_job(&bob, &job).await["status"], "done");
+    let (_, list) = server.get("/api/files/trash", &bob).await;
+    assert_eq!(list["total"], 1);
+    assert!(!server.home("bob").join(".local/share/Trash").exists());
+}
+
+#[tokio::test]
+async fn the_usage_view_and_the_fallback_quota_follow_a_home_scan() {
+    let (server, alice, bob) = setup().await;
+    let home = server.home("alice");
+    std::fs::create_dir_all(home.join(".cache")).unwrap();
+    std::fs::write(home.join(".cache/c"), vec![1u8; 8192]).unwrap();
+    std::fs::write(home.join("notes.txt"), b"hello").unwrap();
+    let (status, usage) = server.get("/api/files/usage", &alice).await;
+    assert_eq!(status, StatusCode::OK, "{usage}");
+    assert_eq!(usage["quotaBackend"], "rast");
+    assert_eq!(usage["quotaBytes"], 100);
+    assert_eq!(usage["byType"]["documents"], 5);
+    let locations = usage["byLocation"].as_object().unwrap();
+    let total: i64 = locations.values().map(|v| v.as_i64().unwrap()).sum();
+    assert_eq!(usage["usedBytes"].as_i64().unwrap(), total, "{usage}");
+    assert!(locations["caches"].as_i64().unwrap() >= 0);
+    // The scan is the account's usage now: apps in HOME count (D2).
+    assert_eq!(server.used(alice.id).await.0, total);
+    if total > 100 {
+        let (status, _) = server.upload(&alice, "dir=/&name=x.txt", b"x").await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+    // A legacy account: RAST's accounting, without the new locations.
+    let (status, usage) = server.get("/api/files/usage", &bob).await;
+    assert_eq!(status, StatusCode::OK, "{usage}");
+    assert_eq!(usage["quotaBackend"], "rast");
+    assert!(usage["byLocation"]["files"].is_i64(), "{usage}");
+}
+
+#[tokio::test]
 async fn shared_folders_keep_the_rast_access_rules() {
     let (server, alice, _bob) = setup().await;
     let admin = server.user("root-admin", Role::Admin, 0).await;
@@ -858,13 +1083,22 @@ async fn shared_folders_keep_the_rast_access_rules() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(bytes, b"Team");
+    // Listings start a HOME scan in the background (the RAST fallback);
+    // the usage view scans on demand.
+    let (_, before) = server.get("/api/files/usage", &alice).await;
     let (status, entry) = server
         .upload(&alice, "dir=/shared/Team&name=new.txt", b"team")
         .await;
     assert_eq!(status, StatusCode::OK, "{entry}");
     assert_eq!(entry["path"], "/shared/Team/new.txt");
     // Shared folders do not count against the quota.
-    assert_eq!(server.used(alice.id).await, (0, 0));
+    assert_eq!(server.used(alice.id).await.1, 0);
+    let (_, after) = server.get("/api/files/usage", &alice).await;
+    assert_eq!(before["usedBytes"], after["usedBytes"]);
+    assert_eq!(
+        server.used(alice.id).await.0,
+        after["usedBytes"].as_i64().unwrap()
+    );
 
     // Read-only: reads work, writes are refused by the server.
     let (status, _) = server.get("/api/files?path=/shared/Board", &alice).await;

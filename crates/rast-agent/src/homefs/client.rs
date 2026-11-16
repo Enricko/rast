@@ -43,6 +43,15 @@ pub struct Reservation {
     pub expires: Instant,
 }
 
+/// What the server last learned about one account's HOME.
+#[derive(Debug, Default, Clone, Copy)]
+struct UsageMark {
+    /// When its HOME scan (or quota report) last started.
+    scanned: Option<Instant>,
+    /// The bytes in its recycle bins, from the last scan or trash listing.
+    trash_bytes: Option<i64>,
+}
+
 /// The chunked uploads the agents are receiving, and those being started.
 #[derive(Debug, Default)]
 struct Uploads {
@@ -103,6 +112,7 @@ pub struct HomeFs {
     agents: std::sync::Mutex<HashMap<i64, AgentSlot>>,
     watching: Arc<std::sync::Mutex<HashSet<i64>>>,
     uploads: std::sync::Mutex<Uploads>,
+    usage: std::sync::Mutex<HashMap<i64, UsageMark>>,
 }
 
 impl HomeFs {
@@ -115,7 +125,44 @@ impl HomeFs {
             agents: std::sync::Mutex::new(HashMap::new()),
             watching: Arc::new(std::sync::Mutex::new(HashSet::new())),
             uploads: std::sync::Mutex::new(Uploads::default()),
+            usage: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Whether the HOME of `user_id` is due a usage scan: no scan started
+    /// within `min_age`. A `true` records the start, so concurrent callers
+    /// do not scan twice.
+    pub fn begin_scan(&self, user_id: i64, min_age: Duration) -> bool {
+        let mut usage = self.usage.lock().unwrap_or_else(PoisonError::into_inner);
+        let mark = usage.entry(user_id).or_default();
+        let now = Instant::now();
+        if mark
+            .scanned
+            .is_some_and(|last| now.saturating_duration_since(last) < min_age)
+        {
+            return false;
+        }
+        mark.scanned = Some(now);
+        true
+    }
+
+    /// Record the bytes in the recycle bins of `user_id`.
+    pub fn note_trash_bytes(&self, user_id: i64, bytes: i64) {
+        self.usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(user_id)
+            .or_default()
+            .trash_bytes = Some(bytes.max(0));
+    }
+
+    /// The bytes in the recycle bins of `user_id`, when known.
+    pub fn trash_bytes(&self, user_id: i64) -> Option<i64> {
+        self.usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&user_id)
+            .and_then(|mark| mark.trash_bytes)
     }
 
     /// Whether the account is in one-HOME mode: its HOME directory belongs
@@ -310,6 +357,34 @@ impl HomeFs {
             Body::from(replay),
         )
         .await
+    }
+
+    /// A request without a body (GET, DELETE) whose JSON reply is read
+    /// completely; an error status becomes the matching error.
+    pub async fn fetch(
+        &self,
+        user_id: i64,
+        method: Method,
+        path_and_query: &str,
+        headers: HeaderMap,
+    ) -> AppResult<Value> {
+        let response = self
+            .exchange(
+                user_id,
+                method,
+                path_and_query,
+                &headers,
+                Body::empty(),
+                Some(Bytes::new()),
+            )
+            .await?;
+        let status = response.status();
+        let value = client::read_json(AGENT, response).await?;
+        if status.is_success() {
+            Ok(value)
+        } else {
+            Err(client::error_from(AGENT, status, &value))
+        }
     }
 
     /// A JSON request whose JSON reply is read completely. `headers` are

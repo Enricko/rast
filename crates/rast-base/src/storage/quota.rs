@@ -181,6 +181,19 @@ pub async fn adjust_used(pool: &SqlitePool, user_id: i64, delta: i64) -> AppResu
     Ok(())
 }
 
+/// Replace the committed usage with a measurement (a scan of a one-HOME
+/// account's HOME, or the kernel's quota report). Reservations stay.
+pub async fn set_used(pool: &SqlitePool, user_id: i64, used: i64) -> AppResult<()> {
+    ensure_row(pool, user_id).await?;
+    sqlx::query("UPDATE storage_usage SET used_bytes = ?, updated_at = ? WHERE user_id = ?")
+        .bind(used.max(0))
+        .bind(db::now_ms())
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Total bytes used below a directory, ignoring symlinks and in-flight
 /// temporary files. Blocking; use inside `spawn_blocking`.
 pub fn dir_used_bytes_blocking(path: &Path) -> u64 {

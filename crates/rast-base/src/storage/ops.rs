@@ -102,7 +102,31 @@ pub struct UsageDto {
     pub used_bytes: i64,
     pub trash_bytes: i64,
     pub by_type: BTreeMap<&'static str, i64>,
+    /// Where the used bytes are (ADR 0005, section 6): `files`, `apps`,
+    /// `caches`, `trash` and, with filesystem quota, `shared`.
+    pub by_location: BTreeMap<&'static str, i64>,
+    /// What enforces `quotaBytes`: `filesystem` (kernel user quota, every
+    /// app counts) or `rast` (RAST's own accounting, File Station and App
+    /// Center only).
+    pub quota_backend: &'static str,
 }
+
+/// The categories of `UsageDto.byType` ([`classify_file`]).
+pub const USAGE_TYPES: [&str; 7] = [
+    "images",
+    "videos",
+    "audio",
+    "documents",
+    "archives",
+    "code",
+    "other",
+];
+/// The keys of `UsageDto.byLocation`.
+pub const USAGE_LOCATIONS: [&str; 5] = ["files", "apps", "caches", "trash", "shared"];
+/// `UsageDto.quotaBackend` of RAST's own accounting.
+pub const QUOTA_BACKEND_RAST: &str = "rast";
+/// `UsageDto.quotaBackend` of kernel user quota.
+pub const QUOTA_BACKEND_FILESYSTEM: &str = "filesystem";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -335,6 +359,7 @@ pub async fn read_entries(
         return Err(AppError::bad_request("path is not a directory"));
     }
     let mut entries: Vec<EntryDto> = Vec::new();
+    let share_top = resolved.is_storage_root() && resolved.kind == crate::storage::RootKind::Share;
     let mut reader = tokio::fs::read_dir(&resolved.physical).await?;
     while let Some(entry) = reader.next_entry().await? {
         let name_os = entry.file_name();
@@ -342,6 +367,10 @@ pub async fn read_entries(
             continue; // non-UTF-8 names are not addressable over the API
         };
         if name.starts_with(TEMP_PREFIX) || safe_path::validate_component(name).is_err() {
+            continue;
+        }
+        // The recycle bins of one-HOME accounts in a shared folder.
+        if share_top && crate::storage::xdg_trash::is_trash_dir_name(name) {
             continue;
         }
         if !show_hidden && name.starts_with('.') {
@@ -580,6 +609,7 @@ pub async fn search_in(
     let base_physical = base.physical.clone();
     let base_logical = base.logical.clone();
     let writable = base.perm.allows_write();
+    let share_top = base.is_storage_root() && base.kind == crate::storage::RootKind::Share;
     let (hits, truncated, scanned) =
         tokio::task::spawn_blocking(move || -> (Vec<EntryDto>, bool, usize) {
             let mut hits: Vec<EntryDto> = Vec::new();
@@ -593,7 +623,14 @@ pub async fn search_in(
                         .file_name()
                         .to_str()
                         .is_some_and(|name| name.starts_with('.'));
+                    let trash = share_top
+                        && entry.depth() == 1
+                        && entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(crate::storage::xdg_trash::is_trash_dir_name);
                     !entry.file_type().is_symlink()
+                        && !trash
                         && (show_hidden || entry.depth() == 0 || !dotted)
                 });
             for entry in walker {
@@ -699,11 +736,16 @@ pub async fn usage(pool: &SqlitePool, storage: &Storage, user: &AuthUser) -> App
 
     let quota = quota::info(pool, user.id).await?;
     let trash_bytes = crate::storage::trash::total_bytes(pool, user.id).await?;
+    // A legacy home: everything RAST counts is files; the recycle bin is
+    // kept outside the home and does not count.
+    let by_location = BTreeMap::from([("files", quota.used_bytes), ("trash", trash_bytes)]);
     Ok(UsageDto {
         quota_bytes: quota.quota_bytes,
         used_bytes: quota.used_bytes,
         trash_bytes,
         by_type,
+        by_location,
+        quota_backend: QUOTA_BACKEND_RAST,
     })
 }
 

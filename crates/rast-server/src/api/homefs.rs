@@ -15,8 +15,8 @@
 //! helper or the agent is down the account gets 503: the server never falls
 //! back to in-process access.
 //!
-//! Deleting, the recycle bin and the usage view are not served for one-HOME
-//! accounts yet: they move to XDG Trash and a HOME scan with task 1.4.
+//! Deleting, the recycle bin and the usage view are answered from the
+//! account's XDG Trash and a scan of its HOME (task 1.4, see [`trash`]).
 
 use std::collections::HashMap;
 
@@ -65,25 +65,14 @@ const JSON_ROUTES: &[&str] = &[
     "/api/files/upload/init",
 ];
 
-/// Not served for one-HOME accounts until task 1.4.
-const LATER_ROUTES: &[&str] = &[
-    "/api/files/delete",
-    "/api/files/usage",
-    "/api/files/trash",
-    "/api/files/trash/restore",
-    "/api/files/trash/delete",
-];
-
-const LATER_MESSAGE: &str =
-    "deleting files, the recycle bin and the storage usage view are not available for this \
-     account yet";
+mod trash;
 
 pub async fn dispatch(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let route = request.uri().path().trim_end_matches('/').to_string();
     let route = route.as_str();
     let known = QUERY_ROUTES.contains(&route)
         || JSON_ROUTES.contains(&route)
-        || LATER_ROUTES.contains(&route);
+        || trash::ROUTES.contains(&route);
     if !known {
         return next.run(request).await;
     }
@@ -96,8 +85,8 @@ pub async fn dispatch(State(state): State<AppState>, request: Request, next: Nex
         Err(error) => return error.into_response(),
     }
     release_expired(&state).await;
-    let result = if LATER_ROUTES.contains(&route) {
-        Err(AppError::unavailable(LATER_MESSAGE))
+    let result = if trash::ROUTES.contains(&route) {
+        trash::handle(&state, user, route, request).await
     } else if QUERY_ROUTES.contains(&route) {
         forward(&state, user, route, request).await
     } else if request.method() == Method::POST {
@@ -333,6 +322,9 @@ async fn forward(
             let status = response.status();
             let mut listing = client::read_json(AGENT, response).await?;
             if status.is_success() {
+                // Apps write into HOME without RAST: the fallback quota
+                // follows a HOME scan, at most every ten minutes.
+                trash::refresh_in_background(state, &user);
                 let info = quota::info(&state.db, user.id).await?;
                 listing["quota"] = serde_json::to_value(QuotaDto {
                     quota_bytes: info.quota_bytes,
