@@ -3417,6 +3417,19 @@ fn require_existing_dir_or_file(path: &Path) -> Result<(), NativeError> {
     }
 }
 
+/// The `setfacl -m` entries for `path_acl`. A recursive grant on a directory
+/// also sets the matching default entry, so files and folders created in the
+/// tree later inherit the access. Entries that are moved into the tree keep
+/// their own ACL; the next recursive grant covers them. `setfacl -R` only
+/// applies default entries to directories.
+fn acl_spec(uid: u32, perms: &str, recursive: bool, is_dir: bool) -> String {
+    if recursive && is_dir {
+        format!("u:{uid}:{perms},d:u:{uid}:{perms}")
+    } else {
+        format!("u:{uid}:{perms}")
+    }
+}
+
 async fn path_acl(options: &NativeOptions, op: PathAclOp) -> Result<Value, NativeError> {
     let ctx = options.validation_context();
     let path = validate_managed_path(&ctx, &op.path, crate::native::protocol::PathPurpose::Acl)?;
@@ -3438,7 +3451,12 @@ async fn path_acl(options: &NativeOptions, op: PathAclOp) -> Result<Value, Nativ
         args.push(OsString::from("-R"));
     }
     args.push(OsString::from("-m"));
-    args.push(OsString::from(format!("u:{}:{}", op.uid, op.perms)));
+    args.push(OsString::from(acl_spec(
+        op.uid,
+        &op.perms,
+        op.recursive,
+        metadata.is_dir(),
+    )));
     args.push(path.as_os_str().to_os_string());
     let output = run_command(setfacl, args, &[], QUICK_CMD_TIMEOUT, 64 * 1024, 64 * 1024).await?;
     if !output.success {
@@ -5017,6 +5035,54 @@ exit 1
             .await
             .unwrap_err();
         assert_eq!(error.code, "acls_unavailable");
+    }
+
+    #[tokio::test]
+    async fn recursive_path_acl_on_a_directory_also_sets_the_default_entry() {
+        let helper = TestHelper::start(|options, dir| {
+            let log = dir.join("setfacl.log");
+            options.setfacl_bin = Some(write_script(
+                dir,
+                "setfacl",
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    log.display()
+                ),
+            ));
+        })
+        .await;
+        let home = helper.options.homes_dir.join("alice");
+        std::fs::create_dir_all(&home).unwrap();
+        let file = home.join("notes.txt");
+        std::fs::write(&file, b"x").unwrap();
+        for (path, recursive) in [(&home, true), (&home, false), (&file, true)] {
+            helper
+                .call(NativeOp::PathAcl(PathAclOp {
+                    path: path.to_string_lossy().into_owned(),
+                    uid: 200_007,
+                    perms: "rx".into(),
+                    recursive,
+                }))
+                .await
+                .unwrap();
+        }
+        let log = std::fs::read_to_string(helper._dir.path().join("setfacl.log")).unwrap();
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                format!("-R -m u:200007:rx,d:u:200007:rx {}", home.display()),
+                format!("-m u:200007:rx {}", home.display()),
+                format!("-R -m u:200007:rx {}", file.display()),
+            ]
+        );
+    }
+
+    #[test]
+    fn acl_spec_adds_a_default_entry_only_for_recursive_directory_grants() {
+        assert_eq!(acl_spec(7, "rx", true, true), "u:7:rx,d:u:7:rx");
+        assert_eq!(acl_spec(7, "rx", false, true), "u:7:rx");
+        assert_eq!(acl_spec(7, "rwx", true, false), "u:7:rwx");
     }
 
     #[tokio::test]

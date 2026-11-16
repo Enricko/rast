@@ -25,6 +25,14 @@ this file by `scripts/changelog-section.sh`.
   named `rast-u5`, if one existed. New usernames of the form
   `rast-u<number>` are now refused, so such a name cannot be chosen again.
 
+### Changed
+
+- **Opening a native app no longer waits for the home access grant.** The
+  recursive read ACL on the person's home now runs in the background, at most
+  one at a time per person. Measured on ext4 with a warm cache: about 0.4 s
+  for 100,000 files and 1.1 to 2.9 s for 300,000 files, which a blocking
+  grant would add to every app start.
+
 ### Upgrade notes
 
 - After upgrading, empty `homes/rast-u<id>` folders left by earlier versions
@@ -33,7 +41,16 @@ this file by `scripts/changelog-section.sh`.
   apps of other users no longer reach its home.
 - The first app start after the upgrade grants the app's Linux account
   read access to the person's home (recursive `rx` ACL), as documented. Apps
-  still save into their own profile.
+  still save into their own profile. The grant runs in the background, so on
+  the first app start the person's files can become readable a few seconds
+  after the app window opens. The helper stops a grant after 13 seconds, so a
+  home with more than about 1.5 million files and folders only gets a partial
+  grant.
+- The grant also adds a default ACL entry for the app's Linux account to
+  every folder in the home (`d:u:rast-u<id>:rx`), so files created later are
+  readable by the app at once. Files moved into the home (chunked uploads,
+  restores from the recycle bin, moves from shared folders) become readable
+  at the next app start.
 
 ## [0.18.2] - 2026-11-15
 
