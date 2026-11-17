@@ -898,6 +898,22 @@ Update it at the end of every session.
   `TcpListener` (slow but steady, stalled, over cap, truncated). No new
   dependency.
 
+- **Task 2.1 plan** (2026-11-17, docs only): `docs/adr/0008-systemd-user-session.md`
+  (status proposed). One-HOME accounts get a systemd user manager with
+  linger only while they use native apps or terminals (new helper
+  operations `user_manager_ensure`, `user_manager_release`,
+  `user_managers_list`); Xpra and apps become user units driven by the
+  helper as the identity (no `--machine=`, which runs the `login` PAM stack
+  per call); file agent and terminals stay system units in
+  `user-<uid>.slice`, which carries the `linux_session_*` limits; apps get
+  `MemoryHigh`, `OOMPolicy=continue` and the `rast app-reaper` subreaper
+  (no `ExitType=cgroup`); the account's own `pulseaudio.socket` and
+  `dbus.socket`; no new packages on production. Legacy native accounts are
+  unchanged. Found: identities can enable linger themselves today
+  (`set-self-linger` is `allow_any=yes`), which sidesteps the cron/at deny
+  lists (A7); the ADR proposes a deny-only polkit rule (maintainer
+  approval). Open questions are listed at the end of the ADR.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
