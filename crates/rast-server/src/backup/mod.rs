@@ -14,9 +14,16 @@
 //!
 //! The live database is never copied directly: `VACUUM INTO` produces a
 //! transactionally consistent snapshot including committed WAL data.
+//!
+//! The `users` scope reads legacy HOMEs and shared folders (owned by the
+//! service) itself. HOMEs in one-HOME mode and migrated shared folders are
+//! read through the root backup reader ([`reader`], ADR 0005 D12), which
+//! keeps numeric owners, modes and ACLs; the manifest marks those entries
+//! `ownersPreserved` and lists their trees in `preservedTrees`.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
+    ffi::OsString,
     fs::{File, OpenOptions},
     io::{BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -34,8 +41,10 @@ use crate::{
     config::Config,
     db,
     error::{AppError, AppResult},
+    native::{backup_reader::TreeKind, client::NativeClient},
 };
 
+pub mod reader;
 pub mod schedule;
 
 pub const BACKUP_FORMAT: u32 = 1;
@@ -49,6 +58,15 @@ pub struct ManifestEntry {
     pub path: String,
     pub size: u64,
     pub sha256: String,
+    /// Written through the backup reader: the archive keeps the entry's
+    /// numeric owner and group, its mode and its ACLs (restore it as root
+    /// with `tar --same-owner`). Absent for entries the service read.
+    #[serde(
+        default,
+        rename = "ownersPreserved",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub owners_preserved: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,10 +81,16 @@ pub struct Manifest {
     pub scopes: Vec<String>,
     pub note: String,
     pub entries: Vec<ManifestEntry>,
-    /// What the backup left out, and why (for example HOMEs in one-HOME
-    /// mode, which the service cannot read).
+    /// What the backup left out, and why (for example a HOME in one-HOME
+    /// mode when the backup reader is unavailable).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The folders written through the backup reader
+    /// (`users/homes/<name>`, `users/shared/<container>`): their entries
+    /// keep numeric owners, modes and ACLs. Everything else under `users/`
+    /// was read by the service and carries neither.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserved_trees: Vec<String>,
 }
 
 /// Metadata returned to the API/CLI after a backup completes.
@@ -89,87 +113,307 @@ pub struct BackupMeta {
 /// Warnings listed at most (the rest is counted).
 const MAX_BACKUP_WARNINGS: usize = 50;
 
-/// The files of the `users` scope, and what was left out. A HOME that
-/// does not belong to the service (`service_uid`) is in one-HOME mode: it
-/// belongs to its Linux identity, the service cannot read it, and it is
-/// skipped with a warning until Backup Center reads HOMEs through the
-/// helper (ADR 0005, D12; task 1.5b).
-fn user_files(cfg: &Config, service_uid: u32) -> (Vec<(PathBuf, String)>, Vec<String>) {
+/// Where the `users` scope may read from. Tests replace the owners (they
+/// cannot chown) and the helper.
+pub(crate) struct BackupEnv {
+    /// The owner of legacy HOMEs and containers: the service (by default
+    /// the owner of the backup's work folder).
+    pub service_uid: Option<u32>,
+    /// The owner of migrated shared folder containers: root.
+    pub container_owner_uid: u32,
+    /// The native helper, when native execution is on.
+    pub native: Option<NativeClient>,
+}
+
+impl BackupEnv {
+    pub(crate) fn from_config(cfg: &Config) -> Self {
+        Self {
+            service_uid: None,
+            container_owner_uid: 0,
+            native: (cfg.native_enabled && cfg!(target_os = "linux"))
+                .then(|| NativeClient::from_config(cfg)),
+        }
+    }
+}
+
+/// What the database says about the folders below the storage roots.
+struct Facts {
+    accounts: HashSet<String>,
+    /// Shared folder name by container.
+    shares: HashMap<String, String>,
+}
+
+async fn load_facts(cfg: &Config, pool: Option<&SqlitePool>) -> Result<Facts, String> {
+    let owned;
+    let pool = match pool {
+        Some(pool) => pool,
+        None => {
+            owned = db::connect(&cfg.db_path(), 2)
+                .await
+                .map_err(|error| error.to_string())?;
+            &owned
+        }
+    };
+    let accounts: Vec<String> = sqlx::query_scalar("SELECT username FROM users")
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let shares: Vec<(String, String)> = sqlx::query_as("SELECT container_path, name FROM shares")
+        .fetch_all(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(Facts {
+        accounts: accounts.into_iter().collect(),
+        shares: shares.into_iter().collect(),
+    })
+}
+
+/// How the `users` scope reads the folders at the top of the homes and
+/// shared roots.
+#[derive(Default)]
+struct UsersPlan {
+    /// Read through the backup reader.
+    trees: Vec<reader::Tree>,
+    /// Top-level HOMEs the service does not read (reader or skipped).
+    not_in_process_homes: HashSet<OsString>,
+    /// Top-level containers the service does not read.
+    not_in_process_shared: HashSet<OsString>,
+    warnings: Vec<String>,
+    reader: Option<reader::ReaderAccess>,
+}
+
+/// The folders directly below `root` with their owner (links and files are
+/// left to the walk, as before).
+fn top_folders(root: &Path) -> Vec<(OsString, u32)> {
     use std::os::unix::fs::MetadataExt;
-    let mut files = Vec::new();
-    let mut warnings = Vec::new();
-    let mut unreadable = 0usize;
-    let mut skipped_homes = HashSet::new();
-    if let Ok(entries) = std::fs::read_dir(cfg.homes_dir()) {
-        for entry in entries.filter_map(Result::ok) {
-            let Ok(meta) = entry.path().symlink_metadata() else {
+    let mut found: Vec<(OsString, u32)> = std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let meta = entry.path().symlink_metadata().ok()?;
+                    meta.is_dir().then(|| (entry.file_name(), meta.uid()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+fn skipped_home(name: &str, owner: &str, reason: &str) -> String {
+    format!(
+        "users/homes/{name}: skipped, the HOME belongs to {owner} (one-HOME mode) and the RAST \
+         service cannot read it; {reason}; back it up as root (see docs/OPERATIONS.md)"
+    )
+}
+
+/// Decide, folder by folder, who reads what. A HOME the service owns is
+/// legacy and read by the service (as before). A HOME that belongs to
+/// another uid is in one-HOME mode: it goes through the backup reader when
+/// the helper is there, a RAST account has that name and the account is in
+/// the native pilot (ADR 0007); otherwise it is skipped with a warning. A
+/// container owned by root is a migrated shared folder: it goes through
+/// the reader when its shared folder is in the pilot, and the service reads
+/// it otherwise (as before, without owners).
+async fn plan_users(
+    cfg: &Config,
+    pool: Option<&SqlitePool>,
+    env: &BackupEnv,
+    service_uid: u32,
+) -> UsersPlan {
+    let mut plan = UsersPlan::default();
+    let homes: Vec<(OsString, u32)> = top_folders(&cfg.homes_dir())
+        .into_iter()
+        .filter(|(_, uid)| *uid != service_uid)
+        .collect();
+    let containers: Vec<(OsString, u32)> = top_folders(&cfg.shared_dir())
+        .into_iter()
+        .filter(|(_, uid)| *uid == env.container_owner_uid && *uid != service_uid)
+        .collect();
+    if homes.is_empty() && containers.is_empty() {
+        return plan;
+    }
+    let facts = match &env.native {
+        Some(_) => Some(load_facts(cfg, pool).await),
+        None => None,
+    };
+    for (name, uid) in homes {
+        plan.not_in_process_homes.insert(name.clone());
+        let shown = name.to_string_lossy().into_owned();
+        let reason = match (name.to_str(), &facts) {
+            (_, None) => Some(
+                "native Linux apps are off on this server, so the backup reader is unavailable"
+                    .to_string(),
+            ),
+            (None, _) => Some("it is not the folder of a RAST account".to_string()),
+            (Some(_), Some(Err(error))) => Some(format!("cannot look up its account: {error}")),
+            (Some(name), Some(Ok(facts))) => {
+                if crate::native::protocol::validate_home_username(name).is_err()
+                    || !facts.accounts.contains(name)
+                {
+                    Some("no RAST account has this name".to_string())
+                } else if !cfg.native_pilot.allows_user(name) {
+                    Some(
+                        "the account is outside the native pilot (native_pilot_prefixes), so the \
+                         backup reader does not read it"
+                            .to_string(),
+                    )
+                } else {
+                    None
+                }
+            }
+        };
+        match reason {
+            Some(reason) => {
+                tracing::warn!(home = %shown, uid, %reason, "backup skips a HOME in one-HOME mode");
+                plan.warnings
+                    .push(skipped_home(&shown, &format!("uid {uid}"), &reason));
+            }
+            None => plan.trees.push(reader::Tree {
+                kind: TreeKind::Home,
+                name: shown,
+            }),
+        }
+    }
+    if let Some(Ok(facts)) = &facts {
+        for (container, _) in containers {
+            let Some(text) = container.to_str() else {
                 continue;
             };
-            if meta.is_dir() && meta.uid() != service_uid {
-                let name = entry.file_name().to_string_lossy().to_string();
-                tracing::warn!(
-                    home = %name,
-                    uid = meta.uid(),
-                    "backup skips a HOME in one-HOME mode"
-                );
-                warnings.push(format!(
-                    "users/homes/{name}: skipped, the HOME belongs to uid {} (one-HOME mode)                      and the RAST service cannot read it; back it up as root (see                      docs/OPERATIONS.md) until Backup Center reads HOMEs through the helper",
-                    meta.uid()
-                ));
-                skipped_homes.insert(entry.file_name());
+            let in_pilot = facts
+                .shares
+                .get(text)
+                .is_some_and(|name| cfg.native_pilot.allows_share(name, text));
+            if in_pilot {
+                plan.not_in_process_shared.insert(container.clone());
+                plan.trees.push(reader::Tree {
+                    kind: TreeKind::Shared,
+                    name: text.to_string(),
+                });
             }
         }
     }
-    for (root, prefix) in [
-        (cfg.homes_dir(), "users/homes"),
-        (cfg.shared_dir(), "users/shared"),
-    ] {
-        if !root.is_dir() {
+    if plan.trees.is_empty() {
+        return plan;
+    }
+    let Some(native) = &env.native else {
+        return plan;
+    };
+    match reader::start(native).await {
+        Ok(access) => plan.reader = Some(access),
+        Err(error) => {
+            tracing::warn!(%error, "the backup reader is unavailable");
+            for tree in std::mem::take(&mut plan.trees) {
+                match tree.kind {
+                    TreeKind::Home => plan.warnings.push(skipped_home(
+                        &tree.name,
+                        "its Linux account",
+                        &format!("the backup reader is unavailable: {error}"),
+                    )),
+                    TreeKind::Shared => {
+                        plan.not_in_process_shared
+                            .remove(&OsString::from(&tree.name));
+                        plan.warnings.push(format!(
+                            "{}: read by the RAST service without owners and ACLs, the backup \
+                             reader is unavailable: {error}",
+                            tree.prefix()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    plan
+}
+
+/// The files below `root` that the service reads itself, leaving out the
+/// top-level folders in `skip`.
+fn walk_in_process(
+    root: &Path,
+    prefix: &str,
+    skip: &HashSet<OsString>,
+    files: &mut Vec<(PathBuf, String)>,
+    warnings: &mut Vec<String>,
+    unlisted: &mut usize,
+) {
+    if !root.is_dir() {
+        return;
+    }
+    let walker = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| !(entry.depth() == 1 && skip.contains(entry.file_name())));
+    for entry in walker {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                if warnings.len() < MAX_BACKUP_WARNINGS {
+                    let path = error
+                        .path()
+                        .and_then(|path| path.strip_prefix(root).ok())
+                        .map(|rel| format!("{prefix}/{}", rel.display()))
+                        .unwrap_or_else(|| prefix.to_string());
+                    warnings.push(format!("{path}: skipped, cannot read it: {error}"));
+                } else {
+                    *unlisted += 1;
+                }
+                continue;
+            }
+        };
+        if !entry.file_type().is_file() {
             continue;
         }
-        let is_homes = prefix == "users/homes";
-        let walker = walkdir::WalkDir::new(&root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| {
-                !(is_homes && entry.depth() == 1 && skipped_homes.contains(entry.file_name()))
-            });
-        for entry in walker {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) => {
-                    unreadable += 1;
-                    if warnings.len() < MAX_BACKUP_WARNINGS {
-                        let path = error
-                            .path()
-                            .and_then(|path| path.strip_prefix(&root).ok())
-                            .map(|rel| format!("{prefix}/{}", rel.display()))
-                            .unwrap_or_else(|| prefix.to_string());
-                        warnings.push(format!("{path}: skipped, cannot read it: {error}"));
-                    }
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel = entry
-                .path()
-                .strip_prefix(&root)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| entry.file_name().to_string_lossy().to_string());
-            files.push((entry.path().to_path_buf(), format!("{prefix}/{rel}")));
-        }
+        let rel = entry
+            .path()
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| entry.file_name().to_string_lossy().to_string());
+        files.push((entry.path().to_path_buf(), format!("{prefix}/{rel}")));
     }
-    let listed = warnings.len();
-    let total = skipped_homes.len() + unreadable;
-    if total > listed {
+}
+
+/// The files of the `users` scope that the service reads itself (legacy
+/// HOMEs and shared folders), and what could not be read.
+fn in_process_files(
+    cfg: &Config,
+    skip_homes: &HashSet<OsString>,
+    skip_shared: &HashSet<OsString>,
+) -> (Vec<(PathBuf, String)>, Vec<String>, usize) {
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    let mut unlisted = 0usize;
+    walk_in_process(
+        &cfg.homes_dir(),
+        "users/homes",
+        skip_homes,
+        &mut files,
+        &mut warnings,
+        &mut unlisted,
+    );
+    walk_in_process(
+        &cfg.shared_dir(),
+        "users/shared",
+        skip_shared,
+        &mut files,
+        &mut warnings,
+        &mut unlisted,
+    );
+    (files, warnings, unlisted)
+}
+
+/// At most [`MAX_BACKUP_WARNINGS`], then how many more there were.
+fn cap_warnings(warnings: &mut Vec<String>, unlisted: usize) {
+    let mut more = unlisted;
+    if warnings.len() > MAX_BACKUP_WARNINGS {
+        more += warnings.len() - MAX_BACKUP_WARNINGS;
+        warnings.truncate(MAX_BACKUP_WARNINGS);
+    }
+    if more > 0 {
         warnings.push(format!(
-            "and {} more entries that could not be read",
-            total - listed
+            "and {more} more entries that could not be read or were left out"
         ));
     }
-    (files, warnings)
 }
 
 /// Default output directory for backups.
@@ -212,6 +456,28 @@ pub async fn create(
     out_dir: Option<&Path>,
     progress: Option<ProgressFn>,
 ) -> AppResult<BackupMeta> {
+    create_with(
+        cfg,
+        pool,
+        scopes,
+        note,
+        out_dir,
+        progress,
+        &BackupEnv::from_config(cfg),
+    )
+    .await
+}
+
+/// [`create`] with the owners and the helper of `env`.
+pub(crate) async fn create_with(
+    cfg: &Config,
+    pool: Option<&SqlitePool>,
+    scopes: &[String],
+    note: &str,
+    out_dir: Option<&Path>,
+    progress: Option<ProgressFn>,
+    env: &BackupEnv,
+) -> AppResult<BackupMeta> {
     let scopes = normalize_scopes(scopes)?;
     let out_dir = out_dir
         .map(Path::to_path_buf)
@@ -225,7 +491,7 @@ pub async fn create(
     let final_path = out_dir.join(&file_name);
 
     let mut guard = BackupLock::acquire(cfg)?;
-    let result = create_inner(cfg, pool, &scopes, note, &final_path, now, &progress).await;
+    let result = create_inner(cfg, pool, &scopes, note, &final_path, now, &progress, env).await;
     guard.release();
     let meta = result?;
 
@@ -249,6 +515,7 @@ pub async fn create(
     Ok(meta)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_inner(
     cfg: &Config,
     pool: Option<&SqlitePool>,
@@ -257,6 +524,7 @@ async fn create_inner(
     final_path: &Path,
     created_at: i64,
     progress: &Option<ProgressFn>,
+    env: &BackupEnv,
 ) -> AppResult<BackupMeta> {
     let tmp_root = cfg.data_dir.join("tmp");
     std::fs::create_dir_all(&tmp_root)?;
@@ -353,15 +621,20 @@ async fn create_inner(
     }
 
     // ---- user data ---------------------------------------------------------
-    let mut user_files: Vec<(PathBuf, String)> = Vec::new();
-    let mut warnings = Vec::new();
-    if scopes.iter().any(|s| s == "users") {
+    let users_scope = scopes.iter().any(|s| s == "users");
+    let mut users = UsersPlan::default();
+    if users_scope {
         // The work folder was made by this process: its owner is the
         // service.
         use std::os::unix::fs::MetadataExt;
-        let service_uid = std::fs::metadata(&work_dir)?.uid();
-        (user_files, warnings) = self::user_files(cfg, service_uid);
+        let service_uid = match env.service_uid {
+            Some(uid) => uid,
+            None => std::fs::metadata(&work_dir)?.uid(),
+        };
+        users = plan_users(cfg, pool, env, service_uid).await;
     }
+    let mut warnings = std::mem::take(&mut users.warnings);
+    let mut preserved_trees: Vec<String> = Vec::new();
 
     // ---- build the archive -------------------------------------------------
     let total_units = 100u64;
@@ -390,6 +663,7 @@ async fn create_inner(
                 path: path.to_string(),
                 size: data.len() as u64,
                 sha256: sha256_bytes(data),
+                owners_preserved: false,
             });
             Ok(())
         };
@@ -415,7 +689,72 @@ async fn create_inner(
             add_bytes(&mut builder, &mut entries, "apps/apps.json", &data)?;
         }
 
-        // User files (streamed one by one, bounded memory)
+        // HOMEs in one-HOME mode and migrated shared folders, through the
+        // backup reader (streamed, bounded memory). A shared folder that the
+        // reader refuses is read by the service below, as before.
+        let tree_total = users.trees.len() as u64;
+        for (index, tree) in std::mem::take(&mut users.trees).into_iter().enumerate() {
+            let Some(access) = &users.reader else {
+                break;
+            };
+            emit(
+                progress,
+                30 + (index as u64 * 25) / tree_total.max(1),
+                total_units,
+                format!("reading {} through the backup reader", tree.prefix()),
+            );
+            match reader::archive_tree(access, &tree, builder.get_mut(), &mut entries)? {
+                reader::Outcome::Written {
+                    complete,
+                    files,
+                    bytes,
+                    warnings: tree_warnings,
+                } => {
+                    tracing::info!(
+                        tree = %tree.prefix(),
+                        complete,
+                        files,
+                        bytes,
+                        "backup read a tree through the backup reader"
+                    );
+                    preserved_trees.push(tree.prefix());
+                    warnings.extend(tree_warnings);
+                }
+                reader::Outcome::Refused(reason) => {
+                    tracing::warn!(tree = %tree.prefix(), %reason, "the backup reader did not read a tree");
+                    match tree.kind {
+                        TreeKind::Home => {
+                            warnings.push(skipped_home(&tree.name, "its Linux account", &reason))
+                        }
+                        TreeKind::Shared => {
+                            users
+                                .not_in_process_shared
+                                .remove(&OsString::from(&tree.name));
+                            warnings.push(format!(
+                                "{}: read by the RAST service without owners and ACLs, {reason}",
+                                tree.prefix()
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Legacy HOMEs and shared folders, read by the service (streamed one
+        // by one, bounded memory).
+        let mut unlisted = 0usize;
+        let mut user_files: Vec<(PathBuf, String)> = Vec::new();
+        if users_scope {
+            let (files, unreadable, more) = in_process_files(
+                cfg,
+                &users.not_in_process_homes,
+                &users.not_in_process_shared,
+            );
+            user_files = files;
+            warnings.extend(unreadable);
+            unlisted = more;
+        }
+        cap_warnings(&mut warnings, unlisted);
         let user_total = user_files.len() as u64;
         for (index, (source, target)) in user_files.iter().enumerate() {
             let mut file = match File::open(source) {
@@ -438,9 +777,10 @@ async fn create_inner(
                 path: target.clone(),
                 size,
                 sha256: sha256_file(source).unwrap_or_default(),
+                owners_preserved: false,
             });
             if index % 32 == 0 {
-                let done = 30 + ((index as u64 * 55) / user_total.max(1));
+                let done = 55 + ((index as u64 * 30) / user_total.max(1));
                 emit(
                     progress,
                     done,
@@ -462,6 +802,7 @@ async fn create_inner(
             note: note.to_string(),
             entries: entries.clone(),
             warnings: warnings.clone(),
+            preserved_trees: preserved_trees.clone(),
         };
         let manifest_data = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| AppError::internal(format!("cannot serialise manifest: {e}")))?;
@@ -611,6 +952,8 @@ pub async fn verify(path: &Path) -> AppResult<Value> {
             "scopes": manifest.scopes,
             "note": manifest.note,
             "entries": manifest.entries.len(),
+            "ownersPreserved": manifest.entries.iter().filter(|entry| entry.owners_preserved).count(),
+            "preservedTrees": manifest.preserved_trees,
         },
         "checks": checks,
         "mismatches": mismatches,
@@ -895,11 +1238,29 @@ mod tests {
             FileConfig {
                 data_dir: Some(dir.join("data")),
                 storage_dir: Some(dir.join("storage")),
+                // Never the host's helper, even where Xpra is installed.
+                native_enabled: Some(false),
                 ..Default::default()
             },
             |_| None,
         )
         .unwrap()
+    }
+
+    /// What the service reads itself, and the warnings, for a service uid.
+    async fn user_files(cfg: &Config, service_uid: u32) -> (Vec<(PathBuf, String)>, Vec<String>) {
+        let env = BackupEnv {
+            service_uid: Some(service_uid),
+            container_owner_uid: 0,
+            native: None,
+        };
+        let plan = plan_users(cfg, None, &env, service_uid).await;
+        assert!(plan.trees.is_empty());
+        let (files, unreadable, _) =
+            in_process_files(cfg, &plan.not_in_process_homes, &plan.not_in_process_shared);
+        let mut warnings = plan.warnings;
+        warnings.extend(unreadable);
+        (files, warnings)
     }
 
     #[tokio::test]
@@ -972,8 +1333,8 @@ mod tests {
             .unwrap_or(false)
     }
 
-    #[test]
-    fn homes_in_one_home_mode_are_skipped_with_a_warning() {
+    #[tokio::test]
+    async fn homes_in_one_home_mode_are_skipped_with_a_warning() {
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let cfg = test_cfg(dir.path());
@@ -987,7 +1348,7 @@ mod tests {
         let me = std::fs::metadata(dir.path()).unwrap().uid();
 
         // Every HOME is the service's: everything is in.
-        let (files, warnings) = user_files(&cfg, me);
+        let (files, warnings) = user_files(&cfg, me).await;
         let mut targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
         targets.sort();
         assert_eq!(
@@ -1002,7 +1363,7 @@ mod tests {
 
         // HOMEs of another uid (one-HOME mode) are left out, by name, and
         // shared folders are still in.
-        let (files, warnings) = user_files(&cfg, me.wrapping_add(1));
+        let (files, warnings) = user_files(&cfg, me.wrapping_add(1)).await;
         let targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
         assert_eq!(targets, ["users/shared/team/plan.txt"]);
         assert_eq!(warnings.len(), 2, "{warnings:?}");

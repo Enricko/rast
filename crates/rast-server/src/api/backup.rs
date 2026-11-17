@@ -485,12 +485,18 @@ pub async fn restore_guide(
             {"title": "Restart and verify", "command": "sudo systemctl start rast.service && rast status",
              "detail": "Sign in and check File Station, users and Activity Logs."},
             {"title": "Restore user files (optional)", "command": format!(
-                "sudo tar -xzf {archive} -C {homes} --strip-components=2 users/homes && sudo tar -xzf {archive} -C {shared} --strip-components=2 users/shared && sudo chown -R rast:rast {homes} {shared}",
+                "sudo tar --numeric-owner --same-owner --acls --xattrs -xzf {archive} -C {homes} --strip-components=2 users/homes && sudo tar --numeric-owner --same-owner --acls --xattrs -xzf {archive} -C {shared} --strip-components=2 users/shared",
                 archive = archive.display(),
                 homes = state.config.homes_dir().display(),
                 shared = state.config.shared_dir().display(),
              ),
-             "detail": "Only for backups that include the users scope. Stop RAST first and try the command on an isolated copy before restoring over live data; existing files with the same names are overwritten."}
+             "detail": "Only for backups that include the users scope. Stop RAST first and try the command on an isolated copy before restoring over live data; existing files with the same names are overwritten. Run as root, tar gives HOMEs in one-HOME mode and migrated shared folders (preservedTrees in the archive's manifest.json) their numeric owners, modes and ACLs back."},
+            {"title": "Give legacy folders back to the service", "command": format!(
+                "sudo chown -R rast:rast {homes}/<username> {shared}/<folder>",
+                homes = state.config.homes_dir().display(),
+                shared = state.config.shared_dir().display(),
+             ),
+             "detail": "Only for the restored folders that are NOT listed under preservedTrees: the service read them without owners, so tar restores them as root. Never run it over the whole homes or shared folder, and never for a folder listed under preservedTrees (a HOME in one-HOME mode belongs to its rast-u<id> account, a migrated container to root). Then start RAST: its shared folder repair pass gives migrated shared folders their group layout back. Check with: sudo -u rast rast doctor"}
         ],
         "rollback": "Database migrations are forward-only: a RAST binary older than the database schema refuses to start. To roll back a release, stop the service, restore the database backup taken before the upgrade, then install the older binary. Binaries older than 0.2.0 do not enforce group policy (only legacy shared-folder memberships), so review access after such a rollback; writes made after the backup are lost.",
         "warning": "Deployed application data (container volumes) is NOT part of a RAST backup; back it up with the application's own procedure."
@@ -648,6 +654,22 @@ mod access_policy_tests {
         assert!(files.contains("users/shared"), "{files}");
         let homes = server.state.config.homes_dir().display().to_string();
         assert!(files.contains(&homes), "targets storage homes: {files}");
+        // Owners and ACLs of one-HOME HOMEs and migrated shared folders are
+        // kept, and nothing hands every HOME to the service.
+        assert!(
+            files.contains("--numeric-owner --same-owner --acls"),
+            "{files}"
+        );
+        for command in commands.iter().filter(|command| command.contains("chown")) {
+            assert!(
+                command.contains(&format!("{homes}/<username>")),
+                "{command}"
+            );
+            assert!(
+                !command.contains(&format!("{homes} ")) && !command.ends_with(&homes),
+                "never the whole homes folder: {command}"
+            );
+        }
         assert!(guide["rollback"]
             .as_str()
             .is_some_and(|text| text.contains("refuses to start")));
