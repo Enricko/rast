@@ -574,6 +574,13 @@ impl LinuxApps {
         self.linux_apps_enabled
     }
 
+    /// Whether the account is in the native pilot (`native_pilot_prefixes`,
+    /// ADR 0007). Outside it every Linux app is invisible to the account,
+    /// whatever the backend and its role, and it cannot start a session.
+    pub fn pilot_allows(&self, user: &AuthUser) -> bool {
+        self.config.native_pilot.allows_user(&user.username)
+    }
+
     /// Reject Linux app mutations when the feature is quarantined.
     fn ensure_linux_apps_enabled(&self) -> AppResult<()> {
         if self.linux_apps_enabled {
@@ -803,7 +810,7 @@ impl LinuxApps {
 
     /// One of the person's own native sessions, if it is running.
     pub async fn native_session_json(&self, user: &AuthUser) -> AppResult<Option<Value>> {
-        if !self.native_enabled {
+        if !self.native_enabled || !self.pilot_allows(user) {
             return Ok(None);
         }
         self.native.session_json(user).await
@@ -813,7 +820,7 @@ impl LinuxApps {
     pub async fn native_launch(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
         self.ensure_native()?;
         let row = self.row(id).await?;
-        if !row.visible_to(user) {
+        if !row.visible_to(user) || !self.pilot_allows(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }
         if !row.is_native() {
@@ -1121,6 +1128,9 @@ impl LinuxApps {
     /// The app list as `user` may see it: everything for an administrator,
     /// only shared apps with a finished build for everyone else.
     pub async fn list(&self, user: &AuthUser) -> AppResult<Vec<Value>> {
+        if !self.pilot_allows(user) {
+            return Ok(Vec::new());
+        }
         let sql = if user.is_admin() {
             format!("SELECT {APP_COLUMNS} FROM linux_apps ORDER BY name COLLATE NOCASE, id")
         } else {
@@ -1143,7 +1153,7 @@ impl LinuxApps {
 
     pub async fn get(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
         let row = self.row(id).await?;
-        if !row.visible_to(user) {
+        if !row.visible_to(user) || !self.pilot_allows(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }
         let running = self.running_counts().get(id).copied().unwrap_or(0);
@@ -1160,7 +1170,7 @@ impl LinuxApps {
 
     pub async fn icon(&self, user: &AuthUser, id: &str) -> AppResult<(String, Vec<u8>)> {
         let row = self.row(id).await?;
-        if !row.visible_to(user) {
+        if !row.visible_to(user) || !self.pilot_allows(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }
         let icon: Option<(Option<String>, Option<Vec<u8>>)> =
@@ -2284,7 +2294,7 @@ impl LinuxApps {
     /// Open an app for `user`: their running copy, or a new one.
     pub async fn open(self: &Arc<Self>, user: &AuthUser, id: &str) -> AppResult<Value> {
         let row = self.row(id).await?;
-        if !row.visible_to(user) {
+        if !row.visible_to(user) || !self.pilot_allows(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }
         // Native apps launch into the person's shared session and return that

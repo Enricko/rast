@@ -141,6 +141,16 @@ pub async fn handle(State(state): State<AppState>, request: Request) -> Response
             Ok(auth) => auth,
             Err(response) => return response,
         };
+    // The native pilot (ADR 0007): an account outside it has no session, so
+    // every key is unknown to it.
+    match in_pilot(&state.db, &state.config.native_pilot, user_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found_page(),
+        Err(error) => {
+            tracing::warn!(error = %error, "cannot load the user for the Xpra proxy");
+            return plain_error(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    }
     let Some(session) = state.linux_apps.find_native_session(key) else {
         return not_found_page();
     };
@@ -314,6 +324,22 @@ async fn authenticate(
         Some((true,)) => Ok((record.user_id, record.session_id)),
         _ => Err(unauthorized_page()),
     }
+}
+
+/// Whether the account is in the native pilot (always, without one).
+async fn in_pilot(
+    db: &sqlx::SqlitePool,
+    pilot: &crate::config::NativePilot,
+    user_id: i64,
+) -> Result<bool, sqlx::Error> {
+    if !pilot.is_active() {
+        return Ok(true);
+    }
+    let username: Option<String> = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(db)
+        .await?;
+    Ok(username.is_some_and(|name| pilot.allows_user(&name)))
 }
 
 /// Is a WebSocket upgrade from this origin allowed? The browser must be on
@@ -1151,6 +1177,28 @@ mod tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn only_accounts_in_the_native_pilot_pass() {
+        let (_dir, db) = test_db().await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at, active)
+             VALUES (3, 't-carol', 'x', 'user', 1, 1, 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        let off = crate::config::NativePilot::off();
+        let pilot = crate::config::NativePilot::with_prefixes(["t-"]).unwrap();
+        for user in [1, 2, 3, 99] {
+            assert!(in_pilot(&db, &off, user).await.unwrap(), "{user}");
+        }
+        // alice is an administrator: outside the pilot all the same.
+        assert!(!in_pilot(&db, &pilot, 1).await.unwrap());
+        assert!(!in_pilot(&db, &pilot, 2).await.unwrap());
+        assert!(in_pilot(&db, &pilot, 3).await.unwrap());
+        assert!(!in_pilot(&db, &pilot, 99).await.unwrap(), "no such account");
     }
 
     #[tokio::test]

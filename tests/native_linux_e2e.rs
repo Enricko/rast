@@ -898,6 +898,193 @@ async fn another_users_session_cookie_cannot_open_an_xpra_key() {
     assert_ne!(alice.user_id, bob.user_id);
 }
 
+/// The native pilot (ADR 0007): only `t-` accounts.
+async fn pilot_server() -> TestServer {
+    TestServer::start_with(|mut file| {
+        file.native_pilot_prefixes = Some(vec!["t-".into()]);
+        file
+    })
+    .await
+}
+
+#[tokio::test]
+async fn accounts_outside_the_native_pilot_see_no_linux_apps_admins_included() {
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    server.seed_app("native-app", "native", "ready", 1).await;
+    server.seed_app("docker-app", "docker", "ready", 1).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    for session in [&admin, &alice] {
+        // The list: no apps, no session and the feature off (the UI hides
+        // it), with the same limits.
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["apps"], json!([]), "{body}");
+        assert_eq!(body["sessions"], json!([]), "{body}");
+        assert!(body["session"].is_null(), "{body}");
+        for flag in ["linuxAppsEnabled", "nativeEnabled", "dockerEnabled"] {
+            assert_eq!(body[flag], false, "{flag}: {body}");
+        }
+        assert_eq!(body["limits"]["idleMinutes"], 2, "{body}");
+        // Every other route: like an app it cannot see.
+        for (method, path) in [
+            ("GET", "/api/linux-apps/native-app"),
+            ("GET", "/api/linux-apps/native-app/icon"),
+            ("POST", "/api/linux-apps/native-app/launch"),
+            ("POST", "/api/linux-apps/docker-app/open"),
+            ("GET", "/api/linux-apps/session"),
+            ("POST", "/api/linux-apps/session/close"),
+            ("POST", "/api/linux-apps/session/runs/0123456789abcdef"),
+            (
+                "POST",
+                "/api/linux-apps/session/runs/0123456789abcdef/close",
+            ),
+            ("GET", "/api/linux-apps/sessions/0123456789abcdef"),
+            ("POST", "/api/linux-apps/sessions/0123456789abcdef/close"),
+            ("GET", "/api/linux-apps/sessions/0123456789abcdef/windows"),
+        ] {
+            let body = (method == "POST").then(|| json!({}));
+            let (status, _, body) = server
+                .request(method, path, body, session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+            assert_eq!(body["error"]["message"], "Linux app not found", "{path}");
+        }
+        // Management: 403 with the reason, before any validation.
+        for (method, path) in [
+            ("POST", "/api/linux-apps/install"),
+            ("POST", "/api/linux-apps/preview"),
+            ("PATCH", "/api/linux-apps/native-app"),
+            ("DELETE", "/api/linux-apps/native-app"),
+            ("POST", "/api/linux-apps/native-app/check"),
+            ("POST", "/api/linux-apps/native-app/update"),
+            ("POST", "/api/linux-apps/native-app/visibility"),
+            ("POST", "/api/linux-apps/native-app/migrate"),
+            ("POST", "/api/linux-apps/native-app/migration/rollback"),
+            ("POST", "/api/linux-apps/native-app/migration/cleanup"),
+        ] {
+            let (status, _, body) = server
+                .request(method, path, Some(json!({})), session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("native pilot"),
+                "{method} {path}: {body}"
+            );
+        }
+    }
+    // Nothing was installed or changed.
+    let apps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM linux_apps")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(apps, 2);
+    // Terminal and the rest of the API are not part of the pilot.
+    let (status, _, body) = server
+        .request("GET", "/api/auth/me", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn accounts_in_the_native_pilot_keep_linux_apps() {
+    let server = pilot_server().await;
+    server
+        .create_user("t-admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    server.seed_app("native-app", "native", "ready", 1).await;
+    for (name, password) in [("t-admin", ADMIN_PASSWORD), ("t-carol", USER_PASSWORD)] {
+        let session = server.login(name, password).await;
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["linuxAppsEnabled"], true, "{body}");
+        assert_eq!(body["nativeEnabled"], true, "{body}");
+        assert_eq!(body["apps"].as_array().map(Vec::len), Some(1), "{body}");
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps/session", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps/native-app", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    // The administrator routes still check the role.
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/preview",
+            Some(json!({})),
+            carol.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("native pilot"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn the_xpra_proxy_refuses_accounts_outside_the_native_pilot() {
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    // A session of each account (left from before the pilot, say).
+    let sessions = server.state.linux_apps.native_sessions();
+    for (key, user) in [
+        ("0123456789abcdef0123456789abcdef", admin.user_id),
+        ("fedcba9876543210fedcba9876543210", carol.user_id),
+    ] {
+        sessions.insert_for_test(rast::linux_apps::native_session::NativeSession::for_test(
+            key.to_string(),
+            user,
+        ));
+    }
+    let (status, _, _) = server
+        .request(
+            "GET",
+            "/linux-apps/session/0123456789abcdef0123456789abcdef/rast-shim.js",
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = server
+        .request(
+            "GET",
+            "/linux-apps/session/fedcba9876543210fedcba9876543210/rast-shim.js",
+            None,
+            carol.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
 fn assert_send_sync<T: Send + Sync>() {}
 
 #[test]

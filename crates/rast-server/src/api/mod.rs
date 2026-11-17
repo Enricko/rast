@@ -62,7 +62,14 @@ pub fn router(state: AppState) -> Router {
         .merge(backup::routes())
         .merge(packages::routes())
         .merge(browser::routes())
-        .merge(linux_apps::routes())
+        .merge(
+            linux_apps::routes()
+                // The native pilot: accounts outside it see no Linux apps.
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    linux_apps::pilot_gate,
+                )),
+        )
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

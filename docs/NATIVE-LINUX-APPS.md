@@ -452,6 +452,27 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
 * **Stuck app:** **End application** first; if the whole session is wedged,
   stop the session's unit or `rast-linux.slice` and launch again.
 
+## Native pilot
+
+`native_pilot_prefixes` (ADR 0007, [CONFIGURATION.md](CONFIGURATION.md))
+limits the native features to accounts whose username starts with one of
+its prefixes. For every other account, administrators included, and for
+every backend (native and legacy Docker):
+
+* `GET /api/linux-apps` answers without apps or sessions and with
+  `linuxAppsEnabled`, `nativeEnabled` and `dockerEnabled` set to `false`, so
+  the App Center section and the "Install Linux App" button disappear;
+* the management routes (install, preview, update, check, visibility,
+  uninstall, migrate and its rollback and cleanup) answer `403` with the
+  reason, and every other `/api/linux-apps*` route answers `404`, like an
+  app the account cannot see;
+* no Xpra session is started for it (`NativeSessions` refuses too), and the
+  display proxy answers `404` for any session key, also for a session left
+  from before the pilot;
+* it stays in the legacy HOME layout (no file agent, no one-HOME mode).
+
+Terminal is not part of the pilot. Without the key nothing changes.
+
 ## Limitations
 
 * Several viewers can be attached to one user's session; they share the same

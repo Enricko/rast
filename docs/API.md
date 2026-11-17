@@ -394,9 +394,21 @@ can launch their own copy, list it and read its icon. Managing apps
 administrator-only. The shared app surface is not governed by the group
 policy's `applications` (Docker) rule.
 
+With the native pilot (`native_pilot_prefixes`, ADR 0007), an account whose
+username does not start with a pilot prefix, administrators included, gets
+`GET /api/linux-apps` with `apps:[]`, `sessions:[]`, `session:null`, the
+usual `limits` and `dockerEnabled`, `nativeEnabled` and `linuxAppsEnabled`
+all `false`; `403 forbidden` (the message names the native pilot) from
+`POST /api/linux-apps/install`, `POST /api/linux-apps/preview`,
+`PATCH`/`DELETE /api/linux-apps/{id}` and `POST /api/linux-apps/{id}/check`,
+`/update`, `/visibility`, `/migrate`, `/migration/rollback` and
+`/migration/cleanup`; and `404 not_found` ("Linux app not found") from every
+other `/api/linux-apps*` route. The Xpra proxy (`/linux-apps/session/{key}/`)
+answers 404 for such an account. Without the key nothing changes.
+
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled}` — the `limits` object is flat (no nested per-backend object) |
+| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled, linuxAppsEnabled}` — the `limits` object is flat (no nested per-backend object); the flags are `false` for an account outside the native pilot |
 | POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
 | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
 | GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |

@@ -35,10 +35,17 @@
 //! | POST | `/api/linux-apps/{id}/migrate` | administrator: migrate a Docker-backed app to native |
 //! | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return it to the Docker backend |
 //! | POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: remove retained legacy data |
+//!
+//! With the native pilot (`native_pilot_prefixes`, ADR 0007), an account
+//! outside it, administrators included, gets the list without apps and
+//! with `linuxAppsEnabled`, `nativeEnabled` and `dockerEnabled` false (the
+//! UI hides the feature), 403 from every management route and 404 from
+//! every other route, like an app it cannot see ([`pilot_gate`]).
 
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderValue},
+    extract::{MatchedPath, Path, Query, Request, State},
+    http::{header, HeaderValue, Method},
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -101,7 +108,58 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+/// Why an account outside the native pilot cannot manage Linux apps.
+pub const OUTSIDE_PILOT: &str = "Linux apps are not enabled for this account: it is outside the \
+    native pilot (native_pilot_prefixes in the RAST configuration).";
+
+/// The administrator routes, by route and method (403 outside the pilot).
+const MANAGEMENT_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/api/linux-apps/install"),
+    ("POST", "/api/linux-apps/preview"),
+    ("PATCH", "/api/linux-apps/{id}"),
+    ("DELETE", "/api/linux-apps/{id}"),
+    ("POST", "/api/linux-apps/{id}/check"),
+    ("POST", "/api/linux-apps/{id}/update"),
+    ("POST", "/api/linux-apps/{id}/visibility"),
+    ("POST", "/api/linux-apps/{id}/migrate"),
+    ("POST", "/api/linux-apps/{id}/migration/rollback"),
+    ("POST", "/api/linux-apps/{id}/migration/cleanup"),
+];
+
+/// The native pilot on every `/api/linux-apps*` route (a route layer, after
+/// authentication). An account in the pilot, or every account without one,
+/// passes. Outside it: the list passes (it answers without apps), the
+/// management routes are 403 and everything else is 404, including routes
+/// added later.
+pub async fn pilot_gate(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let Some(user) = request.extensions().get::<AuthUser>() else {
+        // The handler's own extractor answers 401.
+        return next.run(request).await;
+    };
+    if state.linux_apps.pilot_allows(user) {
+        return next.run(request).await;
+    }
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|path| path.as_str().to_string())
+        .unwrap_or_default();
+    let method = request.method().clone();
+    if method == Method::GET && route == "/api/linux-apps" {
+        return next.run(request).await;
+    }
+    if MANAGEMENT_ROUTES
+        .iter()
+        .any(|(verb, path)| method.as_str() == *verb && route == *path)
+    {
+        return crate::error::AppError::Forbidden(OUTSIDE_PILOT).into_response();
+    }
+    crate::error::AppError::NotFound("Linux app not found").into_response()
+}
+
 async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    // Outside the native pilot the feature is off for this account.
+    let in_pilot = state.linux_apps.pilot_allows(&user);
     Ok(Json(json!({
         "apps": state.linux_apps.list(&user).await?,
         "sessions": state.linux_apps.my_sessions(&user),
@@ -118,9 +176,9 @@ async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<V
             "appCpus": state.config.linux_app_cpus,
             "appTasks": state.config.linux_app_tasks,
         },
-        "dockerEnabled": state.config.docker_enabled && crate::linux_apps::SUPPORTED,
-        "nativeEnabled": state.linux_apps.native_available(),
-        "linuxAppsEnabled": state.linux_apps.linux_apps_enabled(),
+        "dockerEnabled": in_pilot && state.config.docker_enabled && crate::linux_apps::SUPPORTED,
+        "nativeEnabled": in_pilot && state.linux_apps.native_available(),
+        "linuxAppsEnabled": in_pilot && state.linux_apps.linux_apps_enabled(),
     })))
 }
 

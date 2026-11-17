@@ -505,6 +505,9 @@ impl NativeSessions {
         user: &AuthUser,
         request: LaunchRequest,
     ) -> AppResult<(Value, Value)> {
+        // Backstop of the native pilot (ADR 0007): an account outside it
+        // never gets a session, whoever asks.
+        self.ensure_in_pilot(user)?;
         if request.command.is_empty() {
             return Err(AppError::bad_request("this app has no launch command"));
         }
@@ -552,6 +555,16 @@ impl NativeSessions {
 
         let (run, session_json) = self.start_run(&session, user.id, &request).await?;
         Ok((run, session_json))
+    }
+
+    /// Accounts outside the native pilot (`native_pilot_prefixes`) are
+    /// answered like an app they cannot see.
+    fn ensure_in_pilot(&self, user: &AuthUser) -> AppResult<()> {
+        if self.config.native_pilot.allows_user(&user.username) {
+            Ok(())
+        } else {
+            Err(AppError::NotFound("Linux app not found"))
+        }
     }
 
     /// The person's session as JSON, when one exists (starting, ready or just
@@ -862,6 +875,7 @@ impl NativeSessions {
     /// per-user lock plus the map re-check make concurrent callers share one
     /// session and one helper `session_start`.
     async fn ensure_session(self: &Arc<Self>, user: &AuthUser) -> AppResult<Arc<NativeSession>> {
+        self.ensure_in_pilot(user)?;
         if let Some(session) = self.session_of_user(user.id) {
             if session.status() != SessionStatus::Ended {
                 if let Some(session) = self.reusable_session(user, &session).await? {
@@ -2485,6 +2499,14 @@ async fn app_name(db: &SqlitePool, app_id: &str) -> String {
         .unwrap_or_else(|| app_id.to_string())
 }
 
+/// A live session for the proxy's tests (`feature = "test-support"`).
+#[cfg(any(test, feature = "test-support"))]
+impl NativeSessions {
+    pub fn insert_for_test(&self, session: Arc<NativeSession>) {
+        self.insert_session(session);
+    }
+}
+
 /// Constructors and observers used by the proxy's tests (`feature = "test-support"`).
 #[cfg(any(test, feature = "test-support"))]
 impl NativeSession {
@@ -3213,6 +3235,42 @@ mod tests {
             .unwrap();
         assert_eq!(helper.call_count("identity_ensure"), 1);
         assert_eq!(helper.call_count("profile_prepare"), 1, "a legacy launch");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn accounts_outside_the_native_pilot_never_get_a_session() {
+        let (_dir, db) = test_db().await;
+        let file = crate::config::FileConfig {
+            native_pilot_prefixes: Some(vec!["t-".into()]),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        let helper = Arc::new(FakeHelper::default());
+        let sessions = NativeSessions::with_helper(config, db, helper.clone(), EventBus::new());
+        // An administrator outside the pilot: a 404 before any helper call.
+        let mut admin = test_user(1);
+        admin.role = crate::auth::Role::Admin;
+        for user in [admin, test_user(2)] {
+            let error = sessions
+                .launch(&user, launch_request("code"))
+                .await
+                .expect_err("outside the pilot");
+            assert!(matches!(error, AppError::NotFound(_)), "{error}");
+            let started = sessions.ensure_session(&user).await;
+            assert!(
+                matches!(started, Err(AppError::NotFound(_))),
+                "no session outside the pilot"
+            );
+        }
+        assert!(helper.calls().is_empty(), "{:?}", helper.calls());
+        // An account in the pilot starts its session as before.
+        let mut pilot = test_user(2);
+        pilot.username = "t-bob".into();
+        sessions
+            .launch(&pilot, launch_request("code"))
+            .await
+            .unwrap();
+        assert_eq!(helper.call_count("session_start"), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
