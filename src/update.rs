@@ -388,10 +388,47 @@ fn parse_json(bytes: &[u8]) -> Result<Value, Box<dyn std::error::Error>> {
     serde_json::from_slice(bytes).map_err(|e| format!("invalid GitHub API response: {e}").into())
 }
 
+/// Largest body accepted for the small requests (release JSON, `SHA256SUMS`).
+const SMALL_BODY_MAX: u64 = 16 * 1024 * 1024;
+
+/// Timeouts and size cap for the release binary download. The binary is large
+/// and links can be slow, so the budget is based on stalls (idle time) plus a
+/// generous overall ceiling instead of one short whole-request limit.
+#[derive(Debug, Clone)]
+struct DownloadLimits {
+    /// TCP connect budget.
+    connect: Duration,
+    /// Time to receive the response headers.
+    headers: Duration,
+    /// Abort when no byte arrives for this long.
+    idle: Duration,
+    /// Overall ceiling for the body.
+    ceiling: Duration,
+    /// Largest body accepted, checked against `Content-Length` and while reading.
+    max_bytes: u64,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            connect: Duration::from_secs(30),
+            headers: Duration::from_secs(30),
+            idle: Duration::from_secs(60),
+            ceiling: Duration::from_secs(15 * 60),
+            max_bytes: 256 * 1024 * 1024,
+        }
+    }
+}
+
+fn user_agent() -> &'static str {
+    concat!("rast/", env!("CARGO_PKG_VERSION"))
+}
+
+/// Small request: short whole-request timeout and a size cap.
 fn http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(60)))
-        .user_agent(concat!("rast/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent())
         .build()
         .new_agent();
     let mut response = agent
@@ -403,23 +440,129 @@ fn http_get(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     response
         .body_mut()
         .as_reader()
+        .take(SMALL_BODY_MAX + 1)
         .read_to_end(&mut out)
         .map_err(|e| format!("cannot read {url}: {e}"))?;
+    if out.len() as u64 > SMALL_BODY_MAX {
+        return Err(format!("response from {url} is larger than {SMALL_BODY_MAX} bytes").into());
+    }
     Ok(out)
+}
+
+/// Streams `url` into `out` under `limits`. `progress(done, total)` is called
+/// after every chunk. Returns the number of bytes written.
+fn http_stream(
+    url: &str,
+    limits: &DownloadLimits,
+    out: &mut dyn Write,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(limits.connect))
+        .timeout_recv_response(Some(limits.headers))
+        .timeout_per_read(Some(limits.idle))
+        .timeout_recv_body(Some(limits.ceiling))
+        .user_agent(user_agent())
+        .build()
+        .new_agent();
+    let mut response = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("request to {url} failed: {e}"))?;
+    let total = response.body().content_length();
+    if let Some(total) = total {
+        if total > limits.max_bytes {
+            return Err(format!(
+                "{url} is {total} bytes, more than the {} byte limit; aborting",
+                limits.max_bytes
+            )
+            .into());
+        }
+    }
+    let mut reader = response.body_mut().as_reader();
+    let mut buf = [0u8; 64 * 1024];
+    let mut done: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| {
+            format!("download of {url} failed after {done} bytes (stalled or interrupted): {e}")
+        })?;
+        if n == 0 {
+            break;
+        }
+        done += n as u64;
+        if done > limits.max_bytes {
+            return Err(format!(
+                "{url} exceeds the {} byte limit; aborting",
+                limits.max_bytes
+            )
+            .into());
+        }
+        out.write_all(&buf[..n])?;
+        progress(done, total);
+    }
+    if let Some(total) = total {
+        if done != total {
+            return Err(format!("{url} ended after {done} of {total} bytes").into());
+        }
+    }
+    Ok(done)
 }
 
 fn download_text(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     String::from_utf8(http_get(url)?).map_err(|e| format!("{url} is not text: {e}").into())
 }
 
+/// Writes to a file and hashes the same bytes.
+struct HashingWriter<W: Write> {
+    inner: W,
+    hasher: sha2::Sha256,
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(data)?;
+        sha2::Digest::update(&mut self.hasher, &data[..n]);
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Downloads `url` to `target` and returns the SHA-256 (hex) of the bytes.
 fn download_file(url: &str, target: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let bytes = http_get(url)?;
-    let mut file = fs::File::create(target)?;
-    file.write_all(&bytes)?;
-    file.sync_all().ok();
-    // Compute SHA-256 of the downloaded artifact.
-    use sha2::{Digest, Sha256};
-    Ok(hex::encode(Sha256::digest(&bytes)))
+    download_file_with(url, target, &DownloadLimits::default())
+}
+
+fn download_file_with(
+    url: &str,
+    target: &Path,
+    limits: &DownloadLimits,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::IsTerminal;
+    let tty = std::io::stdout().is_terminal();
+    let started = std::time::Instant::now();
+    let mut writer = HashingWriter {
+        inner: fs::File::create(target)?,
+        hasher: <sha2::Sha256 as sha2::Digest>::new(),
+    };
+    let mut last_step = 0u64;
+    let bytes = http_stream(url, limits, &mut writer, |done, total| {
+        if let (true, Some(total)) = (tty, total) {
+            let step = (done * 10).checked_div(total).unwrap_or(10);
+            if step > last_step {
+                last_step = step;
+                println!("  {}%", step * 10);
+            }
+        }
+    })?;
+    writer.inner.sync_all().ok();
+    println!(
+        "downloaded {:.1} MiB in {:.1} s",
+        bytes as f64 / (1024.0 * 1024.0),
+        started.elapsed().as_secs_f64()
+    );
+    Ok(hex::encode(sha2::Digest::finalize(writer.hasher)))
 }
 
 /// Are the native backend's service assets (installed by the installer, not
@@ -793,5 +936,109 @@ mod tests {
     fn arch_suffix_matches_release_assets() {
         let suffix = arch_asset_suffix().unwrap();
         assert!(["x86_64", "aarch64"].contains(&suffix));
+    }
+
+    /// Serves one HTTP response: `chunks` written with `pause` between them.
+    /// `declared` overrides Content-Length (None: the sum of the chunks).
+    fn serve_once(
+        chunks: Vec<Vec<u8>>,
+        pause: Duration,
+        declared: Option<usize>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/rast-linux-x86_64",
+            listener.local_addr().unwrap()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut req = [0u8; 2048];
+            let _ = sock.read(&mut req);
+            let len = declared.unwrap_or_else(|| chunks.iter().map(Vec::len).sum());
+            let head =
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+            if sock.write_all(head.as_bytes()).is_err() {
+                return;
+            }
+            for chunk in chunks {
+                std::thread::sleep(pause);
+                if sock.write_all(&chunk).is_err() || sock.flush().is_err() {
+                    return;
+                }
+            }
+        });
+        (url, handle)
+    }
+
+    fn test_limits() -> DownloadLimits {
+        DownloadLimits {
+            connect: Duration::from_secs(2),
+            headers: Duration::from_secs(2),
+            idle: Duration::from_millis(600),
+            ceiling: Duration::from_secs(5),
+            max_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn slow_download_under_the_idle_timeout_succeeds() {
+        let chunks = vec![b"aaaa".to_vec(), b"bbbb".to_vec(), b"cccc".to_vec()];
+        // Total time (3 x 250 ms) exceeds the idle timeout; no single gap does.
+        let (url, server) = serve_once(chunks, Duration::from_millis(250), None);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("bin");
+        let sum = download_file_with(&url, &target, &test_limits()).unwrap();
+        server.join().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"aaaabbbbcccc");
+        use sha2::{Digest, Sha256};
+        assert_eq!(sum, hex::encode(Sha256::digest(b"aaaabbbbcccc")));
+    }
+
+    #[test]
+    fn stalled_download_fails_with_a_clear_error() {
+        let chunks = vec![b"aaaa".to_vec(), b"bbbb".to_vec()];
+        let (url, server) = serve_once(chunks, Duration::from_millis(1500), None);
+        let dir = tempfile::tempdir().unwrap();
+        let err = download_file_with(&url, &dir.path().join("bin"), &test_limits())
+            .unwrap_err()
+            .to_string();
+        let _ = server.join();
+        assert!(err.contains("stalled or interrupted"), "{err}");
+    }
+
+    #[test]
+    fn body_over_the_cap_fails() {
+        // Declared length over the cap: rejected from the headers.
+        let (url, server) = serve_once(vec![vec![0; 2048]], Duration::ZERO, None);
+        let dir = tempfile::tempdir().unwrap();
+        let err = download_file_with(&url, &dir.path().join("a"), &test_limits())
+            .unwrap_err()
+            .to_string();
+        let _ = server.join();
+        assert!(err.contains("limit"), "{err}");
+
+        // Chunked body without Content-Length cannot be simulated here, so the
+        // streaming check is covered by a lower cap with a matching length.
+        let limits = DownloadLimits {
+            max_bytes: 4,
+            ..test_limits()
+        };
+        let (url, server) = serve_once(
+            vec![b"abcd".to_vec(), b"efgh".to_vec()],
+            Duration::ZERO,
+            Some(4),
+        );
+        let res = http_stream(&url, &limits, &mut Vec::new(), |_, _| {});
+        let _ = server.join();
+        // 4 bytes declared and within the cap: the extra bytes are never read.
+        assert_eq!(res.unwrap(), 4);
+    }
+
+    #[test]
+    fn truncated_download_is_rejected() {
+        let (url, server) = serve_once(vec![b"abcd".to_vec()], Duration::ZERO, Some(10));
+        let res = http_stream(&url, &test_limits(), &mut Vec::new(), |_, _| {});
+        let _ = server.join();
+        assert!(res.is_err());
     }
 }

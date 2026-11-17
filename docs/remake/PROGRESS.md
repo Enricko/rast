@@ -888,6 +888,16 @@ Update it at the end of every session.
     `Shared/t-share`), then check owners (`rast:rast` inside, HOME as
     recorded) and that a new apply brings the link back.
 
+- `rast update` download timeout (2026-11-17, alpha.2 on production failed
+  with `timeout: global` on a 0.7 MB/s link): `src/update.rs` now streams the
+  binary through `http_stream` with `DownloadLimits` (connect 30 s, headers
+  30 s, idle 60 s, ceiling 15 min, cap 256 MiB, `Content-Length` check,
+  truncation check), hashing while writing; small requests keep 60 s global
+  and a 16 MiB cap. Order is unchanged: download and checksum happen before
+  the backup, service stop and binary replacement. Tests with a local
+  `TcpListener` (slow but steady, stalled, over cap, truncated). No new
+  dependency.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)

@@ -559,6 +559,14 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- `rast update` no longer fails on slow links: the release binary was
+  downloaded under one 60 s budget for the whole transfer. It now uses
+  connect and response-header timeouts (30 s), an idle timeout (60 s without
+  a byte), an overall ceiling of 15 minutes and a 256 MiB size cap (also
+  checked against `Content-Length`). Small requests (release JSON,
+  `SHA256SUMS`) keep the 60 s limit. The checksum is still verified before
+  anything is replaced; the download prints progress every 10 % on a
+  terminal and how long it took.
 - Native helper display-port firewall (security relevant): the helper
   trusted any existing nftables table `inet rast_native`, so a table left
   by an earlier helper run with another uid was never corrected. On
