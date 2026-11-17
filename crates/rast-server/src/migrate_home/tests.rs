@@ -534,3 +534,128 @@ fn rows_map_to_the_home_or_the_container_of_their_shared_folder() {
     }
     assert!(map_row(&row("ABC", "/a", "2/ABC".into()), 2, &shares).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// The native pilot (ADR 0007)
+// ---------------------------------------------------------------------------
+
+/// [`fixture`] with `native_pilot_prefixes = ["t-"]`: `T-Alice` is in the
+/// pilot, `admin` and the shared folder `Team` are not.
+async fn pilot_fixture() -> Fixture {
+    let mut fx = fixture().await;
+    fx.cfg.native_pilot = NativePilot::with_prefixes(["t-"]).unwrap();
+    fx
+}
+
+#[tokio::test]
+async fn apply_and_rollback_refuse_an_account_outside_the_native_pilot() {
+    let fx = pilot_fixture().await;
+    let pilot = &fx.cfg.native_pilot;
+    for mode in [Mode::Apply, Mode::Rollback] {
+        assert!(matches!(
+            run_with(&fx.env(), mode, &user("admin"), &migrated).await,
+            Err(AppError::Forbidden(OUTSIDE_PILOT))
+        ));
+        assert_eq!(
+            refuse_outside_pilot(pilot, mode, "admin"),
+            Some(OUTSIDE_PILOT)
+        );
+        assert_eq!(refuse_outside_pilot(pilot, mode, "T-Alice"), None);
+    }
+    assert!(fx.ops().is_empty(), "nothing was asked of the helper");
+    // The dry run still reports it, marked.
+    assert_eq!(refuse_outside_pilot(pilot, Mode::DryRun, "admin"), None);
+    let outcomes = run_with(&fx.env(), Mode::DryRun, &user("admin"), &migrated)
+        .await
+        .unwrap();
+    assert!(
+        outcomes[0].ok && outcomes[0].outside_pilot,
+        "{:?}",
+        outcomes[0]
+    );
+    assert_eq!(fx.ops(), ["home_migrate_scan"]);
+    let lines = describe(Mode::DryRun, &outcomes[0]);
+    assert_eq!(
+        lines[1],
+        "  outside the native pilot: apply and rollback refuse this account"
+    );
+    // Without the pilot nothing is refused.
+    assert_eq!(
+        refuse_outside_pilot(&NativePilot::off(), Mode::Apply, "admin"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn all_selects_only_accounts_in_the_native_pilot() {
+    let fx = pilot_fixture().await;
+    // One recycle bin entry of the shared folder outside the pilot (Alice
+    // cannot open it any more) and one of her HOME.
+    fx.add_trash(ID1, 2, "/shared/Team/a.txt", &format!("2/{ID1}"))
+        .await;
+    fx.add_trash(ID2, 2, "/docs/b.txt", &format!("2/{ID2}"))
+        .await;
+    for mode in [Mode::Apply, Mode::Rollback] {
+        fx.calls.lock().unwrap().clear();
+        let outcomes = run_with(&fx.env(), mode, &Selection::All, &migrated)
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        let (admin, alice) = (&outcomes[0], &outcomes[1]);
+        assert!(admin.ok && admin.outside_pilot && admin.report.is_null());
+        assert_eq!(
+            describe(mode, admin),
+            ["admin (user 1): skipped (outside the native pilot)"]
+        );
+        assert!(alice.ok && !alice.outside_pilot, "{alice:?}");
+        for (op, request) in fx.calls.lock().unwrap().iter() {
+            assert_eq!(request["userId"], 2, "{op}: {request}");
+        }
+        if mode == Mode::Apply {
+            // The entry of the shared folder outside the pilot stays.
+            let batches = fx.requests("home_migrate_trash");
+            assert_eq!(batches.len(), 1);
+            assert_eq!(
+                batches[0]["entries"],
+                json!([{"id": ID2, "deletedAt": 1_794_823_200_000i64, "path": "docs/b.txt"}])
+            );
+            assert_eq!(alice.trash.left.len(), 1);
+            assert!(alice.trash.left[0].contains("outside the native pilot"));
+            assert_eq!(fx.trash_ids(2).await, [ID1]);
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_account_that_can_open_a_shared_folder_outside_the_pilot_stays_legacy() {
+    let fx = pilot_fixture().await;
+    sqlx::query("INSERT INTO share_members (share_id, user_id, perms) VALUES (?, 2, 'read')")
+        .bind(TEAM)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let outcomes = run_with(&fx.env(), Mode::Apply, &user("t-alice"), &migrated)
+        .await
+        .unwrap();
+    let alice = &outcomes[0];
+    assert!(!alice.ok);
+    assert_eq!(alice.outside_pilot_shares, ["Team"]);
+    assert!(alice
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("outside the native pilot"));
+    assert!(fx.ops().is_empty(), "nothing was asked of the helper");
+    // Even when its container is still legacy, the reason is the pilot
+    // (`rast migrate shares` would refuse Team).
+    let legacy = |_: &Path| true;
+    let outcomes = run_with(&fx.env(), Mode::DryRun, &user("t-alice"), &legacy)
+        .await
+        .unwrap();
+    let alice = &outcomes[0];
+    assert!(alice.legacy_shares.is_empty(), "{alice:?}");
+    assert!(alice
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("outside the native pilot") && warning.contains("Team")));
+}

@@ -1026,6 +1026,11 @@ async fn serve(
     for warning in rast::config::warnings(&cfg) {
         tracing::warn!("{warning}");
     }
+    tracing::info!(
+        native_enabled = cfg.native_enabled,
+        "native pilot: {}",
+        cfg.native_pilot.describe()
+    );
 
     // One server per data directory; also lets `rast restore` detect a live
     // server regardless of how it was started.
@@ -1447,6 +1452,13 @@ async fn migrate_command(
     if !cfg.native_enabled {
         return Err("shared folder groups need the native backend (native_enabled = true)".into());
     }
+    // Outside the native pilot: refused before the server must be stopped.
+    if let Some(refusal) = share
+        .as_deref()
+        .and_then(|name| migrate_shares::refuse_outside_pilot(&cfg.native_pilot, mode, name))
+    {
+        return Err(refusal.into());
+    }
     // Apply and rollback change permissions under a running server's feet
     // (D9): they need the server stopped.
     let _instance = if mode == Mode::DryRun {
@@ -1461,8 +1473,10 @@ async fn migrate_command(
     };
     let pool = db::init(&cfg).await?;
     let native = rast::native::client::NativeClient::from_config(&cfg);
-    let outcomes = migrate_shares::run(&pool, &native, mode, share.as_deref()).await?;
-    let failed = outcomes.iter().filter(|outcome| !outcome.ok).count();
+    let outcomes =
+        migrate_shares::run_in_pilot(&pool, &native, &cfg.native_pilot, mode, share.as_deref())
+            .await?;
+    let failed = outcomes.iter().filter(|run| !run.outcome.ok).count();
     if json {
         println!(
             "{}",
@@ -1481,7 +1495,7 @@ async fn migrate_command(
             println!("There are no shared folders.");
         }
         for outcome in &outcomes {
-            for line in migrate_shares::describe(mode, outcome) {
+            for line in migrate_shares::describe_in_pilot(mode, outcome) {
                 println!("{line}");
             }
         }
@@ -1515,6 +1529,12 @@ async fn migrate_home_command(
     };
     if !cfg.native_enabled {
         return Err("one-HOME mode needs the native backend (native_enabled = true)".into());
+    }
+    // Outside the native pilot: refused before the server must be stopped.
+    if let Selection::User(name) = &selection {
+        if let Some(refusal) = migrate_home::refuse_outside_pilot(&cfg.native_pilot, mode, name) {
+            return Err(refusal.into());
+        }
     }
     // Apply and rollback change owners under a running server's feet (D9).
     let _instance = if mode == Mode::DryRun {

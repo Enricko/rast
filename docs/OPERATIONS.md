@@ -728,6 +728,10 @@ Every mode needs `--share <name>` (one shared folder) or `--all` (every
 one); without either the command stops with an error, so a run never
 covers every shared folder by default.
 
+With the native pilot (`native_pilot_prefixes`), apply and `--rollback`
+refuse a shared folder outside it and `--all` skips those; see
+[Testing on production with the native pilot](#testing-on-production-with-the-native-pilot).
+
 - The apply first writes a journal of every entry's group, mode and ACLs to
   `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl` (root,
   0700/0600) and syncs it, then gives the container `root:rast-s<h>-rw`
@@ -817,7 +821,10 @@ sudo -u rast rast migrate home --user <name> --rollback    # undo (server stoppe
 `--all` instead of `--user <name>` covers every account; one of the two is
 required. `--json` prints a machine-readable report; the exit code is 1
 when any account failed (the others are still done). Back up `/etc/rast`,
-`/var/lib/rast` and `/srv/rast` first.
+`/var/lib/rast` and `/srv/rast` first. With the native pilot
+(`native_pilot_prefixes`), apply and `--rollback` refuse an account outside
+it and `--all` skips those; see
+[Testing on production with the native pilot](#testing-on-production-with-the-native-pilot).
 
 - **Dry run.** Per account: the size of the HOME (and on disk), the
   entries that change owner (`rast` → `rast-u<id>`), the ACL entries of
@@ -957,6 +964,50 @@ kernel limit ("filesystem, best effort": files moved in with another
 group, `chgrp` or group-preserving copies are not counted against the
 folder, only against their owner).
 
+## Testing on production with the native pilot
+
+When a release with new native features is tried on a host that serves real
+accounts, `native_pilot_prefixes` (ADR 0007) keeps those features to test
+accounts and test shared folders, so the real ones keep the 0.18.x
+behaviour until the migration of real accounts is approved.
+
+1. Update first, then add the key: a release that does not know
+   `native_pilot_prefixes` refuses to start with it in `/etc/rast/rast.toml`
+   (unknown keys are rejected). After `sudo rast update --version <version>`
+   and a health check, add to `/etc/rast/rast.toml`:
+
+   ```toml
+   native_pilot_prefixes = ["t-"]
+   ```
+
+   then restart RAST. `rast doctor` and the server log at start show
+   `native pilot: on: only accounts and shared folders whose names start
+   with "t-"`.
+2. Test with accounts whose username starts with `t-` and shared folders
+   whose name and container start with `t-` (create a shared folder with its
+   final `t-` name: the container is the name at creation and never
+   changes).
+3. Outside the pilot, administrators included, nothing native happens: no
+   Linux apps (empty list, `linuxAppsEnabled: false`, 404 and 403 from the
+   other routes, no Xpra session or display), legacy HOME layout and RAST
+   recycle bin and quota, no Linux groups, no helper call for their groups
+   or kernel quota. Terminal is unchanged.
+4. `rast migrate shares` and `rast migrate home`: `--dry-run` still reports
+   everything and marks entries outside the pilot; apply and `--rollback` of
+   a `--share` or `--user` outside it are refused (nothing changes, exit
+   code 1, before the server must be stopped), and `--all` covers only the
+   pilot and lists the rest as skipped. A pilot account that can open a
+   shared folder outside the pilot is not moved to one HOME (it would lose
+   access to that folder from its apps).
+5. A shared folder renamed across the boundary (in or out) leaves the
+   pilot: RAST does nothing more to its container or its groups, which keep
+   their pilot members until the pilot ends. Do not rename test shared
+   folders out of `t-`.
+6. To end the pilot, remove the key (every account then gets the native
+   features at the next start: migrate real accounts first, or keep the key
+   until then). `native_pilot_prefixes = []` turns the native features off
+   for everyone without removing them.
+
 ## The private data folder
 
 Since 1.0.1 the database (`rast.db` with its `-wal` and `-shm` files) and
@@ -1016,6 +1067,7 @@ existing encrypted app secrets unreadable. Procedure if rotation is required:
 | Upgrade / downgrade | [Updates](#updates), [Rollback](#rollback) |
 | Disk full | [Monitoring and alerting](#monitoring-and-alerting), then free space and run `rast doctor` |
 | Move shared folders to Linux groups | [Shared folders as Linux groups](#shared-folders-as-linux-groups-rast-migrate-shares) |
+| Test native features on production with test accounts | [Testing on production with the native pilot](#testing-on-production-with-the-native-pilot) |
 | Compromised admin account | [User and session operations](#user-and-session-operations), rotate passwords/keys, review audit logs, see [SECURITY.md](../SECURITY.md) |
 
 ## Troubleshooting

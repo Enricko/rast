@@ -21,6 +21,14 @@
 //! Every account is done on its own: a failure is reported and the others
 //! go on. Apply and rollback need the server stopped (the instance lock,
 //! D9).
+//!
+//! With the native pilot (`native_pilot_prefixes`, ADR 0007) a dry run
+//! still reports every account and marks the ones outside the pilot;
+//! apply and rollback refuse a `--user` outside it before any helper call,
+//! and `--all` skips those (listed as skipped). Apply also refuses an
+//! account in the pilot that can open a shared folder outside it (in
+//! one-HOME mode it could not open it), and recycle bin entries of such
+//! shared folders stay in the legacy recycle bin.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, Write};
@@ -31,7 +39,7 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 
 use crate::auth::AuthUser;
-use crate::config::Config;
+use crate::config::{Config, NativePilot};
 use crate::error::{AppError, AppResult};
 use crate::native::client::NativeClient;
 use crate::native::protocol::MAX_TRASH_BATCH;
@@ -44,6 +52,18 @@ pub enum Mode {
     DryRun,
     Apply,
     Rollback,
+}
+
+/// Why apply and rollback refuse an account outside the native pilot.
+pub const OUTSIDE_PILOT: &str = "this account is outside the native pilot \
+    (native_pilot_prefixes): apply and rollback only run for accounts whose username starts \
+    with a pilot prefix; --dry-run still reports it";
+
+/// Refuse apply and rollback of a `--user` outside the native pilot
+/// before the server is asked to stop (the CLI's first check; usernames
+/// compare in lower case, so the name typed is enough).
+pub fn refuse_outside_pilot(pilot: &NativePilot, mode: Mode, name: &str) -> Option<&'static str> {
+    (mode != Mode::DryRun && !pilot.allows_user(name)).then_some(OUTSIDE_PILOT)
 }
 
 impl Mode {
@@ -111,6 +131,14 @@ pub struct UserOutcome {
     pub warnings: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The account is outside the native pilot: a dry run reports it,
+    /// `--all` with apply or rollback skips it (no helper call).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside_pilot: bool,
+    /// Shared folders the account can open that are outside the native
+    /// pilot: apply refuses while there are any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outside_pilot_shares: Vec<String>,
 }
 
 /// What a run works with.
@@ -138,10 +166,17 @@ async fn run_with(
     selection: &Selection,
     is_legacy: &(dyn Fn(&Path) -> bool + Sync),
 ) -> AppResult<Vec<UserOutcome>> {
+    let pilot = &env.cfg.native_pilot;
     let accounts = match selection {
-        Selection::User(name) => vec![crate::users::find_by_username(env.pool, name)
-            .await?
-            .ok_or(AppError::NotFound("no account has that name"))?],
+        Selection::User(name) => {
+            let account = crate::users::find_by_username(env.pool, name)
+                .await?
+                .ok_or(AppError::NotFound("no account has that name"))?;
+            if mode != Mode::DryRun && !pilot.allows_user(&account.username) {
+                return Err(AppError::Forbidden(OUTSIDE_PILOT));
+            }
+            vec![account]
+        }
         Selection::All => {
             let ids: Vec<i64> = sqlx::query_scalar("SELECT id FROM users ORDER BY id")
                 .fetch_all(env.pool)
@@ -169,7 +204,15 @@ async fn run_with(
             legacy_shares: Vec::new(),
             warnings: Vec::new(),
             error: None,
+            outside_pilot: !pilot.allows_user(&account.username),
+            outside_pilot_shares: Vec::new(),
         };
+        if outcome.outside_pilot && mode != Mode::DryRun {
+            // `--all`: skipped, never sent to the helper.
+            outcome.ok = true;
+            out.push(outcome);
+            continue;
+        }
         let result = match mode {
             Mode::DryRun => dry_run(env, &account, &shares, is_legacy, &mut outcome).await,
             Mode::Apply => apply(env, &account, &shares, is_legacy, &mut outcome).await,
@@ -241,7 +284,12 @@ async fn check_shares(
     shared_names: Option<&Value>,
     outcome: &mut UserOutcome,
 ) -> Result<(), String> {
-    let open = accessible(env.pool, account, shares).await?;
+    let pilot = &env.cfg.native_pilot;
+    let (open, outside): (Vec<&ShareInfo>, Vec<&ShareInfo>) = accessible(env.pool, account, shares)
+        .await?
+        .into_iter()
+        .partition(|share| pilot.allows_share(&share.name, &share.container));
+    outcome.outside_pilot_shares = outside.iter().map(|share| share.name.clone()).collect();
     let root = env.cfg.storage_dir.join("shared");
     outcome.legacy_shares = open
         .iter()
@@ -278,6 +326,13 @@ async fn dry_run(
     )
     .await?;
     check_shares(env, account, shares, is_legacy, scan.get("shared"), outcome).await?;
+    if !outcome.outside_pilot_shares.is_empty() {
+        outcome.warnings.push(format!(
+            "the account can open shared folders outside the native pilot; apply refuses \
+             until it cannot: {}",
+            outcome.outside_pilot_shares.join(", ")
+        ));
+    }
     if !outcome.legacy_shares.is_empty() {
         outcome.warnings.push(format!(
             "migrate these shared folders first (rast migrate shares --share <name>): {}",
@@ -288,7 +343,9 @@ async fn dry_run(
     outcome.trash.rows = rows.len() as u64;
     outcome.trash.bytes = rows.iter().map(|row| row.size_bytes.max(0)).sum();
     for row in &rows {
-        if let Err(why) = map_row(row, account.id, shares) {
+        if let Err(why) = pilot_row(row, shares, &env.cfg.native_pilot)
+            .and_then(|()| map_row(row, account.id, shares))
+        {
             outcome.trash.left.push(left(row, &why));
         }
     }
@@ -349,6 +406,13 @@ async fn apply(
 ) -> Result<(), String> {
     let name = home_name(account);
     check_shares(env, account, shares, is_legacy, None, outcome).await?;
+    if !outcome.outside_pilot_shares.is_empty() {
+        return Err(format!(
+            "the account can open shared folders outside the native pilot, which it could not \
+             open in one-HOME mode; remove its access to them first: {}",
+            outcome.outside_pilot_shares.join(", ")
+        ));
+    }
     if !outcome.legacy_shares.is_empty() {
         return Err(format!(
             "these shared folders of the account are not migrated yet; run \
@@ -513,6 +577,29 @@ fn valid_uuid(id: &str) -> bool {
         })
 }
 
+/// With the native pilot: a row of a shared folder outside it stays in the
+/// legacy recycle bin (no helper call names that container).
+fn pilot_row(row: &TrashRow, shares: &[ShareInfo], pilot: &NativePilot) -> Result<(), String> {
+    if !pilot.is_active() {
+        return Ok(());
+    }
+    let Ok(logical) = LogicalPath::parse(&row.original_path) else {
+        return Ok(());
+    };
+    let Some((name, _)) = logical.shared_parts() else {
+        return Ok(());
+    };
+    match shares
+        .iter()
+        .find(|share| share.name.eq_ignore_ascii_case(name))
+    {
+        Some(share) if !pilot.allows_share(&share.name, &share.container) => {
+            Err("its shared folder is outside the native pilot".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// The helper's entry for a row: where it came from, below the HOME or
 /// below a shared folder's container. The helper refuses a whole batch
 /// with an invalid entry, so everything it checks is checked here first.
@@ -665,7 +752,9 @@ async fn move_trash(
     summary.bytes = rows.iter().map(|row| row.size_bytes.max(0)).sum();
     let mut entries = Vec::new();
     for row in &rows {
-        match map_row(row, account.id, shares) {
+        match pilot_row(row, shares, &env.cfg.native_pilot)
+            .and_then(|()| map_row(row, account.id, shares))
+        {
             Ok(entry) => entries.push((row, entry)),
             Err(why) => summary.left.push(left(row, &why)),
         }
@@ -917,6 +1006,23 @@ fn trash_lines(mode: Mode, trash: &TrashSummary, lines: &mut Vec<String>) {
 
 /// Human-readable lines for one outcome.
 pub fn describe(mode: Mode, outcome: &UserOutcome) -> Vec<String> {
+    if outcome.outside_pilot && mode != Mode::DryRun {
+        return vec![format!(
+            "{} (user {}): skipped (outside the native pilot)",
+            outcome.username, outcome.user_id
+        )];
+    }
+    let mut lines = describe_outcome(mode, outcome);
+    if outcome.outside_pilot {
+        lines.insert(
+            1,
+            "  outside the native pilot: apply and rollback refuse this account".to_string(),
+        );
+    }
+    lines
+}
+
+fn describe_outcome(mode: Mode, outcome: &UserOutcome) -> Vec<String> {
     let report = &outcome.report;
     let status = match (&outcome.error, mode) {
         (Some(error), _) => format!("FAILED: {error}"),

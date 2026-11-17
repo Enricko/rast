@@ -14,14 +14,26 @@
 //!
 //! Each share is done on its own: a failure is reported and the others go
 //! on. Apply and rollback need the server stopped (the instance lock, D9).
+//!
+//! With the native pilot (`native_pilot_prefixes`, ADR 0007) a dry run
+//! still reports every shared folder and marks the ones outside the pilot;
+//! apply and rollback refuse a `--share` outside it before any helper call,
+//! and `--all` skips those (listed as skipped). The members that apply sets
+//! are the accounts in the pilot only.
 
 use serde::Serialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 
+use crate::config::NativePilot;
 use crate::error::{AppError, AppResult};
 use crate::native::client::NativeClient;
 use crate::share_groups::{self, ShareInfo};
+
+/// Why apply and rollback refuse a shared folder outside the native pilot.
+pub const OUTSIDE_PILOT: &str = "this shared folder is outside the native pilot \
+    (native_pilot_prefixes): apply and rollback only run for shared folders whose name and \
+    container start with a pilot prefix; --dry-run still reports it";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -57,15 +69,57 @@ pub struct ShareOutcome {
     pub error: Option<String>,
 }
 
-/// Run one mode over every shared folder, or only the one named `only`.
+/// One shared folder of a run within the native pilot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PilotOutcome {
+    #[serde(flatten)]
+    pub outcome: ShareOutcome,
+    /// Outside the native pilot: a dry run reports it, `--all` with apply
+    /// or rollback skips it (nothing is sent to the helper).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub outside_pilot: bool,
+}
+
+/// Run one mode over every shared folder, or only the one named `only`,
+/// without a native pilot (tests; the CLI uses [`run_in_pilot`]).
+#[cfg(test)]
 pub async fn run(
     pool: &SqlitePool,
     native: &NativeClient,
     mode: Mode,
     only: Option<&str>,
 ) -> AppResult<Vec<ShareOutcome>> {
-    let plan = share_groups::plan(pool).await?;
-    let shares: Vec<&ShareInfo> = plan
+    Ok(run_in_pilot(pool, native, &NativePilot::off(), mode, only)
+        .await?
+        .into_iter()
+        .map(|run| run.outcome)
+        .collect())
+}
+
+/// Refuse apply and rollback of a `--share` outside the native pilot by
+/// the name typed alone, before the server is asked to stop (the CLI's
+/// first check). `--share` matches names in any letter case, so only a
+/// name that cannot be in the pilot in any case is refused here;
+/// [`run_in_pilot`] checks the stored name and the container.
+pub fn refuse_outside_pilot(pilot: &NativePilot, mode: Mode, name: &str) -> Option<&'static str> {
+    let typed = name.trim().to_ascii_lowercase();
+    (mode != Mode::DryRun && !pilot.allows_share_name(&typed)).then_some(OUTSIDE_PILOT)
+}
+
+/// Run one mode over every shared folder, or only the one named `only`,
+/// within the native pilot (see the module documentation).
+pub async fn run_in_pilot(
+    pool: &SqlitePool,
+    native: &NativeClient,
+    pilot: &NativePilot,
+    mode: Mode,
+    only: Option<&str>,
+) -> AppResult<Vec<PilotOutcome>> {
+    let all = share_groups::plan(pool).await?;
+    // Members of the pilot accounts only.
+    let piloted = share_groups::plan_for(pool, pilot).await?;
+    let shares: Vec<&ShareInfo> = all
         .shares
         .iter()
         .filter(|share| only.is_none_or(|name| share.name.eq_ignore_ascii_case(name)))
@@ -73,9 +127,13 @@ pub async fn run(
     if only.is_some() && shares.is_empty() {
         return Err(AppError::NotFound("no shared folder has that name"));
     }
+    let outside = |share: &ShareInfo| !pilot.allows_share(&share.name, &share.container);
+    if only.is_some() && mode != Mode::DryRun && shares.iter().any(|share| outside(share)) {
+        return Err(AppError::Forbidden(OUTSIDE_PILOT));
+    }
     let mut out = Vec::with_capacity(shares.len());
     for share in shares {
-        let members = plan.members.get(&share.id).cloned().unwrap_or_default();
+        let members = piloted.members.get(&share.id).cloned().unwrap_or_default();
         let mut outcome = ShareOutcome {
             share_id: share.id.clone(),
             name: share.name.clone(),
@@ -85,6 +143,16 @@ pub async fn run(
             members: Value::Null,
             error: None,
         };
+        let outside_pilot = outside(share);
+        if outside_pilot && mode != Mode::DryRun {
+            // `--all`: skipped, never sent to the helper.
+            outcome.ok = true;
+            out.push(PilotOutcome {
+                outcome,
+                outside_pilot,
+            });
+            continue;
+        }
         let result = async {
             if mode == Mode::Apply {
                 call(
@@ -115,7 +183,10 @@ pub async fn run(
             }
             Err(error) => outcome.error = Some(error),
         }
-        out.push(outcome);
+        out.push(PilotOutcome {
+            outcome,
+            outside_pilot,
+        });
     }
     Ok(out)
 }
@@ -125,6 +196,26 @@ async fn call(native: &NativeClient, op: &str, params: Value) -> Result<Value, S
         .call_json(op, params)
         .await
         .map_err(|error| format!("{op}: {error}"))
+}
+
+/// Human-readable lines for one outcome of a run within the native pilot.
+pub fn describe_in_pilot(mode: Mode, run: &PilotOutcome) -> Vec<String> {
+    let outcome = &run.outcome;
+    if !run.outside_pilot {
+        return describe(mode, outcome);
+    }
+    if mode != Mode::DryRun {
+        return vec![format!(
+            "{} ({}): skipped (outside the native pilot)",
+            outcome.name, outcome.container
+        )];
+    }
+    let mut lines = describe(mode, outcome);
+    lines.insert(
+        1,
+        "  outside the native pilot: apply and rollback refuse this shared folder".to_string(),
+    );
+    lines
 }
 
 /// Human-readable lines for one outcome.
@@ -420,6 +511,190 @@ mod tests {
             ["shares_migrate_scan", "shares_migrate_rollback"]
         );
         assert!(ops(TEAM).is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_native_pilot_limits_apply_and_rollback_but_not_the_dry_run() {
+        const TEAM: &str = "0123abcd-4567-4ef0-8123-456789abcdef";
+        const PILOT: &str = "55555555-6666-4777-8888-999999999999";
+        // Renamed into the pilot: its container is not.
+        const RENAMED: &str = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = crate::config::Config::from_parts(
+            None,
+            crate::config::FileConfig {
+                data_dir: Some(dir.path().join("data")),
+                storage_dir: Some(dir.path().join("storage")),
+                native_enabled: Some(true),
+                native_helper_socket: Some(dir.path().join("h.sock")),
+                native_pilot_prefixes: Some(vec!["t-".into()]),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap();
+        let pilot = cfg.native_pilot.clone();
+        let pool = crate::db::init(&cfg).await.unwrap();
+        for (id, name, container) in [
+            (TEAM, "Team", "team"),
+            (PILOT, "t-share", "t-share"),
+            (RENAMED, "t-real", "real"),
+        ] {
+            sqlx::query(
+                "INSERT INTO shares (id, name, container_path, created_at, updated_at)
+                 VALUES (?, ?, ?, 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(container)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // alice (outside the pilot) and t-bob, both with write access.
+        for (id, name) in [(1, "alice"), (2, "t-bob")] {
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, active, created_at,
+                                    updated_at)
+                 VALUES (?, ?, 'x', 'user', 1, 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+                 VALUES (?, ?, ?, ?, '/nonexistent', 1)",
+            )
+            .bind(id)
+            .bind(format!("rast-u{id}"))
+            .bind(200_000 + id)
+            .bind(200_000 + id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            for share in [TEAM, PILOT, RENAMED] {
+                sqlx::query(
+                    "INSERT INTO share_members (share_id, user_id, perms) VALUES (?, ?, 'write')",
+                )
+                .bind(share)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+        // Every request, as sent.
+        let socket = dir.path().join("h.sock");
+        let requests: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let log = requests.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut line = String::new();
+                    if BufReader::new(read).read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    log.lock().unwrap().push(request.clone());
+                    let reply = json!({"id": request["id"], "ok": true, "data": {"report": {}}});
+                    let mut bytes = serde_json::to_vec(&reply).unwrap();
+                    bytes.push(b'\n');
+                    let _ = write.write_all(&bytes).await;
+                });
+            }
+        });
+        let native = NativeClient::from_config(&cfg);
+        let shares_named = || -> Vec<String> {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|request| request["shareId"].as_str().unwrap_or_default().to_string())
+                .collect()
+        };
+
+        // `--share` outside the pilot: refused before any helper call, by
+        // the typed name or by the stored one (renamed into the pilot).
+        for mode in [Mode::Apply, Mode::Rollback] {
+            assert_eq!(
+                refuse_outside_pilot(&pilot, mode, "Team"),
+                Some(OUTSIDE_PILOT)
+            );
+            assert_eq!(refuse_outside_pilot(&pilot, mode, "T-Share"), None);
+            for name in ["team", "t-real"] {
+                assert!(matches!(
+                    run_in_pilot(&pool, &native, &pilot, mode, Some(name)).await,
+                    Err(AppError::Forbidden(OUTSIDE_PILOT))
+                ));
+            }
+        }
+        assert!(requests.lock().unwrap().is_empty());
+        assert_eq!(refuse_outside_pilot(&pilot, Mode::DryRun, "Team"), None);
+
+        // The dry run reports every shared folder, marked.
+        let runs = run_in_pilot(&pool, &native, &pilot, Mode::DryRun, None)
+            .await
+            .unwrap();
+        let marked: Vec<(&str, bool)> = runs
+            .iter()
+            .map(|run| (run.outcome.name.as_str(), run.outside_pilot))
+            .collect();
+        // (Ordered by name: `t-real`, `t-share`, `Team`.)
+        assert_eq!(
+            marked,
+            [("t-real", true), ("t-share", false), ("Team", true)]
+        );
+        assert_eq!(shares_named(), [RENAMED, PILOT, TEAM]);
+        assert_eq!(
+            describe_in_pilot(Mode::DryRun, &runs[2])[1],
+            "  outside the native pilot: apply and rollback refuse this shared folder"
+        );
+        assert_eq!(
+            serde_json::to_value(&runs[2]).unwrap()["outsidePilot"],
+            true
+        );
+        assert!(serde_json::to_value(&runs[1]).unwrap()["outsidePilot"].is_null());
+
+        // `--all`: the pilot shared folder only, with the pilot accounts as
+        // members; the others are listed as skipped.
+        for mode in [Mode::Apply, Mode::Rollback] {
+            requests.lock().unwrap().clear();
+            let runs = run_in_pilot(&pool, &native, &pilot, mode, None)
+                .await
+                .unwrap();
+            assert_eq!(runs.len(), 3);
+            assert!(runs.iter().all(|run| run.outcome.ok));
+            assert_eq!(
+                describe_in_pilot(mode, &runs[2]),
+                ["Team (team): skipped (outside the native pilot)"]
+            );
+            assert!(shares_named().iter().all(|share| share == PILOT));
+            if mode == Mode::Apply {
+                let members: Vec<Value> = requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["op"] == "share_members_set")
+                    .cloned()
+                    .collect();
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0]["write"], json!([2]));
+                assert_eq!(members[0]["read"], json!([]));
+            }
+        }
+        // `--share` in the pilot, any letter case.
+        requests.lock().unwrap().clear();
+        let runs = run_in_pilot(&pool, &native, &pilot, Mode::Apply, Some("T-SHARE"))
+            .await
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].outcome.ok && !runs[0].outside_pilot);
+        assert_eq!(shares_named(), [PILOT, PILOT, PILOT]);
     }
 
     #[test]
