@@ -15,6 +15,13 @@
 //! the entries before the break and becomes a warning; a file cut off in
 //! the middle is padded so the archive stays valid, and is left out of the
 //! manifest.
+//!
+//! Each tree has a byte budget (its account's or shared folder's quota
+//! plus slack, [`tree_budget`]; review F7): a file that would exceed it is
+//! not written and ends the tree with a warning, so a padded file is never
+//! larger than the budget either. While data is copied, the free space of
+//! the backup's file system is checked ([`super::SpaceGuard`]); below the
+//! floor the backup fails instead of filling the disk.
 
 use std::io::{self, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -24,7 +31,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use super::ManifestEntry;
+use super::{ManifestEntry, SpaceGuard};
 use crate::error::{AppError, AppResult};
 use crate::native::backup_reader::archive::{self, EntryMeta, Kind, Next};
 use crate::native::backup_reader::{
@@ -75,12 +82,27 @@ pub fn parse_access(reply: &Value) -> Result<ReaderAccess, String> {
     }
 }
 
+/// Room a tree gets beyond its quota: the reader's budget for holes
+/// ([`crate::native::backup_reader::MAX_TREE_HOLES`]) and files that grew
+/// while quota was being counted.
+pub const TREE_SLACK: u64 = 2 << 30;
+
+/// The byte budget of a tree whose account or shared folder has `quota`
+/// bytes (`None` or 0: no limit, no budget): the quota, plus a tenth of it
+/// or [`TREE_SLACK`], whichever is larger.
+pub fn tree_budget(quota: Option<u64>) -> Option<u64> {
+    let quota = quota.filter(|quota| *quota > 0)?;
+    Some(quota.saturating_add((quota / 10).max(TREE_SLACK)))
+}
+
 /// One tree to read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tree {
     pub kind: TreeKind,
     /// The username or the container name.
     pub name: String,
+    /// The most file bytes the archive takes from it ([`tree_budget`]).
+    pub budget: Option<u64>,
 }
 
 impl Tree {
@@ -124,7 +146,10 @@ fn bounded(message: &str, limit: usize) -> String {
 enum CopyError {
     /// The reader's stream is broken or invalid (a warning).
     Stream(String),
-    /// Writing the backup archive failed (the backup fails).
+    /// The tree is larger than its budget (a warning).
+    Budget(u64),
+    /// Writing the backup archive failed, or its file system is almost
+    /// full (the backup fails).
     Archive(io::Error),
 }
 
@@ -149,6 +174,7 @@ fn copy_data<R: Read + ?Sized, W: Write + ?Sized>(
     out: &mut W,
     size: u64,
     buffer: &mut [u8],
+    space: &mut SpaceGuard,
 ) -> Result<Result<String, String>, io::Error> {
     let mut hasher = Sha256::new();
     let mut remaining = size;
@@ -161,6 +187,7 @@ fn copy_data<R: Read + ?Sized, W: Write + ?Sized>(
                 Ok(read) => {
                     hasher.update(&buffer[..read]);
                     out.write_all(&buffer[..read])?;
+                    space.wrote(read as u64)?;
                     remaining -= read as u64;
                     continue;
                 }
@@ -170,6 +197,7 @@ fn copy_data<R: Read + ?Sized, W: Write + ?Sized>(
         }
         buffer[..want].fill(0);
         out.write_all(&buffer[..want])?;
+        space.wrote(want as u64)?;
         remaining -= want as u64;
     }
     archive::write_padding(out, size)?;
@@ -182,9 +210,11 @@ fn copy_data<R: Read + ?Sized, W: Write + ?Sized>(
 fn copy_entries<R: Read + ?Sized, W: Write + ?Sized>(
     input: &mut R,
     prefix: &str,
+    budget: Option<u64>,
     out: &mut W,
     manifest: &mut Vec<ManifestEntry>,
     received: &mut Received,
+    space: &mut SpaceGuard,
 ) -> Result<Trailer, CopyError> {
     let stream = |error: archive::ArchiveError| CopyError::Stream(error.0);
     let mut buffer = vec![0u8; 64 * 1024];
@@ -224,10 +254,17 @@ fn copy_entries<R: Read + ?Sized, W: Write + ?Sized>(
             kind,
             ..entry
         };
+        // Checked before the header is written: nothing of a file beyond
+        // the budget reaches the archive, padding included.
+        if let (Kind::File { size }, Some(budget)) = (&outer.kind, budget) {
+            if received.bytes.saturating_add(*size) > budget {
+                return Err(CopyError::Budget(budget));
+            }
+        }
         archive::write_header(out, &outer).map_err(CopyError::Archive)?;
         if let Kind::File { size } = outer.kind {
             let shown = String::from_utf8_lossy(&outer.path).into_owned();
-            match copy_data(input, out, size, &mut buffer).map_err(CopyError::Archive)? {
+            match copy_data(input, out, size, &mut buffer, space).map_err(CopyError::Archive)? {
                 Ok(sha256) => {
                     archive::read_padding(input, size).map_err(stream)?;
                     manifest.push(ManifestEntry {
@@ -291,6 +328,11 @@ fn trailer_warnings(prefix: &str, trailer: &Trailer) -> Vec<String> {
         ),
         (trailer.too_deep, "nested too deeply"),
         (trailer.too_long, "with names that are too long"),
+        (
+            trailer.other_owner,
+            "owned by accounts this folder may not hold",
+        ),
+        (trailer.sparse, "sparse files beyond the budget for holes"),
     ];
     let listed: Vec<String> = counts
         .iter()
@@ -317,6 +359,7 @@ pub fn archive_tree<W: Write + ?Sized>(
     tree: &Tree,
     out: &mut W,
     manifest: &mut Vec<ManifestEntry>,
+    space: &mut SpaceGuard,
 ) -> AppResult<Outcome> {
     let prefix = tree.prefix();
     let stream = match UnixStream::connect(&access.socket) {
@@ -371,7 +414,15 @@ pub fn archive_tree<W: Write + ?Sized>(
         )));
     }
     let mut received = Received::default();
-    match copy_entries(&mut input, &prefix, out, manifest, &mut received) {
+    match copy_entries(
+        &mut input,
+        &prefix,
+        tree.budget,
+        out,
+        manifest,
+        &mut received,
+        space,
+    ) {
         Ok(trailer) => Ok(Outcome::Written {
             complete: true,
             files: received.files,
@@ -381,6 +432,16 @@ pub fn archive_tree<W: Write + ?Sized>(
         Err(CopyError::Archive(error)) => Err(AppError::internal(format!(
             "cannot write the backup archive: {error}"
         ))),
+        Err(CopyError::Budget(budget)) => Ok(Outcome::Written {
+            complete: false,
+            files: received.files,
+            bytes: received.bytes,
+            warnings: vec![format!(
+                "{prefix}: incomplete, the folder is larger than its backup budget of {budget} \
+                 bytes (its quota plus slack); the files after the first {} entries are left out",
+                received.entries
+            )],
+        }),
         Err(CopyError::Stream(reason)) => Ok(Outcome::Written {
             complete: false,
             files: received.files,

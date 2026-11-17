@@ -36,6 +36,7 @@ pub mod homes;
 pub mod identity;
 pub mod protocol;
 pub mod quota;
+pub mod restore_files;
 pub mod shares;
 
 pub use client::NativeClient;

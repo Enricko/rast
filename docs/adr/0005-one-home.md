@@ -457,10 +457,10 @@ group limit accordingly.
   mode and POSIX ACLs (PAX `SCHILY.acl.*`), never follows symlinks, and
   excludes `~/.cache`, the trash folders and `~/.local/share/flatpak`. The
   layout `users/homes/<username>/…` stays; the manifest records
-  `ownersPreserved`. The restore guide in `docs/OPERATIONS.md` changes to
-  `tar --numeric-owner --same-owner --acls` as root, **without**
-  `chown -R rast:rast` (which would break one HOME), followed by `rast doctor`,
-  which re-applies the share groups. This must land before or with task 1.5.
+  `ownersPreserved`. User files are restored with `rast restore-files` as
+  root (review F1; it replaced the `tar --numeric-owner --same-owner` guide
+  of task 1.5b), **without** `chown -R rast:rast` (which would break one
+  HOME), followed by `rast doctor`, which re-applies the share groups.
   Implemented in task 1.5b (section 14).
 - **Other modules.** `users::create` calls `identity_ensure` and `home_ensure`
   when the helper is available. Storage settings use `statvfs` and
@@ -1075,11 +1075,59 @@ through a root reader (D12).
   `ownersPreserved: true`; the manifest lists their trees in
   `preservedTrees`; `verify` adds both counts to its summary. Additive
   only: older archives read as before.
-- **Restore.** As root, `tar --numeric-owner --same-owner --acls --xattrs`
-  into the storage roots, then `chown -R rast:rast` only for the folders
-  that are not in `preservedTrees` (one by one), then start RAST (the
-  share repair pass) and run `rast doctor`. The identities' uids are
-  `linux_uid_base + <id>` on every host; share gids are taken back by
+- **Who can read what (review F12).** The reader serves the `rast`
+  service every HOME in one-HOME mode and every migrated container it asks
+  for; only the server's plan applies the native pilot. So D5 holds for
+  direct access and for writes, not for reads: whoever runs code as `rast`
+  can read every one-HOME HOME and migrated shared folder through the
+  reader, and administrators can download the archives. This is the price
+  of D12. Every tree the reader serves is logged (target
+  `rast::backup_reader::audit`, with the kind, the name and the peer uid)
+  in the journal of the reader's unit.
+- **Owners (review F6).** Below a tree's root the reader streams only
+  entries of an allowed owner: in a HOME, the tree's identity and the
+  service; in a container, the identity range and the service. Any other
+  entry (for example a hard link to a root-only file on a host with
+  `fs.protected_hardlinks = 0`) is left out and counted as `otherOwner` in
+  the trailer, which the server turns into a warning.
+- **Size (review F7).** Kernel quota counts allocated blocks, so a sparse
+  file costs its owner nothing. The reader measures each file's data with
+  `SEEK_DATA`/`SEEK_HOLE` and leaves out a file once the tree's holes pass
+  1 GiB (`sparse` in the trailer). The server gives each tree a budget of
+  its quota plus max(10 %, 2 GiB) (`users.quota_bytes`,
+  `shares.quota_bytes`; no quota, no budget): the first file that would
+  pass it ends the tree with an `incomplete` warning, and nothing beyond
+  the budget is written. A `users` backup checks that the backup folder's
+  file system keeps 1 GiB free before it starts and every 64 MiB it
+  writes, and stops with an error otherwise.
+- **Restore (review F1).** `sudo rast restore-files --from <archive>`
+  (`--dry-run`, `--tree`, `--target`, `--to-storage`, `--json`). The
+  archive, its manifest and its checksums are the service's, so root
+  trusts none of it. It reads the archive with this codec
+  (`archive::read_backup_entry`: the strict subset, plus the GNU headers
+  of the files the service read); only files, folders, symbolic links and
+  hard links pass. A tree keeps owners only when its first entry is its
+  folder and the layout checks out against the database and the host's
+  `/etc/passwd` and `/etc/group`: a HOME owned by its account's identity
+  (uid `linux_uid_base + id`, a uid and name nobody else holds), holding
+  entries of that identity and the service; or a container owned by root
+  and its share's rw group, holding entries of the service and of RAST
+  identities (root below the top is refused). `preservedTrees` must list
+  exactly those trees. Every other tree comes back as the service's
+  (`0700` folders, file modes without set-id bits). Set-id bits never
+  land on a file; set-gid stays only on folders of a container; a group
+  outside the layout becomes the owner's own; named ACL entries for
+  accounts outside the layout are dropped. It writes below a new root-only
+  folder (`<storage_dir>/restore-<time>` by default) through descriptors
+  (`O_NOFOLLOW` one name at a time, `O_EXCL`, hard links only to files of
+  the same tree written before, folder owners and modes last). One refused
+  entry refuses the run and removes what was written. `--to-storage`
+  needs the service stopped (it takes `rast.lock`, never creating it),
+  writes to `<storage_dir>/.restore-<time>` and moves each tree into
+  `homes/` or `shared/` with `RENAME_NOREPLACE`. The database is opened
+  read-only or immutable, so root leaves no file next to it. Then start
+  RAST (the share repair pass) and run `rast doctor`. The identities' uids
+  are `linux_uid_base + <id>` on every host; share gids are taken back by
   `share_group_ensure` from the container's group when it is free.
 - **Not done here.** The reader is not used for the `apps` scope, and a
   verify of the archive still reads it with `tar` (tar-rs), which cannot
@@ -1096,7 +1144,7 @@ through a root reader (D12).
 | D2 | Kernel uid quota counts everything the user owns on that filesystem (apps, Flatpak, caches, trash, the user's files in shared folders) | Accepted, as on a NAS. |
 | D3 | Shared-folder size limits | Accepted: **migration 0015** adds `shares.quota_bytes`, nullable (`NULL` = no limit). The UI shows whether the limit is enforced by the filesystem or only by RAST. Task 1.3 evaluates group quota on the rw group under Q-a, with its gaps (section 6). **Decided after task 1.3 (2026-11-16):** group quota is shown as "filesystem, best effort"; a repair pass runs at server start (after every `rast migrate shares`) and daily (section 10). |
 | D4 | Soft = `quota_bytes`, hard = soft + max(5 %, 1 GiB), 7-day grace; usage = allocated bytes | Accepted. The 20 GiB default stays and is reviewed again in task 3.2. |
-| D5 | `rast` keeps `rwx` on shared folders during the transition, no access to any HOME | Accepted. |
+| D5 | `rast` keeps `rwx` on shared folders during the transition, no access to any HOME | Accepted. *Note (review F12, 2026-11-17):* no direct access and no writes; reads go through the backup reader (D12), which serves the service every one-HOME HOME and migrated container, and logs each one (section 14). |
 | D6 | Administrators are in every share's rw group | Accepted, with the consequence in section 4: administrator apps and terminals open every share, so administrators should use a non-admin account for everyday app use (documented in `docs/NATIVE-LINUX-APPS.md` in task 1.3). |
 | D7 | A revocation restarts the session after 60 seconds; a grant applies at the next session start | Accepted for now. Task 1.3 evaluates the per-user deny ACL entry on the container as a restart-free alternative, with its gaps (section 4). **Decided after task 1.3 (2026-11-16):** the forced restart stays; on a full revocation the container also gets `u:rast-u<id>:---` during the warning, removed after the restart (section 10). |
 | D8 | On-disk layout of section 1; new accounts get one HOME when the helper is available | Accepted. |

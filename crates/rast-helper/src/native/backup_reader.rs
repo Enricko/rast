@@ -27,11 +27,23 @@
 //!   [`archive`] (the walk of [`walk`]), then one JSON trailer line
 //!   ([`Trailer`]) with the counts and the first problems, then the end of
 //!   the connection.
+//! * Below the tree's root, the walk stores only entries of the owners the
+//!   tree may hold ([`OwnerRules::entry_owners`]): in a HOME its identity
+//!   and the service, in a container the RAST identities and the service.
+//!   Anything else (a hard link to a root file, with
+//!   `fs.protected_hardlinks = 0`) is left out as `otherOwner`. A file with
+//!   more holes than the tree's budget ([`walk::MAX_TREE_HOLES`]) is left
+//!   out as `sparse`: quota counts blocks, the archive would count bytes.
+//! * The service can read every HOME in one-HOME mode and every migrated
+//!   container through the reader (ADR 0005, D5 and section 14); only the
+//!   server's plan applies the native pilot. Every tree served is logged
+//!   (target `rast::backup_reader::audit`, the reader unit's journal) with
+//!   its kind and name, so reads can be audited.
 
 pub mod archive;
 mod walk;
 
-pub use walk::{excluded, MAX_DEPTH, MAX_TREE_PATH};
+pub use walk::{excluded, MAX_DEPTH, MAX_TREE_HOLES, MAX_TREE_PATH};
 
 use std::ffi::{CString, OsString};
 use std::io::{self, BufWriter, Read, Write};
@@ -154,6 +166,12 @@ pub struct Trailer {
     pub changed: u64,
     pub too_deep: u64,
     pub too_long: u64,
+    /// Owned by an account the tree may not hold (review F6), left out.
+    #[serde(default)]
+    pub other_owner: u64,
+    /// Sparse files beyond the tree's hole budget (review F7), left out.
+    #[serde(default)]
+    pub sparse: u64,
     /// The first [`MAX_PROBLEMS`] problems, `<path>: <reason>`.
     pub problems: Vec<String>,
 }
@@ -168,16 +186,33 @@ pub struct OwnerRules {
     /// The gids of shared folder groups (the group of a migrated
     /// container).
     pub container_groups: RangeInclusive<u32>,
+    /// The `rast` service, which may own entries in both (`None`: only the
+    /// identities).
+    pub service: Option<u32>,
 }
 
 impl OwnerRules {
-    /// The rules of `linux_uid_base`.
-    pub fn for_uid_base(uid_base: u32) -> Result<Self, String> {
+    /// The rules of `linux_uid_base` and the service uid.
+    pub fn for_uid_base(uid_base: u32, service: Option<u32>) -> Result<Self, String> {
         Ok(Self {
             home_owners: identity_uid_range(uid_base),
             container_owner: 0,
             container_groups: share_gid_range(uid_base).map_err(|error| error.message)?,
+            service,
         })
+    }
+
+    /// Who may own the entries below a tree's root (review F6): in a HOME
+    /// its own identity (`root_uid`, the HOME's owner) and the service; in
+    /// a shared folder container every RAST identity and the service.
+    pub fn entry_owners(&self, kind: TreeKind, root_uid: u32) -> Vec<RangeInclusive<u32>> {
+        let tree = match kind {
+            TreeKind::Home => root_uid..=root_uid,
+            TreeKind::Shared => self.home_owners.clone(),
+        };
+        std::iter::once(tree)
+            .chain(self.service.map(|service| service..=service))
+            .collect()
     }
 }
 
@@ -201,7 +236,14 @@ pub struct ReaderOptions {
     pub peer_uid: Option<u32>,
     pub idle: Duration,
     pub listen: Listen,
+    /// Test-only: every audit record ([`audit`]) is also kept here.
+    #[cfg(test)]
+    pub test_audit: Option<AuditLog>,
 }
+
+/// Test-only record of the trees a reader served.
+#[cfg(test)]
+pub type AuditLog = std::sync::Arc<std::sync::Mutex<Vec<(TreeKind, String)>>>;
 
 // ---------------------------------------------------------------------------
 // The reader process (`rast backup-reader`)
@@ -504,6 +546,22 @@ pub fn open_tree(
     }
 }
 
+/// Record that the reader serves `name` to the service (review F12): one
+/// record per tree, before its first byte, in the reader unit's journal.
+fn audit(options: &ReaderOptions, kind: TreeKind, name: &str) {
+    tracing::info!(
+        target: "rast::backup_reader::audit",
+        tree = kind.as_str(),
+        %name,
+        peer_uid = ?options.peer_uid,
+        "backup reader serves a tree to the RAST service"
+    );
+    #[cfg(test)]
+    if let Some(log) = &options.test_audit {
+        log.lock().unwrap().push((kind, name.to_string()));
+    }
+}
+
 /// One connection: the request, the reply, the archive and the trailer.
 fn serve(stream: &UnixStream, options: &ReaderOptions) -> io::Result<()> {
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
@@ -532,6 +590,7 @@ fn serve(stream: &UnixStream, options: &ReaderOptions) -> io::Result<()> {
             return out.flush();
         }
     };
+    audit(options, kind, &name);
     write_line(
         &mut out,
         &ReaderReply {
@@ -539,7 +598,7 @@ fn serve(stream: &UnixStream, options: &ReaderOptions) -> io::Result<()> {
             error: None,
         },
     )?;
-    let summary = walk::stream_tree(&mut out, kind, root)?;
+    let summary = walk::stream_tree(&mut out, kind, root, &options.rules)?;
     archive::write_end(&mut out)?;
     write_line(&mut out, &summary)?;
     out.flush()?;
@@ -548,10 +607,26 @@ fn serve(stream: &UnixStream, options: &ReaderOptions) -> io::Result<()> {
         %name,
         entries = summary.entries,
         bytes = summary.bytes,
+        other_owner = summary.other_owner,
+        sparse = summary.sparse,
         problems = summary.problems.len(),
         "backup reader streamed a tree"
     );
     Ok(())
+}
+
+/// Bytes available to unprivileged users on the file system that holds
+/// `path` (`None`: it cannot be measured). Backup Center keeps a floor of
+/// free space with it (review F7).
+pub fn available_bytes(path: &Path) -> Option<u64> {
+    let c_path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    // SAFETY: a zeroed `statvfs` is a valid out parameter.
+    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: NUL-terminated path and a valid out parameter.
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
+        return None;
+    }
+    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +762,7 @@ pub(crate) async fn backup_reader_start(options: &NativeOptions) -> Result<Value
     let peer_uid = service_uid(options)?;
     let gid = options.effective_rast_gid()?;
     // The rules must hold for this configuration before anything starts.
-    OwnerRules::for_uid_base(options.uid_base).map_err(NativeError::invalid)?;
+    OwnerRules::for_uid_base(options.uid_base, Some(peer_uid)).map_err(NativeError::invalid)?;
     let dir = prepare_dir(options, gid)?;
     let socket = dir.join("reader.sock");
     let token_file = dir.join("reader.token");

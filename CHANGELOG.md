@@ -338,6 +338,19 @@ this file by `scripts/changelog-section.sh`.
   as before. Accounts and shared folders outside the native pilot (ADR
   0007) are not read through the reader.
 
+- **`rast restore-files`** (root): restores the user files of a `users`
+  backup (`--dry-run`, `--tree users/homes/<name>`, `--target <new
+  folder>`, `--to-storage`, `--json`). It checks every entry before it
+  writes anything and refuses the whole run on one bad entry: only files,
+  folders and links; owners only for HOMEs in one-HOME mode and migrated
+  shared folders, checked against the database and the host's accounts,
+  never against the manifest; no set-uid or set-gid file; nothing written
+  through a link or over an existing folder. By default it restores into a
+  new root-only folder `<storage_dir>/restore-<time>`; `--to-storage`
+  (service stopped) adds only folders that do not exist. The restore guide
+  (`docs/OPERATIONS.md`, `GET /api/backups/restore-guide`) uses it instead
+  of `tar` as root.
+
 ### Security
 
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
@@ -350,6 +363,26 @@ this file by `scripts/changelog-section.sh`.
   in it and, with `fs.protected_hardlinks = 0`, hard-link them into a
   folder it owns. `rast doctor` warns when `fs.protected_hardlinks` is not
   `1`, lists files that still wait for the move and fails on a conflict.
+- Phase 1 security review (task 1.6):
+  - F1: restoring user files with `tar` as root trusted owners, set-id
+    bits, device nodes and `preservedTrees` from an archive that the
+    `rast` service writes, so code running as `rast` could become root at
+    the next restore. The guide now uses `rast restore-files`, which trusts
+    none of it.
+  - F6: the backup reader streamed files of any owner below a HOME or a
+    shared folder (a hard link to a root-only file, on a host with
+    `fs.protected_hardlinks = 0`). It now stores only entries of the
+    folder's identity (any RAST identity in a shared folder) and of the
+    service; others are left out with a warning.
+  - F7: a sparse file could make a `users` backup arbitrarily large. The
+    reader leaves out sparse files once a folder's holes pass 1 GiB; each
+    folder stops at its quota plus max(10 %, 2 GiB) with an `incomplete`
+    warning; a `users` backup stops when the backup disk has less than
+    1 GiB free.
+  - F12: the backup reader lets the service read every one-HOME HOME and
+    migrated shared folder (ADR 0005, D12). This is now stated in ADR 0005
+    and the security invariants, and every folder the reader serves is
+    logged (`rast::backup_reader::audit` in the reader unit's journal).
 
 ### Upgrade note
 
@@ -395,14 +428,21 @@ this file by `scripts/changelog-section.sh`.
   builds, `cargo clippy` and `cargo test` are unaffected. Installed servers
   need nothing new.
 
-- **Restoring user files** from a `users` backup that lists
-  `preservedTrees` in its manifest: extract as root with
-  `tar --numeric-owner --same-owner --acls --xattrs` and never run
-  `chown -R rast:rast` over the homes or shared folder (see "Restoring
-  user files from an archive" in `docs/OPERATIONS.md`); keep the same
-  `linux_uid_base` on a new host. The backup reader needs no setup: the
-  helper starts it when a backup needs it. Older archives restore as
-  before.
+- **Restoring user files** from a `users` backup: use
+  `sudo rast restore-files --from <archive> --dry-run`, then a restore
+  into a new folder, then `--to-storage` with the service stopped (see
+  "Restoring user files from an archive" in `docs/OPERATIONS.md`). Do not
+  extract a backup with `tar` as root any more, and never run
+  `chown -R rast:rast` over the homes or shared folder; keep the same
+  `linux_uid_base` on a new host and restore the database first. Older
+  archives restore the same way (their folders come back as the
+  service's). The backup reader needs no setup: the helper starts it when
+  a backup needs it.
+
+- A `users` backup now needs 1 GiB free on the backup folder's disk and
+  stops with an error below it. A folder with a quota is backed up up to
+  its quota plus max(10 %, 2 GiB); sparse files beyond 1 GiB of holes per
+  folder and entries of other owners are left out, each with a warning.
 
 ### Changed
 

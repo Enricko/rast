@@ -2208,7 +2208,7 @@ fn scan_processes(
 }
 
 /// `rast-s<16 hex>-rw` or `rast-s<16 hex>-ro`.
-fn is_share_group_name(name: &str) -> bool {
+pub(crate) fn is_share_group_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix("rast-s") else {
         return false;
     };

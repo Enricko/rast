@@ -8,16 +8,23 @@
 //! otherwise the entry is left out and reported. Entries on another file
 //! system or mount (a mount point or a bind mount inside the tree) are left
 //! out, and so are the caches, recycle bins and Flatpak installations of
-//! [`excluded`]. Memory stays bounded: one open folder per level (at most
+//! [`excluded`]. Below the root, only entries of the owners the tree may
+//! hold are stored ([`super::OwnerRules::entry_owners`]; review F6): with
+//! `fs.protected_hardlinks = 0` a user can hard-link any file of the same
+//! file system into a HOME, and the reader reads every file. Sparse files
+//! are stored while the tree's holes stay within [`MAX_TREE_HOLES`]
+//! (review F7): quota counts the blocks a file takes, the archive its
+//! apparent size. Memory stays bounded: one open folder per level (at most
 //! [`MAX_DEPTH`]), one copy buffer, and a capped map of hard links.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::{self, Read, Write};
+use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 
 use super::archive::{self, EntryMeta, Kind};
-use super::{Trailer, TreeKind, MAX_PROBLEMS, MAX_PROBLEM_CHARS};
+use super::{OwnerRules, Trailer, TreeKind, MAX_PROBLEMS, MAX_PROBLEM_CHARS};
 use crate::native::acl::{self, Acl};
 use crate::native::homes::{clear_errno, fstat, is_dir, DIR_FLAGS};
 use crate::native::shares::{
@@ -34,6 +41,13 @@ pub const MAX_TREE_PATH: usize = archive::MAX_PATH_BYTES - 300;
 const MAX_LINKS: usize = 100_000;
 const MAX_LINK_PATH_BYTES: usize = 16 * 1024 * 1024;
 const COPY_BUFFER: usize = 64 * 1024;
+/// The holes (bytes a file does not take on disk) that the files of one
+/// tree may have in total; a sparse file beyond it is left out. Its zeros
+/// would cost the backup time and space but the user no quota.
+pub const MAX_TREE_HOLES: u64 = 1 << 30;
+/// Data segments of one file followed with `SEEK_DATA`/`SEEK_HOLE` at most;
+/// beyond them the space the file takes on disk counts as its data.
+const MAX_SEGMENTS: usize = 65_536;
 
 /// Whether the walk leaves `relative` out: in a HOME `~/.cache`, the XDG
 /// recycle bin `~/.local/share/Trash` and `~/.local/share/flatpak`; at the
@@ -121,6 +135,51 @@ fn meta_of(path: Vec<u8>, kind: Kind, stat: &libc::stat) -> EntryMeta {
     }
 }
 
+/// The bytes of the open file `fd` (`size` bytes long, `allocated` bytes on
+/// disk) that hold data rather than holes, from `SEEK_DATA` and
+/// `SEEK_HOLE`. A file that takes its size on disk has no holes; when the
+/// file system cannot tell, the whole file is data. The file offset is back
+/// at 0 afterwards.
+pub(crate) fn data_bytes(fd: RawFd, size: u64, allocated: u64) -> io::Result<u64> {
+    if allocated >= size {
+        return Ok(size);
+    }
+    let end = i64::try_from(size).unwrap_or(i64::MAX);
+    let mut offset = 0i64;
+    let mut data = 0u64;
+    let mut found = None;
+    for _ in 0..MAX_SEGMENTS {
+        if offset >= end {
+            found = Some(data);
+            break;
+        }
+        // SAFETY: valid fd; lseek has no memory effects.
+        let start = unsafe { libc::lseek(fd, offset, libc::SEEK_DATA) };
+        if start < 0 {
+            found = Some(match io::Error::last_os_error().raw_os_error() {
+                // Only a hole is left.
+                Some(libc::ENXIO) => data,
+                _ => size,
+            });
+            break;
+        }
+        // SAFETY: as above.
+        let stop = unsafe { libc::lseek(fd, start, libc::SEEK_HOLE) };
+        if stop < 0 {
+            found = Some(size);
+            break;
+        }
+        data = data.saturating_add(u64::try_from(stop.min(end) - start.min(end)).unwrap_or(0));
+        offset = stop;
+    }
+    let data = found.unwrap_or(data.max(allocated));
+    // SAFETY: as above.
+    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(data.min(size))
+}
+
 fn readlink_at(dir: RawFd, name: &CStr) -> io::Result<Vec<u8>> {
     let mut buffer = vec![0u8; archive::MAX_LINK_BYTES + 1];
     // SAFETY: valid fd, NUL-terminated name, writable buffer of that length.
@@ -144,12 +203,22 @@ struct Walk<'a, W: Write> {
     link_bytes: usize,
     summary: Trailer,
     buffer: Vec<u8>,
+    /// The uids whose entries below the root are stored.
+    owners: Vec<RangeInclusive<u32>>,
+    /// The holes of the files stored so far.
+    holes: u64,
 }
 
 /// Stream the tree below `root` (a folder the caller opened and checked)
-/// to `out`: the root itself as `.`, then everything below it. Returns the
-/// summary for the trailer; an error means the output failed.
-pub fn stream_tree<W: Write>(out: &mut W, kind: TreeKind, root: OwnedFd) -> io::Result<Trailer> {
+/// to `out`: the root itself as `.`, then everything below it that `rules`
+/// lets the tree hold. Returns the summary for the trailer; an error means
+/// the output failed.
+pub fn stream_tree<W: Write>(
+    out: &mut W,
+    kind: TreeKind,
+    root: OwnedFd,
+    rules: &OwnerRules,
+) -> io::Result<Trailer> {
     let stat = fstat(root.as_raw_fd())?;
     let mut walk = Walk {
         out,
@@ -160,6 +229,8 @@ pub fn stream_tree<W: Write>(out: &mut W, kind: TreeKind, root: OwnedFd) -> io::
         link_bytes: 0,
         summary: Trailer::default(),
         buffer: vec![0u8; COPY_BUFFER],
+        owners: rules.entry_owners(kind, stat.st_uid),
+        holes: 0,
     };
     let mut meta = meta_of(archive::ROOT.to_vec(), Kind::Dir, &stat);
     meta.acl_access = walk.acl(root.as_raw_fd(), acl::ACCESS_XATTR, archive::ROOT);
@@ -236,6 +307,20 @@ impl<W: Write> Walk<'_, W> {
         }
     }
 
+    /// Whether the tree may hold an entry of `uid`; if not, it is counted
+    /// and reported.
+    fn owner_allowed(&mut self, path: &[u8], uid: u32) -> bool {
+        if self.owners.iter().any(|range| range.contains(&uid)) {
+            return true;
+        }
+        self.summary.other_owner += 1;
+        self.problem(
+            path,
+            &format!("owned by uid {uid}, not by an account this folder may hold; left out"),
+        );
+        false
+    }
+
     fn acl(&mut self, fd: RawFd, xattr: &str, path: &[u8]) -> Option<Acl> {
         match acl::read(fd, xattr) {
             Ok(acl) => acl,
@@ -294,15 +379,19 @@ impl<W: Write> Walk<'_, W> {
             self.problem(&relative, "on another file system, left out");
             return Ok(None);
         }
-        match stat.st_mode & libc::S_IFMT {
+        let format = stat.st_mode & libc::S_IFMT;
+        if !matches!(format, libc::S_IFDIR | libc::S_IFREG | libc::S_IFLNK) {
+            // FIFOs, sockets and devices are not backed up.
+            self.summary.special += 1;
+            return Ok(None);
+        }
+        if !self.owner_allowed(&relative, stat.st_uid) {
+            return Ok(None);
+        }
+        match format {
             libc::S_IFDIR => self.dir(parent, name, relative, depth, &stat),
             libc::S_IFREG => self.file(parent, name, relative, &stat).map(|()| None),
-            libc::S_IFLNK => self.symlink(parent, name, relative, &stat).map(|()| None),
-            // FIFOs, sockets and devices are not backed up.
-            _ => {
-                self.summary.special += 1;
-                Ok(None)
-            }
+            _ => self.symlink(parent, name, relative, &stat).map(|()| None),
         }
     }
 
@@ -333,6 +422,9 @@ impl<W: Write> Walk<'_, W> {
         if !same_inode(stat, &opened) || !is_dir(&opened) {
             self.summary.changed += 1;
             self.problem(&relative, "changed while it was read, left out");
+            return Ok(None);
+        }
+        if !self.owner_allowed(&relative, opened.st_uid) {
             return Ok(None);
         }
         let mut meta = meta_of(relative.clone(), Kind::Dir, &opened);
@@ -393,7 +485,35 @@ impl<W: Write> Walk<'_, W> {
             self.problem(&relative, "changed while it was read, left out");
             return Ok(());
         }
+        if !self.owner_allowed(&relative, opened.st_uid) {
+            return Ok(());
+        }
         let size = u64::try_from(opened.st_size).unwrap_or(0);
+        let allocated = u64::try_from(opened.st_blocks)
+            .unwrap_or(0)
+            .saturating_mul(512);
+        let holes = match data_bytes(fd.as_raw_fd(), size, allocated) {
+            Ok(data) => size - data,
+            Err(error) => {
+                self.summary.unreadable += 1;
+                self.problem(&relative, &format!("cannot read it: {error}"));
+                return Ok(());
+            }
+        };
+        if holes > 0 {
+            if self.holes.saturating_add(holes) > MAX_TREE_HOLES {
+                self.summary.sparse += 1;
+                self.problem(
+                    &relative,
+                    &format!(
+                        "a sparse file of {size} bytes with {holes} bytes of holes, more than \
+                         the folder's budget for holes; left out"
+                    ),
+                );
+                return Ok(());
+            }
+            self.holes += holes;
+        }
         let mut meta = meta_of(relative.clone(), Kind::File { size }, &opened);
         meta.acl_access = self.acl(fd.as_raw_fd(), acl::ACCESS_XATTR, &relative);
         archive::write_header(self.out, &meta)?;

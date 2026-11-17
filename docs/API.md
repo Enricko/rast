@@ -324,7 +324,7 @@ group grants. A read-only `backup` grant receives status metadata only:
 | GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
 | PUT | `/api/backups/schedule` | update schedule |
 | POST | `/api/backups/{id}/verify` | integrity check → `{ok, manifest:{…, entries, ownersPreserved, preservedTrees}, checks, mismatches, sizeBytes, path}` (`ownersPreserved` is the number of entries that keep their owners, `preservedTrees` the folders read through the backup reader) |
-| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored as root into the storage roots (never `/`), keeping numeric owners and ACLs; only legacy folders are given back to `rast`, one by one |
+| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored with `sudo rast restore-files` (`--dry-run`, a new root-only folder, then `--to-storage`), which checks every entry and keeps owners and ACLs only for HOMEs in one-HOME mode and migrated shared folders; never raw `tar` or `chown -R` as root |
 
 ## App Center (admins and granted groups)
 

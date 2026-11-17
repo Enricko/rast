@@ -237,6 +237,13 @@ still `crates/rast-base/src/config.rs`.
   pass; share containers and quota go to the agent in server-only headers).
   Agent file operations work on directory descriptors (`openat2` with
   `RESOLVE_BENEATH`, no symlinks followed), never on re-resolved paths.
+- The backup reader (ADR 0005 D12, section 14) lets the `rast` service
+  read every one-HOME HOME and migrated shared folder; the service has no
+  other access to a one-HOME HOME. The reader streams only entries of the
+  owners a tree may hold and logs every tree it serves
+  (`rast::backup_reader::audit`). Archives are written by `rast`, so root
+  never trusts them: user files come back only through
+  `rast restore-files`, never through `tar` as root.
 - Mutating HTTP requests require session + CSRF. Display WebSockets keep the
   5-second login revalidation and same-origin checks.
 - All path handling, including inside agents, goes through the safe-path layer:

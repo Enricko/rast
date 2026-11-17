@@ -484,19 +484,28 @@ pub async fn restore_guide(
              "detail": "The previous database is preserved under /var/lib/rast/backups/pre-restore-*."},
             {"title": "Restart and verify", "command": "sudo systemctl start rast.service && rast status",
              "detail": "Sign in and check File Station, users and Activity Logs."},
-            {"title": "Restore user files (optional)", "command": format!(
-                "sudo tar --numeric-owner --same-owner --acls --xattrs -xzf {archive} -C {homes} --strip-components=2 users/homes && sudo tar --numeric-owner --same-owner --acls --xattrs -xzf {archive} -C {shared} --strip-components=2 users/shared",
+            {"title": "Check the user files (optional)", "command": format!(
+                "sudo rast restore-files --from {archive} --dry-run",
                 archive = archive.display(),
+             ),
+             "detail": "Only for backups that include the users scope. Root reads the archive and checks every entry against the database and the host accounts, without writing anything: only files, folders and links, owners only for HOMEs in one-HOME mode and migrated shared folders, never set-uid or set-gid files. Never extract the archive with tar as root: the service wrote it and could have changed it."},
+            {"title": "Restore user files into a new folder (optional)", "command": format!(
+                "sudo rast restore-files --from {archive}",
+                archive = archive.display(),
+             ),
+             "detail": format!(
+                "Writes into a new root-only folder {storage}/restore-<time> (or --target <new folder>; --tree users/homes/<username> restores one folder). Compare it with the live data before the next step. Folders the service read come back as rast:rast; one refused entry refuses the run and nothing stays.",
+                storage = state.config.storage_dir.display(),
+             )},
+            {"title": "Restore user files into the live storage (optional)", "command": format!(
+                "sudo systemctl stop rast.service && sudo rast restore-files --from {archive} --tree users/homes/<username> --to-storage && sudo systemctl start rast.service",
+                archive = archive.display(),
+             ),
+             "detail": format!(
+                "Restores into {homes} and {shared}, only folders that do not exist there: move a damaged folder aside first. Never chown -R the homes or shared folder. The start runs the shared folder repair pass, which gives migrated shared folders their group layout back. Check with: sudo -u rast rast doctor",
                 homes = state.config.homes_dir().display(),
                 shared = state.config.shared_dir().display(),
-             ),
-             "detail": "Only for backups that include the users scope. Stop RAST first and try the command on an isolated copy before restoring over live data; existing files with the same names are overwritten. Run as root, tar gives HOMEs in one-HOME mode and migrated shared folders (preservedTrees in the archive's manifest.json) their numeric owners, modes and ACLs back."},
-            {"title": "Give legacy folders back to the service", "command": format!(
-                "sudo chown -R rast:rast {homes}/<username> {shared}/<folder>",
-                homes = state.config.homes_dir().display(),
-                shared = state.config.shared_dir().display(),
-             ),
-             "detail": "Only for the restored folders that are NOT listed under preservedTrees: the service read them without owners, so tar restores them as root. Never run it over the whole homes or shared folder, and never for a folder listed under preservedTrees (a HOME in one-HOME mode belongs to its rast-u<id> account, a migrated container to root). Then start RAST: its shared folder repair pass gives migrated shared folders their group layout back. Check with: sudo -u rast rast doctor"}
+             )}
         ],
         "rollback": "Database migrations are forward-only: a RAST binary older than the database schema refuses to start. To roll back a release, stop the service, restore the database backup taken before the upgrade, then install the older binary. Binaries older than 0.2.0 do not enforce group policy (only legacy shared-folder memberships), so review access after such a rollback; writes made after the backup are lost.",
         "warning": "Deployed application data (container volumes) is NOT part of a RAST backup; back it up with the application's own procedure."
@@ -636,8 +645,10 @@ mod access_policy_tests {
             "application/gzip"
         );
 
-        // Regression for audit finding F4: user files must be restored into the
-        // storage roots, never extracted into `/`.
+        // Regression for audit finding F4 and review F1: user files are
+        // restored by `rast restore-files`, which checks every entry, never by
+        // raw `tar` as root (into `/` or anywhere else), and nothing hands
+        // every HOME to the service.
         let (status, _, guide) = server.get("/api/backups/restore-guide", &session).await;
         assert_eq!(status, StatusCode::OK, "{guide}");
         let commands: Vec<String> = guide["steps"]
@@ -646,30 +657,31 @@ mod access_policy_tests {
             .iter()
             .filter_map(|step| step["command"].as_str().map(str::to_string))
             .collect();
-        let files = commands
+        let files: Vec<&String> = commands
             .iter()
-            .find(|command| command.contains("users/homes"))
-            .expect("user file restore command");
-        assert!(!files.contains("-C / "), "must not extract into /: {files}");
-        assert!(files.contains("users/shared"), "{files}");
-        let homes = server.state.config.homes_dir().display().to_string();
-        assert!(files.contains(&homes), "targets storage homes: {files}");
-        // Owners and ACLs of one-HOME HOMEs and migrated shared folders are
-        // kept, and nothing hands every HOME to the service.
+            .filter(|command| command.contains("restore-files"))
+            .collect();
+        assert_eq!(files.len(), 3, "{commands:?}");
+        assert!(files[0].ends_with("--dry-run"), "{}", files[0]);
         assert!(
-            files.contains("--numeric-owner --same-owner --acls"),
-            "{files}"
+            files[2].contains("--tree users/homes/<username> --to-storage"),
+            "{}",
+            files[2]
         );
-        for command in commands.iter().filter(|command| command.contains("chown")) {
+        for command in &commands {
             assert!(
-                command.contains(&format!("{homes}/<username>")),
-                "{command}"
-            );
-            assert!(
-                !command.contains(&format!("{homes} ")) && !command.ends_with(&homes),
-                "never the whole homes folder: {command}"
+                !command.contains("tar ") && !command.contains("chown"),
+                "no raw tar or chown as root: {command}"
             );
         }
+        let homes = server.state.config.homes_dir().display().to_string();
+        assert!(guide["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["detail"]
+                .as_str()
+                .is_some_and(|text| text.contains(&homes))));
         assert!(guide["rollback"]
             .as_str()
             .is_some_and(|text| text.contains("refuses to start")));

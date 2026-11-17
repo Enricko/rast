@@ -22,6 +22,12 @@
 //! [`MAX_PATH_BYTES`], paths must be relative and normalised, and anything
 //! else (GNU long names, global headers, devices, FIFOs, a prefix field,
 //! unknown pax records) refuses the stream.
+//!
+//! [`read_backup_entry`] reads a whole Backup Center archive for
+//! `rast restore-files` (review F1): the same subset, plus the GNU headers
+//! that the backup's own writer (`tar::Builder`) uses for the files the
+//! service read and for the database and configuration: regular files,
+//! with a GNU long name (`L`) before a path longer than 100 bytes.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -45,6 +51,10 @@ const MAX_OCTAL_7: u64 = 0o7_777_777;
 const MAX_OCTAL_11: u64 = 0o77_777_777_777;
 /// Name of the pax header entries (as Python's tarfile and bsdtar write it).
 const PAX_NAME: &[u8] = b"././@PaxHeader";
+/// Magic and version of a GNU header (`ustar  \0`).
+const GNU_MAGIC: &[u8] = b"ustar  \0";
+/// Name of a GNU long name entry.
+const GNU_LONG_NAME: &[u8] = b"././@LongLink";
 /// The path of a tree's root folder in the reader's stream.
 pub const ROOT: &[u8] = b".";
 
@@ -534,6 +544,130 @@ pub fn read_entry<R: Read + ?Sized>(input: &mut R) -> Result<Next, ArchiveError>
     if block.iter().all(|byte| *byte == 0) {
         return Ok(Next::End);
     }
+    read_ustar(block, input)
+}
+
+/// Read the next entry of a Backup Center archive: [`read_entry`]'s subset,
+/// or a regular file in a GNU header as `tar::Builder` writes it (numeric
+/// fields in octal, base-256 or all zero; no owner names, devices or GNU
+/// extensions; a long name only as a `L` entry right before it).
+pub fn read_backup_entry<R: Read + ?Sized>(input: &mut R) -> Result<Next, ArchiveError> {
+    let mut block = [0u8; BLOCK];
+    read_exact(input, &mut block)?;
+    if block.iter().all(|byte| *byte == 0) {
+        return Ok(Next::End);
+    }
+    if &block[257..265] == GNU_MAGIC {
+        read_gnu(block, input)
+    } else {
+        read_ustar(block, input)
+    }
+}
+
+/// A numeric field of a GNU header: octal, base-256 (first byte `0x80`) or
+/// all zero bytes (a field `tar::Builder` never set).
+fn gnu_number(field: &[u8], what: &str) -> Result<u64, ArchiveError> {
+    if field.iter().all(|byte| *byte == 0) {
+        return Ok(0);
+    }
+    if field[0] & 0x80 == 0 {
+        return parse_octal(field, what);
+    }
+    let mut bytes = field.to_vec();
+    bytes[0] &= 0x7f;
+    let (high, low) = bytes.split_at(bytes.len().saturating_sub(8));
+    if high.iter().any(|byte| *byte != 0) {
+        return Err(invalid(format!("invalid {what} field")));
+    }
+    let mut value = [0u8; 8];
+    value[8 - low.len()..].copy_from_slice(low);
+    Ok(u64::from_be_bytes(value))
+}
+
+fn check_gnu_block(block: &[u8; BLOCK]) -> Result<(), ArchiveError> {
+    let recorded = parse_octal(&block[148..156], "checksum")?;
+    let sum: u64 = block
+        .iter()
+        .enumerate()
+        .map(|(index, byte)| {
+            if (148..156).contains(&index) {
+                u64::from(b' ')
+            } else {
+                u64::from(*byte)
+            }
+        })
+        .sum();
+    if sum != recorded {
+        return Err(invalid("header checksum mismatch"));
+    }
+    // No link name, owner names, devices, times, offsets or sparse maps.
+    if block[157..257].iter().any(|byte| *byte != 0) || block[265..].iter().any(|b| *b != 0) {
+        return Err(invalid("unexpected fields in a GNU header"));
+    }
+    Ok(())
+}
+
+/// A regular file in a GNU header (after its long name, if any).
+fn read_gnu<R: Read + ?Sized>(mut block: [u8; BLOCK], input: &mut R) -> Result<Next, ArchiveError> {
+    check_gnu_block(&block)?;
+    let mut long_name: Option<Vec<u8>> = None;
+    if block[156] == b'L' {
+        if c_field(&block[0..100]) != GNU_LONG_NAME {
+            return Err(invalid("invalid GNU long name entry"));
+        }
+        let size = gnu_number(&block[124..136], "size")?;
+        if size == 0 || size > MAX_PATH_BYTES as u64 + 1 {
+            return Err(invalid("invalid GNU long name"));
+        }
+        let mut data = vec![0u8; size as usize];
+        read_exact(input, &mut data)?;
+        read_padding(input, size)?;
+        if data.pop() != Some(0) || data.contains(&0) {
+            return Err(invalid("invalid GNU long name"));
+        }
+        long_name = Some(data);
+        read_exact(input, &mut block)?;
+        if &block[257..265] != GNU_MAGIC {
+            return Err(invalid("a GNU long name without its entry"));
+        }
+        check_gnu_block(&block)?;
+    }
+    if !matches!(block[156], b'0' | 0) {
+        return Err(invalid(format!(
+            "entry type {:?} is not allowed in a GNU header",
+            char::from(block[156])
+        )));
+    }
+    let mode = parse_octal(&block[100..108], "mode")?;
+    if mode > 0o7777 {
+        return Err(invalid("invalid mode"));
+    }
+    let path = long_name.unwrap_or_else(|| c_field(&block[0..100]).to_vec());
+    if !valid_relative(&path) {
+        return Err(invalid(format!(
+            "invalid entry path {:?}",
+            String::from_utf8_lossy(&path)
+        )));
+    }
+    Ok(Next::Entry(EntryMeta {
+        path,
+        kind: Kind::File {
+            size: gnu_number(&block[124..136], "size")?,
+        },
+        mode: mode as u32,
+        uid: id(gnu_number(&block[108..116], "uid")?, "uid")?,
+        gid: id(gnu_number(&block[116..124], "gid")?, "gid")?,
+        mtime: gnu_number(&block[136..148], "mtime")?,
+        acl_access: None,
+        acl_default: None,
+    }))
+}
+
+/// The rest of [`read_entry`] after a non-zero `block`.
+fn read_ustar<R: Read + ?Sized>(
+    mut block: [u8; BLOCK],
+    input: &mut R,
+) -> Result<Next, ArchiveError> {
     check_block(&block)?;
     let mut pax = Pax::default();
     if block[156] == b'x' {

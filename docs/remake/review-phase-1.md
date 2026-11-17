@@ -23,18 +23,18 @@
 
 | Id | Severity | Component | Title | Status |
 | --- | --- | --- | --- | --- |
-| F1 | medium | Restore guide (`docs/OPERATIONS.md`, `api/backup.rs`) | Root restore trusts owners, set-id bits, special files and `preservedTrees` from an archive that `rast` writes | open |
+| F1 | medium | Restore guide (`docs/OPERATIONS.md`, `api/backup.rs`) | Root restore trusts owners, set-id bits, special files and `preservedTrees` from an archive that `rast` writes | fixed (`native/restore_files.rs`, `backup_reader/archive.rs`, `backup/restore_files.rs`, `src/main.rs`, `api/backup.rs`, `docs/OPERATIONS.md`) |
 | F2 | medium | Linux apps (`rast-session` `native_apps.rs`) | A pilot administrator's app actions change data of accounts outside the pilot | open |
 | F3 | low | Share groups, HOME migration | Processes started by cron run outside RAST units: they keep revoked share groups and can start during a migration | open |
 | F4 | low | Helper `home_migrate_trash` | `ensure_dir_in` chowns a folder swapped in after `mkdirat` | open |
 | F5 | low | Helper `home_migrate_rollback` | Rollback leaves the identity write access and identity-owned entries in the legacy HOME | open |
-| F6 | low | Backup reader (`walk.rs`) | The reader streams the content of files of any owner | open |
-| F7 | low | Backup reader, Backup Center | Sparse files make a `users` backup arbitrarily large | open |
+| F6 | low | Backup reader (`walk.rs`) | The reader streams the content of files of any owner | fixed (`backup_reader.rs`, `backup_reader/walk.rs`, `backup/reader.rs`, `src/main.rs`) |
+| F7 | low | Backup reader, Backup Center | Sparse files make a `users` backup arbitrarily large | fixed (`backup_reader/walk.rs`, `backup/reader.rs`, `backup/mod.rs`) |
 | F8 | low | Helper trash move, `rast migrate home` | Legacy recycle-bin rows go to any container: no layout check in the helper, no access check in the CLI | open |
 | F9 | low | Native pilot (share rename) | A shared folder renamed out of the pilot keeps its groups; revocations stop | open |
 | F10 | low | `rast migrate home/shares --dry-run` | Dry runs walk real accounts and shared folders as root and print their paths | open |
 | F11 | low | Pilot runbook (`docs/OPERATIONS.md`) | The runbook does not tie `native_enabled` to `native_pilot_prefixes` | open |
-| F12 | info | Backup reader (ADR 0005 D5, D12) | Any `rast` process can read every one-HOME HOME through the reader | open |
+| F12 | info | Backup reader (ADR 0005 D5, D12) | Any `rast` process can read every one-HOME HOME through the reader | fixed (`backup_reader.rs`, `docs/adr/0005-one-home.md`, `CLAUDE.md`) |
 | F13 | info | Native pilot, one HOME | Shrinking the pilot or turning native apps off strands migrated accounts | open |
 | F14 | info | Helper trash move | Payload checks compare a fresh `lstat`, not the planned one; no link-count check on files | open |
 | F15 | info | Helper `home_migrate_rollback` | Rollback matches entries by inode number, which can be reused | open |
@@ -134,6 +134,28 @@ approval.
 It refuses each of these entries and writes nothing. For the guide, change
 the assertion at `api/backup.rs:660`: the user-files step extracts into a
 scratch folder and runs the checks above.
+
+**Resolution.** Decision A6: the root command `rast restore-files
+--from <archive>` (`--dry-run`, `--tree`, `--target`, `--to-storage`,
+`--json`) replaces `tar` as root in `docs/OPERATIONS.md` and in
+`GET /api/backups/restore-guide`. It reads the archive with the strict
+codec (`archive::read_backup_entry`, which adds the GNU headers the
+backup's own writer uses), so devices, FIFOs, sockets, unknown headers and
+unsafe paths refuse the run. A tree keeps owners only when its folder
+entry comes first and matches the layout, checked against the database
+and the host's `/etc/passwd` and `/etc/group`: a HOME owned by its
+account's identity with entries of that identity and `rast`, or a
+container owned by root and its share's rw group with entries of `rast`
+and RAST identities. `preservedTrees` must list exactly those trees. Other
+trees come back as `rast:rast`. Set-id bits never land on a file (set-gid
+stays on folders of a container), foreign groups and ACL entries are
+replaced or dropped and counted. Everything is written through
+descriptors below a new root-only folder; one refusal removes what was
+written. `--to-storage` takes the service's lock and never replaces a
+folder. Tests: `restore_files::tests` (the four cases above, plus links,
+hard links across trees, host-account conflicts, the storage mode and the
+codec) and two end-to-end tests on real backups in `backup::reader::tests`;
+the guide test now asserts `restore-files` and no `tar` or `chown`.
 
 ### F2 (medium) A pilot administrator's app actions change data of accounts outside the pilot
 
@@ -446,6 +468,14 @@ as a parameter, leaving out the test uid for one file. That file is absent
 from the stream and listed as `otherOwner`. With the uid allowed, it is
 present.
 
+**Resolution.** `OwnerRules` now carries the service uid (the reader's
+peer, `--peer-uid`) and `entry_owners` gives the owners a tree may hold:
+in a HOME its identity and the service, in a container the identity range
+and the service. The walk checks every folder, file and symlink (files
+and folders again on the opened descriptor) and leaves any other entry
+out as `otherOwner`, counted in the trailer; the server turns the count
+into a warning. Test: `entries_of_other_owners_are_left_out`.
+
 ### F7 (low) Sparse files make a `users` backup arbitrarily large
 
 **Description.**
@@ -493,6 +523,21 @@ through the reader and gzip.
   with a `sparse` problem, and the stream stays small.
 - Server: a fake reader announces a 1 TiB file and closes. The tree is
   marked incomplete, and nothing beyond the budget is written.
+
+**Resolution.** The reader measures each file's data with
+`SEEK_DATA`/`SEEK_HOLE` and leaves a file out (`sparse` in the trailer)
+once the tree's holes pass 1 GiB (`MAX_TREE_HOLES`). The server gives each
+tree a budget of its quota plus max(10 %, 2 GiB) (`tree_budget`, from
+`users.quota_bytes` and `shares.quota_bytes`): a file header that would
+pass it ends the tree with an `incomplete` warning before any of its data
+is written. A `users` backup checks that the backup folder keeps 1 GiB
+free (`SpaceGuard`, `MIN_FREE_BYTES`) before it starts and every 64 MiB
+written, and stops with an error. Tests:
+`sparse_files_beyond_the_hole_budget_are_left_out`,
+`data_bytes_counts_only_what_a_file_holds`,
+`a_file_beyond_the_budget_is_never_written`,
+`the_budget_comes_from_the_quota_and_ends_the_tree_with_a_warning`,
+`a_users_backup_stops_before_the_disk_is_full`.
 
 ### F8 (low) Legacy recycle-bin rows go to any container: no layout check in the helper, no access check in the CLI
 
@@ -674,6 +719,14 @@ the helper's journal, so reads can be audited.
 
 **Regression test.** If logging is added: a reader test where one served
 tree gives one log record with the tree's kind and name.
+
+**Resolution.** ADR 0005 states it in D5 (a note on the decision) and in
+section 14 ("Who can read what"), and the security invariants in
+`CLAUDE.md` name the reader as the service's only access to a one-HOME
+HOME. The reader logs every tree it serves (`tracing` target
+`rast::backup_reader::audit`, with kind, name and peer uid) in its unit's
+journal. Test: `the_reader_answers_one_tree_per_connection` checks one
+audit record for one served tree.
 
 ### F13 (info) Shrinking the pilot or turning native apps off strands migrated accounts
 

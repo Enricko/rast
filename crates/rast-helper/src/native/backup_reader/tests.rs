@@ -35,11 +35,13 @@ fn roots() -> Roots {
             home_owners: euid()..=euid(),
             container_owner: euid(),
             container_groups: egid()..=egid(),
+            service: None,
         },
         token: TOKEN.into(),
         peer_uid: None,
         idle: Duration::from_secs(5),
         listen: Listen::Systemd,
+        test_audit: None,
     };
     Roots { dir, options }
 }
@@ -189,12 +191,24 @@ fn only_real_folders_in_the_new_layout_are_opened() {
 
 #[test]
 fn owner_rules_follow_the_uid_base() {
-    let rules = OwnerRules::for_uid_base(200_000).unwrap();
+    let rules = OwnerRules::for_uid_base(200_000, Some(990)).unwrap();
     assert_eq!(rules.home_owners, 200_001..=1_200_000);
     assert_eq!(rules.container_owner, 0);
     assert_eq!(rules.container_groups, 1_200_001..=2_199_999);
+    assert_eq!(rules.service, Some(990));
     assert!(!rules.home_owners.contains(&0));
-    assert!(OwnerRules::for_uid_base(u32::MAX - 10).is_err());
+    assert!(OwnerRules::for_uid_base(u32::MAX - 10, None).is_err());
+    // Below the root: a HOME holds its own identity and the service, a
+    // container every identity and the service; root never.
+    let allows = |owners: &[std::ops::RangeInclusive<u32>], uid: u32| {
+        owners.iter().any(|range| range.contains(&uid))
+    };
+    let home = rules.entry_owners(TreeKind::Home, 200_007);
+    assert!(allows(&home, 200_007) && allows(&home, 990));
+    assert!(!allows(&home, 200_008) && !allows(&home, 0));
+    let shared = rules.entry_owners(TreeKind::Shared, 0);
+    assert!(allows(&shared, 200_007) && allows(&shared, 200_008) && allows(&shared, 990));
+    assert!(!allows(&shared, 0) && !allows(&shared, 1000));
 }
 
 /// The entries of a stream (data included), after the reply line, and the
@@ -227,7 +241,7 @@ fn stream_of(
 ) -> (Vec<(EntryMeta, Vec<u8>)>, Trailer) {
     let root = open_tree(options, kind, name).unwrap();
     let mut out = Vec::new();
-    let summary = walk::stream_tree(&mut out, kind, root).unwrap();
+    let summary = walk::stream_tree(&mut out, kind, root, &options.rules).unwrap();
     archive::write_end(&mut out).unwrap();
     write_line(&mut out, &summary).unwrap();
     parse_stream(&out)
@@ -482,6 +496,8 @@ fn the_reader_answers_one_tree_per_connection() {
     fx.options.listen = Listen::Path(socket.clone());
     fx.options.peer_uid = Some(euid());
     fx.options.idle = Duration::from_millis(1500);
+    let audit = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    fx.options.test_audit = Some(audit.clone());
     let options = fx.options;
     let reader = std::thread::spawn(move || run(options));
     for _ in 0..100 {
@@ -520,7 +536,133 @@ fn the_reader_answers_one_tree_per_connection() {
     // Idle: the reader stops by itself and removes its socket.
     reader.join().unwrap().unwrap();
     assert!(!socket.exists());
+    // One audit record for the one tree served, with its kind and name
+    // (review F12); refused requests serve nothing.
+    assert_eq!(
+        *audit.lock().unwrap(),
+        vec![(TreeKind::Home, "alice".to_string())]
+    );
     drop(fx.dir);
+}
+
+/// Review F6: below the root only entries of the owners the tree may hold
+/// are stored; the content of any other file never leaves the reader.
+#[test]
+fn entries_of_other_owners_are_left_out() {
+    let mut fx = roots();
+    let team = fx.options.shared.join("team");
+    std::fs::create_dir_all(team.join("sub")).unwrap();
+    std::fs::write(team.join("sub/x.txt"), b"x").unwrap();
+    std::fs::write(team.join("shadow"), b"root:$6$secret").unwrap();
+    // The test account owns the container (as root would) but is neither
+    // an identity nor the service: nothing below the root is stored.
+    fx.options.rules.home_owners = euid().wrapping_add(1)..=euid().wrapping_add(1);
+    let (entries, trailer) = stream_of(&fx.options, TreeKind::Shared, "team");
+    let paths: Vec<&[u8]> = entries.iter().map(|(entry, _)| &entry.path[..]).collect();
+    assert_eq!(paths, vec![&b"."[..]], "{trailer:?}");
+    assert!(entries.iter().all(|(_, data)| !data.starts_with(b"root:")));
+    assert_eq!(trailer.other_owner, 2, "{trailer:?}");
+    assert_eq!((trailer.files, trailer.bytes), (0, 0));
+    assert!(trailer
+        .problems
+        .iter()
+        .all(|problem| problem.contains(&format!("owned by uid {}", euid()))));
+    // As the service, the same entries are stored.
+    fx.options.rules.service = Some(euid());
+    let (entries, trailer) = stream_of(&fx.options, TreeKind::Shared, "team");
+    assert_eq!(find(&entries, "sub/x.txt").unwrap().1, b"x");
+    assert_eq!(find(&entries, "shadow").unwrap().1, b"root:$6$secret");
+    assert_eq!(trailer.other_owner, 0);
+    // In a HOME, its owner (the identity) is allowed.
+    fx.options.rules.service = None;
+    fx.options.rules.home_owners = euid()..=euid();
+    std::fs::create_dir(fx.options.homes.join("alice")).unwrap();
+    std::fs::write(fx.options.homes.join("alice/a.txt"), b"a").unwrap();
+    let (entries, trailer) = stream_of(&fx.options, TreeKind::Home, "alice");
+    assert_eq!(find(&entries, "a.txt").unwrap().1, b"a");
+    assert_eq!(trailer.other_owner, 0);
+}
+
+/// Review F7: a sparse file costs its owner no quota, so the holes of one
+/// tree are bounded; a file beyond the budget is left out and reported.
+#[test]
+fn sparse_files_beyond_the_hole_budget_are_left_out() {
+    let fx = roots();
+    let home = fx.options.homes.join("alice");
+    std::fs::create_dir(&home).unwrap();
+    let big = std::fs::File::create(home.join("big")).unwrap();
+    if big.set_len(1 << 40).is_err() {
+        // The test file system cannot hold a 1 TiB sparse file.
+        return;
+    }
+    let small = std::fs::File::create(home.join("small")).unwrap();
+    small.set_len(1 << 20).unwrap();
+    let mut partly = std::fs::File::create(home.join("partly")).unwrap();
+    partly.write_all(b"hello").unwrap();
+    partly.set_len(2 << 20).unwrap();
+    std::fs::write(home.join("plain"), vec![3u8; 10_000]).unwrap();
+    drop((big, small, partly));
+
+    let root = open_tree(&fx.options, TreeKind::Home, "alice").unwrap();
+    let mut out = Vec::new();
+    let trailer = walk::stream_tree(&mut out, TreeKind::Home, root, &fx.options.rules).unwrap();
+    assert!(out.len() < 8 << 20, "the stream stays small: {}", out.len());
+    archive::write_end(&mut out).unwrap();
+    write_line(&mut out, &trailer).unwrap();
+    let (entries, trailer) = parse_stream(&out);
+    assert!(find(&entries, "big").is_none());
+    assert_eq!(trailer.sparse, 1, "{trailer:?}");
+    assert!(
+        trailer
+            .problems
+            .iter()
+            .any(|problem| problem.starts_with("big: a sparse file of 1099511627776 bytes")),
+        "{:?}",
+        trailer.problems
+    );
+    // Holes within the budget are stored, as zeros, and the data before a
+    // hole is read from the start of the file.
+    let (_, data) = find(&entries, "small").unwrap();
+    assert_eq!(data.len(), 1 << 20);
+    assert!(data.iter().all(|byte| *byte == 0));
+    let (_, data) = find(&entries, "partly").unwrap();
+    assert_eq!(data.len(), 2 << 20);
+    assert_eq!(&data[..5], b"hello");
+    assert!(data[5..].iter().all(|byte| *byte == 0));
+    assert_eq!(find(&entries, "plain").unwrap().1, vec![3u8; 10_000]);
+    assert_eq!(trailer.files, 3);
+}
+
+#[test]
+fn data_bytes_counts_only_what_a_file_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f");
+    let mut file = std::fs::File::create(&path).unwrap();
+    file.write_all(&[1u8; 8192]).unwrap();
+    file.set_len(64 << 20).unwrap();
+    file.sync_all().unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let meta = file.metadata().unwrap();
+    use std::os::unix::fs::MetadataExt;
+    let data = walk::data_bytes(file.as_raw_fd(), meta.len(), meta.blocks() * 512).unwrap();
+    // At least the bytes written, far less than the size (unless the file
+    // system has no holes at all).
+    assert!(data >= 8192, "{data}");
+    if meta.blocks() * 512 < meta.len() {
+        assert!(data < 1 << 20, "{data}");
+    }
+    // The offset is back at the start.
+    let mut first = [0u8; 4];
+    (&file).read_exact(&mut first).unwrap();
+    assert_eq!(first, [1u8; 4]);
+    // A file without holes is all data.
+    std::fs::write(dir.path().join("g"), vec![2u8; 5000]).unwrap();
+    let full = std::fs::File::open(dir.path().join("g")).unwrap();
+    let meta = full.metadata().unwrap();
+    assert_eq!(
+        walk::data_bytes(full.as_raw_fd(), meta.len(), meta.blocks() * 512).unwrap(),
+        5000
+    );
 }
 
 #[test]

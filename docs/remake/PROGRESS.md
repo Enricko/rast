@@ -774,6 +774,26 @@ Update it at the end of every session.
 - **Task 1.6, Phase 1 security review** (2026-11-17, `0ab47a6..a13e829`,
   review only): 16 findings (2 medium, 9 low, 5 info), all open, in
   `docs/remake/review-phase-1.md`; no code change.
+- **Task 1.6 fixes, part 1: F1, F6, F7, F12** (2026-11-17, uncommitted):
+  `rast restore-files` (A6; root; strict archive codec, owners checked
+  against the database and `/etc/passwd`/`/etc/group`, `preservedTrees`
+  verified, no set-id files, descriptor writes into a new root-only folder,
+  `--to-storage` with the service's lock and `RENAME_NOREPLACE`); restore
+  guide (API and `docs/OPERATIONS.md`) uses it. Backup reader: only entries
+  of allowed owners (F6), a 1 GiB hole budget per tree (F7), an audit
+  record per served tree (F12). Backup Center: a per-tree budget of quota
+  plus max(10 %, 2 GiB) and a 1 GiB free-space floor for `users` backups
+  (F7). ADR 0005 (D5, section 14) and the security invariants updated.
+  - Tests: 24 new, 3 extended (helper restore and codec, reader owners,
+    holes and audit, server budget, floor, end-to-end restore of real
+    backups, CLI parsing, restore guide).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1112 passed, 0
+    failed; frontend 160 passed, build clean; no new dependency or
+    migration.
+  - Pending on the test host: `sudo rast restore-files --dry-run`, a
+    scratch restore and `--to-storage` for a `t-` account's backup (owners
+    set by root, ACLs, set-gid containers); the audit records in
+    `journalctl -u rast-backup-reader`; a real sparse file on ext4.
 
 ## Phase 1 checklist
 
@@ -846,6 +866,35 @@ gives the least access and keeps data; the session went on with it.
   with `native_enabled = true` the share group syncer would create groups
   and set members for every shared folder, including the real `Test`
   folder and real accounts.
+- **A6, review F1** (2026-11-17): a root-only `rast restore-files` command
+  validates every entry of a Backup Center `users` archive (file types,
+  set-id bits, owners against passwd and the database, `preservedTrees`
+  checked, never trusted; no path through a link) and the restore guide
+  uses it instead of raw `tar` as root.
+- **A7, review F3:** cron and at are denied only to identities of accounts
+  in one-HOME mode (set by `rast migrate home`, removed by its rollback,
+  exact `rast-u<id>` lines in `/etc/cron.deny` and `/etc/at.deny`); legacy
+  and real accounts keep cron from Terminal. Account expiry was rejected
+  because it would also block `user@.service` (PAM `systemd-user`) in
+  Phase 2.
+- **A8, review F9:** a rename that moves a shared folder into or out of
+  the native pilot is refused while the pilot is set.
+- **A9, review F10:** dry runs print only counts and sizes for accounts and
+  shared folders outside the pilot, unless `--show-paths` is given.
+- **A10, `CLAUDE.md` security invariants** (review F12): one bullet added
+  for the backup reader (the service can read every one-HOME HOME and
+  migrated shared folder through it; it serves only allowed owners and
+  audits every tree; archives are never trusted by root: user files come
+  back only through `rast restore-files`). It describes the accepted D12
+  design; the maintainer may reword it.
+- **A11, `rast restore-files` details** (review F1 fix): set-id bits on
+  files are cleared and counted (not refused); wrong owners are refused;
+  groups outside the layout become the owner's group and named ACL entries
+  of unknown accounts are dropped (counted); the default target is a new
+  0700 `<storage_dir>/restore-<time>`, nothing is overwritten; root is
+  needed even for `--dry-run`. Reader budgets: sparse files are left out
+  once a tree's holes pass 1 GiB; each tree may use quota + max(10 %,
+  2 GiB); a `users` backup stops below 1 GiB free.
 
 ## Testing on production
 

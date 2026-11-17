@@ -10,11 +10,13 @@ use sqlx::SqlitePool;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 use super::*;
+use crate::backup::restore_files::Inputs;
 use crate::backup::{self, BackupEnv, BackupMeta, Manifest};
 use crate::config::{Config, FileConfig};
 use crate::db;
 use crate::native::acl::{self, Acl, Entry, Tag};
 use crate::native::backup_reader::{run, Listen, OwnerRules, ReaderOptions};
+use crate::native::restore_files::{Facts, HostAccounts, OwnerLog, Owners};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -169,6 +171,7 @@ fn my_rules() -> OwnerRules {
         home_owners: euid()..=euid(),
         container_owner: euid(),
         container_groups: egid()..=egid(),
+        service: None,
     }
 }
 
@@ -188,6 +191,7 @@ fn one_home_env(native: Option<NativeClient>) -> BackupEnv {
         service_uid: Some(euid().wrapping_add(1)),
         container_owner_uid: euid(),
         native,
+        min_free_bytes: 0,
     }
 }
 
@@ -546,6 +550,7 @@ async fn a_tree_the_reader_refuses_is_a_warning_and_a_share_falls_back() {
             home_owners: euid().wrapping_add(7)..=euid().wrapping_add(7),
             container_owner: euid(),
             container_groups: egid().wrapping_add(7)..=egid().wrapping_add(7),
+            service: None,
         },
     );
     let (env, _) = helper_for(&fx, &reader);
@@ -604,19 +609,30 @@ fn stream(entries: &[(EntryMeta, &[u8])], trailer: Option<Trailer>) -> Vec<u8> {
 }
 
 fn copy(input: &[u8]) -> (Result<Trailer, String>, Vec<u8>, Vec<ManifestEntry>) {
+    copy_within(input, None)
+}
+
+fn copy_within(
+    input: &[u8],
+    budget: Option<u64>,
+) -> (Result<Trailer, String>, Vec<u8>, Vec<ManifestEntry>) {
     let mut out = Vec::new();
     let mut manifest = Vec::new();
     let mut received = Received::default();
     let mut reader = input;
+    let mut space = SpaceGuard::new(std::env::temp_dir(), 0);
     let result = match copy_entries(
         &mut reader,
         "users/homes/t-alice",
+        budget,
         &mut out,
         &mut manifest,
         &mut received,
+        &mut space,
     ) {
         Ok(trailer) => Ok(trailer),
         Err(CopyError::Stream(reason)) => Err(reason),
+        Err(CopyError::Budget(budget)) => Err(format!("budget {budget}")),
         Err(CopyError::Archive(error)) => panic!("{error}"),
     };
     (result, out, manifest)
@@ -929,4 +945,296 @@ fn only_unexpected_losses_become_warnings() {
     assert_eq!(warnings.len(), 3, "{warnings:?}");
     assert!(warnings[0].contains("2 unreadable, 1 on other file systems or mounts"));
     assert_eq!(warnings[1], "users/homes/t-alice/docs/x: cannot open it ");
+    // Entries of other owners (F6) and sparse files (F7) are lost against
+    // the user's will: they are warnings.
+    let left_out = Trailer {
+        done: true,
+        other_owner: 1,
+        sparse: 2,
+        ..Trailer::default()
+    };
+    let warnings = trailer_warnings("users/homes/t-alice", &left_out);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains("1 owned by accounts this folder may not hold, 2 sparse files"),
+        "{warnings:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Budgets and free space (review F7)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_tree_budget_is_its_quota_plus_slack() {
+    assert_eq!(tree_budget(None), None);
+    assert_eq!(tree_budget(Some(0)), None);
+    assert_eq!(tree_budget(Some(1 << 30)), Some((1 << 30) + TREE_SLACK));
+    let big = 100u64 << 40;
+    assert_eq!(tree_budget(Some(big)), Some(big + big / 10));
+    assert_eq!(tree_budget(Some(u64::MAX)), Some(u64::MAX));
+}
+
+/// A reader that announces a 1 TiB file: nothing of it is written, the
+/// tree is incomplete and the entries before it stay.
+#[test]
+fn a_file_beyond_the_budget_is_never_written() {
+    let mut input = Vec::new();
+    archive::write_header(&mut input, &meta(b".", Kind::Dir)).unwrap();
+    archive::write_header(&mut input, &meta(b"a.txt", Kind::File { size: 3 })).unwrap();
+    input.extend_from_slice(b"abc");
+    archive::write_padding(&mut input, 3).unwrap();
+    archive::write_header(&mut input, &meta(b"huge", Kind::File { size: 1 << 40 })).unwrap();
+    // The stream ends there.
+    let (result, out, manifest) = copy_within(&input, Some(1 << 20));
+    assert_eq!(result.unwrap_err(), format!("budget {}", 1 << 20));
+    assert!(out.len() < 8 * 1024, "{}", out.len());
+    let entries = outer(&out);
+    let paths: Vec<&[u8]> = entries.iter().map(|entry| &entry.path[..]).collect();
+    assert_eq!(
+        paths,
+        [&b"users/homes/t-alice"[..], b"users/homes/t-alice/a.txt"]
+    );
+    assert_eq!(manifest.len(), 1);
+}
+
+#[tokio::test]
+async fn the_budget_comes_from_the_quota_and_ends_the_tree_with_a_warning() {
+    let fx = fixture(None).await;
+    sqlx::query("UPDATE users SET quota_bytes = ? WHERE username = 'alice'")
+        .bind(1_000_000i64)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    std::fs::create_dir_all(fx.cfg.home_for("alice")).unwrap();
+    let budget = tree_budget(Some(1_000_000)).unwrap();
+    let mut bytes = b"{\"ok\":true}\n".to_vec();
+    archive::write_header(&mut bytes, &meta(b".", Kind::Dir)).unwrap();
+    archive::write_header(&mut bytes, &meta(b"a.txt", Kind::File { size: 3 })).unwrap();
+    bytes.extend_from_slice(b"abc");
+    archive::write_padding(&mut bytes, 3).unwrap();
+    archive::write_header(&mut bytes, &meta(b"huge", Kind::File { size: budget + 1 })).unwrap();
+    let reader = fake_reader(&fx, bytes);
+    let (env, _) = helper_for(&fx, &reader);
+
+    let meta = backup_users(&fx, &env).await;
+    assert_eq!(meta.warnings.len(), 1, "{:?}", meta.warnings);
+    assert!(
+        meta.warnings[0].starts_with(
+            "users/homes/alice: incomplete, the folder is larger than its backup budget"
+        ),
+        "{:?}",
+        meta.warnings
+    );
+    assert!(meta.size_bytes < 64 * 1024, "{}", meta.size_bytes);
+    let (seen, manifest) = read_archive(&meta.path);
+    assert_eq!(manifest.preserved_trees, ["users/homes/alice"]);
+    assert_eq!(seen["users/homes/alice/a.txt"].data, b"abc");
+    assert!(!seen.contains_key("users/homes/alice/huge"));
+    let verified = backup::verify(Path::new(&meta.path)).await.unwrap();
+    assert_eq!(verified["ok"], true, "{verified}");
+    drop(fx.dir);
+}
+
+#[tokio::test]
+async fn a_users_backup_stops_before_the_disk_is_full() {
+    let fx = fixture(None).await;
+    std::fs::create_dir_all(fx.cfg.home_for("legacy")).unwrap();
+    std::fs::write(fx.cfg.home_for("legacy").join("a.txt"), b"a").unwrap();
+    let mut env = one_home_env(None);
+    // The service owns everything here (legacy), and no file system has
+    // this much free.
+    env.service_uid = Some(euid());
+    env.min_free_bytes = u64::MAX;
+    let error = backup::create_with(
+        &fx.cfg,
+        Some(&fx.pool),
+        &["users".into()],
+        "",
+        None,
+        None,
+        &env,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("bytes free, less than"), "{error}");
+    // A database-only backup does not measure.
+    let meta = backup::create_with(
+        &fx.cfg,
+        Some(&fx.pool),
+        &["db".into()],
+        "",
+        None,
+        None,
+        &env,
+    )
+    .await
+    .unwrap();
+    assert!(meta.warnings.is_empty());
+    let mut guard = SpaceGuard::new(fx.dir.path().to_path_buf(), u64::MAX);
+    assert!(guard.wrote(1).is_ok(), "measured only every 64 MiB");
+    assert!(guard.wrote(64 << 20).is_err());
+    drop(fx.dir);
+}
+
+/// Review F1: what a users backup holds goes back with
+/// `rast restore-files`, checked entry by entry, never with raw `tar`.
+fn restore_inputs(cfg: &Config, identity: Option<(i64, u32)>) -> (Config, Inputs, OwnerLog) {
+    let mut cfg = cfg.clone();
+    let (mut passwd, mut group) = (String::new(), String::new());
+    if let Some((id, uid)) = identity {
+        cfg.linux_uid_base = uid - u32::try_from(id).unwrap();
+        passwd = format!("rast-u{id}:x:{uid}:{uid}::/:/bin/sh\n");
+        group = format!("rast-u{id}:x:{uid}:\n");
+    }
+    let log = OwnerLog::default();
+    let inputs = Inputs {
+        facts: Facts::default(),
+        host: HostAccounts::parse(&passwd, &group),
+        service_uid: euid().wrapping_add(1),
+        service_gid: egid().wrapping_add(1),
+        owners: Owners::Record(log.clone()),
+    };
+    (cfg, inputs, log)
+}
+
+fn recorded(log: &OwnerLog, path: &Path) -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).unwrap();
+    log.lock().unwrap()[&(meta.dev(), meta.ino())]
+}
+
+#[tokio::test]
+async fn a_one_home_backup_comes_back_with_restore_files() {
+    use crate::backup::restore_files::{load_facts, run_with, Mode, RunOptions};
+    use std::os::unix::fs::MetadataExt;
+    if euid() < 2 {
+        eprintln!("skipped: runs as an unprivileged account");
+        return;
+    }
+    let fx = fixture(None).await;
+    let home = fx.cfg.home_for("alice");
+    std::fs::create_dir_all(home.join("docs")).unwrap();
+    std::fs::write(home.join("docs/a.txt"), b"alpha").unwrap();
+    std::fs::set_permissions(
+        home.join("docs/a.txt"),
+        std::fs::Permissions::from_mode(0o640),
+    )
+    .unwrap();
+    std::fs::hard_link(home.join("docs/a.txt"), home.join("docs/b.txt")).unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", home.join("passwd")).unwrap();
+    std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let team = fx.cfg.shared_dir().join("team");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(team.join("plan.txt"), b"plan").unwrap();
+    let reader = real_reader(&fx, my_rules());
+    let (env, _calls) = helper_for(&fx, &reader);
+    let meta = backup_users(&fx, &env).await;
+    assert!(meta.warnings.is_empty(), "{:?}", meta.warnings);
+
+    let facts = load_facts(&fx.cfg.db_path()).await.unwrap();
+    let alice = facts.accounts["alice"];
+    assert_eq!(facts.shares["team"], "s1");
+    let (cfg, mut inputs, log) = restore_inputs(&fx.cfg, Some((alice, euid())));
+    inputs.facts = facts;
+
+    // The container belongs to the test account, not to root: the whole
+    // archive is refused, and a dry run writes nothing anyway.
+    let all = RunOptions {
+        archive: PathBuf::from(&meta.path),
+        trees: Vec::new(),
+        mode: Mode::DryRun,
+    };
+    let report = run_with(&cfg, all, inputs.clone()).await.unwrap();
+    assert!(!report.ok);
+    assert!(
+        report.refused[0].starts_with("users/shared/team: the container belongs to uid"),
+        "{:?}",
+        report.refused
+    );
+
+    let target = fx.dir.path().join("restored");
+    let alice_only = RunOptions {
+        archive: PathBuf::from(&meta.path),
+        trees: vec!["users/homes/alice".into()],
+        mode: Mode::Scratch(Some(target.clone())),
+    };
+    let report = run_with(&cfg, alice_only, inputs).await.unwrap();
+    assert!(report.ok, "{report:?}");
+    let restored = target.join("homes/alice");
+    assert_eq!(
+        std::fs::read(restored.join("docs/a.txt")).unwrap(),
+        b"alpha"
+    );
+    assert_eq!(
+        std::fs::metadata(restored.join("docs/a.txt"))
+            .unwrap()
+            .mode()
+            & 0o7777,
+        0o640
+    );
+    assert_eq!(
+        std::fs::metadata(restored.join("docs/a.txt"))
+            .unwrap()
+            .ino(),
+        std::fs::metadata(restored.join("docs/b.txt"))
+            .unwrap()
+            .ino()
+    );
+    assert_eq!(
+        std::fs::read_link(restored.join("passwd")).unwrap(),
+        Path::new("/etc/passwd")
+    );
+    assert_eq!(recorded(&log, &restored).0, euid());
+    assert_eq!(recorded(&log, &restored.join("docs/a.txt")).0, euid());
+    assert!(!target.join("shared/team").exists());
+    drop(fx.dir);
+}
+
+#[tokio::test]
+async fn a_legacy_backup_comes_back_as_the_services_files() {
+    use crate::backup::restore_files::{run_with, Mode, RunOptions};
+    let fx = fixture(None).await;
+    std::fs::create_dir_all(fx.cfg.home_for("alice").join("deep/er")).unwrap();
+    std::fs::write(fx.cfg.home_for("alice").join("deep/er/a.txt"), b"a").unwrap();
+    let long = "n".repeat(150);
+    std::fs::write(fx.cfg.home_for("alice").join(&long), b"long").unwrap();
+    std::fs::create_dir_all(fx.cfg.shared_dir().join("team")).unwrap();
+    std::fs::write(fx.cfg.shared_dir().join("team/plan.txt"), b"p").unwrap();
+    let (mut env, _calls) = helper_for(&fx, Path::new("/nonexistent/reader.sock"));
+    env.service_uid = Some(euid());
+    env.container_owner_uid = 0;
+    let meta = backup_users(&fx, &env).await;
+    assert!(meta.warnings.is_empty(), "{:?}", meta.warnings);
+
+    let (cfg, inputs, log) = restore_inputs(&fx.cfg, None);
+    let target = fx.dir.path().join("restored");
+    let options = RunOptions {
+        archive: PathBuf::from(&meta.path),
+        trees: Vec::new(),
+        mode: Mode::Scratch(Some(target.clone())),
+    };
+    let report = run_with(&cfg, options, inputs).await.unwrap();
+    assert!(report.ok, "{report:?}");
+    let service = (euid().wrapping_add(1), egid().wrapping_add(1));
+    let alice = target.join("homes/alice");
+    assert_eq!(std::fs::read(alice.join("deep/er/a.txt")).unwrap(), b"a");
+    assert_eq!(std::fs::read(alice.join(&long)).unwrap(), b"long");
+    for path in [
+        alice.clone(),
+        alice.join("deep"),
+        alice.join("deep/er"),
+        alice.join("deep/er/a.txt"),
+        target.join("shared/team/plan.txt"),
+    ] {
+        assert_eq!(recorded(&log, &path), service, "{}", path.display());
+    }
+    let layouts: Vec<&str> = report
+        .trees
+        .iter()
+        .map(|tree| tree.layout.as_str())
+        .collect();
+    assert_eq!(layouts, ["legacy", "legacy"]);
+    drop(fx.dir);
 }

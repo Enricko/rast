@@ -191,6 +191,30 @@ enum Command {
         #[command(subcommand)]
         cmd: MigrateCommand,
     },
+    /// Restore user files (HOMEs, shared folders) from a backup archive, as
+    /// root: every entry is checked, owners only as the layout allows
+    RestoreFiles {
+        /// Backup archive (Backup Center or `rast backup`, users scope)
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Only this folder: users/homes/<name> or users/shared/<container>
+        /// (repeatable; default: every folder in the archive)
+        #[arg(long = "tree", value_name = "FOLDER", value_parser = parse_restore_tree)]
+        trees: Vec<String>,
+        /// Check every entry and write nothing
+        #[arg(long, conflicts_with_all = ["target", "to_storage"])]
+        dry_run: bool,
+        /// New folder to restore into (default: <storage_dir>/restore-<time>)
+        #[arg(long, value_name = "DIR", conflicts_with = "to_storage")]
+        target: Option<PathBuf>,
+        /// Restore into the live storage (stop rast.service first); a folder
+        /// that exists there is never replaced
+        #[arg(long)]
+        to_storage: bool,
+        /// Machine-readable report
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -603,7 +627,9 @@ async fn run(
         } => {
             use rast::native::backup_reader;
             init_tracing(log_level.as_deref().unwrap_or("info"));
-            let rules = backup_reader::OwnerRules::for_uid_base(uid_base)
+            // The peer is the `rast` service, which may own entries in a
+            // HOME or a container too (review F6).
+            let rules = backup_reader::OwnerRules::for_uid_base(uid_base, peer_uid)
                 .map_err(|error| format!("backup reader: {error}"))?;
             let token = backup_reader::token_from(token_file.as_deref())?;
             let options = backup_reader::ReaderOptions {
@@ -681,6 +707,25 @@ async fn run(
                     Ok(ExitCode::SUCCESS)
                 }
                 Command::Restore { from, dry_run, yes } => restore(cfg, from, dry_run, yes).await,
+                Command::RestoreFiles {
+                    from,
+                    trees,
+                    dry_run,
+                    target,
+                    to_storage,
+                    json,
+                } => {
+                    let mode = if dry_run {
+                        backup::restore_files::Mode::DryRun
+                    } else if to_storage {
+                        backup::restore_files::Mode::Storage
+                    } else {
+                        backup::restore_files::Mode::Scratch(
+                            target.map(std::path::absolute).transpose()?,
+                        )
+                    };
+                    restore_files(cfg, from, trees, mode, json).await
+                }
                 Command::Migrate { cmd } => migrate_command(cfg, cmd).await,
                 Command::Update { version, check } => {
                     rast::update::run(cfg, version.as_deref(), check).await
@@ -1809,6 +1854,71 @@ async fn restore(
     Ok(ExitCode::SUCCESS)
 }
 
+fn parse_restore_tree(text: &str) -> Result<String, String> {
+    rast::native::restore_files::parse_tree(text)
+}
+
+/// `rast restore-files` (review F1): root restores user files from an
+/// archive the service wrote, without trusting it.
+async fn restore_files(
+    cfg: Config,
+    from: PathBuf,
+    trees: Vec<String>,
+    mode: backup::restore_files::Mode,
+    json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::native::restore_files::{describe, take_service_lock, ServiceLock};
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(
+            "rast restore-files sets the owners of what it restores and runs as root: \
+                    sudo rast restore-files ..."
+                .into(),
+        );
+    }
+    // Into the live storage only while the service is stopped, and it
+    // cannot start until the restore ends.
+    let _lock = if matches!(mode, backup::restore_files::Mode::Storage) {
+        let path = rast::db::InstanceLock::path(&cfg);
+        match take_service_lock(&path)
+            .map_err(|error| format!("cannot check {}: {error}", path.display()))?
+        {
+            ServiceLock::Busy => {
+                return Err(format!(
+                    "rast.service is running ({} is locked); stop it first: \
+                     sudo systemctl stop rast.service",
+                    path.display()
+                )
+                .into())
+            }
+            lock => Some(lock),
+        }
+    } else {
+        None
+    };
+    let report = backup::restore_files::run(
+        &cfg,
+        backup::restore_files::RunOptions {
+            archive: from,
+            trees,
+            mode,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in describe(&report) {
+            println!("{line}");
+        }
+    }
+    Ok(if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 #[allow(dead_code)]
 fn _assert_traits() {
     // Compile-time check that Config is Send + Sync for tokio::spawn.
@@ -1829,6 +1939,46 @@ mod tests {
             Some(Command::Migrate { cmd }) => Ok(cmd),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn restore_files_takes_one_target_and_valid_folders() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["rast", "restore-files", "--from", "/b.tar.gz"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|cli| cli.command)
+        };
+        for args in [
+            &["--dry-run", "--to-storage"][..],
+            &["--dry-run", "--target", "/x"],
+            &["--target", "/x", "--to-storage"],
+            &["--tree", "users/homes/../etc"],
+            &["--tree", "homes/alice"],
+            &["--tree", "users/other/alice"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["rast", "restore-files"]).is_err());
+        let command = parse(&[
+            "--tree",
+            "users/homes/t-alice",
+            "--tree",
+            "users/shared/team",
+            "--to-storage",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            command,
+            Some(Command::RestoreFiles { ref trees, dry_run: false, target: None, to_storage: true, json: true, .. })
+                if trees == &["users/homes/t-alice", "users/shared/team"]
+        ));
+        let command = parse(&[]).unwrap();
+        assert!(matches!(
+            command,
+            Some(Command::RestoreFiles { ref trees, dry_run: false, target: None, to_storage: false, .. })
+                if trees.is_empty()
+        ));
     }
 
     #[test]

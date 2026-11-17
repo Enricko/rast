@@ -19,7 +19,13 @@
 //! service) itself. HOMEs in one-HOME mode and migrated shared folders are
 //! read through the root backup reader ([`reader`], ADR 0005 D12), which
 //! keeps numeric owners, modes and ACLs; the manifest marks those entries
-//! `ownersPreserved` and lists their trees in `preservedTrees`.
+//! `ownersPreserved` and lists their trees in `preservedTrees`. The
+//! `users` scope stops with an error before the backup folder's file
+//! system has less than [`MIN_FREE_BYTES`] free ([`SpaceGuard`]), and each
+//! tree read through the reader has a byte budget
+//! ([`reader::tree_budget`]; review F7). Restore user files with the root
+//! command `rast restore-files` ([`restore_files`]), never with a raw `tar`
+//! as root (review F1).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -45,6 +51,7 @@ use crate::{
 };
 
 pub mod reader;
+pub mod restore_files;
 pub mod schedule;
 
 pub const BACKUP_FORMAT: u32 = 1;
@@ -113,6 +120,57 @@ pub struct BackupMeta {
 /// Warnings listed at most (the rest is counted).
 const MAX_BACKUP_WARNINGS: usize = 50;
 
+/// Free space the `users` scope leaves on the file system of the backup's
+/// work folder (review F7): below it the backup stops with an error rather
+/// than filling the disk.
+pub const MIN_FREE_BYTES: u64 = 1 << 30;
+/// Bytes written between two measurements of [`SpaceGuard`].
+const SPACE_CHECK_EVERY: u64 = 64 << 20;
+
+/// Stops a backup before its file system is full.
+pub struct SpaceGuard {
+    path: PathBuf,
+    floor: u64,
+    since_check: u64,
+}
+
+impl SpaceGuard {
+    pub fn new(path: PathBuf, floor: u64) -> Self {
+        Self {
+            path,
+            floor,
+            since_check: 0,
+        }
+    }
+
+    /// Measure now: an error when less than the floor is free.
+    pub fn check(&mut self) -> std::io::Result<()> {
+        self.since_check = 0;
+        if self.floor == 0 {
+            return Ok(());
+        }
+        match crate::native::backup_reader::available_bytes(&self.path) {
+            Some(free) if free < self.floor => Err(std::io::Error::other(format!(
+                "the file system of {} has {free} bytes free, less than the {} bytes a backup \
+                 must leave; the backup stops",
+                self.path.display(),
+                self.floor
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// `bytes` were written: measure again every [`SPACE_CHECK_EVERY`].
+    pub fn wrote(&mut self, bytes: u64) -> std::io::Result<()> {
+        self.since_check = self.since_check.saturating_add(bytes);
+        if self.since_check >= SPACE_CHECK_EVERY {
+            self.check()
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Where the `users` scope may read from. Tests replace the owners (they
 /// cannot chown) and the helper.
 pub(crate) struct BackupEnv {
@@ -123,6 +181,8 @@ pub(crate) struct BackupEnv {
     pub container_owner_uid: u32,
     /// The native helper, when native execution is on.
     pub native: Option<NativeClient>,
+    /// Free space the `users` scope leaves ([`MIN_FREE_BYTES`]).
+    pub min_free_bytes: u64,
 }
 
 impl BackupEnv {
@@ -132,6 +192,7 @@ impl BackupEnv {
             container_owner_uid: 0,
             native: (cfg.native_enabled && cfg!(target_os = "linux"))
                 .then(|| NativeClient::from_config(cfg)),
+            min_free_bytes: MIN_FREE_BYTES,
         }
     }
 }
@@ -139,8 +200,12 @@ impl BackupEnv {
 /// What the database says about the folders below the storage roots.
 struct Facts {
     accounts: HashSet<String>,
+    /// Quota of each account (bytes, 0: none).
+    account_quota: HashMap<String, u64>,
     /// Shared folder name by container.
     shares: HashMap<String, String>,
+    /// Quota of each shared folder by container (bytes).
+    share_quota: HashMap<String, u64>,
 }
 
 async fn load_facts(cfg: &Config, pool: Option<&SqlitePool>) -> Result<Facts, String> {
@@ -154,17 +219,30 @@ async fn load_facts(cfg: &Config, pool: Option<&SqlitePool>) -> Result<Facts, St
             &owned
         }
     };
-    let accounts: Vec<String> = sqlx::query_scalar("SELECT username FROM users")
+    let accounts: Vec<(String, i64)> = sqlx::query_as("SELECT username, quota_bytes FROM users")
         .fetch_all(pool)
         .await
         .map_err(|error| error.to_string())?;
-    let shares: Vec<(String, String)> = sqlx::query_as("SELECT container_path, name FROM shares")
-        .fetch_all(pool)
-        .await
-        .map_err(|error| error.to_string())?;
+    let shares: Vec<(String, String, Option<i64>)> =
+        sqlx::query_as("SELECT container_path, name, quota_bytes FROM shares")
+            .fetch_all(pool)
+            .await
+            .map_err(|error| error.to_string())?;
+    let quota = |bytes: Option<i64>| bytes.and_then(|bytes| u64::try_from(bytes).ok());
     Ok(Facts {
-        accounts: accounts.into_iter().collect(),
-        shares: shares.into_iter().collect(),
+        accounts: accounts.iter().map(|(name, _)| name.clone()).collect(),
+        account_quota: accounts
+            .iter()
+            .filter_map(|(name, bytes)| Some((name.clone(), quota(Some(*bytes))?)))
+            .collect(),
+        share_quota: shares
+            .iter()
+            .filter_map(|(container, _, bytes)| Some((container.clone(), quota(*bytes)?)))
+            .collect(),
+        shares: shares
+            .into_iter()
+            .map(|(container, name, _)| (container, name))
+            .collect(),
     })
 }
 
@@ -241,6 +319,10 @@ async fn plan_users(
     for (name, uid) in homes {
         plan.not_in_process_homes.insert(name.clone());
         let shown = name.to_string_lossy().into_owned();
+        let budget = match &facts {
+            Some(Ok(facts)) => reader::tree_budget(facts.account_quota.get(&shown).copied()),
+            _ => None,
+        };
         let reason = match (name.to_str(), &facts) {
             (_, None) => Some(
                 "native Linux apps are off on this server, so the backup reader is unavailable"
@@ -273,6 +355,7 @@ async fn plan_users(
             None => plan.trees.push(reader::Tree {
                 kind: TreeKind::Home,
                 name: shown,
+                budget,
             }),
         }
     }
@@ -290,6 +373,7 @@ async fn plan_users(
                 plan.trees.push(reader::Tree {
                     kind: TreeKind::Shared,
                     name: text.to_string(),
+                    budget: reader::tree_budget(facts.share_quota.get(text).copied()),
                 });
             }
         }
@@ -635,6 +719,12 @@ async fn create_inner(
     }
     let mut warnings = std::mem::take(&mut users.warnings);
     let mut preserved_trees: Vec<String> = Vec::new();
+    let mut space = SpaceGuard::new(work_dir.clone(), env.min_free_bytes);
+    if users_scope {
+        space
+            .check()
+            .map_err(|error| AppError::internal(error.to_string()))?;
+    }
 
     // ---- build the archive -------------------------------------------------
     let total_units = 100u64;
@@ -703,7 +793,8 @@ async fn create_inner(
                 total_units,
                 format!("reading {} through the backup reader", tree.prefix()),
             );
-            match reader::archive_tree(access, &tree, builder.get_mut(), &mut entries)? {
+            match reader::archive_tree(access, &tree, builder.get_mut(), &mut entries, &mut space)?
+            {
                 reader::Outcome::Written {
                     complete,
                     files,
@@ -779,6 +870,9 @@ async fn create_inner(
                 sha256: sha256_file(source).unwrap_or_default(),
                 owners_preserved: false,
             });
+            space
+                .wrote(size)
+                .map_err(|error| AppError::internal(error.to_string()))?;
             if index % 32 == 0 {
                 let done = 55 + ((index as u64 * 30) / user_total.max(1));
                 emit(
@@ -1253,6 +1347,7 @@ mod tests {
             service_uid: Some(service_uid),
             container_owner_uid: 0,
             native: None,
+            min_free_bytes: 0,
         };
         let plan = plan_users(cfg, None, &env, service_uid).await;
         assert!(plan.trees.is_empty());
