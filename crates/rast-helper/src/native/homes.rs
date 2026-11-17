@@ -411,6 +411,63 @@ fn ensure_skeleton(
     (created, skipped)
 }
 
+/// The one HOME of `identity`, when its passwd entry names one: a folder
+/// directly below the homes root, with a valid HOME name, that is a real
+/// directory (no link followed) owned by the identity. Anything else keeps
+/// the identity on its legacy home.
+pub(crate) fn one_home_of(
+    options: &NativeOptions,
+    identity: &Identity,
+    entry: &PasswdEntry,
+) -> Option<PathBuf> {
+    let home = &entry.home;
+    if home.parent() != Some(options.homes_dir.as_path()) {
+        return None;
+    }
+    let name = home.file_name()?.to_str()?;
+    validate_home_username(name).ok()?;
+    let homes = open_dir(&options.homes_dir).ok()?;
+    let stat = stat_at(homes.as_raw_fd(), name).ok()?;
+    (is_dir(&stat) && classify(options, identity, stat.st_uid) == Owner::Identity)
+        .then(|| home.clone())
+}
+
+/// Check (and repair the mode of) the one HOME of an identity in one-HOME
+/// mode: a real directory owned by the identity, mode 0700. Opened below
+/// the homes root with `O_NOFOLLOW`, changed through that descriptor.
+pub(crate) fn ensure_one_home(
+    options: &NativeOptions,
+    identity: &Identity,
+) -> Result<(), NativeError> {
+    let home = &identity.home;
+    let name = home
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|_| home.parent() == Some(options.homes_dir.as_path()))
+        .ok_or_else(|| {
+            NativeError::identity_conflict(format!(
+                "{} is not a HOME below {}",
+                home.display(),
+                options.homes_dir.display()
+            ))
+        })?;
+    let homes =
+        open_dir(&options.homes_dir).map_err(|error| failed("open", &options.homes_dir, error))?;
+    let fd = open_dir_at(homes.as_raw_fd(), name).map_err(|error| failed("open", home, error))?;
+    let stat = fstat(fd.as_raw_fd()).map_err(|error| failed("inspect", home, error))?;
+    check_owner(options, identity, home, &stat)?;
+    if stat.st_mode & 0o7777 != 0o700 {
+        fchmod(fd.as_raw_fd(), 0o700).map_err(|error| failed("chmod", home, error))?;
+        tracing::info!(
+            user_id = identity.user_id,
+            home = %home.display(),
+            previous_mode = format!("{:04o}", stat.st_mode & 0o7777),
+            "repaired the mode of a one HOME"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) async fn home_ensure(
     options: &NativeOptions,
     op: HomeEnsureOp,
@@ -1162,5 +1219,98 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, "invalid_request");
+    }
+
+    fn passwd(home: PathBuf) -> PasswdEntry {
+        PasswdEntry {
+            username: "rast-u7".into(),
+            uid: 200_007,
+            gid: 200_007,
+            home,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_one_home_comes_from_passwd_and_the_owner_of_the_folder() {
+        let fx = fixture(|root| root.join("storage/homes/alice"));
+        let homes = fx.options.homes_dir.clone();
+        let identity = Identity::derive(&fx.options, 7).unwrap();
+        let legacy = identity.home.clone();
+        std::fs::create_dir(homes.join("alice")).unwrap();
+
+        let resolved = identity
+            .clone()
+            .resolved(&fx.options, &passwd(homes.join("alice")));
+        assert!(resolved.one_home);
+        assert_eq!(resolved.home, homes.join("alice"));
+
+        // Not a one HOME: the legacy identity home, a folder below a HOME,
+        // a name that is not a HOME name, a missing folder, a link.
+        for home in [
+            legacy.clone(),
+            homes.join("alice/sub"),
+            homes.join("Alice"),
+            homes.join("bob"),
+            PathBuf::from("/etc"),
+        ] {
+            let kept = identity
+                .clone()
+                .resolved(&fx.options, &passwd(home.clone()));
+            assert!(!kept.one_home, "{}", home.display());
+            assert_eq!(kept.home, legacy);
+        }
+        std::os::unix::fs::symlink(homes.join("alice"), homes.join("carol")).unwrap();
+        assert!(
+            !identity
+                .clone()
+                .resolved(&fx.options, &passwd(homes.join("carol")))
+                .one_home
+        );
+
+        // A HOME that the service (or anyone but the identity) owns.
+        let mut other = fixture(|root| root.join("storage/homes/alice"));
+        std::fs::create_dir(other.options.homes_dir.join("alice")).unwrap();
+        other.options.test_identity_uid = Some(euid().wrapping_add(2));
+        let identity = Identity::derive(&other.options, 7).unwrap();
+        assert!(
+            !identity
+                .resolved(
+                    &other.options,
+                    &passwd(other.options.homes_dir.join("alice"))
+                )
+                .one_home
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_one_home_repairs_the_mode_through_a_descriptor() {
+        let fx = fixture(|root| root.join("storage/homes/alice"));
+        let home = fx.options.homes_dir.join("alice");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let identity = Identity::derive(&fx.options, 7)
+            .unwrap()
+            .resolved(&fx.options, &passwd(home.clone()));
+        assert!(identity.one_home);
+        // `ensure_home` takes the one-HOME path for such an identity.
+        crate::native::identity::ensure_home(&fx.options, &identity)
+            .await
+            .unwrap();
+        assert_eq!(mode(&home), 0o700);
+        assert!(
+            !fx.options.linux_users_dir().join("7").exists(),
+            "no legacy home is made for a one-HOME account"
+        );
+
+        // A link swapped in after the resolution is refused, not followed.
+        std::fs::rename(&home, fx.options.homes_dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(fx.options.homes_dir.join("real"), &home).unwrap();
+        std::fs::set_permissions(
+            fx.options.homes_dir.join("real"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        assert!(ensure_one_home(&fx.options, &identity).is_err());
+        assert_eq!(mode(&fx.options.homes_dir.join("real")), 0o755);
     }
 }

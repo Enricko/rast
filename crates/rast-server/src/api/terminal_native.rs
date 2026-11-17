@@ -423,7 +423,22 @@ async fn resolve_folder(
     let Some(folder) = folder else {
         return Ok((None, false));
     };
-    let logical = LogicalPath::parse(&folder.path)?;
+    let (path, write) = folder_for_terminal(state, user, &folder.path).await?;
+    Ok((Some(path), write))
+}
+
+/// The host folder a terminal opened on the logical folder `path` starts
+/// in, and whether the person may write there.
+pub async fn folder_for_terminal(
+    state: &AppState,
+    user: &AuthUser,
+    path: &str,
+) -> AppResult<(PathBuf, bool)> {
+    let logical = LogicalPath::parse(path)?;
+    let in_home = logical.segments().first().map(String::as_str) != Some("shared");
+    if in_home && state.homefs.is_one_home(&state.db, user).await? {
+        return one_home_folder(state, user, &logical).await;
+    }
     let resolved = state
         .storage
         .resolve(&state.db, user, &logical.as_string(), Access::Read)
@@ -435,7 +450,43 @@ async fn resolve_folder(
             "Open in Terminal works on folders, not files.",
         ));
     }
-    Ok((Some(resolved.physical), resolved.perm.allows_write()))
+    Ok((resolved.physical, resolved.perm.allows_write()))
+}
+
+/// A folder of a one-HOME account's HOME (ADR 0005, section 7). The HOME
+/// belongs to the account's identity, so the server cannot look inside it:
+/// the person's file agent checks the folder beneath the HOME (no link
+/// followed), and the shell then enters it with the identity's own rights.
+async fn one_home_folder(
+    state: &AppState,
+    user: &AuthUser,
+    logical: &LogicalPath,
+) -> AppResult<(PathBuf, bool)> {
+    let query = format!(
+        "/api/files/stat?path={}",
+        percent_encoding::utf8_percent_encode(
+            &logical.as_string(),
+            percent_encoding::NON_ALPHANUMERIC
+        )
+    );
+    let entry = state
+        .homefs
+        .fetch(user.id, axum::http::Method::GET, &query, HeaderMap::new())
+        .await?;
+    if entry.get("kind").and_then(Value::as_str) != Some("dir") {
+        return Err(AppError::bad_request(
+            "Open in Terminal works on folders, not files.",
+        ));
+    }
+    let username = user.username.to_ascii_lowercase();
+    crate::storage::safe_path::validate_component(&username)
+        .map_err(|_| AppError::internal("invalid user home directory"))?;
+    let mut physical = state.storage.homes_root.join(username);
+    for segment in logical.segments() {
+        physical.push(segment);
+    }
+    // A person may always write in their own HOME.
+    Ok((physical, true))
 }
 
 /// The session that opened the terminal is still valid and the account may

@@ -176,6 +176,24 @@ fn identity_home_is_healthy(home: &std::path::Path, uid: u32) -> bool {
     }
 }
 
+/// Is `path` a real folder (no link followed) owned by `uid`? A RAST home
+/// owned by the account's identity is its one HOME (ADR 0005, section 1);
+/// the server can read the owner because the homes root is its own.
+fn owned_by(path: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == uid)
+}
+
+/// Where and with which profile variables an app starts.
+struct Launch {
+    /// The app's `HOME`.
+    home: PathBuf,
+    /// Its working directory.
+    cwd: PathBuf,
+    /// The variables of its profile (legacy per-app XDG folders).
+    env: BTreeMap<String, String>,
+}
+
 impl Identity {
     fn from_json(data: &Value) -> Option<Self> {
         Some(Self {
@@ -1007,8 +1025,9 @@ impl NativeSessions {
     async fn ensure_identity(&self, user_id: i64) -> AppResult<(Identity, bool)> {
         let mut repaired = false;
         if let Some(identity) = self.stored_identity(user_id).await {
-            if !self.strict_identity_health
-                || identity_home_is_healthy(&identity.home, identity.uid)
+            if (!self.strict_identity_health
+                || identity_home_is_healthy(&identity.home, identity.uid))
+                && !self.home_mode_changed(user_id, &identity).await
             {
                 self.validate_identity_mapping(user_id, &identity)?;
                 return Ok((identity, false));
@@ -1052,6 +1071,18 @@ impl NativeSessions {
         .execute(&self.db)
         .await;
         Ok((identity, repaired))
+    }
+
+    /// Did the account change between legacy and one-HOME mode since its
+    /// identity was cached (`rast migrate home` and its rollback update the
+    /// cache, an interrupted run may not)? Its RAST home is owned by the
+    /// identity exactly when it is in one-HOME mode.
+    async fn home_mode_changed(&self, user_id: i64, identity: &Identity) -> bool {
+        let Ok(rast_home) = crate::users::home_dir_by_id(&self.db, &self.config, user_id).await
+        else {
+            return false;
+        };
+        (identity.home == rast_home) != owned_by(&rast_home, identity.uid)
     }
 
     /// The helper must map a RAST user to `linux_uid_base + userId` with the
@@ -1270,14 +1301,16 @@ impl NativeSessions {
         });
     }
 
-    async fn start_run(
+    /// The legacy launch of an account whose RAST home still belongs to the
+    /// service: a per-app profile prepared by the helper, the `RAST` link to
+    /// the RAST home in it and the background read grant on that home.
+    async fn profile_launch(
         self: &Arc<Self>,
-        session: &Arc<NativeSession>,
+        identity: &Identity,
         user_id: i64,
         request: &LaunchRequest,
-    ) -> AppResult<(Value, Value)> {
-        let identity = session.identity();
-        let display = session.lock().display;
+        rast_home: &Path,
+    ) -> AppResult<Launch> {
         let profile_root = self
             .config
             .linux_apps_dir()
@@ -1289,13 +1322,10 @@ impl NativeSessions {
         // per-app profile; it returns the profile HOME the app must use.
         let identity_home = identity.home.display().to_string();
         let profile_home = profile_root.join("home");
-        // The person's RAST home is named after their RAST username, never
-        // after the Linux account name `rast-u<id>` (`identity.username`).
-        let rast_home = crate::users::home_dir_by_id(&self.db, &self.config, user_id).await?;
         // The helper only accepts an existing RAST home; create the person's
         // home folder when it has none yet (the server owns the homes root).
         if !rast_home.is_dir() {
-            if let Err(error) = std::fs::create_dir_all(&rast_home) {
+            if let Err(error) = std::fs::create_dir_all(rast_home) {
                 tracing::warn!(
                     user_id,
                     "cannot create the RAST home {}: {error}",
@@ -1375,7 +1405,7 @@ impl NativeSessions {
             );
         }
         if rast_home.is_dir() {
-            self.spawn_home_grant(user_id, identity.uid, &rast_home);
+            self.spawn_home_grant(user_id, identity.uid, rast_home);
         }
 
         // The helper's cwd allow-list covers the managed app trees, not the
@@ -1397,6 +1427,82 @@ impl NativeSessions {
             None => home.clone(),
         };
 
+        let env = BTreeMap::from([
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                profile_root.join("config").display().to_string(),
+            ),
+            (
+                "XDG_DATA_HOME".to_string(),
+                profile_root.join("data").display().to_string(),
+            ),
+            (
+                "XDG_CACHE_HOME".to_string(),
+                profile_root.join("cache").display().to_string(),
+            ),
+            (
+                "XDG_STATE_HOME".to_string(),
+                profile_root.join("state").display().to_string(),
+            ),
+            (
+                "TMPDIR".to_string(),
+                profile_root.join("tmp").display().to_string(),
+            ),
+        ]);
+        Ok(Launch { home, cwd, env })
+    }
+
+    /// The launch of a one-HOME account (ADR 0005, section 7): the app gets
+    /// the HOME and the XDG defaults inside it, and no per-app profile, link
+    /// or ACL grant. It starts in the HOME unless the launcher names a
+    /// folder of the managed app trees.
+    fn one_home_launch(&self, user_id: i64, request: &LaunchRequest, home: PathBuf) -> Launch {
+        let cwd = match request.cwd.as_deref() {
+            Some(cwd) if self.managed_cwd(cwd) => cwd.to_path_buf(),
+            Some(cwd) => {
+                tracing::info!(
+                    app = %request.app_id,
+                    user_id,
+                    working_dir = %cwd.display(),
+                    "ignoring the launcher working directory (outside the managed app tree)"
+                );
+                home.clone()
+            }
+            None => home.clone(),
+        };
+        Launch {
+            home,
+            cwd,
+            env: BTreeMap::new(),
+        }
+    }
+
+    async fn start_run(
+        self: &Arc<Self>,
+        session: &Arc<NativeSession>,
+        user_id: i64,
+        request: &LaunchRequest,
+    ) -> AppResult<(Value, Value)> {
+        let identity = session.identity();
+        let display = session.lock().display;
+        // The person's RAST home is named after their RAST username, never
+        // after the Linux account name `rast-u<id>` (`identity.username`).
+        let rast_home = crate::users::home_dir_by_id(&self.db, &self.config, user_id).await?;
+        // The helper names the RAST home as the identity's home only for an
+        // account in one-HOME mode (its passwd home, owned by the identity).
+        let one_home = identity.home == rast_home;
+        let launch = if one_home {
+            self.one_home_launch(user_id, request, rast_home)
+        } else {
+            self.profile_launch(&identity, user_id, request, &rast_home)
+                .await?
+        };
+        let Launch {
+            home,
+            cwd,
+            env: profile_env,
+        } = launch;
+
         let mut env: BTreeMap<String, String> = BTreeMap::new();
         env.insert("DISPLAY".into(), format!(":{display}"));
         // The session's X server uses the auth file the helper pins as the
@@ -1404,32 +1510,14 @@ impl NativeSessions {
         // the cookie for the allocated display there). Applications must use
         // the same file; pointing at Xpra's runtime files is wrong because
         // stale `Xauthority-<old display>` files from earlier sessions remain
-        // in the runtime directory.
+        // in the runtime directory. For a one-HOME account the identity home
+        // is that HOME.
         env.insert(
             "XAUTHORITY".into(),
             identity.home.join(".Xauthority").display().to_string(),
         );
         env.insert("HOME".into(), home.display().to_string());
-        env.insert(
-            "XDG_CONFIG_HOME".into(),
-            profile_root.join("config").display().to_string(),
-        );
-        env.insert(
-            "XDG_DATA_HOME".into(),
-            profile_root.join("data").display().to_string(),
-        );
-        env.insert(
-            "XDG_CACHE_HOME".into(),
-            profile_root.join("cache").display().to_string(),
-        );
-        env.insert(
-            "XDG_STATE_HOME".into(),
-            profile_root.join("state").display().to_string(),
-        );
-        env.insert(
-            "TMPDIR".into(),
-            profile_root.join("tmp").display().to_string(),
-        );
+        env.extend(profile_env);
         for (name, value) in &request.env {
             env.insert(name.clone(), value.clone());
         }
@@ -1475,7 +1563,10 @@ impl NativeSessions {
         // delegate to a dead instance instead of opening a window (the legacy
         // Docker image cleaned these in its init script). The app is not
         // running at this point (launch is idempotent), so this is safe.
-        if request.chromium {
+        // A one-HOME browser keeps its profile in the HOME, where only the
+        // identity may change it; Chromium itself clears locks of a process
+        // that no longer runs on this host.
+        if request.chromium && !one_home {
             if let Err(error) = self
                 .helper
                 .call(
@@ -1537,8 +1628,12 @@ impl NativeSessions {
                                 .contains("working directory"))
                     {
                         format!(
-                            "the app could not start because its profile directory {} was not \
-                             accessible ({})",
+                            "the app could not start because its {} {} was not accessible ({})",
+                            if one_home {
+                                "HOME"
+                            } else {
+                                "profile directory"
+                            },
                             home.display(),
                             error.message
                         )
@@ -2460,6 +2555,9 @@ mod tests {
         port: StdMutex<Option<u16>>,
         /// When set, `path_acl` waits for a permit (a slow home grant).
         acl_gate: StdMutex<Option<Arc<tokio::sync::Semaphore>>>,
+        /// When set, `identity_ensure` answers with this uid and home (an
+        /// account in one-HOME mode).
+        identity_override: StdMutex<Option<(u32, PathBuf)>>,
         /// Fake identity homes and profile trees; removed with the helper.
         scratch: Scratch,
     }
@@ -2558,8 +2656,17 @@ mod tests {
             match op {
                 "identity_ensure" => {
                     let user_id = params["userId"].as_i64().unwrap_or(0);
-                    let uid = 200_000 + user_id as u32;
-                    let home = self.scratch.0.path().join(format!("homes/{user_id}"));
+                    let (uid, home) = self
+                        .identity_override
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .unwrap_or_else(|| {
+                            (
+                                200_000 + user_id as u32,
+                                self.scratch.0.path().join(format!("homes/{user_id}")),
+                            )
+                        });
                     let _ = std::fs::create_dir_all(&home);
                     Ok(json!({
                         "username": format!("rast-u{user_id}"),
@@ -3019,6 +3126,93 @@ mod tests {
         assert_eq!(grants[0]["recursive"], true);
         assert_eq!(grants[0]["perms"], "rx");
         assert_eq!(grants[2]["path"], alice_home);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_home_launches_use_the_home_without_profile_link_or_grant() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, db) = test_db().await;
+        let file = crate::config::FileConfig {
+            data_dir: Some(dir.path().join("data")),
+            storage_dir: Some(dir.path().join("storage")),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        // alice's HOME belongs to her identity (the test account stands in).
+        let home = dir.path().join("storage/homes/alice");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let helper = Arc::new(FakeHelper::default());
+        *helper.identity_override.lock().unwrap() = Some((200_001, home.clone()));
+        let sessions = NativeSessions::with_helper(config, db, helper.clone(), EventBus::new());
+        let mut request = launch_request("code");
+        request.chromium = true;
+        sessions.launch(&test_user(1), request).await.unwrap();
+
+        for op in [
+            "profile_prepare",
+            "path_symlink",
+            "path_acl",
+            "profile_clean_locks",
+        ] {
+            assert_eq!(helper.call_count(op), 0, "{op} is not used for a one HOME");
+        }
+        assert!(sessions.home_grants().is_empty());
+        let (_, params) = helper
+            .calls()
+            .into_iter()
+            .find(|(name, _)| name == "app_start")
+            .unwrap();
+        let home = home.display().to_string();
+        assert_eq!(params["cwd"], home);
+        assert_eq!(params["env"]["HOME"], home);
+        assert_eq!(params["env"]["XAUTHORITY"], format!("{home}/.Xauthority"));
+        for name in [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "TMPDIR",
+        ] {
+            assert!(
+                params["env"].get(name).is_none(),
+                "{name} keeps its default"
+            );
+        }
+        assert!(
+            !dir.path().join("data/linux-apps/profiles/code").exists(),
+            "no per-app profile is made"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_cached_one_home_that_was_rolled_back_is_asked_again() {
+        let (dir, db) = test_db().await;
+        let file = crate::config::FileConfig {
+            data_dir: Some(dir.path().join("data")),
+            storage_dir: Some(dir.path().join("storage")),
+            ..Default::default()
+        };
+        let config = Arc::new(Config::from_parts(None, file, |_| None).unwrap());
+        // The cache still names alice's HOME, which the service owns again.
+        let home = dir.path().join("storage/homes/alice");
+        std::fs::create_dir_all(&home).unwrap();
+        sqlx::query(
+            "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+             VALUES (1, 'rast-u1', 200001, 200001, ?, 1)",
+        )
+        .bind(home.display().to_string())
+        .execute(&db)
+        .await
+        .unwrap();
+        let helper = Arc::new(FakeHelper::default());
+        let sessions = NativeSessions::with_helper(config, db, helper.clone(), EventBus::new());
+        sessions
+            .launch(&test_user(1), launch_request("code"))
+            .await
+            .unwrap();
+        assert_eq!(helper.call_count("identity_ensure"), 1);
+        assert_eq!(helper.call_count("profile_prepare"), 1, "a legacy launch");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

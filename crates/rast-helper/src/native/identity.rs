@@ -56,7 +56,12 @@ pub struct Identity {
     pub username: String,
     pub uid: u32,
     pub gid: u32,
+    /// The home the identity's sessions, apps and terminals use: its one
+    /// HOME (`one_home`) or the legacy `<data_dir>/linux-users/<userId>`.
     pub home: PathBuf,
+    /// The account is in one-HOME mode (ADR 0005): its passwd home is
+    /// `<homes>/<name>`, a real folder owned by the identity.
+    pub one_home: bool,
 }
 
 impl Identity {
@@ -75,7 +80,18 @@ impl Identity {
             uid: ids.uid,
             gid: ids.gid,
             home: options.linux_users_dir().join(ids.user_id.to_string()),
+            one_home: false,
         })
+    }
+
+    /// This identity with the home its passwd entry names, when that is its
+    /// one HOME ([`crate::native::homes::one_home_of`]); otherwise as it is.
+    pub fn resolved(mut self, options: &NativeOptions, entry: &PasswdEntry) -> Self {
+        if let Some(home) = crate::native::homes::one_home_of(options, &self, entry) {
+            self.home = home;
+            self.one_home = true;
+        }
+        self
     }
 
     /// Home directory path relative to `<data_dir>/linux-users`.
@@ -333,6 +349,12 @@ pub async fn ensure_identity(
         created = true;
     }
 
+    // An account in one-HOME mode keeps its HOME; the legacy home is only
+    // made for the others.
+    let identity = match &passwd {
+        Some(entry) => identity.resolved(options, entry),
+        None => identity,
+    };
     ensure_home(options, &identity).await?;
     Ok((identity, created))
 }
@@ -354,6 +376,11 @@ pub(crate) async fn ensure_home(
     options: &NativeOptions,
     identity: &Identity,
 ) -> Result<(), NativeError> {
+    if identity.one_home {
+        // The one HOME lives below the service's homes root: checked and
+        // repaired through descriptors only, never by path.
+        return crate::native::homes::ensure_one_home(options, identity);
+    }
     std::fs::create_dir_all(&identity.home).map_err(|error| {
         NativeError::command_failed(format!(
             "cannot create home {}: {error}",
@@ -653,6 +680,7 @@ mod tests {
             uid: 200_007,
             gid: 200_007,
             home: PathBuf::from("/var/lib/rast/linux-users/7"),
+            one_home: false,
         }
     }
 

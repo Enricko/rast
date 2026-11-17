@@ -599,6 +599,60 @@ async fn one_home_accounts_are_served_by_their_agent_and_legacy_ones_in_process(
     assert_eq!(roots[0]["path"], "/");
 }
 
+fn auth_user(session: &Session, username: &str) -> rast::auth::AuthUser {
+    rast::auth::AuthUser {
+        id: session.id,
+        username: username.into(),
+        display_name: username.into(),
+        role: Role::User,
+        session_id: "s".into(),
+        quota_bytes: 100,
+        must_change_password: false,
+    }
+}
+
+#[tokio::test]
+async fn terminals_of_one_home_accounts_open_folders_checked_by_their_agent() {
+    use rast::api::terminal_native::folder_for_terminal;
+    let (server, alice, bob) = setup().await;
+    let home = server.home("alice");
+    std::fs::create_dir_all(home.join("docs/deep")).unwrap();
+    std::fs::write(home.join("note.txt"), b"x").unwrap();
+    std::os::unix::fs::symlink("/etc", home.join("etc")).unwrap();
+    let user = auth_user(&alice, "alice");
+
+    let (path, write) = folder_for_terminal(&server.state, &user, "/docs/deep")
+        .await
+        .unwrap();
+    assert_eq!(path, home.join("docs/deep"));
+    assert!(write);
+    let (path, _) = folder_for_terminal(&server.state, &user, "/")
+        .await
+        .unwrap();
+    assert_eq!(path, home);
+    assert_eq!(server.starts(), 1, "the agent checked the folder");
+    // Files, missing folders, links out of the HOME and traversal fail.
+    for bad in ["/note.txt", "/missing", "/etc", "/../bob"] {
+        assert!(
+            folder_for_terminal(&server.state, &user, bad)
+                .await
+                .is_err(),
+            "{bad}"
+        );
+    }
+    // A legacy account still resolves in-process (no agent).
+    std::fs::create_dir_all(server.home("bob").join("work")).unwrap();
+    let (path, write) = folder_for_terminal(&server.state, &auth_user(&bob, "bob"), "/work")
+        .await
+        .unwrap();
+    assert_eq!(
+        path,
+        server.home("bob").join("work").canonicalize().unwrap()
+    );
+    assert!(write);
+    assert_eq!(*server.helper.users.lock().unwrap(), vec![alice.id]);
+}
+
 #[tokio::test]
 async fn paths_are_validated_and_the_root_file_system_is_not_forwarded() {
     let (server, alice, _bob) = setup().await;

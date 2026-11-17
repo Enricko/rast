@@ -519,7 +519,7 @@ async fn require_identity(options: &NativeOptions, user_id: i64) -> Result<Ident
         ));
     };
     identity::check_existing_identity(&identity, Some(&entry), None)?;
-    Ok(identity)
+    Ok(identity.resolved(options, &entry))
 }
 
 // ---------------------------------------------------------------------------
@@ -1310,7 +1310,6 @@ async fn app_start(options: &NativeOptions, op: AppStartOp) -> Result<Value, Nat
     validate_app_unit(&op.unit)?;
     validate_argv(&op.argv)?;
     validate_argv0(&ctx, &op.argv[0])?;
-    let cwd = validate_cwd(&ctx, &op.cwd)?;
     validate_env(&op.env)?;
     let limits = ResourceLimits {
         memory_max_mb: op.memory_max_mb,
@@ -1319,12 +1318,22 @@ async fn app_start(options: &NativeOptions, op: AppStartOp) -> Result<Value, Nat
     };
     validate_limits(limits, ctx.app_limits, "application")?;
     let identity = require_identity(options, op.user_id).await?;
+    // Apps of a one-HOME account start in that HOME (ADR 0005, section 7),
+    // which belongs to the identity: nothing on the way is changed for it.
+    let home_cwd = identity.one_home && Path::new(&op.cwd) == identity.home;
+    let cwd = if home_cwd {
+        identity.home.clone()
+    } else {
+        validate_cwd(&ctx, &op.cwd)?
+    };
     identity::ensure_home(options, &identity).await?;
     validate_session_xauthority(options, &identity)?;
     let runtime_dir = prepare_runtime_dir(options, &identity, None)?;
     ensure_identity_traversal(options, &runtime_dir)?;
     // The app identity must be able to chdir to `cwd` and exec `argv[0]`.
-    ensure_identity_traversal(options, &cwd)?;
+    if !home_cwd {
+        ensure_identity_traversal(options, &cwd)?;
+    }
     ensure_identity_traversal(options, Path::new(&op.argv[0]))?;
     validate_cwd_traversable(options, &cwd, &identity)?;
     check_memory_admission(options, limits.memory_max_mb, "application")?;
@@ -1834,6 +1843,30 @@ async fn terminal_working_directory(
     Ok(canonical)
 }
 
+/// The working directory of a one-HOME account's terminal: a clean
+/// absolute path in its HOME or below the shared root. Kernel permissions
+/// and the account's share groups decide whether the shell can enter it,
+/// so nothing is resolved, granted or made traversable by root (ADR 0005,
+/// section 7): a path that the user's own links lead elsewhere is entered
+/// with the user's own rights only.
+fn one_home_terminal_directory(
+    options: &NativeOptions,
+    identity: &Identity,
+    requested: &str,
+) -> Result<PathBuf, NativeError> {
+    let path = crate::native::protocol::validate_absolute_path(requested)?;
+    let shared = options.storage_dir.join("shared");
+    let allowed = path.starts_with(&identity.home) || (path.starts_with(&shared) && path != shared);
+    if !allowed {
+        return Err(NativeError::cwd_inaccessible(format!(
+            "{} is outside your HOME and the shared folders and cannot be opened in a \
+             terminal",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 /// Administrator root shells may start anywhere the server resolved; the
 /// server still only sends RAST folder paths (or nothing for the default), and
 /// the helper requires an existing real directory.
@@ -2122,6 +2155,7 @@ async fn terminal_start(
         (None, Some(account)) => (account.uid, account.home.clone(), account.name.clone()),
         (None, None) => (0, PathBuf::from("/root"), "root".to_string()),
     };
+    let one_home = identity.as_ref().is_some_and(|identity| identity.one_home);
     let cwd = if op.cwd.is_empty() {
         home.clone()
     } else if op.root {
@@ -2132,11 +2166,17 @@ async fn terminal_start(
             Some(account) if !account_can_enter(account, &cwd).await => home.clone(),
             _ => cwd,
         }
+    } else if one_home {
+        let identity = identity.as_ref().expect("identity");
+        one_home_terminal_directory(options, identity, &op.cwd)?
     } else {
         let identity = identity.as_ref().expect("identity");
         terminal_working_directory(options, identity, &op.cwd, op.write_access).await?
     };
-    if let Some(identity) = identity.as_ref() {
+    // A one-HOME account reaches its folders with its own permissions:
+    // systemd changes into the working directory as the identity, and
+    // nothing on the way is opened, granted or changed by root.
+    if let Some(identity) = identity.as_ref().filter(|_| !one_home) {
         ensure_identity_traversal(options, &cwd)?;
         validate_cwd_traversable(options, &cwd, identity)?;
     }
@@ -3926,6 +3966,7 @@ async fn prepare_profile_tree(
         uid: ids.uid,
         gid: ids.gid,
         home: expected_home.clone(),
+        one_home: false,
     };
     identity::ensure_home(options, &identity).await?;
     let _ = identity::ensure_runtime_dir(options, &identity)?;
@@ -4182,6 +4223,10 @@ exit 0
                 r#"#!/bin/sh
 case "$1" in
   passwd)
+    if [ -f "{dir}/user.exists" ] && [ -f "{dir}/one-home" ]; then
+      echo "rast-u7:x:200007:200007:RAST Linux app:{dir}/storage/homes/alice:/usr/sbin/nologin"
+      exit 0
+    fi
     if [ -f "{dir}/user.exists" ]; then
       echo "rast-u7:x:200007:200007:RAST Linux app:{data}/linux-users/7:/usr/sbin/nologin"
       exit 0
@@ -5643,6 +5688,7 @@ exit 0
             uid: 200_007,
             gid: 200_007,
             home: PathBuf::from("/var/lib/rast/linux-users/7"),
+            one_home: false,
         };
         let unit = terminal_unit(identity.uid, "0123456789abcdef0123456789abcdef");
         assert_eq!(unit, "rast-term-u200007-0123456789abcdef0123456789abcdef");
@@ -5737,6 +5783,7 @@ exit 0
             uid: 200_007,
             gid: 200_007,
             home: PathBuf::from("/var/lib/rast/linux-users/7"),
+            one_home: false,
         };
         let session_dir = Path::new("/run/rast-linux/terminal/abc");
         let mut extra = BTreeMap::new();
@@ -5807,6 +5854,7 @@ exit 0
             uid: 200_007,
             gid: 200_007,
             home: PathBuf::from("/var/lib/rast/linux-users/7"),
+            one_home: false,
         };
         let limits = ResourceLimits::from_config(512, 2, 256);
         let mut env = BTreeMap::new();
@@ -5880,5 +5928,189 @@ exit 0
         assert!(root_joined.contains("WorkingDirectory=/root"));
         assert!(root_joined.contains("--setenv=PATH=/usr/bin"));
         assert!(!root_joined.contains("RestrictSUIDSGID=yes"));
+    }
+
+    /// A helper whose identity rast-u7 is in one-HOME mode (passwd home
+    /// `storage/homes/alice`, which the test account stands in for), with a
+    /// logging `setfacl` and a `systemd-run` whose units start at once.
+    async fn one_home_helper() -> TestHelper {
+        TestHelper::start(|options, dir| {
+            configure_identity(options, dir);
+            for marker in ["user.exists", "group.exists", "one-home"] {
+                std::fs::write(dir.join(marker), b"x").unwrap();
+            }
+            options.storage_dir = dir.join("storage");
+            // SAFETY: geteuid has no preconditions.
+            options.test_identity_uid = Some(unsafe { libc::geteuid() });
+            options.systemctl_bin = systemctl_script(dir);
+            options.setfacl_bin = Some(write_script(
+                dir,
+                "setfacl",
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                    dir.join("setfacl.log").display()
+                ),
+            ));
+            let log = dir.join("systemd-run.log");
+            options.systemd_run_bin = write_script(
+                dir,
+                "systemd-run",
+                &format!(
+                    r#"#!/bin/sh
+line=""
+sep=""
+for arg in "$@"; do
+  line="$line$sep$arg"; sep=$(printf '\037')
+  case "$arg" in --unit=*) touch "{dir}/active-${{arg#--unit=}}.service" ;; esac
+done
+printf '%s\n' "$line" >> "{log}"
+exit 0
+"#,
+                    dir = dir.display(),
+                    log = log.display()
+                ),
+            );
+        })
+        .await
+    }
+
+    fn working_directory(args: &[String]) -> Option<&str> {
+        args.iter()
+            .find_map(|arg| arg.strip_prefix("--property=WorkingDirectory="))
+    }
+
+    #[tokio::test]
+    async fn one_home_apps_start_in_their_home_without_touching_it() {
+        let helper = one_home_helper().await;
+        let home = helper.options.homes_dir.join("alice");
+        let start = |cwd: &Path| {
+            NativeOp::AppStart(AppStartOp {
+                user_id: 7,
+                app_id: "demo".into(),
+                run_id: "abc123".into(),
+                unit: "rast-app-u200007-demo-1".into(),
+                argv: vec!["/usr/bin/true".into()],
+                cwd: cwd.to_string_lossy().into_owned(),
+                env: BTreeMap::from([("HOME".to_string(), home.display().to_string())]),
+                memory_max_mb: 512,
+                cpu_quota_percent: 100,
+                tasks_max: 128,
+            })
+        };
+        helper.call(start(&home)).await.unwrap();
+        let runs = logged_args(&helper._dir.path().join("systemd-run.log"));
+        assert_eq!(working_directory(&runs[0]), Some(home.to_str().unwrap()));
+        let joined = runs[0].join(" ");
+        assert!(joined.contains(&format!("--setenv=HOME={}", home.display())));
+        assert!(joined.contains(&format!(
+            "--setenv=XAUTHORITY={}",
+            home.join(".Xauthority").display()
+        )));
+        // No legacy identity home was made, and nothing was granted.
+        assert!(!helper.options.linux_users_dir().join("7").exists());
+        assert!(!helper._dir.path().join("setfacl.log").exists());
+
+        // A folder below the HOME is not a managed working directory.
+        let error = helper
+            .call(start(&home.join("Documents")))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "forbidden");
+    }
+
+    #[tokio::test]
+    async fn the_home_of_another_account_is_no_app_working_directory() {
+        // rast-u7 is a legacy account: the one HOME of `alice` (which it
+        // does not have) is outside its managed roots.
+        let helper = TestHelper::start(|options, dir| {
+            configure_identity(options, dir);
+            std::fs::write(dir.join("user.exists"), b"x").unwrap();
+            std::fs::write(dir.join("group.exists"), b"x").unwrap();
+            options.systemctl_bin = systemctl_script(dir);
+            options.systemd_run_bin = systemd_run_script(dir);
+        })
+        .await;
+        let home = helper.options.homes_dir.join("alice");
+        let error = helper
+            .call(NativeOp::AppStart(AppStartOp {
+                user_id: 7,
+                app_id: "demo".into(),
+                run_id: "abc123".into(),
+                unit: "rast-app-u200007-demo-1".into(),
+                argv: vec!["/usr/bin/true".into()],
+                cwd: home.to_string_lossy().into_owned(),
+                env: BTreeMap::new(),
+                memory_max_mb: 512,
+                cpu_quota_percent: 100,
+                tasks_max: 128,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "forbidden");
+        assert!(!helper._dir.path().join("systemd-run.log").exists());
+    }
+
+    #[tokio::test]
+    async fn one_home_terminals_get_no_grant_and_stay_in_home_or_shares() {
+        let helper = one_home_helper().await;
+        let home = helper.options.homes_dir.join("alice");
+        let shared = helper.options.storage_dir.join("shared");
+        let start = |cwd: String, write: bool| {
+            NativeOp::TerminalStart(TerminalStartOp {
+                user_id: 7,
+                session_id: "0123456789abcdef0123456789abcdef".into(),
+                shell: "/bin/sh".into(),
+                cwd,
+                root: false,
+                account: None,
+                write_access: write,
+                env: BTreeMap::new(),
+                memory_max_mb: 512,
+                cpu_quota_percent: 100,
+                tasks_max: 256,
+            })
+        };
+        // The HOME by default; folders of the HOME and of a share as asked,
+        // even ones root cannot see (systemd enters them as the identity).
+        for (cwd, expected) in [
+            (String::new(), home.clone()),
+            (
+                home.join("Documents").display().to_string(),
+                home.join("Documents"),
+            ),
+            (
+                shared.join("team/docs").display().to_string(),
+                shared.join("team/docs"),
+            ),
+        ] {
+            let started = helper.call(start(cwd, true)).await.unwrap();
+            assert_eq!(started["home"], home.display().to_string());
+            assert_eq!(started["cwd"], expected.display().to_string());
+            let runs = logged_args(&helper._dir.path().join("systemd-run.log"));
+            let args = runs.last().unwrap();
+            assert_eq!(working_directory(args), Some(expected.to_str().unwrap()));
+            assert!(args
+                .iter()
+                .any(|arg| *arg == format!("--setenv=HOME={}", home.display())));
+        }
+        assert!(
+            !helper._dir.path().join("setfacl.log").exists(),
+            "a one-HOME terminal never gets an ACL grant"
+        );
+        // Outside the HOME and the shared folders, the shared root itself,
+        // `..` segments and relative paths are refused.
+        for cwd in [
+            "/etc".to_string(),
+            helper.options.homes_dir.join("bob").display().to_string(),
+            shared.display().to_string(),
+            format!("{}/../bob", home.display()),
+            "Documents".to_string(),
+        ] {
+            let error = helper.call(start(cwd.clone(), false)).await.unwrap_err();
+            assert!(
+                ["cwd_inaccessible", "invalid_request"].contains(&error.code.as_str()),
+                "{cwd}: {error:?}"
+            );
+        }
     }
 }
