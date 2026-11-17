@@ -180,6 +180,10 @@ pub(super) async fn refresh_usage(state: &AppState, user: &AuthUser) -> AppResul
         .fetch(user.id, Method::GET, USAGE_ROUTE, agent_headers(&roots)?)
         .await?;
     let allocated = count(&value, "allocatedBytes")?;
+    let truncated = value
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let trash_bytes = count(&value, "trashBytes")?;
     let mut by_location = known(
         &USAGE_LOCATIONS,
@@ -195,7 +199,10 @@ pub(super) async fn refresh_usage(state: &AppState, user: &AuthUser) -> AppResul
             by_location.insert("shared", kernel.saturating_sub(allocated).max(0));
             kernel
         }
-        None => allocated,
+        None => {
+            let before = quota::info(&state.db, user.id).await?.used_bytes;
+            scanned_usage(allocated, truncated, before)
+        }
     };
     quota::set_used(&state.db, user.id, used).await?;
     state.homefs.note_trash_bytes(user.id, trash_bytes);
@@ -208,6 +215,18 @@ pub(super) async fn refresh_usage(state: &AppState, user: &AuthUser) -> AppResul
         by_location,
         quota_backend: state.quota.one_home_backend(),
     })
+}
+
+/// The used bytes after a HOME scan (the RAST fallback). A scan that
+/// stopped at its entry limit saw only part of HOME: it may raise the
+/// usage, never lower it, so a HOME with more entries than the limit does
+/// not get free quota from it.
+fn scanned_usage(allocated: i64, truncated: bool, before: i64) -> i64 {
+    if truncated {
+        allocated.max(before)
+    } else {
+        allocated
+    }
 }
 
 /// The kernel's used bytes of an identity, when user quota is on.
@@ -637,6 +656,13 @@ mod tests {
         let mut extra = good.clone();
         extra["html"] = json!("<b/>");
         assert!(agent_entry(&extra).is_err());
+    }
+
+    #[test]
+    fn a_partial_home_scan_never_lowers_the_usage() {
+        assert_eq!(scanned_usage(5, false, 9), 5);
+        assert_eq!(scanned_usage(5, true, 9), 9);
+        assert_eq!(scanned_usage(12, true, 9), 12);
     }
 
     #[test]
