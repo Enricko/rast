@@ -282,6 +282,55 @@ async fn sessions_that_carry_a_lost_group_are_found() {
     );
 }
 
+#[tokio::test]
+async fn processes_outside_units_keep_a_lost_shared_folder_denied() {
+    // Review F3: a cron job of user 5 (deactivated: no access) still
+    // carries Team's group. RAST cannot restart it, so Team keeps denying
+    // user 5, also after a session restart, until the job ends.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(test_config(dir.path())).await.unwrap();
+    state.session_restarts = SessionRestarts::with_warning(Duration::from_secs(600));
+    seed(&state.db).await;
+    crate::access::bump_generation();
+    let plan = plan(&state.db).await.unwrap();
+    let rw = |share: &str| shares::rw_group_name(share).unwrap();
+    let ro = |share: &str| shares::ro_group_name(share).unwrap();
+    let reply = json!({
+        "users": [
+            // A reader of Team whose job carries Team's ro group: allowed.
+            {"userId": 2, "processes": 0, "gids": [], "outsideProcesses": 1, "outsideGids": [13]},
+            {"userId": 5, "processes": 0, "gids": [], "outsideProcesses": 1, "outsideGids": [12, 99]},
+        ],
+        "groups": {"12": rw(TEAM), "13": ro(TEAM)},
+    });
+    let index = plan.group_index();
+    let outside = outside_holders_in_reply(&reply, &plan, &index);
+    assert_eq!(
+        outside,
+        BTreeMap::from([(5, BTreeMap::from([(TEAM.to_string(), "team".to_string())]))])
+    );
+    assert!(
+        stale_in_reply(&reply, &plan, &index).is_empty(),
+        "nothing to restart"
+    );
+
+    let restarts = state.session_restarts.clone();
+    assert_eq!(
+        restarts.set_outside_holders(outside.clone()),
+        [(5, vec![TEAM.to_string()])]
+    );
+    assert!(
+        restarts.set_outside_holders(outside).is_empty(),
+        "logged once"
+    );
+    assert_eq!(restarts.wanted_denials(TEAM), BTreeSet::from([5]));
+    restarts.restart_now(&state, 5).await;
+    assert_eq!(restarts.wanted_denials(TEAM), BTreeSet::from([5]));
+    // The job ended: the entry goes at the next sync.
+    restarts.set_outside_holders(BTreeMap::new());
+    assert!(restarts.wanted_denials(TEAM).is_empty());
+}
+
 /// A helper that answers every operation and records `(op, shareId,
 /// userIds)`.
 fn recording_helper(socket: &std::path::Path) -> Arc<Mutex<Vec<(String, String, Value)>>> {

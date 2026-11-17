@@ -98,6 +98,18 @@ pub struct TrashSummary {
     pub restored: u64,
     /// Entries that stay in the legacy recycle bin: `<id> (<path>): why`.
     pub left: Vec<String>,
+    /// The same entries without their path (`<id>: why`), for
+    /// [`hide_paths_outside_pilot`].
+    #[serde(skip)]
+    left_without_paths: Vec<String>,
+}
+
+impl TrashSummary {
+    /// An entry that stays in the legacy recycle bin, and why.
+    fn leave(&mut self, row: &TrashRow, why: &str) {
+        self.left.push(left(row, why));
+        self.left_without_paths.push(format!("{}: {why}", row.id));
+    }
 }
 
 /// Usage after the migration against the account's quota: the HOME, the
@@ -342,11 +354,12 @@ async fn dry_run(
     let rows = load_rows(env.pool, account.id).await?;
     outcome.trash.rows = rows.len() as u64;
     outcome.trash.bytes = rows.iter().map(|row| row.size_bytes.max(0)).sum();
+    let open = accessible(env.pool, account, shares).await?;
     for row in &rows {
         if let Err(why) = pilot_row(row, shares, &env.cfg.native_pilot)
-            .and_then(|()| map_row(row, account.id, shares))
+            .and_then(|()| map_row(row, account.id, shares, &open))
         {
-            outcome.trash.left.push(left(row, &why));
+            outcome.trash.leave(row, &why);
         }
     }
     if scan["mode"] == "legacy" {
@@ -428,16 +441,21 @@ async fn apply(
     )
     .await?;
     outcome.report = applied.clone();
+    if applied["jobs"]["crontab"] == true {
+        let identity = format!("rast-u{}", account.id);
+        outcome.warnings.push(format!(
+            "{identity} has a crontab from before the migration, and cron may still run it \
+             outside RAST units: check it with `sudo crontab -l -u {identity}` and remove it \
+             with `sudo crontab -r -u {identity}`"
+        ));
+    }
     let home = env.cfg.home_for(&name);
     save_identity(env.pool, account.id, &identity, &home).await?;
     if applied["alreadyOneHome"] == true && applied["journal"].is_null() {
         // Made in one-HOME mode: there is no legacy recycle bin to move.
         let rows = load_rows(env.pool, account.id).await?;
         for row in &rows {
-            outcome
-                .trash
-                .left
-                .push(left(row, "the HOME was never migrated"));
+            outcome.trash.leave(row, "the HOME was never migrated");
         }
         outcome.trash.rows = rows.len() as u64;
     } else {
@@ -603,7 +621,15 @@ fn pilot_row(row: &TrashRow, shares: &[ShareInfo], pilot: &NativePilot) -> Resul
 /// The helper's entry for a row: where it came from, below the HOME or
 /// below a shared folder's container. The helper refuses a whole batch
 /// with an invalid entry, so everything it checks is checked here first.
-fn map_row(row: &TrashRow, user_id: i64, shares: &[ShareInfo]) -> Result<Value, String> {
+/// A row of a shared folder maps only to one the account can open now
+/// (`open`, review F8): the payload of a folder it lost stays in the
+/// legacy recycle bin.
+fn map_row(
+    row: &TrashRow,
+    user_id: i64,
+    shares: &[ShareInfo],
+    open: &[&ShareInfo],
+) -> Result<Value, String> {
     if !valid_uuid(&row.id) {
         return Err("its id is not a lowercase UUID".into());
     }
@@ -621,6 +647,9 @@ fn map_row(row: &TrashRow, user_id: i64, shares: &[ShareInfo]) -> Result<Value, 
                 .iter()
                 .find(|share| share.name.eq_ignore_ascii_case(name))
                 .ok_or("its shared folder no longer exists")?;
+            if !open.iter().any(|known| known.id == share.id) {
+                return Err("the account can no longer open its shared folder".into());
+            }
             (Some(share.container.clone()), rest.to_vec())
         }
         None => (None, logical.segments().to_vec()),
@@ -750,13 +779,14 @@ async fn move_trash(
     let rows = load_rows(env.pool, account.id).await?;
     summary.rows = rows.len() as u64;
     summary.bytes = rows.iter().map(|row| row.size_bytes.max(0)).sum();
+    let open = accessible(env.pool, account, shares).await?;
     let mut entries = Vec::new();
     for row in &rows {
         match pilot_row(row, shares, &env.cfg.native_pilot)
-            .and_then(|()| map_row(row, account.id, shares))
+            .and_then(|()| map_row(row, account.id, shares, &open))
         {
             Ok(entry) => entries.push((row, entry)),
-            Err(why) => summary.left.push(left(row, &why)),
+            Err(why) => summary.leave(row, &why),
         }
     }
     if entries.is_empty() {
@@ -797,13 +827,13 @@ async fn move_trash(
                         summary.already += 1;
                     }
                 }
-                Some("missing") => summary.left.push(left(row, "its data is missing")),
-                _ => summary.left.push(left(
+                Some("missing") => summary.leave(row, "its data is missing"),
+                _ => summary.leave(
                     row,
                     result["message"]
                         .as_str()
                         .unwrap_or("it could not be moved"),
-                )),
+                ),
             }
         }
     }
@@ -856,11 +886,138 @@ async fn restore_rows(
 }
 
 // ---------------------------------------------------------------------------
+// rast doctor
+// ---------------------------------------------------------------------------
+
+/// `rast doctor`: the accounts in one-HOME mode (their HOME is a folder of
+/// their identity, as `is_one_home` checks, never followed).
+///
+/// - Review F13: an account outside the native pilot, or on a server with
+///   native apps off, is stranded: File Station runs in-process as `rast`
+///   and cannot open the HOME, backups skip it, and the RAST quota applies
+///   again (the files are intact). Roll such accounts back first.
+/// - Review F3 (decision A7): the identity of an account in one-HOME mode
+///   must be in `<etc>/cron.deny`, and in `<etc>/at.deny` when that file
+///   exists (without it only root may use `at`). Files this user cannot
+///   read are named once.
+///
+/// Read-only, as the service user.
+pub async fn doctor_report(cfg: &Config, pool: &SqlitePool, etc: &Path) -> (Vec<String>, usize) {
+    use std::os::unix::fs::MetadataExt;
+    let mut lines = Vec::new();
+    let mut warnings = 0;
+    let rows = match sqlx::query(
+        "SELECT u.username, li.username AS identity, li.uid
+         FROM users u JOIN linux_identities li ON li.user_id = u.id ORDER BY u.id",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                vec![format!("[WARN] cannot list the one-HOME accounts: {error}")],
+                1,
+            )
+        }
+    };
+    let mut one_home = Vec::new();
+    for row in rows {
+        let username: String = row.get("username");
+        let identity: String = row.get("identity");
+        let uid: i64 = row.get("uid");
+        let name = username.to_ascii_lowercase();
+        if validate_component(&name).is_err() {
+            continue;
+        }
+        let owned = std::fs::symlink_metadata(cfg.home_for(&name))
+            .is_ok_and(|meta| meta.is_dir() && i64::from(meta.uid()) == uid);
+        if owned {
+            one_home.push((username, identity));
+        }
+    }
+    let read = |file: &str| match std::fs::read_to_string(etc.join(file)) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
+    let cron = read(crate::native::job_deny::CRON_DENY);
+    let at = read(crate::native::job_deny::AT_DENY);
+    let mut unreadable = BTreeMap::new();
+    let mut active = 0;
+    for (username, identity) in &one_home {
+        let reason = if !cfg.native_enabled {
+            Some("native apps are off (native_enabled = false)")
+        } else if !cfg.native_pilot.allows_user(username) {
+            Some("it is outside the native pilot (native_pilot_prefixes)")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            warnings += 1;
+            lines.push(format!(
+                "[WARN] the account {username} is in one-HOME mode, but {reason}: File Station \
+                 cannot open its HOME, backups skip it and the RAST quota applies again (its \
+                 files are intact). Put it back in the pilot with native apps on, and run \
+                 `rast migrate home --rollback --user {username}` before you take it out"
+            ));
+            continue;
+        }
+        active += 1;
+        for (file, text, required) in [
+            (crate::native::job_deny::CRON_DENY, &cron, true),
+            (crate::native::job_deny::AT_DENY, &at, false),
+        ] {
+            let listed = match text {
+                Ok(Some(text)) => crate::native::job_deny::lists(text, identity),
+                Ok(None) => !required,
+                Err(error) => {
+                    unreadable.insert(file, error.to_string());
+                    continue;
+                }
+            };
+            if !listed {
+                warnings += 1;
+                lines.push(format!(
+                    "[WARN] the account {username} is in one-HOME mode, but {identity} is not in \
+                     {}: its jobs start outside RAST units and keep the groups of shared folders \
+                     it loses; run `rast migrate home --user {username}` again to list it",
+                    etc.join(file).display()
+                ));
+            }
+        }
+    }
+    for (file, error) in unreadable {
+        lines.push(format!(
+            "[INFO] cannot read {} ({error}); run `sudo rast doctor` to check that one-HOME \
+             identities are listed in it",
+            etc.join(file).display()
+        ));
+    }
+    if !one_home.is_empty() && warnings == 0 {
+        lines.insert(
+            0,
+            format!("[    ] one-HOME accounts ... ok ({active} in the native pilot)"),
+        );
+    }
+    (lines, warnings)
+}
+
+// ---------------------------------------------------------------------------
 // Output
 // ---------------------------------------------------------------------------
 
 fn count(value: &Value) -> u64 {
     value["count"].as_u64().unwrap_or(0)
+}
+
+/// `text: sample`, or `text` alone when the sample is empty (paths hidden).
+fn with_sample(text: String, sample: String) -> String {
+    if sample.is_empty() {
+        text
+    } else {
+        format!("{text}: {sample}")
+    }
 }
 
 fn sample(value: &Value, limit: usize) -> String {
@@ -910,7 +1067,7 @@ fn tree_lines(tree: &Value, done: bool, lines: &mut Vec<String>) {
     ] {
         let n = count(&tree[key]);
         if n > 0 {
-            lines.push(format!("  {n} {label}: {}", sample(&tree[key], 5)));
+            lines.push(with_sample(format!("  {n} {label}"), sample(&tree[key], 5)));
         }
     }
     if tree["nonUtf8"].as_u64().unwrap_or(0) > 0 {
@@ -936,9 +1093,12 @@ fn merge_lines(merge: &Value, done: bool, lines: &mut Vec<String>) {
     ));
     for source in &sources {
         let mut line = format!(
-            "    {} ({}): {} moves, {} conflicts, {} skipped",
+            "    {}{}: {} moves, {} conflicts, {} skipped",
             source["source"].as_str().unwrap_or("?"),
-            source["path"].as_str().unwrap_or("?"),
+            source["path"]
+                .as_str()
+                .map(|path| format!(" ({path})"))
+                .unwrap_or_default(),
             source["moves"].as_u64().unwrap_or(0),
             source["conflicts"].as_u64().unwrap_or(0),
             source["skipped"].as_u64().unwrap_or(0),
@@ -957,16 +1117,16 @@ fn merge_lines(merge: &Value, done: bool, lines: &mut Vec<String>) {
     }
     let conflicts = count(&merge["conflicts"]);
     if conflicts > 0 {
-        lines.push(format!(
-            "  {conflicts} conflicts (they stay in the old profile): {}",
-            sample(&merge["conflicts"], 50)
+        lines.push(with_sample(
+            format!("  {conflicts} conflicts (they stay in the old profile)"),
+            sample(&merge["conflicts"], 50),
         ));
     }
     let skipped = count(&merge["skipped"]);
     if skipped > 0 {
-        lines.push(format!(
-            "  {skipped} skipped: {}",
-            sample(&merge["skipped"], 10)
+        lines.push(with_sample(
+            format!("  {skipped} skipped"),
+            sample(&merge["skipped"], 10),
         ));
     }
 }
@@ -1001,6 +1161,17 @@ fn trash_lines(mode: Mode, trash: &TrashSummary, lines: &mut Vec<String>) {
                 trash.left.len() - 20
             ));
         }
+    }
+}
+
+/// Accounts outside the native pilot (ADR 0007, review F10, decision A9):
+/// a dry run shows only counts and sizes for them, no paths and no ACL
+/// entry text, unless `--show-paths` is given. Accounts in the pilot keep
+/// every detail.
+pub fn hide_paths_outside_pilot(outcomes: &mut [UserOutcome]) {
+    for outcome in outcomes.iter_mut().filter(|outcome| outcome.outside_pilot) {
+        crate::migrate_shares::redact_paths(&mut outcome.report);
+        outcome.trash.left = std::mem::take(&mut outcome.trash.left_without_paths);
     }
 }
 

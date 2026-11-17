@@ -468,6 +468,10 @@ enum MigrateCommand {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+        /// Also show paths and ACL entries of shared folders outside the
+        /// native pilot (a dry run shows only counts and sizes for them)
+        #[arg(long)]
+        show_paths: bool,
     },
     /// Accounts: move a legacy account into one-HOME mode (its HOME, app
     /// profiles and recycle bin become its Linux identity's). Run as the
@@ -490,6 +494,10 @@ enum MigrateCommand {
         /// Machine-readable output
         #[arg(long)]
         json: bool,
+        /// Also show paths and ACL entries of accounts outside the native
+        /// pilot (a dry run shows only counts and sizes for them)
+        #[arg(long)]
+        show_paths: bool,
     },
 }
 
@@ -1346,8 +1354,10 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     print!("[    ] database ... ");
     let mut user_ids = std::collections::BTreeSet::new();
     let mut share_containers: Vec<(String, String)> = Vec::new();
+    let mut doctor_pool = None;
     match db::init(&cfg).await {
         Ok(pool) => {
+            doctor_pool = Some(pool.clone());
             user_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM users")
                 .fetch_all(&pool)
                 .await
@@ -1502,6 +1512,16 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         warnings += trash_warnings;
     }
+    // One-HOME accounts the pilot or native apps no longer cover, and
+    // identities cron or `at` may still run (review F13, F3).
+    if let Some(pool) = &doctor_pool {
+        let (lines, one_home_warnings) =
+            rast::migrate_home::doctor_report(&cfg, pool, std::path::Path::new("/etc")).await;
+        for line in &lines {
+            println!("{line}");
+        }
+        warnings += one_home_warnings;
+    }
 
     print!("[    ] time drift (system clock) ... ");
     println!(
@@ -1536,21 +1556,23 @@ async fn migrate_command(
     cmd: MigrateCommand,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use rast::migrate_shares::{self, Mode};
-    let (share, dry_run, rollback, json) = match cmd {
+    let (share, dry_run, rollback, json, show_paths) = match cmd {
         MigrateCommand::Shares {
             share,
             all: _,
             dry_run,
             rollback,
             json,
-        } => (share, dry_run, rollback, json),
+            show_paths,
+        } => (share, dry_run, rollback, json, show_paths),
         MigrateCommand::Home {
             user,
             all: _,
             dry_run,
             rollback,
             json,
-        } => return migrate_home_command(cfg, user, dry_run, rollback, json).await,
+            show_paths,
+        } => return migrate_home_command(cfg, user, dry_run, rollback, json, show_paths).await,
     };
     let mode = match (dry_run, rollback) {
         (true, _) => Mode::DryRun,
@@ -1581,9 +1603,12 @@ async fn migrate_command(
     };
     let pool = db::init(&cfg).await?;
     let native = rast::native::client::NativeClient::from_config(&cfg);
-    let outcomes =
+    let mut outcomes =
         migrate_shares::run_in_pilot(&pool, &native, &cfg.native_pilot, mode, share.as_deref())
             .await?;
+    if !show_paths {
+        migrate_shares::hide_paths_outside_pilot(&mut outcomes);
+    }
     let failed = outcomes.iter().filter(|run| !run.outcome.ok).count();
     if json {
         println!(
@@ -1624,6 +1649,7 @@ async fn migrate_home_command(
     dry_run: bool,
     rollback: bool,
     json: bool,
+    show_paths: bool,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use rast::migrate_home::{self, Env, Mode, Selection};
     let mode = match (dry_run, rollback) {
@@ -1662,7 +1688,10 @@ async fn migrate_home_command(
         pool: &pool,
         native: &native,
     };
-    let outcomes = migrate_home::run(&env, mode, &selection).await?;
+    let mut outcomes = migrate_home::run(&env, mode, &selection).await?;
+    if !show_paths {
+        migrate_home::hide_paths_outside_pilot(&mut outcomes);
+    }
     let failed = outcomes.iter().filter(|outcome| !outcome.ok).count();
     if json {
         println!(
@@ -2024,11 +2053,29 @@ mod tests {
             let cmd = parse(&with(&["home", "--user", "t-alice", "--json"])).unwrap();
             assert!(matches!(
                 cmd,
-                MigrateCommand::Home { user: Some(ref name), all: false, json: true, dry_run, rollback }
+                MigrateCommand::Home {
+                    user: Some(ref name), all: false, json: true, dry_run, rollback,
+                    show_paths: false,
+                }
                     if name == "t-alice"
                         && dry_run == (mode == Some("--dry-run"))
                         && rollback == (mode == Some("--rollback"))
             ));
+            // Review F10: paths outside the native pilot only on request.
+            for sub in ["shares", "home"] {
+                let selection = if sub == "shares" { "--share" } else { "--user" };
+                let cmd = parse(&with(&[sub, selection, "x", "--show-paths"])).unwrap();
+                assert!(matches!(
+                    cmd,
+                    MigrateCommand::Shares {
+                        show_paths: true,
+                        ..
+                    } | MigrateCommand::Home {
+                        show_paths: true,
+                        ..
+                    }
+                ));
+            }
             let cmd = parse(&with(&["home", "--all"])).unwrap();
             assert!(matches!(
                 cmd,

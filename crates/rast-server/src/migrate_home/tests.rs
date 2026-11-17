@@ -262,6 +262,11 @@ async fn the_dry_run_adds_the_recycle_bin_quota_and_shared_folder_checks() {
     assert_eq!(
         alice.trash.left,
         [
+            // Alice cannot open Team (review F8).
+            format!(
+                "{ID2} (/shared/team/plans/q4.txt): the account can no longer open its shared \
+                 folder"
+            ),
             format!("{ID3} (/shared/old/x.txt): its shared folder no longer exists"),
             format!("{ID4} (/docs/b.txt): its data is not in the account's recycle bin"),
         ]
@@ -305,6 +310,13 @@ async fn the_dry_run_adds_the_recycle_bin_quota_and_shared_folder_checks() {
 #[tokio::test]
 async fn apply_moves_the_recycle_bin_in_batches_and_keeps_rows_it_could_not_move() {
     let fx = fixture().await;
+    // Alice can open Team (a row maps only to a shared folder the account
+    // can open now, review F8).
+    sqlx::query("INSERT INTO share_members (share_id, user_id, perms) VALUES (?, 2, 'read')")
+        .bind(TEAM)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
     fx.add_trash(ID1, 2, "/docs/a.txt", &format!("2/{ID1}"))
         .await;
     fx.add_trash(ID2, 2, "/shared/Team/plans/q4.txt", &format!("2/{ID2}"))
@@ -501,6 +513,7 @@ fn rows_map_to_the_home_or_the_container_of_their_shared_folder() {
         name: "Team".into(),
         container: "team".into(),
     }];
+    let open: Vec<&ShareInfo> = shares.iter().collect();
     let row = |id: &str, original: &str, trashed: String| TrashRow {
         id: id.into(),
         user_id: 2,
@@ -511,12 +524,35 @@ fn rows_map_to_the_home_or_the_container_of_their_shared_folder() {
         deleted_at: 5,
     };
     assert_eq!(
-        map_row(&row(ID1, "/a/b c.txt", format!("2/{ID1}")), 2, &shares).unwrap(),
+        map_row(
+            &row(ID1, "/a/b c.txt", format!("2/{ID1}")),
+            2,
+            &shares,
+            &open
+        )
+        .unwrap(),
         json!({"id": ID1, "deletedAt": 5, "path": "a/b c.txt"})
     );
     assert_eq!(
-        map_row(&row(ID1, "/shared/TEAM/x", format!("2/{ID1}")), 2, &shares).unwrap()["container"],
+        map_row(
+            &row(ID1, "/shared/TEAM/x", format!("2/{ID1}")),
+            2,
+            &shares,
+            &open
+        )
+        .unwrap()["container"],
         "team"
+    );
+    // A shared folder the account cannot open any more (review F8).
+    assert_eq!(
+        map_row(
+            &row(ID1, "/shared/TEAM/x", format!("2/{ID1}")),
+            2,
+            &shares,
+            &[]
+        )
+        .unwrap_err(),
+        "the account can no longer open its shared folder"
     );
     for (original, trashed) in [
         ("/shared/Team", format!("2/{ID1}")),
@@ -528,11 +564,11 @@ fn rows_map_to_the_home_or_the_container_of_their_shared_folder() {
         ("/a", "../2/x".to_string()),
     ] {
         assert!(
-            map_row(&row(ID1, original, trashed.clone()), 2, &shares).is_err(),
+            map_row(&row(ID1, original, trashed.clone()), 2, &shares, &open).is_err(),
             "{original} {trashed}"
         );
     }
-    assert!(map_row(&row("ABC", "/a", "2/ABC".into()), 2, &shares).is_err());
+    assert!(map_row(&row("ABC", "/a", "2/ABC".into()), 2, &shares, &open).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -658,4 +694,200 @@ async fn an_account_that_can_open_a_shared_folder_outside_the_pilot_stays_legacy
         .warnings
         .iter()
         .any(|warning| warning.contains("outside the native pilot") && warning.contains("Team")));
+}
+
+#[tokio::test]
+async fn a_dry_run_shows_only_counts_for_accounts_outside_the_pilot() {
+    // Review F10, decision A9.
+    let fx = pilot_fixture().await;
+    fx.add_trash(ID1, 1, "/secret/plan.txt", "1/elsewhere")
+        .await;
+    fx.add_trash(ID2, 2, "/docs/kept.txt", "2/elsewhere").await;
+    let mut outcomes = run_with(&fx.env(), Mode::DryRun, &Selection::All, &migrated)
+        .await
+        .unwrap();
+    hide_paths_outside_pilot(&mut outcomes);
+    let (admin, alice) = (&outcomes[0], &outcomes[1]);
+    assert!(admin.outside_pilot && !alice.outside_pilot);
+    let hidden = [
+        "docs",
+        "b.txt",
+        "u:1001",
+        "linux-apps/profiles",
+        "config/pulse",
+        "secret",
+    ];
+    let text = describe(Mode::DryRun, admin).join("\n");
+    let json = serde_json::to_string(admin).unwrap();
+    for needle in hidden {
+        assert!(!text.contains(needle), "{needle} in {text}");
+        assert!(!json.contains(needle), "{needle} in {json}");
+    }
+    // The counts and sizes stay.
+    assert!(text.contains(
+        "  HOME: 2 folders, 3 files, 30 bytes (12288 on disk); 5 entries to give to the identity"
+    ));
+    assert!(
+        text.contains("  1 entries with other ACL entries (kept)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("    chrome: 1 moves, 1 conflicts, 0 skipped"),
+        "{text}"
+    );
+    assert!(text.contains(&format!(
+        "    {ID1}: its data is not in the account's recycle bin"
+    )));
+    assert_eq!(admin.trash.rows, 1);
+    // An account in the pilot keeps every detail.
+    let text = describe(Mode::DryRun, alice).join("\n");
+    assert!(text.contains("b.txt: u:1001:rw-"), "{text}");
+    assert!(text.contains("/docs/kept.txt"), "{text}");
+}
+
+#[tokio::test]
+async fn rows_of_a_shared_folder_the_account_lost_stay_in_the_legacy_bin() {
+    // Review F8: Alice deleted a file in Team, then lost access to it.
+    let fx = fixture().await;
+    fx.add_trash(ID1, 2, "/shared/Team/report.odt", &format!("2/{ID1}"))
+        .await;
+    fx.add_trash(ID2, 2, "/docs/b.txt", &format!("2/{ID2}"))
+        .await;
+    let outcomes = run_with(&fx.env(), Mode::DryRun, &user("t-alice"), &migrated)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcomes[0].trash.left,
+        [format!(
+            "{ID1} (/shared/Team/report.odt): the account can no longer open its shared folder"
+        )]
+    );
+    let outcomes = run_with(&fx.env(), Mode::Apply, &user("t-alice"), &migrated)
+        .await
+        .unwrap();
+    let alice = &outcomes[0];
+    assert!(alice.ok, "{alice:?}");
+    let batches = fx.requests("home_migrate_trash");
+    assert_eq!(batches.len(), 1);
+    assert_eq!(
+        batches[0]["entries"],
+        json!([{"id": ID2, "deletedAt": 1_794_823_200_000i64, "path": "docs/b.txt"}])
+    );
+    for (op, request) in fx.calls.lock().unwrap().iter() {
+        assert!(!request.to_string().contains("\"team\""), "{op}: {request}");
+    }
+    assert_eq!(alice.trash.left.len(), 1);
+    assert_eq!(fx.trash_ids(2).await, [ID1]);
+}
+
+// ---------------------------------------------------------------------------
+// rast doctor (review F3 and F13)
+// ---------------------------------------------------------------------------
+
+/// Put `T-Alice` (user 2) in one-HOME mode: her HOME is a folder of her
+/// identity (the test's own uid stands for it).
+async fn one_home_alice(fx: &Fixture) {
+    use std::os::unix::fs::MetadataExt;
+    let home = fx.cfg.home_for("t-alice");
+    std::fs::create_dir_all(&home).unwrap();
+    let uid = std::fs::metadata(&home).unwrap().uid();
+    sqlx::query(
+        "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+         VALUES (2, 'rast-u2', ?, ?, ?, 1)",
+    )
+    .bind(i64::from(uid))
+    .bind(i64::from(uid))
+    .bind(home.display().to_string())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    // A legacy account with an identity: never reported.
+    std::fs::create_dir_all(fx.cfg.home_for("admin")).unwrap();
+    sqlx::query(
+        "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+         VALUES (1, 'rast-u1', 200001, 200001, '/x', 1)",
+    )
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn doctor_names_one_home_accounts_the_pilot_or_native_apps_no_longer_cover() {
+    // Review F13: the pilot shrank to nobody, or native apps were turned off.
+    let mut fx = fixture().await;
+    one_home_alice(&fx).await;
+    let etc = fx.dir.path().join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    std::fs::write(etc.join("cron.deny"), "rast-u2\n").unwrap();
+    fx.cfg.native_pilot = NativePilot::with_prefixes(Vec::<String>::new()).unwrap();
+    let (lines, warnings) = doctor_report(&fx.cfg, &fx.pool, &etc).await;
+    assert_eq!(warnings, 1, "{lines:?}");
+    assert!(lines[0].starts_with("[WARN] the account T-Alice is in one-HOME mode"));
+    assert!(lines[0].contains("outside the native pilot"), "{lines:?}");
+    assert!(lines[0].contains("rast migrate home --rollback --user T-Alice"));
+
+    fx.cfg.native_pilot = NativePilot::with_prefixes(["t-"]).unwrap();
+    fx.cfg.native_enabled = false;
+    let (lines, warnings) = doctor_report(&fx.cfg, &fx.pool, &etc).await;
+    assert_eq!(warnings, 1, "{lines:?}");
+    assert!(lines[0].contains("native apps are off"), "{lines:?}");
+
+    fx.cfg.native_enabled = true;
+    let (lines, warnings) = doctor_report(&fx.cfg, &fx.pool, &etc).await;
+    assert_eq!(
+        (lines, warnings),
+        (
+            vec!["[    ] one-HOME accounts ... ok (1 in the native pilot)".to_string()],
+            0
+        )
+    );
+}
+
+#[tokio::test]
+async fn doctor_names_one_home_identities_that_cron_or_at_may_still_run() {
+    // Review F3, decision A7.
+    let mut fx = fixture().await;
+    fx.cfg.native_pilot = NativePilot::with_prefixes(["t-"]).unwrap();
+    one_home_alice(&fx).await;
+    let etc = fx.dir.path().join("etc");
+    std::fs::create_dir_all(&etc).unwrap();
+    // Neither file: cron lets everyone in, `at` only root.
+    let (lines, warnings) = doctor_report(&fx.cfg, &fx.pool, &etc).await;
+    assert_eq!(warnings, 1, "{lines:?}");
+    assert!(
+        lines[0].contains("rast-u2 is not in") && lines[0].contains("cron.deny"),
+        "{lines:?}"
+    );
+    std::fs::write(etc.join("cron.deny"), "rast-u20\n rast-u2 \n").unwrap();
+    std::fs::write(etc.join("at.deny"), "daemon\n").unwrap();
+    let (lines, warnings) = doctor_report(&fx.cfg, &fx.pool, &etc).await;
+    assert_eq!(warnings, 1, "{lines:?}");
+    assert!(lines[0].contains("at.deny"), "{lines:?}");
+    std::fs::write(etc.join("at.deny"), "daemon\nrast-u2\n").unwrap();
+    assert_eq!(doctor_report(&fx.cfg, &fx.pool, &etc).await.1, 0);
+}
+
+#[tokio::test]
+async fn apply_warns_about_a_crontab_from_before() {
+    let fx = fixture_with(Arc::new(|op, request| {
+        let mut reply = answers(op, request)?;
+        if op == "home_migrate_apply" {
+            reply["jobs"] = json!({"cronDeny": "added", "atDeny": "absent", "crontab": true});
+        }
+        Ok(reply)
+    }))
+    .await;
+    let outcomes = run_with(&fx.env(), Mode::Apply, &user("T-Alice"), &migrated)
+        .await
+        .unwrap();
+    assert!(outcomes[0].ok, "{:?}", outcomes[0]);
+    assert!(
+        outcomes[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("sudo crontab -r -u rast-u2")),
+        "{:?}",
+        outcomes[0].warnings
+    );
 }

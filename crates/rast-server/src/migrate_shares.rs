@@ -191,6 +191,35 @@ pub async fn run_in_pilot(
     Ok(out)
 }
 
+/// Remove every path and ACL entry text from a helper report: `paths`
+/// lists become empty and `path` fields go, counts and sizes stay (review
+/// F10, decision A9).
+pub(crate) fn redact_paths(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                match key.as_str() {
+                    "paths" => *item = Value::Array(Vec::new()),
+                    "path" => *item = Value::Null,
+                    _ => redact_paths(item),
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_paths),
+        _ => {}
+    }
+}
+
+/// Shared folders outside the native pilot (ADR 0007, review F10, decision
+/// A9): a dry run shows only counts and sizes for them, no paths and no
+/// ACL entry text, unless `--show-paths` is given. Shared folders in the
+/// pilot keep every detail.
+pub fn hide_paths_outside_pilot(runs: &mut [PilotOutcome]) {
+    for run in runs.iter_mut().filter(|run| run.outside_pilot) {
+        redact_paths(&mut run.outcome.report);
+    }
+}
+
 async fn call(native: &NativeClient, op: &str, params: Value) -> Result<Value, String> {
     native
         .call_json(op, params)
@@ -281,7 +310,11 @@ pub fn describe(mode: Mode, outcome: &ShareOutcome) -> Vec<String> {
                     .as_array()
                     .map(|paths| paths.iter().filter_map(Value::as_str).take(5).collect())
                     .unwrap_or_default();
-                lines.push(format!("  {n} {label}: {}", sample.join(", ")));
+                lines.push(if sample.is_empty() {
+                    format!("  {n} {label}")
+                } else {
+                    format!("  {n} {label}: {}", sample.join(", "))
+                });
             }
             // ACL entries that the new ACL removes: every listed one, so
             // the administrator knows what will be lost.
@@ -695,6 +728,43 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert!(runs[0].outcome.ok && !runs[0].outside_pilot);
         assert_eq!(shares_named(), [PILOT, PILOT, PILOT]);
+    }
+
+    #[test]
+    fn a_dry_run_shows_only_counts_for_shared_folders_outside_the_pilot() {
+        // Review F10, decision A9.
+        let report = json!({"report": {
+            "dirs": 2, "files": 3, "bytes": 10,
+            "changes": {"count": 5, "paths": ["docs"]},
+            "symlinks": {"count": 1, "paths": ["docs/link"]},
+            "foreignAclEntries": {"count": 1, "paths": ["docs/plan.txt: u:1001:rw-"]},
+        }});
+        let run = |name: &str, outside_pilot| PilotOutcome {
+            outcome: ShareOutcome {
+                share_id: "id".into(),
+                name: name.into(),
+                container: name.to_lowercase(),
+                ok: true,
+                report: report.clone(),
+                members: Value::Null,
+                error: None,
+            },
+            outside_pilot,
+        };
+        let mut runs = vec![run("Team", true), run("t-share", false)];
+        hide_paths_outside_pilot(&mut runs);
+        let text = describe_in_pilot(Mode::DryRun, &runs[0]).join("\n");
+        let json = serde_json::to_string(&runs[0]).unwrap();
+        for needle in ["docs", "plan.txt", "u:1001"] {
+            assert!(!text.contains(needle), "{needle} in {text}");
+            assert!(!json.contains(needle), "{needle} in {json}");
+        }
+        assert!(text.contains("  2 folders, 3 files, 10 bytes; 5 entries to change"));
+        assert!(text.contains("  1 symlinks (left unchanged)\n"), "{text}");
+        assert!(text.contains("  1 entries with ACL entries that RAST does not manage"));
+        let text = describe_in_pilot(Mode::DryRun, &runs[1]).join("\n");
+        assert!(text.contains("docs/plan.txt: u:1001:rw-"), "{text}");
+        assert!(text.contains("docs/link"), "{text}");
     }
 
     #[test]

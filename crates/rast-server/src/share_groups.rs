@@ -39,6 +39,11 @@
 //! restart, or one that survived its restart) is warned and restarted
 //! again.
 //!
+//! Processes of an identity outside the user's units (a cron or `at` job:
+//! review F3) are never restarted, but while one of them carries the group
+//! of a shared folder its user lost entirely, that folder keeps the deny
+//! entry, also after the session restart; the server log names the user.
+//!
 //! With the native pilot (`native_pilot_prefixes`, ADR 0007) all of this
 //! covers only the shared folders and accounts in the pilot: no helper call
 //! of the syncer, the repair pass or the create and delete hooks names a
@@ -616,8 +621,18 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     }
     // Sessions that still carry a group their user lost.
     match stale_sessions(native, &plan).await {
-        Ok(stale) => {
+        Ok((stale, outside)) => {
             known.stale_check_failed = false;
+            // Never restarted; their shares stay denied (review F3).
+            for (user_id, shares) in state.session_restarts.set_outside_holders(outside) {
+                tracing::warn!(
+                    user_id,
+                    shares = ?shares,
+                    "processes of the account outside RAST units (for example cron or at jobs) \
+                     still carry the groups of shared folders it lost; those folders stay denied \
+                     until the processes end"
+                );
+            }
             for (user_id, lost) in stale {
                 if state.session_restarts.recently_restarted(user_id) {
                     continue;
@@ -683,16 +698,18 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     Ok(known.share_errors.is_empty())
 }
 
+/// Shares lost entirely, by user (id → container).
+type LostShares = BTreeMap<i64, BTreeMap<String, String>>;
+
 /// The users whose running processes carry a share group they are no
 /// longer a member of, with the shares they lost entirely (a session that
 /// holds the rw group of a share it may now only read has lost nothing
-/// entirely).
-async fn stale_sessions(
-    native: &NativeClient,
-    plan: &Plan,
-) -> AppResult<BTreeMap<i64, BTreeMap<String, String>>> {
+/// entirely); and the users whose processes outside their units carry the
+/// group of a share they lost entirely (review F3).
+async fn stale_sessions(native: &NativeClient, plan: &Plan) -> AppResult<(LostShares, LostShares)> {
     let index = plan.group_index();
     let mut out = BTreeMap::new();
+    let mut outside = BTreeMap::new();
     for batch in plan.identities.chunks(SESSION_GROUPS_BATCH) {
         let reply = native
             .call_json("share_session_groups", json!({ "userIds": batch }))
@@ -703,8 +720,45 @@ async fn stale_sessions(
         for (user_id, lost) in stale_in_reply(&reply, plan, &index) {
             out.insert(user_id, lost);
         }
+        outside.extend(outside_holders_in_reply(&reply, plan, &index));
     }
-    Ok(out)
+    Ok((out, outside))
+}
+
+/// The shares a user lost entirely whose group a process of the user's
+/// identity outside the user's units still carries (`outsideGids` of a
+/// `share_session_groups` reply, review F3).
+fn outside_holders_in_reply(
+    reply: &Value,
+    plan: &Plan,
+    index: &HashMap<String, (&ShareInfo, bool)>,
+) -> LostShares {
+    let mut out = BTreeMap::new();
+    for user in reply["users"].as_array().into_iter().flatten() {
+        let Some(user_id) = user["userId"].as_i64() else {
+            continue;
+        };
+        let mut lost = BTreeMap::new();
+        for gid in user["outsideGids"].as_array().into_iter().flatten() {
+            let Some((share, _)) = gid
+                .as_u64()
+                .and_then(|gid| reply["groups"][gid.to_string()].as_str())
+                .and_then(|name| index.get(name))
+            else {
+                continue;
+            };
+            let membership = plan.members.get(&share.id);
+            let member =
+                membership.is_some_and(|m| m.write.contains(&user_id) || m.read.contains(&user_id));
+            if !member {
+                lost.insert(share.id.clone(), share.container.clone());
+            }
+        }
+        if !lost.is_empty() {
+            out.insert(user_id, lost);
+        }
+    }
+    out
 }
 
 /// [`stale_sessions`] for one `share_session_groups` reply.
@@ -825,6 +879,9 @@ pub struct SessionRestarts {
     /// The deny entries the helper last set, by share id. A share missing
     /// here is set (and so cleaned) on the next sync.
     denials: Arc<tokio::sync::Mutex<HashMap<String, BTreeSet<i64>>>>,
+    /// Shares lost entirely whose group a process outside the user's units
+    /// still carries, by user (review F3): denied until it ends.
+    outside: Arc<Mutex<LostShares>>,
 }
 
 impl Default for SessionRestarts {
@@ -842,7 +899,21 @@ impl SessionRestarts {
             warning,
             restarted: Arc::default(),
             denials: Arc::default(),
+            outside: Arc::default(),
         }
+    }
+
+    /// The holders outside units of the last pass (review F3). Returns the
+    /// users whose list changed, with their new list (for the log).
+    pub fn set_outside_holders(&self, holders: LostShares) -> Vec<(i64, Vec<String>)> {
+        let mut current = self.outside.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = holders
+            .iter()
+            .filter(|(user_id, shares)| current.get(user_id) != Some(shares))
+            .map(|(user_id, shares)| (*user_id, shares.keys().cloned().collect()))
+            .collect();
+        *current = holders;
+        changed
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<i64, PendingRestart>> {
@@ -1019,14 +1090,24 @@ impl SessionRestarts {
     }
 
     /// The users each share must deny now: those with a pending forced
-    /// restart who lost it entirely (at most [`MAX_DENIALS`]).
+    /// restart who lost it entirely, and those whose processes outside
+    /// their units still carry its group (review F3); at most
+    /// [`MAX_DENIALS`].
     pub fn wanted_denials(&self, share_id: &str) -> BTreeSet<i64> {
-        let wanted: BTreeSet<i64> = self
+        let mut wanted: BTreeSet<i64> = self
             .lock()
             .iter()
             .filter(|(_, pending)| pending.forced && pending.denied.contains_key(share_id))
             .map(|(user_id, _)| *user_id)
             .collect();
+        wanted.extend(
+            self.outside
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .filter(|(_, shares)| shares.contains_key(share_id))
+                .map(|(user_id, _)| *user_id),
+        );
         if wanted.len() > MAX_DENIALS {
             tracing::warn!(
                 share = share_id,
