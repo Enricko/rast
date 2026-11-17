@@ -1280,6 +1280,21 @@ fn describe_outcome(mode: Mode, outcome: &UserOutcome) -> Vec<String> {
                 count(&steps["missing"]),
                 count(&steps["conflicts"]),
             ));
+            if let Some(links) = rolled["sharedLinksRemoved"]
+                .as_array()
+                .filter(|links| !links.is_empty())
+            {
+                let names: Vec<&str> = links.iter().filter_map(Value::as_str).collect();
+                lines.push(format!(
+                    "  shared folder links removed from ~/Shared: {}{}",
+                    names.join(", "),
+                    if rolled["sharedFolderRemoved"].as_bool().unwrap_or(false) {
+                        " (and the empty ~/Shared folder)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
         }
     }
     trash_lines(mode, &outcome.trash, &mut lines);

@@ -30,11 +30,12 @@
 //! device and mount): no link is ever followed, no entry of another mount
 //! is changed, and a hard-linked file is never given away.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, CString, OsString};
 use std::io::{self, BufRead};
 use std::ops::RangeInclusive;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,7 +46,8 @@ use serde_json::{json, Value};
 use crate::native::acl::{self, Acl, Entry, Tag};
 use crate::native::daemon::{running_user_units, stop_unit};
 use crate::native::homes::{
-    self, c_name, fchmod, fchown, fstat, is_dir, is_symlink, open_dir, stop_files_agent, DIR_FLAGS,
+    self, c_name, fchmod, fchown, fstat, is_dir, is_symlink, open_dir, share_link_container,
+    stop_files_agent, DIR_FLAGS, SHARED_DIR,
 };
 use crate::native::identity::{check_existing_identity, getent_passwd, Identity, PasswdEntry};
 use crate::native::protocol::{
@@ -358,6 +360,23 @@ pub struct HomeTree {
     /// identity (not visited). A rollback stops on them (review F5).
     #[serde(skip)]
     pub identity_unvisited: Sample,
+    /// Paths (with everything below them) that leave the HOME before a
+    /// rollback walks it: RAST's `~/Shared` links, merged app data and
+    /// recycle bin entries. They do not count in `identity_unvisited` when
+    /// the rollback checks the HOME before it changes anything.
+    #[serde(skip)]
+    pub leaving: BTreeSet<String>,
+}
+
+impl HomeTree {
+    /// `path` or one of its parents leaves the HOME.
+    fn leaves(&self, path: &str) -> bool {
+        !self.leaving.is_empty()
+            && (self.leaving.contains(path)
+                || path
+                    .match_indices('/')
+                    .any(|(at, _)| self.leaving.contains(&path[..at])))
+    }
 }
 
 /// What merging one source (the identity home or one app) does.
@@ -481,7 +500,7 @@ fn walk_tree(
         };
         let owner = owners.owner(&stat);
         let identity_unvisited = |tree: &mut HomeTree| {
-            if owner.0 == owners.uid {
+            if owner.0 == owners.uid && !tree.leaves(&path) {
                 tree.identity_unvisited.add(&path);
             }
         };
@@ -3019,6 +3038,9 @@ pub(crate) enum TestPoint {
     BeforeTrashMove,
     /// After the moves of a batch.
     TrashBatchEnd,
+    /// After a rollback checked the HOME and removed RAST's share links,
+    /// before it changes anything else (the HOME is open here).
+    RollbackChecked,
 }
 
 #[cfg(test)]
@@ -3097,6 +3119,11 @@ pub struct HomeRollbackReport {
     pub trash_restored: Vec<String>,
     /// Recycle bin entries that are gone (restored or deleted since).
     pub trash_gone: Vec<String>,
+    /// RAST's own `~/Shared/<name>` links of one-HOME mode, removed (a
+    /// legacy HOME has none).
+    pub shared_links_removed: Vec<String>,
+    /// `~/Shared` itself was removed: made in one-HOME mode and empty then.
+    pub shared_folder_removed: bool,
     pub tree: HomeTree,
 }
 
@@ -3274,7 +3301,19 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
             "the HOME is not the folder the journal recorded",
         ));
     }
+    // Review F5, before anything changes: a refusal leaves the HOME as it
+    // was (the check after the walk below stays, for what appears in
+    // between). RAST's own `~/Shared` links are no reason to refuse: they
+    // are removed first.
+    let share_links = share_links(options, &home, &owners);
+    check_identity_entries(&home, &owners, &journal, share_links.as_ref(), account)?;
     let mut report = HomeRollbackReport::default();
+    if let Some(links) = share_links {
+        let recorded = journal.records.iter().any(|record| record.p == SHARED_DIR);
+        remove_share_links(&home, links, &owners, recorded, &mut report)?;
+    }
+    #[cfg(test)]
+    test_point(TestPoint::RollbackChecked, &home);
     // The recycle bin first, then the merge, then the HOME's own entries.
     undo_trash(options, account, &home, &journal.dir, &owners, &mut report)?;
     let mut ignored = MergeReport::default();
@@ -3312,30 +3351,10 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
         }
         Ok(())
     })?;
-    // The identity can reach a legacy HOME again (the 0.18.3 grant), so
-    // nothing in it may stay the identity's. RAST never deletes them: the
-    // administrator moves them out and runs the rollback again, which
-    // continues from here (review F5).
-    if tree.identity_unvisited.count > 0 {
-        return Err(NativeError::identity_conflict(format!(
-            "the HOME holds {} link(s), special file(s) or file(s) with several links of {}, \
-             which a legacy HOME must not keep: {}{}; move them out of the HOME and run the \
-             rollback again",
-            tree.identity_unvisited.count,
-            account.identity.username,
-            tree.identity_unvisited
-                .paths
-                .iter()
-                .map(|path| show(path))
-                .collect::<Vec<_>>()
-                .join(", "),
-            if tree.identity_unvisited.count > tree.identity_unvisited.paths.len() as u64 {
-                ", …"
-            } else {
-                ""
-            },
-        )));
-    }
+    // The backstop of the check above: something of the identity appeared
+    // since. The entries are the service's now and the HOME is still the
+    // identity's; the next run continues from here.
+    refuse_identity_entries(account, &tree.identity_unvisited)?;
     report.restored = restored;
     report.returned = returned;
     report.changed_since = changed;
@@ -3349,6 +3368,237 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
         home_record,
         report,
     })
+}
+
+/// The identity can reach a legacy HOME again (the 0.18.3 grant), so no
+/// link, special file or file with several links in it may stay the
+/// identity's. RAST never deletes them: the administrator moves them out
+/// and runs the rollback again (review F5).
+fn refuse_identity_entries(account: &Account, found: &Sample) -> Result<(), NativeError> {
+    if found.count == 0 {
+        return Ok(());
+    }
+    Err(NativeError::identity_conflict(format!(
+        "the HOME holds {} link(s), special file(s) or file(s) with several links of {}, which \
+         a legacy HOME must not keep: {}{}; move them out of the HOME and run the rollback again",
+        found.count,
+        account.identity.username,
+        found
+            .paths
+            .iter()
+            .map(|path| show(path))
+            .collect::<Vec<_>>()
+            .join(", "),
+        if found.count > found.paths.len() as u64 {
+            ", …"
+        } else {
+            ""
+        },
+    )))
+}
+
+/// The rollback's check before it changes anything: walk the HOME without
+/// changing it and refuse on what [`refuse_identity_entries`] refuses,
+/// except what leaves the HOME before the rollback walks it: RAST's share
+/// links and the paths of [`leaving_paths`].
+fn check_identity_entries(
+    home: &OwnedFd,
+    owners: &Owners,
+    journal: &Journal,
+    share_links: Option<&ShareLinks>,
+    account: &Account,
+) -> Result<(), NativeError> {
+    let mut tree = HomeTree {
+        leaving: leaving_paths(home, journal, owners)?,
+        ..HomeTree::default()
+    };
+    for link in share_links.iter().flat_map(|links| &links.links) {
+        tree.leaving.insert(join(SHARED_DIR, &link.name));
+    }
+    walk_tree(home, owners, &mut tree, |_, _| Ok(()))?;
+    refuse_identity_entries(account, &tree.identity_unvisited)
+}
+
+/// What the rollback moves out of the HOME before it walks it (read only):
+/// the entries the merge moved in that are still the recorded inode, and
+/// the HOME's recycle bin entries that go back to the legacy recycle bin.
+fn leaving_paths(
+    home: &OwnedFd,
+    journal: &Journal,
+    owners: &Owners,
+) -> Result<BTreeSet<String>, NativeError> {
+    let at = |rel: &str| -> Option<libc::stat> {
+        let (parent, name) = split(rel);
+        let dir = open_rel(home, parent).ok()?;
+        lstat_at(dir.as_raw_fd(), &c_name(name).ok()?).ok()
+    };
+    let is = |stat: &libc::stat, dev: u64, ino: u64, dir: bool| {
+        dev_of(stat) == dev && ino_of(stat) == ino && is_dir(stat) == dir
+    };
+    let mut leaving = BTreeSet::new();
+    for step in &journal.steps {
+        if step.op == StepKind::Move
+            && at(&step.dst).is_some_and(|stat| is(&stat, step.dev, step.ino, step.d))
+        {
+            leaving.insert(step.dst.clone());
+        }
+    }
+    let files = join(&trash_rel(None, owners.uid), "files");
+    for batch in trash_batches(&journal.dir)? {
+        let lines: Vec<TrashLine> = read_lines(&journal.dir, &batch, "recycle bin journal")?;
+        for (index, line) in lines.iter().enumerate() {
+            validate_trash_line(line, owners).map_err(|why| {
+                NativeError::forbidden(format!("line {} of {batch} is refused: {why}", index + 1))
+            })?;
+            let Some(moved) = line
+                .moved
+                .as_ref()
+                .filter(|moved| moved.container.is_none())
+            else {
+                continue;
+            };
+            let path = join(&files, &moved.name);
+            let first = &moved.records[0];
+            if at(&path).is_some_and(|stat| is(&stat, first.dev, first.ino, first.d)) {
+                leaving.insert(path);
+            }
+        }
+    }
+    Ok(leaving)
+}
+
+/// One of RAST's `~/Shared/<name>` links.
+struct ShareLink {
+    name: String,
+    c_name: CString,
+    stat: libc::stat,
+}
+
+/// RAST's `~/Shared/<name>` links in a HOME, which the file agent keeps in
+/// one-HOME mode as the identity: symlinks of the identity directly in
+/// `Shared` whose target is a container directly below the canonical shared
+/// root ([`share_link_container`], the agent's rule). Anything else in
+/// `Shared` is the user's.
+struct ShareLinks {
+    /// `Shared`, open (no link followed, on the HOME's mount).
+    dir: OwnedFd,
+    stat: libc::stat,
+    links: Vec<ShareLink>,
+}
+
+/// Find RAST's share links (read only). `None`: no `Shared` folder that
+/// could hold them.
+fn share_links(options: &NativeOptions, home: &OwnedFd, owners: &Owners) -> Option<ShareLinks> {
+    // The agent names the canonical shared root (it resolves the configured
+    // one when it starts).
+    let shared_root = std::fs::canonicalize(options.storage_dir.join("shared")).ok()?;
+    let name = cname(SHARED_DIR).ok()?;
+    let stat = lstat_at(home.as_raw_fd(), &name).ok()?;
+    if !is_dir(&stat) {
+        return None;
+    }
+    let dir = open_at(home.as_raw_fd(), &name, DIR_FLAGS).ok()?;
+    let opened = fstat(dir.as_raw_fd()).ok()?;
+    let home_stat = fstat(home.as_raw_fd()).ok()?;
+    // The tree walk does not enter another mount either.
+    if !same_inode(&opened, &stat)
+        || opened.st_dev != home_stat.st_dev
+        || fd_mount_id(dir.as_raw_fd()).ok()? != fd_mount_id(home.as_raw_fd()).ok()?
+    {
+        return None;
+    }
+    let mut links = Vec::new();
+    for c_name in dir_names(dir.as_raw_fd(), MAX_TREE_ENTRIES).ok()?? {
+        // Only names the agent can have made (shared folder names).
+        let Some(name) = c_name
+            .to_str()
+            .ok()
+            .filter(|name| rast_base::storage::safe_path::validate_component(name).is_ok())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Ok(entry) = lstat_at(dir.as_raw_fd(), &c_name) else {
+            continue;
+        };
+        if !is_symlink(&entry) || owners.owner(&entry).0 != owners.uid {
+            continue;
+        }
+        let Ok(target) = read_link_at(dir.as_raw_fd(), &c_name) else {
+            continue;
+        };
+        let target = Path::new(std::ffi::OsStr::from_bytes(&target));
+        if share_link_container(target, &shared_root).is_some() {
+            links.push(ShareLink {
+                name,
+                c_name,
+                stat: entry,
+            });
+        }
+    }
+    Some(ShareLinks {
+        dir,
+        stat: opened,
+        links,
+    })
+}
+
+/// The target of the link `name` in `dir` (the link itself is read, never
+/// followed).
+fn read_link_at(dir: RawFd, name: &CStr) -> io::Result<Vec<u8>> {
+    let mut buffer = vec![0u8; libc::PATH_MAX as usize];
+    // SAFETY: a valid fd, a NUL-terminated name and a buffer of the length
+    // passed.
+    let length =
+        unsafe { libc::readlinkat(dir, name.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()) };
+    if length < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let length = length as usize;
+    if length >= buffer.len() {
+        return Err(io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+    }
+    buffer.truncate(length);
+    Ok(buffer)
+}
+
+/// Remove RAST's share links (by name on the open `Shared` folder, each
+/// still the link that was checked), then `Shared` itself when it is empty,
+/// the identity's and not in the journal (`recorded`): one-HOME mode made
+/// it. Otherwise `Shared` stays and goes to the service with the other
+/// entries made since.
+fn remove_share_links(
+    home: &OwnedFd,
+    links: ShareLinks,
+    owners: &Owners,
+    recorded: bool,
+    report: &mut HomeRollbackReport,
+) -> Result<(), NativeError> {
+    for link in &links.links {
+        match lstat_at(links.dir.as_raw_fd(), &link.c_name) {
+            Ok(now) if is_symlink(&now) && same_inode(&now, &link.stat) => {}
+            _ => continue,
+        }
+        unlink_at(links.dir.as_raw_fd(), &link.c_name, false)
+            .map_err(|error| io_failed("remove", &join(SHARED_DIR, &link.name), error))?;
+        report.shared_links_removed.push(link.name.clone());
+    }
+    report.shared_links_removed.sort();
+    if recorded || owners.owner(&links.stat).0 != owners.uid {
+        return Ok(());
+    }
+    let empty = dir_names(links.dir.as_raw_fd(), 1)
+        .ok()
+        .flatten()
+        .is_some_and(|names| names.is_empty());
+    let name = cname(SHARED_DIR)?;
+    if empty
+        && lstat_at(home.as_raw_fd(), &name).is_ok_and(|now| same_inode(&now, &links.stat))
+        && unlink_at(home.as_raw_fd(), &name, true).is_ok()
+    {
+        report.shared_folder_removed = true;
+    }
+    Ok(())
 }
 
 /// Give an entry the journal has no record of to the service (`gid`: the

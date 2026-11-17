@@ -1015,3 +1015,31 @@ async fn the_create_and_delete_hooks_act_only_on_pilot_shared_folders() {
     );
     assert_only_pilot(&calls.lock().unwrap());
 }
+
+#[test]
+fn links_go_to_one_home_accounts_and_a_rollback_forgets_them() {
+    let mut team = ShareRoots::default();
+    team.insert(
+        "Team",
+        ShareRoot {
+            id: TEAM.to_string(),
+            name: "Team".into(),
+            container: "team".into(),
+        },
+    )
+    .unwrap();
+    let mut sent = HashMap::new();
+    // A legacy account is never sent links.
+    assert!(!links_due(&mut sent, 2, false, &team, true));
+    // One HOME: sent once, then only on a change.
+    assert!(links_due(&mut sent, 2, true, &team, false));
+    sent.insert(2, team.clone());
+    assert!(!links_due(&mut sent, 2, true, &team, false));
+    assert!(links_due(&mut sent, 2, true, &team, true));
+    assert!(links_due(&mut sent, 2, true, &ShareRoots::default(), false));
+    // Rolled back (its links are gone), then migrated again with the same
+    // shared folders: the links are sent again.
+    assert!(!links_due(&mut sent, 2, false, &team, false));
+    assert!(!sent.contains_key(&2));
+    assert!(links_due(&mut sent, 2, true, &team, false));
+}

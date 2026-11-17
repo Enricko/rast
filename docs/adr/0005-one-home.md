@@ -1024,6 +1024,23 @@ deviates from section 8:
   deletes them. The rollback is safe to run again: recycle bin entries
   already back in the legacy bin are reported as restored again, so their
   rows come back.
+- **Share links and the order of the F5 check (production, 2026-11-17).**
+  RAST's own `~/Shared/<name>` links (symlinks of the identity directly in
+  `Shared` whose target is a container directly below the canonical shared
+  root, the agent's rule, now `homes::share_link_container`; only names a
+  shared folder can have) are removed by the rollback with `unlinkat` on
+  the opened `Shared` folder, and `Shared` too when it is then empty, the
+  identity's and not in the journal (`sharedLinksRemoved`,
+  `sharedFolderRemoved`). Before, every member of a migrated shared folder
+  was refused. Anything else in `Shared` is the user's and keeps the F5
+  rule. The F5 check now also runs read-only before the rollback changes
+  anything (not counting the share links and what moves out of the HOME
+  first: merged app data still in place, the HOME's recycle bin entries),
+  so a refusal leaves the HOME as it was; the check after the walk stays
+  as the backstop, and a run it stopped (the state the old order left)
+  continues from its journal. The server forgets the links it sent to an
+  account that is no longer in one-HOME mode, so a new migration gets
+  them again.
 - **Shared folders the account lost (review F8).** A recycle bin row of a
   shared folder the account can no longer open stays in the legacy bin.
 - **Payloads (review F14).** Before a moved payload changes owner, the

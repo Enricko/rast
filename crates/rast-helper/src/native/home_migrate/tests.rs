@@ -1390,15 +1390,17 @@ async fn a_rollback_resets_new_entries_and_stops_on_links_of_the_identity() {
     let error = fx.rollback().await.unwrap_err();
     assert_eq!(error.code, "identity_conflict", "{error:?}");
     assert!(error.message.contains("drop/l"), "{error:?}");
-    // Stopped before the HOME step: the HOME is still the identity's.
+    // Refused before anything changed: the HOME is still the identity's,
+    // and so are the folder and the recycle bin entry.
     assert_eq!(fx.owner(&home), UID);
     assert!(!fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+    assert_eq!(fx.owner(&drop), UID);
+    assert_eq!(mode(&drop), 0o777);
+    assert!(!legacy.join(ID1).exists());
 
     // The administrator moves the link out; the rollback continues.
     std::fs::remove_file(drop.join("l")).unwrap();
     let rolled = fx.rollback().await.unwrap();
-    // The recycle bin entry went back in the first run; its row comes
-    // back all the same.
     assert_eq!(rolled["report"]["trashRestored"], json!([ID1]), "{rolled}");
     assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "one");
     for (path, expected) in [("drop", 0o755), ("drop/tool.sh", 0o755)] {
@@ -1519,4 +1521,238 @@ async fn one_home_mode_keeps_cron_and_at_away_and_a_rollback_lets_them_back() {
     assert_eq!(rolled["jobs"]["cronDeny"], "removed", "{rolled}");
     assert_eq!(std::fs::read_to_string(&cron).unwrap(), "");
     assert_eq!(std::fs::read_to_string(&at).unwrap(), "daemon\n");
+}
+
+/// The shared root with these containers, canonical (as the agent names
+/// it in the `~/Shared` links).
+fn shared_root(fx: &Fixture, containers: &[&str]) -> PathBuf {
+    let root = fx.options.storage_dir.join("shared");
+    for container in containers {
+        std::fs::create_dir_all(root.join(container)).unwrap();
+    }
+    std::fs::canonicalize(root).unwrap()
+}
+
+/// `~/Shared` as the file agent makes it in one-HOME mode (the identity's,
+/// 0700), with a link of the identity per `(name, target)`.
+fn shared_links(fx: &Fixture, links: &[(&str, &Path)]) -> PathBuf {
+    let shared = fx.home().join("Shared");
+    if !shared.exists() {
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fx.give(&shared);
+    }
+    for (name, target) in links {
+        symlink(target, shared.join(name)).unwrap();
+        fx.give(&shared.join(name));
+    }
+    shared
+}
+
+/// Owner, mode, ACLs, link target and contents of every entry below the
+/// storage and data folders (the journals aside).
+fn snapshot(fx: &Fixture) -> BTreeMap<PathBuf, String> {
+    fn visit(fx: &Fixture, path: &Path, out: &mut BTreeMap<PathBuf, String>) {
+        let meta = std::fs::symlink_metadata(path).unwrap();
+        let mut state = format!("{} {:o}", fx.owner(path), mode(path));
+        if meta.is_symlink() {
+            state.push_str(&format!(
+                " -> {}",
+                std::fs::read_link(path).unwrap().display()
+            ));
+        } else {
+            state.push_str(&format!(" {:?}", read_acl(path, acl::ACCESS_XATTR)));
+            if meta.is_dir() {
+                state.push_str(&format!(" {:?}", read_acl(path, acl::DEFAULT_XATTR)));
+            } else {
+                state.push_str(&format!(" {:?}", std::fs::read(path).unwrap()));
+            }
+        }
+        out.insert(path.to_path_buf(), state);
+        if meta.is_dir() && !path.ends_with("migrations") {
+            for entry in std::fs::read_dir(path).unwrap() {
+                visit(fx, &entry.unwrap().path(), out);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    visit(fx, &fx.options.storage_dir, &mut out);
+    visit(fx, &fx.options.data_dir, &mut out);
+    out
+}
+
+#[tokio::test]
+async fn a_rollback_removes_the_share_links_of_one_home_mode() {
+    // Production, 2026-11-17: a member of a migrated shared folder could
+    // not be rolled back because of its `~/Shared/<name>` links.
+    let fx = fixture();
+    populate(&fx);
+    fx.apply().await.unwrap();
+    let root = shared_root(&fx, &["t-share", "team"]);
+    let shared = shared_links(
+        &fx,
+        &[
+            ("t-share", &root.join("t-share")),
+            ("Team", &root.join("team")),
+        ],
+    );
+
+    let rolled = fx.rollback().await.unwrap();
+    let report = &rolled["report"];
+    assert_eq!(
+        report["sharedLinksRemoved"],
+        json!(["Team", "t-share"]),
+        "{report}"
+    );
+    assert_eq!(report["sharedFolderRemoved"], true);
+    assert!(!shared.exists());
+    // The shared folders themselves are untouched.
+    assert!(root.join("t-share").is_dir() && root.join("team").is_dir());
+    assert_eq!(fx.owner(&fx.home()), euid());
+    assert!(fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+}
+
+#[tokio::test]
+async fn other_links_in_shared_stop_the_rollback_before_it_changes_anything() {
+    let fx = fixture();
+    populate(&fx);
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    fx.apply().await.unwrap();
+    trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    let root = shared_root(&fx, &["t-share"]);
+    let shared = shared_links(&fx, &[("t-share", &root.join("t-share"))]);
+    let outside = fx.root().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    // A link elsewhere, one deeper in a shared folder, one to the shared
+    // root itself: the user's, not RAST's.
+    for (name, target) in [
+        ("etc", outside.clone()),
+        ("Deep", root.join("t-share/sub")),
+        ("All", root.clone()),
+    ] {
+        shared_links(&fx, &[(name, &target)]);
+        let before = snapshot(&fx);
+        let error = fx.rollback().await.unwrap_err();
+        assert_eq!(error.code, "identity_conflict", "{error:?}");
+        assert!(
+            error.message.contains(&format!("Shared/{name}")),
+            "{error:?}"
+        );
+        assert!(!error.message.contains("Shared/t-share"), "{error:?}");
+        assert_eq!(
+            snapshot(&fx),
+            before,
+            "{name}: the refusal changed something"
+        );
+        assert!(!fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+        std::fs::remove_file(shared.join(name)).unwrap();
+    }
+    let rolled = fx.rollback().await.unwrap();
+    assert_eq!(rolled["report"]["sharedLinksRemoved"], json!(["t-share"]));
+    assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "one");
+    assert!(!shared.exists());
+}
+
+#[tokio::test]
+async fn a_file_in_shared_is_kept_with_its_folder() {
+    let fx = fixture();
+    populate(&fx);
+    fx.apply().await.unwrap();
+    let root = shared_root(&fx, &["t-share"]);
+    let shared = shared_links(&fx, &[("t-share", &root.join("t-share"))]);
+    write(&shared.join("notes.txt"), "mine");
+    fx.give(&shared.join("notes.txt"));
+
+    let rolled = fx.rollback().await.unwrap();
+    let report = &rolled["report"];
+    assert_eq!(report["sharedLinksRemoved"], json!(["t-share"]));
+    assert_eq!(report["sharedFolderRemoved"], false);
+    let mut returned = sample_paths(&report["returned"]);
+    returned.sort();
+    assert_eq!(returned, ["Shared", "Shared/notes.txt"]);
+    // Made since the migration: the service's now, as any other entry.
+    assert_eq!(
+        std::fs::read_to_string(shared.join("notes.txt")).unwrap(),
+        "mine"
+    );
+    assert_eq!(fx.owner(&shared), euid());
+    assert_eq!(mode(&shared), 0o755);
+    assert_eq!(fx.owner(&shared.join("notes.txt")), euid());
+    assert!(std::fs::symlink_metadata(shared.join("t-share")).is_err());
+}
+
+#[tokio::test]
+async fn a_shared_folder_of_the_legacy_home_stays_even_when_empty() {
+    let fx = fixture();
+    populate(&fx);
+    // The person had a folder named `Shared` before the migration.
+    std::fs::create_dir(fx.home().join("Shared")).unwrap();
+    std::fs::set_permissions(
+        fx.home().join("Shared"),
+        std::fs::Permissions::from_mode(0o750),
+    )
+    .unwrap();
+    fx.apply().await.unwrap();
+    assert_eq!(fx.owner(&fx.home().join("Shared")), UID);
+    let root = shared_root(&fx, &["t-share"]);
+    let shared = shared_links(&fx, &[("t-share", &root.join("t-share"))]);
+
+    let rolled = fx.rollback().await.unwrap();
+    assert_eq!(rolled["report"]["sharedLinksRemoved"], json!(["t-share"]));
+    assert_eq!(rolled["report"]["sharedFolderRemoved"], false);
+    assert!(shared.is_dir());
+    assert_eq!(std::fs::read_dir(&shared).unwrap().count(), 0);
+    // Restored as recorded.
+    assert_eq!(fx.owner(&shared), euid());
+    assert_eq!(mode(&shared), 0o750);
+}
+
+#[tokio::test]
+async fn a_rollback_stopped_after_its_walk_resumes_and_completes() {
+    // The state the old check left on production: the walk had given the
+    // entries back to the service, then the rollback stopped, with the
+    // HOME still the identity's. A link that appears after the first
+    // check stops the walk the same way today.
+    let fx = fixture();
+    populate(&fx);
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    fx.apply().await.unwrap();
+    trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    let root = shared_root(&fx, &["t-share"]);
+    let shared = shared_links(&fx, &[("t-share", &root.join("t-share"))]);
+    let late = fx.home().join("late");
+    let (owners, planted) = (fx.owners.clone(), late.clone());
+    set_test_hook(Some(Box::new(move |point, _| {
+        if point == TestPoint::RollbackChecked {
+            symlink("/etc", &planted).unwrap();
+            owners.lock().unwrap().insert(key(&planted), (UID, UID));
+        }
+    })));
+    let account = Account::of(&fx.options, 7, USER).unwrap();
+    let outcome = rollback_tree(&fx.options, &account);
+    set_test_hook(None);
+    let error = outcome.err().expect("the backstop stops the rollback");
+    assert_eq!(error.code, "identity_conflict", "{error:?}");
+    assert!(error.message.contains("late"), "{error:?}");
+    // Half rolled back: entries are the service's, the HOME is not yet.
+    assert_eq!(fx.owner(&fx.home().join("docs/a.txt")), euid());
+    assert_eq!(fx.owner(&fx.home()), UID);
+    assert!(!fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+    assert!(!shared.exists());
+
+    std::fs::remove_file(&late).unwrap();
+    let rolled = fx.rollback().await.unwrap();
+    assert_eq!(rolled["report"]["trashRestored"], json!([ID1]), "{rolled}");
+    assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "one");
+    assert_eq!(fx.owner(&fx.home()), euid());
+    assert_eq!(mode(&fx.home()), 0o750);
+    assert_eq!(fx.owner(&fx.home().join("docs/a.txt")), euid());
+    assert!(fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+    assert_eq!(fx.passwd_home(), fx.identity_home());
 }

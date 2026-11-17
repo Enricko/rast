@@ -663,15 +663,13 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     // `~/Shared` links of one-HOME accounts whose shares changed.
     for user in &plan.accounts {
         let roots = plan.roots.get(&user.id).cloned().unwrap_or_default();
-        if known.links.get(&user.id) == Some(&roots) && !changes.changed().contains(&user.id) {
-            continue;
-        }
-        if !state
+        let one_home = state
             .homefs
             .is_one_home(&state.db, user)
             .await
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let changed = changes.changed().contains(&user.id);
+        if !links_due(&mut known.links, user.id, one_home, &roots, changed) {
             continue;
         }
         match sync_links(state, user.id, &roots).await {
@@ -803,6 +801,24 @@ fn stale_in_reply(
         }
     }
     out
+}
+
+/// Whether the `~/Shared` links of an account go to its agent now. A legacy
+/// account has no links (the rollback of `rast migrate home` removes them):
+/// it is never sent any, and what it was sent is forgotten, so the account
+/// gets its links again after a new migration.
+fn links_due(
+    sent: &mut HashMap<i64, ShareRoots>,
+    user_id: i64,
+    one_home: bool,
+    roots: &ShareRoots,
+    changed: bool,
+) -> bool {
+    if !one_home {
+        sent.remove(&user_id);
+        return false;
+    }
+    changed || sent.get(&user_id) != Some(roots)
 }
 
 /// Ask the user's agent to bring `~/Shared` in line with `roots`.

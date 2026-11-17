@@ -107,7 +107,8 @@ fn answers(op: &str, request: &Value) -> Result<Value, String> {
             "journal": "000000000001",
             "report": {"restored": 4, "trashRestored": [ID1, ID2, ID1, "00000000-0000-4000-8000-0000000fffff"],
                        "returned": {"count": 1, "paths": ["new.txt"]},
-                       "steps": {"moved": 2, "created": 1}},
+                       "steps": {"moved": 2, "created": 1},
+                       "sharedLinksRemoved": ["Team"], "sharedFolderRemoved": true},
         }),
         other => return Err(format!("unexpected {other}")),
     })
@@ -431,6 +432,10 @@ async fn apply_moves_the_recycle_bin_in_batches_and_keeps_rows_it_could_not_move
         lines[1],
         "  4 entries restored; 1 made since given back to the service, 0 changed since \
          (left as they are), 0 missing"
+    );
+    assert_eq!(
+        lines[3],
+        "  shared folder links removed from ~/Shared: Team (and the empty ~/Shared folder)"
     );
     let _ = &fx.dir;
 }
