@@ -2175,6 +2175,7 @@ export class LinuxApps {
       "div",
       { class: "col" },
       h("p", {}, `${app.name} disappears from every desktop and open copies close. Files in RAST home folders are not touched.`),
+      h("p", { class: "muted" }, "Its program files are removed for every account. With a native pilot, only accounts in the pilot lose their settings."),
       h(
         "label",
         { class: "checkbox" },
@@ -2194,9 +2195,14 @@ export class LinuxApps {
           keepOpen: true,
           onClick: async (close) => {
             try {
-              await ctx.api.del(`/api/linux-apps/${encodeURIComponent(app.id)}`, { removeData: removeData.checked });
+              const result = await ctx.api.del<{ removed?: { keptOutsidePilot?: number[] } }>(
+                `/api/linux-apps/${encodeURIComponent(app.id)}`,
+                { removeData: removeData.checked },
+              );
               close();
               ctx.toast.success(`${app.name} was uninstalled`);
+              const kept = result?.removed?.keptOutsidePilot?.length ?? 0;
+              if (kept > 0) ctx.toast.info(`The settings of ${kept} account(s) outside the native pilot were kept`);
               await this.reload();
             } catch (err) {
               error.textContent = errorMessage(err);

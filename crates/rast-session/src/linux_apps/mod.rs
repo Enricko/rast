@@ -153,6 +153,9 @@ pub struct Session {
     pub app_id: String,
     pub app_name: String,
     pub user_id: i64,
+    /// The account's username when the copy started (usernames never
+    /// change). The display proxy checks it against the native pilot.
+    username: String,
     /// Basic-auth credentials of the container's web server.
     authorization: String,
     state: Mutex<SessionState>,
@@ -579,6 +582,14 @@ impl LinuxApps {
     /// whatever the backend and its role, and it cannot start a session.
     pub fn pilot_allows(&self, user: &AuthUser) -> bool {
         self.config.native_pilot.allows_user(&user.username)
+    }
+
+    /// Whether a legacy Docker copy belongs to an account in the native
+    /// pilot: the display proxy's backstop (review F16). The key comes only
+    /// from the gated `open` route and legacy copies are stopped at start,
+    /// so this holds anyway; the proxy checks it again all the same.
+    pub fn pilot_allows_session(&self, session: &Session) -> bool {
+        self.config.native_pilot.allows_user(&session.username)
     }
 
     /// Reject Linux app mutations when the feature is quarantined.
@@ -2197,6 +2208,11 @@ impl LinuxApps {
             .filter(|s| s.app_id == id)
             .cloned()
             .collect();
+        // The native pilot (review F2): the worker removes every account's
+        // volume at once, so check before any copy is stopped.
+        if remove_data && self.config.docker_enabled {
+            self.native_apps.check_docker_uninstall(id).await?;
+        }
         for session in sessions {
             self.end(&session, "removed", None);
         }
@@ -2240,6 +2256,44 @@ impl LinuxApps {
 
     pub fn find_by_key(&self, key: &str) -> Option<Arc<Session>> {
         self.sessions().get(key).cloned()
+    }
+
+    /// A ready legacy copy whose page is served from `port`, for the display
+    /// proxy's tests (`feature = "test-support"`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn insert_legacy_session_for_test(
+        &self,
+        key: &str,
+        user_id: i64,
+        username: &str,
+        port: u16,
+    ) {
+        let now = Instant::now();
+        let session = Arc::new(Session {
+            id: uuid::Uuid::new_v4().to_string(),
+            key: key.to_string(),
+            app_id: "test".into(),
+            app_name: "Test".into(),
+            user_id,
+            username: username.to_string(),
+            authorization: "Basic test".into(),
+            state: Mutex::new(SessionState {
+                status: Status::Ready,
+                port: Some(port),
+                control_port: None,
+                vnc_ports: Vec::new(),
+                window_streams: HashMap::new(),
+                separate_windows: false,
+                viewers: 0,
+                last_input: now,
+                empty_since: None,
+                created: now,
+                started_at_ms: 0,
+                reason: None,
+                error: None,
+            }),
+        });
+        self.sessions().insert(key.to_string(), session);
     }
 
     fn find_by_id(&self, user: &AuthUser, session_id: &str) -> AppResult<Arc<Session>> {
@@ -2339,6 +2393,7 @@ impl LinuxApps {
             app_id: id.to_string(),
             app_name: row.name.clone(),
             user_id: user.id,
+            username: user.username.clone(),
             authorization,
             state: Mutex::new(SessionState {
                 status: Status::Starting,

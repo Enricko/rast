@@ -977,6 +977,12 @@ pub async fn update_share(
     let before = shares::find_by_id(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound("shared folder not found"))?;
+    check_pilot_rename(
+        &state.config.native_pilot,
+        &before.name,
+        &before.container_path,
+        body.name.as_deref(),
+    )?;
     let members_changed = body.members.is_some();
     let mut affected = crate::access::affected_users_for_share(&state.db, &before.name)
         .await
@@ -1011,6 +1017,37 @@ pub async fn update_share(
     )
     .await;
     Ok(Json(dto))
+}
+
+/// While the native pilot is set, a rename may not move a shared folder
+/// into or out of it (ADR 0007, review F9, decision A8): a folder that left
+/// the pilot would keep its Linux groups, and later revocations would no
+/// longer reach them. A container never changes, so only the name decides.
+fn check_pilot_rename(
+    pilot: &crate::config::NativePilot,
+    name: &str,
+    container: &str,
+    new_name: Option<&str>,
+) -> AppResult<()> {
+    let Some(raw) = new_name else {
+        return Ok(());
+    };
+    if !pilot.is_active() {
+        return Ok(());
+    }
+    let new_name = shares::validate_share_name(raw)?;
+    let before = pilot.allows_share(name, container);
+    let after = pilot.allows_share(&new_name, container);
+    if before == after {
+        return Ok(());
+    }
+    let direction = if before { "out of" } else { "into" };
+    Err(AppError::bad_request(format!(
+        "Renaming {name:?} to {new_name:?} would move this shared folder {direction} the \
+         native pilot (native_pilot_prefixes). While the pilot is set, choose a name that \
+         keeps it {} the pilot.",
+        if before { "in" } else { "outside" }
+    )))
 }
 
 /// DELETE /api/shares/{id} — removes the definition but keeps the data.

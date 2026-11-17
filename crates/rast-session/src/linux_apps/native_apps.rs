@@ -2310,7 +2310,25 @@ impl NativeApps {
             }
         }
 
-        let profiles = self.profile_users(app_id).await;
+        // The native pilot (review F2): only accounts in it lose their app
+        // data; the others keep it and are reported.
+        let (profiles, outside) = self
+            .split_by_pilot(&self.profile_users(app_id).await)
+            .await?;
+        let kept_outside: Vec<i64> = if remove_data {
+            outside
+                .into_iter()
+                .filter(|user_id| fs::symlink_metadata(self.profile_dir(app_id, *user_id)).is_ok())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !kept_outside.is_empty() {
+            warnings.push(format!(
+                "the app data of {} account(s) outside the native pilot was kept",
+                kept_outside.len()
+            ));
+        }
         let mut removed_profiles: Vec<i64> = Vec::new();
         if remove_data {
             for user_id in &profiles {
@@ -2339,8 +2357,95 @@ impl NativeApps {
             "appId": app_id,
             "removedPackages": removed_packages,
             "removedProfiles": removed_profiles,
+            "keptOutsidePilot": kept_outside,
             "warnings": warnings,
         }))
+    }
+
+    /// Split user ids into those the native pilot allows and the others
+    /// (ADR 0007, review F2). Without a pilot every id is allowed. An id
+    /// without an account counts as outside, so its data is kept.
+    async fn split_by_pilot(&self, users: &[i64]) -> AppResult<(Vec<i64>, Vec<i64>)> {
+        let pilot = &self.config.native_pilot;
+        if !pilot.is_active() {
+            return Ok((users.to_vec(), Vec::new()));
+        }
+        let mut inside = Vec::new();
+        let mut outside = Vec::new();
+        for user_id in users {
+            let username: Option<String> =
+                sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
+                    .bind(user_id)
+                    .fetch_optional(&self.db)
+                    .await?;
+            if username.is_some_and(|name| pilot.allows_user(&name)) {
+                inside.push(*user_id);
+            } else {
+                outside.push(*user_id);
+            }
+        }
+        Ok((inside, outside))
+    }
+
+    /// While the native pilot is set, refuse an app-wide data step (a
+    /// migration, its cleanup, a Docker uninstall with data) when accounts
+    /// outside the pilot have data for the app (review F2): their data is
+    /// never touched on behalf of a pilot administrator.
+    async fn refuse_outside_pilot(&self, users: &[i64], what: &str) -> AppResult<()> {
+        let mut users = users.to_vec();
+        users.sort_unstable();
+        users.dedup();
+        let (_, outside) = self.split_by_pilot(&users).await?;
+        if outside.is_empty() {
+            return Ok(());
+        }
+        Err(AppError::conflict(format!(
+            "{} account(s) outside the native pilot have data for this app, so it cannot be              {what} while the pilot (native_pilot_prefixes) is set; nothing was changed.",
+            outside.len()
+        )))
+    }
+
+    /// Every account with a legacy Docker volume, a legacy container or a
+    /// native profile of `app_id`, for [`Self::refuse_outside_pilot`].
+    async fn legacy_data_users(&self, app_id: &str) -> AppResult<Vec<i64>> {
+        let mut users: Vec<i64> = self
+            .legacy
+            .volumes(app_id)
+            .await
+            .map_err(AppError::unavailable)?
+            .iter()
+            .map(|volume| volume.user_id)
+            .collect();
+        let containers = self
+            .legacy
+            .list_containers()
+            .await
+            .map_err(AppError::unavailable)?;
+        users.extend(
+            containers_of(&containers)
+                .into_iter()
+                .filter(|(app, _)| app == app_id)
+                .map(|(_, user_id)| user_id),
+        );
+        users.extend(
+            self.profile_users(app_id)
+                .await
+                .into_iter()
+                .filter(|user_id| fs::symlink_metadata(self.profile_dir(app_id, *user_id)).is_ok()),
+        );
+        Ok(users)
+    }
+
+    /// A Docker app's uninstall with its data removes every account's
+    /// volume at once; while the native pilot is set, it is refused when an
+    /// account outside the pilot has a volume or a copy (review F2).
+    pub async fn check_docker_uninstall(&self, app_id: &str) -> AppResult<()> {
+        if !self.config.native_pilot.is_active() {
+            return Ok(());
+        }
+        let users = self.legacy_data_users(app_id).await?;
+        self.refuse_outside_pilot(&users, "uninstalled with its data")
+            .await
     }
 
     /// User ids that have a profile directory for `app_id`.
@@ -2937,6 +3042,13 @@ impl NativeApps {
                 .await;
             return Err(error);
         }
+        // The native pilot (review F2): the migration stops every copy and
+        // moves every account's data, so accounts outside the pilot must have
+        // none. Checked before any state changes.
+        if self.config.native_pilot.is_active() {
+            let users = self.legacy_data_users(app_id).await?;
+            self.refuse_outside_pilot(&users, "migrated").await?;
+        }
         self.set_migration_state(app_id, Some("prepared"), None)
             .await;
         match self.run_migration(app_id, &row, format, staged, job).await {
@@ -3445,6 +3557,11 @@ impl NativeApps {
         let mut removed_profiles: Vec<i64> = Vec::new();
         let mut warnings: Vec<String> = Vec::new();
         let recorded = recorded_volumes(row.docker_volume.as_deref());
+        // The native pilot (review F2): the cleanup removes the recorded
+        // volumes and profiles of every account at once.
+        let recorded_users: Vec<i64> = recorded.iter().map(|volume| volume.user_id).collect();
+        self.refuse_outside_pilot(&recorded_users, "cleaned up")
+            .await?;
         for volume in &recorded {
             match self.legacy.volume_remove(app_id, volume.user_id).await {
                 Ok(()) => removed_volumes.push(volume.name.clone()),
@@ -4356,6 +4473,11 @@ mod tests {
     }
 
     async fn test_env(handler: Handler) -> TestEnv {
+        test_env_with(handler, None).await
+    }
+
+    /// `test_env` with the native pilot `native_pilot_prefixes = pilot`.
+    async fn test_env_with(handler: Handler, pilot: Option<&[&str]>) -> TestEnv {
         let dir = tempfile::tempdir().unwrap();
         let config = Arc::new(
             Config::from_parts(
@@ -4364,6 +4486,8 @@ mod tests {
                     data_dir: Some(dir.path().join("data")),
                     storage_dir: Some(dir.path().join("storage")),
                     native_enabled: Some(true),
+                    native_pilot_prefixes: pilot
+                        .map(|prefixes| prefixes.iter().map(|prefix| prefix.to_string()).collect()),
                     ..FileConfig::default()
                 },
                 |_| None,
@@ -6099,6 +6223,140 @@ mod tests {
             0o644,
         );
         volume
+    }
+
+    // -----------------------------------------------------------------
+    // Native pilot (review F2)
+    // -----------------------------------------------------------------
+
+    /// A pilot of `t-`: user 1 `admin` (outside), 2 `t-admin`, 3 `t-carol`
+    /// (inside), and a helper that accepts `path_remove`.
+    async fn pilot_env() -> TestEnv {
+        let env = test_env_with(
+            Arc::new(|op: &str, _: &Value| match op {
+                "path_remove" => ok(json!({})),
+                other => helper_failure("unsupported", &format!("unexpected helper op {other}")),
+            }),
+            Some(&["t-"]),
+        )
+        .await;
+        for name in ["t-admin", "t-carol"] {
+            sqlx::query(
+                "INSERT INTO users (username, display_name, password_hash, role, created_at, updated_at)
+                 VALUES (?, ?, 'x', 'user', 0, 0)",
+            )
+            .bind(name)
+            .bind(name)
+            .execute(&env.db)
+            .await
+            .unwrap();
+        }
+        env
+    }
+
+    #[tokio::test]
+    async fn uninstall_with_data_in_the_pilot_keeps_the_data_of_other_accounts() {
+        let env = pilot_env().await;
+        insert_native_row(&env, "demo", LinuxFormat::Deb, None, "1.0").await;
+        for user in ["1", "3"] {
+            fs::create_dir_all(env.config.linux_profiles_dir().join("demo").join(user)).unwrap();
+        }
+        let removed = env.apps.uninstall(2, "demo", true).await.unwrap();
+        assert_eq!(removed["removedProfiles"], json!([3]), "{removed}");
+        assert_eq!(removed["keptOutsidePilot"], json!([1]), "{removed}");
+        assert!(removed["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("outside the native pilot"));
+        let removals: Vec<String> = env
+            .helper
+            .calls("path_remove")
+            .iter()
+            .map(|params| params["path"].as_str().unwrap().to_string())
+            .collect();
+        let outside = env.config.linux_profiles_dir().join("demo").join("1");
+        assert!(
+            !removals.iter().any(|path| Path::new(path) == outside),
+            "{removals:?}"
+        );
+        assert!(removals
+            .iter()
+            .any(|path| Path::new(path) == env.config.linux_profiles_dir().join("demo/3")));
+    }
+
+    #[tokio::test]
+    async fn migration_in_the_pilot_refuses_while_other_accounts_have_data() {
+        let env = pilot_env().await;
+        {
+            let mut state = env.legacy.state();
+            state.volumes = vec![
+                LegacyVolume {
+                    user_id: 1,
+                    name: "rast-linux-demo-u1".to_string(),
+                },
+                LegacyVolume {
+                    user_id: 3,
+                    name: "rast-linux-demo-u3".to_string(),
+                },
+            ];
+            state.containers = json!({"containers": [
+                {"app": "demo", "userId": 1, "state": "running", "running": true},
+            ]});
+        }
+        insert_docker_row(&env, "demo", LinuxFormat::Deb, Some("apt")).await;
+        let error = in_job(&env, "linuxapps.migrate", move |apps, ctx| async move {
+            apps.migrate_legacy(2, "demo", None, None, &ctx).await
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error.contains("1 account(s) outside the native pilot"),
+            "{error}"
+        );
+        assert!(env.legacy.state().stopped.is_empty());
+        assert!(env.legacy.state().exported.is_empty());
+        assert!(env.helper.calls("identity_ensure").is_empty());
+        // Nothing changed: no migration state was recorded.
+        let row: (String, Option<String>) =
+            sqlx::query_as("SELECT backend, migration_state FROM linux_apps WHERE id = 'demo'")
+                .fetch_one(&env.db)
+                .await
+                .unwrap();
+        assert_eq!(row, ("docker".to_string(), None));
+        // The cleanup and a Docker uninstall with data refuse the same way.
+        sqlx::query(
+            "UPDATE linux_apps SET migration_state = 'rolled_back', docker_volume = ? WHERE id = 'demo'",
+        )
+        .bind(
+            json!([{"userId": 1, "name": "rast-linux-demo-u1"},
+                   {"userId": 3, "name": "rast-linux-demo-u3"}])
+            .to_string(),
+        )
+        .execute(&env.db)
+        .await
+        .unwrap();
+        let error = env
+            .apps
+            .cleanup_migration(2, "demo", true)
+            .await
+            .unwrap_err();
+        assert!(
+            error.public_message().contains("outside the native pilot"),
+            "{error}"
+        );
+        assert!(env.legacy.state().removed.is_empty());
+        let error = env.apps.check_docker_uninstall("demo").await.unwrap_err();
+        assert!(
+            error.public_message().contains("outside the native pilot"),
+            "{error}"
+        );
+        // With only pilot accounts left, both go ahead.
+        env.legacy
+            .state()
+            .volumes
+            .retain(|volume| volume.user_id == 3);
+        env.legacy.state().containers = json!({"containers": []});
+        env.apps.check_docker_uninstall("demo").await.unwrap();
     }
 
     #[tokio::test]

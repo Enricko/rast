@@ -1085,6 +1085,118 @@ async fn the_xpra_proxy_refuses_accounts_outside_the_native_pilot() {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+#[tokio::test]
+async fn a_rename_across_the_native_pilot_boundary_is_refused() {
+    // Review F9, decision A8: while the pilot is set, a rename may not move
+    // a shared folder into or out of it; renames on one side still work.
+    let server = pilot_server().await;
+    server
+        .create_user("t-admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("t-admin", ADMIN_PASSWORD).await;
+    let mut ids = Vec::new();
+    for name in ["t-share", "Test"] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/shares",
+                Some(json!({"name": name})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+    let rename = |id: &str, name: &str| {
+        let path = format!("/api/shares/{id}");
+        let body = json!({"name": name});
+        let headers = admin.headers_with_csrf();
+        let server = &server;
+        async move { server.request("PATCH", &path, Some(body), headers).await }
+    };
+    // Out of the pilot, and back into it from outside: refused, name kept.
+    let (status, _, body) = rename(&ids[0], "team").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("out of the native pilot"), "{body}");
+    let (status, _, body) = rename(&ids[1], "t-test").await;
+    // "Test" keeps its container, so "t-test" stays outside the pilot.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM shares ORDER BY name")
+        .fetch_all(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(names, ["t-share", "t-test"]);
+    // Inside the pilot: allowed.
+    let (status, _, body) = rename(&ids[0], "t-team").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "t-team", "{body}");
+    // A container that matches with a name that does not (renamed before
+    // the pilot): moving it into the pilot is refused as well.
+    sqlx::query("UPDATE shares SET name = 'team' WHERE id = ?")
+        .bind(&ids[0])
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let (status, _, body) = rename(&ids[0], "t-back").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("into the native pilot"), "{body}");
+}
+
+#[tokio::test]
+async fn the_legacy_display_proxy_refuses_accounts_outside_the_native_pilot() {
+    // Review F16: a legacy Docker copy of an account outside the pilot is
+    // unknown to `/linux-apps/<key>/`, as in the Xpra proxy.
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    // A fake app page that answers every request.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buffer = [0u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\napp page")
+                .await;
+        }
+    });
+    let apps = &server.state.linux_apps;
+    let outside = "0123456789abcdef0123456789abcdef";
+    let inside = "fedcba9876543210fedcba9876543210";
+    apps.insert_legacy_session_for_test(outside, admin.user_id, "admin", port);
+    apps.insert_legacy_session_for_test(inside, carol.user_id, "t-carol", port);
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/linux-apps/{outside}/"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/linux-apps/{inside}/"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 fn assert_send_sync<T: Send + Sync>() {}
 
 #[test]

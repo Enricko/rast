@@ -125,6 +125,11 @@ pub async fn handle<S: HasLinuxApps>(State(state): State<S>, request: Request) -
     let Some(session) = state.linux_apps().find_by_key(key) else {
         return closed_page(StatusCode::NOT_FOUND);
     };
+    // The native pilot (ADR 0007, review F16): a copy of an account outside
+    // it is unknown, as in the Xpra proxy.
+    if !state.linux_apps().pilot_allows_session(&session) {
+        return closed_page(StatusCode::NOT_FOUND);
+    }
     // Separate windows: `/linux-apps/<key>/vnc/<window>/` carries the picture
     // and input of one app window, relayed to that window's VNC server.
     if let Some(window) = tail
@@ -597,6 +602,7 @@ mod tests {
             app_id: "test".into(),
             app_name: "Test".into(),
             user_id: 1,
+            username: "test".into(),
             authorization: "Basic test".into(),
             state: std::sync::Mutex::new(super::super::SessionState {
                 status: super::super::Status::Ready,
