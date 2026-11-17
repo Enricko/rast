@@ -699,7 +699,8 @@ async fn apply_changes(state: &AppState, changes: &Changes, plan: &Plan) {
     let mut changed: Vec<i64> = changes.changed().into_iter().collect();
     changed.sort_unstable();
     for user_id in changed {
-        state.homefs.stop_agent(user_id).await;
+        // Record the pending restart before the agent stops, so nobody who
+        // sees the agent restart can still read the previous state.
         if let Some(gained) = changes.gained.get(&user_id) {
             state.session_restarts.regained(user_id, gained);
         }
@@ -715,6 +716,7 @@ async fn apply_changes(state: &AppState, changes: &Changes, plan: &Plan) {
         } else {
             state.session_restarts.granted(state, user_id);
         }
+        state.homefs.stop_agent(user_id).await;
     }
 }
 
