@@ -235,7 +235,7 @@ pub fn share_gid_range(uid_base: u32) -> Result<RangeInclusive<u32>, NativeError
 }
 
 /// The uids of RAST identities.
-fn identity_uid_range(uid_base: u32) -> RangeInclusive<u32> {
+pub(crate) fn identity_uid_range(uid_base: u32) -> RangeInclusive<u32> {
     uid_base.saturating_add(1)..=uid_base.saturating_add(MAX_USER_ID as u32)
 }
 
@@ -2459,7 +2459,7 @@ pub struct Record {
     pub dacl: Option<String>,
 }
 
-fn record_of(path: &str, fd: RawFd, stat: &libc::stat) -> io::Result<Record> {
+pub(crate) fn record_of(path: &str, fd: RawFd, stat: &libc::stat) -> io::Result<Record> {
     let dir = is_dir(stat);
     let now = current(fd, stat, dir)?;
     Ok(Record {
@@ -2515,7 +2515,7 @@ impl Record {
 
     /// The mode a rollback sets: never set-uid, and set-gid only on
     /// folders (where it only makes new entries inherit the group).
-    fn restored_mode(&self) -> u32 {
+    pub(crate) fn restored_mode(&self) -> u32 {
         if self.d {
             self.mode & 0o3777
         } else {

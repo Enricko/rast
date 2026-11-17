@@ -131,7 +131,11 @@ pub fn timeout_for_op(name: &str) -> Duration {
         | "share_dir_repair"
         | "shares_migrate_scan"
         | "shares_migrate_apply"
-        | "shares_migrate_rollback" => SHARE_TREE_TIMEOUT,
+        | "shares_migrate_rollback"
+        | "home_migrate_scan"
+        | "home_migrate_apply"
+        | "home_migrate_trash"
+        | "home_migrate_rollback" => SHARE_TREE_TIMEOUT,
         "share_trash_usage" => SHARE_TRASH_USAGE_TIMEOUT,
         _ => QUICK_OP_TIMEOUT,
     }
@@ -310,6 +314,17 @@ pub enum NativeOp {
     SharesMigrateApply(ShareDirOp),
     /// `rast migrate shares --rollback`: restore from the journal.
     SharesMigrateRollback(ShareDirOp),
+    /// `rast migrate home --dry-run`: what moving an account into one-HOME
+    /// mode would change (ADR 0005, section 8).
+    HomeMigrateScan(HomeMigrateOp),
+    /// `rast migrate home`: journal, then the HOME, the app profiles and
+    /// the passwd home.
+    HomeMigrateApply(HomeMigrateOp),
+    /// `rast migrate home`, after the apply: one batch of the account's
+    /// legacy recycle bin into XDG Trash.
+    HomeMigrateTrash(HomeTrashOp),
+    /// `rast migrate home --rollback`: restore from the journal.
+    HomeMigrateRollback(HomeMigrateOp),
     AppStart(AppStartOp),
     AppStop(AppStopOp),
     TerminalStart(TerminalStartOp),
@@ -367,6 +382,10 @@ impl NativeOp {
             Self::SharesMigrateScan(_) => "shares_migrate_scan",
             Self::SharesMigrateApply(_) => "shares_migrate_apply",
             Self::SharesMigrateRollback(_) => "shares_migrate_rollback",
+            Self::HomeMigrateScan(_) => "home_migrate_scan",
+            Self::HomeMigrateApply(_) => "home_migrate_apply",
+            Self::HomeMigrateTrash(_) => "home_migrate_trash",
+            Self::HomeMigrateRollback(_) => "home_migrate_rollback",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
             Self::TerminalStart(_) => "terminal_start",
@@ -412,7 +431,11 @@ impl NativeOp {
             | Self::ShareDirRepair(_)
             | Self::SharesMigrateScan(_)
             | Self::SharesMigrateApply(_)
-            | Self::SharesMigrateRollback(_) => SHARE_TREE_TIMEOUT,
+            | Self::SharesMigrateRollback(_)
+            | Self::HomeMigrateScan(_)
+            | Self::HomeMigrateApply(_)
+            | Self::HomeMigrateTrash(_)
+            | Self::HomeMigrateRollback(_) => SHARE_TREE_TIMEOUT,
             Self::ShareTrashUsage(_) => SHARE_TRASH_USAGE_TIMEOUT,
             Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
@@ -523,6 +546,10 @@ impl NativeRequest {
             | NativeOp::SharesMigrateScan(op)
             | NativeOp::SharesMigrateApply(op)
             | NativeOp::SharesMigrateRollback(op) => merge!(op),
+            NativeOp::HomeMigrateScan(op)
+            | NativeOp::HomeMigrateApply(op)
+            | NativeOp::HomeMigrateRollback(op) => merge!(op),
+            NativeOp::HomeMigrateTrash(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
             NativeOp::TerminalStart(op) => merge!(op),
@@ -666,6 +693,12 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         }
         "shares_migrate_rollback" => {
             NativeOp::SharesMigrateRollback(op_from(rest, "shares_migrate_rollback")?)
+        }
+        "home_migrate_scan" => NativeOp::HomeMigrateScan(op_from(rest, "home_migrate_scan")?),
+        "home_migrate_apply" => NativeOp::HomeMigrateApply(op_from(rest, "home_migrate_apply")?),
+        "home_migrate_trash" => NativeOp::HomeMigrateTrash(op_from(rest, "home_migrate_trash")?),
+        "home_migrate_rollback" => {
+            NativeOp::HomeMigrateRollback(op_from(rest, "home_migrate_rollback")?)
         }
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
@@ -844,6 +877,50 @@ pub struct HomeEnsureOp {
     pub user_id: i64,
     /// The RAST username, which is the name of the HOME folder.
     pub username: String,
+}
+
+/// `home_migrate_scan`, `home_migrate_apply` and `home_migrate_rollback`
+/// of one RAST user: the helper builds every path itself (the HOME
+/// `<homes>/<username>`, the identity home and the app profiles).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "HomeMigrateOp", deny_unknown_fields)]
+pub struct HomeMigrateOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    /// The RAST username, which is the name of the HOME folder.
+    pub username: String,
+}
+
+/// Largest batch of one `home_migrate_trash`.
+pub const MAX_TRASH_BATCH: usize = 256;
+
+/// One batch of an account's legacy recycle bin (`<storage>/.trash/<userId>`)
+/// to move into XDG Trash, after `home_migrate_apply`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "HomeTrashOp", deny_unknown_fields)]
+pub struct HomeTrashOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    pub username: String,
+    pub entries: Vec<LegacyTrashEntry>,
+}
+
+/// One legacy recycle bin entry: its payload is `<storage>/.trash/<userId>/<id>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename = "LegacyTrashEntry", deny_unknown_fields)]
+pub struct LegacyTrashEntry {
+    /// The lowercase UUID of the entry (its payload's name).
+    pub id: String,
+    /// When it was deleted, in milliseconds since 1970.
+    #[serde(rename = "deletedAt")]
+    pub deleted_at: i64,
+    /// Where it came from, relative: below the HOME, or below the shared
+    /// folder's container when `container` is set.
+    pub path: String,
+    /// The container of the shared folder it came from (a direct child of
+    /// the shared root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
 }
 
 /// Start or stop the per-user file agent of one RAST user. The helper finds
@@ -2416,6 +2493,36 @@ mod tests {
                 user_id: 7,
                 username: "alice".into(),
             }),
+            NativeOp::HomeMigrateScan(HomeMigrateOp {
+                user_id: 7,
+                username: "alice".into(),
+            }),
+            NativeOp::HomeMigrateApply(HomeMigrateOp {
+                user_id: 7,
+                username: "alice".into(),
+            }),
+            NativeOp::HomeMigrateRollback(HomeMigrateOp {
+                user_id: 7,
+                username: "alice".into(),
+            }),
+            NativeOp::HomeMigrateTrash(HomeTrashOp {
+                user_id: 7,
+                username: "alice".into(),
+                entries: vec![
+                    LegacyTrashEntry {
+                        id: "00000000-0000-4000-8000-000000000001".into(),
+                        deleted_at: 1,
+                        path: "docs/a.txt".into(),
+                        container: None,
+                    },
+                    LegacyTrashEntry {
+                        id: "00000000-0000-4000-8000-000000000002".into(),
+                        deleted_at: 2,
+                        path: "plans/q4.txt".into(),
+                        container: Some("team".into()),
+                    },
+                ],
+            }),
             NativeOp::FilesAgentStart(FilesAgentOp { user_id: 7 }),
             NativeOp::FilesAgentStop(FilesAgentOp { user_id: 7 }),
             NativeOp::ShareGroupEnsure(ShareGroupOp {
@@ -2485,6 +2592,35 @@ mod tests {
             share_id: SHARE_ID.into(),
             container: "team".into(),
         }
+    }
+
+    #[test]
+    fn home_migration_requests_take_an_id_and_a_name() {
+        for op in [
+            "home_migrate_scan",
+            "home_migrate_apply",
+            "home_migrate_rollback",
+        ] {
+            let parsed = parse_request_line(
+                format!(r#"{{"id":1,"op":"{op}","userId":7,"username":"alice"}}"#).as_bytes(),
+            )
+            .unwrap();
+            assert_eq!(parsed.op.name(), op);
+            assert_eq!(parsed.op.timeout(), SHARE_TREE_TIMEOUT);
+            assert!(parsed.op.is_long_running());
+            assert_eq!(timeout_for_op(op), SHARE_TREE_TIMEOUT);
+        }
+        let trash = parse_request_line(
+            br#"{"id":1,"op":"home_migrate_trash","userId":7,"username":"alice","entries":[{"id":"00000000-0000-4000-8000-000000000001","deletedAt":5,"path":"a/b.txt","container":"team"}]}"#,
+        )
+        .unwrap();
+        let NativeOp::HomeMigrateTrash(op) = &trash.op else {
+            panic!("{:?}", trash.op);
+        };
+        assert_eq!(op.entries[0].container.as_deref(), Some("team"));
+        assert_eq!(op.entries[0].deleted_at, 5);
+        assert!(trash.op.is_long_running());
+        assert_eq!(timeout_for_op("home_migrate_trash"), SHARE_TREE_TIMEOUT);
     }
 
     #[test]
@@ -2566,6 +2702,14 @@ mod tests {
             r#"{"id":1,"op":"share_quota_set","shareId":"S","softBytes":1,"hardBytes":2,"container":"team"}"#,
             r#"{"id":1,"op":"quota_report","userIds":["rast-u3"]}"#,
             r#"{"id":1,"op":"quota_report","userIds":[3],"uids":[1]}"#,
+            // The HOME migration: ids and names only, never a path.
+            r#"{"id":1,"op":"home_migrate_scan","userId":7}"#,
+            r#"{"id":1,"op":"home_migrate_apply","userId":7,"username":"alice","home":"/etc"}"#,
+            r#"{"id":1,"op":"home_migrate_rollback","userId":7,"username":"alice","journal":"/tmp/j"}"#,
+            r#"{"id":1,"op":"home_migrate_apply","userId":"7","username":"alice"}"#,
+            r#"{"id":1,"op":"home_migrate_trash","userId":7,"username":"alice"}"#,
+            r#"{"id":1,"op":"home_migrate_trash","userId":7,"username":"alice","entries":[{"id":"x","deletedAt":1,"path":"a","payload":"/etc/shadow"}]}"#,
+            r#"{"id":1,"op":"home_migrate_trash","userId":7,"username":"alice","entries":[{"id":"x","path":"a"}]}"#,
         ] {
             let line = line.replace("\"S\"", &format!("\"{SHARE_ID}\""));
             let error = parse_request_line(line.as_bytes()).unwrap_err();

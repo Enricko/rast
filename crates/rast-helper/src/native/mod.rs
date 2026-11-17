@@ -30,6 +30,7 @@ pub mod audio;
 pub mod client;
 pub mod daemon;
 pub(crate) mod firewall;
+pub mod home_migrate;
 pub mod homes;
 pub mod identity;
 pub mod protocol;
@@ -152,6 +153,11 @@ pub struct NativeOptions {
     /// `/proc`.
     #[cfg(test)]
     pub test_proc_dir: Option<PathBuf>,
+    /// Test-only: owners that `rast migrate home` gave entries, by device
+    /// and inode (tests cannot chown); entries not in it have their real
+    /// owner.
+    #[cfg(test)]
+    pub test_owners: Option<home_migrate::OwnerMap>,
 }
 
 impl NativeOptions {
@@ -221,6 +227,8 @@ impl NativeOptions {
             test_identity_uid: None,
             #[cfg(test)]
             test_proc_dir: None,
+            #[cfg(test)]
+            test_owners: None,
         }
     }
 
@@ -267,6 +275,7 @@ impl NativeOptions {
             test_mode: true,
             test_identity_uid: None,
             test_proc_dir: None,
+            test_owners: None,
         }
     }
 

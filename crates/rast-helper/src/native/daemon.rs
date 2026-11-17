@@ -327,6 +327,10 @@ fn log_context(op: &NativeOp) -> (Option<i64>, Option<String>) {
         NativeOp::IdentityEnsure(IdentityEnsureOp { user_id, .. }) => (Some(*user_id), None),
         NativeOp::IdentityRemove(IdentityRemoveOp { user_id, .. }) => (Some(*user_id), None),
         NativeOp::HomeEnsure(op) => (Some(op.user_id), None),
+        NativeOp::HomeMigrateScan(op)
+        | NativeOp::HomeMigrateApply(op)
+        | NativeOp::HomeMigrateRollback(op) => (Some(op.user_id), None),
+        NativeOp::HomeMigrateTrash(op) => (Some(op.user_id), None),
         NativeOp::QuotaSet(op) => (Some(op.user_id), None),
         NativeOp::FilesAgentStart(op) | NativeOp::FilesAgentStop(op) => (Some(op.user_id), None),
         NativeOp::SessionStart(SessionStartOp { user_id, .. })
@@ -429,6 +433,16 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::QuotaReport(op) => super::shares::quota_report(options, op).await,
         NativeOp::SharesMigrateScan(op) => super::shares::shares_migrate_scan(options, op).await,
         NativeOp::SharesMigrateApply(op) => super::shares::shares_migrate_apply(options, op).await,
+        NativeOp::HomeMigrateScan(op) => super::home_migrate::home_migrate_scan(options, op).await,
+        NativeOp::HomeMigrateApply(op) => {
+            super::home_migrate::home_migrate_apply(options, op).await
+        }
+        NativeOp::HomeMigrateTrash(op) => {
+            super::home_migrate::home_migrate_trash(options, op).await
+        }
+        NativeOp::HomeMigrateRollback(op) => {
+            super::home_migrate::home_migrate_rollback(options, op).await
+        }
         NativeOp::SharesMigrateRollback(op) => {
             super::shares::shares_migrate_rollback(options, op).await
         }
@@ -1132,6 +1146,41 @@ async fn unit_state(options: &NativeOptions, unit: &str) -> Result<UnitInfo, Nat
 }
 
 /// Whether a unit with its full name (`x.socket`, `x.service`) is active.
+/// The units RAST runs for one account that are running (or starting or
+/// stopping): its graphical session, apps, terminals and file agent, by
+/// name without `.service`.
+pub(crate) async fn running_user_units(
+    options: &NativeOptions,
+    user_id: i64,
+    uid: u32,
+) -> Result<Vec<String>, NativeError> {
+    let selectors = [
+        format!("rast-xpra-u{user_id}.service"),
+        format!("rast-app-u{uid}-*.service"),
+        format!("rast-term-u{uid}-*.service"),
+        format!("{}{uid}.service", super::homes::FILES_UNIT_PREFIX),
+    ];
+    let selectors: Vec<&str> = selectors.iter().map(String::as_str).collect();
+    let units = systemctl_show(options, &selectors).await?;
+    let mut names: Vec<String> = units
+        .into_iter()
+        .filter(|raw| {
+            matches!(
+                raw.active_state.as_deref(),
+                Some("active" | "activating" | "deactivating" | "reloading" | "refreshing")
+            )
+        })
+        .filter_map(|raw| raw.id)
+        .filter(|id| {
+            super::shares::is_user_unit(&format!("{id}.service"), user_id, uid)
+                && validate_unit(id).is_ok()
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
 pub(crate) async fn unit_active(options: &NativeOptions, unit: &str) -> Result<bool, NativeError> {
     let units = systemctl_show(options, &[unit]).await?;
     Ok(units

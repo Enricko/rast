@@ -578,6 +578,10 @@ mod tests {
             "shares_migrate_scan",
             "shares_migrate_apply",
             "shares_migrate_rollback",
+            "home_migrate_scan",
+            "home_migrate_apply",
+            "home_migrate_trash",
+            "home_migrate_rollback",
         ] {
             assert_eq!(
                 client.timeout_for(op),
