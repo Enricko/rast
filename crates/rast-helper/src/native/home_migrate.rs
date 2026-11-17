@@ -2624,14 +2624,23 @@ fn move_trash(
             message,
         };
         if let Some(moved) = done.get(&entry.id) {
-            results.insert(
-                index,
-                TrashResult {
-                    name: Some(moved.name.clone()),
-                    ..result("already", None)
-                },
-            );
-            continue;
+            // An earlier batch planned it. It moved unless its payload is
+            // still in the legacy recycle bin (that batch stopped before
+            // the move): then it is planned again.
+            let still_legacy = match (&legacy, cname(&entry.id)) {
+                (Some(legacy), Ok(name)) => lstat_at(legacy.as_raw_fd(), &name).is_ok(),
+                _ => false,
+            };
+            if !still_legacy {
+                results.insert(
+                    index,
+                    TrashResult {
+                        name: Some(moved.name.clone()),
+                        ..result("already", None)
+                    },
+                );
+                continue;
+            }
         }
         let Some(legacy) = &legacy else {
             results.insert(index, result("missing", None));
@@ -2687,9 +2696,12 @@ fn move_trash(
     }
     let legacy = legacy.expect("planned entries have a payload");
 
-    // The trash folders, and a free name in each entry's `files`.
+    // The trash folders, and a free name in each entry's `files`. A trash
+    // folder that cannot be used (for example a `.Trash-<uid>` made first
+    // by another member) fails the entries of that folder only.
     let mut created = Vec::new();
-    let mut folders: HashMap<Option<String>, (OwnedFd, OwnedFd)> = HashMap::new();
+    let mut folders: HashMap<Option<String>, Result<(OwnedFd, OwnedFd), String>> = HashMap::new();
+    let mut taken: HashMap<Option<String>, std::collections::HashSet<String>> = HashMap::new();
     let mut lines = vec![TrashLine {
         created: Vec::new(),
         moved: None,
@@ -2697,32 +2709,26 @@ fn move_trash(
     let mut moves = Vec::new();
     for (index, plan) in planned {
         let container = plan.entry.container.clone();
-        if !folders.contains_key(&container) {
-            let base = match trash_base(options, &home, container.as_deref()) {
-                Ok(base) => base,
-                Err(error) => {
-                    results.insert(
-                        index,
-                        TrashResult {
-                            id: plan.entry.id.clone(),
-                            status: "failed",
-                            name: None,
-                            message: Some(error.message),
-                        },
-                    );
-                    continue;
-                }
-            };
-            let pair = ensure_trash(&base, container.as_deref(), &owners, &mut created)?;
-            folders.insert(container.clone(), pair);
-        }
-        let (files, info) = &folders[&container];
-        let (_, base_name) = split(&plan.entry.path);
-        let origin = match &container {
-            None => format!("{home_path}/{}", plan.entry.path),
-            Some(_) => plan.entry.path.clone(),
+        let failed = |message: String| TrashResult {
+            id: plan.entry.id.clone(),
+            status: "failed",
+            name: None,
+            message: Some(message),
         };
-        let body = rast_base::storage::xdg_trash::format_info(&origin, plan.entry.deleted_at);
+        let pair = folders.entry(container.clone()).or_insert_with(|| {
+            trash_base(options, &home, container.as_deref())
+                .and_then(|base| ensure_trash(&base, container.as_deref(), &owners, &mut created))
+                .map_err(|error| error.message)
+        });
+        let (files, info) = match pair {
+            Ok((files, info)) => (files, info),
+            Err(message) => {
+                results.insert(index, failed(message.clone()));
+                continue;
+            }
+        };
+        let (_, base_name) = split(&plan.entry.path);
+        let taken = taken.entry(container.clone()).or_default();
         let mut chosen = None;
         for attempt in 1..=MAX_TRASH_NAMES {
             let candidate = if attempt == 1 {
@@ -2733,16 +2739,19 @@ fn move_trash(
             if rast_base::storage::safe_path::validate_component(&candidate).is_err() {
                 break;
             }
-            if lstat_at(files.as_raw_fd(), &cname(&candidate)?).is_ok() {
+            let info_name = rast_base::storage::xdg_trash::info_name(&candidate);
+            // Nothing else writes there while the lock is held and the
+            // account's processes are stopped; the info file is created
+            // with `O_EXCL` before the move all the same.
+            if taken.contains(&candidate)
+                || lstat_at(files.as_raw_fd(), &cname(&candidate)?).is_ok()
+                || lstat_at(info.as_raw_fd(), &cname(&info_name)?).is_ok()
+            {
                 continue;
             }
-            // Reserving the info file claims the name.
-            if write_info(info, &candidate, &body, &owners)
-                .map_err(|error| io_failed("write the trash info of", &candidate, error))?
-            {
-                chosen = Some(candidate);
-                break;
-            }
+            taken.insert(candidate.clone());
+            chosen = Some(candidate);
+            break;
         }
         let Some(name) = chosen else {
             results.insert(
@@ -2768,13 +2777,42 @@ fn move_trash(
         moves.push((index, plan.entry, container, name, plan.stat));
     }
     lines[0].created = created;
+    if moves.is_empty() && lines[0].created.is_empty() {
+        return Ok(results.into_values().collect());
+    }
+    // The batch journal is written before any info file or payload.
     let batch = format!("{TRASH_PREFIX}{:04}.jsonl", batches.len() + 1);
     write_synced(&journal.dir, &batch, &lines)?;
 
     for (index, entry, container, name, stat) in moves {
-        let (files, info) = &folders[&container];
+        let Some(Ok((files, info))) = folders.get(&container) else {
+            continue;
+        };
         let from = cname(&entry.id)?;
         let to = cname(&name)?;
+        let origin = match &container {
+            None => format!("{home_path}/{}", entry.path),
+            Some(_) => entry.path.clone(),
+        };
+        let body = rast_base::storage::xdg_trash::format_info(&origin, entry.deleted_at);
+        match write_info(info, &name, &body, &owners) {
+            Ok(true) => {}
+            Ok(false) => {
+                results.insert(
+                    index,
+                    TrashResult {
+                        id: entry.id.clone(),
+                        status: "failed",
+                        name: None,
+                        message: Some("its name in the recycle bin was taken".into()),
+                    },
+                );
+                continue;
+            }
+            Err(error) => {
+                return Err(io_failed("write the trash info of", &name, error));
+            }
+        }
         let still = lstat_at(legacy.as_raw_fd(), &from).is_ok_and(|now| same_inode(&now, &stat));
         // An entry of a shared folder's bin keeps the folder's group.
         let group = match &container {
@@ -2909,15 +2947,20 @@ fn undo_trash(
                 };
                 let name = cname(&moved.name)?;
                 let first = &moved.records[0];
-                let Ok(stat) = lstat_at(files.as_raw_fd(), &name) else {
-                    gone(report);
-                    continue;
-                };
-                if dev_of(&stat) != first.dev
-                    || ino_of(&stat) != first.ino
-                    || is_dir(&stat) != first.d
-                {
-                    gone(report);
+                let here = lstat_at(files.as_raw_fd(), &name).ok().filter(|stat| {
+                    dev_of(stat) == first.dev
+                        && ino_of(stat) == first.ino
+                        && is_dir(stat) == first.d
+                });
+                if here.is_none() {
+                    let id = cname(&moved.id)?;
+                    if lstat_at(legacy.as_raw_fd(), &id).is_ok() {
+                        // Never moved (the batch stopped after its journal):
+                        // only its info file, if made, is the migration's.
+                        remove_info(&trash, &moved.name)?;
+                    } else {
+                        gone(report);
+                    }
                     continue;
                 }
                 restore_payload(&files, &name, &moved.records, owners)?;
@@ -2930,13 +2973,7 @@ fn undo_trash(
                     Ok(()) => {}
                     Err(error) => return Err(io_failed("move back", &moved.name, error)),
                 }
-                if let Ok(info) = open_rel(&trash, "info") {
-                    let info_name = rast_base::storage::xdg_trash::info_name(&moved.name);
-                    let c = cname(&info_name)?;
-                    if lstat_at(info.as_raw_fd(), &c).is_ok_and(|stat| is_regular(&stat)) {
-                        let _ = unlink_at(info.as_raw_fd(), &c, false);
-                    }
-                }
+                remove_info(&trash, &moved.name)?;
                 report.trash_restored.push(moved.id.clone());
             }
             // The folders the batch made, when they are empty again.
@@ -2949,6 +2986,19 @@ fn undo_trash(
                     let _ = unlink_at(parent.as_raw_fd(), &cname(name)?, true);
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// Remove the info file of `name` in the trash folder `trash` (a regular
+/// file only).
+fn remove_info(trash: &OwnedFd, name: &str) -> Result<(), NativeError> {
+    if let Ok(info) = open_rel(trash, "info") {
+        let info_name = rast_base::storage::xdg_trash::info_name(name);
+        let c = cname(&info_name)?;
+        if lstat_at(info.as_raw_fd(), &c).is_ok_and(|stat| is_regular(&stat)) {
+            let _ = unlink_at(info.as_raw_fd(), &c, false);
         }
     }
     Ok(())

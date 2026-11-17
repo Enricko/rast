@@ -661,6 +661,13 @@ Update it at the end of every session.
     warning (manifest, job result, Backup Center) instead of silently.
   - `b1bba53` feat(cli)!: `rast migrate home`; `rast migrate shares` needs
     `--share` or `--all`.
+  - fix(helper) after a self-review of `home_migrate_trash`: a batch that
+    stopped after its journal but before the move is planned again instead
+    of reported `already` (which made the CLI delete rows whose data was
+    still in the legacy recycle bin); info files are created after the
+    batch journal and a rollback removes those of entries that never
+    moved; a `.Trash-<uid>` made by another member fails only that shared
+    folder's entries, not the whole batch.
   - Tests: 14 helper tests on temporary trees with an owner overlay
     (dry-run changes nothing; apply; 0.18.3 grant stripped and restored
     exactly; foreign ACL entries kept; hard links and planted links never
@@ -668,7 +675,8 @@ Update it at the end of every session.
     merged; interrupted apply resumes; apply twice is a no-op that keeps
     the session; tampered, world-readable and unknown-field journals
     refused; running processes and units that do not stop block it;
-    recycle bin into XDG Trash of HOME and of a shared folder and back);
+    recycle bin into XDG Trash of HOME and of a shared folder and back; a
+    batch that stopped before its move; a squatted `.Trash-<uid>`);
     protocol and timeout tests; 6 CLI tests with a fake helper (dry-run
     report, batches of 256, rows saved and restored, legacy shares refused,
     one failing account, accounts made in one-HOME mode); per-share apply,
@@ -679,7 +687,7 @@ Update it at the end of every session.
     has no native backend, so `rast migrate home` cannot run there); see
     "Open questions" for a risk in its `down`. Native tests are listed
     under "Pending on the test host (task 1.5)".
-  - Gates: fmt and clippy clean; `cargo test --workspace` 1035 passed, 0
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1037 passed, 0
     failed; frontend 160 tests passed and build clean; no new dependency
     or migration.
 

@@ -1037,3 +1037,100 @@ fn plan_steps_and_roots_are_strict() {
     assert!(!valid_uuid("ABCDEF00-0000-4000-8000-000000000001"));
     assert!(!valid_uuid("00000000-0000-4000-8000-00000000000g"));
 }
+
+#[tokio::test]
+async fn a_batch_that_stopped_before_its_move_is_planned_again_and_undone_cleanly() {
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    fx.apply().await.unwrap();
+    // A batch wrote its journal and the info file, then stopped before the
+    // payload moved.
+    let owners = Owners::of(&fx.options, &Identity::derive(&fx.options, 7).unwrap()).unwrap();
+    let legacy_fd = open_dir(&legacy).unwrap();
+    let (records, _) = payload_records(&legacy_fd, &cname(ID1).unwrap(), &owners)
+        .unwrap()
+        .unwrap();
+    let journal = fx.journal_root().join(&fx.journals()[0]);
+    let line = TrashLine {
+        created: Vec::new(),
+        moved: Some(TrashMove {
+            id: ID1.into(),
+            container: None,
+            name: "a.txt".into(),
+            records,
+        }),
+    };
+    write_synced(&open_dir(&journal).unwrap(), "trash-0001.jsonl", &[line]).unwrap();
+    let bin = fx.home().join(".local/share/Trash");
+    write(&bin.join("info/a.txt.trashinfo"), "[Trash Info]\n");
+    std::fs::create_dir_all(bin.join("files")).unwrap();
+    for path in [
+        fx.home().join(".local"),
+        fx.home().join(".local/share"),
+        bin.clone(),
+        bin.join("files"),
+        bin.join("info"),
+        bin.join("info/a.txt.trashinfo"),
+    ] {
+        fx.give(&path);
+    }
+
+    // Not "already": its data is still in the legacy recycle bin.
+    let reply = trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    assert_eq!(statuses(&reply), [("moved".into(), "a.txt.2".into())]);
+    assert!(!legacy.join(ID1).exists());
+    let again = trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    assert_eq!(statuses(&again), [("already".into(), "a.txt.2".into())]);
+
+    let rolled = fx.rollback().await.unwrap();
+    assert_eq!(rolled["report"]["trashRestored"], json!([ID1]));
+    assert_eq!(rolled["report"]["trashGone"], json!([]));
+    assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "one");
+    // The info files of both batches are gone.
+    assert!(!bin.join("info/a.txt.trashinfo").exists());
+    assert!(!bin.join("info/a.txt.2.trashinfo").exists());
+}
+
+#[tokio::test]
+async fn a_recycle_bin_folder_made_by_another_member_fails_only_its_entries() {
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    write(&legacy.join(ID2), "team");
+    let team = fx.options.storage_dir.join("shared/team");
+    let squat = team.join(rast_base::storage::xdg_trash::share_trash_name(UID));
+    std::fs::create_dir_all(&squat).unwrap();
+    fx.owners
+        .lock()
+        .unwrap()
+        .insert(key(&squat), (200_008, 200_008));
+    fx.apply().await.unwrap();
+    let reply = trash(
+        &fx,
+        vec![
+            entry(ID1, "docs/a.txt", None),
+            entry(ID2, "plans/q4.txt", Some("team")),
+        ],
+    )
+    .await
+    .unwrap();
+    let results = reply["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "moved", "{reply}");
+    assert_eq!(results[1]["status"], "failed");
+    assert!(
+        results[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not belong to the account"),
+        "{reply}"
+    );
+    // Nothing of the other member's folder changed; the entry stays.
+    assert!(legacy.join(ID2).is_file());
+    assert_eq!(fx.owner(&squat), 200_008);
+    assert_eq!(std::fs::read_dir(&squat).unwrap().count(), 0);
+}
