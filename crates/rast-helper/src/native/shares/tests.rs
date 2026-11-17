@@ -7,6 +7,17 @@ const SHARE: &str = "0123abcd-4567-4ef0-8123-456789abcdef";
 const RW: &str = "rast-s0123abcd45674ef0-rw";
 const RO: &str = "rast-s0123abcd45674ef0-ro";
 
+/// A uid of another account that is not the test's own euid (the helper
+/// treats that one as `rast` in test mode; CI runners run as 1001).
+fn other_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 4242 {
+        4243
+    } else {
+        4242
+    }
+}
+
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
@@ -924,7 +935,7 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
             perm: 6,
         },
         Entry {
-            tag: Tag::User(1001),
+            tag: Tag::User(other_uid()),
             perm: 6,
         },
         Entry {
@@ -1001,8 +1012,11 @@ async fn the_migration_journals_first_and_rolls_back_exactly() {
     assert_eq!(
         foreign_paths,
         [
-            "docs/deep: default u:1001:rw-, default g:2000:r--",
-            "docs/plan.txt: u:1001:rw-, g:2000:r--",
+            format!(
+                "docs/deep: default u:{}:rw-, default g:2000:r--",
+                other_uid()
+            ),
+            format!("docs/plan.txt: u:{}:rw-, g:2000:r--", other_uid()),
         ]
     );
     assert_eq!(mode(&team), 0o750, "the scan changes nothing");

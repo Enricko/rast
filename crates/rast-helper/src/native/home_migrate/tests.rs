@@ -13,6 +13,17 @@ fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// A uid of another account that is neither the test's own euid (the
+/// helper treats that one as `rast` in test mode; CI runners run as 1001)
+/// nor an identity.
+fn other_uid() -> u32 {
+    if euid() == 4242 {
+        4243
+    } else {
+        4242
+    }
+}
+
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, body).unwrap();
@@ -282,7 +293,7 @@ fn populate(fx: &Fixture) {
         vec![
             acl_entry(Tag::UserObj, 6),
             acl_entry(Tag::User(UID), 5),
-            acl_entry(Tag::User(1001), 6),
+            acl_entry(Tag::User(other_uid()), 6),
             acl_entry(Tag::GroupObj, 4),
             acl_entry(Tag::Mask, 7),
             acl_entry(Tag::Other, 4),
@@ -352,7 +363,7 @@ async fn the_dry_run_reports_owners_acls_merges_and_conflicts_without_changes() 
     }
     assert_eq!(
         sample_paths(&tree["foreignAclEntries"]),
-        vec!["shared-with-bob.txt: u:1001:rw-".to_string()]
+        vec![format!("shared-with-bob.txt: u:{}:rw-", other_uid())]
     );
     let merge = &scan["merge"];
     assert_eq!(merge["regenerated"], json!([".Xauthority"]));
@@ -431,7 +442,7 @@ async fn apply_gives_the_home_to_the_identity_strips_the_grant_and_merges() {
         kept.0,
         vec![
             acl_entry(Tag::UserObj, 6),
-            acl_entry(Tag::User(1001), 6),
+            acl_entry(Tag::User(other_uid()), 6),
             acl_entry(Tag::GroupObj, 4),
             acl_entry(Tag::Mask, 6),
             acl_entry(Tag::Other, 4),
@@ -741,7 +752,7 @@ async fn a_home_of_another_owner_or_a_link_is_refused() {
     fx.owners
         .lock()
         .unwrap()
-        .insert(key(&fx.home()), (1001, 1001));
+        .insert(key(&fx.home()), (other_uid(), other_uid()));
     assert_eq!(fx.scan().await["mode"], "foreign");
     assert_eq!(fx.apply().await.unwrap_err().code, "identity_conflict");
     // A HOME made in one-HOME mode needs no migration.
