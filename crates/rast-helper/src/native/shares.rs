@@ -136,13 +136,22 @@ impl ShareLock {
 }
 
 /// The `flock` of a share's migration journal folder, held by apply and
-/// rollback for their whole run.
-struct MigrationLock {
+/// rollback for their whole run (the HOME migration uses it too).
+pub(crate) struct MigrationLock {
     _file: std::fs::File,
 }
 
 impl MigrationLock {
     fn acquire(journal_root: &OwnedFd, share_id: &str) -> Result<Self, NativeError> {
+        Self::acquire_in(
+            journal_root,
+            &format!("a migration or rollback of shared folder {share_id} is still running"),
+        )
+    }
+
+    /// Take the lock in `journal_root`; `busy` is the message when another
+    /// process holds it.
+    pub(crate) fn acquire_in(journal_root: &OwnedFd, busy: &str) -> Result<Self, NativeError> {
         let name = c_name(MIGRATION_LOCK_FILE).expect("name");
         // SAFETY: valid fd and NUL-terminated name; the fd is owned below.
         let fd = unsafe {
@@ -165,9 +174,7 @@ impl MigrationLock {
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = io::Error::last_os_error();
             return Err(if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                NativeError::share_busy(format!(
-                    "a migration or rollback of shared folder {share_id} is still running"
-                ))
+                NativeError::share_busy(busy.to_string())
             } else {
                 NativeError::command_failed(format!("cannot lock the migration: {error}"))
             });
@@ -685,7 +692,7 @@ fn c_name(name: &str) -> io::Result<CString> {
     CString::new(name).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))
 }
 
-fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
+pub(crate) fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
     // SAFETY: zeroed `stat` is a valid out parameter.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: valid fd, NUL-terminated name, valid out pointer.
@@ -696,7 +703,7 @@ fn lstat_at(dir: RawFd, name: &CStr) -> io::Result<libc::stat> {
     Ok(stat)
 }
 
-fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
+pub(crate) fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
     // SAFETY: valid fd and NUL-terminated name; the fd is owned below.
     let fd = unsafe {
         libc::openat(
@@ -712,16 +719,16 @@ fn open_at(dir: RawFd, name: &CStr, flags: libc::c_int) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-const FILE_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
+pub(crate) const FILE_FLAGS: libc::c_int = libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOCTTY;
 
 // The field types of `struct stat` differ between architectures.
 #[allow(clippy::unnecessary_cast)]
-fn dev_of(stat: &libc::stat) -> u64 {
+pub(crate) fn dev_of(stat: &libc::stat) -> u64 {
     stat.st_dev as u64
 }
 
 #[allow(clippy::unnecessary_cast)]
-fn ino_of(stat: &libc::stat) -> u64 {
+pub(crate) fn ino_of(stat: &libc::stat) -> u64 {
     stat.st_ino as u64
 }
 
@@ -729,7 +736,7 @@ fn ino_of(stat: &libc::stat) -> u64 {
 /// `name` is empty (`statx` with `STATX_MNT_ID`, Linux 5.8). A mount point
 /// reports the mount on top of it. Two entries with one `st_dev` can still
 /// be on two mounts (a bind mount); their mount ids differ.
-fn mount_id(dir: RawFd, name: &CStr) -> io::Result<u64> {
+pub(crate) fn mount_id(dir: RawFd, name: &CStr) -> io::Result<u64> {
     // SAFETY: zeroed `statx` is a valid out parameter.
     let mut stx: libc::statx = unsafe { std::mem::zeroed() };
     let flags = if name.is_empty() {
@@ -760,22 +767,22 @@ fn mount_id(dir: RawFd, name: &CStr) -> io::Result<u64> {
 }
 
 /// The mount id of the open descriptor `fd`.
-fn fd_mount_id(fd: RawFd) -> io::Result<u64> {
+pub(crate) fn fd_mount_id(fd: RawFd) -> io::Result<u64> {
     mount_id(fd, c"")
 }
 
-fn same_inode(a: &libc::stat, b: &libc::stat) -> bool {
+pub(crate) fn same_inode(a: &libc::stat, b: &libc::stat) -> bool {
     a.st_dev == b.st_dev && a.st_ino == b.st_ino
 }
 
-fn is_regular(stat: &libc::stat) -> bool {
+pub(crate) fn is_regular(stat: &libc::stat) -> bool {
     stat.st_mode & libc::S_IFMT == libc::S_IFREG
 }
 
 /// The names in the folder `dir` (without `.` and `..`); `None` when it
 /// holds more than `limit`. Members fill shared folders, so a folder with
 /// millions of names is refused before they fill root's memory.
-fn dir_names(dir: RawFd, limit: u64) -> io::Result<Option<Vec<CString>>> {
+pub(crate) fn dir_names(dir: RawFd, limit: u64) -> io::Result<Option<Vec<CString>>> {
     // A new open file description, so reading moves no shared offset.
     let own = open_at(dir, c".", DIR_FLAGS)?;
     // SAFETY: `own` is a valid directory fd; `fdopendir` takes it over and
@@ -819,7 +826,7 @@ fn too_many_entries(limit: u64) -> NativeError {
 /// The owner of prepared containers, whose other entries walks leave
 /// alone: root. Tests run as one unprivileged account that owns every test
 /// file and cannot chown, so they use a uid that owns nothing.
-fn root_uid(options: &NativeOptions) -> u32 {
+pub(crate) fn root_uid(options: &NativeOptions) -> u32 {
     if options.is_test_mode() {
         u32::MAX - 15
     } else {
@@ -828,13 +835,13 @@ fn root_uid(options: &NativeOptions) -> u32 {
 }
 
 /// The owner of the journal folders: the helper itself (root).
-fn journal_owner() -> u32 {
+pub(crate) fn journal_owner() -> u32 {
     // SAFETY: geteuid has no preconditions.
     unsafe { libc::geteuid() }
 }
 
 /// The `rast` service uid (the owner of legacy containers).
-fn service_uid(options: &NativeOptions) -> Result<u32, NativeError> {
+pub(crate) fn service_uid(options: &NativeOptions) -> Result<u32, NativeError> {
     match options.rast_uid {
         Some(uid) => Ok(uid),
         // SAFETY: geteuid has no preconditions.
@@ -894,7 +901,7 @@ fn open_container(
     Ok((fd, opened))
 }
 
-fn tree_error(what: &str, path: &std::path::Path, error: io::Error) -> NativeError {
+pub(crate) fn tree_error(what: &str, path: &std::path::Path, error: io::Error) -> NativeError {
     match error.raw_os_error() {
         Some(libc::ENOENT) => NativeError::not_found(format!("{} does not exist", path.display())),
         Some(libc::ELOOP) | Some(libc::ENOTDIR) => {
@@ -1133,7 +1140,7 @@ pub struct Sample {
 }
 
 impl Sample {
-    fn add(&mut self, path: &str) {
+    pub(crate) fn add(&mut self, path: &str) {
         self.count += 1;
         if self.paths.len() < REPORT_SAMPLE {
             self.paths.push(path.to_string());
@@ -1496,7 +1503,7 @@ fn handle_entry(
     Ok(())
 }
 
-fn show(path: &str) -> &str {
+pub(crate) fn show(path: &str) -> &str {
     if path.is_empty() {
         "."
     } else {
@@ -1577,7 +1584,7 @@ fn checked_container(
     Ok((fd, stat))
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, NativeError> + Send + 'static,
 ) -> Result<T, NativeError> {
     tokio::task::spawn_blocking(work).await.map_err(|error| {
@@ -2109,7 +2116,7 @@ pub fn is_user_unit(unit: &str, user_id: i64, uid: u32) -> bool {
             .any(|prefix| name.len() > prefix.len() && name.starts_with(prefix.as_str()))
 }
 
-fn proc_dir(options: &NativeOptions) -> PathBuf {
+pub(crate) fn proc_dir(options: &NativeOptions) -> PathBuf {
     #[cfg(test)]
     if let Some(dir) = &options.test_proc_dir {
         return dir.clone();
@@ -2120,7 +2127,7 @@ fn proc_dir(options: &NativeOptions) -> PathBuf {
 
 /// Read at most [`MAX_STATUS_BYTES`] of the file `name` in the process
 /// folder `dir`.
-fn read_proc_file(dir: &OwnedFd, name: &CStr) -> Option<String> {
+pub(crate) fn read_proc_file(dir: &OwnedFd, name: &CStr) -> Option<String> {
     use std::io::Read;
     let file = std::fs::File::from(open_at(dir.as_raw_fd(), name, libc::O_RDONLY).ok()?);
     let mut text = String::new();
@@ -2457,7 +2464,7 @@ fn record_of(path: &str, fd: RawFd, stat: &libc::stat) -> io::Result<Record> {
 
 /// A relative path of a journal: names joined by `/`, none empty, `.` or
 /// `..`, no NUL.
-fn valid_relative(path: &str) -> bool {
+pub(crate) fn valid_relative(path: &str) -> bool {
     path.is_empty()
         || path
             .split('/')
@@ -2553,13 +2560,23 @@ fn open_journal_root(
     share_id: &str,
     create: bool,
 ) -> Result<Option<OwnedFd>, NativeError> {
+    open_journal_dir(options, &["migrations", "shares", share_id], create)
+}
+
+/// Open (creating with `create`) `<data_dir>/<parts…>`: every folder below
+/// the data directory must belong to the helper (root) with mode 0700.
+pub(crate) fn open_journal_dir(
+    options: &NativeOptions,
+    parts: &[&str],
+    create: bool,
+) -> Result<Option<OwnedFd>, NativeError> {
     let data = &options.data_dir;
     let mut dir = open_dir(data).map_err(|error| tree_error("open", data, error))?;
     let owner = journal_owner();
     let mut path = data.clone();
-    for part in ["migrations", "shares", share_id] {
+    for part in parts {
         path.push(part);
-        let name = c_name(part).map_err(|_| NativeError::invalid("invalid share id"))?;
+        let name = c_name(part).map_err(|_| NativeError::invalid("invalid journal folder"))?;
         match lstat_at(dir.as_raw_fd(), &name) {
             Ok(_) => {}
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) && create => {
@@ -2597,9 +2614,18 @@ fn active_journal(
     let Some(root) = open_journal_root(options, share_id, false)? else {
         return Ok(None);
     };
+    newest_journal(&root, "shares")
+}
+
+/// The newest stamp folder below `root` that holds a complete journal and
+/// was not rolled back (`what` names the journal in errors).
+pub(crate) fn newest_journal(
+    root: &OwnedFd,
+    what: &str,
+) -> Result<Option<(String, OwnedFd)>, NativeError> {
     let names = dir_names(root.as_raw_fd(), MAX_TREE_ENTRIES)
         .map_err(|error| NativeError::command_failed(format!("cannot read the journals: {error}")))?
-        .ok_or_else(|| NativeError::forbidden("too many shares journals"))?;
+        .ok_or_else(|| NativeError::forbidden(format!("too many {what} journals")))?;
     let mut stamps: Vec<String> = names
         .into_iter()
         .filter_map(|name| name.into_string().ok())
@@ -2616,9 +2642,9 @@ fn active_journal(
             NativeError::command_failed(format!("cannot inspect a journal: {error}"))
         })?;
         if stat.st_uid != owner || stat.st_mode & 0o077 != 0 {
-            return Err(NativeError::forbidden(
-                "a shares journal folder is not a folder of root with mode 0700",
-            ));
+            return Err(NativeError::forbidden(format!(
+                "a {what} journal folder is not a folder of root with mode 0700"
+            )));
         }
         if lstat_at(dir.as_raw_fd(), &c_name(JOURNAL_FILE).expect("name")).is_ok() {
             return Ok(Some((stamp, dir)));
@@ -2627,7 +2653,7 @@ fn active_journal(
     Ok(None)
 }
 
-fn now_stamp() -> String {
+pub(crate) fn now_stamp() -> String {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -2643,6 +2669,16 @@ fn write_journal(
     records: &[Record],
 ) -> Result<String, NativeError> {
     let root = open_journal_root(options, share_id, true)?.expect("created");
+    write_journal_lines(&root, records)
+}
+
+/// Create the next stamp folder below `root` (0700) and write `lines` into
+/// it as its journal, one JSON object per line, synced:
+/// `journal.jsonl.part` first, renamed to `journal.jsonl` once complete.
+pub(crate) fn write_journal_lines<T: Serialize>(
+    root: &OwnedFd,
+    lines: &[T],
+) -> Result<String, NativeError> {
     let mut stamp = now_stamp();
     // Two runs in one second: the next free stamp.
     while lstat_at(root.as_raw_fd(), &c_name(&stamp).expect("digits")).is_ok() {
@@ -2660,7 +2696,21 @@ fn write_journal(
     let dir = open_at(root.as_raw_fd(), &stamp_name, DIR_FLAGS).map_err(|error| {
         NativeError::command_failed(format!("cannot open the journal folder: {error}"))
     })?;
-    let part = c_name(&format!("{JOURNAL_FILE}.part")).expect("name");
+    write_synced(&dir, JOURNAL_FILE, lines)?;
+    Ok(stamp)
+}
+
+/// Write `lines` (one JSON object each) to `<name>.part` in `dir`, sync it
+/// and rename it to `name`; root-only (0600), never over an existing file.
+pub(crate) fn write_synced<T: Serialize>(
+    dir: &OwnedFd,
+    name: &str,
+    lines: &[T],
+) -> Result<(), NativeError> {
+    let part = c_name(&format!("{name}.part")).map_err(|_| NativeError::invalid("name"))?;
+    // A part file left by a run that stopped half way is replaced.
+    // SAFETY: valid fd and NUL-terminated name.
+    unsafe { libc::unlinkat(dir.as_raw_fd(), part.as_ptr(), 0) };
     // SAFETY: valid fd and NUL-terminated name; the fd is owned below.
     let fd = unsafe {
         libc::openat(
@@ -2682,8 +2732,8 @@ fn write_journal(
     let failed = |error: io::Error| {
         NativeError::command_failed(format!("cannot write the journal: {error}"))
     };
-    for record in records {
-        serde_json::to_writer(&mut writer, record)
+    for line in lines {
+        serde_json::to_writer(&mut writer, line)
             .map_err(|error| failed(io::Error::other(error)))?;
         writer.write_all(b"\n").map_err(failed)?;
     }
@@ -2691,14 +2741,15 @@ fn write_journal(
         .into_inner()
         .map_err(|error| failed(error.into_error()))?;
     file.sync_all().map_err(failed)?;
-    let full = c_name(JOURNAL_FILE).expect("name");
+    let full = c_name(name).map_err(|_| NativeError::invalid("name"))?;
     // SAFETY: valid fds and NUL-terminated names.
     if unsafe {
-        libc::renameat(
+        libc::renameat2(
             dir.as_raw_fd(),
             part.as_ptr(),
             dir.as_raw_fd(),
             full.as_ptr(),
+            libc::RENAME_NOREPLACE,
         )
     } != 0
     {
@@ -2706,24 +2757,36 @@ fn write_journal(
     }
     // SAFETY: valid fd.
     unsafe { libc::fsync(dir.as_raw_fd()) };
-    Ok(stamp)
+    Ok(())
 }
 
-/// Read and validate every line of a journal.
-fn read_journal(dir: &OwnedFd, rast_uid: u32, owner: u32) -> Result<Vec<Record>, NativeError> {
-    let name = c_name(JOURNAL_FILE).expect("name");
-    let fd = open_at(dir.as_raw_fd(), &name, libc::O_RDONLY).map_err(|error| {
+/// Open the file `name` of the journal folder `dir` for reading: a regular
+/// file of `owner` (root) that nobody else can read or write.
+pub(crate) fn open_journal_file(
+    dir: &OwnedFd,
+    name: &str,
+    owner: u32,
+    what: &str,
+) -> Result<std::fs::File, NativeError> {
+    let c = c_name(name).map_err(|_| NativeError::invalid("name"))?;
+    let fd = open_at(dir.as_raw_fd(), &c, libc::O_RDONLY).map_err(|error| {
         NativeError::command_failed(format!("cannot open the journal: {error}"))
     })?;
     let stat = fstat(fd.as_raw_fd()).map_err(|error| {
         NativeError::command_failed(format!("cannot inspect the journal: {error}"))
     })?;
     if !is_regular(&stat) || stat.st_uid != owner || stat.st_mode & 0o077 != 0 {
-        return Err(NativeError::forbidden(
-            "the shares journal is not a file of root with mode 0600",
-        ));
+        return Err(NativeError::forbidden(format!(
+            "the {what} journal is not a file of root with mode 0600"
+        )));
     }
-    let reader = io::BufReader::new(std::fs::File::from(fd));
+    Ok(std::fs::File::from(fd))
+}
+
+/// Read and validate every line of a journal.
+fn read_journal(dir: &OwnedFd, rast_uid: u32, owner: u32) -> Result<Vec<Record>, NativeError> {
+    let file = open_journal_file(dir, JOURNAL_FILE, owner, "shares")?;
+    let reader = io::BufReader::new(file);
     let mut records = Vec::new();
     for (index, line) in reader.lines().enumerate() {
         let line = line.map_err(|error| {
