@@ -63,6 +63,10 @@ pub struct Manifest {
     pub scopes: Vec<String>,
     pub note: String,
     pub entries: Vec<ManifestEntry>,
+    /// What the backup left out, and why (for example HOMEs in one-HOME
+    /// mode, which the service cannot read).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// Metadata returned to the API/CLI after a backup completes.
@@ -77,6 +81,95 @@ pub struct BackupMeta {
     pub scopes: Vec<String>,
     pub created_at: i64,
     pub duration_ms: i64,
+    /// What the backup left out, and why.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Warnings listed at most (the rest is counted).
+const MAX_BACKUP_WARNINGS: usize = 50;
+
+/// The files of the `users` scope, and what was left out. A HOME that
+/// does not belong to the service (`service_uid`) is in one-HOME mode: it
+/// belongs to its Linux identity, the service cannot read it, and it is
+/// skipped with a warning until Backup Center reads HOMEs through the
+/// helper (ADR 0005, D12; task 1.5b).
+fn user_files(cfg: &Config, service_uid: u32) -> (Vec<(PathBuf, String)>, Vec<String>) {
+    use std::os::unix::fs::MetadataExt;
+    let mut files = Vec::new();
+    let mut warnings = Vec::new();
+    let mut unreadable = 0usize;
+    let mut skipped_homes = HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(cfg.homes_dir()) {
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() && meta.uid() != service_uid {
+                let name = entry.file_name().to_string_lossy().to_string();
+                tracing::warn!(
+                    home = %name,
+                    uid = meta.uid(),
+                    "backup skips a HOME in one-HOME mode"
+                );
+                warnings.push(format!(
+                    "users/homes/{name}: skipped, the HOME belongs to uid {} (one-HOME mode)                      and the RAST service cannot read it; back it up as root (see                      docs/OPERATIONS.md) until Backup Center reads HOMEs through the helper",
+                    meta.uid()
+                ));
+                skipped_homes.insert(entry.file_name());
+            }
+        }
+    }
+    for (root, prefix) in [
+        (cfg.homes_dir(), "users/homes"),
+        (cfg.shared_dir(), "users/shared"),
+    ] {
+        if !root.is_dir() {
+            continue;
+        }
+        let is_homes = prefix == "users/homes";
+        let walker = walkdir::WalkDir::new(&root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                !(is_homes && entry.depth() == 1 && skipped_homes.contains(entry.file_name()))
+            });
+        for entry in walker {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    unreadable += 1;
+                    if warnings.len() < MAX_BACKUP_WARNINGS {
+                        let path = error
+                            .path()
+                            .and_then(|path| path.strip_prefix(&root).ok())
+                            .map(|rel| format!("{prefix}/{}", rel.display()))
+                            .unwrap_or_else(|| prefix.to_string());
+                        warnings.push(format!("{path}: skipped, cannot read it: {error}"));
+                    }
+                    continue;
+                }
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let rel = entry
+                .path()
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| entry.file_name().to_string_lossy().to_string());
+            files.push((entry.path().to_path_buf(), format!("{prefix}/{rel}")));
+        }
+    }
+    let listed = warnings.len();
+    let total = skipped_homes.len() + unreadable;
+    if total > listed {
+        warnings.push(format!(
+            "and {} more entries that could not be read",
+            total - listed
+        ));
+    }
+    (files, warnings)
 }
 
 /// Default output directory for backups.
@@ -261,30 +354,13 @@ async fn create_inner(
 
     // ---- user data ---------------------------------------------------------
     let mut user_files: Vec<(PathBuf, String)> = Vec::new();
+    let mut warnings = Vec::new();
     if scopes.iter().any(|s| s == "users") {
-        for (root, prefix) in [
-            (cfg.homes_dir(), "users/homes"),
-            (cfg.shared_dir(), "users/shared"),
-        ] {
-            if !root.is_dir() {
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(&root)
-                .follow_links(false)
-                .into_iter()
-                .filter_map(Result::ok)
-            {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let rel = entry
-                    .path()
-                    .strip_prefix(&root)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| entry.file_name().to_string_lossy().to_string());
-                user_files.push((entry.path().to_path_buf(), format!("{prefix}/{rel}")));
-            }
-        }
+        // The work folder was made by this process: its owner is the
+        // service.
+        use std::os::unix::fs::MetadataExt;
+        let service_uid = std::fs::metadata(&work_dir)?.uid();
+        (user_files, warnings) = self::user_files(cfg, service_uid);
     }
 
     // ---- build the archive -------------------------------------------------
@@ -385,6 +461,7 @@ async fn create_inner(
             scopes: scopes.to_vec(),
             note: note.to_string(),
             entries: entries.clone(),
+            warnings: warnings.clone(),
         };
         let manifest_data = serde_json::to_vec_pretty(&manifest)
             .map_err(|e| AppError::internal(format!("cannot serialise manifest: {e}")))?;
@@ -421,6 +498,7 @@ async fn create_inner(
         scopes: scopes.to_vec(),
         created_at,
         duration_ms: db::now_ms() - created_at,
+        warnings,
     })
 }
 
@@ -892,6 +970,69 @@ mod tests {
             .await
             .map(|v| v["ok"].as_bool().unwrap_or(false))
             .unwrap_or(false)
+    }
+
+    #[test]
+    fn homes_in_one_home_mode_are_skipped_with_a_warning() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        cfg.ensure_dirs().unwrap();
+        for name in ["alice", "t-bob"] {
+            std::fs::create_dir_all(cfg.home_for(name).join("docs")).unwrap();
+            std::fs::write(cfg.home_for(name).join("docs/a.txt"), b"a").unwrap();
+        }
+        std::fs::create_dir_all(cfg.shared_dir().join("team")).unwrap();
+        std::fs::write(cfg.shared_dir().join("team/plan.txt"), b"p").unwrap();
+        let me = std::fs::metadata(dir.path()).unwrap().uid();
+
+        // Every HOME is the service's: everything is in.
+        let (files, warnings) = user_files(&cfg, me);
+        let mut targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
+        targets.sort();
+        assert_eq!(
+            targets,
+            [
+                "users/homes/alice/docs/a.txt",
+                "users/homes/t-bob/docs/a.txt",
+                "users/shared/team/plan.txt"
+            ]
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // HOMEs of another uid (one-HOME mode) are left out, by name, and
+        // shared folders are still in.
+        let (files, warnings) = user_files(&cfg, me.wrapping_add(1));
+        let targets: Vec<&str> = files.iter().map(|(_, target)| target.as_str()).collect();
+        assert_eq!(targets, ["users/shared/team/plan.txt"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings
+            .iter()
+            .any(|w| w.starts_with("users/homes/t-bob: skipped") && w.contains("one-HOME mode")));
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_folder_is_reported_instead_of_dropped_silently() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = test_cfg(dir.path());
+        cfg.ensure_dirs().unwrap();
+        let locked = cfg.home_for("alice").join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("x.txt"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions do not apply.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+        let meta = create(&cfg, None, &["users".into()], "", None, None).await;
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let meta = meta.unwrap();
+        assert_eq!(meta.warnings.len(), 1, "{:?}", meta.warnings);
+        assert!(meta.warnings[0].starts_with("users/homes/alice/locked: skipped, cannot read it"));
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["warnings"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]
