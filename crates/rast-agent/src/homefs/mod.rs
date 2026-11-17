@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
-use crate::fileagent::SHARES_HEADER;
+use crate::fileagent::{SHARES_HEADER, SHARE_FREE_HEADER};
 use crate::storage::safe_path::validate_component;
 use crate::storage::shares::{rw_group_name, MAX_SHARE_NAME};
 
@@ -123,6 +123,76 @@ impl ShareRoots {
     }
 }
 
+/// Most shared folders one [`SHARE_FREE_HEADER`] names.
+pub const MAX_SHARE_FREE: usize = 1024;
+
+/// The bytes still free below the size limits of shared folders, by share
+/// id, for a restore from a recycle bin (a share without a limit is not
+/// named). The server measures them and sends them in
+/// [`SHARE_FREE_HEADER`] as `id=bytes` pairs separated by commas.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShareFree(BTreeMap<String, u64>);
+
+impl ShareFree {
+    /// Record the free bytes of a share.
+    pub fn insert(&mut self, share_id: &str, free: u64) -> AppResult<()> {
+        if rw_group_name(share_id).is_none() || self.0.len() >= MAX_SHARE_FREE {
+            return Err(AppError::internal("invalid shared folder limit"));
+        }
+        self.0.insert(share_id.to_string(), free);
+        Ok(())
+    }
+
+    /// The free bytes of a share, `None` when it has no limit.
+    pub fn get(&self, share_id: &str) -> Option<u64> {
+        self.0.get(share_id).copied()
+    }
+
+    /// Put the header on an agent request (replacing any other value).
+    pub fn apply(&self, headers: &mut HeaderMap) -> AppResult<()> {
+        headers.remove(SHARE_FREE_HEADER);
+        if self.0.is_empty() {
+            return Ok(());
+        }
+        let value = self
+            .0
+            .iter()
+            .map(|(id, free)| format!("{id}={free}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let value = HeaderValue::from_str(&value)
+            .map_err(|_| AppError::internal("cannot encode shared folder limits"))?;
+        headers.insert(SHARE_FREE_HEADER, value);
+        Ok(())
+    }
+
+    /// The limits of a request, as the agent reads them: strictly.
+    pub fn from_headers(headers: &HeaderMap) -> AppResult<Self> {
+        let mut values = headers.get_all(SHARE_FREE_HEADER).iter();
+        let Some(value) = values.next() else {
+            return Ok(Self::default());
+        };
+        let bad = || AppError::bad_request("invalid shared folder limit header");
+        if values.next().is_some() || value.len() > MAX_SHARES_HEADER {
+            return Err(bad());
+        }
+        let text = value.to_str().map_err(|_| bad())?;
+        let mut free = Self::default();
+        for pair in text.split(',') {
+            let (id, bytes) = pair.split_once('=').ok_or_else(bad)?;
+            if bytes.is_empty() || !bytes.bytes().all(|byte| byte.is_ascii_digit()) {
+                return Err(bad());
+            }
+            let bytes: u64 = bytes.parse().map_err(|_| bad())?;
+            if free.0.contains_key(id) {
+                return Err(bad());
+            }
+            free.insert(id, bytes).map_err(|_| bad())?;
+        }
+        Ok(free)
+    }
+}
+
 fn valid(path_name: &str, root: &ShareRoot) -> bool {
     validate_component(path_name).is_ok()
         && validate_component(&root.container).is_ok()
@@ -190,6 +260,57 @@ mod tests {
         assert!(ShareRoots::from_headers(&twice).is_err());
         // The server never records an invalid share.
         assert!(ShareRoots::default().insert("team", root("../x")).is_err());
+    }
+
+    #[test]
+    fn free_bytes_of_shared_folders_travel_in_one_strict_header() {
+        const OTHER: &str = "00000000-0000-4000-8000-000000000002";
+        let mut free = ShareFree::default();
+        free.insert(ID, 10).unwrap();
+        free.insert(OTHER, 0).unwrap();
+        assert!(free.insert("x", 1).is_err());
+        let mut headers = HeaderMap::new();
+        headers.insert(SHARE_FREE_HEADER, HeaderValue::from_static("planted"));
+        free.apply(&mut headers).unwrap();
+        assert_eq!(headers.get_all(SHARE_FREE_HEADER).iter().count(), 1);
+        let read = ShareFree::from_headers(&headers).unwrap();
+        assert_eq!(read, free);
+        assert_eq!(read.get(ID), Some(10));
+        assert_eq!(read.get(OTHER), Some(0));
+        assert_eq!(read.get("00000000-0000-4000-8000-000000000003"), None);
+        ShareFree::default().apply(&mut headers).unwrap();
+        assert!(headers.get(SHARE_FREE_HEADER).is_none());
+        assert_eq!(
+            ShareFree::from_headers(&headers).unwrap(),
+            ShareFree::default()
+        );
+        for bad in [
+            "",
+            "x=1",
+            ID,
+            &format!("{ID}="),
+            &format!("{ID}=-1"),
+            &format!("{ID}=+1"),
+            &format!("{ID}=1x"),
+            &format!("{ID}=18446744073709551616"),
+            &format!("{ID}=1,{ID}=2"),
+            &format!("{ID}=1,"),
+            &format!("{ID}=1;{OTHER}=2"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(SHARE_FREE_HEADER, HeaderValue::from_str(bad).unwrap());
+            assert!(ShareFree::from_headers(&headers).is_err(), "{bad}");
+        }
+        let mut twice = HeaderMap::new();
+        twice.append(
+            SHARE_FREE_HEADER,
+            HeaderValue::from_str(&format!("{ID}=1")).unwrap(),
+        );
+        twice.append(
+            SHARE_FREE_HEADER,
+            HeaderValue::from_str(&format!("{ID}=1")).unwrap(),
+        );
+        assert!(ShareFree::from_headers(&twice).is_err());
     }
 
     #[test]

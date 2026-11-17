@@ -54,6 +54,11 @@ pub const QUOTA_HEADER: &str = "x-rast-quota-free";
 /// server's database records for them (`homefs::ShareRoots`). Set by the
 /// server only (it removes the header from browser requests).
 pub const SHARES_HEADER: &str = "x-rast-shares";
+/// Header of a restore from a recycle bin: the bytes still free below the
+/// size limit of each limited shared folder the request may write
+/// (`homefs::ShareFree`). Set by the server only (it removes the header
+/// from browser requests).
+pub const SHARE_FREE_HEADER: &str = "x-rast-share-free";
 
 /// Where a validated upload of the root agent goes.
 #[derive(Debug, Clone)]

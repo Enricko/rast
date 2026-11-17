@@ -31,7 +31,7 @@ use serde_json::{json, Value};
 use crate::api::files::audit_file;
 use crate::auth::{AuthUser, ClientIp};
 use crate::error::{AppError, AppResult};
-use crate::fileagent::{client, QUOTA_HEADER, REPLACED_HEADER, SHARES_HEADER};
+use crate::fileagent::{client, QUOTA_HEADER, REPLACED_HEADER, SHARES_HEADER, SHARE_FREE_HEADER};
 use crate::homefs::client::AGENT;
 use crate::homefs::{ShareRoot, ShareRoots};
 use crate::jobs::JobSpec;
@@ -264,6 +264,7 @@ async fn forward(
     // Only the server states the free quota and the shares' containers.
     parts.headers.remove(QUOTA_HEADER);
     parts.headers.remove(SHARES_HEADER);
+    parts.headers.remove(SHARE_FREE_HEADER);
     let mut roots = ShareRoots::default();
     let query: HashMap<String, String> = Query::try_from_uri(&parts.uri)
         .map(|Query(query)| query)

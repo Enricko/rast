@@ -6,6 +6,7 @@
 //! release quota; restores re-reserve it transactionally before moving the data
 //! back. Permanent deletion and "empty bin" remove payloads for good.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,10 @@ use crate::{
     auth::AuthUser,
     db,
     error::{AppError, AppResult},
-    storage::{quota, safe_path, transfer, LogicalPath, ResolvedPath, Storage, MAX_BATCH_PATHS},
+    storage::{
+        quota, safe_path, share_quota, transfer, LogicalPath, ResolvedPath, Storage,
+        MAX_BATCH_PATHS,
+    },
 };
 
 /// Default number of expired entries physically removed per maintenance pass.
@@ -197,6 +201,8 @@ struct RestorePlan {
     logical: LogicalPath,
     target: PathBuf,
     in_home: bool,
+    /// The shared folder the entry goes back into.
+    share_id: Option<String>,
 }
 
 async fn load_records(
@@ -265,8 +271,32 @@ pub async fn restore(
             logical,
             target,
             in_home: root.in_home,
+            share_id: root.share_id.clone(),
         });
     }
+
+    // The entries going back into a limited shared folder must fit its
+    // limit together (the legacy recycle bin is outside the folder); the
+    // bytes are held until they are in place.
+    let mut share_totals: BTreeMap<String, u64> = BTreeMap::new();
+    for plan in &plans {
+        if let Some(share_id) = &plan.share_id {
+            let total = share_totals.entry(share_id.clone()).or_default();
+            *total = total.saturating_add(plan.record.size_bytes.max(0) as u64);
+        }
+    }
+    let mut share_held: BTreeMap<String, (share_quota::ShareReservation, u64)> = BTreeMap::new();
+    for (share_id, total) in share_totals {
+        if let Some(reservation) = share_quota::reserve(pool, storage, &share_id, total).await? {
+            share_held.insert(share_id, (reservation, 0));
+        }
+    }
+    // What was restored counts as written; the rest is given back.
+    let settle = |held: BTreeMap<String, (share_quota::ShareReservation, u64)>| {
+        for (reservation, moved) in held.into_values() {
+            reservation.commit(moved);
+        }
+    };
 
     let reserve_total: i64 = plans
         .iter()
@@ -307,13 +337,22 @@ pub async fn restore(
             if reserved_remaining > 0 {
                 let _ = quota::rollback(pool, user.id, reserved_remaining).await;
             }
+            settle(share_held);
             return Err(error);
+        }
+        if let Some((_, moved)) = plan
+            .share_id
+            .as_ref()
+            .and_then(|share_id| share_held.get_mut(share_id))
+        {
+            *moved = moved.saturating_add(plan.record.size_bytes.max(0) as u64);
         }
         restored.push(RestoredItem {
             id: plan.record.id,
             path: plan.logical.as_string(),
         });
     }
+    settle(share_held);
     Ok(restored)
 }
 
@@ -764,5 +803,76 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_restore_into_a_shared_folder_must_fit_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&test_cfg(dir.path())).unwrap();
+        let pool = db::connect(&dir.path().join("trash-limit.db"), 4)
+            .await
+            .unwrap();
+        for (id, username, role) in [(1_i64, "admin", "admin"), (2, "alice", "user")] {
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, quota_bytes, created_at, updated_at)
+                 VALUES (?, ?, 'x', ?, 0, 1, 1)",
+            )
+            .bind(id)
+            .bind(username)
+            .bind(role)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        std::fs::create_dir_all(storage.home_dir("alice")).unwrap();
+        let admin = auth_user(1, "admin");
+        let alice = auth_user(2, "alice");
+        let share = shares::create(
+            &pool,
+            &storage,
+            &admin,
+            shares::CreateShareInput {
+                name: "limited".into(),
+                description: None,
+                members: Some(vec![shares::MemberInput {
+                    user_id: 2,
+                    perms: Some("write".into()),
+                }]),
+                quota_bytes: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        let container = storage.shared_container_dir(&share.name);
+        std::fs::write(container.join("big.txt"), b"01234567").unwrap();
+        let resolved = storage
+            .resolve(&pool, &alice, "/shared/limited/big.txt", Access::Write)
+            .await
+            .unwrap();
+        let row = move_to_trash(&pool, &storage, &alice, &resolved)
+            .await
+            .unwrap();
+        // The legacy recycle bin is outside the folder: 5 of 10 bytes used.
+        std::fs::write(container.join("five.txt"), b"01234").unwrap();
+        share_quota::forget(&share.id);
+        let error = restore(&pool, &storage, &alice, std::slice::from_ref(&row.id))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!container.join("big.txt").exists());
+        std::fs::remove_file(container.join("five.txt")).unwrap();
+        share_quota::forget(&share.id);
+        restore(&pool, &storage, &alice, &[row.id]).await.unwrap();
+        assert_eq!(
+            std::fs::read(container.join("big.txt")).unwrap(),
+            b"01234567"
+        );
+        // The restored bytes count right away.
+        assert!(share_quota::check(&pool, &storage, &share.id, 3)
+            .await
+            .is_err());
+        share_quota::check(&pool, &storage, &share.id, 2)
+            .await
+            .unwrap();
     }
 }

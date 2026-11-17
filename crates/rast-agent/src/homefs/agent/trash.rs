@@ -33,7 +33,7 @@ use super::{exists_as, page_params, HomeAgent, HomeSpace, Node, NsRoot};
 use crate::error::{AppError, AppResult};
 use crate::fileagent::{blocking, check, CancelOnDrop};
 use crate::homefs::fsat::{self, fs_error, Info, Kind, Resolve};
-use crate::homefs::{ShareRoots, SHARED_DIR};
+use crate::homefs::{ShareFree, ShareRoots, SHARED_DIR};
 use crate::storage::trash::TrashEntryDto;
 use crate::storage::xdg_trash::{
     self, entry_name, format_directory_sizes, format_info, home_origin, info_name,
@@ -964,6 +964,19 @@ fn resolve_ids(
     Ok(out)
 }
 
+/// The id of the shared folder an entry of the trash at `place` is
+/// restored into when that is not the folder holding the trash.
+fn arriving_share<'a>(place: &Place, target: &Target, shares: &'a ShareRoots) -> Option<&'a str> {
+    let Target::Share { path_name, .. } = target else {
+        return None;
+    };
+    let root = shares.get(path_name)?;
+    match place {
+        Place::Share { share_id, .. } if *share_id == root.id => None,
+        _ => Some(root.id.as_str()),
+    }
+}
+
 /// The folder a target goes into (made where missing) and its root.
 fn target_parent(
     space: &HomeSpace,
@@ -1005,11 +1018,29 @@ pub(super) async fn restore(
     Json(body): Json<IdsRequest>,
 ) -> AppResult<Json<Value>> {
     let shares = ShareRoots::from_headers(&headers)?;
+    let free = ShareFree::from_headers(&headers)?;
     let cancel = Arc::new(AtomicBool::new(false));
     let _guard = CancelOnDrop(cancel.clone());
     let space = agent.space.clone();
     blocking(move || {
         let plan = resolve_ids(&space, &body.ids, &shares)?;
+        // What goes into a limited shared folder from elsewhere must fit
+        // (an entry of its own recycle bin is counted there already).
+        let mut incoming: BTreeMap<&str, u64> = BTreeMap::new();
+        for (trash, item) in &plan {
+            if let Some(share_id) = arriving_share(&trash.place, &item.target, &shares) {
+                let bytes = incoming.entry(share_id).or_default();
+                *bytes = bytes.saturating_add(item.size);
+            }
+        }
+        if incoming
+            .iter()
+            .any(|(share_id, bytes)| free.get(share_id).is_some_and(|free| *bytes > free))
+        {
+            return Err(AppError::PayloadTooLarge(
+                crate::storage::share_quota::LIMIT_EXCEEDED,
+            ));
+        }
         // Every destination first: a conflict restores nothing.
         let mut targets = HashSet::new();
         for (_, item) in &plan {

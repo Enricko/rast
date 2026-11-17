@@ -24,7 +24,7 @@ use crate::auth::{AuthUser, ClientIp};
 use crate::error::{AppError, AppResult};
 use crate::homefs::agent::usage::USAGE_ROUTE;
 use crate::homefs::client::AGENT;
-use crate::homefs::{ShareRoot, ShareRoots};
+use crate::homefs::{ShareFree, ShareRoot, ShareRoots};
 use crate::jobs::JobSpec;
 use crate::state::AppState;
 use crate::storage::ops::{UsageDto, USAGE_LOCATIONS, USAGE_TYPES};
@@ -504,13 +504,26 @@ async fn restore(
     // Only folders the account may write: an entry whose origin is a
     // shared folder it may not write goes back into HOME.
     let roots = share_roots(state, user, Need::Write).await?;
+    // What a limited shared folder still takes: the agent refuses a
+    // restore into it from elsewhere (the HOME recycle bin) that does not
+    // fit.
+    let mut free = ShareFree::default();
+    for (_, root) in roots.iter() {
+        if let Some(bytes) =
+            crate::storage::share_quota::free(&state.db, &state.storage, &root.id).await?
+        {
+            free.insert(&root.id, bytes)?;
+        }
+    }
+    let mut headers = agent_headers(&roots)?;
+    free.apply(&mut headers)?;
     let reply = state
         .homefs
         .call(
             user.id,
             "/api/files/trash/restore",
             &json!({ "ids": ids }),
-            agent_headers(&roots)?,
+            headers,
         )
         .await?;
     let restored = reply
@@ -532,6 +545,17 @@ async fn restore(
     let delta = home_delta(&reply);
     if delta != 0 {
         quota::adjust_used(&state.db, user.id, delta).await?;
+    }
+    // Limited shared folders that got entries back are measured again.
+    for (_, path) in &restored {
+        let share = LogicalPath::parse(path)
+            .ok()
+            .and_then(|logical| logical.shared_parts().map(|(name, _)| name.to_string()));
+        if let Some(root) = share.as_deref().and_then(|name| roots.get(name)) {
+            if free.get(&root.id).is_some() {
+                crate::storage::share_quota::forget(&root.id);
+            }
+        }
     }
     for (id, path) in &restored {
         audit_file(

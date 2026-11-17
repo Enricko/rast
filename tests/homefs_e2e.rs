@@ -800,6 +800,80 @@ async fn the_members_recycle_bins_count_towards_a_shared_folders_limit() {
 }
 
 #[tokio::test]
+async fn a_restore_into_a_shared_folder_must_fit_its_limit() {
+    let (server, alice, _bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let (status, share) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Team", "quotaBytes": 10,
+                   "members": [{"userId": alice.id, "perms": "write"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{share}");
+    let share_id = share["id"].as_str().unwrap().to_string();
+    // An app deleted a file of the shared folder through `~/Shared/Team`
+    // into the HOME recycle bin.
+    let home = server.home("alice");
+    let trash = home.join(".local/share/Trash");
+    std::fs::create_dir_all(trash.join("files")).unwrap();
+    std::fs::create_dir_all(trash.join("info")).unwrap();
+    std::fs::write(trash.join("files/big.txt"), b"01234567").unwrap();
+    let origin = home.join("Shared/Team/big.txt");
+    std::fs::write(
+        trash.join("info/big.txt.trashinfo"),
+        format!(
+            "[Trash Info]\nPath={}\nDeletionDate=2026-11-17T10:00:00\n",
+            rast::storage::xdg_trash::encode_path(&origin.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    let (_, list) = server.get("/api/files/trash", &alice).await;
+    let item = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["originalPath"] == "/shared/Team/big.txt")
+        .unwrap_or_else(|| panic!("{list}"))
+        .clone();
+    let id = item["id"].as_str().unwrap().to_string();
+    // 5 of 10 bytes used: the 8 bytes do not fit, and nothing moves.
+    let (status, entry) = server
+        .upload(&alice, "dir=/shared/Team&name=five.txt", b"01234")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{entry}");
+    let (status, body) = server
+        .post("/api/files/trash/restore", &alice, json!({"ids": [id]}))
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(
+        body.to_string()
+            .contains(rast::storage::share_quota::LIMIT_EXCEEDED),
+        "{body}"
+    );
+    let container = server.state.config.shared_dir().join("Team");
+    assert!(!container.join("big.txt").exists());
+    assert!(trash.join("files/big.txt").exists());
+    // With room again, it goes back.
+    std::fs::remove_file(container.join("five.txt")).unwrap();
+    rast::storage::share_quota::forget(&share_id);
+    let (status, body) = server
+        .post("/api/files/trash/restore", &alice, json!({"ids": [id]}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        std::fs::read(container.join("big.txt")).unwrap(),
+        b"01234567"
+    );
+    // Measured again: the restored bytes count.
+    let (status, _) = server
+        .upload(&alice, "dir=/shared/Team&name=three.txt", b"012")
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn chunked_uploads_belong_to_their_account() {
     let (server, alice, bob) = setup().await;
     let (status, init) = server
