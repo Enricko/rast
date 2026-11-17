@@ -305,6 +305,11 @@ Apps, caches and the trash count against the quota. Without kernel quota
 App Center are; see "Recycle bin and quota of one-HOME accounts" in
 `docs/OPERATIONS.md`.
 
+Backup Center's `users` scope keeps a one-HOME account's owners, modes and
+ACLs, but leaves out `~/.cache`, the trash (`~/.local/share/Trash`) and
+Flatpak apps (`~/.local/share/flatpak`); see "What is in a backup archive"
+in `docs/OPERATIONS.md`.
+
 ## Windows and the desktop
 
 * Every normal remote top-level window becomes **one RAST window** with its own
@@ -445,6 +450,12 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
   transient units in `rast-linux.slice` too. When the helper is down, a
   stopped agent cannot be started again and File Station answers `503` for
   that person until the helper is back.
+* **The backup reader** (`rast-backup-reader`, ADR 0005 D12) is a transient,
+  read-only root unit outside `rast-linux.slice`, started by the helper when
+  Backup Center backs up a HOME in one-HOME mode or a migrated shared folder,
+  and stopped after 5 idle minutes. When the helper is down, those folders
+  are skipped (HOMEs) or read without owners (shared folders), with a
+  warning in the backup result.
 * **To actually end everything:** stop `rast-linux.slice` (or the individual
   `rast-xpra-*`/`rast-app-*` units). A reboot also starts from fresh
   processes; profiles and installs stay on disk.

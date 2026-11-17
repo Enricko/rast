@@ -323,6 +323,21 @@ this file by `scripts/changelog-section.sh`.
   start show the pilot. See "Testing on production with the native pilot"
   in `docs/OPERATIONS.md`.
 
+- **Backup reader (ADR 0005, D12).** Backup Center's `users` scope now
+  includes HOMEs in one-HOME mode and migrated shared folders. The native
+  helper starts a read-only root unit, `rast-backup-reader` (new helper
+  operation `backup_reader_start`, internal command `rast backup-reader`),
+  that streams one HOME or one shared folder to the backup with numeric
+  owners, modes and POSIX ACLs. Symbolic links are stored as links and
+  never followed; other file systems, FIFOs, sockets and devices are left
+  out; `~/.cache`, `~/.local/share/Trash`, `~/.local/share/flatpak` and a
+  shared folder's recycle bins are excluded. The archive's `manifest.json`
+  marks those entries `ownersPreserved` and lists their folders in
+  `preservedTrees`; the verify result (`rast restore --dry-run`, the verify
+  API) shows both. Legacy HOMEs and shared folders are read by the service
+  as before. Accounts and shared folders outside the native pilot (ADR
+  0007) are not read through the reader.
+
 ### Security
 
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
@@ -358,7 +373,7 @@ this file by `scripts/changelog-section.sh`.
   stopped) undoes it from the journal. Afterwards the account's apps share
   one HOME (settings of an app that conflicted stay in its old profile and
   are listed), its quota counts app data, caches and the recycle bin, and
-  Backup Center skips its HOME with a warning until task 1.5b. Scripts that
+  Backup Center reads its HOME through the backup reader. Scripts that
   call `rast migrate shares` without arguments must add `--all` (or
   `--share <name>`).
 
@@ -380,6 +395,15 @@ this file by `scripts/changelog-section.sh`.
   builds, `cargo clippy` and `cargo test` are unaffected. Installed servers
   need nothing new.
 
+- **Restoring user files** from a `users` backup that lists
+  `preservedTrees` in its manifest: extract as root with
+  `tar --numeric-owner --same-owner --acls --xattrs` and never run
+  `chown -R rast:rast` over the homes or shared folder (see "Restoring
+  user files from an archive" in `docs/OPERATIONS.md`); keep the same
+  `linux_uid_base` on a new host. The backup reader needs no setup: the
+  helper starts it when a backup needs it. Older archives restore as
+  before.
+
 ### Changed
 
 - **`rast migrate shares` needs `--share <name>` or `--all`** in every mode
@@ -395,12 +419,17 @@ this file by `scripts/changelog-section.sh`.
   their app profiles, the `RAST` link and the grant until they are
   migrated.
 
-- Backups of the `users` scope skip HOMEs in one-HOME mode (they belong to
-  the account's Linux user and the service cannot read them) and say so:
-  the archive's manifest and the job result list `warnings`, and Backup
-  Center shows them after a backup. Folders that cannot be read are listed
-  too instead of being left out silently. Back up such HOMEs as root until
-  Backup Center reads them through the helper (task 1.5b).
+- Backups of the `users` scope say what they left out: the archive's
+  manifest and the job result list `warnings`, and Backup Center shows them
+  after a backup. Folders that cannot be read are listed instead of being
+  left out silently, and so is a HOME in one-HOME mode that the backup
+  reader cannot read (native Linux apps off, helper or reader failure, an
+  account outside the native pilot); back such a HOME up as root.
+- The restore guide (Backup Center and `docs/OPERATIONS.md`) extracts user
+  files as root with `tar --numeric-owner --same-owner --acls --xattrs`,
+  so HOMEs in one-HOME mode and migrated shared folders keep their owners
+  and ACLs, and gives only legacy folders back to `rast`, one by one,
+  instead of `chown -R rast:rast` over every HOME and shared folder.
 
 - New `crates/rast-api` crate holds the shared File Station DTOs
   (`EntryDto`, `ListingDto`, `BreadcrumbDto`, `QuotaDto`; JSON unchanged).

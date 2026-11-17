@@ -318,13 +318,13 @@ group grants. A read-only `backup` grant receives status metadata only:
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error,downloadable}], total}` |
-| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}`; the finished job's result is the backup (`fileName`, `sizeBytes`, `sha256`, …) with `warnings` (what was left out, such as HOMEs in one-HOME mode) when there are any |
+| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}`; the finished job's result is the backup (`fileName`, `sizeBytes`, `sha256`, …) with `warnings` (what was left out or is incomplete, such as a HOME in one-HOME mode when the backup reader is unavailable) when there are any. The archive's `manifest.json` marks entries read through the backup reader `ownersPreserved: true` (numeric owners, mode and ACLs kept) and lists their folders in `preservedTrees`; both are omitted when empty |
 | DELETE | `/api/backups/{id}` | delete archive |
 | GET | `/api/backups/{id}/download` | streamed archive (admin only, audited as `backup.download`) |
 | GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
 | PUT | `/api/backups/schedule` | update schedule |
-| POST | `/api/backups/{id}/verify` | integrity check |
-| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
+| POST | `/api/backups/{id}/verify` | integrity check → `{ok, manifest:{…, entries, ownersPreserved, preservedTrees}, checks, mismatches, sizeBytes, path}` (`ownersPreserved` is the number of entries that keep their owners, `preservedTrees` the folders read through the backup reader) |
+| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored as root into the storage roots (never `/`), keeping numeric owners and ACLs; only legacy folders are given back to `rast`, one by one |
 
 ## App Center (admins and granted groups)
 

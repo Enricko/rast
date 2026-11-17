@@ -728,6 +728,33 @@ Update it at the end of every session.
     failed; frontend 160 tests passed and build clean; no new dependency
     or migration.
 
+- **Task 1.5b, Backup Center reads one-HOME HOMEs** (2026-11-17, ADR 0005
+  D12 and section 14). New helper operation `backup_reader_start` (no
+  fields) starts `rast-backup-reader`: socket-activated, root with only
+  `CAP_DAC_READ_SEARCH`, read-only file system, token credential, peer uid
+  `rast`, 5 idle minutes; internal command `rast backup-reader`. One JSON
+  request per connection names one HOME (identity-owned) or one migrated
+  container (root, share group); the reply is a strict ustar + PAX stream
+  (numeric owners, modes, `SCHILY.acl.*`, links never followed, mounts,
+  special files, caches, trash and Flatpak left out) and a bounded
+  trailer. Small tar codec in `rast-helper`, no new dependency. The server
+  plans the `users` scope per folder (legacy in process; one-HOME HOMEs
+  only for pilot accounts that exist; migrated containers of pilot shares,
+  falling back to in-process), re-parses the stream strictly and writes
+  each entry again; manifest `ownersPreserved` and `preservedTrees`,
+  verify shows both. Restore guide (API and `docs/OPERATIONS.md`): root
+  `tar --numeric-owner --same-owner --acls --xattrs`, `chown` only for
+  legacy folders, repair pass, `rast doctor`.
+  - Tests: 29 new (codec, request strictness, folder and owner checks, real
+    walks with ACLs, hard links, symlinks, excludes, FIFO, unreadable
+    entries, the reader over a socket, the unit arguments; server with the
+    real reader and fake helpers/readers, broken and lying streams, pilot
+    and legacy paths). GNU tar 1.35 lists and extracts the stream and a
+    full backup with `--acls` (checked by hand).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1088 passed, 0
+    failed; frontend 160 tests passed and build clean; no new dependency
+    or migration.
+
 - **Task 0.6, app matrix scenario** (2026-11-17, `d067bf8`; not yet run on
   a native session, see A4): `tests/e2e/scenarios/app-matrix.mjs` runs the
   five checks of CLAUDE.md for Chrome, Firefox, VS Code and LibreOffice
@@ -757,9 +784,9 @@ Update it at the end of every session.
     --share <name> | --all`, both with tests for every mode.
   - Removes the 0.18.3 entries `u:rast-u<id>:rx` and `d:u:rast-u<id>:rx`
     (and terminal grants); `--rollback` restores them.
-- [ ] Task 1.5b: Backup Center reads HOMEs through the helper (D12,
-  `backup_reader_start`); until then one-HOME HOMEs are skipped with a
-  warning.
+- [x] Task 1.5b: Backup Center reads HOMEs through the helper (D12,
+  `backup_reader_start`; unit, fake-helper and real-reader tests; root and
+  systemd checks pending on the test host).
 - [ ] Task 1.6: Phase 1 security review
 - [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
 

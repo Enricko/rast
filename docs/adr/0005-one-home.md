@@ -267,7 +267,7 @@ operation is idempotent.
 | `share_trash_usage` | `shareId`, `container` | Task 1.4 review (2026-11-17): read-only. The share must have its groups and the container must be a real folder of `rast` or root. Sums the apparent size of the regular files below the folders named like recycle bins at the top of the container (`.Trash`, `.Trash-*`), which the service cannot read; no-follow, one device and mount, at most 1 000 000 names (`truncated` when it stops early), 60 s deadline, not serialised with long-running work. For RAST's check of shared folder limits (section 11). |
 | `share_deny_set` | `shareId`, `container`, `userIds` (at most 256) | D7 decision (2026-11-16): the full set of `u:rast-u<id>:---` entries on the access ACL of a prepared container, the stopgap while a full revocation waits for the user's session restart. Entries of users not listed are removed; the default ACL is not touched. |
 | `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run as the identity in one of the user's units and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. A process counts only when its real and effective uid are the identity's and the first non-slice component of its cgroup (`/proc/<pid>/cgroup`) is `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…` or `rast-term-u<uid>-…` (`.service`); both files are read through one descriptor of `/proc/<pid>`, which stays bound to that process. Lets the server find sessions that still hold a revoked group after a server restart. Phase 2 (user units under `user@<uid>.service`) must extend the unit rule. |
-| `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (same pattern as `rootfs_start`). It only streams tar archives of the fixed homes and shared roots (section 7). |
+| `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (socket-activated, like `files_agent_start`; task 1.5b, section 14). It only streams tar archives of one HOME owned by an identity or one migrated container, directly below the fixed homes and shared roots (section 7). Returns `{unit, socket, token}`. |
 
 **Trust assumption.** The helper cannot check the `userId` ↔ `username`
 mapping of a legacy home, because it lives in the database. During the
@@ -461,6 +461,7 @@ group limit accordingly.
   `tar --numeric-owner --same-owner --acls` as root, **without**
   `chown -R rast:rast` (which would break one HOME), followed by `rast doctor`,
   which re-applies the share groups. This must land before or with task 1.5.
+  Implemented in task 1.5b (section 14).
 - **Other modules.** `users::create` calls `identity_ensure` and `home_ensure`
   when the helper is available. Storage settings use `statvfs` and
   `quota_report` instead of a tree walk. Deactivating an account also stops
@@ -994,8 +995,98 @@ deviates from section 8:
   Until then the `users` scope skips HOMEs that the service does not own
   and lists them in `warnings` (manifest, job result, Backup Center), and
   the restore guide no longer runs `chown -R rast:rast` over every home.
+  Done in task 1.5b (section 14).
 - **Cleanup** of the emptied legacy folders, `.trash/<userId>`, the journal
   folders and stray `homes/rast-u<id>` stays a separate, confirmed step.
+
+### 14. Task 1.5b: implementation notes (2026-11-17)
+
+Backup Center reads HOMEs in one-HOME mode and migrated shared folders
+through a root reader (D12).
+
+- **Helper operation.** `backup_reader_start` takes no field at all, like
+  `rootfs_start`. The helper writes a new 64-hex token
+  (`<run_dir>/backup-reader/reader.token`, root 0600, folder `root:rast`
+  0750, opened without following links) and starts `rast-backup-reader`
+  with `systemd-run`. The unit is socket-activated: `reader.sock` is
+  `root:rast` 0660 and removed when the unit stops, the token reaches the
+  reader as the credential `token` (`LoadCredential=`) and never appears on
+  a command line, and the reader accepts only the uid of `rast`
+  (`SO_PEERCRED`). A running reader is reused with its token. The reader
+  stops after 300 s without a connection; the next backup starts it again.
+- **Unit.** The reader runs as root with `CapabilityBoundingSet=
+  CAP_DAC_READ_SEARCH` (read any file, write none), `NoNewPrivileges`,
+  `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`,
+  `PrivateDevices`, `PrivateNetwork`, `RestrictAddressFamilies=AF_UNIX`,
+  `ProtectKernel*`, `ProtectControlGroups`, `MemoryMax=256M`,
+  `TasksMax=16`, `UMask=0077` and no writable path. It is the socket
+  activation pattern of `files_agent_start`, not the root file agent's own
+  bind, because a read-only unit cannot create its socket.
+- **Request.** One JSON line per connection, `deny_unknown_fields`:
+  `{token, tree: "home"|"shared", name}`, at most 4 KiB, 10 s to arrive.
+  `name` is one username (`validate_home_username`) or one container
+  (`validate_share_container`); nothing else is taken, in particular no
+  path. The reader opens the folder directly below the fixed root with
+  `O_NOFOLLOW` (a link is `forbidden`), checks that it is the same inode as
+  the directory entry and on the root's device and mount, and serves it
+  only in the new layout: a HOME owned by an identity uid
+  (`linux_uid_base + 1 ..= + 1 000 000`), or a container owned by root
+  whose group is in the share gid range. A legacy folder is refused
+  (`not_one_home`, `legacy_container`): the service reads those itself.
+  The helper is pilot-agnostic (ADR 0007); the server decides which trees
+  it asks for.
+- **Stream.** A reply line (`{ok}` or `{ok:false, error:{code,message}}`),
+  then a POSIX tar of the tree (`.` first, then depth first), the two end
+  blocks, and one trailer line (counts and at most 20 problems of at most
+  300 characters). The tar writer and reader are a small codec in
+  `rast-helper` (`native::backup_reader::archive`): ustar headers with
+  numeric uid and gid, no user or group names, plus PAX records for long
+  or non-UTF-8 paths and link targets, large ids, sizes and times, and
+  `SCHILY.acl.access` / `SCHILY.acl.default` in the text form GNU tar
+  writes (one entry per line, numeric ids). No new dependency.
+- **Walk.** Descriptor based (`openat` with `O_NOFOLLOW`, `fstatat` with
+  `AT_SYMLINK_NOFOLLOW`, same-inode checks), at most 256 levels and 3 796
+  bytes of path. Symlinks are stored as links and never followed; hard
+  links after the first are stored as links (the first 100 000 or 16 MiB
+  of names, then as copies); FIFOs, sockets and devices are left out;
+  other file systems and mounts are left out and counted. Excluded: in a
+  HOME `.cache`, `.local/share/Trash` and `.local/share/flatpak`; in a
+  container `.Trash` and `.Trash-<digits>` at the top. A file that shrinks
+  while it is read is padded with zeros, as GNU tar does, and reported.
+  Memory stays bounded (64 KiB buffer, the capped hard link map).
+- **Server.** `backup::create` plans the `users` scope folder by folder: a
+  HOME that the service owns is legacy and read in process as before (no
+  owners). A HOME of another uid goes to the reader when native execution
+  is on, a RAST account has that name and the account is in the native
+  pilot; otherwise it is skipped with a warning naming the reason. A
+  container owned by root goes to the reader when its shared folder is in
+  the pilot, and is read in process otherwise. The server starts the reader
+  once per backup and treats its stream as untrusted: it parses it with the
+  same strict codec (checksums, magic, entry types `0 5 2 1 x` only, PAX
+  keys from a fixed list and at most 64 KiB, relative normalised paths, no
+  data on links), requires the folder itself first and the trailer to
+  match what arrived, and writes every entry again under
+  `users/homes/<name>/` or `users/shared/<container>/` (hard link targets
+  too). A stream that breaks becomes a warning (`incomplete`); a file cut
+  off in the middle is padded so the archive stays valid and is left out
+  of the manifest. A refused or unreachable tree becomes a warning for a
+  HOME and an in-process read (with a warning) for a container.
+- **Manifest.** Entries written through the reader carry
+  `ownersPreserved: true`; the manifest lists their trees in
+  `preservedTrees`; `verify` adds both counts to its summary. Additive
+  only: older archives read as before.
+- **Restore.** As root, `tar --numeric-owner --same-owner --acls --xattrs`
+  into the storage roots, then `chown -R rast:rast` only for the folders
+  that are not in `preservedTrees` (one by one), then start RAST (the
+  share repair pass) and run `rast doctor`. The identities' uids are
+  `linux_uid_base + <id>` on every host; share gids are taken back by
+  `share_group_ensure` from the container's group when it is free.
+- **Not done here.** The reader is not used for the `apps` scope, and a
+  verify of the archive still reads it with `tar` (tar-rs), which cannot
+  parse ACL values with newlines in PAX records (GNU tar's own format); it
+  only needs the paths and sizes, which come first. Real systemd, the
+  capability set, the 0700 HOMEs and the restore are checked on the test
+  host (PROGRESS, "Pending on the test host").
 
 ### Decisions (taken by the maintainer on 2026-11-16)
 

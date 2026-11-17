@@ -116,6 +116,7 @@ The web server bridges each session to a WebSocket (see `docs/API.md`).
 | `rast-xpra-u<id>` (transient) | `/usr/bin/xpra start :<display> …` | `rast-u<uid>` (unprivileged identity) | One Xpra seamless graphical session per RAST user, lazily started |
 | `rast-app-u<uid>-<app>-<n>` (transient) | the app's launcher argv | `rast-u<uid>` | One native application process group inside that person's session |
 | `rast-files-u<uid>.socket` + `.service` (transient) | `/usr/local/bin/rast file-agent --home <HOME> …` | `rast-u<uid>` | Per-user file agent of a one-HOME account (ADR 0005): File Station over that person's HOME, socket-activated by the helper (`files_agent_start`), exits after 15 idle minutes unless the person has other processes |
+| `rast-backup-reader.socket` + `.service` (transient) | `/usr/local/bin/rast backup-reader --homes <homes> --shared <shared> …` | `root`, only `CAP_DAC_READ_SEARCH`, read-only file system | Backup reader (ADR 0005, D12): streams one HOME in one-HOME mode or one migrated shared folder as a tar archive with numeric owners, modes and ACLs to the backup engine of `rast serve`; socket `root:rast` 0660, token credential, peer uid `rast`; socket-activated by the helper (`backup_reader_start`), exits after 5 idle minutes |
 
 The transient units are independent systemd units, not children of
 `rast-native.service`: stopping or restarting the helper leaves running

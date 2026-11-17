@@ -77,7 +77,7 @@ version, schema version, scope, per-file SHA-256) and, depending on `--scope`:
 | --- | --- |
 | `db` | Consistent SQLite snapshot (`VACUUM INTO`, includes committed WAL data) |
 | `config` | `/etc/rast/rast.toml`, `/etc/rast/rast.env` (if present) and `secret.key` |
-| `users` | Copy of user homes and shared folders (HOMEs in one-HOME mode are skipped, see below) |
+| `users` | Copy of user homes and shared folders; HOMEs in one-HOME mode and migrated shared folders keep their numeric owners, modes and ACLs (see below) |
 | `apps` | Managed application definitions (compose files + encrypted env metadata) |
 
 Native Linux app installs and per-person profiles (`<data_dir>/linux-apps`) are
@@ -86,12 +86,34 @@ in use (stop `rast-linux.slice` first, then archive the directory; see
 [Upgrade and rollback of native apps](#upgrade-and-rollback-of-native-apps)).
 
 A HOME in one-HOME mode (`rast migrate home`) belongs to the account's Linux
-user and the service cannot read it, so the `users` scope **skips** it: the
-archive's `manifest.json` and the backup result list it under `warnings`
-(`users/homes/<name>: skipped, …`), and Backup Center shows the warning
-after the backup. Folders that cannot be read are listed the same way. Until
-Backup Center reads HOMEs through the helper (task 1.5b), back such HOMEs up
-as root, keeping owners and ACLs, for example
+user (`rast-u<id>`, 0700) and a migrated shared folder to root and its share
+group, so the service cannot read them itself. The `users` scope reads them
+through the **backup reader** (ADR 0005, D12): a read-only root unit
+`rast-backup-reader` that the native helper starts on demand
+(`backup_reader_start`) and that stops after 5 idle minutes. Their entries
+keep numeric uid and gid, mode and POSIX ACLs; symbolic links are stored as
+links and never followed; other file systems and mount points, FIFOs,
+sockets and devices are left out; and these are excluded on purpose: in a
+HOME `~/.cache`, `~/.local/share/Trash` and `~/.local/share/flatpak`, in a
+shared folder its recycle bins (`.Trash`, `.Trash-<uid>`). The archive's
+`manifest.json` marks those entries `ownersPreserved` and lists their
+folders under `preservedTrees` (`users/homes/<name>`,
+`users/shared/<container>`); the verify result (`rast restore --dry-run`,
+`POST /api/backups/{id}/verify`) shows both.
+HOMEs owned by the service (legacy accounts) and legacy shared folders are
+read by the service as before, without owners.
+
+A HOME in one-HOME mode is **skipped** with a warning
+(`users/homes/<name>: skipped, …`, in `manifest.json`, the backup result and
+Backup Center) when the reader cannot be used: native Linux apps are off
+(`native_enabled = false`), the helper or the reader fails, no RAST account
+has that name, or the account is outside the native pilot
+(`native_pilot_prefixes`, ADR 0007). A migrated shared folder in that case
+is read by the service without owners and ACLs, with a warning. Entries the
+reader could not read (unreadable, changed while read, on another mount),
+and a stream that broke (`users/homes/<name>: incomplete, …`; the entries
+before the break are in the archive) are listed the same way. For such a
+HOME, take a root copy that keeps owners and ACLs, for example
 `sudo tar --numeric-owner --acls -czf home-<name>.tar.gz -C /srv/rast/homes <name>`.
 
 Default scopes: `db,config`. Default output directory: `/var/lib/rast/backups`.
@@ -190,8 +212,12 @@ sudo -u rast rast doctor
 
 `rast restore` replaces the **database** only. A `users`-scope archive also
 contains the raw user files, stored as `users/homes/<username>/...` and
-`users/shared/<name>/...`. They must be extracted into the configured
-`storage_dir` subdirectories — never into `/`.
+`users/shared/<container>/...`. They must be extracted **as root** into the
+configured `storage_dir` subdirectories — never into `/`. Root keeps the
+numeric owners, modes and ACLs that the archive holds for HOMEs in one-HOME
+mode and migrated shared folders (the folders listed under `preservedTrees`
+in `manifest.json`); the other folders were read by the service without
+owners and are given back to `rast` one by one afterwards.
 
 With the default `storage_dir = /srv/rast`:
 
@@ -199,37 +225,45 @@ With the default `storage_dir = /srv/rast`:
 archive=/var/lib/rast/backups/rast-...-db-config-users.tar.gz
 sudo systemctl stop rast.service        # do not extract while the server runs
 
-# 1. Inspect the archive (no writes).
-tar -tzf "$archive" | head -n 30
+# 1. Inspect the archive (no writes): its entries, and which folders keep
+#    their owners (manifest.preservedTrees).
+tar -tvzf "$archive" --numeric-owner | head -n 30
+sudo -u rast rast restore --from "$archive" --dry-run | grep -A 10 preservedTrees
 
-# 2. Test on an isolated copy first: extract to a scratch directory and compare.
-scratch=$(mktemp -d)
-mkdir -p "$scratch/homes" "$scratch/shared"
-tar -xzf "$archive" -C "$scratch/homes" --strip-components=2 users/homes
-tar -xzf "$archive" -C "$scratch/shared" --strip-components=2 users/shared
-diff -r "$scratch/homes/<username>" /srv/rast/homes/<username> | head
+# 2. Test on an isolated copy first: extract to a scratch directory as root
+#    and compare contents, owners and ACLs.
+scratch=$(sudo mktemp -d)
+sudo mkdir -p "$scratch/homes" "$scratch/shared"
+sudo tar --numeric-owner --same-owner --acls --xattrs -xzf "$archive" -C "$scratch/homes" --strip-components=2 users/homes
+sudo tar --numeric-owner --same-owner --acls --xattrs -xzf "$archive" -C "$scratch/shared" --strip-components=2 users/shared
+sudo diff -r "$scratch/homes/<username>" /srv/rast/homes/<username> | head
+sudo getfacl -R -n "$scratch/shared/<container>" | head -n 40
 
 # 3. Extract into storage_dir (NOT into /).
-sudo tar -xzf "$archive" -C /srv/rast/homes --strip-components=2 users/homes
-sudo tar -xzf "$archive" -C /srv/rast/shared --strip-components=2 users/shared
-# Give what you restored to the service, folder by folder (see below):
-sudo chown -R rast:rast /srv/rast/homes/<username>     # each restored home
-sudo chown -R rast:rast /srv/rast/shared/<folder>      # each restored shared folder
-sudo chown root /srv/rast/shared/<folder>              # only if it was migrated (rast migrate shares)
-# Per-user homes stay private; shared folders follow their share policy.
+sudo tar --numeric-owner --same-owner --acls --xattrs -xzf "$archive" -C /srv/rast/homes --strip-components=2 users/homes
+sudo tar --numeric-owner --same-owner --acls --xattrs -xzf "$archive" -C /srv/rast/shared --strip-components=2 users/shared
+# Give the folders that are NOT listed under preservedTrees to the service,
+# folder by folder (legacy accounts and legacy shared folders):
+sudo chown -R rast:rast /srv/rast/homes/<username>     # each legacy home
 sudo chmod 0700 /srv/rast/homes/<username>
+sudo chown -R rast:rast /srv/rast/shared/<container>   # each legacy shared folder
 
-# 4. Start and verify.
+# 4. Start and verify: the start runs the shared folder repair pass, which
+#    gives migrated shared folders their group layout back.
 sudo systemctl start rast.service
 sudo -u rast rast doctor
 ```
 
 Never run `chown -R rast:rast` over all of `/srv/rast/homes` or
-`/srv/rast/shared`: a HOME in one-HOME mode belongs to its account's Linux
-user (`rast-u<id>`) and would stop working for its apps, terminals and file
-agent, and a migrated shared folder's container must stay owned by root
-(the server's repair pass gives its entries the group layout back when it
-starts). HOMEs in one-HOME mode are not in the archive anyway; restore them
+`/srv/rast/shared`, nor over a folder listed under `preservedTrees`: a HOME
+in one-HOME mode belongs to its account's Linux user (`rast-u<id>`) and
+would stop working for its apps, terminals and file agent, and a migrated
+shared folder's container must stay owned by root with its share group.
+Numeric owners restore correctly on another host because an identity's uid
+is always `linux_uid_base + <user id>` (keep the same `linux_uid_base`);
+share groups take the gid of the restored container back when they are
+created again, and the repair pass re-applies the group layout. HOMEs that
+a backup skipped (see the warnings) are not in the archive: restore them
 from your root copy with `sudo tar --numeric-owner --same-owner --acls -xzf
 home-<name>.tar.gz -C /srv/rast/homes`.
 
@@ -251,9 +285,12 @@ On a fresh host, in this order:
 4. Restore user files into `storage_dir/homes` and `storage_dir/shared` with
    the commands in
    [Restoring user files from an archive](#restoring-user-files-from-an-archive)
-   (never extract `users/` into `/`). Match ownership: `rast:rast`; per-user
-   homes are `0700`.
-5. `sudo systemctl start rast.service && sudo -u rast rast doctor`.
+   (never extract `users/` into `/`), as root so that the folders listed
+   under `preservedTrees` keep their owners and ACLs; give only the other
+   (legacy) folders to `rast:rast`, one by one. Per-user homes are `0700`.
+   Keep the same `linux_uid_base`.
+5. `sudo systemctl start rast.service && sudo -u rast rast doctor` (the
+   start runs the shared folder repair pass).
 
 Without `secret.key`, sessions and encrypted app secrets cannot be recovered;
 everything else still works.
