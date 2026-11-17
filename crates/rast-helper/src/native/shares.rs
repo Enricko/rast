@@ -1176,6 +1176,12 @@ pub struct TreeReport {
     /// (`.Trash-<uid>`, owned by that uid): private to their owner, so the
     /// walk leaves them (and what is in them) alone.
     pub user_trash: u64,
+    /// Entries at the top of the container named as the recycle bin of a
+    /// RAST identity that cannot be its (a link, a file, or a folder of
+    /// another owner, made first by another member): that member's agent
+    /// never uses it, so an administrator should remove it. Reported only;
+    /// the walk treats them like any other entry.
+    pub foreign_trash: Sample,
 }
 
 /// One entry the walk hands to its visitor: a folder (opened and checked)
@@ -1270,6 +1276,16 @@ fn walk_limited(
                 continue;
             }
         };
+        if frame.path.is_empty()
+            && rast_base::storage::xdg_trash::is_foreign_share_trash(
+                text,
+                is_dir(&stat),
+                stat.st_uid,
+                &(owners.identity_uids.0..=owners.identity_uids.1),
+            )
+        {
+            report.foreign_trash.add(&path);
+        }
         if is_symlink(&stat) {
             report.symlinks.add(&path);
             continue;

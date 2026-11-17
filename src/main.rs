@@ -1206,6 +1206,7 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // Database
     print!("[    ] database ... ");
     let mut user_ids = std::collections::BTreeSet::new();
+    let mut share_containers: Vec<(String, String)> = Vec::new();
     match db::init(&cfg).await {
         Ok(pool) => {
             user_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM users")
@@ -1213,6 +1214,12 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 .await
                 .unwrap_or_default()
                 .into_iter()
+                .collect();
+            share_containers = rast::storage::shares::list_records(&pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|record| (record.name, record.container_path))
                 .collect();
             let version = db::schema_version(&pool).await;
             println!("ok (schema v{version}, {})", cfg.db_path().display());
@@ -1347,6 +1354,14 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("{line}");
         }
         warnings += identities.warnings;
+    }
+    if cfg.native_enabled {
+        let (lines, trash_warnings) =
+            rast::share_groups::doctor_share_trash(&cfg, &share_containers);
+        for line in &lines {
+            println!("{line}");
+        }
+        warnings += trash_warnings;
     }
 
     print!("[    ] time drift (system clock) ... ");

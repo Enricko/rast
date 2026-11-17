@@ -379,6 +379,27 @@ pub async fn repair_all(state: &AppState, native: &NativeClient) -> AppResult<Re
                 "shared folder repair: entries got the group layout back"
             );
         }
+        let squatted = report["foreignTrash"]["count"].as_u64().unwrap_or(0);
+        if squatted > 0 {
+            let sample: Vec<&str> = report["foreignTrash"]["paths"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .take(REPAIR_LOGGED_PATHS)
+                        .collect()
+                })
+                .unwrap_or_default();
+            tracing::warn!(
+                share = %record.id,
+                name = %record.name,
+                entries = squatted,
+                sample = ?sample,
+                "shared folder repair: recycle bin folders made by someone else block their \
+                 member's recycle bin; an administrator should remove them"
+            );
+        }
         let foreign = report["foreignAclEntries"]["count"].as_u64().unwrap_or(0);
         if foreign > 0 {
             let sample: Vec<&str> = report["foreignAclEntries"]["paths"]
@@ -1056,6 +1077,65 @@ pub async fn share_deleted(state: &AppState, share_id: &str, container_path: &st
     {
         tracing::warn!(share = share_id, error = %error, "cannot remove the groups of a deleted shared folder");
     }
+}
+
+/// `rast doctor`: entries at the top of shared folders named as the
+/// recycle bin of a RAST identity that cannot be its (`.Trash-<uid>` made
+/// first by another member: a link, a file, or a folder of another owner).
+/// That member's agent never uses it, so the member cannot delete into the
+/// folder's recycle bin until an administrator removes it (ADR 0005,
+/// section 5). Read-only, as the service: `rast` can list every container.
+/// `shares` are `(name, container)` pairs from the database.
+pub fn doctor_share_trash(
+    cfg: &crate::config::Config,
+    shares: &[(String, String)],
+) -> (Vec<String>, usize) {
+    use std::os::unix::fs::MetadataExt;
+    let base = cfg.linux_uid_base;
+    let uids =
+        base.saturating_add(1)..=base.saturating_add(crate::native::protocol::MAX_USER_ID as u32);
+    let mut lines = Vec::new();
+    for (name, container) in shares {
+        let Ok(container) = shares::validated_container(container) else {
+            continue;
+        };
+        let dir = cfg.shared_dir().join(&container);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(entry_name) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if crate::storage::xdg_trash::is_foreign_share_trash(
+                &entry_name,
+                meta.is_dir(),
+                meta.uid(),
+                &uids,
+            ) {
+                lines.push(format!(
+                    "[WARN] shared folder {name}: {} is not the recycle bin of uid {} (owner uid {}, \
+                     {}); that member cannot delete into this folder's recycle bin until an \
+                     administrator removes it",
+                    dir.join(&entry_name).display(),
+                    entry_name.trim_start_matches(".Trash-"),
+                    meta.uid(),
+                    if meta.file_type().is_symlink() {
+                        "a link"
+                    } else if meta.is_dir() {
+                        "a folder"
+                    } else {
+                        "not a folder"
+                    }
+                ));
+            }
+        }
+    }
+    let warnings = lines.len();
+    (lines, warnings)
 }
 
 #[cfg(test)]

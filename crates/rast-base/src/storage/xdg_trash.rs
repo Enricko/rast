@@ -80,6 +80,28 @@ pub fn share_trash_name(uid: u32) -> String {
     format!(".Trash-{uid}")
 }
 
+/// The uid a top-level `.Trash-<uid>` name of a shared folder is for (the
+/// canonical decimal form only: `.Trash-007` names nobody's).
+pub fn share_trash_uid(name: &str) -> Option<u32> {
+    let uid: u32 = name.strip_prefix(".Trash-")?.parse().ok()?;
+    (share_trash_name(uid) == name).then_some(uid)
+}
+
+/// Whether the entry `name` at the top of a shared folder (owner `owner`, a
+/// folder or not) is named as the recycle bin of an account in `uids` but
+/// cannot be that account's: a link, a file, or a folder of another owner.
+/// Its member's agent never uses it (the Trash specification's check), so
+/// that member cannot delete into this shared folder's recycle bin until an
+/// administrator removes it.
+pub fn is_foreign_share_trash(
+    name: &str,
+    is_dir: bool,
+    owner: u32,
+    uids: &std::ops::RangeInclusive<u32>,
+) -> bool {
+    share_trash_uid(name).is_some_and(|uid| uids.contains(&uid) && !(is_dir && owner == uid))
+}
+
 /// The name of the info file of the trash entry `name`.
 pub fn info_name(name: &str) -> String {
     format!("{name}{INFO_SUFFIX}")
@@ -444,6 +466,44 @@ mod tests {
             "/home/alice/docs/a dir",
         ),
     ];
+
+    #[test]
+    fn foreign_trash_folders_of_a_share_are_recognised() {
+        let uids = 200_001..=1_200_000;
+        assert_eq!(share_trash_uid(".Trash-200005"), Some(200_005));
+        for name in [
+            ".Trash-007",
+            ".Trash-",
+            ".Trash",
+            ".Trash-5x",
+            "Trash-5",
+            ".Trash--5",
+        ] {
+            assert_eq!(share_trash_uid(name), None, "{name}");
+        }
+        // Its own folder is fine; a link or file, or another owner, is not.
+        assert!(!is_foreign_share_trash(
+            ".Trash-200005",
+            true,
+            200_005,
+            &uids
+        ));
+        assert!(is_foreign_share_trash(
+            ".Trash-200005",
+            false,
+            200_005,
+            &uids
+        ));
+        assert!(is_foreign_share_trash(
+            ".Trash-200005",
+            true,
+            200_006,
+            &uids
+        ));
+        // Names of accounts outside RAST, and other names, are not counted.
+        assert!(!is_foreign_share_trash(".Trash-1000", true, 200_006, &uids));
+        assert!(!is_foreign_share_trash("docs", true, 200_006, &uids));
+    }
 
     #[test]
     fn files_written_by_gio_are_read() {

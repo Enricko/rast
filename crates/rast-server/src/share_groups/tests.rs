@@ -640,3 +640,33 @@ async fn identity_conflicts_are_remembered_until_they_are_gone() {
     assert!(sync_once(&state, &native, &mut known).await.unwrap());
     assert!(known.conflicts.is_empty());
 }
+
+#[test]
+fn doctor_lists_recycle_bin_folders_made_by_someone_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config(dir.path());
+    let team = cfg.shared_dir().join("team");
+    std::fs::create_dir_all(&team).unwrap();
+    let base = cfg.linux_uid_base;
+    // Made by this process (not by the identities they are named for).
+    std::fs::create_dir_all(team.join(format!(".Trash-{}", base + 5))).unwrap();
+    std::fs::write(team.join(format!(".Trash-{}", base + 6)), b"").unwrap();
+    // Not names of RAST identities' recycle bins.
+    std::fs::create_dir_all(team.join(".Trash-1000")).unwrap();
+    std::fs::create_dir_all(team.join("docs")).unwrap();
+    let shares = vec![
+        ("Team".to_string(), "team".to_string()),
+        ("Gone".to_string(), "missing".to_string()),
+        ("Bad".to_string(), "../etc".to_string()),
+    ];
+    let (mut lines, warnings) = doctor_share_trash(&cfg, &shares);
+    lines.sort();
+    assert_eq!(warnings, 2, "{lines:?}");
+    assert!(
+        lines[0].contains(&format!(".Trash-{}", base + 5)),
+        "{lines:?}"
+    );
+    assert!(lines[0].contains("a folder"), "{lines:?}");
+    assert!(lines[1].contains("not a folder"), "{lines:?}");
+    assert!(lines.iter().all(|line| line.contains("shared folder Team")));
+}

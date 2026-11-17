@@ -786,11 +786,16 @@ fn the_walk_leaves_the_recycle_bins_of_members_alone() {
         std::fs::create_dir_all(top.join(folder)).unwrap();
     }
     std::fs::write(top.join(format!("{mine}/files/x")), b"x").unwrap();
+    // Named as the recycle bins of other identities: a file and a link.
+    let file_squat = rast_base::storage::xdg_trash::share_trash_name(me + 2);
+    let link_squat = rast_base::storage::xdg_trash::share_trash_name(me + 3);
+    std::fs::write(top.join(&file_squat), b"").unwrap();
+    symlink("/etc", top.join(&link_squat)).unwrap();
     let fd = open_dir(&top).unwrap();
     let owners = Owners {
         root_uid: u32::MAX - 15,
         rast_uid: u32::MAX - 16,
-        identity_uids: (me, me),
+        identity_uids: (me, me + 3),
     };
     let mount = fd_mount_id(fd.as_raw_fd()).unwrap();
     let mut report = TreeReport::default();
@@ -804,11 +809,20 @@ fn the_walk_leaves_the_recycle_bins_of_members_alone() {
     // Only the top `.Trash-<owner>`; a name that is not its owner's and one
     // deeper down are walked like any folder.
     assert_eq!(report.user_trash, 1);
+    // The folder, file and link that other identities cannot use are
+    // reported (and otherwise treated like any entry).
+    let mut foreign = report.foreign_trash.paths.clone();
+    foreign.sort();
+    let mut expected_foreign = vec![other.clone(), file_squat.clone(), link_squat.clone()];
+    expected_foreign.sort();
+    assert_eq!(foreign, expected_foreign);
+    assert_eq!(report.symlinks.paths, vec![link_squat.clone()]);
     let mut expected = vec![
         "docs".to_string(),
         format!("docs/{mine}"),
         other.clone(),
         format!("{other}/files"),
+        file_squat.clone(),
     ];
     expected.sort();
     assert_eq!(visited, expected);
