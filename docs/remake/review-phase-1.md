@@ -24,21 +24,21 @@
 | Id | Severity | Component | Title | Status |
 | --- | --- | --- | --- | --- |
 | F1 | medium | Restore guide (`docs/OPERATIONS.md`, `api/backup.rs`) | Root restore trusts owners, set-id bits, special files and `preservedTrees` from an archive that `rast` writes | fixed (`native/restore_files.rs`, `backup_reader/archive.rs`, `backup/restore_files.rs`, `src/main.rs`, `api/backup.rs`, `docs/OPERATIONS.md`) |
-| F2 | medium | Linux apps (`rast-session` `native_apps.rs`) | A pilot administrator's app actions change data of accounts outside the pilot | open |
-| F3 | low | Share groups, HOME migration | Processes started by cron run outside RAST units: they keep revoked share groups and can start during a migration | open |
-| F4 | low | Helper `home_migrate_trash` | `ensure_dir_in` chowns a folder swapped in after `mkdirat` | open |
-| F5 | low | Helper `home_migrate_rollback` | Rollback leaves the identity write access and identity-owned entries in the legacy HOME | open |
+| F2 | medium | Linux apps (`rast-session` `native_apps.rs`) | A pilot administrator's app actions change data of accounts outside the pilot | fixed (`linux_apps/native_apps.rs`, `linux_apps/mod.rs`, `frontend/src/apps/packages/linux.ts`) |
+| F3 | low | Share groups, HOME migration | Processes started by cron run outside RAST units: they keep revoked share groups and can start during a migration | fixed (`native/shares.rs`, `native/home_migrate.rs`, `native/job_deny.rs`, `native/mod.rs`, `share_groups.rs`, `migrate_home.rs`, `src/main.rs`) |
+| F4 | low | Helper `home_migrate_trash` | `ensure_dir_in` chowns a folder swapped in after `mkdirat` | fixed (`native/home_migrate.rs`, `native/homes.rs`, `native/shares.rs`) |
+| F5 | low | Helper `home_migrate_rollback` | Rollback leaves the identity write access and identity-owned entries in the legacy HOME | fixed (`native/home_migrate.rs`) |
 | F6 | low | Backup reader (`walk.rs`) | The reader streams the content of files of any owner | fixed (`backup_reader.rs`, `backup_reader/walk.rs`, `backup/reader.rs`, `src/main.rs`) |
 | F7 | low | Backup reader, Backup Center | Sparse files make a `users` backup arbitrarily large | fixed (`backup_reader/walk.rs`, `backup/reader.rs`, `backup/mod.rs`) |
-| F8 | low | Helper trash move, `rast migrate home` | Legacy recycle-bin rows go to any container: no layout check in the helper, no access check in the CLI | open |
-| F9 | low | Native pilot (share rename) | A shared folder renamed out of the pilot keeps its groups; revocations stop | open |
-| F10 | low | `rast migrate home/shares --dry-run` | Dry runs walk real accounts and shared folders as root and print their paths | open |
-| F11 | low | Pilot runbook (`docs/OPERATIONS.md`) | The runbook does not tie `native_enabled` to `native_pilot_prefixes` | open |
+| F8 | low | Helper trash move, `rast migrate home` | Legacy recycle-bin rows go to any container: no layout check in the helper, no access check in the CLI | fixed (`native/home_migrate.rs`, `migrate_home.rs`) |
+| F9 | low | Native pilot (share rename) | A shared folder renamed out of the pilot keeps its groups; revocations stop | fixed (`api/files.rs`) |
+| F10 | low | `rast migrate home/shares --dry-run` | Dry runs walk real accounts and shared folders as root and print their paths | fixed (`migrate_shares.rs`, `migrate_home.rs`, `src/main.rs`) |
+| F11 | low | Pilot runbook (`docs/OPERATIONS.md`) | The runbook does not tie `native_enabled` to `native_pilot_prefixes` | fixed (`native/mod.rs`, `docs/OPERATIONS.md`, `docs/adr/0007-native-pilot.md`) |
 | F12 | info | Backup reader (ADR 0005 D5, D12) | Any `rast` process can read every one-HOME HOME through the reader | fixed (`backup_reader.rs`, `docs/adr/0005-one-home.md`, `CLAUDE.md`) |
-| F13 | info | Native pilot, one HOME | Shrinking the pilot or turning native apps off strands migrated accounts | open |
-| F14 | info | Helper trash move | Payload checks compare a fresh `lstat`, not the planned one; no link-count check on files | open |
-| F15 | info | Helper `home_migrate_rollback` | Rollback matches entries by inode number, which can be reused | open |
-| F16 | info | Legacy Docker display proxy | `/linux-apps/<key>/` has no pilot backstop | open |
+| F13 | info | Native pilot, one HOME | Shrinking the pilot or turning native apps off strands migrated accounts | fixed (`migrate_home.rs`, `src/main.rs`, `docs/OPERATIONS.md`) |
+| F14 | info | Helper trash move | Payload checks compare a fresh `lstat`, not the planned one; no link-count check on files | fixed (`native/home_migrate.rs`) |
+| F15 | info | Helper `home_migrate_rollback` | Rollback matches entries by inode number, which can be reused | fixed (`native/home_migrate.rs`, `native/shares.rs`) |
+| F16 | info | Legacy Docker display proxy | `/linux-apps/<key>/` has no pilot backstop | fixed (`linux_apps/mod.rs`, `linux_apps/proxy.rs`) |
 
 When to fix, as proposed by the review:
 
@@ -228,6 +228,18 @@ account has a profile folder.
 - `migrate`, with a volume of the outside account, answers 409 and makes
   no `stop_container` or `identity_ensure` call for that account.
 
+**Resolution.** With the pilot set, `uninstall` with `removeData` splits
+the accounts that have a profile of the app by the pilot (an account that
+no longer exists counts as outside): only pilot accounts lose their
+profile, and the reply lists the others as `keptOutsidePilot` (App Center
+says how many kept their settings, and its dialog says so before). The
+actions that cannot be split refuse with 409 and change nothing while an
+account outside the pilot has data for the app: `migrate` of a legacy
+Docker app, `migration/cleanup`, and the uninstall of a Docker app with
+its data (`check_docker_uninstall`, before any session ends). Tests:
+`uninstall_with_data_in_the_pilot_keeps_the_data_of_other_accounts`,
+`migration_in_the_pilot_refuses_while_other_accounts_have_data`.
+
 ### F3 (low) Processes started by cron run outside RAST units: they keep revoked share groups and can start during a migration
 
 **Description.** Two Phase 1 checks assume one of two things: every
@@ -305,6 +317,46 @@ The server's later passes see no unit process with that group.
 - Migration: a test hook adds an identity process after the first check.
   Apply stops before `finish`, and a second run resumes.
 
+**Resolution.** Decision A7.
+
+1. `share_session_groups` now also reports, per user, the processes whose
+   real, effective or saved uid is the identity's but that run outside the
+   user's units (`outsideProcesses`, `outsideGids`). The server never
+   restarts for them; `SessionRestarts::wanted_denials` keeps the deny
+   entry of every share the user lost entirely while such a process
+   carries its group, also after the restart, and the server logs the
+   user once per change. Tests:
+   `processes_outside_rast_units_are_named_as_holders` and the extended
+   `session_groups_name_the_share_groups_processes_carry` (helper),
+   `processes_outside_units_keep_a_lost_shared_folder_denied` (server).
+2. `home_migrate_apply`, when it finishes (also for an account that is
+   already in one-HOME mode), lists `rast-u<id>` in `/etc/cron.deny`
+   (created `root:root 0644` when missing) and in `/etc/at.deny` (only
+   when it exists: without it only root may use `at`, and creating it
+   would let every other account use `at`); `home_migrate_rollback`
+   removes the line before the HOME step. New module `native/job_deny.rs`:
+   only the exact line of a validated `rast-u<digits>` name is added or
+   removed, the file is opened without following links, must be a regular
+   file with one link and at most 1 MiB, and is replaced atomically (a
+   part file with the old owner, group and mode, synced, renamed over it,
+   folder synced; edits serialized). The reply says whether the identity
+   has a crontab in the spool (cron may still run it), and the CLI warns
+   with the commands to check and remove it. `rast doctor` names one-HOME
+   identities missing from either file. Legacy and non-pilot identities
+   are never listed (the CLI only migrates pilot accounts). Tests:
+   `identities_are_listed_and_unlisted_exactly`,
+   `a_missing_at_deny_is_never_created_and_links_are_refused`,
+   `one_home_mode_keeps_cron_and_at_away_and_a_rollback_lets_them_back`,
+   `doctor_names_one_home_identities_that_cron_or_at_may_still_run`,
+   `apply_warns_about_a_crontab_from_before`.
+3. `refuse_running` (now also the saved uid) runs again at the start of
+   `finish`, at the start of `finish_rollback` and at the end of every
+   trash batch; the journal stays, and the next run resumes. Tests:
+   `a_process_that_starts_during_apply_or_rollback_stops_it_before_the_home_step`
+   (the fake `usermod`, which runs between the tree and the HOME step,
+   starts the process),
+   `a_process_that_starts_during_a_recycle_bin_batch_stops_it_and_the_next_batch_resumes`.
+
 ### F4 (low) `ensure_dir_in` chowns a folder swapped in after `mkdirat`
 
 **Description.** `home_migrate_trash` creates the XDG Trash folders with
@@ -364,6 +416,18 @@ legacy recycle bin with a reason and change nothing.
 renames a non-empty folder owned by another uid into the place of
 `.Trash-<uid>`. The trash batch reports the entry as left, and the
 swapped folder keeps its owner, mode and ACLs.
+
+**Resolution.** `ensure_dir_in` creates with `homes::mkdir_at` and, when
+it created the folder, opens it with `homes::open_created_dir` (owned by
+the helper and empty) before any `fchown`, ACL change or `fchmod`; a
+folder swapped in is refused ("was replaced before it could be taken
+over; nothing was changed"), and only that folder's entries fail. The
+move path also checks the container (`open_container`, then owner root
+and group in the share gid range) before it makes `.Trash-<uid>`; the
+rollback opens containers without that check, so payloads still come
+back after a layout change. Tests:
+`a_folder_swapped_in_for_a_new_recycle_bin_folder_is_never_taken_over`,
+`a_container_outside_the_group_layout_gets_no_recycle_bin`.
 
 ### F5 (low) Rollback leaves the identity write access and identity-owned entries in the legacy HOME
 
@@ -428,6 +492,22 @@ identity, and a symlink owned by the identity.
 - Rollback reports the symlink and stops before the HOME step.
 - After the symlink is removed, rollback leaves the directory owned by
   `rast`, mode 0755, without named entries.
+
+**Resolution.** Every entry the rollback does not restore from the
+journal (made since the migration, or recorded but another file now) goes
+to the service with the HOME's group, without access or default ACL, and
+with mode 0755 (folders and files with the owner's execute bit) or 0644;
+it is listed as `returned`. The walk now notes links, special files and
+files with several links of the identity; when there are any, the
+rollback stops with `identity_conflict` and their paths after the tree
+and before the passwd home and the HOME step, and deletes nothing. A
+second run continues: `undo_trash` reports entries that are already back
+in the legacy bin (moved back by the stopped run, or never moved) as
+`trashRestored` again, so the CLI puts their saved rows back
+(`INSERT OR IGNORE`). `refuse_running` runs again before the HOME step
+(F3). Test: `a_rollback_resets_new_entries_and_stops_on_links_of_the_identity`
+(a 0777 folder with named `rwx` and default entries, an executable 0777
+file and a symlink, all of the identity, plus a moved recycle bin entry).
 
 ### F6 (low) The backup reader streams the content of files of any owner
 
@@ -592,6 +672,17 @@ container.
 - Helper: a container owned by the service gets `forbidden`, and nothing
   is created.
 
+**Resolution.** Helper: the trash move opens a shared folder's container
+with `open_container` and makes `.Trash-<uid>` only when it is owned by
+root with a group in the share gid range; otherwise its entries fail with
+"not in the group layout; run `rast migrate shares` for it first". CLI:
+`map_row` gets the shares the account can open (`accessible`, the same
+check as the apply's shared folder check), and a row of any other shared
+folder stays in the legacy bin ("the account can no longer open its
+shared folder"), in the dry run and in the apply. Tests:
+`a_container_outside_the_group_layout_gets_no_recycle_bin` (helper),
+`rows_of_a_shared_folder_the_account_lost_stay_in_the_legacy_bin` (CLI).
+
 ### F9 (low) A shared folder renamed out of the pilot keeps its groups; revocations stop
 
 **Description.** A share's container never changes. A share stays in the
@@ -630,6 +721,14 @@ groups and set deny entries for its members (least access).
 - renaming `t-share` to `team` answers 409 and keeps the name;
 - renaming it to `t-team` still works.
 
+**Resolution.** Decision A8. `PATCH /api/shares/{id}` validates the new
+name and, while the pilot is set, refuses with 400 a rename for which
+`allows_share(name, container)` changes, in either direction, before
+anything is written; the message names the pilot and says to keep the
+folder on its side. ADR 0007, the API and the runbook say so. Test:
+`a_rename_across_the_native_pilot_boundary_is_refused` (out of the pilot,
+into it, and an allowed rename inside it).
+
 ### F10 (low) Dry runs walk real accounts and shared folders as root and print their paths
 
 **Description.** ADR 0007 says `--dry-run` reports everything.
@@ -664,6 +763,16 @@ given. Either way, update ADR 0007 and the runbook.
 fake helper that returns samples. The output has the counts and none of
 the sample paths.
 
+**Resolution.** Decision A9. `rast migrate shares` and `rast migrate home`
+take `--show-paths`; without it, the CLI removes the paths (every
+`paths` sample, `path` values, ACL entry text, the merge sources' paths
+and the recycle bin rows' paths) from the reports of shared folders and
+accounts outside the pilot, in the text and in `--json`, and keeps counts
+and sizes. Pilot entries are unchanged. Tests:
+`a_dry_run_shows_only_counts_for_shared_folders_outside_the_pilot`,
+`a_dry_run_shows_only_counts_for_accounts_outside_the_pilot`, and the CLI
+parse test for `--show-paths`.
+
 ### F11 (low) The pilot runbook does not tie `native_enabled` to `native_pilot_prefixes`
 
 **Description.** Production runs with `native_enabled = false`. The
@@ -697,6 +806,13 @@ every account then has the native features.
 
 **Regression test.** A `rast doctor` test with native apps on and no
 pilot: the output has a warning line that names the key.
+
+**Resolution.** The runbook (`docs/OPERATIONS.md`, step 1) and ADR 0007
+("Upgrade order") give the order: update with `native_enabled = false`,
+add `native_pilot_prefixes`, restart and check `rast doctor`, only then
+set `native_enabled = true`; `CONFIGURATION.md` and the upgrade note say
+it too. `rast doctor` warns when native apps are on and the key is not
+set, naming the key. Test: `doctor_warns_when_native_apps_are_on_without_a_pilot`.
 
 ### F12 (info) Any `rast` process can read every one-HOME HOME through the reader
 
@@ -756,6 +872,14 @@ server has native apps off.
 **Regression test.** A `rast doctor` test with a HOME owned by an identity
 and the pilot set to `[]`: the output has a warning that names the account.
 
+**Resolution.** `rast doctor` (`migrate_home::doctor_report`) lists every
+account whose HOME is a folder of its identity (the `is_one_home` check,
+not followed) and warns, naming it, when it is outside the pilot or when
+native apps are off, with the rollback command. The runbook's new step 7
+says to roll back one-HOME accounts before removing a prefix or turning
+native apps off; step 8 no longer calls `[]` harmless. Test:
+`doctor_names_one_home_accounts_the_pilot_or_native_apps_no_longer_cover`.
+
 ### F14 (info) Payload checks compare a fresh `lstat`, not the planned one; no link-count check on files
 
 **Description.** `payload_records` checks the legacy payloads (link count
@@ -783,6 +907,18 @@ the planned record, and require one link for a file. Otherwise report
 payload with a hard link to another file. The status is `changed`, and
 nothing is chowned.
 
+**Resolution.** `convert_payload` gets the planned records. Before any
+change it requires the moved entry to be a file or folder of the planned
+type, the same inode as the planned record (device, inode, inode
+generation), and one link for a file, on both the `lstat` and the opened
+descriptor; inside a folder, only entries that match their planned record
+change owner. Otherwise the entry goes back to the legacy bin unchanged,
+its info file is removed and the result is `changed` (it stays in the
+legacy bin; the CLI keeps its row). Test:
+`a_payload_swapped_after_planning_is_changed_and_never_given_away` (a test
+hook before the move swaps one payload for a hard link to another file of
+the service and links the other payload elsewhere).
+
 ### F15 (info) Rollback matches entries by inode number, which can be reused
 
 **Description.** `rollback_tree` matches a journal record to an entry by
@@ -801,6 +937,14 @@ the change time in the journal. Treat a mismatch as `changedSince`.
 **Regression test.** An overlay test with the same device and inode but a
 different generation: the entry is reported as `changedSince` and not
 restored.
+
+**Resolution.** `Record` has an optional `gen` field: the inode generation
+from `FS_IOC_GETVERSION` (ext4, btrfs; absent on file systems without
+it, and in older journals). `is_recorded` requires it to match when it
+was recorded, in the rollback walk, in recycle bin payloads and for the
+HOME itself; a mismatch is `changedSince` and the entry is reset like a
+new one (F5). Test: `a_reused_inode_number_is_reported_and_not_restored`
+(the journal's generation of one file is changed).
 
 ### F16 (info) The legacy Docker display proxy has no pilot backstop
 
@@ -828,6 +972,11 @@ pilot does not allow, as `native_proxy::in_pilot` does.
 
 **Regression test.** A legacy session of an account outside the pilot:
 `/linux-apps/<key>/` answers 404.
+
+**Resolution.** `Session` records the username at open, and the legacy
+display proxy answers 404 when the native pilot does not allow it, right
+after the session lookup. Test:
+`the_legacy_display_proxy_refuses_accounts_outside_the_native_pilot`.
 
 ## Checked and found sound
 

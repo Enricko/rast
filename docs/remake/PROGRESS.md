@@ -794,6 +794,33 @@ Update it at the end of every session.
     scratch restore and `--to-storage` for a `t-` account's backup (owners
     set by root, ACLs, set-gid containers); the audit records in
     `journalctl -u rast-backup-reader`; a real sparse file on ext4.
+- **Task 1.6 fixes, part 2: F2, F3, F4, F5, F8, F9, F10, F11, F13, F14,
+  F15, F16** (2026-11-17, uncommitted): pilot-scoped Linux app actions
+  (F2) and legacy display proxy backstop (F16); share rename across the
+  pilot refused with 400 (F9, A8); counts-only dry runs outside the pilot
+  and `--show-paths` (F10, A9); `rast doctor` warnings for native apps
+  without a pilot (F11) and for stranded one-HOME accounts (F13); helper
+  migration hardening: no take-over of swapped recycle bin folders and a
+  container layout check (F4, F8 with a CLI access check), rollback
+  resets unrecorded entries and stops on identity links (F5), planned
+  payload checks (F14), inode generation in journals (F15). F3 (A7):
+  holders outside RAST units keep deny entries, `refuse_running` again
+  before the HOME steps and at the end of trash batches, and
+  `/etc/cron.deny` and `/etc/at.deny` edits by the helper (new
+  `native/job_deny.rs`) for one-HOME identities, with a doctor check.
+  Runbook, ADR 0005 (section 13), ADR 0007, API, CONFIGURATION and
+  NATIVE-LINUX-APPS updated.
+  - Tests: 24 new, several extended (`share_session_groups`, CLI parse,
+    `rast migrate home` apply, dry run and row mapping).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1136 passed, 0
+    failed; frontend 160 passed, build clean; no new dependency or
+    migration.
+  - Pending on the test host: the cron and at deny edits as root on the
+    real `/etc` (no `cron.deny` today; Ubuntu's `at.deny` is
+    `root:daemon 0640`), `crontab -l -u rast-u<id>` refused after an
+    apply; `FS_IOC_GETVERSION` on the production file system (ext4); a
+    rollback of a `t-` account with a link in its HOME; a cron job of a
+    `t-` identity keeping a revoked `t-share` denied.
 
 ## Phase 1 checklist
 

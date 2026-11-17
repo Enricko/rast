@@ -266,7 +266,7 @@ operation is idempotent.
 | `share_dir_repair` | `shareId`, `container` | Daily repair pass (D3 decision, 2026-11-16): the recursive `share_dir_prepare` of a container that already has the layout (owned by root); a legacy container is left for `rast migrate shares`. Keeps the container's deny entries. |
 | `share_trash_usage` | `shareId`, `container` | Task 1.4 review (2026-11-17): read-only. The share must have its groups and the container must be a real folder of `rast` or root. Sums the apparent size of the regular files below the folders named like recycle bins at the top of the container (`.Trash`, `.Trash-*`), which the service cannot read; no-follow, one device and mount, at most 1 000 000 names (`truncated` when it stops early), 60 s deadline, not serialised with long-running work. For RAST's check of shared folder limits (section 11). |
 | `share_deny_set` | `shareId`, `container`, `userIds` (at most 256) | D7 decision (2026-11-16): the full set of `u:rast-u<id>:---` entries on the access ACL of a prepared container, the stopgap while a full revocation waits for the user's session restart. Entries of users not listed are removed; the default ACL is not touched. |
-| `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run as the identity in one of the user's units and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. A process counts only when its real and effective uid are the identity's and the first non-slice component of its cgroup (`/proc/<pid>/cgroup`) is `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…` or `rast-term-u<uid>-…` (`.service`); both files are read through one descriptor of `/proc/<pid>`, which stays bound to that process. Lets the server find sessions that still hold a revoked group after a server restart. Phase 2 (user units under `user@<uid>.service`) must extend the unit rule. |
+| `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run as the identity in one of the user's units and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. A process counts only when its real and effective uid are the identity's and the first non-slice component of its cgroup (`/proc/<pid>/cgroup`) is `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…` or `rast-term-u<uid>-…` (`.service`); both files are read through one descriptor of `/proc/<pid>`, which stays bound to that process. Lets the server find sessions that still hold a revoked group after a server restart. Review F3: every other process whose real, effective or saved uid is an identity's (a cron or `at` job) is reported as `outsideProcesses` and `outsideGids`; it never triggers a restart, but the server keeps the deny entry of a share its user lost while such a process carries its group. Phase 2 (user units under `user@<uid>.service`) must extend the unit rule. |
 | `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (socket-activated, like `files_agent_start`; task 1.5b, section 14). It only streams tar archives of one HOME owned by an identity or one migrated container, directly below the fixed homes and shared roots (section 7). Returns `{unit, socket, token}`. |
 
 **Trust assumption.** The helper cannot check the `userId` ↔ `username`
@@ -998,6 +998,43 @@ deviates from section 8:
   Done in task 1.5b (section 14).
 - **Cleanup** of the emptied legacy folders, `.trash/<userId>`, the journal
   folders and stray `homes/rast-u<id>` stays a separate, confirmed step.
+- **Processes that start later (review F3).** The check for processes of
+  the identity (real, effective or saved uid) runs again before the HOME
+  itself is given away, at the end of every recycle bin batch and before
+  the HOME step of a rollback; a new process stops the run with the
+  journal kept, and the next run resumes. When the apply finishes (also
+  for an account that is already in one-HOME mode), the helper lists
+  `rast-u<id>` in `/etc/cron.deny` (created `root:root 0644` if missing)
+  and in `/etc/at.deny` (only when it exists: without it only root may use
+  `at`), atomically and with the file's owner and mode, adding or removing
+  only that exact line; the rollback removes it before the HOME step.
+  The reply says whether the identity has a crontab in the spool (cron
+  may still run it), and the CLI warns. `rast doctor` names one-HOME
+  identities missing from either file.
+- **New recycle bin folders (review F4).** `ensure_dir_in` creates with
+  `homes::mkdir_at` and takes a folder over only when it is the one it
+  created (owned by the helper and empty); a folder swapped in after
+  `mkdirat` is refused. A shared folder's `.Trash-<uid>` is only made in a
+  container with the group layout (owner root, group in the share range).
+- **Rollback of entries the journal does not have (review F5).** Entries
+  made since the migration, and recorded entries that are another file
+  now, go to the service with no ACLs and mode 0755 (folders, executable
+  files) or 0644. Links, special files and files with several links of the
+  identity stop the rollback before the HOME step with a list; RAST never
+  deletes them. The rollback is safe to run again: recycle bin entries
+  already back in the legacy bin are reported as restored again, so their
+  rows come back.
+- **Shared folders the account lost (review F8).** A recycle bin row of a
+  shared folder the account can no longer open stays in the legacy bin.
+- **Payloads (review F14).** Before a moved payload changes owner, the
+  helper compares it with the planned record (device, inode, type, inode
+  generation, one link for a file); otherwise it goes back to the legacy
+  bin unchanged (`changed`). Inside a folder only planned entries change
+  owner.
+- **Inode generation (review F15).** Records carry the inode generation
+  (`gen`, from `FS_IOC_GETVERSION`, on file systems that have one). A
+  rollback restores an entry only when the generation matches too;
+  otherwise it is `changedSince`. Journals without it match as before.
 
 ### 14. Task 1.5b: implementation notes (2026-11-17)
 

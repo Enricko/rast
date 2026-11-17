@@ -383,6 +383,53 @@ this file by `scripts/changelog-section.sh`.
     migrated shared folder (ADR 0005, D12). This is now stated in ADR 0005
     and the security invariants, and every folder the reader serves is
     logged (`rast::backup_reader::audit` in the reader unit's journal).
+  - F2: with the native pilot, uninstalling a Linux app "with its data"
+    removed the settings of every account. It now removes those of pilot
+    accounts only (App Center says how many kept theirs, reply field
+    `keptOutsidePilot`); migrating or cleaning up a legacy Docker app, and
+    uninstalling a Docker app with its data, answer `409` while accounts
+    outside the pilot have data for it.
+  - F3: processes that cron or `at` start run outside RAST units. While
+    one of them carries the group of a shared folder its user lost, the
+    folder stays denied to that user (also after the session restart) and
+    the server logs it. `rast migrate home` checks again for processes of
+    the account before the HOME changes hands, at the end of every recycle
+    bin batch and before the HOME step of a rollback, and stops with the
+    journal kept. Accounts in one-HOME mode are listed in `/etc/cron.deny`
+    (and `/etc/at.deny` when it exists); a rollback takes them out, the
+    apply warns about an existing crontab, and `rast doctor` names one-HOME
+    identities that are missing.
+  - F4: a folder swapped in for a new recycle bin folder during
+    `rast migrate home` was given to the account; such a folder is now
+    refused, and a shared folder's recycle bin is only made in a container
+    with the group layout.
+  - F5: a rollback of `rast migrate home` left entries made in one-HOME
+    mode with the account's modes and ACLs, and its links in the HOME. Such
+    entries now get the modes the legacy File Station makes (0755/0644, no
+    ACLs), and links, special files and hard links of the account stop the
+    rollback before the HOME step with a list. A rollback that stopped can
+    be run again and still puts the recycle bin rows back.
+  - F8: recycle bin entries of a shared folder the account can no longer
+    open stay in the legacy recycle bin.
+  - F9: with the native pilot, renaming a shared folder into or out of the
+    pilot is refused (`400`).
+  - F10: with the native pilot, dry runs of accounts and shared folders
+    outside it print counts and sizes only; `--show-paths` (new option of
+    `rast migrate shares` and `rast migrate home`) prints paths and ACL
+    entries too.
+  - F11: `rast doctor` warns when native apps are on without
+    `native_pilot_prefixes`; the runbook sets the pilot before
+    `native_enabled`.
+  - F13: `rast doctor` names one-HOME accounts outside the pilot or on a
+    server with native apps off (File Station cannot open their HOME);
+    roll them back first.
+  - F14: a recycle bin payload that changed after its batch was planned
+    (another file, or a file with several links) is no longer given to the
+    account; it stays in the legacy recycle bin (status `changed`).
+  - F15: journals of `rast migrate home` record the inode generation; a
+    rollback no longer restores an entry whose inode number was reused.
+  - F16: the legacy Docker display proxy refuses accounts outside the
+    native pilot.
 
 ### Upgrade note
 
@@ -413,6 +460,15 @@ this file by `scripts/changelog-section.sh`.
 - Add `native_pilot_prefixes` to `/etc/rast/rast.toml` only **after**
   updating to a release that knows it: an older release refuses to start
   with an unknown key. Remove it before a rollback to such a release.
+  Update with `native_enabled = false`, add the key and restart, check that
+  `rast doctor` shows the pilot, and only then set `native_enabled = true`.
+  Before removing a prefix or turning native apps off, roll back the
+  one-HOME accounts it covers (`rast doctor` names stranded ones).
+
+- `rast migrate home` now edits `/etc/cron.deny` (and `/etc/at.deny` when
+  it exists) for the accounts it moves to one HOME: it adds or removes the
+  line `rast-u<id>` only, and creates `/etc/cron.deny` as `root:root 0644`
+  when it is missing. Its rollback removes the line.
 
 - The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
   `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.

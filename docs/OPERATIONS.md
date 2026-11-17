@@ -795,7 +795,9 @@ one); without either the command stops with an error, so a run never
 covers every shared folder by default.
 
 With the native pilot (`native_pilot_prefixes`), apply and `--rollback`
-refuse a shared folder outside it and `--all` skips those; see
+refuse a shared folder outside it and `--all` skips those, and a dry run of
+a shared folder outside it prints counts and sizes only, without paths or
+ACL entries (`--show-paths` prints them too); see
 [Testing on production with the native pilot](#testing-on-production-with-the-native-pilot).
 
 - The apply first writes a journal of every entry's group, mode and ACLs to
@@ -868,6 +870,17 @@ refuse a shared folder outside it and `--all` skips those; see
   group its user lost, for example because the server restarted during a
   warning, is warned and restarted again. Leftover deny entries of an
   earlier run are removed by the first check.
+- **Processes outside RAST units** (review F3). A process whose real,
+  effective or saved uid is `rast-u<id>` but that runs outside the
+  person's units (a cron or `at` job and its children) is never restarted
+  by RAST. While such a process carries the group of a shared folder its
+  user lost entirely, that folder keeps the deny entry
+  `u:rast-u<id>:---`, also after the session restart, and the server logs
+  `processes of the account outside RAST units ... still carry the groups
+  of shared folders it lost`. End the process
+  (`sudo pkill -u rast-u<id>`); the entry goes at the next check. Accounts
+  in one-HOME mode are kept away from cron and `at` (see
+  `rast migrate home`).
 
 ## Moving accounts to one HOME (`rast migrate home`)
 
@@ -886,7 +899,9 @@ sudo -u rast rast migrate home --user <name> --rollback    # undo (server stoppe
 
 `--all` instead of `--user <name>` covers every account; one of the two is
 required. `--json` prints a machine-readable report; the exit code is 1
-when any account failed (the others are still done). Back up `/etc/rast`,
+when any account failed (the others are still done). With the native
+pilot, a dry run of an account outside it prints counts and sizes only, no
+paths (`--show-paths` prints them too). Back up `/etc/rast`,
 `/var/lib/rast` and `/srv/rast` first. With the native pilot
 (`native_pilot_prefixes`), apply and `--rollback` refuse an account outside
 it and `--all` skips those; see
@@ -911,7 +926,10 @@ it and `--all` skips those; see
   administrator account can only be migrated after all of them. The apply
   stops the account's session, apps, terminals and file agent, and refuses
   while any process of `rast-u<id>` still runs (for example
-  `sudo pkill -u rast-u<id>`, then run it again).
+  `sudo pkill -u rast-u<id>`, then run it again). It checks again before
+  the HOME itself changes hands, at the end of every recycle bin batch and
+  before the HOME step of a rollback: a process that started meanwhile (a
+  cron job) stops the run with the journal kept, and the next run resumes.
 - **Apply.** The helper writes a journal of every entry's owner, group,
   mode and ACLs and the plan of every move to
   `<data_dir>/migrations/home/<userId>/<stamp>/` (`journal.jsonl`,
@@ -923,7 +941,14 @@ it and `--all` skips those; see
   file** — `config` → `~/.config`, `data` → `~/.local/share`, `state` →
   `~/.local/state`, `cache` → `~/.cache`, `home` → `~/` — sets the passwd
   home, and finally gives the HOME itself to the account (0700, no ACL)
-  and writes `applied`. An entry that the HOME already has (a file, or a
+  and writes `applied`. Then it lists `rast-u<id>` in `/etc/cron.deny`
+  (created as `root:root 0644` if missing) and in `/etc/at.deny` (only if
+  that file exists: without it only root may use `at`), adding just that
+  line and keeping the file's owner and mode; the rollback takes the line
+  out again. Legacy accounts and accounts outside the pilot are never
+  listed. A crontab installed before the migration stays in the cron
+  spool, and cron may still run it: the apply warns about it (remove it
+  with `sudo crontab -r -u rast-u<id>`). An entry that the HOME already has (a file, or a
   file where a folder is) is a conflict: it stays in the old profile and
   is listed. `.Xauthority` is not moved (the session makes it again), nor
   is a profile's `tmp`. Data on another file system than the HOME is not
@@ -934,19 +959,33 @@ it and `--all` skips those; see
   entries deleted from one), in batches of 256. Its database rows are saved
   to `<data_dir>/migrate-home/<userId>/trash-rows-<time>.jsonl` (0600)
   before they are deleted. Entries whose shared folder no longer exists,
-  and entries whose data is missing, stay in the legacy recycle bin and
-  are listed.
+  or that the account can no longer open, entries whose data is missing,
+  and entries whose data changed after the batch was planned (status
+  `changed`: another file, or a file with several links), stay in the
+  legacy recycle bin and are listed. A shared folder's `.Trash-<uid>` is
+  only made in a container with the group layout of `rast migrate shares`
+  (owner root, the share's group).
 - An apply that stopped half way resumes with its journal when run again;
   an account that is done is left as it is (its session keeps running).
   An apply or rollback still running in the helper keeps the account
   locked (`share_busy`, "still running") until it ends.
 - **Rollback** (server stopped) moves the recycle bin entries and the
   merged app data back, restores the recorded owners, groups, modes and
-  ACLs (the 0.18.3 grant included), gives entries made since the migration
-  to the service, sets the passwd home back and puts the recycle bin rows
-  back; the journal folder is renamed `<stamp>.rolled-back`. Entries that
-  are another file now, or that the HOME holds in place of a moved entry,
-  are listed and left as they are. Set-uid bits are never restored.
+  ACLs (the 0.18.3 grant included), sets the passwd home back and puts the
+  recycle bin rows back; the journal folder is renamed
+  `<stamp>.rolled-back`. Entries made since the migration, and recorded
+  entries that are another file now (another inode, or the same inode
+  number with another inode generation), are given to the service as the
+  legacy File Station makes them: no ACLs, mode 0755 for folders and
+  executable files, 0644 otherwise (listed as `returned`, and the second
+  kind as `changedSince`). Set-uid bits are never restored.
+- The rollback **stops before the HOME step** when the HOME holds links,
+  special files or files with several links of `rast-u<id>`, and names
+  them: a legacy HOME must keep nothing of the identity's, which reads it
+  again through the 0.18.3 grant. RAST never deletes them: move them out
+  of the HOME (or remove them after checking), then run `--rollback`
+  again; it continues where it stopped and still puts the recycle bin rows
+  back.
 - **Afterwards** the account's quota counts its app data, caches and
   recycle bin (ADR 0005, D2), and Backup Center skips its HOME with a
   warning (see "What is in a backup archive"). The legacy folders that the
@@ -1037,18 +1076,26 @@ accounts, `native_pilot_prefixes` (ADR 0007) keeps those features to test
 accounts and test shared folders, so the real ones keep the 0.18.x
 behaviour until the migration of real accounts is approved.
 
-1. Update first, then add the key: a release that does not know
-   `native_pilot_prefixes` refuses to start with it in `/etc/rast/rast.toml`
-   (unknown keys are rejected). After `sudo rast update --version <version>`
-   and a health check, add to `/etc/rast/rast.toml`:
+1. Set the pilot **before** native apps are on: `native_enabled = true`
+   without `native_pilot_prefixes` gives every account and every shared
+   folder the native features at the next start (Linux apps, shared folder
+   groups for the real folders, kernel limits, `--all` covering everyone),
+   and `rast doctor` warns about it. In this order:
+   1. Update with `native_enabled` still `false`
+      (`sudo rast update --version <version>`, then a health check). A
+      release that does not know `native_pilot_prefixes` refuses to start
+      with it in `/etc/rast/rast.toml` (unknown keys are rejected), so the
+      key comes after the update.
+   2. Add to `/etc/rast/rast.toml`:
 
-   ```toml
-   native_pilot_prefixes = ["t-"]
-   ```
+      ```toml
+      native_pilot_prefixes = ["t-"]
+      ```
 
-   then restart RAST. `rast doctor` and the server log at start show
-   `native pilot: on: only accounts and shared folders whose names start
-   with "t-"`.
+      restart RAST, and check that `rast doctor` shows `native pilot: on:
+      only accounts and shared folders whose names start with "t-"`.
+   3. Only then set `native_enabled = true`, restart, and check
+      `rast doctor` again.
 2. Test with accounts whose username starts with `t-` and shared folders
    whose name and container start with `t-` (create a shared folder with its
    final `t-` name: the container is the name at creation and never
@@ -1059,20 +1106,38 @@ behaviour until the migration of real accounts is approved.
    recycle bin and quota, no Linux groups, no helper call for their groups
    or kernel quota. Terminal is unchanged.
 4. `rast migrate shares` and `rast migrate home`: `--dry-run` still reports
-   everything and marks entries outside the pilot; apply and `--rollback` of
+   everything and marks entries outside the pilot, with counts and sizes
+   only (no paths, no ACL entries) unless `--show-paths` is given; apply and `--rollback` of
    a `--share` or `--user` outside it are refused (nothing changes, exit
    code 1, before the server must be stopped), and `--all` covers only the
    pilot and lists the rest as skipped. A pilot account that can open a
    shared folder outside the pilot is not moved to one HOME (it would lose
    access to that folder from its apps).
-5. A shared folder renamed across the boundary (in or out) leaves the
-   pilot: RAST does nothing more to its container or its groups, which keep
-   their pilot members until the pilot ends. Do not rename test shared
-   folders out of `t-`.
-6. To end the pilot, remove the key (every account then gets the native
+5. While the pilot is set, renaming a shared folder across the boundary (a
+   `t-` name to another, or the other way) is refused with 400: choose a
+   name that keeps it on its side.
+6. Linux apps act only on pilot accounts: uninstalling an app "with its
+   data" removes the app data of accounts in the pilot only (the others
+   are kept and counted), and migrating or cleaning up a legacy Docker
+   app is refused while accounts outside the pilot have data for it.
+7. **Before an account leaves the pilot** (a prefix is removed, or
+   `native_pilot_prefixes = []`) **or native apps are turned off**, roll
+   back every account in one-HOME mode that it covers:
+   `sudo -u rast rast migrate home --user <name> --rollback` (server
+   stopped). Otherwise the account is stranded: File Station cannot open
+   its HOME (it belongs to `rast-u<id>`), backups skip it and the RAST
+   quota applies again; its files are intact. `rast doctor` names every
+   such account; put it back in the pilot with native apps on to roll it
+   back. Shared folders keep their group layout, which gives nothing to
+   accounts outside the pilot.
+8. To end the pilot, remove the key (every account then gets the native
    features at the next start: migrate real accounts first, or keep the key
-   until then). `native_pilot_prefixes = []` turns the native features off
-   for everyone without removing them.
+   until then). `native_pilot_prefixes = []` keeps the native features from
+   everyone (step 7 first).
+9. `rast doctor` also names one-HOME identities that are missing from
+   `/etc/cron.deny` (or from `/etc/at.deny` when it exists): run
+   `rast migrate home --user <name>` again to list them. Run it as root
+   (`sudo rast doctor`) if `/etc/at.deny` is not readable by `rast`.
 
 ## The private data folder
 

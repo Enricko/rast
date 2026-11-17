@@ -479,8 +479,15 @@ every backend (native and legacy Docker):
   app the account cannot see;
 * no Xpra session is started for it (`NativeSessions` refuses too), and the
   display proxy answers `404` for any session key, also for a session left
-  from before the pilot;
+  from before the pilot; so does the legacy Docker display proxy;
 * it stays in the legacy HOME layout (no file agent, no one-HOME mode).
+
+App actions of a pilot administrator that touch the data of every account
+are scoped too: *Also delete its settings* removes the settings of pilot
+accounts only (App Center says how many accounts kept theirs), and
+migrating a legacy Docker app, cleaning up its retained data, or
+uninstalling a Docker app with its data is refused while accounts outside
+the pilot have data for it.
 
 Terminal is not part of the pilot. Without the key nothing changes.
 

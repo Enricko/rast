@@ -52,8 +52,15 @@ Outside the pilot, administrators included:
   the feature), the management routes answer 403 with the reason, every
   other route 404 like an invisible app (new routes default to 404). The
   service layer (`LinuxApps::list`, `get`, `icon`, `open`, `native_launch`,
-  `native_session_json`), `NativeSessions::launch` and `ensure_session`, and
-  the Xpra display proxy refuse as well, as backstops.
+  `native_session_json`), `NativeSessions::launch` and `ensure_session`, the
+  Xpra display proxy and the legacy Docker display proxy (review F16)
+  refuse as well, as backstops. App actions that touch the data of every
+  account are scoped (review F2): uninstalling an app with its data removes
+  the app data of pilot accounts only (the reply counts the others as
+  `keptOutsidePilot`); migrating or cleaning up a legacy Docker app, and
+  uninstalling a Docker app with its data, are refused (409) while accounts
+  outside the pilot have data for it. An account that no longer exists
+  counts as outside.
 - **One HOME.** `HomeFs::is_one_home` is false: File Station, Terminal and
   apps keep the legacy layout, recycle bin and quota.
 - **Shared folder groups.** The plan holds only pilot shared folders,
@@ -66,7 +73,9 @@ Outside the pilot, administrators included:
 - **Quota.** Kernel user limits only for pilot one-HOME accounts, group
   limits and recycle bin measurements only for pilot shared folders.
 - **CLI.** `rast migrate shares` and `rast migrate home`: `--dry-run`
-  reports everything and marks entries outside the pilot. Apply and
+  reports everything and marks entries outside the pilot; for those it
+  prints counts and sizes only, without paths or ACL entries, unless
+  `--show-paths` is given (review F10, decision A9). Apply and
   `--rollback` refuse a `--share` or `--user` outside it, by the typed name
   before the server lock and again by the stored name and container, with
   exit code 1 and nothing changed; `--all` covers only the pilot and lists
@@ -80,21 +89,33 @@ show the pilot.
 ## Consequences
 
 - **Rename across the boundary.** A shared folder's container is its name at
-  creation and never changes. Renaming a pilot folder out of the prefix, or
-  renaming a real folder into it, makes it leave (or never join) the pilot:
-  name and container must both match. RAST then does nothing to its
-  container or its groups (least access, data kept): the groups keep the
-  pilot members they had, nobody is added or removed, and no repair or
-  delete hook runs. Create test shared folders with their final `t-` name.
+  creation and never changes, and name and container must both match. While
+  the pilot is set, `PATCH /api/shares/{id}` refuses (400) a rename that
+  would move a folder into or out of the pilot (review F9, decision A8).
+  A folder that is already across the boundary (renamed before the check
+  existed) is outside the pilot: RAST does nothing to its container or its
+  groups (least access, data kept): the groups keep the pilot members they
+  had, nobody is added or removed, and no repair or delete hook runs.
+  Create test shared folders with their final `t-` name.
 - **Upgrade order.** The configuration rejects unknown keys, so a release
   that does not know `native_pilot_prefixes` refuses to start with it. Add
   the key to `/etc/rast/rast.toml` only **after** updating to a binary that
-  knows it, and remove it before a rollback to an older one.
+  knows it, and remove it before a rollback to an older one. Native apps
+  must never be on without the key (review F11): update with
+  `native_enabled = false`, add the key and restart, check that
+  `rast doctor` shows the pilot, and only then set `native_enabled = true`.
+  `rast doctor` warns when native apps are on and no pilot is set.
 - **Ending the pilot.** Removing the key gives every account the native
   features at the next start, so real accounts must be migrated (or the key
   kept) first. Leftover state of real accounts (an Xpra unit adopted at
   start, an old group membership) stays harmless while the pilot is on: the
   proxy and the routes refuse them, and nothing is changed.
+- **Shrinking the pilot or turning native apps off** strands accounts in
+  one-HOME mode (review F13): File Station runs in-process as `rast` and
+  cannot open a HOME that belongs to the identity, backups skip it, and
+  the RAST quota applies again (the files are intact). Roll those accounts
+  back first (`rast migrate home --rollback`); `rast doctor` names every
+  one-HOME account outside the pilot or on a server with native apps off.
 - No migration, no new dependency, no API break: the API change is additive
   (flags false and 403/404 only when the key is set). Tests cover the
   configuration, every gated path and the CLI binary.
