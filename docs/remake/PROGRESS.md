@@ -915,7 +915,35 @@ Update it at the end of every session.
   systemd checks pending on the test host).
 - [x] Task 1.5c: native pilot gate (ADR 0007, agent decision A5)
 - [x] Task 1.6: Phase 1 security review (`docs/remake/review-phase-1.md`, 16 findings, all fixed with regression tests: `c2bd208`, `3285c92`, `79e855c`, `343dc16`, `a49cefa`; the review of task 1.5 was folded into it)
-- [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
+- [x] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
+  - Passed on production 1.0.1-alpha.2 on 2026-11-17 with `t-alice`, `t-bob`
+    and `t-share`:
+    - App matrix through the public URL: Google Chrome passes all five
+      checks, and its saved file is in File Station after 1.6 s
+      (`tests/e2e/results/app-matrix-one-home-2026-11-17T22-24-42-282`).
+    - Chrome runs as `rast-u127` with `HOME=/srv/rast/homes/t-alice` and
+      reads a file uploaded through File Station.
+    - Kernel checks:
+      - `t-bob` and the `rast` service get `Permission denied` on
+        `t-alice`'s HOME, and `t-alice` on `t-bob`'s;
+      - `t-bob` can read `t-share` but not write to it;
+      - a file `t-alice` writes there gets `rast-u127` and the
+        share's `-rw` group, mode 660.
+      - `/etc/cron.deny` lists both identities; `at.deny` is not created.
+    - File Station in one-HOME mode: listing, upload (owned by
+      `rast-u127`), XDG Trash restore and usage.
+    - `rast migrate shares --share t-share` and `rast migrate home --user
+      t-alice|t-bob`: dry-run, apply, rollback and apply again.
+      - The first rollback (alpha.1) stopped on RAST's own `~/Shared`
+        link after its walk; fixed in `f6143ca`, and the resumed rollback
+        on alpha.2 completed.
+      - After the rollback, recorded entries have their old owner, mode
+        and ACL; new entries went to `rast` (HOME) or were reported and
+        left (share, as documented); `cron.deny` was empty and the
+        passwd HOMEs were back.
+      - A second apply is a no-op.
+    - The responsiveness budgets fail (typing p95 327 ms, scroll 1.2 fps,
+      drag 18 fps): this is the latency task that comes next.
 
 ## In progress
 
@@ -938,8 +966,19 @@ permissions for this session are listed in "Testing on production"). Order:
    `/var/lib/rast/backups/rast-20261117-185218-db-config.tar.gz`, rollback
    binary `/usr/local/bin/rast.rollback-0.18.3`; the real `admin` account
    was still active after the 30-minute wait),
-   [ ] app matrix baseline in legacy mode (replaces 0.6 on 0.18.3, A4),
-   [ ] Phase 1 exit with test accounts.
+   [x] app matrix baseline in legacy mode (replaces 0.6 on 0.18.3, A4): the
+   first run on alpha.1 showed no Chrome window; cause: a stale
+   `rast_native` nftables table from an older helper run kept
+   `meta skuid != 1000`, so the server (uid 993) was reset on every Xpra
+   port (fixed in `e056cce`),
+   [x] `1.0.1-alpha.2` deploy (2026-11-17 22:16 UTC; two attempts before
+   rolled back automatically because alpha.1's updater gives the 18 MB
+   download 60 s and this host's link swings between 6 and 0.07 MB/s,
+   fixed for later updates in `6f509ff`; the helper replaced the stale
+   table at start-up; cold backups in `/root/rast-backups/`),
+   [x] Phase 1 exit with test accounts (2026-11-17, see the checklist).
+   Native was on for the `t-` pilot from 19:05 to 22:30 UTC, then
+   quarantined again.
 3. [ ] Native window latency investigation (before Phase 2).
 4. [ ] Phases 2, 3, 4 (4.1–4.3), 5, 6; task 4.4 last (not deployed without
    the maintainer); Phase 7 skipped.
