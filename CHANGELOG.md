@@ -13,6 +13,13 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **E2E app matrix:** the `app-matrix` scenario (`node tests/e2e/run.mjs
+  --scenario=app-matrix`) runs the five app checks (launcher, RAST window,
+  typing, saved file visible in File Station, normal close) for Chrome,
+  Firefox, VS Code and LibreOffice, with typing, scroll and window-drag
+  responsiveness budgets, against the dev instance or against production
+  with a `t-` test account only.
+
 - **About RAST (Leptos)** app: the first window rendered by the new
   `crates/rast-ui` crate (Leptos, compiled to WebAssembly and built with
   Trunk). It shows the product name and version; the WASM module is fetched
@@ -295,6 +302,27 @@ this file by `scripts/changelog-section.sh`.
   optional `hidden=false` parameter on `GET /api/files` and
   `GET /api/files/search`; without it responses are unchanged.
 
+- **Native pilot (ADR 0007).** New optional configuration key
+  `native_pilot_prefixes` (env `RAST_NATIVE_PILOT_PREFIXES`, comma
+  separated), for example `["t-"]`. When set, the native features are
+  limited to accounts whose username, and shared folders whose name and
+  container, start with one of the prefixes; `[]` means nobody, and
+  without the key nothing changes. Outside the pilot, administrators
+  included: no Linux apps of any backend (the list is empty and
+  `linuxAppsEnabled`, `nativeEnabled` and `dockerEnabled` are `false`, the
+  management routes answer `403`, every other `/api/linux-apps*` route and
+  the Xpra proxy `404`, and no session is started), no one-HOME mode, no
+  Linux groups, no kernel quota and no helper call that names the account
+  or the shared folder. `rast migrate shares` and `rast migrate home` still
+  report everything with `--dry-run` (entries outside the pilot are
+  marked), refuse apply and `--rollback` of a `--share` or `--user` outside
+  it (exit code 1, nothing changed), and with `--all` cover only the pilot
+  (the others are listed as skipped). A shared folder renamed across the
+  boundary leaves the pilot and RAST leaves its container and groups as
+  they are. Terminal is unchanged. `rast doctor` and the server log at
+  start show the pilot. See "Testing on production with the native pilot"
+  in `docs/OPERATIONS.md`.
+
 ### Security
 
 - The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
@@ -333,6 +361,10 @@ this file by `scripts/changelog-section.sh`.
   Backup Center skips its HOME with a warning until task 1.5b. Scripts that
   call `rast migrate shares` without arguments must add `--all` (or
   `--share <name>`).
+
+- Add `native_pilot_prefixes` to `/etc/rast/rast.toml` only **after**
+  updating to a release that knows it: an older release refuses to start
+  with an unknown key. Remove it before a rollback to such a release.
 
 - The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
   `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.

@@ -691,6 +691,60 @@ Update it at the end of every session.
     failed; frontend 160 tests passed and build clean; no new dependency
     or migration.
 
+- **Task 1.5c, native pilot gate** (2026-11-17, ADR 0007; agent decision
+  A5). New optional key `native_pilot_prefixes` (env
+  `RAST_NATIVE_PILOT_PREFIXES`, comma separated; validated, `[]` = nobody;
+  absent = unchanged). Outside the pilot, administrators included: every
+  `/api/linux-apps*` route is gated by a route layer (list empty with
+  `linuxAppsEnabled`/`nativeEnabled`/`dockerEnabled` false, management
+  403, everything else 404), with backstops in `LinuxApps`,
+  `NativeSessions::launch`/`ensure_session` and the Xpra proxy;
+  `is_one_home` is false; the share group plan, the syncer (helper replies
+  that name accounts outside the pilot are dropped), the repair pass and
+  the create/delete hooks see only pilot shared folders (name and
+  container) and accounts; quota sync and the recycle bin measure only
+  pilot accounts and folders; `rast migrate shares|home`: dry-run marks
+  entries outside the pilot, apply and rollback refuse them (`--share` /
+  `--user`, before the instance lock, exit 1) and `--all` skips them; a
+  pilot account that can open a non-pilot folder stays legacy. `rast
+  doctor` and the start log show the pilot. Terminal unchanged.
+  - Decisions: a shared folder renamed across the boundary leaves the
+    pilot and nothing is done to its container or groups; `/check` is a
+    management route (403); leftover sessions of non-pilot accounts are
+    still adopted at start but the proxy refuses them;
+    `POST /api/session/restart` is unchanged.
+  - Tests: config (file, env, `[]`, validation), one-HOME, doctor,
+    `NativeSessions` backstop, proxy, API for a non-pilot administrator and
+    user and for pilot accounts, the Xpra proxy with live test sessions,
+    share group plan/syncer/repair/hooks with a recording helper, quota
+    sync and the recycle bin measure, `rast migrate home` and `rast migrate
+    shares` (refusals, `--all`, dry-run marks), and the CLI binary
+    (`tests/migrate_pilot_cli.rs`).
+  - Production: add `native_pilot_prefixes = ["t-"]` to
+    `/etc/rast/rast.toml` only after the deploy of a build that knows it
+    (see "Testing on production with the native pilot" in
+    `docs/OPERATIONS.md`).
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1059 passed, 0
+    failed; frontend 160 tests passed and build clean; no new dependency
+    or migration.
+
+- **Task 0.6, app matrix scenario** (2026-11-17, `d067bf8`; not yet run on
+  a native session, see A4): `tests/e2e/scenarios/app-matrix.mjs` runs the
+  five checks of CLAUDE.md for Chrome, Firefox, VS Code and LibreOffice
+  plus the maintainer's responsiveness checks, measured on the page's own
+  clock (budgets in one table: typing p95 ≤ 150 ms, scroll p95 ≤ 200 ms and
+  ≥ 15 changed frames/s, window drag ≥ 30 frames/s, repaint after the drop
+  ≤ 250 ms). The file of check 4 goes to `<HOME>/rast-matrix/`; in legacy
+  mode check 4 is an expected fail. Against production it accepts only
+  `t-` accounts (never `t-admin`) and an allow-listed set of API calls, and
+  installs nothing. 29 `node --test` unit tests. The baseline run on
+  `1.0.1-alpha.1` is pending on the test host.
+- **CI fixes** (2026-11-17): `6151186` a pending session restart is
+  recorded before the agent stops (a browser could read the old state;
+  `homefs_e2e` flaked under load); `65673a6` the `~/Shared` link report is
+  sorted (directory order differs on CI runners, which failed the last
+  three CI runs of the Remake PR).
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
@@ -711,7 +765,57 @@ Update it at the end of every session.
 
 ## In progress
 
-- Nothing.
+Autonomous session of 2026-11-17 (the maintainer's instruction: finish the
+remake in one session; Claude coordinates, subagents do the tasks; production
+permissions for this session are listed in "Testing on production"). Order:
+
+1. [x] Test accounts on production 0.18.3: `t-admin` (temporary, plain
+   administrator, never used for apps or terminals), `t-alice` and `t-bob`
+   (users), shared folder `t-share` (`t-alice` write, `t-bob` read).
+   Passwords in `~/.config/rast-test/creds` (0600, outside the repo); every
+   root command is logged in `~/rast-automation.log`.
+2. [ ] Rest of Phase 1: review of task 1.5, task 1.5b, task 1.6 and its
+   fixes, responsiveness checks in the app matrix, task 0.6 on 0.18.3,
+   deploy `1.0.1-alpha.1`, Phase 1 exit with test accounts.
+3. [ ] Native window latency investigation (before Phase 2).
+4. [ ] Phases 2, 3, 4 (4.1–4.3), 5, 6; task 4.4 last (not deployed without
+   the maintainer); Phase 7 skipped.
+
+## Agent decisions, to be confirmed by the maintainer
+
+(Keputusan agent, perlu konfirmasi maintainer.) Each is the option that
+gives the least access and keeps data; the session went on with it.
+
+- **A1, test accounts on 0.18.3** (2026-11-17): the 0.18.3 CLI has only
+  `user create-admin`, which refuses when an administrator exists, and
+  signing in as a real administrator is not allowed. The accounts were
+  made with a one-off tool built from the `v0.18.3` tag (an example program
+  outside the repository that calls the same `users::create` as the API and
+  refuses names without `t-`), run once as `rast`. `t-admin` is a plain
+  administrator (not super administrator).
+- **A2, the shared folder `Test`** is treated as a real shared folder (its
+  name has no `t-` prefix and real accounts are members): never migrated or
+  changed.
+- **A3, "delete" of test accounts** means deactivate and revoke sessions
+  (`DELETE /api/users/{id}`); RAST has no hard delete. `t-admin` is
+  deactivated after its last use.
+- **A4, task 0.6 is not run on 0.18.3.** 0.18.3 has no way to give native
+  apps to some accounts only: app visibility is `users` or `admins` per
+  app, with no group or user rule, so a native app that `t-alice` can open
+  is open to every real account too (and `admins` apps to the real
+  administrators). Running the baseline there would lift the native
+  quarantine for real users, which the session rules forbid. Instead, the
+  app matrix baseline runs on `1.0.1-alpha.1` with the native pilot gate
+  (A5), with the test accounts still in legacy mode (the 0.18.3 code path
+  for legacy accounts is kept), before they are migrated.
+- **A5, native pilot gate** (task 1.5c, ADR 0007): new optional config key
+  `native_pilot_prefixes`. With it, native apps, one-HOME mode, shared
+  folder groups, quota limits and the migration commands (apply and
+  rollback) apply only to accounts and shared folders whose name starts
+  with a listed prefix. Production gets `["t-"]` after the deploy. Reason:
+  with `native_enabled = true` the share group syncer would create groups
+  and set members for every shared folder, including the real `Test`
+  folder and real accounts.
 
 ## Testing on production
 
