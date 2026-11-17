@@ -113,6 +113,11 @@ pub fn sync(
             Err(error) => return Err(fs_error(error.into())),
         }
     }
+    // The folder is read in directory order, which differs between file
+    // systems: report names sorted, so the result does not depend on it.
+    report.linked.sort();
+    report.removed.sort();
+    report.conflicts.sort();
     Ok(report)
 }
 
