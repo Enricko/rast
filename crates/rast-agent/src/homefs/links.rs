@@ -20,6 +20,7 @@ use rustix::fs as rfs;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
+use crate::native::homes::share_link_container;
 
 use super::fsat::{self, fs_error, Kind};
 use super::{ShareRoots, SHARED_DIR};
@@ -35,13 +36,6 @@ pub struct SharedLinks {
     pub removed: Vec<String>,
     /// Share names taken by something else in `~/Shared` (left unchanged).
     pub conflicts: Vec<String>,
-}
-
-/// Whether `target` names a direct child of `shared_root`.
-fn share_target<'a>(target: &'a Path, shared_root: &Path) -> Option<&'a std::ffi::OsStr> {
-    (target.parent() == Some(shared_root))
-        .then(|| target.file_name())
-        .flatten()
 }
 
 /// Bring `<home>/Shared` in line with `shares` (keyed by link name).
@@ -83,7 +77,7 @@ pub fn sync(
             Ok(target) => PathBuf::from(std::ffi::OsString::from_vec(target.into_bytes())),
             Err(_) => continue,
         };
-        let ours = share_target(&target, shared_root).is_some();
+        let ours = share_link_container(&target, shared_root).is_some();
         match wanted_target {
             Some(wanted) if *wanted == target => {
                 done.insert(name);

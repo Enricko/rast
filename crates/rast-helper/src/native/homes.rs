@@ -18,7 +18,7 @@
 //! inside a HOME goes through directory file descriptors opened with
 //! `O_NOFOLLOW`, so a symlink the user planted is never followed by root.
 
-use std::ffi::{CString, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
@@ -54,6 +54,19 @@ pub const SKELETON: &[&str] = &[
 ];
 /// Timeout of `usermod`.
 const USERMOD_TIMEOUT: Duration = Duration::from_secs(45);
+/// Folder in HOME that holds the `~/Shared/<name>` links to shared folders.
+/// They are for apps only: the agent never follows them (ADR 0005).
+pub const SHARED_DIR: &str = "Shared";
+
+/// The container a `~/Shared/<name>` link of RAST names: the link's
+/// `target` must be a direct child of `shared_root` (the canonical shared
+/// root, as the links name it). The file agent only creates and removes
+/// such links; anything else in `~/Shared` is the user's.
+pub fn share_link_container<'a>(target: &'a Path, shared_root: &Path) -> Option<&'a OsStr> {
+    (target.parent() == Some(shared_root))
+        .then(|| target.file_name())
+        .flatten()
+}
 
 /// Who owns a HOME directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -803,6 +816,18 @@ pub(crate) async fn files_agent_stop(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_share_link_names_a_direct_child_of_the_shared_root() {
+        let root = Path::new("/srv/rast/shared");
+        let container = |target: &'static str| share_link_container(Path::new(target), root);
+        assert_eq!(container("/srv/rast/shared/team"), Some(OsStr::new("team")));
+        assert_eq!(container("/srv/rast/shared/team/sub"), None);
+        assert_eq!(container("/srv/rast/shared"), None);
+        assert_eq!(container("/srv/rast/other/team"), None);
+        assert_eq!(container("shared/team"), None);
+        assert_eq!(container("/srv/rast/shared/.."), None);
+    }
 
     struct Fixture {
         dir: tempfile::TempDir,

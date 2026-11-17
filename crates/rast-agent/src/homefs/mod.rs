@@ -26,9 +26,9 @@ pub mod watch;
 /// Prefix of chunked upload ids that belong to a per-user agent (the root
 /// agent uses `sys-`).
 pub const UPLOAD_PREFIX: &str = "usr-";
-/// Folder in HOME that holds the `~/Shared/<name>` links to shared folders.
-/// They are for apps only: the agent never follows them (ADR 0005).
-pub const SHARED_DIR: &str = "Shared";
+/// Folder in HOME that holds the `~/Shared/<name>` links to shared folders
+/// (kept with the root helper, which also knows the links).
+pub use crate::native::homes::SHARED_DIR;
 /// Largest [`SHARES_HEADER`] value an agent accepts.
 pub const MAX_SHARES_HEADER: usize = 64 * 1024;
 
