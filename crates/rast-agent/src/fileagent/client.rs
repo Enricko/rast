@@ -88,6 +88,7 @@ const FORBIDDEN: &[&str] = &[
     "write permission required",
     "permission denied",
     "invalid agent token",
+    "this recycle bin folder belongs to another account; ask an administrator to remove it",
 ];
 const NOT_FOUND: &[&str] = &[
     "path not found",

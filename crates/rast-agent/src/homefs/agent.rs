@@ -2800,6 +2800,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_share_trash_folder_made_by_someone_else_is_never_used() {
+        let fx = start(None).await;
+        let container = fx.shared.join("team-1");
+        std::fs::create_dir_all(&container).unwrap();
+        std::fs::write(container.join("x.txt"), b"x").unwrap();
+        fx.share("team", "team-1");
+        let trash = container.join(format!(".Trash-{}", euid()));
+        let elsewhere = fx.dir.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("files")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("info")).unwrap();
+        // Another member put a link, then a file, in its place.
+        std::os::unix::fs::symlink(&elsewhere, &trash).unwrap();
+        for round in 0..2 {
+            let (status, reply) = fx
+                .post(
+                    "/api/files/delete",
+                    json!({"paths": ["/shared/team/x.txt"]}),
+                )
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{round}: {reply}");
+            assert!(
+                reply["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("belongs to another account"),
+                "{reply}"
+            );
+            assert!(container.join("x.txt").is_file());
+            std::fs::remove_file(&trash).unwrap();
+            std::fs::write(&trash, b"").unwrap();
+        }
+        assert_eq!(
+            std::fs::read_dir(elsewhere.join("files")).unwrap().count(),
+            0
+        );
+        let (status, _) = fx.get("/api/files/trash").await;
+        assert_eq!(status, StatusCode::OK, "HOME's recycle bin still lists");
+
+        // The user's own folder, opened up since: closed again before use.
+        std::fs::remove_file(&trash).unwrap();
+        for part in ["", "files", "info"] {
+            std::fs::create_dir_all(trash.join(part)).unwrap();
+        }
+        for part in ["", "files", "info"] {
+            std::fs::set_permissions(trash.join(part), std::fs::Permissions::from_mode(0o2777))
+                .unwrap();
+        }
+        let (status, _) = fx.get("/api/files/trash").await;
+        assert_eq!(status, StatusCode::OK);
+        for part in ["", "files", "info"] {
+            let mode = std::fs::metadata(trash.join(part))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o7777, 0o2700, "{part:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn one_entry_named_twice_in_a_request_is_handled_once() {
         let fx = start(None).await;
         for name in ["k", "m"] {

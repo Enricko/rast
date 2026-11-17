@@ -97,15 +97,31 @@ pub(super) fn readable_root(space: &HomeSpace) -> AppResult<OwnedFd> {
     readable(space.home_root.as_fd())
 }
 
+/// Why a trash folder that is not this user's own is not used.
+const NOT_OWN_TRASH: &str =
+    "this recycle bin folder belongs to another account; ask an administrator to remove it";
+
 /// A trash folder must belong to this user (the specification's check).
 fn owned(fd: &OwnedFd) -> AppResult<Info> {
     let info = fsat::stat_fd(fd).map_err(fs_error)?;
     if !info.is_dir() || info.uid != euid() {
-        return Err(AppError::Forbidden(
-            "the recycle bin folder belongs to someone else",
-        ));
+        return Err(AppError::Forbidden(NOT_OWN_TRASH));
     }
     Ok(info)
+}
+
+/// Close a shared folder's trash folder (or its `files/` or `info/`) to the
+/// other members: no ACL, 0700, the set-gid bit kept (so new entries keep
+/// the share's group). Done every time it is opened, not only when it is
+/// made, so a folder that was opened up since (by the user's own apps) is
+/// closed before anything in it is used.
+fn close_to_members(fd: &OwnedFd, info: &Info) -> AppResult<()> {
+    fsat::remove_acls(fd.as_fd()).map_err(fs_error)?;
+    let mode = 0o700 | (info.mode & 0o2000);
+    if info.mode & 0o7777 != mode {
+        fsat::set_dir_mode(fd.as_fd(), mode).map_err(fs_error)?;
+    }
+    Ok(())
 }
 
 /// `files/` or `info/` below the trash folder `top`.
@@ -165,11 +181,9 @@ impl HomeSpace {
                         let handle = fsat::open_dir_at(root.fd.as_fd(), &name, &info)?;
                         readable(handle.as_fd())?
                     }
-                    Some(_) => {
-                        return Err(AppError::Forbidden(
-                            "the recycle bin folder of this shared folder is not a folder",
-                        ))
-                    }
+                    // A link or a file in its place (made by another
+                    // member) is never used.
+                    Some(_) => return Err(AppError::Forbidden(NOT_OWN_TRASH)),
                     None if !create => return Ok(None),
                     None => {
                         match fsat::mkdir_mode_at(root.fd.as_fd(), &name, 0o700) {
@@ -181,15 +195,7 @@ impl HomeSpace {
                     }
                 };
                 let info = owned(&top)?;
-                if create {
-                    // Closed to the other members: no inherited ACL, 0700
-                    // (set-gid kept, so new entries keep the share's group).
-                    fsat::remove_acls(top.as_fd()).map_err(fs_error)?;
-                    let mode = 0o700 | (info.mode & 0o2000);
-                    if info.mode & 0o7777 != mode {
-                        fsat::set_dir_mode(top.as_fd(), mode).map_err(fs_error)?;
-                    }
-                }
+                close_to_members(&top, &info)?;
                 (root, top)
             }
         };
@@ -199,9 +205,11 @@ impl HomeSpace {
         let Some(info) = part(top.as_fd(), "info", create)? else {
             return Ok(None);
         };
-        if create && matches!(place, Place::Share { .. }) {
-            fsat::remove_acls(files.as_fd()).map_err(fs_error)?;
-            fsat::remove_acls(info.as_fd()).map_err(fs_error)?;
+        if matches!(place, Place::Share { .. }) {
+            for part in [&files, &info] {
+                let stat = fsat::stat_fd(part).map_err(fs_error)?;
+                close_to_members(part, &stat)?;
+            }
         }
         let dev = fsat::stat_fd(&files).map_err(fs_error)?.dev;
         Ok(Some(Trash {
@@ -465,7 +473,9 @@ impl Trash {
         let Some(meta) = fsat::stat_at(self.info.as_fd(), &info_file).map_err(fs_error)? else {
             return Ok(None);
         };
-        if meta.kind != Kind::File {
+        // Only this user (the agent, or the user's apps) writes info files:
+        // one of another owner was planted while the folder was open.
+        if meta.kind != Kind::File || meta.uid != euid() {
             return Ok(None);
         }
         let Some(bytes) =
@@ -1268,6 +1278,17 @@ mod tests {
             Mode::empty(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn the_server_shows_why_a_recycle_bin_folder_is_not_used() {
+        let reply = json!({"error": {"code": "forbidden", "message": NOT_OWN_TRASH}});
+        let error = crate::fileagent::client::error_from(
+            "file agent",
+            axum::http::StatusCode::FORBIDDEN,
+            &reply,
+        );
+        assert_eq!(error.public_message(), NOT_OWN_TRASH);
     }
 
     #[test]
