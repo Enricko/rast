@@ -1162,19 +1162,23 @@ pub(super) async fn empty(
             }
         }
         for trash in &trashes {
-            let (names, _) =
-                fsat::names_limited(trash.files.as_fd(), usize::MAX).map_err(fs_error)?;
-            for name in names {
-                // Kept: what is on another file system (a mount).
-                if let Err(error) = fsat::remove_at(trash.files.as_fd(), &name, Some(trash.dev)) {
-                    tracing::warn!(error = %error, "cannot remove a recycle bin entry");
-                }
-            }
-            let (names, _) =
-                fsat::names_limited(trash.info.as_fd(), usize::MAX).map_err(fs_error)?;
-            for name in names.iter().filter(|name| name.ends_with(INFO_SUFFIX)) {
-                let _ = fsat::unlink_at(trash.info.as_fd(), name);
-            }
+            drain(
+                trash.files.as_fd(),
+                EMPTY_BATCH,
+                |_| true,
+                |name| {
+                    // Kept: what is on another file system (a mount).
+                    fsat::remove_at(trash.files.as_fd(), name, Some(trash.dev)).inspect_err(
+                        |error| tracing::warn!(error = %error, "cannot remove a recycle bin entry"),
+                    )
+                },
+            )?;
+            drain(
+                trash.info.as_fd(),
+                EMPTY_BATCH,
+                |name| name.ends_with(INFO_SUFFIX),
+                |name| fsat::unlink_at(trash.info.as_fd(), name).map_err(fs_error),
+            )?;
             trash.save_sizes(&BTreeMap::new());
         }
         Ok(Json(json!({
@@ -1186,6 +1190,49 @@ pub(super) async fn empty(
         })))
     })
     .await
+}
+
+/// Names read from one folder at a time while a trash is emptied.
+const EMPTY_BATCH: usize = 4096;
+/// Names an emptying skips at most (entries on another file system, or
+/// names that are not the trash's own); more are left for the next one.
+const MAX_EMPTY_KEPT: usize = 10_000;
+
+/// Remove every name in the folder `dir` that `wanted` accepts, reading at
+/// most `batch` new names at a time, so a folder with millions of entries
+/// (an app can fill a trash) is never held in memory at once. Names that
+/// `wanted` refuses or `remove` cannot remove stay, at most
+/// [`MAX_EMPTY_KEPT`] of them. Returns how many were removed.
+fn drain(
+    dir: BorrowedFd<'_>,
+    batch: usize,
+    wanted: impl Fn(&str) -> bool,
+    mut remove: impl FnMut(&str) -> AppResult<()>,
+) -> AppResult<usize> {
+    let mut kept: HashSet<String> = HashSet::new();
+    let mut removed = 0;
+    loop {
+        // Read past the names already kept, so every pass sees new ones.
+        let (names, more) = fsat::names_limited(dir, batch + kept.len()).map_err(fs_error)?;
+        let mut fresh = 0;
+        for name in names {
+            if kept.contains(&name) {
+                continue;
+            }
+            fresh += 1;
+            if wanted(&name) && remove(&name).is_ok() {
+                removed += 1;
+                continue;
+            }
+            if kept.len() >= MAX_EMPTY_KEPT {
+                return Ok(removed);
+            }
+            kept.insert(name);
+        }
+        if !more || fresh == 0 {
+            return Ok(removed);
+        }
+    }
 }
 
 /// Bytes in the trashes of the shared folders of a request (for the usage
@@ -1208,4 +1255,52 @@ pub(super) fn share_trash_bytes(space: &HomeSpace, shares: &ShareRoots) -> u64 {
 /// listed or served).
 pub(super) fn hidden_in_share(name: &str) -> bool {
     xdg_trash::is_trash_dir_name(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(path: &std::path::Path) -> OwnedFd {
+        rfs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn emptying_reads_a_large_folder_in_batches_and_skips_what_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        for index in 0..25 {
+            std::fs::write(dir.path().join(format!("{index}.trashinfo")), b"").unwrap();
+        }
+        // Not the trash's own, and one that cannot be removed.
+        std::fs::write(dir.path().join("stray"), b"").unwrap();
+        std::fs::write(dir.path().join("7.trashinfo.keep"), b"").unwrap();
+        let fd = open(dir.path());
+        let mut calls = 0;
+        let removed = drain(
+            fd.as_fd(),
+            3,
+            |name| name.ends_with(INFO_SUFFIX) || name.ends_with(".keep"),
+            |name| {
+                calls += 1;
+                if name.ends_with(".keep") {
+                    return Err(AppError::Forbidden("permission denied"));
+                }
+                std::fs::remove_file(dir.path().join(name)).map_err(AppError::from)
+            },
+        )
+        .unwrap();
+        assert_eq!(removed, 25);
+        assert_eq!(calls, 26, "every name is tried once");
+        let mut left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["7.trashinfo.keep", "stray"]);
+    }
 }
