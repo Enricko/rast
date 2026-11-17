@@ -15,6 +15,7 @@ import restartRecovery from "./j-restart-recovery.mjs";
 import failedInstalls from "./k-failed-installs.mjs";
 import uninstall from "./l-uninstall.mjs";
 import migration from "./m-migration.mjs";
+import appMatrix from "./app-matrix.mjs";
 
 export const scenarios = [
   smoke,
@@ -31,4 +32,5 @@ export const scenarios = [
   failedInstalls,
   uninstall,
   migration,
+  appMatrix, // opt-in: run it with --scenario=app-matrix
 ];
