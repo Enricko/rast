@@ -965,7 +965,13 @@ pub(crate) fn summarize_command(output: &CommandOutput) -> String {
 pub async fn run(cfg: Config, check: bool) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let options = NativeOptions::from_config(&cfg);
     if check {
-        let (errors, warnings) = options.check_environment();
+        let (errors, mut warnings) = options.check_environment();
+        // Read back the owned nftables table (root only, read-only): a table
+        // left by another helper run with another uid is a warning here and
+        // is replaced when the helper starts.
+        if let Some(warning) = firewall::check_installed(&options).await {
+            warnings.push(warning);
+        }
         for warning in &warnings {
             println!("WARN: {warning}");
         }
@@ -1233,6 +1239,13 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
                     "the helper cannot see Xpra; start rast-native.service after installing Xpra"
                         .to_string(),
                 );
+            }
+            // The helper reads its nftables table back (this command usually
+            // runs unprivileged and cannot list nftables itself).
+            match firewall::doctor_status(ping.get("displayFirewall")) {
+                Some(Ok(line)) => report.lines.push(line),
+                Some(Err(message)) => warn(&mut report, message),
+                None => {}
             }
         }
         Ok(Err(error)) => warn(

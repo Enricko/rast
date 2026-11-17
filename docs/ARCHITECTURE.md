@@ -121,9 +121,11 @@ The web server bridges each session to a WebSocket (see `docs/API.md`).
 The transient units are independent systemd units, not children of
 `rast-native.service`: stopping or restarting the helper leaves running
 sessions and applications alive, and stopping `rast-linux.slice` (or the
-individual units) ends them. On start the helper reconciles the nftables
-display-port set against the live `rast-xpra-*` units and the web server adopts
-the running sessions from the database. The user/operator guide is
+individual units) ends them. On start the helper verifies its nftables table
+(replacing it in one transaction when it is not exactly the expected rule for
+the `rast` uid), reconciles the display-port set against the live
+`rast-xpra-*` units and the web server adopts the running sessions from the
+database. The user/operator guide is
 [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 The units are installed from [`deploy/`](../deploy):

@@ -405,7 +405,7 @@ async fn process(
 
 async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, NativeError> {
     match op {
-        NativeOp::Ping => Ok(ping(options)),
+        NativeOp::Ping => Ok(ping(options).await),
         NativeOp::IdentityEnsure(op) => identity_ensure(options, op).await,
         NativeOp::IdentityRemove(op) => identity_remove(options, op).await,
         NativeOp::SessionStart(op) => session_start(options, op).await,
@@ -477,7 +477,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
 // Simple probes and identity
 // ---------------------------------------------------------------------------
 
-fn ping(options: &NativeOptions) -> Value {
+async fn ping(options: &NativeOptions) -> Value {
     let xpra = std::fs::metadata(&options.xpra_bin)
         .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
         .unwrap_or(false);
@@ -486,6 +486,9 @@ fn ping(options: &NativeOptions) -> Value {
         "root": is_root() || options.is_test_mode(),
         "xpra": xpra,
         "dockerFallback": false,
+        // The owned nftables table as this helper reads it back (`rast
+        // doctor` runs unprivileged and cannot list nftables itself).
+        "displayFirewall": super::firewall::ping_status().await,
     })
 }
 
@@ -4373,6 +4376,8 @@ exit 0
         assert_eq!(ping["root"], true);
         assert_eq!(ping["xpra"], true);
         assert_eq!(ping["dockerFallback"], false);
+        // A test helper never installs the display-port firewall.
+        assert_eq!(ping["displayFirewall"]["state"], "inactive");
     }
 
     #[tokio::test]

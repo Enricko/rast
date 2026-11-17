@@ -98,7 +98,9 @@ impl NativeClient {
     }
 
     /// Cheap liveness/feature probe. Returns the helper's `data` object:
-    /// `{"version":1,"root":true,"xpra":true,"dockerFallback":false}`.
+    /// `{"version":1,"root":true,"xpra":true,"dockerFallback":false,
+    /// "displayFirewall":{"state":"ok","allowedUid":993}}` (older helpers send
+    /// no `displayFirewall`).
     pub async fn ping(&self) -> Result<Value, NativeError> {
         self.call_json("ping", Value::Object(Map::new())).await
     }
