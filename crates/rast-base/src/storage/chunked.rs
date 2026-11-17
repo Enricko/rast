@@ -69,6 +69,10 @@ pub struct ChunkedUpload {
     pub expires_at: i64,
     /// Serialises writers (and complete/cancel) for one upload id.
     pub write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Bytes held in a limited shared folder until the upload completes;
+    /// given back when the last copy of the session goes (cancelled or
+    /// expired).
+    pub share: Option<Arc<crate::storage::share_quota::ShareReservation>>,
 }
 
 /// `POST /api/files/upload/init` response.
@@ -248,12 +252,17 @@ impl Storage {
         } else {
             0
         };
-        if let Some(share_id) = parent.share_id.as_deref() {
-            let growth = (i64::try_from(size).unwrap_or(i64::MAX))
-                .saturating_sub(old_size)
-                .max(0) as u64;
-            crate::storage::share_quota::check(pool, self, share_id, growth).await?;
-        }
+        let share = match parent.share_id.as_deref() {
+            Some(share_id) => {
+                let growth = (i64::try_from(size).unwrap_or(i64::MAX))
+                    .saturating_sub(old_size)
+                    .max(0) as u64;
+                crate::storage::share_quota::reserve(pool, self, share_id, growth)
+                    .await?
+                    .map(Arc::new)
+            }
+            None => None,
+        };
         if reserved > 0 && !quota::reserve(pool, user.id, reserved).await? {
             return Err(AppError::PayloadTooLarge("storage quota exceeded"));
         }
@@ -292,6 +301,7 @@ impl Storage {
             created_at: now,
             expires_at: now.saturating_add(self.upload_ttl_ms.max(1)),
             write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            share,
         };
         let inserted = {
             let mut map = self
@@ -446,6 +456,13 @@ impl Storage {
             self.refresh_target(pool, user, &session).await?;
         finalize_temp_file(&session.temp_path, &target).await?;
         self.take_session(upload_id, user.id);
+        if let Some(share) = &session.share {
+            let growth = i64::try_from(session.declared)
+                .unwrap_or(i64::MAX)
+                .saturating_sub(old_size)
+                .max(0) as u64;
+            share.commit(growth);
+        }
         if in_home {
             let used_delta = i64::try_from(session.declared).unwrap_or(i64::MAX) - old_size;
             quota::commit(pool, user.id, session.reserved, used_delta).await?;
@@ -605,6 +622,82 @@ mod tests {
                 Body::from(data.to_vec()),
             )
             .await
+    }
+
+    /// A shared folder `limited` with a 100-byte limit that Alice can
+    /// write to.
+    async fn limited_share(ctx: &Ctx) -> String {
+        let mut admin = auth_user(1, "alice");
+        admin.role = Role::Admin;
+        crate::storage::shares::create(
+            &ctx.pool,
+            &ctx.storage,
+            &admin,
+            crate::storage::shares::CreateShareInput {
+                name: "limited".into(),
+                description: None,
+                members: Some(vec![crate::storage::shares::MemberInput {
+                    user_id: 1,
+                    perms: Some("write".into()),
+                }]),
+                quota_bytes: Some(100),
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn running_uploads_hold_their_bytes_in_a_shared_folders_limit() {
+        let ctx = setup().await;
+        let share_id = limited_share(&ctx).await;
+        let start = |name: &'static str, size: u64| {
+            ctx.storage.init_chunked_upload(
+                &ctx.pool,
+                &ctx.alice,
+                "/shared/limited",
+                name,
+                size,
+                false,
+            )
+        };
+        let first = start("a.bin", 60).await.unwrap();
+        // The share is measured again (a minute later): the running
+        // upload's bytes still count, so a second one does not fit.
+        crate::storage::share_quota::forget(&share_id);
+        let error = start("b.bin", 60).await.unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(
+            error
+                .to_string()
+                .contains(crate::storage::share_quota::LIMIT_EXCEEDED),
+            "{error}"
+        );
+        let small = start("c.bin", 40).await.unwrap();
+        // Cancelling gives the bytes back.
+        ctx.storage
+            .cancel_chunked_upload(&ctx.pool, &ctx.alice, &small.upload_id)
+            .await
+            .unwrap();
+        // Completing keeps them (as written bytes).
+        chunk(&ctx, &first.upload_id, 0, &[7; 60]).await.unwrap();
+        ctx.storage
+            .complete_chunked_upload(&ctx.pool, &ctx.alice, &first.upload_id)
+            .await
+            .unwrap();
+        assert!(start("d.bin", 41).await.is_err());
+        let last = start("e.bin", 40).await.unwrap();
+        // An upload that expires gives its bytes back too.
+        ctx.storage
+            .uploads
+            .lock()
+            .unwrap()
+            .get_mut(&last.upload_id)
+            .unwrap()
+            .expires_at = 0;
+        ctx.storage.cleanup_expired_uploads(&ctx.pool).await;
+        start("f.bin", 40).await.unwrap();
     }
 
     #[tokio::test]

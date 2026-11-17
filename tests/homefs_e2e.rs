@@ -697,6 +697,55 @@ async fn chunked_uploads_are_limited_like_in_process_ones() {
 }
 
 #[tokio::test]
+async fn uploads_to_a_shared_folder_hold_their_bytes_while_they_run() {
+    let (server, alice, _bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let (status, share) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Team", "quotaBytes": 10,
+                   "members": [{"userId": alice.id, "perms": "write"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{share}");
+    let share_id = share["id"].as_str().unwrap().to_string();
+    let init = |name: &str, size: u64| {
+        server.post(
+            "/api/files/upload/init",
+            &alice,
+            json!({"dir": "/shared/Team", "name": name, "size": size}),
+        )
+    };
+    let (status, first) = init("a.bin", 6).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    // Measured again a minute later: the running upload still counts.
+    rast::storage::share_quota::forget(&share_id);
+    let (status, body) = init("b.bin", 6).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    // Nor does a single-request upload fit beside it.
+    let (status, _) = server
+        .upload(&alice, "dir=/shared/Team&name=c.txt", b"012345")
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // Cancelling gives the bytes back.
+    let (status, _, _) = server
+        .json(
+            "DELETE",
+            &format!(
+                "/api/files/upload?uploadId={}",
+                first["uploadId"].as_str().unwrap()
+            ),
+            Some(&alice),
+            None,
+        )
+        .await;
+    assert!(status.is_success(), "{status}");
+    let (status, second) = init("b.bin", 6).await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+}
+
+#[tokio::test]
 async fn chunked_uploads_belong_to_their_account() {
     let (server, alice, bob) = setup().await;
     let (status, init) = server

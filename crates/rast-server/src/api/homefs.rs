@@ -279,6 +279,7 @@ async fn forward(
 
     // A single-request upload reserves its size first, like in-process.
     let mut reserved = 0i64;
+    let mut share_reserved = None;
     if uploading {
         let dir = query.get("dir").map(String::as_str).unwrap_or("/");
         let logical = check(state, &user, dir, Need::Write, &mut roots).await?;
@@ -296,8 +297,9 @@ async fn forward(
             }
             reserved = bytes;
         } else if let Some(share_id) = share_id_of(&roots, &logical) {
-            crate::storage::share_quota::check(&state.db, &state.storage, &share_id, length)
-                .await?;
+            share_reserved =
+                crate::storage::share_quota::reserve(&state.db, &state.storage, &share_id, length)
+                    .await?;
         }
     }
 
@@ -357,17 +359,24 @@ async fn forward(
             }
             Ok(untrusted(response))
         }
-        ("/api/files/upload", "POST") => finish_upload(state, &user, &ip, response, reserved).await,
-        ("/api/files/upload/complete", "POST") => {
-            let reserved = state
-                .homefs
-                .take(&upload_id, user.id)
-                .map(|reservation| reservation.bytes);
-            match reserved {
-                Some(bytes) => finish_upload(state, &user, &ip, response, bytes).await,
-                None => finish_upload(state, &user, &ip, response, 0).await,
-            }
+        ("/api/files/upload", "POST") => {
+            let share = share_reserved.map(std::sync::Arc::new);
+            finish_upload(state, &user, &ip, response, reserved, share).await
         }
+        ("/api/files/upload/complete", "POST") => match state.homefs.take(&upload_id, user.id) {
+            Some(reservation) => {
+                finish_upload(
+                    state,
+                    &user,
+                    &ip,
+                    response,
+                    reservation.bytes,
+                    reservation.share,
+                )
+                .await
+            }
+            None => finish_upload(state, &user, &ip, response, 0, None).await,
+        },
         ("/api/files/upload", "DELETE") => {
             if let Some(reservation) = state.homefs.take(&upload_id, user.id) {
                 let _ = quota::rollback(&state.db, user.id, reservation.bytes).await;
@@ -378,14 +387,16 @@ async fn forward(
     }
 }
 
-/// Account, audit and publish a finished upload; release its reservation
-/// when it failed.
+/// Account, audit and publish a finished upload; release its reservations
+/// when it failed (a shared folder's goes when `share` is dropped without a
+/// commit).
 async fn finish_upload(
     state: &AppState,
     user: &AuthUser,
     ip: &ClientIp,
     response: Response<Body>,
     reserved: i64,
+    share: Option<std::sync::Arc<crate::storage::share_quota::ShareReservation>>,
 ) -> AppResult<Response> {
     let status = response.status();
     let replaced = header_number(response.headers(), REPLACED_HEADER).unwrap_or(0);
@@ -413,6 +424,12 @@ async fn finish_upload(
         }
     };
     let home = LogicalPath::parse(&entry.path).is_ok_and(|logical| in_home(&logical));
+    if let Some(share) = &share {
+        let replaced = i64::try_from(replaced).unwrap_or(0);
+        let growth = entry.size.max(0).saturating_sub(replaced).max(0) as u64;
+        // What the agent says it wrote, never more than was reserved.
+        share.commit(growth.min(share.bytes()));
+    }
     if home {
         let replaced = i64::try_from(replaced).unwrap_or(0);
         quota::commit(
@@ -574,9 +591,13 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
             return Err(AppError::PayloadTooLarge("storage quota exceeded"));
         }
         reserved = bytes;
-    } else if let Some(share_id) = share_id_of(&roots, &logical) {
-        crate::storage::share_quota::check(&state.db, &state.storage, &share_id, size).await?;
     }
+    let share = match share_id_of(&roots, &logical) {
+        Some(share_id) if !in_home(&logical) => {
+            crate::storage::share_quota::reserve(&state.db, &state.storage, &share_id, size).await?
+        }
+        _ => None,
+    };
     let reply = state
         .homefs
         .call(
@@ -601,7 +622,7 @@ async fn upload_init(state: &AppState, user: &AuthUser, body: &Value) -> AppResu
         .filter(|id| id.starts_with(crate::homefs::UPLOAD_PREFIX));
     match upload_id {
         Some(id) => {
-            slot.register(id, reserved);
+            slot.register(id, reserved, share);
             Ok(json_response(StatusCode::OK, value))
         }
         None => {

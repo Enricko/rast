@@ -34,13 +34,16 @@ pub const AGENT: &str = "file agent";
 const MAX_WATCH_LINE: usize = 256 * 1024;
 
 /// Bytes reserved in `storage_usage` for a chunked upload an agent is
-/// receiving (0 for a shared folder); committed or released when it
-/// completes, is cancelled or expires.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// receiving (0 for a shared folder), and in a limited shared folder's
+/// size limit; committed or released when it completes, is cancelled or
+/// expires.
+#[derive(Debug, Clone)]
 pub struct Reservation {
     pub user_id: i64,
     pub bytes: i64,
     pub expires: Instant,
+    /// Given back when the last copy goes without a commit.
+    pub share: Option<Arc<crate::storage::share_quota::ShareReservation>>,
 }
 
 /// What the server last learned about one account's HOME.
@@ -69,8 +72,13 @@ pub struct UploadSlot<'a> {
 
 impl UploadSlot<'_> {
     /// Record the upload the agent accepted, with the quota bytes reserved
-    /// for it.
-    pub fn register(self, upload_id: &str, bytes: i64) {
+    /// for it (and the bytes reserved in a limited shared folder).
+    pub fn register(
+        self,
+        upload_id: &str,
+        bytes: i64,
+        share: Option<crate::storage::share_quota::ShareReservation>,
+    ) {
         if let Ok(mut uploads) = self.uploads.lock() {
             uploads.reservations.insert(
                 upload_id.to_string(),
@@ -78,6 +86,7 @@ impl UploadSlot<'_> {
                     user_id: self.user_id,
                     bytes,
                     expires: Instant::now() + UPLOAD_TTL + Duration::from_secs(60),
+                    share: share.map(Arc::new),
                 },
             );
         }
@@ -856,7 +865,7 @@ mod tests {
         for index in 1..MAX_UPLOADS_PER_USER {
             fs.begin_upload(1)
                 .unwrap()
-                .register(&format!("usr-a{index}"), 0);
+                .register(&format!("usr-a{index}"), 0, None);
         }
         let error = fs.begin_upload(1).err().unwrap();
         assert!(
@@ -865,7 +874,7 @@ mod tests {
         );
         // A slot dropped without registering frees its place.
         drop(starting);
-        fs.begin_upload(1).unwrap().register("usr-a0", 0);
+        fs.begin_upload(1).unwrap().register("usr-a0", 0, None);
         assert!(fs.begin_upload(1).is_err());
         // Taking an upload (complete or cancel) frees its place.
         assert!(fs.take("usr-a0", 1).is_some());
@@ -876,9 +885,11 @@ mod tests {
         let mut registered = MAX_UPLOADS_PER_USER - 1;
         while registered < MAX_UPLOADS_GLOBAL {
             for _ in 0..MAX_UPLOADS_PER_USER.min(MAX_UPLOADS_GLOBAL - registered) {
-                fs.begin_upload(user)
-                    .unwrap()
-                    .register(&format!("usr-{user}-{registered}"), 0);
+                fs.begin_upload(user).unwrap().register(
+                    &format!("usr-{user}-{registered}"),
+                    0,
+                    None,
+                );
                 registered += 1;
             }
             user += 1;

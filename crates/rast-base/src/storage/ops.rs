@@ -851,6 +851,9 @@ pub struct UploadPlan {
     /// Size of the file being replaced, if any.
     pub old_size: i64,
     pub expected: u64,
+    /// Bytes held in a limited shared folder while the upload runs
+    /// (released when the plan is dropped without being committed).
+    pub share: Option<crate::storage::share_quota::ShareReservation>,
 }
 
 /// Validate an upload target and reserve the quota needed for it.
@@ -888,10 +891,13 @@ pub async fn plan_upload(
     } else {
         0
     };
-    if let Some(share_id) = parent.share_id.as_deref() {
-        let growth = length.saturating_sub(old_size).max(0) as u64;
-        crate::storage::share_quota::check(pool, storage, share_id, growth).await?;
-    }
+    let share = match parent.share_id.as_deref() {
+        Some(share_id) => {
+            let growth = length.saturating_sub(old_size).max(0) as u64;
+            crate::storage::share_quota::reserve(pool, storage, share_id, growth).await?
+        }
+        None => None,
+    };
     if reserved > 0 && !quota::reserve(pool, user.id, reserved).await? {
         return Err(AppError::PayloadTooLarge("storage quota exceeded"));
     }
@@ -921,6 +927,7 @@ pub async fn plan_upload(
         reserved,
         old_size,
         expected: content_length,
+        share,
     })
 }
 
@@ -942,6 +949,7 @@ pub async fn commit_upload(
         reserved,
         old_size,
         expected,
+        share,
     } = plan;
     if written != expected {
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -968,6 +976,9 @@ pub async fn commit_upload(
     if in_home {
         let used_delta = written as i64 - old_size;
         quota::commit(pool, user.id, reserved, used_delta).await?;
+    }
+    if let Some(share) = share {
+        share.commit((written as i64).saturating_sub(old_size).max(0) as u64);
     }
     let writable = true;
     let _ = storage;
@@ -1498,6 +1509,61 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn a_single_upload_holds_its_bytes_in_a_shared_folders_limit() {
+        let ctx = setup().await;
+        let mut admin = auth_user(1, "alice");
+        admin.role = Role::Admin;
+        let share = crate::storage::shares::create(
+            &ctx.pool,
+            &ctx.storage,
+            &admin,
+            crate::storage::shares::CreateShareInput {
+                name: "limited".into(),
+                description: None,
+                members: Some(vec![crate::storage::shares::MemberInput {
+                    user_id: 1,
+                    perms: Some("write".into()),
+                }]),
+                quota_bytes: Some(10),
+            },
+        )
+        .await
+        .unwrap();
+        let plan = |name: &'static str, size: u64| {
+            plan_upload(
+                &ctx.pool,
+                &ctx.storage,
+                &ctx.user,
+                "/shared/limited",
+                name,
+                false,
+                size,
+            )
+        };
+        let running = plan("a.bin", 6).await.unwrap();
+        crate::storage::share_quota::forget(&share.id);
+        let error = plan("b.bin", 6).await.unwrap_err();
+        assert_eq!(error.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+        // An aborted upload gives its bytes back; a finished one keeps them.
+        abort_upload(&ctx.pool, &ctx.user, running).await;
+        let second = plan("b.bin", 6).await.unwrap();
+        let mut file = second.file;
+        file.write_all(b"012345").await.unwrap();
+        commit_upload(
+            &ctx.pool,
+            &ctx.storage,
+            &ctx.user,
+            UploadPlan { file, ..second },
+            6,
+        )
+        .await
+        .unwrap();
+        assert!(plan("c.bin", 5).await.is_err());
+        drop(plan("c.bin", 4).await.unwrap());
+        plan("c.bin", 4).await.unwrap();
     }
 
     #[tokio::test]
