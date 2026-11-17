@@ -1128,8 +1128,9 @@ async fn kernel_user_quota_sets_d4_limits_and_counts_everything_the_identity_own
         .unwrap()
         .sets
         .clone();
-    // D4: soft = quota, hard = soft + max(5 %, 1 GiB).
-    assert_eq!(sets, vec![(alice.id, 100, 100 + (1 << 30))]);
+    // D4: soft = quota, hard = soft + max(5 %, 1 GiB), in whole KiB as the
+    // kernel keeps them (a quota of 100 bytes is one block).
+    assert_eq!(sets, vec![(alice.id, 1024, 1024 + (1 << 30))]);
     assert_eq!(server.used(alice.id).await.0, 10 << 20);
     // Nothing changes: no second set.
     rast::quota_sync::sync_once(&server.state, &native)

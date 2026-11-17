@@ -46,18 +46,26 @@ const REPORT_CHUNK: usize = 1000;
 pub const SHARE_ENFORCED_FILESYSTEM_BEST_EFFORT: &str = "filesystem, best effort";
 pub const SHARE_ENFORCED_RAST: &str = "RAST only";
 
+/// The unit of kernel block limits (`QIF_DQBLKSIZE`): a limit set in bytes
+/// reads back rounded up to whole blocks.
+const QUOTA_BLOCK: u64 = 1024;
+
 /// The kernel limits of D4 for an account, in bytes: `(soft, hard)`,
-/// `(0, 0)` for no limit. Capped at the filesystem's size (`total`, when
-/// known), which the helper refuses to exceed.
+/// `(0, 0)` for no limit. Whole 1 KiB blocks, as the kernel keeps and
+/// reports them (so a pass that reads them back finds them unchanged and
+/// does not set them again), and capped at the whole blocks of the
+/// filesystem's size (`total`, when known), which the helper refuses to
+/// exceed.
 pub fn d4_limits(quota_bytes: i64, admin: bool, total: u64) -> (u64, u64) {
     if admin || quota_bytes <= 0 {
         return (0, 0);
     }
-    let soft = quota_bytes as u64;
-    let mut hard = soft.saturating_add((soft / 20).max(HARD_MARGIN_MIN));
-    let mut soft = soft;
+    let whole = |bytes: u64| bytes.div_ceil(QUOTA_BLOCK).saturating_mul(QUOTA_BLOCK);
+    let mut soft = whole(quota_bytes as u64);
+    let mut hard = whole(soft.saturating_add((soft / 20).max(HARD_MARGIN_MIN)));
     if total > 0 {
-        hard = hard.min(total);
+        let cap = (total / QUOTA_BLOCK * QUOTA_BLOCK).max(QUOTA_BLOCK);
+        hard = hard.min(cap);
         soft = soft.min(hard);
     }
     (soft, hard)
@@ -570,8 +578,18 @@ mod tests {
         );
         assert_eq!(
             d4_limits(10 * GIB as i64, false, 10 * GIB + 5),
-            (10 * GIB, 10 * GIB + 5)
+            (10 * GIB, 10 * GIB)
         );
+        // Whole KiB, as the kernel reads them back: a quota of 10 GiB + 1
+        // byte is not set again on every pass.
+        let (soft, hard) = d4_limits(10 * GIB as i64 + 1, false, 0);
+        assert_eq!((soft, hard), (10 * GIB + 1024, 11 * GIB + 1024));
+        let kernel = |bytes: u64| bytes.div_ceil(1024) * 1024;
+        for quota in [1, 1023, 1025, 7 * GIB as i64 + 3, 333 * GIB as i64 + 999] {
+            let (soft, hard) = d4_limits(quota, false, 40 * GIB + 77);
+            assert_eq!((kernel(soft), kernel(hard)), (soft, hard), "{quota}");
+            assert!(soft as i64 >= quota.min(40 * GIB as i64) && hard <= 40 * GIB);
+        }
     }
 
     #[test]
