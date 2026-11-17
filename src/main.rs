@@ -160,6 +160,32 @@ enum Command {
         #[arg(long = "idle-seconds", default_value_t = 900)]
         idle_seconds: u64,
     },
+    /// Internal: read-only root reader of HOMEs and migrated shared folders
+    /// for Backup Center (ADR 0005, D12), started by the native helper
+    #[command(hide = true)]
+    BackupReader {
+        /// Root of the HOMEs (`<storage_dir>/homes`).
+        #[arg(long)]
+        homes: PathBuf,
+        /// Root of the shared folder containers (`<storage_dir>/shared`).
+        #[arg(long)]
+        shared: PathBuf,
+        /// `linux_uid_base`: which owners a HOME or a container may have.
+        #[arg(long = "uid-base")]
+        uid_base: u32,
+        /// Only this uid may connect (the RAST service).
+        #[arg(long = "peer-uid")]
+        peer_uid: Option<u32>,
+        /// Bind this socket instead of the one systemd passes (development).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Token file (default: the systemd credential `token`).
+        #[arg(long = "token-file")]
+        token_file: Option<PathBuf>,
+        /// Exit after this many seconds without a connection.
+        #[arg(long = "idle-seconds", default_value_t = 300)]
+        idle_seconds: u64,
+    },
     /// Move existing data to the one-HOME layout (ADR 0005)
     Migrate {
         #[command(subcommand)]
@@ -564,6 +590,42 @@ async fn run(
                 format!("file agent failed: {error}").into()
             })
         }
+        // The backup reader is started by the helper with everything it
+        // needs on its command line; it reads no configuration.
+        Command::BackupReader {
+            homes,
+            shared,
+            uid_base,
+            peer_uid,
+            socket,
+            token_file,
+            idle_seconds,
+        } => {
+            use rast::native::backup_reader;
+            init_tracing(log_level.as_deref().unwrap_or("info"));
+            let rules = backup_reader::OwnerRules::for_uid_base(uid_base)
+                .map_err(|error| format!("backup reader: {error}"))?;
+            let token = backup_reader::token_from(token_file.as_deref())?;
+            let options = backup_reader::ReaderOptions {
+                homes,
+                shared,
+                rules,
+                token,
+                peer_uid,
+                idle: std::time::Duration::from_secs(idle_seconds.max(30)),
+                listen: match socket {
+                    Some(path) => backup_reader::Listen::Path(path),
+                    None => backup_reader::Listen::Systemd,
+                },
+            };
+            tokio::task::spawn_blocking(move || backup_reader::run(options))
+                .await
+                .map_err(|error| format!("backup reader failed: {error}"))?
+                .map(|_| ExitCode::SUCCESS)
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    format!("backup reader failed: {error}").into()
+                })
+        }
         other => {
             let mut cfg = Config::load(config_path.as_deref())?;
             if let Some(level) = log_level {
@@ -655,6 +717,7 @@ async fn run(
                 }),
                 Command::Serve { .. }
                 | Command::FileAgent { .. }
+                | Command::BackupReader { .. }
                 | Command::Version
                 | Command::Package { .. }
                 | Command::Catalog { .. } => unreachable!(),

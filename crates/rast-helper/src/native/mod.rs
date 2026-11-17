@@ -27,6 +27,7 @@
 
 pub mod acl;
 pub mod audio;
+pub mod backup_reader;
 pub mod client;
 pub mod daemon;
 pub(crate) mod firewall;

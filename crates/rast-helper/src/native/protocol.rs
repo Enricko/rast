@@ -266,6 +266,10 @@ pub enum NativeOp {
     /// Start (or find) the root file agent behind File Station's root file
     /// system; replies with its socket and token.
     RootfsStart,
+    /// Start (or find) the backup reader that streams HOMEs and shared
+    /// folders to Backup Center (ADR 0005, D12); replies with its socket
+    /// and token.
+    BackupReaderStart,
     /// Official runtimes in the administrator accounts' home directories.
     RuntimesDetect(RuntimesDetectOp),
     /// Create or repair the one HOME of a RAST user (ADR 0005).
@@ -361,6 +365,7 @@ impl NativeOp {
             Self::UnitStatus(_) => "unit_status",
             Self::UnitsList => "units_list",
             Self::RootfsStart => "rootfs_start",
+            Self::BackupReaderStart => "backup_reader_start",
             Self::RuntimesDetect(_) => "runtimes_detect",
             Self::HomeEnsure(_) => "home_ensure",
             Self::FilesAgentStart(_) => "files_agent_start",
@@ -451,6 +456,7 @@ impl NativeOp {
                 | Self::UnitStatus(_)
                 | Self::UnitsList
                 | Self::RootfsStart
+                | Self::BackupReaderStart
                 | Self::FilesAgentStart(_)
                 | Self::FilesAgentStop(_)
                 | Self::PackagePolicy(_)
@@ -519,6 +525,7 @@ impl NativeRequest {
             NativeOp::Ping
             | NativeOp::UnitsList
             | NativeOp::RootfsStart
+            | NativeOp::BackupReaderStart
             | NativeOp::AptUpdate
             | NativeOp::QuotaStatus => {}
             NativeOp::QuotaSet(op) => merge!(op),
@@ -667,6 +674,9 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "unit_status" => NativeOp::UnitStatus(op_from(rest, "unit_status")?),
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
         "rootfs_start" => no_fields(rest, "rootfs_start").map(|_| NativeOp::RootfsStart)?,
+        "backup_reader_start" => {
+            no_fields(rest, "backup_reader_start").map(|_| NativeOp::BackupReaderStart)?
+        }
         "runtimes_detect" => NativeOp::RuntimesDetect(op_from(rest, "runtimes_detect")?),
         "home_ensure" => NativeOp::HomeEnsure(op_from(rest, "home_ensure")?),
         "files_agent_start" => NativeOp::FilesAgentStart(op_from(rest, "files_agent_start")?),
@@ -2387,6 +2397,7 @@ mod tests {
             }),
             NativeOp::UnitsList,
             NativeOp::RootfsStart,
+            NativeOp::BackupReaderStart,
             NativeOp::AppStart(AppStartOp {
                 user_id: 7,
                 app_id: "demo".into(),
@@ -2729,6 +2740,31 @@ mod tests {
         assert!(validate_share_container("team").is_ok());
         for bad in ["", ".", "..", "a/b", "a\0b"] {
             assert!(validate_share_container(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn backup_reader_start_takes_no_field_at_all() {
+        let parsed = parse_request_line(br#"{"id":3,"op":"backup_reader_start"}"#).unwrap();
+        assert_eq!(parsed.op, NativeOp::BackupReaderStart);
+        assert_eq!(parsed.op.name(), "backup_reader_start");
+        assert_eq!(parsed.op.timeout(), QUICK_OP_TIMEOUT);
+        // Not serialised with long-running work: a backup must not wait for
+        // an APT transaction.
+        assert!(!parsed.op.is_long_running());
+        assert_eq!(timeout_for_op("backup_reader_start"), QUICK_OP_TIMEOUT);
+        // No path, no name, nothing: the reader only reads the configured
+        // homes and shared roots, and the tree is named per connection.
+        for line in [
+            r#"{"id":1,"op":"backup_reader_start","path":"/"}"#,
+            r#"{"id":1,"op":"backup_reader_start","homes":"/etc"}"#,
+            r#"{"id":1,"op":"backup_reader_start","username":"alice"}"#,
+            r#"{"id":1,"op":"backup_reader_start","container":"team"}"#,
+            r#"{"id":1,"op":"backup_reader_start","socket":"/tmp/x.sock"}"#,
+            r#"{"id":1,"op":"backup_reader_start","userId":7}"#,
+        ] {
+            let error = parse_request_line(line.as_bytes()).unwrap_err();
+            assert_eq!(error.code(), "invalid_request", "{line}");
         }
     }
 

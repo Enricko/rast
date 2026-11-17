@@ -414,6 +414,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::UnitsList => units_list(options).await,
         NativeOp::RuntimesDetect(op) => runtimes_detect(op).await,
         NativeOp::RootfsStart => rootfs_start(options).await,
+        NativeOp::BackupReaderStart => super::backup_reader::backup_reader_start(options).await,
         NativeOp::HomeEnsure(op) => super::homes::home_ensure(options, op).await,
         NativeOp::FilesAgentStart(op) => super::homes::files_agent_start(options, op).await,
         NativeOp::FilesAgentStop(op) => super::homes::files_agent_stop(options, op).await,
