@@ -2800,6 +2800,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn one_entry_named_twice_in_a_request_is_handled_once() {
+        let fx = start(None).await;
+        for name in ["k", "m"] {
+            std::fs::write(fx.home.join(name), b"kk").unwrap();
+        }
+        fx.post("/api/files/delete", json!({"paths": ["/k", "/m"]}))
+            .await;
+        let (_, list) = fx.get("/api/files/trash").await;
+        // The same entry with upper-case hex digits.
+        let twice = |id: String| {
+            let upper = format!("h:{}", id.trim_start_matches("h:").to_uppercase());
+            assert_ne!(upper, id);
+            json!({ "ids": [id, upper] })
+        };
+        let (status, reply) = fx
+            .post("/api/files/trash/delete", twice(id_of(&list, "/k")))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["deleted"], 1);
+        assert_eq!(reply["originalPaths"], json!(["/k"]));
+        let (status, reply) = fx
+            .post("/api/files/trash/restore", twice(id_of(&list, "/m")))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["restored"].as_array().unwrap().len(), 1);
+        assert!(fx.home.join("m").is_file());
+    }
+
+    #[tokio::test]
     async fn entries_are_removed_for_good_by_id_by_age_and_all_at_once() {
         let fx = start(None).await;
         for name in ["a", "b", "c"] {

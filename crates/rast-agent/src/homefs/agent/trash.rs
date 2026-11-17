@@ -927,10 +927,11 @@ fn resolve_ids(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for raw in ids {
-        if !seen.insert(raw.clone()) {
+        let id = TrashId::parse(raw).ok_or(AppError::NotFound("recycle bin entry not found"))?;
+        // By the canonical id: `h:4A` and `h:4a` name the same entry.
+        if !seen.insert(id.encode()) {
             continue;
         }
-        let id = TrashId::parse(raw).ok_or(AppError::NotFound("recycle bin entry not found"))?;
         let place = space.place_of(&id, shares)?;
         let trash = match open.iter().find(|trash| trash.place == place) {
             Some(trash) => trash.clone(),
