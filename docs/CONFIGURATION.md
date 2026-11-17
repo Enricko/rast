@@ -59,6 +59,7 @@ applied by `src/config.rs`.
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
 | `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
 | `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
+| `native_pilot_prefixes` | array of strings | unset | The native pilot ([ADR 0007](adr/0007-native-pilot.md)): when set, the native features — Linux apps (any backend, administrators included), one-HOME mode, shared folder groups, filesystem quota, and apply/rollback of `rast migrate home` and `rast migrate shares` — are limited to the accounts whose username, and the shared folders whose name **and** container, start with one of the prefixes. Unset: every account, as before. `[]`: nobody. Prefixes: 1–32 characters, lower case letters, digits, `.`, `_` and `-`, starting with a letter or digit; at most 16. Usernames match in any letter case. Terminal is not affected. Add the key only after updating to a release that knows it (older releases refuse unknown keys) | `RAST_NATIVE_PILOT_PREFIXES` |
 | `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
 | `terminal_admin_root` | boolean | `true` | Super administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Administrators and selected ordinary users always run unprivileged. Set `false` if nobody should get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
 | `terminal_admin_account` | string | unset | With `terminal_admin_root`: run the super administrators' terminals as this Linux login account (it must be a member of `sudo`, `admin` or `wheel`) instead of root. The shell is a login shell with the account's own environment, exactly like its SSH login; `sudo` gives root | `RAST_TERMINAL_ADMIN_ACCOUNT` |
@@ -116,6 +117,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_DOCKER_ENABLED` | `docker_enabled` | `true`/`false` |
 | `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
 | `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
+| `RAST_NATIVE_PILOT_PREFIXES` | `native_pilot_prefixes` | Comma separated (`t-,qa-`); empty means unset, only commas (`,`) means nobody |
 | `RAST_TERMINAL_ENABLED` | `terminal_enabled` | `true`/`false` |
 | `RAST_TERMINAL_ADMIN_ROOT` | `terminal_admin_root` | `true`/`false` |
 | `RAST_TERMINAL_ADMIN_ACCOUNT` | `terminal_admin_account` | account name |
@@ -187,6 +189,15 @@ Additional variables that are **not** configuration-file keys:
   `systemctl status rast-app-*` and `/sys/fs/cgroup/...`. `linux_uid_base` must
   not overlap systemd's dynamic uid range or existing local accounts. Session
   and window behaviour is documented in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
+* **Native pilot.** `native_pilot_prefixes = ["t-"]` keeps the native
+  features to test accounts and test shared folders while the rest of the
+  server runs as before (for example while a release is tested on a
+  production host, see [OPERATIONS.md](OPERATIONS.md#testing-on-production-with-the-native-pilot)).
+  Outside the pilot an account sees no Linux apps (the list is empty and
+  `linuxAppsEnabled` is `false`), gets 404 from the other Linux app routes
+  and 403 from the management routes, stays in the legacy HOME layout, and is
+  never named in a helper call for groups or quota. `rast doctor` and the
+  server log at start show the pilot.
 
 ## Examples
 

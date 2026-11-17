@@ -147,6 +147,11 @@ pub struct FileConfig {
     pub linux_app_tasks: Option<u32>,
     /// Free memory kept in reserve when admitting a new native application.
     pub linux_admission_reserve_mb: Option<u32>,
+    /// The native pilot (ADR 0007): when set, native apps, one-HOME mode,
+    /// shared folder groups, kernel quota limits and the migration commands
+    /// apply only to accounts and shared folders whose names start with one
+    /// of these prefixes (`[]`: nobody). Absent: no restriction.
+    pub native_pilot_prefixes: Option<Vec<String>>,
 
     // ---- Native Terminal (PTY) ------------------------------------------
     /// Enable the server-wide Terminal application (admins must still grant
@@ -218,6 +223,9 @@ pub struct Config {
     pub linux_app_cpus: u32,
     pub linux_app_tasks: u32,
     pub linux_admission_reserve_mb: u32,
+    /// Which accounts and shared folders the native features apply to
+    /// (`native_pilot_prefixes`, ADR 0007).
+    pub native_pilot: NativePilot,
     /// Native Terminal settings (PTY shells under the per-user identity).
     pub terminal: TerminalConfig,
     /// Config file that was actually loaded, if any.
@@ -257,6 +265,127 @@ impl Default for TerminalConfig {
             tasks: 512,
             path_extra: Vec::new(),
             admin_account: None,
+        }
+    }
+}
+
+/// Longest native pilot prefix (a username is at most 32 characters).
+pub const MAX_PILOT_PREFIX: usize = 32;
+/// Most native pilot prefixes.
+pub const MAX_PILOT_PREFIXES: usize = 16;
+
+/// The native pilot (`native_pilot_prefixes`, ADR 0007): which accounts and
+/// shared folders the native features apply to while native execution is
+/// tried on a server that also serves real accounts.
+///
+/// Off (the default): every account and shared folder, as before. On:
+/// only accounts whose username starts with one of the prefixes (usernames
+/// are stored in lower case), and only shared folders whose name **and**
+/// container both start with one (case-sensitive), so a shared folder
+/// renamed across the boundary is outside the pilot in both directions.
+/// An empty list puts nobody in the pilot. The pilot only ever takes
+/// native features away from accounts and shared folders.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativePilot {
+    prefixes: Option<Vec<String>>,
+}
+
+impl NativePilot {
+    /// No pilot: the native features apply to everyone.
+    pub fn off() -> Self {
+        Self::default()
+    }
+
+    /// A pilot of these prefixes (validated: 1 to [`MAX_PILOT_PREFIX`]
+    /// characters of the username charset in lower case, starting with a
+    /// letter or digit, at most [`MAX_PILOT_PREFIXES`]). Duplicates go.
+    pub fn with_prefixes<I, S>(prefixes: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut out: Vec<String> = Vec::new();
+        for prefix in prefixes {
+            let prefix = prefix.as_ref().trim();
+            let valid = !prefix.is_empty()
+                && prefix.len() <= MAX_PILOT_PREFIX
+                && prefix
+                    .bytes()
+                    .next()
+                    .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                && prefix.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.')
+                });
+            if !valid {
+                return Err(format!(
+                    "native_pilot_prefixes: {prefix:?} is not a valid prefix (1-{MAX_PILOT_PREFIX} \
+                     lower-case letters, digits, '.', '-' or '_', starting with a letter or digit)"
+                ));
+            }
+            if !out.iter().any(|known| known == prefix) {
+                out.push(prefix.to_string());
+            }
+        }
+        if out.len() > MAX_PILOT_PREFIXES {
+            return Err(format!(
+                "native_pilot_prefixes: at most {MAX_PILOT_PREFIXES} prefixes"
+            ));
+        }
+        Ok(Self {
+            prefixes: Some(out),
+        })
+    }
+
+    /// Whether the pilot restricts anything.
+    pub fn is_active(&self) -> bool {
+        self.prefixes.is_some()
+    }
+
+    /// The prefixes, `None` when the pilot is off.
+    pub fn prefixes(&self) -> Option<&[String]> {
+        self.prefixes.as_deref()
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match &self.prefixes {
+            None => true,
+            Some(prefixes) => prefixes.iter().any(|prefix| name.starts_with(prefix)),
+        }
+    }
+
+    /// Whether the native features apply to the account `username`
+    /// (compared in lower case, as usernames are stored).
+    pub fn allows_user(&self, username: &str) -> bool {
+        !self.is_active() || self.matches(&username.trim().to_ascii_lowercase())
+    }
+
+    /// Whether the native features apply to a shared folder: its name and
+    /// its container must both start with a prefix.
+    pub fn allows_share(&self, name: &str, container: &str) -> bool {
+        self.matches(name) && self.matches(container)
+    }
+
+    /// Whether a shared folder's name alone is in the pilot (a first check
+    /// before its container is known).
+    pub fn allows_share_name(&self, name: &str) -> bool {
+        self.matches(name)
+    }
+
+    /// One line for `rast doctor` and the start-up log.
+    pub fn describe(&self) -> String {
+        match &self.prefixes {
+            None => "off: all accounts and shared folders".to_string(),
+            Some(prefixes) if prefixes.is_empty() => {
+                "on: nobody (native_pilot_prefixes = [])".to_string()
+            }
+            Some(prefixes) => format!(
+                "on: only accounts and shared folders whose names start with {}",
+                prefixes
+                    .iter()
+                    .map(|prefix| format!("{prefix:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -599,6 +728,20 @@ impl Config {
                 "linux_admission_reserve_mb must be between 0 and 1048576".into(),
             ));
         }
+        // An empty variable counts as unset (like every RAST_* variable); a
+        // value of only commas is the empty list (nobody).
+        let native_pilot = match non_empty_env_in(&env, "RAST_NATIVE_PILOT_PREFIXES") {
+            Some(raw) => NativePilot::with_prefixes(
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|prefix| !prefix.is_empty()),
+            ),
+            None => match file.native_pilot_prefixes {
+                Some(prefixes) => NativePilot::with_prefixes(prefixes),
+                None => Ok(NativePilot::off()),
+            },
+        }
+        .map_err(ConfigError::Invalid)?;
 
         let terminal_path_extra: Vec<String> = get_str(
             file.terminal_path_extra.map(|v| v.join(":")),
@@ -716,6 +859,7 @@ impl Config {
             linux_app_cpus,
             linux_app_tasks,
             linux_admission_reserve_mb,
+            native_pilot,
             terminal,
             loaded_from,
         })
@@ -1143,6 +1287,119 @@ mod tests {
             };
             assert!(Config::from_parts(None, file, no_env).is_err());
         }
+    }
+
+    #[test]
+    fn the_native_pilot_is_off_unless_configured() {
+        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
+        assert!(!cfg.native_pilot.is_active());
+        assert_eq!(cfg.native_pilot, NativePilot::off());
+        assert!(cfg.native_pilot.allows_user("alice"));
+        assert!(cfg.native_pilot.allows_share("Test", "Test"));
+        assert_eq!(
+            cfg.native_pilot.describe(),
+            "off: all accounts and shared folders"
+        );
+    }
+
+    #[test]
+    fn the_native_pilot_comes_from_the_file_or_the_environment() {
+        let file =
+            FileConfig::from_toml_str(r#"native_pilot_prefixes = ["t-", "pilot."]"#).unwrap();
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        let pilot = &cfg.native_pilot;
+        assert!(pilot.is_active());
+        assert_eq!(pilot.prefixes().unwrap(), ["t-", "pilot."]);
+        // Usernames compare in lower case, as they are stored.
+        assert!(pilot.allows_user("t-alice"));
+        assert!(pilot.allows_user("T-Alice"));
+        assert!(pilot.allows_user("pilot.bob"));
+        assert!(!pilot.allows_user("alice"));
+        assert!(!pilot.allows_user("at-alice"));
+        // Shared folders: name and container, case-sensitive.
+        assert!(pilot.allows_share("t-share", "t-share"));
+        assert!(pilot.allows_share("t-renamed", "t-share"));
+        assert!(!pilot.allows_share("T-share", "T-share"));
+        assert!(!pilot.allows_share("Test", "Test"));
+        // Renamed across the boundary, in either direction: outside.
+        assert!(!pilot.allows_share("t-test", "Test"));
+        assert!(!pilot.allows_share("Share", "t-share"));
+        assert!(pilot.allows_share_name("t-test"));
+        assert!(!pilot.allows_share_name("Test"));
+        assert!(pilot.describe().contains("\"t-\", \"pilot.\""));
+
+        // The environment wins over the file.
+        let file = FileConfig::from_toml_str(r#"native_pilot_prefixes = ["t-"]"#).unwrap();
+        let env = |k: &str| match k {
+            "RAST_NATIVE_PILOT_PREFIXES" => Some(" x-, y- ,x-".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, file, env).unwrap();
+        assert_eq!(cfg.native_pilot.prefixes().unwrap(), ["x-", "y-"]);
+        assert!(!cfg.native_pilot.allows_user("t-alice"));
+        // An empty variable is unset; the file applies.
+        let file = FileConfig::from_toml_str(r#"native_pilot_prefixes = ["t-"]"#).unwrap();
+        let env = |k: &str| match k {
+            "RAST_NATIVE_PILOT_PREFIXES" => Some("  ".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, file, env).unwrap();
+        assert_eq!(cfg.native_pilot.prefixes().unwrap(), ["t-"]);
+    }
+
+    #[test]
+    fn an_empty_native_pilot_lets_nobody_in() {
+        let file = FileConfig::from_toml_str("native_pilot_prefixes = []").unwrap();
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        let pilot = &cfg.native_pilot;
+        assert!(pilot.is_active());
+        assert!(pilot.prefixes().unwrap().is_empty());
+        assert!(!pilot.allows_user("t-alice"));
+        assert!(!pilot.allows_user("admin"));
+        assert!(!pilot.allows_share("t-share", "t-share"));
+        assert!(pilot.describe().contains("nobody"));
+        // Only commas in the environment: the empty list too.
+        let env = |k: &str| match k {
+            "RAST_NATIVE_PILOT_PREFIXES" => Some(",".into()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
+        assert!(cfg.native_pilot.is_active());
+        assert!(!cfg.native_pilot.allows_user("t-alice"));
+    }
+
+    #[test]
+    fn native_pilot_prefixes_are_validated() {
+        for bad in [
+            r#"[""]"#,
+            r#"["T-"]"#,
+            r#"["-t"]"#,
+            r#"["t/"]"#,
+            r#"["t -"]"#,
+            r#"["tü-"]"#,
+            r#"["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]"#,
+        ] {
+            let file =
+                FileConfig::from_toml_str(&format!("native_pilot_prefixes = {bad}")).unwrap();
+            let error = Config::from_parts(None, file, no_env).unwrap_err();
+            assert!(
+                error.to_string().contains("native_pilot_prefixes"),
+                "{bad}: {error}"
+            );
+        }
+        let many: Vec<String> = (0..17).map(|n| format!("p{n}-")).collect();
+        assert!(NativePilot::with_prefixes(&many).is_err());
+        assert!(NativePilot::with_prefixes(&many[..16]).is_ok());
+        let longest = "a".repeat(MAX_PILOT_PREFIX);
+        assert!(NativePilot::with_prefixes([longest.as_str()]).is_ok());
+        let env = |k: &str| match k {
+            "RAST_NATIVE_PILOT_PREFIXES" => Some("t-,Bad".into()),
+            _ => None,
+        };
+        assert!(Config::from_parts(None, FileConfig::default(), env).is_err());
+        // An unknown key is still refused (forward compatibility of the
+        // file is the operator's job: ADR 0007).
+        assert!(FileConfig::from_toml_str("native_pilot = [\"t-\"]").is_err());
     }
 
     #[test]

@@ -1082,12 +1082,17 @@ pub(crate) async fn doctor_identities_with(
 pub async fn doctor_report(cfg: &Config) -> DoctorReport {
     let mut report = DoctorReport::default();
     report.lines.push("[INFO] native Linux apps".to_string());
+    // Which accounts and shared folders the native features apply to (ADR
+    // 0007).
+    let pilot = format!("        native pilot: {}", cfg.native_pilot.describe());
     if !cfg.native_enabled {
         report
             .lines
             .push("        disabled (native backend off; Docker backend still works)".to_string());
+        report.lines.push(pilot);
         return report;
     }
+    report.lines.push(pilot);
     let options = NativeOptions::from_config(cfg);
     let warn = |report: &mut DoctorReport, message: String| {
         report.warnings += 1;
@@ -1526,6 +1531,26 @@ mod tests {
         assert_eq!(report.failures, 0);
         assert_eq!(report.lines[0], "[INFO] native Linux apps");
         assert!(report.lines[1].contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_the_native_pilot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = config(&temp.path().join("data"), &temp.path().join("storage"));
+        cfg.native_enabled = false;
+        let report = doctor_report(&cfg).await;
+        assert!(report
+            .lines
+            .contains(&"        native pilot: off: all accounts and shared folders".to_string()));
+        cfg.native_pilot = crate::config::NativePilot::with_prefixes(["t-"]).unwrap();
+        let report = doctor_report(&cfg).await;
+        assert_eq!(report.warnings, 0);
+        assert!(
+            report.lines.iter().any(|line| line
+                == "        native pilot: on: only accounts and shared folders whose names start \
+                    with \"t-\""),
+            "{report:?}"
+        );
     }
 
     #[tokio::test]

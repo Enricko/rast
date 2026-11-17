@@ -145,6 +145,15 @@ native_enabled = true
 # while keeping its implementation in the binary.
 # env: RAST_LINUX_APPS_ENABLED
 linux_apps_enabled = true
+# Native pilot (ADR 0007): limit the native features (Linux apps, one-HOME
+# mode, shared folder groups, filesystem quota and `rast migrate home` /
+# `rast migrate shares` apply and rollback) to the accounts whose username,
+# and the shared folders whose name and container, start with one of these
+# prefixes (lower case; letters, digits, ".", "_", "-"). Absent: everyone,
+# as before. [] = nobody. Terminal is not affected. Add this key only after
+# updating to a release that knows it: older releases refuse unknown keys.
+# env: RAST_NATIVE_PILOT_PREFIXES (comma separated)
+# native_pilot_prefixes = ["t-"]
 
 # ---- Terminal (native PTY shells) ----------------------------------------
 # Interactive shells run as the mapped per-user identity through the native
