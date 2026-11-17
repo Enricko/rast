@@ -24,6 +24,9 @@ use crate::storage::{quota, shares, Storage};
 const MEASURE_TTL: Duration = Duration::from_secs(60);
 /// Largest limit accepted (2^53, exact in JSON).
 pub const MAX_SHARE_QUOTA: i64 = 1 << 53;
+/// The 413 message of a write that does not fit a share's limit (in
+/// process, and from a per-user file agent).
+pub const LIMIT_EXCEEDED: &str = "the shared folder's size limit would be exceeded";
 
 #[derive(Debug, Clone, Copy)]
 struct Measured {
@@ -126,9 +129,7 @@ pub async fn check(
     bytes: u64,
 ) -> AppResult<()> {
     match free(pool, storage, share_id).await? {
-        Some(free) if bytes > free => Err(AppError::PayloadTooLarge(
-            "the shared folder's size limit would be exceeded",
-        )),
+        Some(free) if bytes > free => Err(AppError::PayloadTooLarge(LIMIT_EXCEEDED)),
         Some(_) => {
             note_written(share_id, bytes);
             Ok(())

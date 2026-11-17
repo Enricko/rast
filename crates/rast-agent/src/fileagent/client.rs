@@ -98,6 +98,7 @@ const NOT_FOUND: &[&str] = &[
 ];
 const TOO_LARGE: &[&str] = &[
     "storage quota exceeded",
+    crate::storage::share_quota::LIMIT_EXCEEDED,
     "file exceeds the maximum upload size",
     "chunk is too large",
     "chunk exceeds the declared upload size",
@@ -201,6 +202,10 @@ mod tests {
             (StatusCode::FORBIDDEN, "symbolic links are not supported"),
             (StatusCode::NOT_FOUND, "path not found"),
             (StatusCode::PAYLOAD_TOO_LARGE, "storage quota exceeded"),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                crate::storage::share_quota::LIMIT_EXCEEDED,
+            ),
             (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 "preview is not supported for this file type",

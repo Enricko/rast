@@ -1258,6 +1258,13 @@ async fn shared_folder_size_limits_apply_to_file_station_writes() {
     assert_eq!(status, StatusCode::OK, "{job}");
     let failed = server.wait_job(&alice, &job).await;
     assert_eq!(failed["status"], "failed", "{failed}");
+    // The agent's reason reaches the browser.
+    assert!(
+        failed
+            .to_string()
+            .contains(rast::storage::share_quota::LIMIT_EXCEEDED),
+        "{failed}"
+    );
     let shared = server.state.config.shared_dir();
     assert!(!shared.join("Team/five.txt").exists());
     // Removing the limit lets it through.

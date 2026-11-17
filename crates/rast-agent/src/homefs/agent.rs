@@ -1234,7 +1234,7 @@ async fn transfer_items(
             return Err(AppError::PayloadTooLarge(if dest_in_home {
                 "storage quota exceeded"
             } else {
-                "the shared folder's size limit would be exceeded"
+                crate::storage::share_quota::LIMIT_EXCEEDED
             }));
         }
         let mut bytes = 0u64;
