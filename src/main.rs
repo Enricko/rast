@@ -401,14 +401,40 @@ enum MigrateCommand {
     /// Shared folders: Linux groups, group-owned containers and ACLs. Run
     /// as the `rast` user, before `rast migrate home`; apply and rollback
     /// need the server stopped.
+    #[command(group(clap::ArgGroup::new("selection").required(true).args(["share", "all"])))]
     Shares {
         /// Only this shared folder (by name)
         #[arg(long, value_name = "NAME")]
         share: Option<String>,
+        /// Every shared folder
+        #[arg(long)]
+        all: bool,
         /// Report what would change, change nothing
         #[arg(long, conflicts_with = "rollback")]
         dry_run: bool,
         /// Restore owners, modes and ACLs from the migration journal
+        #[arg(long)]
+        rollback: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accounts: move a legacy account into one-HOME mode (its HOME, app
+    /// profiles and recycle bin become its Linux identity's). Run as the
+    /// `rast` user, after `rast migrate shares`; apply and rollback need the
+    /// server stopped.
+    #[command(group(clap::ArgGroup::new("selection").required(true).args(["user", "all"])))]
+    Home {
+        /// Only this account (by RAST username)
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
+        /// Every account
+        #[arg(long)]
+        all: bool,
+        /// Report what would change, change nothing
+        #[arg(long, conflicts_with = "rollback")]
+        dry_run: bool,
+        /// Undo the migration from its journal
         #[arg(long)]
         rollback: bool,
         /// Machine-readable output
@@ -1397,12 +1423,22 @@ async fn migrate_command(
     cmd: MigrateCommand,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     use rast::migrate_shares::{self, Mode};
-    let MigrateCommand::Shares {
-        share,
-        dry_run,
-        rollback,
-        json,
-    } = cmd;
+    let (share, dry_run, rollback, json) = match cmd {
+        MigrateCommand::Shares {
+            share,
+            all: _,
+            dry_run,
+            rollback,
+            json,
+        } => (share, dry_run, rollback, json),
+        MigrateCommand::Home {
+            user,
+            all: _,
+            dry_run,
+            rollback,
+            json,
+        } => return migrate_home_command(cfg, user, dry_run, rollback, json).await,
+    };
     let mode = match (dry_run, rollback) {
         (true, _) => Mode::DryRun,
         (_, true) => Mode::Rollback,
@@ -1451,6 +1487,75 @@ async fn migrate_command(
         }
         if failed > 0 {
             eprintln!("rast: {failed} shared folder(s) failed; the others are done");
+        }
+    }
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+async fn migrate_home_command(
+    cfg: Config,
+    user: Option<String>,
+    dry_run: bool,
+    rollback: bool,
+    json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::migrate_home::{self, Env, Mode, Selection};
+    let mode = match (dry_run, rollback) {
+        (true, _) => Mode::DryRun,
+        (_, true) => Mode::Rollback,
+        _ => Mode::Apply,
+    };
+    let selection = match user {
+        Some(name) => Selection::User(name),
+        None => Selection::All,
+    };
+    if !cfg.native_enabled {
+        return Err("one-HOME mode needs the native backend (native_enabled = true)".into());
+    }
+    // Apply and rollback change owners under a running server's feet (D9).
+    let _instance = if mode == Mode::DryRun {
+        None
+    } else {
+        Some(db::InstanceLock::try_acquire(&cfg)?.ok_or_else(|| {
+            format!(
+                "the RAST server is running on {}; stop it first (systemctl stop rast)",
+                cfg.data_dir.display()
+            )
+        })?)
+    };
+    let pool = db::init(&cfg).await?;
+    let native = rast::native::client::NativeClient::from_config(&cfg);
+    let env = Env {
+        cfg: &cfg,
+        pool: &pool,
+        native: &native,
+    };
+    let outcomes = migrate_home::run(&env, mode, &selection).await?;
+    let failed = outcomes.iter().filter(|outcome| !outcome.ok).count();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": mode.as_str(),
+                "users": outcomes,
+                "failed": failed,
+            }))?
+        );
+    } else {
+        if outcomes.is_empty() {
+            println!("There are no accounts.");
+        }
+        for outcome in &outcomes {
+            for line in migrate_home::describe(mode, outcome) {
+                println!("{line}");
+            }
+        }
+        if failed > 0 {
+            eprintln!("rast: {failed} account(s) failed; the others are done");
         }
     }
     Ok(if failed > 0 {
@@ -1627,4 +1732,79 @@ fn _assert_traits() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Config>();
     assert_send_sync::<AppResult<()>>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<MigrateCommand, clap::Error> {
+        let mut argv = vec!["rast", "migrate"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv)?;
+        match cli.command {
+            Some(Command::Migrate { cmd }) => Ok(cmd),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrations_name_one_share_or_account_or_all_of_them() {
+        // No selection is an error: a run never covers everything by
+        // default.
+        for args in [
+            &["shares"][..],
+            &["shares", "--dry-run"],
+            &["shares", "--rollback"],
+            &["home"],
+            &["home", "--dry-run"],
+            &["home", "--rollback"],
+            &["shares", "--share", "team", "--all"],
+            &["home", "--user", "t-alice", "--all"],
+            &["home", "--user", "t-alice", "--dry-run", "--rollback"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        for mode in [None, Some("--dry-run"), Some("--rollback")] {
+            let with = |args: &[&'static str]| {
+                let mut args = args.to_vec();
+                args.extend(mode);
+                args
+            };
+            let cmd = parse(&with(&["shares", "--share", "team"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Shares { share: Some(ref name), all: false, dry_run, rollback, .. }
+                    if name == "team"
+                        && dry_run == (mode == Some("--dry-run"))
+                        && rollback == (mode == Some("--rollback"))
+            ));
+            let cmd = parse(&with(&["shares", "--all"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Shares {
+                    share: None,
+                    all: true,
+                    ..
+                }
+            ));
+            let cmd = parse(&with(&["home", "--user", "t-alice", "--json"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Home { user: Some(ref name), all: false, json: true, dry_run, rollback }
+                    if name == "t-alice"
+                        && dry_run == (mode == Some("--dry-run"))
+                        && rollback == (mode == Some("--rollback"))
+            ));
+            let cmd = parse(&with(&["home", "--all"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Home {
+                    user: None,
+                    all: true,
+                    ..
+                }
+            ));
+        }
+    }
 }

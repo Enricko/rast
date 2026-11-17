@@ -382,6 +382,44 @@ mod tests {
             run(&pool, &native, Mode::DryRun, Some("nope")).await,
             Err(AppError::NotFound(_))
         ));
+        for mode in [Mode::Apply, Mode::Rollback] {
+            assert!(matches!(
+                run(&pool, &native, mode, Some("nope")).await,
+                Err(AppError::NotFound(_))
+            ));
+        }
+
+        // `--share` applies to that shared folder only.
+        calls.lock().unwrap().clear();
+        let outcomes = run(&pool, &native, Mode::Apply, Some("TEAM"))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].ok);
+        assert_eq!(
+            ops(TEAM),
+            [
+                "share_group_ensure",
+                "share_members_set",
+                "shares_migrate_apply"
+            ]
+        );
+        assert!(ops(SALES).is_empty());
+        // And so do dry-run and rollback: one share, one helper call.
+        calls.lock().unwrap().clear();
+        let outcomes = run(&pool, &native, Mode::DryRun, Some("sales"))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        let outcomes = run(&pool, &native, Mode::Rollback, Some("sales"))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            ops(SALES),
+            ["shares_migrate_scan", "shares_migrate_rollback"]
+        );
+        assert!(ops(TEAM).is_empty());
     }
 
     #[test]

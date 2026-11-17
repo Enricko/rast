@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod backup;
+pub mod migrate_home;
 pub mod migrate_shares;
 pub mod monitor;
 pub mod native_proxy;
