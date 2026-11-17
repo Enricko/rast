@@ -136,7 +136,11 @@ differences:
   writes to a read-only one). `~/Shared` lists no shared folders: they are
   listed by `GET /api/files/roots`, as for every account.
 * A copy or move into HOME that does not fit the quota fails as a whole
-  (`413` in the job), before anything is written.
+  (`413` in the job), before anything is written. The same holds for a
+  shared folder with a size limit (uploads, copies, moves and restores).
+* A deletion in a shared folder whose `.Trash-<uid>` was made by someone
+  else answers `403` ("this recycle bin folder belongs to another account;
+  ask an administrator to remove it").
 * `503` when the account's file agent cannot be started or reached (the
   privileged helper is down); the server never serves such an account
   in-process instead.
@@ -178,7 +182,7 @@ No account is switched to one-HOME mode by this version.
 | GET | `/api/files/search?q=&path=&type=&page=&hidden=` | recursive search (bounded); `hidden=false` skips dot files and does not descend into dot folders |
 | GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}, byLocation:{files, apps, caches, trash, shared}, quotaBackend:"filesystem|rast"}`; `byLocation` and `quotaBackend` are additive (legacy accounts: `files` and `trash`, `"rast"`); `quotaBackend` says what enforces `quotaBytes`: the kernel for File Station, Terminal and every app, or RAST for File Station and App Center only |
 | GET | `/api/files/trash?page=` | `{items:[{id, originalPath, sizeBytes, kind, deletedAt}], total}` |
-| POST | `/api/files/trash/restore` | `{ids:[]}` |
+| POST | `/api/files/trash/restore` | `{ids:[]}`; `409` when a destination exists, `413` when the entries going into a shared folder from another recycle bin do not fit its size limit (nothing is restored) |
 | POST | `/api/files/trash/delete` | `{ids:[]}` permanent delete (irreversible) |
 | DELETE | `/api/files/trash` | empty the bin |
 

@@ -784,7 +784,28 @@ The service account cannot read either; the retention setting
 (`trashRetentionDays`) is applied when the account opens its recycle bin.
 A `.Trash-<uid>` folder in a shared folder is private to its owner: it is
 hidden in File Station, the repair pass leaves it alone, and it holds that
-member's deleted files until they empty it.
+member's deleted files until they empty it. Its bytes count towards the
+shared folder's size limit.
+
+**A `.Trash-<uid>` that is not its owner's.** A member with write access
+can create the folder name of another member first (a link, a file, or a
+folder they own), from an app or a terminal. That member's file agent then
+never uses it (the Trash specification's check): deleting and restoring in
+that shared folder fail with "this recycle bin folder belongs to another
+account; ask an administrator to remove it". RAST never changes or removes
+it. The daily repair pass logs it ("recycle bin folders made by someone
+else") and `rast doctor` lists it with the owner uid. To fix it, look at
+what it holds first, then remove it as root, for example:
+
+```bash
+sudo ls -la /srv/rast/storage/shared/<container>/.Trash-<uid>
+sudo rm -r /srv/rast/storage/shared/<container>/.Trash-<uid>   # after checking
+```
+
+The member's agent creates a new, private one at the next deletion. A
+`.Trash-<uid>` of an account that left the shared folder, or was deleted,
+is not removed either; it keeps counting towards the folder's size limit
+until an administrator removes it the same way.
 
 **Which quota applies.** `rast doctor` (section "storage quota") and Control
 Panel → Storage say it:
@@ -804,12 +825,31 @@ Panel → Storage say it:
 RAST never edits `/etc/fstab`, turns quota on or changes grace times. With
 user quota only accounting (not enforcing), `rast doctor` warns.
 
+**Grace times.** Between the soft and the hard limit, the kernel allows
+writes only for the filesystem's block grace time; after it, the soft limit
+acts as the hard one until usage drops below it. RAST's limits (D4) assume
+7 days. Grace times are global for each filesystem and quota type, so they
+would affect accounts outside RAST too: RAST only reads them. `rast doctor`
+prints them ("storage quota") and warns when the user block grace is not 7
+days. Set them as root when quota is turned on (runbook in ADR 0005,
+section 9):
+
+```bash
+sudo setquota -t -u 604800 604800 /   # user quota: 7 days for blocks and inodes
+sudo setquota -t -g 604800 604800 /   # group quota (shared folder limits)
+sudo repquota -u / | head -3          # shows the grace times
+```
+
 **Shared-folder size limits** (Control Panel → Shared folders, "Size limit"):
-RAST checks them for File Station uploads, copies and moves into the
-folder ("RAST only"). With group quota on the shared filesystem, the
-folder's read-write group also gets a kernel limit ("filesystem, best
-effort": files moved in with another group, `chgrp` or group-preserving
-copies are not counted against the folder, only against their owner).
+RAST checks them for File Station uploads, copies, moves into the folder
+and restores from a recycle bin ("RAST only"). The usage it compares with
+the limit is the folder's files plus the members' recycle bins at its top
+(measured by the native helper, kept for a minute), plus the uploads still
+running. Apps and terminals of members are not limited by it. With group
+quota on the shared filesystem, the folder's read-write group also gets a
+kernel limit ("filesystem, best effort": files moved in with another
+group, `chgrp` or group-preserving copies are not counted against the
+folder, only against their owner).
 
 ## The private data folder
 

@@ -225,11 +225,22 @@ this file by `scripts/changelog-section.sh`.
 
 - **Shared folder size limits (migration 0015).** Control Panel → Shared
   folders has a "Size limit" (none by default). RAST checks it for File
-  Station uploads, copies and moves into the folder; with group quota on
-  the shared filesystem the folder's read-write group also gets a kernel
-  limit. Each limited folder shows what enforces it: "filesystem, best
-  effort" or "RAST only". `/api/shares` gains the additive `quotaBytes` and
+  Station uploads, copies, moves into the folder and restores from a
+  recycle bin (`413` "the shared folder's size limit would be exceeded",
+  nothing written); uploads hold their bytes while they run, and the
+  members' recycle bins in the folder count (new read-only helper
+  operation `share_trash_usage`). With group quota on the shared
+  filesystem the folder's read-write group also gets a kernel limit. Each
+  limited folder shows what enforces it: "filesystem, best effort" or
+  "RAST only". `/api/shares` gains the additive `quotaBytes` and
   `quotaEnforcedBy`.
+
+- **Recycle bin folders in shared folders that are not their owner's.** A
+  `.Trash-<uid>` that another member made first (a link, a file or a
+  folder of someone else) is never used: that member's deletions there
+  answer `403` with a message to ask an administrator. The daily repair
+  pass logs such folders and `rast doctor` lists them; RAST does not
+  change them (see `docs/OPERATIONS.md`).
 
 - **File Station: "Show hidden files".** A new toolbar button next to the
   list and grid view buttons shows or hides files and folders whose names
@@ -313,6 +324,17 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- Recycle bin of one-HOME accounts (review of task 1.4): a restore never
+  lands on a `.Trash*` name at the top of a shared folder; an entry named
+  twice in one request is handled once; "Empty" reads large recycle bins
+  in bounded batches; a shared folder's own `.Trash-<uid>` is closed again
+  (`0700`, no ACL) whenever it is used.
+- Kernel quota (review of task 1.4): `quota_set` sets limits only on the
+  account `rast-u<id>` with the uid RAST expects (`identity_conflict`
+  otherwise); limits are whole KiB, so the periodic pass does not set them
+  again; a HOME scan that stopped at its entry limit no longer lowers the
+  usage; the shared folder size limit message from a file agent reaches
+  the browser.
 - File Station live updates: the server's file watcher now watches each
   home on its own, so one home it cannot read no longer stops changes in
   other homes from being reported. Homes of one-HOME accounts are left to

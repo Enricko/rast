@@ -258,11 +258,12 @@ operation is idempotent.
 | `share_dir_release` | `shareId`, `container` | Task 1.3: the container of a deleted shared folder (whose data RAST keeps) goes back to `rast:rast` 0700 without ACLs before its groups are removed, so a later share that gets the freed gid cannot open it. |
 | `quota_status` | none | Device and filesystem type of the homes and shared roots; user and project quota each `off`, `accounting` or `enforced`; grace times. |
 | `quota_set` | `userId`, `softBytes`, `hardBytes` | 0 = no limit; hard ≥ soft; both ≤ filesystem size. `quotactl(Q_SETQUOTA, USRQUOTA)` through `libc` (already a dependency). |
-| `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project quota (project id = rw gid) when available, otherwise group quota on the rw gid if task 1.3 accepts it (D3). Returns the backend that enforces the limit. |
+| `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project quota (project id = rw gid) when available, otherwise group quota on the rw gid if task 1.3 accepts it (D3). Returns the backend that enforces the limit. Task 1.4: group quota only; project quota is deferred until a host supports it (section 11). |
 | `quota_report` | `userIds`, `shareIds` | At most 10 000 ids; used bytes and limits from `Q_GETQUOTA`. |
 | `home_migrate_scan`, `home_migrate_apply`, `home_migrate_rollback` | `userId`, `username` | Section 8. The scan is read-only with bounded output (counts, plus the first 50 paths per category). |
 | `shares_migrate_scan`, `shares_migrate_apply`, `shares_migrate_rollback` | `shareId`, `container` | Same pattern for shared folders (task 1.3). |
 | `share_dir_repair` | `shareId`, `container` | Daily repair pass (D3 decision, 2026-11-16): the recursive `share_dir_prepare` of a container that already has the layout (owned by root); a legacy container is left for `rast migrate shares`. Keeps the container's deny entries. |
+| `share_trash_usage` | `shareId`, `container` | Task 1.4 review (2026-11-17): read-only. The share must have its groups and the container must be a real folder of `rast` or root. Sums the apparent size of the regular files below the folders named like recycle bins at the top of the container (`.Trash`, `.Trash-*`), which the service cannot read; no-follow, one device and mount, at most 1 000 000 names (`truncated` when it stops early), 60 s deadline, not serialised with long-running work. For RAST's check of shared folder limits (section 11). |
 | `share_deny_set` | `shareId`, `container`, `userIds` (at most 256) | D7 decision (2026-11-16): the full set of `u:rast-u<id>:---` entries on the access ACL of a prepared container, the stopgap while a full revocation waits for the user's session restart. Entries of users not listed are removed; the default ACL is not touched. |
 | `share_session_groups` | `userIds` (1 to 200) | Read-only: per user, how many processes run as the identity in one of the user's units and which gids of the share range they carry (`Groups:` of `/proc/<pid>/status`), with the names of those that are share groups. A process counts only when its real and effective uid are the identity's and the first non-slice component of its cgroup (`/proc/<pid>/cgroup`) is `rast-xpra-u<id>`, `rast-files-u<uid>`, `rast-app-u<uid>-…` or `rast-term-u<uid>-…` (`.service`); both files are read through one descriptor of `/proc/<pid>`, which stays bound to that process. Lets the server find sessions that still hold a revoked group after a server restart. Phase 2 (user units under `user@<uid>.service`) must extend the unit rule. |
 | `backup_reader_start` | none | Starts the root reader unit `rast-backup-reader` (same pattern as `rootfs_start`). It only streams tar archives of the fixed homes and shared roots (section 7). |
@@ -331,6 +332,13 @@ served to anyone else, or chowned for anyone else.
   project id, no `EXDEV`) and only the person who deleted it can restore it,
   as today. `.Trash*` entries are hidden in listings. Entries that GIO moved
   from a share into the home trash are shown with their `/shared/…` path.
+- A `.Trash-<uid>` that another member made first (a link, a file, or a
+  folder of another owner) is never used, as the specification asks: that
+  member's deletions and restores in the share answer `403` with "this
+  recycle bin folder belongs to another account; ask an administrator to
+  remove it". RAST does not change or remove it (task 1.4 review decision,
+  2026-11-17); the daily repair pass logs it and `rast doctor` lists it,
+  and an administrator removes it (`docs/OPERATIONS.md`).
 - `TrashEntryDto` is unchanged. Ids stay opaque strings: `h:` or
   `s:<shareId>:` followed by the encoded trash name. The agent purges entries
   by `DeletionDate` with the existing retention setting.
@@ -820,25 +828,41 @@ list. The evaluation:
 - Shared-folder limits on the kernel side: group quota on the rw gid
   (`share_quota_set`, the same D4 margin), shown as "filesystem, best
   effort". RAST checks every limit for File Station writes (single and
-  chunked uploads, copies and moves from outside the share; the whole
-  batch must fit), against a walk of the container that is kept for a
-  minute.
+  chunked uploads, copies and moves from outside the share, restores from
+  a recycle bin; the whole batch must fit), against a measurement of the
+  container that is kept for a minute: a walk by the service without the
+  recycle bin folders at its top, plus `share_trash_usage` for those.
+  Uploads reserve their bytes while they run (as the user quota does), so
+  two uploads that start together cannot both use the same free space; a
+  cancelled, failed or expired upload gives them back.
+- A restore through the per-user agent gets the bytes still free in every
+  limited shared folder the account may write in the server-only header
+  `x-rast-share-free` (`<shareId>=<bytes>` pairs separated by commas,
+  strictly parsed, removed from browser requests). The agent refuses the
+  restore (`413`, nothing moved) when the entries arriving from another
+  recycle bin (the HOME one, where GIO puts files deleted through
+  `~/Shared/<name>`) do not fit; entries of the share's own `.Trash-<uid>`
+  are counted there already. An agent from before this header ignores it
+  until it restarts.
 
 **Deviations and open items.**
 
-- **Project quota is not used yet.** `share_dir_prepare` does not set
-  project ids (no filesystem here or on production has project quota), so
-  `share_quota_set` uses group quota only; `quota_status` reports the
-  project state. Project ids and project limits come with the first host
-  that has project quota.
-- **Grace times are not set by RAST.** They are global per filesystem, so
-  changing them would affect accounts outside RAST. `rast doctor` reports
-  them and notes when the block grace is not 7 days; the runbook (section
-  9) sets them.
-- The RAST share-limit check does not reserve bytes (two uploads that
-  start together can both pass), does not see members' `.Trash-<uid>`
-  folders (`0700`) or what apps write, and does not cover restores from the
-  recycle bin into the share.
+- **Project quota is deferred** (maintainer's decision, 2026-11-17) until a
+  host supports it; on production that needs a new disk (D1, Q-c).
+  `share_dir_prepare` does not set project ids, `share_quota_set` uses
+  group quota only, and `quota_status` reports the project state. Project
+  ids and project limits come with the first host that has project quota.
+- **Grace times are not set by RAST** (accepted, 2026-11-17). They are
+  global per filesystem, so changing them would affect accounts outside
+  RAST. `rast doctor` reports them and notes when the block grace is not 7
+  days; the runbook (section 9) sets them and `docs/OPERATIONS.md`
+  explains them.
+- The RAST share-limit check ("RAST only", production until Q-a) does not
+  see what members' apps write. The three gaps the first version had
+  (no reservation for uploads, members' `.Trash-<uid>` not counted,
+  restores not checked) are closed (review, 2026-11-17). A
+  `.Trash-<uid>` of an account that left the share, or was deleted, stays
+  and keeps counting until an administrator removes it.
 - Under the fallback a HOME scan that runs while an upload is in progress
   counts its temporary file on top of the reservation until the next scan.
 - Not tested here (no kernel quota on this host, no root): `quotactl_fd`
@@ -846,6 +870,48 @@ list. The evaluation:
   tests (`Q_XGETQSTATV` answers "off" on a filesystem without quota).
   Pending on the test host: section "Pending on the test host" in
   `docs/remake/PROGRESS.md`.
+
+### 12. Task 1.4: security review (2026-11-17)
+
+An independent review of task 1.4 (commits after `7da51ae`). Fixed, each
+with a regression test:
+
+- A restore could target a `.Trash*` name at the top of a shared folder
+  (another member's recycle bin, or a name that member's agent then
+  refuses); such origins now go to the fallback name.
+- An id named twice in one request, in different hex case, was handled
+  twice; ids are deduplicated by their canonical form.
+- "Empty" read a whole `files/` folder into memory; it now works in
+  bounded batches.
+- An own share trash with loose bits (an app's `chmod`) or a foreign info
+  file stayed as it was; every open closes it again (`0700` + set-gid, no
+  ACL), and info files of other owners are not listed.
+- The share-limit message from the agent became a generic one; it now
+  reaches the browser.
+- D4 limits were not whole KiB, so every pass set them again; they are
+  rounded up to quota blocks.
+- A HOME scan that stopped at its entry limit could lower the usage; a
+  partial scan only raises it.
+- `quota_set` set limits on uid `linux_uid_base + id` without checking
+  that the account exists with that uid; it now checks passwd and refuses
+  a missing account (`not_found`) or another uid (`identity_conflict`).
+- Squatted `.Trash-<uid>` folders are reported (`foreignTrash` in the tree
+  walk, the repair pass log, `rast doctor`), section 5.
+
+Found sound: the quota operations take ids only (`u64` limits refuse
+negative values; uids only from the identity range, gids only from the
+share range; bounded id lists); `.trashinfo` decoding refuses NUL and
+control characters, and relative and absolute paths follow the
+specification; a `~/.local/share/Trash` that is a symlink is refused;
+large trashes are bounded (20 000 entries listed).
+
+**Open: migration 0015 blocks a rollback to 0.18.x.** The sqlx migrator
+of 0.18.x refuses a database with an applied migration it does not know
+(`VersionMissing(15)`), so after a 1.0.1 build has opened the database,
+`rast update --version 0.18.x` installs a binary that does not start. A
+rollback to 0.18.x must restore the database from the backup taken before
+the deploy (or a 0.18.x patch release must ignore unknown migrations).
+The deploy checklist says so until the maintainer decides.
 
 ### Decisions (taken by the maintainer on 2026-11-16)
 

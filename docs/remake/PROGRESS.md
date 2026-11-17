@@ -3,9 +3,9 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1 to 1.4 done, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.5). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1 to 1.4 done and task 1.4 reviewed, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.5). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; pre-releases are `1.0.1-alpha.N`, each with a `chore(release)` commit; releases are pre-release only until the final remake gate)
-- **Last updated:** 2026-11-16
+- **Last updated:** 2026-11-17
 - **Test host:** production (`desktop.lufria.tech`) doubles as the test host;
   there is no separate VM or VPS (maintainer's decision, 2026-11-16). See
   "Testing on production" below and Production safety in `CLAUDE.md`.
@@ -599,12 +599,49 @@ Update it at the end of every session.
     D3); no new dependency; no deploy or config change. No pre-release
     prepared (it follows task 1.5 and its review).
 
+- **Task 1.4 security review** (2026-11-17, independent review of the
+  commits after `7da51ae` against ADR 0005; ADR 0005 section 12). Bugs
+  fixed, one commit each, each with a regression test that fails without
+  the fix:
+  - `bf617ae` fix(agent): a restore never targets a `.Trash*` name at the
+    top of a shared folder.
+  - `878acff` fix(agent): one entry named twice in a request (hex case) is
+    handled once.
+  - `5bffa60` fix(agent): "Empty" reads its folders in bounded batches.
+  - `b215232` fix(agent): an own share trash is closed again (`0700` +
+    set-gid, no ACL) whenever it is used; foreign info files are skipped.
+  - `2b480eb` fix(agent): the share-limit message reaches the browser.
+  - `ed0a457` fix(server): D4 limits are whole KiB.
+  - `1166713` fix(server): a truncated HOME scan never lowers the usage.
+  - `c7d5c7a` fix(helper): `quota_set` checks passwd (missing account
+    `not_found`, other uid `identity_conflict`).
+  Maintainer's decisions on the 1.4 report (2026-11-17), applied:
+  - Project quota is deferred until a host supports it (production needs a
+    new disk, D1); recorded in ADR 0005, section 11.
+  - Grace times: reported by `rast doctor` and explained in the runbook
+    (`docs/OPERATIONS.md`); RAST never sets them.
+  - A `.Trash-<uid>` made first by another member is reported, never
+    changed: `5a66cd2` feat(helper) (`foreignTrash` in the tree walk
+    report, the daily repair pass log, `rast doctor`).
+  - The three "RAST only" share-limit gaps are closed:
+    `6553ac8` fix(storage) (uploads reserve their bytes while they run, in
+    process and through the agent), `e76db3f` feat(helper) (new read-only
+    helper operation `share_trash_usage`; members' recycle bins count
+    towards the limit), `8d8ab5f` fix(storage) (a restore must fit: in
+    process, and through the agent with the new server-only header
+    `x-rast-share-free`).
+  - Open, for the maintainer: migration 0015 makes a binary-only rollback
+    to 0.18.x impossible (see "Open questions").
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1003 passed, 0
+    failed (one run showed the timing flake below); no frontend change; no
+    new dependency or migration; no deploy or config change.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
 - [x] Task 1.2: per-user file agent (unit and fake-helper integration tests; the tests below under "Pending on the test host" are still open)
 - [x] Task 1.3: shared folders as Linux groups (unit and fake-helper tests; kernel-level tests under "Pending on the test host")
-- [x] Task 1.4: XDG Trash and quota (unit and fake-helper tests; kernel quota and real apps under "Pending on the test host (task 1.4)")
+- [x] Task 1.4: XDG Trash and quota (unit and fake-helper tests; kernel quota and real apps under "Pending on the test host (task 1.4)"; security review 2026-11-17)
 - [ ] Task 1.5: HOME migration command
   - `rast migrate home` must run per account (the production migration
     starts with the test accounts), and `rast migrate shares` per share
@@ -684,8 +721,13 @@ installed with `rast update --version`. No tag was made.
   `1.0.1-alpha.1`. A server on a pre-release must move to the next
   pre-release or to the final `1.0.1` with `--version`; plain
   `rast update` reports "already up to date".
-- **Rollback to 0.18.x:** `Remake` adds no migration (still `0014`, schema
-  v14), so a 0.18.x binary opens the database. The move of `rast.db` and
+- **Rollback to 0.18.x:** since task 1.4, `Remake` adds migration `0015`
+  (schema v15). The sqlx migrator of 0.18.x refuses a database with an
+  applied migration it does not know (`VersionMissing(15)`), so a 0.18.x
+  binary no longer starts on a database that a 1.0.1 build has opened: a
+  rollback restores the database backup taken before the deploy
+  (`/var/lib/rast`), then installs 0.18.x (see "Open questions"). This note
+  said "no migration" before task 1.4. The move of `rast.db` and
   `secret.key` into `private/` keeps links an older binary follows (still
   to be verified on production, see "Pending on the test host (task 1.3)").
   A binary rollback does not undo groups, ACLs or owners set by
@@ -831,6 +873,20 @@ test user, fake helper).
   at the hard limit (`EDQUOT`), the usage view says "filesystem", a test
   share limit appears in `repquota -g /` for its rw group and the share
   says "filesystem, best effort".
+- Review follow-up (2026-11-17), with a test share that has a size limit
+  and two test accounts:
+  - Delete into the share's recycle bin as one test account, then upload
+    as the other: the limit counts the `.Trash-<uid>` bytes
+    (`share_trash_usage`, answered by the helper as root).
+  - Two large uploads into the share at once: the second is refused while
+    the first runs; cancelling the first frees its bytes.
+  - Delete a file of the share through `~/Shared/<name>` in a GTK app (GIO
+    puts it in the HOME recycle bin), fill the share, restore in File
+    Station: `413` with the limit message, nothing moved.
+  - As one test account, create `.Trash-<uid of the other>` at the top of
+    the test share: the other account's delete there answers `403` with
+    the "belongs to another account" message, the repair pass logs it and
+    `rast doctor` lists it.
 
 ## Next
 
@@ -859,11 +915,15 @@ test user, fake helper).
 
 ## Open questions
 
-- **Project quota for shared folders (task 1.4):** `share_dir_prepare`
-  does not set project ids yet, so share limits use group quota only
-  ("filesystem, best effort"). Setting project ids (FS_IOC_FSSETXATTR with
-  the inherit flag) is only useful on a host with project quota, which
-  production does not have (D1). Do it when such a host exists?
+- **Migration 0015 and rollback to 0.18.x (task 1.4 review, 2026-11-17):**
+  0.18.x cannot open a schema-v15 database (sqlx `VersionMissing(15)`), so
+  the rollback steps of every deploy checklist must restore the database
+  backup taken before the deploy. Options: (a) keep it so (no code
+  change), (b) also release a 0.18.4 that runs its migrator with
+  `ignore_missing`, so a binary rollback works again. Which one?
+- Project quota for shared folders: deferred until a host supports it
+  (maintainer, 2026-11-17; ADR 0005, section 11). Setting project ids
+  (FS_IOC_FSSETXATTR with the inherit flag) comes with that host.
 
 - **Root agent token (from the task 1.2 review follow-up):** should
   `RootFs` get the same "ask the helper again once" retry as the per-user
@@ -883,6 +943,12 @@ test user, fake helper).
 - **Timing-sensitive tests:** the two known flaky tests were fixed in
   `2b9b8a5` (see Done). Any other test that holds a `flock` while sibling tests
   fork processes has the same risk; keep such tests in their own binary.
+  Seen once on 2026-11-17 under a full workspace run:
+  `native::shares::tests::operations_on_one_shared_folder_never_overlap`
+  (rast-helper) failed at the final `shares_migrate_rollback` after the
+  test dropped its `flock`; it passed alone, in five runs of the crate and
+  in the next full run. It holds a `flock` while sibling tests fork the
+  fake account tools, the same pattern.
 - Does `scripts/changelog-section.sh` accept the `## [1.0.1] - Unreleased`
   heading? Yes: it only reads the text inside the square brackets (checked by
   the maintainer).
