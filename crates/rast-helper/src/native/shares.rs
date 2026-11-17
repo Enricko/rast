@@ -98,6 +98,8 @@ pub const SHARE_LOCK_WAIT: Duration = if cfg!(test) {
 };
 /// File name of the migration lock in a share's journal folder.
 pub const MIGRATION_LOCK_FILE: &str = "lock";
+/// How long taking the migration lock is retried.
+const MIGRATION_LOCK_WAIT: Duration = Duration::from_millis(500);
 
 /// The per-share locks of this helper process.
 static SHARE_LOCKS: std::sync::LazyLock<
@@ -170,16 +172,27 @@ impl MigrationLock {
         }
         // SAFETY: `fd` is a fresh, valid descriptor.
         let file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
-        // SAFETY: valid fd.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        // A child process that the helper is starting holds a copy of every
+        // descriptor until its `exec` closes them, so a lock that was just
+        // released can look taken for a moment: wait a little before
+        // reporting it busy.
+        let deadline = std::time::Instant::now() + MIGRATION_LOCK_WAIT;
+        loop {
+            // SAFETY: valid fd.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(Self { _file: file });
+            }
             let error = io::Error::last_os_error();
-            return Err(if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-                NativeError::share_busy(busy.to_string())
-            } else {
-                NativeError::command_failed(format!("cannot lock the migration: {error}"))
-            });
+            if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+                return Err(NativeError::command_failed(format!(
+                    "cannot lock the migration: {error}"
+                )));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(NativeError::share_busy(busy.to_string()));
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        Ok(Self { _file: file })
     }
 }
 const MAX_ACCOUNT_OUTPUT: usize = 1024 * 1024;
