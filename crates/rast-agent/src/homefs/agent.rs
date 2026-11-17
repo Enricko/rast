@@ -2727,6 +2727,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nothing_is_restored_into_a_trash_folder_name_of_a_share() {
+        let fx = start(None).await;
+        let container = fx.shared.join("team-1");
+        std::fs::create_dir_all(&container).unwrap();
+        fx.share("team", "team-1");
+        let shared = std::fs::canonicalize(&fx.shared).unwrap();
+        let home = std::fs::canonicalize(&fx.home).unwrap();
+        let other = format!(".Trash-{}", euid() + 1);
+        // Origins at the top of the share that name another member's
+        // recycle bin, through the shared root and through `~/Shared`.
+        plant(
+            &fx.home,
+            "a",
+            &format!("{}/team-1/{other}/files/a", shared.display()),
+            Some(b"a"),
+        );
+        plant(
+            &fx.home,
+            "b",
+            &format!("{}/{SHARED_DIR}/team/{other}/b", home.display()),
+            Some(b"b"),
+        );
+        plant(
+            &fx.home,
+            "c",
+            &format!("{}/team-1/.Trash/c", shared.display()),
+            Some(b"c"),
+        );
+        let (_, list) = fx.get("/api/files/trash").await;
+        let ids: Vec<String> = ["/a", "/b", "/c"]
+            .iter()
+            .map(|path| id_of(&list, path))
+            .collect();
+        let (status, reply) = fx
+            .post("/api/files/trash/restore", json!({ "ids": ids }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        for name in ["a", "b", "c"] {
+            assert!(fx.home.join(name).is_file(), "{name}");
+        }
+        assert_eq!(std::fs::read_dir(&container).unwrap().count(), 0);
+
+        // A shared folder's own entry named like a trash folder whose origin
+        // is unusable goes back to the top without the reserved name.
+        fx.share("team", "team-1");
+        std::fs::create_dir_all(container.join("docs").join(&other)).unwrap();
+        let (status, _) = fx
+            .post(
+                "/api/files/delete",
+                json!({ "paths": [format!("/shared/team/docs/{other}")] }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let trash = container.join(format!(".Trash-{}", euid()));
+        std::fs::write(
+            trash.join(format!("info/{other}.trashinfo")),
+            "[Trash Info]\nPath=/etc/x\nDeletionDate=2026-11-16T10:00:00\n",
+        )
+        .unwrap();
+        let (_, list) = fx.get("/api/files/trash").await;
+        let restored = format!("/shared/team/{} (restored)", other.trim_start_matches('.'));
+        let id = id_of(&list, &restored);
+        let (status, reply) = fx
+            .post("/api/files/trash/restore", json!({ "ids": [id] }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert!(container
+            .join(format!("{} (restored)", other.trim_start_matches('.')))
+            .is_dir());
+        assert!(!container.join(&other).exists());
+    }
+
+    #[tokio::test]
     async fn entries_are_removed_for_good_by_id_by_age_and_all_at_once() {
         let fx = start(None).await;
         for name in ["a", "b", "c"] {

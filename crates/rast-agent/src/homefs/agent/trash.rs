@@ -272,6 +272,18 @@ enum Target {
 }
 
 impl Target {
+    /// Whether the target is a trash folder name (`.Trash`, `.Trash-<uid>`)
+    /// at the top of a shared folder: reserved there, so nothing is ever
+    /// restored into or as one (another member's recycle bin, or a name
+    /// that member's agent would then refuse to use).
+    fn is_share_trash(&self) -> bool {
+        matches!(
+            self,
+            Self::Share { segments, .. }
+                if segments.first().is_some_and(|first| is_trash_dir_name(first))
+        )
+    }
+
     fn logical(&self) -> AppResult<LogicalPath> {
         let text = match self {
             Self::Home(segments) => format!("/{}", segments.join("/")),
@@ -299,8 +311,12 @@ impl Target {
 /// The top of the root that holds the trash, under the entry's own name:
 /// where an entry goes whose recorded origin is not usable.
 fn fallback(place: &Place, name: &str) -> Target {
+    let share = matches!(place, Place::Share { .. });
     let safe = if matches!(name, "shared") || name == crate::storage::safe_path::RESERVED_NAME {
         format!("{name} (restored)")
+    } else if share && is_trash_dir_name(name) {
+        // Without the dot: `.Trash-5 (restored)` would still be reserved.
+        format!("{} (restored)", name.trim_start_matches('.'))
     } else {
         name.to_string()
     };
@@ -371,7 +387,7 @@ fn target_of(
         }
     };
     found
-        .filter(|target| target.logical().is_ok())
+        .filter(|target| !target.is_share_trash() && target.logical().is_ok())
         .unwrap_or_else(|| fallback(place, name))
 }
 
