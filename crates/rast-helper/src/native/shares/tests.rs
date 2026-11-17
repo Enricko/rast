@@ -815,6 +815,31 @@ fn the_walk_leaves_the_recycle_bins_of_members_alone() {
 }
 
 #[tokio::test]
+async fn quota_limits_are_set_only_for_the_users_own_account() {
+    let fx = fixture();
+    std::fs::create_dir_all(&fx.options.homes_dir).unwrap();
+    let uid = fx.options.uid_base + 3;
+    let op = || QuotaSetOp {
+        user_id: 3,
+        soft_bytes: 1 << 30,
+        hard_bytes: 2 << 30,
+    };
+    // No account rast-u3 yet.
+    let error = quota_set(&fx.options, op()).await.unwrap_err();
+    assert_eq!(error.code, "not_found", "{error:?}");
+    // rast-u3 with another uid (an account outside RAST holds it).
+    fx.add_identity(3, uid + 7);
+    let error = quota_set(&fx.options, op()).await.unwrap_err();
+    assert_eq!(error.code, "identity_conflict", "{error:?}");
+    // Its own account: the kernel is asked (no quota on this test host).
+    std::fs::write(fx.root().join("passwd.db"), "").unwrap();
+    fx.add_identity(3, uid);
+    let error = quota_set(&fx.options, op()).await.unwrap_err();
+    assert_ne!(error.code, "identity_conflict", "{error:?}");
+    assert_ne!(error.code, "not_found", "{error:?}");
+}
+
+#[tokio::test]
 async fn containers_are_real_folders_in_the_shared_root() {
     let fx = fixture();
     fx.ensure_groups().await;

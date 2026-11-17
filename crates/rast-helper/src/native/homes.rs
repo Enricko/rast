@@ -291,7 +291,7 @@ pub(crate) fn failed(what: &str, path: &Path, error: io::Error) -> NativeError {
 // ---------------------------------------------------------------------------
 
 /// The identity's passwd entry, which must exist with the derived ids.
-async fn identity_entry(
+pub(crate) async fn identity_entry(
     options: &NativeOptions,
     identity: &Identity,
 ) -> Result<PasswdEntry, NativeError> {

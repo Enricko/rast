@@ -2193,6 +2193,11 @@ pub(crate) async fn quota_set(
     options: &NativeOptions,
     op: QuotaSetOp,
 ) -> Result<Value, NativeError> {
+    // Only for a uid that is this user's own Linux account: with a low
+    // `linux_uid_base` the derived uid could belong to an account outside
+    // RAST.
+    let identity = crate::native::identity::Identity::derive(options, op.user_id)?;
+    crate::native::homes::identity_entry(options, &identity).await?;
     let options = options.clone();
     let limits = crate::native::quota::ByteLimits {
         soft_bytes: op.soft_bytes,
