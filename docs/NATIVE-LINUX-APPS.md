@@ -188,6 +188,13 @@ Consequences:
 
 ## Files and folders
 
+* **One-HOME accounts** (after `rast migrate home`, ADR 0005) have no app
+  profiles, `RAST` link or grant: every app starts in the person's HOME
+  `<storage_dir>/homes/<username>` with `HOME` set to it and the usual
+  `~/.config`, `~/.local/share`, `~/.cache`, so a file an app saves is in
+  File Station at once and every app sees the same settings. The rest of
+  this list describes **legacy accounts**, which keep their profiles until
+  they are migrated.
 * The person's **own RAST home** (`<storage_dir>/homes/<username>`) is linked
   into the app profile as `RAST` and granted a recursive read + traverse ACL
   (`rx`) for the app identity. Native apps can open and read files from it, but
@@ -219,9 +226,16 @@ Consequences:
   directory (`home_ensure`: 0700, owned by `rast-u<id>`, with `~/.config`,
   `~/.cache`, `~/.local/…`) and start a per-user file agent for it
   (`files_agent_start`, unit `rast-files-u<uid>`). File Station then serves
-  that person through the agent instead of the `rast` service. Nothing calls
-  `home_ensure` yet: apps keep the read-only `RAST` link described above until
-  the home migration (`rast migrate home`) ships.
+  that person through the agent instead of the `rast` service. Accounts move
+  to one HOME one at a time with `rast migrate home` (dry-run, apply,
+  rollback; see [OPERATIONS.md](OPERATIONS.md)): the HOME's entries, the
+  legacy identity home and the app profiles become the person's, merged
+  into the HOME per file (`config` → `~/.config`, `data` →
+  `~/.local/share`, `state` → `~/.local/state`, `cache` → `~/.cache`,
+  `home` → `~/`; an entry the HOME already has stays in the old profile and
+  is reported), and the recycle bin moves into XDG Trash. New accounts
+  still start in legacy mode until the migration has been verified on
+  production (ADR 0005, D8).
 * **Shared folders as Linux groups (ADR 0005, section 4).** Every shared
   folder has two Linux groups, `rast-s<h>-rw` (read-write) and
   `rast-s<h>-ro` (read-only), where `<h>` is the first 16 hex digits of the
@@ -232,7 +246,7 @@ Consequences:
   apps and terminals of members reach it with the kernel's own checks, and
   a one-HOME account finds it as `~/Shared/<name>` (a link its file agent
   keeps). Existing shared folders move to this layout with
-  `rast migrate shares` (dry-run, apply, rollback; see
+  `rast migrate shares --share <name>` (dry-run, apply, rollback; see
   [OPERATIONS.md](OPERATIONS.md)).
   * Running apps and terminals keep the groups they started with. When an
     administrator revokes access, the person sees a warning and their apps
@@ -271,9 +285,10 @@ Consequences:
   administration.
 * Application installs live under `<data_dir>/linux-apps/apps/<id>/<version>/`
   (portable/AppImage, read-only to app users) and per-person profiles under
-  `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity).
-  Uninstalling with *Also delete its settings* removes only those profiles,
-  never files in RAST homes.
+  `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity;
+  legacy accounts only). Uninstalling with *Also delete its settings* removes
+  only those profiles, never files in RAST homes; a one-HOME account keeps
+  an app's settings in its HOME, where the app put them.
 
 ### Recycle bin and quota (one-HOME accounts)
 

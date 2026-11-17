@@ -97,6 +97,12 @@ agent process (ordinary users: uid 200000+id, gid rast-u<id>;            rast te
   account may not open in File Station. Folders that are not opened once remain
   inaccessible from the shell until an administrator changes their RAST access
   or they are opened in a terminal once (the ACL is grant-only and idempotent).
+  **One-HOME accounts** (after `rast migrate home`, ADR 0005) get no grant: the
+  shell's HOME is their HOME, which they own, and shared folders are reached
+  through their Linux groups. "Open in Terminal" accepts a folder in the HOME
+  (checked by the account's file agent) or in a shared folder they can open;
+  `rast migrate home` removes the grants that earlier terminals left in the
+  HOME (`u:rast-u<id>:rwX`/`rX`).
 * **Lifecycle**: a terminal stays open until it is closed. Closing a tab (or
   the Terminal window) terminates that process tree (SIGTERM, then SIGKILL
   after a short grace). Reloading the page, closing the browser or losing the

@@ -3,7 +3,7 @@
 Living log for the RAST remake (see `CLAUDE.md` and `docs/adr/0001-incremental-remake.md`).
 Update it at the end of every session.
 
-- **Current phase:** Phase 1 — One HOME (tasks 1.1 to 1.4 done and task 1.4 reviewed, with the maintainer's D3 and D7 decisions; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next task 1.5). Phase 0 closed on 2026-11-16, task 0.6 deferred
+- **Current phase:** Phase 1 — One HOME (tasks 1.1 to 1.5 done, task 1.4 reviewed; their kernel-level and native tests are pending on the test host, which is now production with test accounts; next: the review of task 1.5, then the first pre-release deploy, task 1.5b and task 1.6). Phase 0 closed on 2026-11-16, task 0.6 deferred
 - **Branch / version:** `Remake` / 1.0.1 (not bumped per phase; pre-releases are `1.0.1-alpha.N`, each with a `chore(release)` commit; releases are pre-release only until the final remake gate)
 - **Last updated:** 2026-11-17
 - **Test host:** production (`desktop.lufria.tech`) doubles as the test host;
@@ -636,21 +636,68 @@ Update it at the end of every session.
     failed (one run showed the timing flake below); no frontend change; no
     new dependency or migration; no deploy or config change.
 
+- **Task 1.5, HOME migration command** (2026-11-17, ADR 0005 sections 8
+  and 13). The maintainer's decisions for this task: `rast migrate shares`
+  needs `--share <name>` or `--all` like `rast migrate home --user <name>
+  | --all`; app profiles merge per file; the legacy path (`setfacl -R`
+  grant, `RAST` link, profiles) stays for legacy accounts; new accounts
+  stay legacy (D8 after verification); the backup reader (D12) is task
+  1.5b. Commits:
+  - `b52f133` refactor(helper): the descriptor walk and journal helpers of
+    shares are shared (no behaviour change).
+  - `85a21b7` feat(native): one-HOME accounts use their HOME for sessions,
+    apps and terminals (no profile, `RAST` link, per-launch grant or
+    terminal ACL; the helper detects one-HOME from passwd and the HOME's
+    owner; a cached identity is asked again when the mode changed).
+  - `2ff2fa2` fix(helper): the migration lock is retried for 500 ms (the
+    `operations_on_one_shared_folder_never_overlap` flake: a forked child
+    still held the released `flock`).
+  - `0e2b542` feat(helper): `home_migrate_scan`, `home_migrate_apply`,
+    `home_migrate_trash`, `home_migrate_rollback` (journal and plan first,
+    owners and ACLs including the 0.18.3 `u:rast-u<id>:rx` and
+    `d:u:rast-u<id>:rx`, per-file merge, passwd home, the HOME last;
+    resume; exact rollback; recycle bin batches into XDG Trash).
+  - `5e116f5` fix(backup): HOMEs in one-HOME mode are skipped with a
+    warning (manifest, job result, Backup Center) instead of silently.
+  - `b1bba53` feat(cli)!: `rast migrate home`; `rast migrate shares` needs
+    `--share` or `--all`.
+  - Tests: 14 helper tests on temporary trees with an owner overlay
+    (dry-run changes nothing; apply; 0.18.3 grant stripped and restored
+    exactly; foreign ACL entries kept; hard links and planted links never
+    followed; per-file conflicts; a profile of another identity never
+    merged; interrupted apply resumes; apply twice is a no-op that keeps
+    the session; tampered, world-readable and unknown-field journals
+    refused; running processes and units that do not stop block it;
+    recycle bin into XDG Trash of HOME and of a shared folder and back);
+    protocol and timeout tests; 6 CLI tests with a fake helper (dry-run
+    report, batches of 256, rows saved and restored, legacy shares refused,
+    one failing account, accounts made in one-HOME mode); per-share apply,
+    dry-run and rollback of `rast migrate shares`; CLI parser tests for
+    both selections; backup skip and unreadable-folder tests.
+  - Not run: the dev instance in docker mode (`scripts/e2e/dev-instance.sh`
+    needs `sudo` for the service user and a root worker, and docker mode
+    has no native backend, so `rast migrate home` cannot run there); see
+    "Open questions" for a risk in its `down`. Native tests are listed
+    under "Pending on the test host (task 1.5)".
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1035 passed, 0
+    failed; frontend 160 tests passed and build clean; no new dependency
+    or migration.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
 - [x] Task 1.2: per-user file agent (unit and fake-helper integration tests; the tests below under "Pending on the test host" are still open)
 - [x] Task 1.3: shared folders as Linux groups (unit and fake-helper tests; kernel-level tests under "Pending on the test host")
 - [x] Task 1.4: XDG Trash and quota (unit and fake-helper tests; kernel quota and real apps under "Pending on the test host (task 1.4)"; security review 2026-11-17)
-- [ ] Task 1.5: HOME migration command
-  - `rast migrate home` must run per account (the production migration
-    starts with the test accounts), and `rast migrate shares` per share
-    (`--share <name>` exists, with tests for dry-run, rollback and an
-    unknown name).
-  - `rast migrate home` must also remove the default ACL entries
-    (`d:u:rast-u<id>`) that 0.18.3 adds to every folder in the person's home,
-    together with the access entries `u:rast-u<id>:rx`, and `--rollback` must
-    restore both.
+- [x] Task 1.5: HOME migration command (unit, fake-helper and CLI tests;
+  native tests under "Pending on the test host (task 1.5)"; review pending)
+  - `rast migrate home --user <name> | --all`, `rast migrate shares
+    --share <name> | --all`, both with tests for every mode.
+  - Removes the 0.18.3 entries `u:rast-u<id>:rx` and `d:u:rast-u<id>:rx`
+    (and terminal grants); `--rollback` restores them.
+- [ ] Task 1.5b: Backup Center reads HOMEs through the helper (D12,
+  `backup_reader_start`); until then one-HOME HOMEs are skipped with a
+  warning.
 - [ ] Task 1.6: Phase 1 security review
 - [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
 
@@ -888,25 +935,140 @@ test user, fake helper).
     the "belongs to another account" message, the repair pass logs it and
     `rast doctor` lists it.
 
+## Pending on the test host (task 1.5)
+
+Run by the maintainer (or with the maintainer's go-ahead) on production
+after the deploy of the pre-release that contains task 1.5, with **test
+accounts** (`t-…`) and **test shared folders** only. Use a non-admin test
+account first: administrators can open every shared folder (D6), so an
+administrator test account can only be migrated once every shared folder
+is migrated. `<id>` below is the test account's user id, `<t-name>` its
+username, `<share>` a test shared folder.
+
+**Deploy checklist (before `sudo rast update --version 1.0.1-alpha.1`)**
+
+1. Version check: production runs **0.18.3** (`rast version`:
+   `RAST 0.18.3 (f69a4544e6fd)`, 2026-11-17). Rollback version: **0.18.3**.
+2. Backups, as root, to a folder outside `/srv/rast` (check the space first
+   with `df -h / /srv`):
+
+   ```bash
+   dest=/root/rast-predeploy-$(date +%Y%m%d-%H%M%S)
+   sudo install -d -m 0700 "$dest"
+   # Consistent database snapshot (VACUUM INTO) and configuration:
+   sudo -u rast rast backup --scope db,config --note "before 1.0.1-alpha.1"
+   # The three trees, with numeric owners, ACLs and xattrs (stop rast.service
+   # first for a fully consistent copy of /var/lib/rast):
+   sudo tar --numeric-owner --acls --xattrs -czf "$dest/etc-rast.tar.gz" -C / etc/rast
+   sudo tar --numeric-owner --acls --xattrs -czf "$dest/var-lib-rast.tar.gz" -C / var/lib/rast
+   sudo tar --numeric-owner --acls --xattrs -czf "$dest/srv-rast.tar.gz" -C / srv/rast
+   sudo sh -c "cd '$dest' && sha256sum *.tar.gz > SHA256SUMS"
+   ```
+
+   `rast update` also makes a `db,config` snapshot ("pre-update snapshot
+   (running 0.18.3)") in `/var/lib/rast/backups` and keeps the old binary
+   as `/usr/local/bin/rast.rollback-0.18.3`.
+3. Deploy (maintainer): `sudo rast update --version 1.0.1-alpha.1`, then
+   `rast version`, `sudo rast status`, `sudo -u rast rast doctor` and
+   `curl -fsS http://127.0.0.1:8720/healthz`.
+
+**Rollback steps (if the deploy must be undone)**
+
+1. With the **new** binary and `rast.service` stopped, undo every
+   migration that ran, test accounts first, then test shares:
+   `sudo -u rast rast migrate home --user <t-name> --rollback` for each
+   migrated test account, then
+   `sudo -u rast rast migrate shares --share <share> --rollback` for each
+   migrated test share.
+2. Migration 0015 makes a binary-only rollback impossible (0.18.3 refuses
+   a schema-v15 database), and `rast update --version 0.18.3` run by the
+   new binary would open (and keep) the v15 database for its own snapshot,
+   then fail to start 0.18.3 and restore the new binary. So, with
+   `rast.service` stopped: put the old binary back
+   (`sudo install -m 0755 /usr/local/bin/rast.rollback-0.18.3 /usr/local/bin/rast`),
+   check the pre-update archive with it
+   (`sudo -u rast rast restore --from /var/lib/rast/backups/<pre-update snapshot>.tar.gz --dry-run`),
+   restore it (`… --yes`), then restart `rast-native.service` and
+   `rast-worker.service` so they run 0.18.3 too, and start `rast.service`.
+   `sudo rast update --version 0.18.3` afterwards only confirms the
+   version.
+3. Health check: `rast version` shows 0.18.3; `sudo rast status`;
+   `sudo -u rast rast doctor`; `curl -fsS http://127.0.0.1:8720/healthz`;
+   sign in with a test account and open a file and a native app.
+4. If anything is still wrong: restore `/etc/rast`, `/var/lib/rast` and
+   `/srv/rast` from `$dest` (`tar --numeric-owner --same-owner --acls
+   --xattrs -xzf … -C /`, services stopped).
+
+**Tests (test accounts and test shares only)**
+
+- Preparation, in legacy mode: the test account can open only test
+  shares; it opens Chrome (sign-in or a bookmark, so its profile holds
+  data), a GTK app, and a terminal on a HOME folder (terminal grant);
+  it deletes a file in its HOME and one in a test share (legacy recycle
+  bin). Save the state:
+  `sudo getfacl -R -p /srv/rast/homes/<t-name> > /root/t-acl-before.txt`
+  and `sudo find /srv/rast/homes/<t-name> -printf '%u %g %m %p\n' | sort > /root/t-owners-before.txt`.
+  The 0.18.3 entries are there:
+  `grep -c 'rast-u<id>' /root/t-acl-before.txt` > 0.
+- `sudo -u rast rast migrate shares --share <share>` (dry-run, then apply
+  with `rast.service` stopped) for every test share of the account.
+- Dry run with the server running:
+  `sudo -u rast rast migrate home --user <t-name> --dry-run`: the report
+  lists the 0.18.3 entries, the Chrome profile merge and its conflicts,
+  the recycle bin entries, the projected usage, a stray
+  `homes/rast-u<id>` if any, running units; `getfacl`/`find` again show
+  no change.
+- Refusals: an administrator test account while a real shared folder is
+  legacy (names the shared folders, nothing changes); a process of
+  `rast-u<id>` that is not in a unit (for example a test `sleep` started
+  as that user by the maintainer) gives `identity_in_use`.
+- Apply (`rast.service` stopped):
+  `sudo -u rast rast migrate home --user <t-name>`. Then:
+  `stat -c '%U %G %a' /srv/rast/homes/<t-name>` = `rast-u<id> rast-u<id> 700`;
+  `getent passwd rast-u<id>` has the HOME;
+  `sudo getfacl -R -p /srv/rast/homes/<t-name> | grep -c 'rast-u'` = 0;
+  `sudo ls -l /var/lib/rast/migrations/home/<id>/` has one stamp with
+  `journal.jsonl`, `plan.jsonl`, `applied` (root, 0600); the account's
+  units of before are stopped, other accounts' are not.
+- After `rast.service` starts: File Station shows the HOME through the
+  agent; the recycle bin lists the migrated entries (restore one, from the
+  HOME and from the test share); Chrome opens with its bookmarks and
+  sign-ins (merged into `~/.config/google-chrome`); **a file saved by
+  Chrome appears in File Station, and a file uploaded in File Station opens
+  in Chrome** (Phase 1 exit); a terminal starts in the HOME and gets no
+  ACL grant; a Backup Center `users` backup lists the HOME under
+  `warnings`.
+- A second apply says "already in one-HOME mode" and leaves the session
+  running.
+- Rollback (`rast.service` stopped):
+  `sudo -u rast rast migrate home --user <t-name> --rollback`; then
+  `getfacl -R -p` and `find -printf` compared with the saved files
+  (`diff`) show only entries made after the migration (now `rast`-owned);
+  the Chrome profile is back in `<data_dir>/linux-apps/profiles/…`; the
+  legacy recycle bin lists the entries again; apps start in legacy mode
+  with the `RAST` link.
+- Migrate the test account again and keep it in one-HOME mode for the
+  task 1.4 list ("XDG Trash with real apps") and the Phase 1 exit.
+
 ## Next
 
-1. Task 1.5 (HOME migration command): `rast migrate home` per account,
-   including the move of the legacy recycle bin into the XDG Trash
-   (ADR 0005, section 8 step 6) and the PROGRESS items of the checklist.
-2. Task 1.6 (Phase 1 security review): includes the new root helper
-   operations of task 1.3 and its follow-up (`share_deny_set`,
-   `share_dir_repair`, `share_session_groups`).
-3. First deploy to production (the maintainer), after task 1.5 and its
-   review (maintainer's instruction, 2026-11-16): a
+1. Review of task 1.5 (the new root helper operations `home_migrate_*`,
+   the journal and the CLI), before the first deploy.
+2. First deploy to production (the maintainer), after that review
+   (maintainer's instruction, 2026-11-16): a
    `chore(release): 1.0.1-alpha.1` commit (see "Pre-release check",
-   decision), Claude prepares the deploy checklist, then run the "Pending
-   on the test host" lists on production with test accounts. The
-   checklist must say that migration 0015 makes a binary-only rollback to
-   0.18.x impossible: the rollback restores the pre-upgrade database
-   backup (`/var/lib/rast`), then installs 0.18.x.
-4. 0.18.3 (D13) is released: the maintainer installs it on production, then
-   removes the stray `homes/rast-u*` folders (read-only listing script in
-   PR #2).
+   decision), then the deploy checklist under "Pending on the test host
+   (task 1.5)", then the "Pending on the test host" lists on production
+   with test accounts.
+3. Task 1.5b: Backup Center reads HOMEs through the helper (D12) and the
+   restore guide moves to `tar --numeric-owner --same-owner --acls`.
+4. Task 1.6 (Phase 1 security review): includes the new root helper
+   operations of tasks 1.3 and 1.5 (`share_deny_set`, `share_dir_repair`,
+   `share_session_groups`, `home_migrate_*`).
+5. Production runs 0.18.3 (checked 2026-11-17, `rast version`: 0.18.3
+   `f69a4544e6fd`). The maintainer removes the stray `homes/rast-u*`
+   folders (read-only listing script in PR #2); `rast migrate home
+   --dry-run` lists a stray folder per account.
 5. Task 0.6 (deferred): baseline app matrix on production with a test
    account while it still runs 0.18.x, before the first 1.0.1 pre-release
    is deployed. `docs/NATIVE-LINUX-APPS.md` allows only one native RAST
@@ -914,6 +1076,18 @@ test user, fake helper).
    run `dev-instance.sh up native` here.
 
 ## Open questions
+
+- **`scripts/e2e/dev-instance.sh down` can stop production sessions
+  (found in task 1.5, not changed):** `stop_all` calls
+  `stop_native_units` when the instance is in native mode **or** a helper
+  log exists in `/tmp/rast-e2e`, and that function stops every
+  `rast-app-*` and `rast-xpra-*` unit on the host, which on this host are
+  the production users' sessions and apps. A leftover helper log from an
+  earlier native run is enough. Proposal: only stop units when the mode
+  is native and refuse native mode on a host where `rast-native.service`
+  is active, or list the units the dev helper started and stop only
+  those. Until then: never run `down` with a helper log in
+  `/tmp/rast-e2e`.
 
 - **Migration 0015 and rollback to 0.18.x (task 1.4 review, 2026-11-17):**
   0.18.x cannot open a schema-v15 database (sqlx `VersionMissing(15)`), so
@@ -943,12 +1117,13 @@ test user, fake helper).
 - **Timing-sensitive tests:** the two known flaky tests were fixed in
   `2b9b8a5` (see Done). Any other test that holds a `flock` while sibling tests
   fork processes has the same risk; keep such tests in their own binary.
-  Seen once on 2026-11-17 under a full workspace run:
+  Seen on 2026-11-17 under a full workspace run:
   `native::shares::tests::operations_on_one_shared_folder_never_overlap`
   (rast-helper) failed at the final `shares_migrate_rollback` after the
-  test dropped its `flock`; it passed alone, in five runs of the crate and
-  in the next full run. It holds a `flock` while sibling tests fork the
-  fake account tools, the same pattern.
+  test dropped its `flock`, because a sibling test's forked child still
+  held a copy of the descriptor. Fixed in task 1.5 (`2ff2fa2`): the
+  migration lock is retried for 500 ms; five crate runs and the full run
+  passed since.
 - Does `scripts/changelog-section.sh` accept the `## [1.0.1] - Unreleased`
   heading? Yes: it only reads the text inside the square brackets (checked by
   the maintainer).

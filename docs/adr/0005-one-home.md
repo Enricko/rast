@@ -260,7 +260,8 @@ operation is idempotent.
 | `quota_set` | `userId`, `softBytes`, `hardBytes` | 0 = no limit; hard ≥ soft; both ≤ filesystem size. `quotactl(Q_SETQUOTA, USRQUOTA)` through `libc` (already a dependency). |
 | `share_quota_set` | `shareId`, `softBytes`, `hardBytes` | Project quota (project id = rw gid) when available, otherwise group quota on the rw gid if task 1.3 accepts it (D3). Returns the backend that enforces the limit. Task 1.4: group quota only; project quota is deferred until a host supports it (section 11). |
 | `quota_report` | `userIds`, `shareIds` | At most 10 000 ids; used bytes and limits from `Q_GETQUOTA`. |
-| `home_migrate_scan`, `home_migrate_apply`, `home_migrate_rollback` | `userId`, `username` | Section 8. The scan is read-only with bounded output (counts, plus the first 50 paths per category). |
+| `home_migrate_scan`, `home_migrate_apply`, `home_migrate_rollback` | `userId`, `username` | Section 8 and 13. The scan is read-only with bounded output (counts, plus the first 50 paths per category). |
+| `home_migrate_trash` | `userId`, `username`, `entries` (1 to 256: `id` lowercase UUID, `deletedAt` ≥ 0, `path` relative with valid components, optional `container`) | Task 1.5 (section 13): moves one batch of the legacy recycle bin `<storage>/.trash/<userId>/<id>` into XDG Trash of the HOME or of the container, after the apply. No path to the payload is taken; it is built from the ids. |
 | `shares_migrate_scan`, `shares_migrate_apply`, `shares_migrate_rollback` | `shareId`, `container` | Same pattern for shared folders (task 1.3). |
 | `share_dir_repair` | `shareId`, `container` | Daily repair pass (D3 decision, 2026-11-16): the recursive `share_dir_prepare` of a container that already has the layout (owned by root); a legacy container is left for `rast migrate shares`. Keeps the container's deny entries. |
 | `share_trash_usage` | `shareId`, `container` | Task 1.4 review (2026-11-17): read-only. The share must have its groups and the container must be a real folder of `rast` or root. Sums the apparent size of the regular files below the folders named like recycle bins at the top of the container (`.Trash`, `.Trash-*`), which the service cannot read; no-follow, one device and mount, at most 1 000 000 names (`truncated` when it stops early), 60 s deadline, not serialised with long-running work. For RAST's check of shared folder limits (section 11). |
@@ -913,6 +914,89 @@ rollback to 0.18.x must restore the database from the backup taken before
 the deploy (or a 0.18.x patch release must ignore unknown migrations).
 The deploy checklist says so until the maintainer decides.
 
+### 13. Task 1.5: implementation notes (2026-11-17)
+
+Decisions taken by the maintainer for task 1.5, and where the code
+deviates from section 8:
+
+- **Selection.** `rast migrate home` takes `--user <name>` or `--all`,
+  and `rast migrate shares` now takes `--share <name>` or `--all` in
+  every mode; neither runs without a selection (a behaviour change of
+  `rast migrate shares`, recorded in the CHANGELOG).
+- **Per-file merge (deviation from step 5).** App profiles are merged per
+  file, not all-or-nothing: an entry the HOME does not have moves in (a
+  folder moves as a whole), a folder both have is merged, and anything
+  else (a file the HOME has, a file where a folder is) is a conflict that
+  stays in the old profile and is reported as `<app>: <path>`. No isolated
+  profiles are created (D10 stays opt-in for later); the rollback moves
+  every moved entry back. The legacy identity home is merged first, then
+  the apps in name order, so the first source wins a name. `.Xauthority`
+  and the profiles' `tmp` are not moved; a source on another file system
+  or mount than the HOME is not moved (`otherFileSystem`), nor are entries
+  of a source that are not the identity's or are mount points, and a
+  profile folder that does not belong to the identity is never merged.
+- **Journal.** Plain JSON lines, not gzip: `plan.jsonl` (the folders to
+  create and the moves, each with the source's device and inode), then
+  `journal.jsonl` (every HOME entry handed to the walk: path, type, owner,
+  group, mode, ACL, default ACL, device, inode; the HOME itself first,
+  owned by `rast`), then `applied` once the HOME is the identity's. A
+  folder without `journal.jsonl` is not a journal. Recycle bin batches get
+  `trash-NNNN.jsonl` (the folders they create, then per entry its id, its
+  new name and the records of its payload), written before anything
+  moves. All of it lives in
+  `<data_dir>/migrations/home/<userId>/<stamp>/` (root 0700/0600, `.part`
+  then `rename` without replace, synced) and is read back as untrusted
+  input: owners only `rast` or the identity (never uid 0 or group 0), no
+  mode bits above `07777`, ACLs that decode, relative normalised paths,
+  `deny_unknown_fields`. The rollback renames the folder
+  `<stamp>.rolled-back`; a new apply starts a new journal.
+- **ACL entries.** Every named-user entry of a RAST identity uid is
+  removed from the access and default ACLs of the HOME's entries (the
+  0.18.3 read grant `u:rast-u<id>:rx` and `d:u:rast-u<id>:rx`, terminal
+  grants `rwX`/`rX`, and stray entries of other identities). When no
+  named entry is left the ACL is removed and the group bits become the
+  owning group's entry again; otherwise the mask is recomputed. Other
+  named entries are kept and listed (`foreignAclEntries`). The rollback
+  restores the recorded ACLs exactly, the 0.18.3 grant included.
+- **Order of apply.** Stop the account's units (session, apps, terminals,
+  file agent) and refuse while a unit stays active or any process of the
+  identity runs (`/proc`, real or effective uid) → lock
+  (`<…>/home/<userId>/lock`, `flock`) → journal → entries of the HOME
+  (owner, ACLs) → merge steps (`renameat2(RENAME_NOREPLACE)`; a step whose
+  source is no longer the recorded inode but whose target is counts as
+  done, so a resumed run continues) → `usermod --home` → the HOME itself
+  (owner, `0700`, no ACL) → `applied`. The HOME is given away last, so an
+  interrupted run leaves the account in legacy mode. An applied account
+  returns `alreadyOneHome` without stopping its session.
+- **Recycle bin.** The CLI maps each `trash` row to a batch entry: a home
+  origin `/a/b` becomes `a/b` (info file `Path=<HOME>/a/b`), a share origin
+  `/shared/<name>/a/b` becomes `a/b` below that share's container
+  (`Path=a/b`, `.Trash-<uid>` keeps the container's group and set-gid bit,
+  like the agent's). Rows whose share no longer exists, whose payload is
+  not `<userId>/<id>` or whose data is missing stay in the legacy recycle
+  bin and are listed. Rows are saved to
+  `<data_dir>/migrate-home/<userId>/trash-rows-<ms>.jsonl` (rast 0700/0600)
+  before the helper moves anything and deleted once it reports `moved` or
+  `already`; the rollback puts back the rows of the entries the helper
+  moved back and renames the files `.rolled-back`.
+- **Shared folders first.** The apply refuses while a shared folder the
+  account can open still has a legacy container (owner not root), because
+  its file agent and apps could not open it. Administrators can open every
+  shared folder (D6), so they come last.
+- **Legacy path kept.** The per-launch `setfacl -R` grant, the `RAST` link,
+  per-app profiles and `profile_clean_locks` stay for legacy accounts and
+  are skipped for one-HOME accounts (detected by the helper: the passwd
+  home is the HOME and the HOME belongs to the identity). They are removed
+  when no legacy account is left.
+- **New accounts (D8)** still start in legacy mode until the migration has
+  been verified on production with test accounts.
+- **Backup Center (D12)** reading HOMEs through the helper is task 1.5b.
+  Until then the `users` scope skips HOMEs that the service does not own
+  and lists them in `warnings` (manifest, job result, Backup Center), and
+  the restore guide no longer runs `chown -R rast:rast` over every home.
+- **Cleanup** of the emptied legacy folders, `.trash/<userId>`, the journal
+  folders and stray `homes/rast-u<id>` stays a separate, confirmed step.
+
 ### Decisions (taken by the maintainer on 2026-11-16)
 
 | # | Question | Decision |
@@ -945,8 +1029,10 @@ The deploy checklist says so until the maintainer decides.
 - **Task 1.4 (done 2026-11-16, section 11):** XDG Trash, quota backends,
   the `quota_*` operations, the usage breakdown, migration 0015
   (`shares.quota_bytes`) with the "enforced by" indicator in the UI.
-- **Task 1.5:** `rast migrate home`, the journal, removal of the per-launch
-  `setfacl -R` and the `RAST` symlink, the backup reader, an Upgrade note.
+- **Task 1.5 (done 2026-11-17, section 13):** `rast migrate home`, the
+  journal, the per-launch `setfacl -R` and the `RAST` symlink skipped for
+  one-HOME accounts, `rast migrate shares` per share, an Upgrade note. The
+  backup reader moved to task 1.5b.
 - **Test host:** one HOME needs the helper and a native instance, and only
   one native RAST may run per host. The Phase 1 exit (a file saved by Chrome
   visible in File Station; dry-run, apply and rollback) therefore runs on the

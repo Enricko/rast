@@ -347,7 +347,11 @@ only).
   linux-apps/profiles/<app>/<user>/  one native application profile per person (0700, owned by their identity)
   linux-apps/staging/<uuid>/         uploads/downloads being inspected or installed
   linux-apps/migrations/<app>/<user> Docker→native profile exports (retained until cleanup)
-  linux-users/<user_id>/             unprivileged Linux identity homes (0700 rast-u<uid>)
+  linux-users/<user_id>/             unprivileged Linux identity homes (0700 rast-u<uid>; legacy accounts)
+  migrations/shares/<shareId>/<stamp>/  `rast migrate shares` journals (root 0700/0600)
+  migrations/home/<userId>/<stamp>/     `rast migrate home` journals: journal.jsonl, plan.jsonl,
+                                     applied, trash-NNNN.jsonl (root 0700/0600)
+  migrate-home/<userId>/             legacy recycle bin rows saved by `rast migrate home` (0700/0600)
 /run/rast-linux/<uid>/               native session runtime dir (0700; Xpra sockets, logs, Xauthority target is the home)
 /run/rast/native.sock                native helper socket (0660 root:rast)
   packages/                          App Center (0751 with packages_shell_path)
@@ -361,7 +365,7 @@ only).
                                      (a replaced version tree waits in .trash/displaced.*
                                      until the new one is recorded; restored after a crash)
 /srv/rast/                           storage dir (0755 rast:rast)
-  homes/<username>/                  per-user home, 0700
+  homes/<username>/                  per-user home, 0700 (rast; rast-u<id> in one-HOME mode)
   shared/<name>/                     shared folders (ACL in DB)
   .trash/<user_id>/<uuid>/           recycle bin (root 0700, per-user 0700)
 /etc/profile.d/rast-packages.sh      App Center bin/ first on PATH (0644 root, written by

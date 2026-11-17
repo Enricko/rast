@@ -77,13 +77,22 @@ version, schema version, scope, per-file SHA-256) and, depending on `--scope`:
 | --- | --- |
 | `db` | Consistent SQLite snapshot (`VACUUM INTO`, includes committed WAL data) |
 | `config` | `/etc/rast/rast.toml`, `/etc/rast/rast.env` (if present) and `secret.key` |
-| `users` | Copy of user homes and shared folders |
+| `users` | Copy of user homes and shared folders (HOMEs in one-HOME mode are skipped, see below) |
 | `apps` | Managed application definitions (compose files + encrypted env metadata) |
 
 Native Linux app installs and per-person profiles (`<data_dir>/linux-apps`) are
 **not** part of any backup scope: back them up separately when native apps are
 in use (stop `rast-linux.slice` first, then archive the directory; see
 [Upgrade and rollback of native apps](#upgrade-and-rollback-of-native-apps)).
+
+A HOME in one-HOME mode (`rast migrate home`) belongs to the account's Linux
+user and the service cannot read it, so the `users` scope **skips** it: the
+archive's `manifest.json` and the backup result list it under `warnings`
+(`users/homes/<name>: skipped, …`), and Backup Center shows the warning
+after the backup. Folders that cannot be read are listed the same way. Until
+Backup Center reads HOMEs through the helper (task 1.5b), back such HOMEs up
+as root, keeping owners and ACLs, for example
+`sudo tar --numeric-owner --acls -czf home-<name>.tar.gz -C /srv/rast/homes <name>`.
 
 Default scopes: `db,config`. Default output directory: `/var/lib/rast/backups`.
 
@@ -203,14 +212,26 @@ diff -r "$scratch/homes/<username>" /srv/rast/homes/<username> | head
 # 3. Extract into storage_dir (NOT into /).
 sudo tar -xzf "$archive" -C /srv/rast/homes --strip-components=2 users/homes
 sudo tar -xzf "$archive" -C /srv/rast/shared --strip-components=2 users/shared
-sudo chown -R rast:rast /srv/rast/homes /srv/rast/shared
+# Give what you restored to the service, folder by folder (see below):
+sudo chown -R rast:rast /srv/rast/homes/<username>     # each restored home
+sudo chown -R rast:rast /srv/rast/shared/<folder>      # each restored shared folder
+sudo chown root /srv/rast/shared/<folder>              # only if it was migrated (rast migrate shares)
 # Per-user homes stay private; shared folders follow their share policy.
-sudo chmod 0700 /srv/rast/homes/*
+sudo chmod 0700 /srv/rast/homes/<username>
 
 # 4. Start and verify.
 sudo systemctl start rast.service
 sudo -u rast rast doctor
 ```
+
+Never run `chown -R rast:rast` over all of `/srv/rast/homes` or
+`/srv/rast/shared`: a HOME in one-HOME mode belongs to its account's Linux
+user (`rast-u<id>`) and would stop working for its apps, terminals and file
+agent, and a migrated shared folder's container must stay owned by root
+(the server's repair pass gives its entries the group layout back when it
+starts). HOMEs in one-HOME mode are not in the archive anyway; restore them
+from your root copy with `sudo tar --numeric-owner --same-owner --acls -xzf
+home-<name>.tar.gz -C /srv/rast/homes`.
 
 `--strip-components=2 users/homes` removes the `users/homes/` prefix, so each
 home is restored under its username; the same applies to `users/shared`.
@@ -697,11 +718,15 @@ created. Existing ones are moved with `rast migrate shares`, before
 `rast migrate home`:
 
 ```bash
-sudo -u rast rast migrate shares --dry-run          # read-only report; the server may run
+sudo -u rast rast migrate shares --share <name> --dry-run   # read-only report; the server may run
 sudo systemctl stop rast
-sudo -u rast rast migrate shares                    # apply (all shares, or --share <name>)
+sudo -u rast rast migrate shares --share <name>             # apply one shared folder
 sudo systemctl start rast
 ```
+
+Every mode needs `--share <name>` (one shared folder) or `--all` (every
+one); without either the command stops with an error, so a run never
+covers every shared folder by default.
 
 - The apply first writes a journal of every entry's group, mode and ACLs to
   `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl` (root,
@@ -721,7 +746,7 @@ sudo systemctl start rast
   g:2000:r-x`. They are removed by the apply, and again by the daily
   repair pass (below), which logs each one it removes. The journal keeps them for a rollback; to keep a copy of
   your own, save them first with `sudo getfacl -R -p <path>`.
-- `sudo -u rast rast migrate shares --rollback` (server stopped) restores
+- `sudo -u rast rast migrate shares --share <name> --rollback` (server stopped) restores
   the journal: only entries that are still the recorded inode with the
   recorded owner; entries changed since are reported and left. The groups
   stay; they give nothing without the container layout. Set-uid bits, and
@@ -773,6 +798,87 @@ sudo systemctl start rast
   group its user lost, for example because the server restarted during a
   warning, is warned and restarted again. Leftover deny entries of an
   earlier run are removed by the first check.
+
+## Moving accounts to one HOME (`rast migrate home`)
+
+`rast migrate home` moves a legacy account into one-HOME mode (ADR 0005,
+section 8): its HOME, its app data and its recycle bin become its Linux
+account's (`rast-u<id>`), so File Station, terminals and every app share
+one HOME. Run it after `rast migrate shares`, one account at a time:
+
+```bash
+sudo -u rast rast migrate home --user <name> --dry-run     # read-only report; the server may run
+sudo systemctl stop rast
+sudo -u rast rast migrate home --user <name>               # apply
+sudo systemctl start rast
+sudo -u rast rast migrate home --user <name> --rollback    # undo (server stopped)
+```
+
+`--all` instead of `--user <name>` covers every account; one of the two is
+required. `--json` prints a machine-readable report; the exit code is 1
+when any account failed (the others are still done). Back up `/etc/rast`,
+`/var/lib/rast` and `/srv/rast` first.
+
+- **Dry run.** Per account: the size of the HOME (and on disk), the
+  entries that change owner (`rast` → `rast-u<id>`), the ACL entries of
+  RAST identities that are removed (the 0.18.3 read grant `u:rast-u<id>:rx`
+  and `d:u:rast-u<id>:rx`, and terminal grants), other named ACL entries
+  (kept, listed with their entries), files with several hard links, links,
+  root-owned entries, entries of other accounts and other mounts (all left
+  as they are), the app data that is merged into the HOME per app with its
+  conflicts (first 50 paths), the legacy recycle bin and the entries that
+  stay in it, the projected usage against the quota (the HOME, the merged
+  app data and the recycle bin), `~/Shared` names that collide with shared
+  folders, a stray `homes/rast-u<id>` folder (D13; RAST never deletes it),
+  running units and processes, and the shared folders that still need
+  `rast migrate shares`.
+- **Before the apply.** Every shared folder the account can open must be
+  migrated (`rast migrate shares --share <name>`); the apply refuses and
+  names them otherwise. Administrators can open every shared folder, so an
+  administrator account can only be migrated after all of them. The apply
+  stops the account's session, apps, terminals and file agent, and refuses
+  while any process of `rast-u<id>` still runs (for example
+  `sudo pkill -u rast-u<id>`, then run it again).
+- **Apply.** The helper writes a journal of every entry's owner, group,
+  mode and ACLs and the plan of every move to
+  `<data_dir>/migrations/home/<userId>/<stamp>/` (`journal.jsonl`,
+  `plan.jsonl`; root, 0700/0600, synced) before it changes anything. It
+  then gives the HOME's entries to `rast-u<id>` and removes the identity
+  ACL entries, merges the legacy identity home
+  (`<data_dir>/linux-users/<id>`) and every app profile
+  (`<data_dir>/linux-apps/profiles/<app>/<id>/`) into the HOME **per
+  file** — `config` → `~/.config`, `data` → `~/.local/share`, `state` →
+  `~/.local/state`, `cache` → `~/.cache`, `home` → `~/` — sets the passwd
+  home, and finally gives the HOME itself to the account (0700, no ACL)
+  and writes `applied`. An entry that the HOME already has (a file, or a
+  file where a folder is) is a conflict: it stays in the old profile and
+  is listed. `.Xauthority` is not moved (the session makes it again), nor
+  is a profile's `tmp`. Data on another file system than the HOME is not
+  moved.
+- **Recycle bin.** The legacy recycle bin
+  (`<storage_dir>/.trash/<userId>`) moves into XDG Trash
+  (`~/.local/share/Trash`, or the shared folder's `.Trash-<uid>` for
+  entries deleted from one), in batches of 256. Its database rows are saved
+  to `<data_dir>/migrate-home/<userId>/trash-rows-<time>.jsonl` (0600)
+  before they are deleted. Entries whose shared folder no longer exists,
+  and entries whose data is missing, stay in the legacy recycle bin and
+  are listed.
+- An apply that stopped half way resumes with its journal when run again;
+  an account that is done is left as it is (its session keeps running).
+  An apply or rollback still running in the helper keeps the account
+  locked (`share_busy`, "still running") until it ends.
+- **Rollback** (server stopped) moves the recycle bin entries and the
+  merged app data back, restores the recorded owners, groups, modes and
+  ACLs (the 0.18.3 grant included), gives entries made since the migration
+  to the service, sets the passwd home back and puts the recycle bin rows
+  back; the journal folder is renamed `<stamp>.rolled-back`. Entries that
+  are another file now, or that the HOME holds in place of a moved entry,
+  are listed and left as they are. Set-uid bits are never restored.
+- **Afterwards** the account's quota counts its app data, caches and
+  recycle bin (ADR 0005, D2), and Backup Center skips its HOME with a
+  warning (see "What is in a backup archive"). The legacy folders that the
+  migration emptied, `.trash/<userId>` and a stray `homes/rast-u<id>` are
+  not deleted: cleaning them up is a separate step.
 
 ## Recycle bin and quota of one-HOME accounts
 

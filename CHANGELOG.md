@@ -139,8 +139,9 @@ this file by `scripts/changelog-section.sh`.
   every entry whose ACL holds entries RAST does not manage, with those
   entries, since the apply replaces the whole ACL) and may
   run while the server runs; `rast migrate shares` (apply) and
-  `rast migrate shares --rollback` need the server stopped. `--share <name>`
-  limits it to one shared folder, `--json` gives a machine-readable report.
+  `rast migrate shares --rollback` need the server stopped. Every mode takes
+  `--share <name>` (one shared folder) or `--all` (every one), `--json`
+  gives a machine-readable report.
   Each shared folder is migrated on its own and a failure does not stop the
   others (exit code 1). The apply writes a journal first and resumes an
   interrupted run; the rollback restores owners, modes and ACLs from it.
@@ -152,6 +153,50 @@ this file by `scripts/changelog-section.sh`.
   gave up after 15 seconds while the helper went on working, so a large
   share was reported as failed in the middle of its apply).
   Creating groups and setting their members waits up to two minutes.
+
+- **`rast migrate home` (ADR 0005, section 8, task 1.5).** Moves a legacy
+  account into one-HOME mode: its HOME, app data and recycle bin become its
+  Linux account's (`rast-u<id>`). Run it as the service user, after
+  `rast migrate shares`, for one account at a time
+  (`sudo -u rast rast migrate home --user <name> [--dry-run | --rollback]`)
+  or, only when asked, for every account (`--all`); `--json` gives a
+  machine-readable report.
+  - `--dry-run` (the server may run) reports the size of the HOME (and on
+    disk), the entries that change owner, the ACL entries of RAST
+    identities that are removed (the read grant of 0.18.3,
+    `u:rast-u<id>:rx` and `d:u:rast-u<id>:rx`, and terminal grants), other
+    ACL entries (kept), hard-linked files, links and mount points (left as
+    they are), the app data that is merged into the HOME per app, its
+    conflicts, the legacy recycle bin, the projected usage against the
+    quota, `~/Shared` name collisions, a stray `homes/rast-u<id>` folder,
+    running units and processes, and the shared folders that still need
+    `rast migrate shares`.
+  - The apply (server stopped) stops the account's session, apps,
+    terminals and file agent, refuses while a process of `rast-u<id>`
+    still runs or a shared folder the account can open is not migrated,
+    and writes a journal of every entry's owner, group, mode and ACLs and
+    of every move to `<data_dir>/migrations/home/<userId>/<stamp>/` (root,
+    0700/0600, synced) before it changes anything. It then gives the HOME's
+    entries to `rast-u<id>`, removes the identity ACL entries, merges the
+    legacy identity home and the app profiles into the HOME **per file**
+    (`config` → `~/.config`, `data` → `~/.local/share`, `state` →
+    `~/.local/state`, `cache` → `~/.cache`, `home` → `~/`; an entry the
+    HOME already has stays where it was and is reported), sets the passwd
+    home, and gives the HOME itself to the account last (0700, no ACL). The
+    legacy recycle bin moves into XDG Trash (`~/.local/share/Trash`, or the
+    shared folder's `.Trash-<uid>`) in batches; its rows are saved below
+    `<data_dir>/migrate-home/<userId>/` first. An interrupted run resumes
+    from its journal; a second run changes nothing and leaves the session
+    running. Hard-linked files are never given away and no link is ever
+    followed.
+  - `--rollback` (server stopped) moves the recycle bin and the merged app
+    data back, restores the recorded owners, modes and ACLs (the 0.18.3
+    grant included), gives entries made since to the service, and sets the
+    passwd home and the recycle bin rows back.
+  - New privileged helper operations `home_migrate_scan`,
+    `home_migrate_apply`, `home_migrate_trash` and `home_migrate_rollback`
+    take a user id and the HOME's name only; journals are read back as
+    untrusted input (no root owner, set-uid bits dropped).
 
 - **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
   With the native backend, the server recomputes the members of every
@@ -274,7 +319,20 @@ this file by `scripts/changelog-section.sh`.
 
 - For one-HOME accounts the quota now counts everything in HOME: apps,
   caches and the recycle bin (ADR 0005, D2). Legacy accounts are unchanged
-  until `rast migrate home` (a later release).
+  until `rast migrate home`.
+
+- **`rast migrate home`** moves accounts into one-HOME mode, one at a
+  time; nothing switches by itself and new accounts still start in legacy
+  mode. Order: back up `/etc/rast`, `/var/lib/rast` and `/srv/rast`; run
+  `rast migrate shares --share <name>` for every shared folder the account
+  can open; then `rast migrate home --user <name> --dry-run`, and with the
+  server stopped `rast migrate home --user <name>`. `--rollback` (server
+  stopped) undoes it from the journal. Afterwards the account's apps share
+  one HOME (settings of an app that conflicted stay in its old profile and
+  are listed), its quota counts app data, caches and the recycle bin, and
+  Backup Center skips its HOME with a warning until task 1.5b. Scripts that
+  call `rast migrate shares` without arguments must add `--all` (or
+  `--share <name>`).
 
 - The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
   `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.
@@ -291,6 +349,26 @@ this file by `scripts/changelog-section.sh`.
   need nothing new.
 
 ### Changed
+
+- **`rast migrate shares` needs `--share <name>` or `--all`** in every mode
+  (dry-run, apply, rollback). Without one it now stops with an error
+  instead of covering every shared folder, so a run never migrates
+  everything by default; `rast migrate home` takes `--user <name>` or
+  `--all` the same way.
+
+- Native apps and terminals of one-HOME accounts use the HOME: apps start
+  there with `HOME` set to it and without per-app profile folders, the
+  `RAST` link or the per-launch `setfacl -R` grant; terminals get no ACL
+  grant and may start in the HOME or a shared folder. Legacy accounts keep
+  their app profiles, the `RAST` link and the grant until they are
+  migrated.
+
+- Backups of the `users` scope skip HOMEs in one-HOME mode (they belong to
+  the account's Linux user and the service cannot read them) and say so:
+  the archive's manifest and the job result list `warnings`, and Backup
+  Center shows them after a backup. Folders that cannot be read are listed
+  too instead of being left out silently. Back up such HOMEs as root until
+  Backup Center reads them through the helper (task 1.5b).
 
 - New `crates/rast-api` crate holds the shared File Station DTOs
   (`EntryDto`, `ListingDto`, `BreadcrumbDto`, `QuotaDto`; JSON unchanged).
@@ -324,6 +402,10 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- `rast migrate shares` (and `rast migrate home`) no longer reports a
+  shared folder or account as busy right after another migration step
+  released it: the helper retries its migration lock for half a second (a
+  process it was starting still held a copy of the lock).
 - Recycle bin of one-HOME accounts (review of task 1.4): a restore never
   lands on a `.Trash*` name at the top of a shared folder; an entry named
   twice in one request is handled once; "Empty" reads large recycle bins

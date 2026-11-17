@@ -159,7 +159,9 @@ differences:
   when user quota is on (then files the account owns in shared folders
   count as well, `byLocation.shared`).
 
-No account is switched to one-HOME mode by this version.
+Accounts are switched to one-HOME mode one at a time by an administrator
+with `rast migrate home` (see [OPERATIONS.md](OPERATIONS.md)); new accounts
+still start in legacy mode. The API is the same in both modes.
 
 | Method | Path | Notes |
 | --- | --- | --- |
@@ -316,7 +318,7 @@ group grants. A read-only `backup` grant receives status metadata only:
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error,downloadable}], total}` |
-| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}` |
+| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}`; the finished job's result is the backup (`fileName`, `sizeBytes`, `sha256`, …) with `warnings` (what was left out, such as HOMEs in one-HOME mode) when there are any |
 | DELETE | `/api/backups/{id}` | delete archive |
 | GET | `/api/backups/{id}/download` | streamed archive (admin only, audited as `backup.download`) |
 | GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
