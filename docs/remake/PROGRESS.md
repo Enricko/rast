@@ -837,7 +837,8 @@ Update it at the end of every session.
 - [x] Task 1.5b: Backup Center reads HOMEs through the helper (D12,
   `backup_reader_start`; unit, fake-helper and real-reader tests; root and
   systemd checks pending on the test host).
-- [ ] Task 1.6: Phase 1 security review
+- [x] Task 1.5c: native pilot gate (ADR 0007, agent decision A5)
+- [x] Task 1.6: Phase 1 security review (`docs/remake/review-phase-1.md`, 16 findings, all fixed with regression tests: `c2bd208`, `3285c92`, `79e855c`, `343dc16`, `a49cefa`; the review of task 1.5 was folded into it)
 - [ ] **Exit:** a file saved by Chrome appears in File Station and vice versa; cross-user tests pass; dry-run and rollback tested on production with test accounts and test shares
 
 ## In progress
@@ -851,9 +852,11 @@ permissions for this session are listed in "Testing on production"). Order:
    (users), shared folder `t-share` (`t-alice` write, `t-bob` read).
    Passwords in `~/.config/rast-test/creds` (0600, outside the repo); every
    root command is logged in `~/rast-automation.log`.
-2. [ ] Rest of Phase 1: review of task 1.5, task 1.5b, task 1.6 and its
-   fixes, responsiveness checks in the app matrix, task 0.6 on 0.18.3,
-   deploy `1.0.1-alpha.1`, Phase 1 exit with test accounts.
+2. [ ] Rest of Phase 1: [x] task 1.5c (native pilot gate), [x] task 1.5b,
+   [x] task 1.6 and its fixes (CI green again from `a13e829`), [x] app matrix
+   with responsiveness checks (task 0.6 scenario), [ ] `1.0.1-alpha.1` deploy,
+   [ ] app matrix baseline in legacy mode (replaces 0.6 on 0.18.3, A4),
+   [ ] Phase 1 exit with test accounts.
 3. [ ] Native window latency investigation (before Phase 2).
 4. [ ] Phases 2, 3, 4 (4.1–4.3), 5, 6; task 4.4 last (not deployed without
    the maintainer); Phase 7 skipped.
