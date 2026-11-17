@@ -420,6 +420,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::ShareDirRemove(op) => super::shares::share_dir_remove(options, op).await,
         NativeOp::ShareDirRelease(op) => super::shares::share_dir_release(options, op).await,
         NativeOp::ShareDirRepair(op) => super::shares::share_dir_repair(options, op).await,
+        NativeOp::ShareTrashUsage(op) => super::shares::share_trash_usage(options, op).await,
         NativeOp::ShareDenySet(op) => super::shares::share_deny_set(options, op).await,
         NativeOp::ShareSessionGroups(op) => super::shares::share_session_groups(options, op).await,
         NativeOp::QuotaStatus => super::shares::quota_status(options).await,

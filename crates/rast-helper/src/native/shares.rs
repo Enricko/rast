@@ -1845,6 +1845,139 @@ pub(crate) async fn share_dir_repair(
     }))
 }
 
+/// Deepest folder level `share_trash_usage` descends to (as the service's
+/// own walk of a container).
+const TRASH_USAGE_MAX_DEPTH: usize = 64;
+
+/// What `share_trash_usage` measured.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashUsage {
+    /// Apparent size of the regular files.
+    pub bytes: u64,
+    pub files: u64,
+    /// The walk stopped at its entry limit (or skipped a folder that
+    /// holds more names than are left): `bytes` is a lower bound.
+    pub truncated: bool,
+}
+
+/// `share_trash_usage`: the bytes in the recycle bin folders at the top of
+/// a shared folder's container (`.Trash` and `.Trash-*`, ADR 0005, section
+/// 5), for its size limit. Those of one-HOME members are theirs alone
+/// (0700), so the service cannot measure them. Read-only: nothing is
+/// changed, symlinks are never followed, and the walk stays on the
+/// container's file system and mount.
+pub(crate) async fn share_trash_usage(
+    options: &NativeOptions,
+    op: ShareDirOp,
+) -> Result<Value, NativeError> {
+    validate_share_container(&op.container)?;
+    let layout = Layout::for_share(options, &op.share_id).await?;
+    let options = options.clone();
+    let container = op.container.clone();
+    let usage = blocking(move || {
+        let (fd, _) = checked_container(&options, &container, &layout)?;
+        trash_usage(&fd, MAX_TREE_ENTRIES)
+    })
+    .await?;
+    Ok(json!({
+        "shareId": op.share_id,
+        "container": op.container,
+        "usage": usage,
+    }))
+}
+
+/// Sum the regular files below the folders named like recycle bins at the
+/// top of `container`, reading at most `limit` names in all.
+fn trash_usage(container: &OwnedFd, limit: u64) -> Result<TrashUsage, NativeError> {
+    let inspect = |error: io::Error| {
+        NativeError::command_failed(format!("cannot inspect the container: {error}"))
+    };
+    let top = fstat(container.as_raw_fd()).map_err(inspect)?;
+    let mount = fd_mount_id(container.as_raw_fd()).map_err(|error| {
+        if error.kind() == io::ErrorKind::Unsupported {
+            NativeError::unavailable(error.to_string())
+        } else {
+            inspect(error)
+        }
+    })?;
+    // A folder below `parent` that is still the entry `stat` described and
+    // has no mount on top of it.
+    let open_checked = |parent: RawFd, name: &CStr, stat: &libc::stat| -> Option<OwnedFd> {
+        if !is_dir(stat) || stat.st_dev != top.st_dev {
+            return None;
+        }
+        let dir = open_at(parent, name, DIR_FLAGS).ok()?;
+        let opened = fstat(dir.as_raw_fd()).ok()?;
+        let id = fd_mount_id(dir.as_raw_fd()).ok()?;
+        (same_inode(&opened, stat) && id == mount).then_some(dir)
+    };
+    let mut usage = TrashUsage::default();
+    let mut read = 0u64;
+    let Some(names) = dir_names(container.as_raw_fd(), limit).map_err(inspect)? else {
+        usage.truncated = true;
+        return Ok(usage);
+    };
+    read += names.len() as u64;
+    let mut stack: Vec<(OwnedFd, std::vec::IntoIter<CString>)> = Vec::new();
+    let open_frame = |dir: OwnedFd, read: &mut u64, usage: &mut TrashUsage| match dir_names(
+        dir.as_raw_fd(),
+        limit.saturating_sub(*read),
+    ) {
+        Ok(Some(names)) => {
+            *read += names.len() as u64;
+            Some((dir, names.into_iter()))
+        }
+        Ok(None) => {
+            usage.truncated = true;
+            None
+        }
+        Err(_) => None,
+    };
+    for name in names {
+        if !name
+            .to_str()
+            .is_ok_and(rast_base::storage::xdg_trash::is_trash_dir_name)
+        {
+            continue;
+        }
+        let Ok(stat) = lstat_at(container.as_raw_fd(), &name) else {
+            continue;
+        };
+        if let Some(dir) = open_checked(container.as_raw_fd(), &name, &stat) {
+            if let Some(frame) = open_frame(dir, &mut read, &mut usage) {
+                stack.push(frame);
+            }
+        }
+    }
+    while let Some((dir, names)) = stack.last_mut() {
+        let Some(name) = names.next() else {
+            stack.pop();
+            continue;
+        };
+        let parent = dir.as_raw_fd();
+        let Ok(stat) = lstat_at(parent, &name) else {
+            continue;
+        };
+        if is_regular(&stat) {
+            if stat.st_dev == top.st_dev {
+                usage.bytes = usage.bytes.saturating_add(stat.st_size.max(0) as u64);
+                usage.files += 1;
+            }
+            continue;
+        }
+        if stack.len() >= TRASH_USAGE_MAX_DEPTH {
+            continue;
+        }
+        if let Some(child) = open_checked(parent, &name, &stat) {
+            if let Some(frame) = open_frame(child, &mut read, &mut usage) {
+                stack.push(frame);
+            }
+        }
+    }
+    Ok(usage)
+}
+
 pub(crate) async fn share_deny_set(
     options: &NativeOptions,
     op: ShareDenySetOp,

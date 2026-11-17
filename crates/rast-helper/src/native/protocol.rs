@@ -111,6 +111,10 @@ pub const APT_UPDATE_TIMEOUT: Duration = Duration::from_secs(190);
 /// Client-side deadline for operations that walk a whole shared folder
 /// (`share_dir_prepare` with `recursive`, `shares_migrate_*`).
 pub const SHARE_TREE_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Client-side deadline for `share_trash_usage` (a bounded, read-only
+/// walk of the recycle bins in one shared folder; a write into the shared
+/// folder waits for it).
+pub const SHARE_TRASH_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Client-side deadline for an operation name (used by generic JSON calls).
 pub fn timeout_for_op(name: &str) -> Duration {
@@ -128,6 +132,7 @@ pub fn timeout_for_op(name: &str) -> Duration {
         | "shares_migrate_scan"
         | "shares_migrate_apply"
         | "shares_migrate_rollback" => SHARE_TREE_TIMEOUT,
+        "share_trash_usage" => SHARE_TRASH_USAGE_TIMEOUT,
         _ => QUICK_OP_TIMEOUT,
     }
 }
@@ -282,6 +287,9 @@ pub enum NativeOp {
     /// Apply the group layout again to everything in a prepared container
     /// (the daily repair pass); legacy containers are left alone.
     ShareDirRepair(ShareDirOp),
+    /// The bytes in the recycle bin folders at the top of a container
+    /// (read-only), for the shared folder's size limit.
+    ShareTrashUsage(ShareDirOp),
     /// Set the per-user deny entries (`u:rast-u<id>:---`) on a prepared
     /// container: the stopgap while a revocation waits for its restart.
     ShareDenySet(ShareDenySetOp),
@@ -349,6 +357,7 @@ impl NativeOp {
             Self::ShareDirRemove(_) => "share_dir_remove",
             Self::ShareDirRelease(_) => "share_dir_release",
             Self::ShareDirRepair(_) => "share_dir_repair",
+            Self::ShareTrashUsage(_) => "share_trash_usage",
             Self::ShareDenySet(_) => "share_deny_set",
             Self::ShareSessionGroups(_) => "share_session_groups",
             Self::QuotaStatus => "quota_status",
@@ -404,6 +413,7 @@ impl NativeOp {
             | Self::SharesMigrateScan(_)
             | Self::SharesMigrateApply(_)
             | Self::SharesMigrateRollback(_) => SHARE_TREE_TIMEOUT,
+            Self::ShareTrashUsage(_) => SHARE_TRASH_USAGE_TIMEOUT,
             Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
         }
@@ -429,6 +439,7 @@ impl NativeOp {
                 | Self::ShareSessionGroups(_)
                 | Self::QuotaStatus
                 | Self::QuotaReport(_)
+                | Self::ShareTrashUsage(_)
         )
     }
 
@@ -508,6 +519,7 @@ impl NativeRequest {
             NativeOp::ShareDirRemove(op)
             | NativeOp::ShareDirRelease(op)
             | NativeOp::ShareDirRepair(op)
+            | NativeOp::ShareTrashUsage(op)
             | NativeOp::SharesMigrateScan(op)
             | NativeOp::SharesMigrateApply(op)
             | NativeOp::SharesMigrateRollback(op) => merge!(op),
@@ -639,6 +651,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "share_dir_remove" => NativeOp::ShareDirRemove(op_from(rest, "share_dir_remove")?),
         "share_dir_release" => NativeOp::ShareDirRelease(op_from(rest, "share_dir_release")?),
         "share_dir_repair" => NativeOp::ShareDirRepair(op_from(rest, "share_dir_repair")?),
+        "share_trash_usage" => NativeOp::ShareTrashUsage(op_from(rest, "share_trash_usage")?),
         "share_deny_set" => NativeOp::ShareDenySet(op_from(rest, "share_deny_set")?),
         "share_session_groups" => {
             NativeOp::ShareSessionGroups(op_from(rest, "share_session_groups")?)
@@ -2432,6 +2445,7 @@ mod tests {
             NativeOp::SharesMigrateApply(share_dir()),
             NativeOp::SharesMigrateRollback(share_dir()),
             NativeOp::ShareDirRepair(share_dir()),
+            NativeOp::ShareTrashUsage(share_dir()),
             NativeOp::ShareDenySet(ShareDenySetOp {
                 share_id: SHARE_ID.into(),
                 container: "team".into(),
@@ -2495,6 +2509,19 @@ mod tests {
         assert_eq!(timeout_for_op("share_dir_prepare"), SHARE_TREE_TIMEOUT);
         assert_eq!(timeout_for_op("share_dir_repair"), SHARE_TREE_TIMEOUT);
         assert_eq!(timeout_for_op("share_deny_set"), QUICK_OP_TIMEOUT);
+        let trash = parse_request_line(
+            format!(
+                r#"{{"id":1,"op":"share_trash_usage","shareId":"{SHARE_ID}","container":"team"}}"#
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(!trash.op.is_long_running(), "read-only");
+        assert_eq!(trash.op.timeout(), SHARE_TRASH_USAGE_TIMEOUT);
+        assert_eq!(
+            timeout_for_op("share_trash_usage"),
+            SHARE_TRASH_USAGE_TIMEOUT
+        );
         let groups =
             parse_request_line(br#"{"id":1,"op":"share_session_groups","userIds":[3]}"#).unwrap();
         assert!(!groups.op.is_long_running(), "read-only");
@@ -2522,6 +2549,11 @@ mod tests {
             r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team"}"#,
             r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team","userIds":[3],"uid":0}"#,
             r#"{"id":1,"op":"share_deny_set","shareId":"S","container":"team","userIds":["rast-u3"]}"#,
+            // A container name only: never a path, a uid or a depth.
+            r#"{"id":1,"op":"share_trash_usage","shareId":"S"}"#,
+            r#"{"id":1,"op":"share_trash_usage","shareId":"S","container":"team","path":"/"}"#,
+            r#"{"id":1,"op":"share_trash_usage","shareId":"S","container":"team","uid":0}"#,
+            r#"{"id":1,"op":"share_trash_usage","shareId":"S","container":"team","recursive":true}"#,
             r#"{"id":1,"op":"share_session_groups"}"#,
             r#"{"id":1,"op":"share_session_groups","userIds":[3],"pid":1}"#,
             // Quota: ids only, never a path, a uid or a gid.

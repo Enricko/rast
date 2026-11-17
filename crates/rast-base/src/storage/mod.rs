@@ -83,6 +83,9 @@ pub struct Storage {
     pub uploads: Arc<Mutex<HashMap<String, chunked::ChunkedUpload>>>,
     /// Lifetime of a chunked-upload session (overridable in tests).
     pub upload_ttl_ms: i64,
+    /// How the members' recycle bins in shared folders are measured for
+    /// their size limits (set by the server when the helper is in use).
+    pub share_trash: share_quota::TrashMeasureSlot,
 }
 
 impl Storage {
@@ -113,6 +116,7 @@ impl Storage {
             uploads_root,
             uploads: Arc::new(Mutex::new(HashMap::new())),
             upload_ttl_ms: chunked::UPLOAD_TTL_MS,
+            share_trash: share_quota::TrashMeasureSlot::default(),
         })
     }
 

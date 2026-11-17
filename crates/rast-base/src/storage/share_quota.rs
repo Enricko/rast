@@ -4,26 +4,30 @@
 //! RAST checks a limit for File Station writes into the share (uploads,
 //! copies and moves from outside it): the bytes the container holds, plus
 //! the bytes of uploads still running, plus the incoming bytes must fit.
-//! The container's usage is measured by a walk (apparent sizes, what the
-//! service can read), kept for a minute and raised by the writes RAST
-//! accounts in between. An upload *reserves* its bytes for as long as it
-//! runs ([`ShareReservation`]), as `quota::reserve` does for a user's
-//! quota, so two uploads that start together cannot both use the same free
-//! space. Bytes that members' apps write and members' own recycle bins
-//! (`.Trash-<uid>`, 0700) are not seen by this check: with the RAST
-//! fallback the label is "RAST only", with group quota
+//! The container's usage is measured (apparent sizes), kept for a minute
+//! and raised by the writes RAST accounts in between: the service walks
+//! the container except the recycle bin folders at its top (`.Trash`,
+//! `.Trash-<uid>`), and the helper measures those, which are private to
+//! each member (`share_trash_usage`, through [`TrashMeasure`]). An upload
+//! *reserves* its bytes for as long as it runs ([`ShareReservation`]), as
+//! `quota::reserve` does for a user's quota, so two uploads that start
+//! together cannot both use the same free space. Bytes that members' apps
+//! write are not seen by this check: with the RAST fallback the label is
+//! "RAST only", with group quota
 //! on the shared filesystem "filesystem, best effort" (the kernel limit is
 //! the rw group's, see `quota_sync` in the server).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use futures::future::BoxFuture;
 use sqlx::SqlitePool;
 
 use crate::error::{AppError, AppResult};
-use crate::storage::{quota, shares, Storage};
+use crate::storage::{shares, xdg_trash, Storage};
 
 /// How long a measured usage is trusted.
 const MEASURE_TTL: Duration = Duration::from_secs(60);
@@ -56,6 +60,71 @@ fn cache() -> MutexGuard<'static, HashMap<String, ShareUsage>> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Measures the bytes in the recycle bin folders at the top of a shared
+/// folder's container (the server's helper; nothing in process, where the
+/// service walk sees every byte it can read).
+pub trait TrashMeasure: Send + Sync {
+    /// The bytes, `None` when they cannot be measured now (counted as 0
+    /// until the next measurement).
+    fn trash_bytes(&self, share_id: &str, container: &str) -> BoxFuture<'static, Option<u64>>;
+}
+
+/// Where a [`Storage`] finds its [`TrashMeasure`], set once at start.
+#[derive(Clone, Default)]
+pub struct TrashMeasureSlot(Arc<OnceLock<Arc<dyn TrashMeasure>>>);
+
+impl TrashMeasureSlot {
+    /// Install the measure (later calls are ignored).
+    pub fn set(&self, measure: Arc<dyn TrashMeasure>) {
+        let _ = self.0.set(measure);
+    }
+
+    fn get(&self) -> Option<&Arc<dyn TrashMeasure>> {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for TrashMeasureSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("TrashMeasureSlot")
+            .field(&self.0.get().is_some())
+            .finish()
+    }
+}
+
+/// The bytes of the regular files in a container, without the recycle bin
+/// folders at its top (the helper measures those) and without upload part
+/// files. Symlinks are never followed.
+fn container_bytes_blocking(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let walker = walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .max_depth(64)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_symlink()
+                && !(entry.depth() == 1
+                    && entry.file_type().is_dir()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(xdg_trash::is_trash_dir_name))
+        });
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_file()
+            || entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(crate::storage::TEMP_PREFIX))
+        {
+            continue;
+        }
+        total = total.saturating_add(entry.metadata().map(|meta| meta.len()).unwrap_or(0));
+    }
+    total
+}
+
 /// Validate a requested limit: 0 or absent removes it.
 pub fn normalize(quota_bytes: Option<i64>) -> AppResult<Option<i64>> {
     match quota_bytes {
@@ -77,7 +146,8 @@ pub async fn limit(pool: &SqlitePool, share_id: &str) -> AppResult<Option<i64>> 
     Ok(limit.flatten().filter(|bytes| *bytes > 0))
 }
 
-/// The bytes a share's container holds (cached for a minute).
+/// The bytes a share's container holds, its members' recycle bins
+/// included (cached for a minute).
 pub async fn used(storage: &Storage, share_id: &str, container: &str) -> AppResult<u64> {
     if let Some(found) = cache()
         .get(share_id)
@@ -88,9 +158,14 @@ pub async fn used(storage: &Storage, share_id: &str, container: &str) -> AppResu
     }
     let container = shares::validated_container(container)?;
     let path = storage.shared_root.join(&container);
-    let bytes = tokio::task::spawn_blocking(move || quota::dir_used_bytes_blocking(&path))
+    let walked = tokio::task::spawn_blocking(move || container_bytes_blocking(&path))
         .await
         .map_err(AppError::from)?;
+    let trash = match storage.share_trash.get() {
+        Some(measure) => measure.trash_bytes(share_id, &container).await.unwrap_or(0),
+        None => 0,
+    };
+    let bytes = walked.saturating_add(trash);
     cache().entry(share_id.to_string()).or_default().measured = Some(Measured {
         bytes,
         at: Instant::now(),
@@ -251,6 +326,50 @@ mod tests {
         assert_eq!(normalize(Some(5)).unwrap(), Some(5));
         assert!(normalize(Some(-1)).is_err());
         assert!(normalize(Some(MAX_SHARE_QUOTA + 1)).is_err());
+    }
+
+    struct FixedTrash(Option<u64>);
+
+    impl TrashMeasure for FixedTrash {
+        fn trash_bytes(&self, _: &str, container: &str) -> BoxFuture<'static, Option<u64>> {
+            assert_eq!(container, "team");
+            let bytes = self.0;
+            Box::pin(async move { bytes })
+        }
+    }
+
+    #[tokio::test]
+    async fn the_members_recycle_bins_count_once_through_the_measure() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::new(&crate::storage::tests::test_config(dir.path())).unwrap();
+        let team = storage.shared_root.join("team");
+        std::fs::create_dir_all(team.join(".Trash-200005/files")).unwrap();
+        std::fs::create_dir_all(team.join("docs/.Trash")).unwrap();
+        std::fs::write(team.join("plain"), [0u8; 4]).unwrap();
+        std::fs::write(team.join("docs/.Trash/x"), [0u8; 8]).unwrap();
+        // The measure counts this one (readable here, private on a host).
+        std::fs::write(team.join(".Trash-200005/files/y"), [0u8; 100]).unwrap();
+        // A file of that name at the top is the service's to count.
+        std::fs::write(team.join(".Trash-200006"), [0u8; 16]).unwrap();
+        std::fs::write(
+            team.join(format!("{}part", crate::storage::TEMP_PREFIX)),
+            [0u8; 32],
+        )
+        .unwrap();
+        let id = "00000000-0000-4000-8000-00000000beef";
+        assert_eq!(used(&storage, id, "team").await.unwrap(), 4 + 8 + 16);
+        forget(id);
+        storage.share_trash.set(Arc::new(FixedTrash(Some(100))));
+        assert_eq!(used(&storage, id, "team").await.unwrap(), 4 + 8 + 16 + 100);
+        // Cached for a minute.
+        std::fs::write(team.join("later"), [0u8; 64]).unwrap();
+        assert_eq!(used(&storage, id, "team").await.unwrap(), 128);
+        forget(id);
+        let other = Storage::new(&crate::storage::tests::test_config(dir.path())).unwrap();
+        other.share_trash.set(Arc::new(FixedTrash(None)));
+        // Not measurable now: the walk alone.
+        assert_eq!(used(&other, id, "team").await.unwrap(), 4 + 8 + 16 + 64);
+        forget(id);
     }
 
     #[test]

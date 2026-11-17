@@ -86,6 +86,14 @@ impl AppState {
             crate::storage::Storage::new(&config)
                 .map_err(|e| AppError::internal(format!("cannot initialise storage: {e}")))?,
         );
+        if config.native_enabled {
+            // The members' recycle bins count towards shared folder limits.
+            storage
+                .share_trash
+                .set(Arc::new(crate::quota_sync::HelperTrashMeasure::new(
+                    crate::native::client::NativeClient::from_config(&config),
+                )));
+        }
         let docker = crate::docker::DockerManager::new(&config);
 
         let config = Arc::new(config);

@@ -14,7 +14,9 @@
 //! the used bytes, and apps, Terminal and launchers are not limited.
 //!
 //! Shared-folder limits on the kernel side are group quota on the rw gid
-//! ("filesystem, best effort", D3).
+//! ("filesystem, best effort", D3). RAST's own check of those limits
+//! counts the members' recycle bins in the container through the helper
+//! ([`HelperTrashMeasure`], `share_trash_usage`).
 //!
 //! Legacy accounts (HOME owned by the service) always use RAST's
 //! accounting.
@@ -552,6 +554,64 @@ pub async fn doctor_report(cfg: &crate::config::Config) -> (Vec<String>, usize) 
 /// Shared by the state constructor.
 pub fn new_backend() -> Arc<QuotaBackend> {
     Arc::new(QuotaBackend::default())
+}
+
+/// Most `share_trash_usage` walks the server runs at once (each reads up
+/// to a million names as root).
+const TRASH_MEASURES_AT_ONCE: usize = 2;
+
+/// Measures the recycle bin folders at the top of shared folders through
+/// the helper, for RAST's check of their size limits (the service cannot
+/// read the members' own `.Trash-<uid>`).
+pub struct HelperTrashMeasure {
+    native: NativeClient,
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl HelperTrashMeasure {
+    pub fn new(native: NativeClient) -> Self {
+        Self {
+            native,
+            permits: Arc::new(tokio::sync::Semaphore::new(TRASH_MEASURES_AT_ONCE)),
+        }
+    }
+}
+
+impl crate::storage::share_quota::TrashMeasure for HelperTrashMeasure {
+    fn trash_bytes(
+        &self,
+        share_id: &str,
+        container: &str,
+    ) -> futures::future::BoxFuture<'static, Option<u64>> {
+        let native = self.native.clone();
+        let permits = self.permits.clone();
+        let params = json!({"shareId": share_id, "container": container});
+        let share = share_id.to_string();
+        Box::pin(async move {
+            let _permit = permits.acquire_owned().await.ok()?;
+            match native.call_json("share_trash_usage", params).await {
+                Ok(reply) => {
+                    let usage = &reply["usage"];
+                    if usage["truncated"] == true {
+                        tracing::warn!(
+                            share = %share,
+                            "the recycle bins of a shared folder hold too many entries to \
+                             measure them all; its size limit counts what was measured"
+                        );
+                    }
+                    usage["bytes"].as_u64()
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        share = %share,
+                        error = %error,
+                        "cannot measure the recycle bins of a shared folder"
+                    );
+                    None
+                }
+            }
+        })
+    }
 }
 
 #[cfg(test)]

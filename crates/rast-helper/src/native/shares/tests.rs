@@ -1693,3 +1693,77 @@ async fn operations_on_one_shared_folder_never_overlap() {
     // The lock file is no journal.
     assert!(active_journal(&fx.options, SHARE).unwrap().is_none());
 }
+
+#[test]
+fn the_trash_usage_counts_the_recycle_bins_at_the_top_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path().join("team");
+    for folder in [
+        ".Trash-200005/files/deep/er",
+        ".Trash-200005/info",
+        ".Trash/200006/files",
+        "docs/.Trash-200005/files",
+    ] {
+        std::fs::create_dir_all(top.join(folder)).unwrap();
+    }
+    std::fs::write(top.join(".Trash-200005/files/a"), [0u8; 10]).unwrap();
+    std::fs::write(top.join(".Trash-200005/files/deep/er/b"), [0u8; 20]).unwrap();
+    std::fs::write(top.join(".Trash-200005/info/a.trashinfo"), [0u8; 3]).unwrap();
+    std::fs::write(top.join(".Trash/200006/files/c"), [0u8; 40]).unwrap();
+    // Not recycle bins at the top: the service measures these itself.
+    std::fs::write(top.join("docs/.Trash-200005/files/d"), [0u8; 80]).unwrap();
+    std::fs::write(top.join(".Trash-200007"), [0u8; 160]).unwrap();
+    std::fs::write(top.join("plain"), [0u8; 320]).unwrap();
+    // Links are never followed, at the top or below.
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("big"), [0u8; 640]).unwrap();
+    symlink(&outside, top.join(".Trash-200008")).unwrap();
+    symlink(&outside, top.join(".Trash-200005/files/link")).unwrap();
+    symlink(outside.join("big"), top.join(".Trash-200005/files/big")).unwrap();
+    let fd = open_dir(&top).unwrap();
+    let usage = trash_usage(&fd, MAX_TREE_ENTRIES).unwrap();
+    assert_eq!(
+        usage,
+        TrashUsage {
+            bytes: 10 + 20 + 3 + 40,
+            files: 4,
+            truncated: false,
+        }
+    );
+    // A bounded walk says that it stopped.
+    let partial = trash_usage(&fd, 6).unwrap();
+    assert!(partial.truncated);
+    assert!(partial.bytes < usage.bytes);
+}
+
+#[tokio::test]
+async fn the_trash_usage_needs_a_shared_folder_and_a_real_container() {
+    let fx = fixture();
+    let op = |container: &str| ShareDirOp {
+        share_id: SHARE.into(),
+        container: container.into(),
+    };
+    std::fs::create_dir_all(fx.shared().join("team/.Trash-200005/files")).unwrap();
+    std::fs::write(fx.shared().join("team/.Trash-200005/files/a"), b"abc").unwrap();
+    // No groups for that id: not a RAST shared folder.
+    let error = share_trash_usage(&fx.options, op("team"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "not_found", "{error:?}");
+    fx.ensure_groups().await;
+    let reply = share_trash_usage(&fx.options, op("team")).await.unwrap();
+    assert_eq!(reply["usage"]["bytes"], 3, "{reply}");
+    assert_eq!(reply["usage"]["truncated"], false, "{reply}");
+    for bad in ["../team", "team/.Trash-200005", "", "."] {
+        assert!(
+            share_trash_usage(&fx.options, op(bad)).await.is_err(),
+            "{bad}"
+        );
+    }
+    symlink(fx.shared().join("team"), fx.shared().join("linked")).unwrap();
+    let error = share_trash_usage(&fx.options, op("linked"))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, "forbidden", "{error:?}");
+}

@@ -59,6 +59,9 @@ struct HelperLog {
     /// Kernel quota as the fake helper reports it (`None`: the quota
     /// operations fail, like an older helper).
     kernel: Mutex<Option<Kernel>>,
+    /// The bytes `share_trash_usage` reports per share id (none: the
+    /// operation fails, like an older helper).
+    share_trash: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 /// What the fake kernel keeps: user quota state, used bytes and limits per
@@ -264,6 +267,17 @@ impl TestServer {
                         }})
                     } else if let Some(data) = log.quota(&request) {
                         json!({"id": request["id"], "ok": true, "data": data})
+                    } else if let Some(bytes) = (request["op"] == "share_trash_usage")
+                        .then(|| {
+                            let share = request["shareId"].as_str().unwrap_or_default();
+                            log.share_trash.lock().unwrap().get(share).copied()
+                        })
+                        .flatten()
+                    {
+                        json!({"id": request["id"], "ok": true, "data": {
+                            "shareId": request["shareId"], "container": request["container"],
+                            "usage": {"bytes": bytes, "files": 1, "truncated": false},
+                        }})
                     } else if request["op"] == "share_members_set" {
                         json!({"id": request["id"], "ok": true, "data": log.members_set(&request)})
                     } else if ["share_group_ensure", "share_dir_prepare"]
@@ -743,6 +757,46 @@ async fn uploads_to_a_shared_folder_hold_their_bytes_while_they_run() {
     assert!(status.is_success(), "{status}");
     let (status, second) = init("b.bin", 6).await;
     assert_eq!(status, StatusCode::OK, "{second}");
+}
+
+#[tokio::test]
+async fn the_members_recycle_bins_count_towards_a_shared_folders_limit() {
+    let (server, alice, _bob) = setup().await;
+    let admin = server.user("root-admin", Role::Admin, 0).await;
+    let (status, share) = server
+        .post(
+            "/api/shares",
+            &admin,
+            json!({"name": "Team", "quotaBytes": 10,
+                   "members": [{"userId": alice.id, "perms": "write"}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{share}");
+    let share_id = share["id"].as_str().unwrap().to_string();
+    // The helper measures 8 bytes in the members' recycle bins.
+    server
+        .helper
+        .share_trash
+        .lock()
+        .unwrap()
+        .insert(share_id.clone(), 8);
+    rast::storage::share_quota::forget(&share_id);
+    let (status, _) = server
+        .upload(&alice, "dir=/shared/Team&name=a.txt", b"012")
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    // Emptied: the next measurement lets the upload through.
+    server
+        .helper
+        .share_trash
+        .lock()
+        .unwrap()
+        .insert(share_id.clone(), 0);
+    rast::storage::share_quota::forget(&share_id);
+    let (status, entry) = server
+        .upload(&alice, "dir=/shared/Team&name=a.txt", b"012")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{entry}");
 }
 
 #[tokio::test]
