@@ -670,3 +670,299 @@ fn doctor_lists_recycle_bin_folders_made_by_someone_else() {
     assert!(lines[1].contains("not a folder"), "{lines:?}");
     assert!(lines.iter().all(|line| line.contains("shared folder Team")));
 }
+
+// ---------------------------------------------------------------------------
+// The native pilot (ADR 0007)
+// ---------------------------------------------------------------------------
+
+/// `t-share`: in the pilot (name and container).
+const PILOT: &str = "55555555-6666-4777-8888-999999999999";
+/// Renamed out of the pilot: name `Moved`, container `t-moved`.
+const RENAMED_OUT: &str = "66666666-7777-4888-8999-aaaaaaaaaaaa";
+/// Renamed into the pilot: name `t-real`, container `real`.
+const RENAMED_IN: &str = "77777777-8888-4999-8aaa-bbbbbbbbbbbb";
+/// The accounts in the pilot (see [`seed_pilot`]).
+const PILOT_USERS: [i64; 3] = [8, 9, 10];
+
+fn pilot_config(dir: &std::path::Path, native: bool) -> Config {
+    Config::from_parts(
+        None,
+        FileConfig {
+            data_dir: Some(dir.join("data")),
+            storage_dir: Some(dir.join("storage")),
+            monitor_interval_secs: Some(300),
+            native_enabled: Some(native),
+            native_helper_socket: Some(dir.join("h.sock")),
+            native_pilot_prefixes: Some(vec!["t-".into()]),
+            ..Default::default()
+        },
+        |_| None,
+    )
+    .expect("test config")
+}
+
+/// [`seed`], plus the pilot accounts 8 `t-alice`, 9 `t-bob` and 10
+/// `t-admin` (an administrator), and three shared folders: `t-share` (bob,
+/// outside the pilot, was given write too), and two renamed across the
+/// boundary.
+async fn seed_pilot(pool: &SqlitePool) {
+    seed(pool).await;
+    for (id, name, role) in [
+        (8, "t-alice", "user"),
+        (9, "t-bob", "user"),
+        (10, "t-admin", "admin"),
+    ] {
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, active, created_at, updated_at)
+             VALUES (?, ?, 'x', ?, 1, 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(role)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+             VALUES (?, ?, ?, ?, '/nonexistent', 1)",
+        )
+        .bind(id)
+        .bind(format!("rast-u{id}"))
+        .bind(200_000 + id)
+        .bind(200_000 + id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for (id, name, container) in [
+        (PILOT, "t-share", "t-share"),
+        (RENAMED_OUT, "Moved", "t-moved"),
+        (RENAMED_IN, "t-real", "real"),
+    ] {
+        sqlx::query(
+            "INSERT INTO shares (id, name, container_path, created_at, updated_at)
+             VALUES (?, ?, ?, 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(container)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    exec(
+        pool,
+        &format!(
+            "INSERT INTO share_members (share_id, user_id, perms) VALUES
+             ('{PILOT}', 8, 'write'), ('{PILOT}', 9, 'read'), ('{PILOT}', 2, 'write'),
+             ('{RENAMED_OUT}', 8, 'write'), ('{RENAMED_IN}', 8, 'write')"
+        ),
+    )
+    .await;
+}
+
+/// A helper that answers through `answer` and records every request.
+fn full_recording_helper(
+    socket: &std::path::Path,
+    answer: fn(&Value) -> Value,
+) -> Arc<Mutex<Vec<Value>>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let log = calls.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let log = log.clone();
+            tokio::spawn(async move {
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(read).read_line(&mut line).await.is_err() {
+                    return;
+                }
+                let request: Value = serde_json::from_str(&line).unwrap();
+                log.lock().unwrap().push(request.clone());
+                let reply = json!({"id": request["id"], "ok": true, "data": answer(&request)});
+                let mut bytes = serde_json::to_vec(&reply).unwrap();
+                bytes.push(b'\n');
+                let _ = write.write_all(&bytes).await;
+            });
+        }
+    });
+    calls
+}
+
+/// Every share and account a helper request names must be in the pilot.
+fn assert_only_pilot(calls: &[Value]) {
+    for request in calls {
+        if let Some(share) = request["shareId"].as_str() {
+            assert_eq!(share, PILOT, "{request}");
+        }
+        let mut users: Vec<i64> = Vec::new();
+        users.extend(request["userId"].as_i64());
+        for key in ["userIds", "write", "read"] {
+            users.extend(
+                request[key]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_i64),
+            );
+        }
+        for user in users {
+            assert!(PILOT_USERS.contains(&user), "{request}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_plan_covers_only_the_native_pilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(pilot_config(dir.path(), false))
+        .await
+        .unwrap();
+    seed_pilot(&state.db).await;
+    let piloted = plan_for(&state.db, &state.config.native_pilot)
+        .await
+        .unwrap();
+    assert_eq!(
+        piloted
+            .shares
+            .iter()
+            .map(|share| share.id.as_str())
+            .collect::<Vec<_>>(),
+        [PILOT],
+        "renamed across the boundary in either direction: outside"
+    );
+    assert_eq!(
+        piloted
+            .accounts
+            .iter()
+            .map(|user| user.id)
+            .collect::<Vec<_>>(),
+        PILOT_USERS
+    );
+    assert_eq!(piloted.identities, PILOT_USERS);
+    // bob (outside the pilot) and the administrators outside it are in no
+    // group; the pilot administrator is in the rw group (D6).
+    assert_eq!(
+        piloted.members[PILOT],
+        Membership {
+            write: vec![8, 10],
+            read: vec![9],
+        }
+    );
+    assert_eq!(names_of(&piloted, 8), ["t-share"]);
+    assert!(!piloted.roots.contains_key(&1));
+    assert!(!piloted.roots.contains_key(&2));
+    // Without the pilot: everything, as before.
+    let all = plan(&state.db).await.unwrap();
+    assert_eq!(all.shares.len(), 5);
+    assert_eq!(all.identities, [1, 2, 3, 4, 5, 7, 8, 9, 10]);
+}
+
+#[tokio::test]
+async fn the_syncer_never_names_a_share_or_an_account_outside_the_pilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AppState::new(pilot_config(dir.path(), false))
+        .await
+        .unwrap();
+    state.session_restarts = SessionRestarts::with_warning(Duration::from_secs(600));
+    seed_pilot(&state.db).await;
+    let socket = dir.path().join("fake.sock");
+    let calls = full_recording_helper(&socket, |request| match request["op"].as_str() {
+        // bob (2) was in the rw group before the pilot was set: the helper
+        // takes him out and says so.
+        Some("share_members_set") => json!({
+            "shareId": request["shareId"],
+            "write": {"added": [8, 10], "removed": [2]},
+            "read": {"added": [9], "removed": []},
+        }),
+        Some("share_session_groups") => json!({"users": [], "groups": {}}),
+        _ => json!({"applied": true}),
+    });
+    let native = native_for(dir.path(), socket);
+    let mut known = Known::default();
+    assert!(sync_once(&state, &native, &mut known).await.unwrap());
+    let calls = calls.lock().unwrap().clone();
+    assert_only_pilot(&calls);
+    let ops: Vec<&str> = calls.iter().filter_map(|c| c["op"].as_str()).collect();
+    assert!(ops.contains(&"share_group_ensure"), "{ops:?}");
+    assert!(ops.contains(&"share_members_set"), "{ops:?}");
+    let asked: Vec<&Value> = calls
+        .iter()
+        .filter(|c| c["op"] == "share_session_groups")
+        .map(|c| &c["userIds"])
+        .collect();
+    assert_eq!(asked, [&json!(PILOT_USERS)]);
+    // The pilot accounts are offered a restart; bob's sessions are left
+    // alone.
+    for user in PILOT_USERS {
+        assert!(state.session_restarts.pending(user).is_some(), "{user}");
+    }
+    assert!(state.session_restarts.pending(2).is_none());
+}
+
+#[tokio::test]
+async fn the_repair_pass_skips_shared_folders_outside_the_pilot() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::new(pilot_config(dir.path(), false))
+        .await
+        .unwrap();
+    seed_pilot(&state.db).await;
+    let socket = dir.path().join("fake.sock");
+    let calls = full_recording_helper(
+        &socket,
+        |_| json!({"repaired": true, "report": {"changes": {"count": 0, "paths": []}}}),
+    );
+    let native = native_for(dir.path(), socket);
+    let summary = repair_all(&state, &native).await.unwrap();
+    assert_eq!(summary.repaired, 1);
+    let calls = calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_only_pilot(&calls);
+}
+
+#[tokio::test]
+async fn the_create_and_delete_hooks_act_only_on_pilot_shared_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    // The hooks use the configured helper: it must be listening first.
+    let calls = full_recording_helper(&dir.path().join("h.sock"), |request| {
+        match request["op"].as_str() {
+            Some("share_session_groups") => json!({"users": [], "groups": {}}),
+            _ => json!({"applied": true}),
+        }
+    });
+    let state = AppState::new(pilot_config(dir.path(), true)).await.unwrap();
+    for (id, name, container) in [
+        (TEAM, "Team", "team"),
+        (RENAMED_OUT, "Moved", "t-moved"),
+        (RENAMED_IN, "t-real", "real"),
+    ] {
+        share_created(&state, id, name, container).await;
+        share_deleted(&state, id, name, container).await;
+    }
+    let named = |share: &str| -> Vec<String> {
+        calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c["shareId"] == share)
+            .map(|c| c["op"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    for share in [TEAM, RENAMED_OUT, RENAMED_IN] {
+        assert!(named(share).is_empty(), "{share}: {:?}", named(share));
+    }
+    share_created(&state, PILOT, "t-share", "t-share").await;
+    share_deleted(&state, PILOT, "t-share", "t-share").await;
+    assert_eq!(
+        named(PILOT),
+        [
+            "share_group_ensure",
+            "share_dir_prepare",
+            "share_dir_release",
+            "share_group_remove"
+        ]
+    );
+    assert_only_pilot(&calls.lock().unwrap());
+}

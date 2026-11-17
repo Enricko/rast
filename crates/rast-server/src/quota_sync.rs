@@ -237,8 +237,16 @@ pub fn parse_share_rows(value: &Value) -> AppResult<Vec<ShareRow>> {
 
 /// Set the group limits of the shared folders that differ from D3/D4
 /// (`share_quota_set`). Returns how many were set.
+///
+/// With the native pilot (ADR 0007) only shared folders in it are asked
+/// for or set.
 async fn sync_shares(state: &AppState, native: &NativeClient, total: u64) -> AppResult<(u64, u64)> {
-    let records = crate::storage::shares::list_records(&state.db).await?;
+    let pilot = &state.config.native_pilot;
+    let records: Vec<_> = crate::storage::shares::list_records(&state.db)
+        .await?
+        .into_iter()
+        .filter(|record| pilot.allows_share(&record.name, &record.container_path))
+        .collect();
     let (mut set, mut failed) = (0, 0);
     for chunk in records.chunks(crate::native::quota::MAX_REPORT_SHARES) {
         let ids: Vec<&str> = chunk.iter().map(|record| record.id.as_str()).collect();
@@ -294,7 +302,8 @@ struct Account {
     quota_bytes: i64,
 }
 
-/// The one-HOME accounts (active or not: their files still count).
+/// The one-HOME accounts (active or not: their files still count). An
+/// account outside the native pilot is never one (`HomeFs::is_one_home`).
 async fn one_home_accounts(state: &AppState) -> AppResult<Vec<Account>> {
     use sqlx::Row as _;
     let rows = sqlx::query(
@@ -563,17 +572,49 @@ const TRASH_MEASURES_AT_ONCE: usize = 2;
 /// Measures the recycle bin folders at the top of shared folders through
 /// the helper, for RAST's check of their size limits (the service cannot
 /// read the members' own `.Trash-<uid>`).
+///
+/// With the native pilot (ADR 0007) a shared folder outside it is never
+/// measured: its members are never in one-HOME mode, so it holds no
+/// `.Trash-<uid>` of theirs, and the helper is never asked about it.
 pub struct HelperTrashMeasure {
     native: NativeClient,
     permits: Arc<tokio::sync::Semaphore>,
+    pilot: crate::config::NativePilot,
+    db: sqlx::SqlitePool,
 }
 
 impl HelperTrashMeasure {
-    pub fn new(native: NativeClient) -> Self {
+    pub fn new(
+        native: NativeClient,
+        pilot: crate::config::NativePilot,
+        db: sqlx::SqlitePool,
+    ) -> Self {
         Self {
             native,
             permits: Arc::new(tokio::sync::Semaphore::new(TRASH_MEASURES_AT_ONCE)),
+            pilot,
+            db,
         }
+    }
+
+    /// Whether the shared folder is in the native pilot (always, without
+    /// one). A share that is gone, or a database error, counts as outside.
+    async fn in_pilot(
+        pilot: &crate::config::NativePilot,
+        db: &sqlx::SqlitePool,
+        share_id: &str,
+        container: &str,
+    ) -> bool {
+        if !pilot.is_active() {
+            return true;
+        }
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM shares WHERE id = ?")
+            .bind(share_id)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+        name.is_some_and(|name| pilot.allows_share(&name, container))
     }
 }
 
@@ -585,9 +626,13 @@ impl crate::storage::share_quota::TrashMeasure for HelperTrashMeasure {
     ) -> futures::future::BoxFuture<'static, Option<u64>> {
         let native = self.native.clone();
         let permits = self.permits.clone();
+        let (pilot, db) = (self.pilot.clone(), self.db.clone());
         let params = json!({"shareId": share_id, "container": container});
-        let share = share_id.to_string();
+        let (share, container) = (share_id.to_string(), container.to_string());
         Box::pin(async move {
+            if !Self::in_pilot(&pilot, &db, &share, &container).await {
+                return None;
+            }
             let _permit = permits.acquire_owned().await.ok()?;
             match native.call_json("share_trash_usage", params).await {
                 Ok(reply) => {
@@ -681,6 +726,169 @@ mod tests {
         ] {
             assert!(parse_rows(&bad).is_err(), "{bad}");
         }
+    }
+
+    #[tokio::test]
+    async fn kernel_limits_cover_only_the_native_pilot() {
+        use std::sync::Mutex;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        const TEAM: &str = "0123abcd-4567-4ef0-8123-456789abcdef";
+        const PILOT: &str = "55555555-6666-4777-8888-999999999999";
+        let dir = tempfile::tempdir().unwrap();
+        // The background syncers of the state use a helper that is not
+        // there; this test drives the pass itself with `native`.
+        let cfg = crate::config::Config::from_parts(
+            None,
+            crate::config::FileConfig {
+                data_dir: Some(dir.path().join("data")),
+                storage_dir: Some(dir.path().join("storage")),
+                native_enabled: Some(true),
+                native_helper_socket: Some(dir.path().join("absent.sock")),
+                native_pilot_prefixes: Some(vec!["t-".into()]),
+                ..Default::default()
+            },
+            |_| None,
+        )
+        .unwrap();
+        let state = AppState::new(cfg).await.unwrap();
+        // A one-HOME account is one whose HOME belongs to its identity's
+        // uid: this process's. uids are unique, so the identity is alice's
+        // (outside the pilot) first, then t-alice's.
+        let uid = {
+            use std::os::unix::fs::MetadataExt;
+            i64::from(std::fs::metadata(dir.path()).unwrap().uid())
+        };
+        for (id, name) in [(1, "alice"), (2, "t-alice")] {
+            std::fs::create_dir_all(state.config.home_for(name)).unwrap();
+            sqlx::query(
+                "INSERT INTO users (id, username, password_hash, role, quota_bytes, created_at,
+                                    updated_at)
+                 VALUES (?, ?, 'x', 'user', 100, 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+             VALUES (1, 'rast-u1', ?, ?, '/nonexistent', 1)",
+        )
+        .bind(uid)
+        .bind(uid)
+        .execute(&state.db)
+        .await
+        .unwrap();
+        for (id, name) in [(TEAM, "team"), (PILOT, "t-share")] {
+            sqlx::query(
+                "INSERT INTO shares (id, name, container_path, quota_bytes, created_at, updated_at)
+                 VALUES (?, ?, ?, 1048576, 1, 1)",
+            )
+            .bind(id)
+            .bind(name)
+            .bind(name)
+            .execute(&state.db)
+            .await
+            .unwrap();
+        }
+        let socket = dir.path().join("h.sock");
+        let calls: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let log = calls.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let log = log.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut line = String::new();
+                    if BufReader::new(read).read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    log.lock().unwrap().push(request.clone());
+                    let root = json!({"device": "8:2", "fsType": "ext4", "totalBytes": 1u64 << 40,
+                                      "user": "enforced", "group": "enforced", "project": "off"});
+                    let ids = |key: &str| request[key].as_array().cloned().unwrap_or_default();
+                    let data = match request["op"].as_str() {
+                        Some("quota_status") => json!({"homes": root, "shared": root}),
+                        Some("quota_report") => json!({
+                            "users": ids("userIds").iter().map(|id| json!([id, 7, 0, 0, 0]))
+                                .collect::<Vec<_>>(),
+                            "shares": ids("shareIds").iter().map(|id| json!([id, 0, 0, 0, 0]))
+                                .collect::<Vec<_>>(),
+                        }),
+                        _ => json!({}),
+                    };
+                    let reply = json!({"id": request["id"], "ok": true, "data": data});
+                    let mut bytes = serde_json::to_vec(&reply).unwrap();
+                    bytes.push(b'\n');
+                    let _ = write.write_all(&bytes).await;
+                });
+            }
+        });
+        let native = NativeClient::new(socket);
+        let summary = sync_once(&state, &native).await.unwrap();
+        assert_eq!(
+            summary.accounts, 0,
+            "alice is outside the pilot: {summary:?}"
+        );
+        assert_eq!(summary.limits_set, 0);
+        assert_eq!(summary.share_limits_set, 1);
+        sqlx::query("UPDATE linux_identities SET user_id = 2, username = 'rast-u2'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        let summary = sync_once(&state, &native).await.unwrap();
+        assert_eq!(summary.accounts, 1, "{summary:?}");
+        assert_eq!(summary.limits_set, 1);
+        let sent = calls.lock().unwrap().clone();
+        for request in &sent {
+            assert!(
+                request["userId"].is_null() || request["userId"] == 2,
+                "{request}"
+            );
+            assert!(
+                request["shareId"].is_null() || request["shareId"] == PILOT,
+                "{request}"
+            );
+            for id in request["userIds"].as_array().into_iter().flatten() {
+                assert_eq!(id, 2, "{request}");
+            }
+            for id in request["shareIds"].as_array().into_iter().flatten() {
+                assert_eq!(id, PILOT, "{request}");
+            }
+        }
+        let ops: Vec<&str> = sent.iter().filter_map(|c| c["op"].as_str()).collect();
+        assert!(
+            ops.contains(&"quota_set") && ops.contains(&"share_quota_set"),
+            "{ops:?}"
+        );
+        // The kernel's usage is the pilot account's only.
+        assert_eq!(quota::info(&state.db, 2).await.unwrap().used_bytes, 7);
+        assert_eq!(quota::info(&state.db, 1).await.unwrap().used_bytes, 0);
+
+        // The recycle bins of a shared folder outside the pilot are never
+        // measured.
+        use crate::storage::share_quota::TrashMeasure;
+        let measure =
+            HelperTrashMeasure::new(native, state.config.native_pilot.clone(), state.db.clone());
+        let measured = || {
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|c| c["op"] == "share_trash_usage")
+                .map(|c| c["shareId"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        calls.lock().unwrap().clear();
+        assert_eq!(measure.trash_bytes(TEAM, "team").await, None);
+        // The container must be in the pilot too.
+        assert_eq!(measure.trash_bytes(PILOT, "moved").await, None);
+        assert!(measured().is_empty());
+        measure.trash_bytes(PILOT, "t-share").await;
+        assert_eq!(measured(), [PILOT]);
     }
 
     #[test]

@@ -92,6 +92,8 @@ impl AppState {
                 .share_trash
                 .set(Arc::new(crate::quota_sync::HelperTrashMeasure::new(
                     crate::native::client::NativeClient::from_config(&config),
+                    config.native_pilot.clone(),
+                    db.clone(),
                 )));
         }
         let docker = crate::docker::DockerManager::new(&config);
@@ -158,12 +160,15 @@ impl AppState {
             config.files_root_enabled,
             crate::native::client::NativeClient::from_config(&config),
         ));
-        let homefs = Arc::new(crate::homefs::client::HomeFs::new(
-            config.native_enabled,
-            crate::native::client::NativeClient::from_config(&config),
-            config.homes_dir(),
-            events.clone(),
-        ));
+        let homefs = Arc::new(
+            crate::homefs::client::HomeFs::new(
+                config.native_enabled,
+                crate::native::client::NativeClient::from_config(&config),
+                config.homes_dir(),
+                events.clone(),
+            )
+            .with_pilot(config.native_pilot.clone()),
+        );
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),

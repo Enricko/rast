@@ -38,6 +38,13 @@
 //! a session that still holds a group its user lost (after a server
 //! restart, or one that survived its restart) is warned and restarted
 //! again.
+//!
+//! With the native pilot (`native_pilot_prefixes`, ADR 0007) all of this
+//! covers only the shared folders and accounts in the pilot: no helper call
+//! of the syncer, the repair pass or the create and delete hooks names a
+//! shared folder or an account outside it. A shared folder renamed across
+//! the boundary is outside the pilot (its name and container must both
+//! match): nothing is done to its container or its groups any more.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -49,6 +56,7 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 
 use crate::auth::{AuthUser, Role};
+use crate::config::NativePilot;
 use crate::db::now_ms;
 use crate::error::AppResult;
 use crate::homefs::{ShareRoot, ShareRoots};
@@ -131,10 +139,21 @@ impl Plan {
     }
 }
 
-/// Compute the groups of every shared folder from Effective Access.
+/// Compute the groups of every shared folder from Effective Access, for
+/// every account (without the native pilot: the migration commands list
+/// every shared folder with it).
 pub async fn plan(pool: &SqlitePool) -> AppResult<Plan> {
+    plan_for(pool, &NativePilot::off()).await
+}
+
+/// [`plan`] for the shared folders and accounts in the native pilot only:
+/// the others are in no share, membership, root or identity list.
+pub async fn plan_for(pool: &SqlitePool, pilot: &NativePilot) -> AppResult<Plan> {
     let mut plan = Plan::default();
     for record in shares::list_records(pool).await? {
+        if !pilot.allows_share(&record.name, &record.container_path) {
+            continue;
+        }
         match shares::validated_container(&record.container_path) {
             Ok(container) => plan.shares.push(ShareInfo {
                 id: record.id,
@@ -156,9 +175,13 @@ pub async fn plan(pool: &SqlitePool) -> AppResult<Plan> {
     .fetch_all(pool)
     .await?;
     for row in rows {
+        let username: String = row.get("username");
+        if !pilot.allows_user(&username) {
+            continue;
+        }
         plan.accounts.push(AuthUser {
             id: row.get("id"),
-            username: row.get("username"),
+            username,
             display_name: row.get("display_name"),
             role: row.get::<Role, _>("role"),
             session_id: String::new(),
@@ -166,9 +189,23 @@ pub async fn plan(pool: &SqlitePool) -> AppResult<Plan> {
             must_change_password: false,
         });
     }
-    plan.identities = sqlx::query_scalar("SELECT user_id FROM linux_identities ORDER BY user_id")
+    plan.identities = if pilot.is_active() {
+        // An identity without an account is outside the pilot.
+        let rows: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT li.user_id, u.username FROM linux_identities li
+             JOIN users u ON u.id = li.user_id ORDER BY li.user_id",
+        )
         .fetch_all(pool)
         .await?;
+        rows.into_iter()
+            .filter(|(_, username)| pilot.allows_user(username))
+            .map(|(id, _)| id)
+            .collect()
+    } else {
+        sqlx::query_scalar("SELECT user_id FROM linux_identities ORDER BY user_id")
+            .fetch_all(pool)
+            .await?
+    };
     for share in &plan.shares {
         let mut membership = Membership::default();
         for user in &plan.accounts {
@@ -247,6 +284,24 @@ impl Changes {
 
     pub fn changed(&self) -> HashSet<i64> {
         self.granted.union(&self.revoked).copied().collect()
+    }
+
+    /// Keep only the users in `allowed`; returns the others, sorted. (A
+    /// helper reply can name an account outside the native pilot that was
+    /// in a group before the pilot was set: the helper removed it from the
+    /// group, but nothing is done to its sessions.)
+    pub fn retain_users(&mut self, allowed: &HashSet<i64>) -> Vec<i64> {
+        let mut dropped: Vec<i64> = self
+            .changed()
+            .into_iter()
+            .filter(|user| !allowed.contains(user))
+            .collect();
+        dropped.sort_unstable();
+        self.granted.retain(|user| allowed.contains(user));
+        self.revoked.retain(|user| allowed.contains(user));
+        self.lost.retain(|user, _| allowed.contains(user));
+        self.gained.retain(|user, _| allowed.contains(user));
+        dropped
     }
 }
 
@@ -342,10 +397,15 @@ fn repair_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool
     last.is_none_or(|last| now.saturating_duration_since(last) >= REPAIR_INTERVAL)
 }
 
-/// One repair pass over every shared folder, one at a time.
+/// One repair pass over every shared folder (in the native pilot), one at
+/// a time.
 pub async fn repair_all(state: &AppState, native: &NativeClient) -> AppResult<RepairSummary> {
     let mut summary = RepairSummary::default();
+    let pilot = &state.config.native_pilot;
     for record in shares::list_records(&state.db).await? {
+        if !pilot.allows_share(&record.name, &record.container_path) {
+            continue;
+        }
         let Ok(container) = shares::validated_container(&record.container_path) else {
             continue;
         };
@@ -494,7 +554,8 @@ async fn sync_share(
 /// One pass. `Ok(false)` when the groups of some shared folder could not
 /// be set (everything else was done); the loop then tries again soon.
 async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -> AppResult<bool> {
-    let plan = plan(&state.db).await?;
+    let pilot = &state.config.native_pilot;
+    let plan = plan_for(&state.db, pilot).await?;
     let mut changes = Changes::default();
     // A shared folder whose groups the helper refuses (a group name taken
     // outside the range, an account with an unexpected uid) must not hold
@@ -536,6 +597,17 @@ async fn sync_once(state: &AppState, native: &NativeClient, known: &mut Known) -
     known
         .conflicts
         .retain(|id, _| current.contains(id.as_str()));
+    if pilot.is_active() {
+        let allowed: HashSet<i64> = plan.identities.iter().copied().collect();
+        let outside = changes.retain_users(&allowed);
+        if !outside.is_empty() {
+            tracing::warn!(
+                users = ?outside,
+                "shared folder groups: accounts outside the native pilot left groups of shared \
+                 folders in it; their running sessions are left alone"
+            );
+        }
+    }
     // Changes the helper already made are acted on even when it went away
     // half way through.
     apply_changes(state, &changes, &plan).await;
@@ -1026,9 +1098,11 @@ async fn restart(state: &AppState, user_id: i64, reason: &str) {
 }
 
 /// Before a shared folder is used: its groups, and its container with the
-/// group layout (a new, empty container needs no recursive pass).
-pub async fn share_created(state: &AppState, share_id: &str, container_path: &str) {
-    if !state.config.native_enabled {
+/// group layout (a new, empty container needs no recursive pass). Nothing
+/// for a shared folder outside the native pilot.
+pub async fn share_created(state: &AppState, share_id: &str, name: &str, container_path: &str) {
+    if !state.config.native_enabled || !state.config.native_pilot.allows_share(name, container_path)
+    {
         return;
     }
     let Ok(container) = shares::validated_container(container_path) else {
@@ -1053,9 +1127,12 @@ pub async fn share_created(state: &AppState, share_id: &str, container_path: &st
 }
 
 /// After a shared folder's definition is removed (its data stays): close its
-/// container to the old groups, then remove the groups.
-pub async fn share_deleted(state: &AppState, share_id: &str, container_path: &str) {
-    if !state.config.native_enabled {
+/// container to the old groups, then remove the groups. Nothing for a
+/// shared folder outside the native pilot (its container is left as it
+/// is, a legacy one included).
+pub async fn share_deleted(state: &AppState, share_id: &str, name: &str, container_path: &str) {
+    if !state.config.native_enabled || !state.config.native_pilot.allows_share(name, container_path)
+    {
         return;
     }
     let native = NativeClient::from_config(&state.config);

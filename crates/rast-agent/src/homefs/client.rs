@@ -115,6 +115,8 @@ type AgentSlot = Arc<Mutex<Option<(PathBuf, String)>>>;
 pub struct HomeFs {
     /// `native_enabled` on Linux: without the helper every account is legacy.
     enabled: bool,
+    /// Accounts outside the native pilot are always legacy (ADR 0007).
+    pilot: crate::config::NativePilot,
     native: NativeClient,
     homes_root: PathBuf,
     events: EventBus,
@@ -128,6 +130,7 @@ impl HomeFs {
     pub fn new(enabled: bool, native: NativeClient, homes_root: PathBuf, events: EventBus) -> Self {
         Self {
             enabled: enabled && cfg!(target_os = "linux"),
+            pilot: crate::config::NativePilot::off(),
             native,
             homes_root,
             events,
@@ -136,6 +139,12 @@ impl HomeFs {
             uploads: std::sync::Mutex::new(Uploads::default()),
             usage: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Only accounts in the native pilot can be in one-HOME mode.
+    pub fn with_pilot(mut self, pilot: crate::config::NativePilot) -> Self {
+        self.pilot = pilot;
+        self
     }
 
     /// Whether the HOME of `user_id` is due a usage scan: no scan started
@@ -176,9 +185,11 @@ impl HomeFs {
 
     /// Whether the account is in one-HOME mode: its HOME directory belongs
     /// to the uid of its Linux identity. A missing identity, a missing HOME
-    /// or a HOME owned by anyone else keeps the account in legacy mode.
+    /// or a HOME owned by anyone else keeps the account in legacy mode, and
+    /// so does an account outside the native pilot (ADR 0007), whatever its
+    /// HOME looks like.
     pub async fn is_one_home(&self, pool: &SqlitePool, user: &AuthUser) -> AppResult<bool> {
-        if !self.enabled {
+        if !self.enabled || !self.pilot.allows_user(&user.username) {
             return Ok(false);
         }
         let uid: Option<i64> =
@@ -617,6 +628,69 @@ mod tests {
             PathBuf::from("/nonexistent/homes"),
             EventBus::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn accounts_outside_the_native_pilot_are_never_one_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::connect(&dir.path().join("rast.db"), 2)
+            .await
+            .unwrap();
+        // Two accounts whose HOMEs belong to their identity's uid (this
+        // process's uid stands in for it).
+        // SAFETY: geteuid has no preconditions.
+        let uid = i64::from(unsafe { libc::geteuid() });
+        let homes = dir.path().join("homes");
+        // One identity (uids are unique), and a HOME under either name: the
+        // pilot looks at the account's username.
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+             VALUES (1, 'alice', 'x', 'user', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO linux_identities (user_id, username, uid, gid, home, created_at)
+             VALUES (1, 'rast-u1', ?, ?, '/nonexistent', 1)",
+        )
+        .bind(uid)
+        .bind(uid)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for name in ["alice", "t-alice"] {
+            std::fs::create_dir_all(homes.join(name)).unwrap();
+        }
+        let user = |id: i64, name: &str| AuthUser {
+            id,
+            username: name.to_string(),
+            display_name: name.to_string(),
+            role: crate::auth::Role::Admin,
+            session_id: String::new(),
+            quota_bytes: 0,
+            must_change_password: false,
+        };
+        let fs = |pilot| {
+            HomeFs::new(
+                true,
+                NativeClient::new(PathBuf::from("/nonexistent/native.sock")),
+                homes.clone(),
+                EventBus::new(),
+            )
+            .with_pilot(pilot)
+        };
+        let off = fs(crate::config::NativePilot::off());
+        assert!(off.is_one_home(&pool, &user(1, "alice")).await.unwrap());
+        assert!(off.is_one_home(&pool, &user(1, "t-alice")).await.unwrap());
+        let pilot = fs(crate::config::NativePilot::with_prefixes(["t-"]).unwrap());
+        assert!(!pilot.is_one_home(&pool, &user(1, "alice")).await.unwrap());
+        assert!(pilot.is_one_home(&pool, &user(1, "T-Alice")).await.unwrap());
+        let nobody = fs(crate::config::NativePilot::with_prefixes(Vec::<String>::new()).unwrap());
+        assert!(!nobody
+            .is_one_home(&pool, &user(1, "t-alice"))
+            .await
+            .unwrap());
     }
 
     /// A helper that answers `files_agent_start` for user 2 at once and
