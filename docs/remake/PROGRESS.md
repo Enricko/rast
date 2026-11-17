@@ -771,6 +771,9 @@ Update it at the end of every session.
   `homefs_e2e` flaked under load); `65673a6` the `~/Shared` link report is
   sorted (directory order differs on CI runners, which failed the last
   three CI runs of the Remake PR).
+- **Task 1.6, Phase 1 security review** (2026-11-17, `0ab47a6..a13e829`,
+  review only): 16 findings (2 medium, 9 low, 5 info), all open, in
+  `docs/remake/review-phase-1.md`; no code change.
 
 ## Phase 1 checklist
 
