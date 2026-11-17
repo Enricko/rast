@@ -559,6 +559,31 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- Native helper display-port firewall (security relevant): the helper
+  trusted any existing nftables table `inet rast_native`, so a table left
+  by an earlier helper run with another uid was never corrected. On
+  1.0.1-alpha.1 such a table reset every connection of the RAST server to
+  the Xpra display ports (no native session became ready) and let the
+  other uid reach every display port. The helper now reads the table back
+  when it starts and before each session port is added, and replaces
+  anything that is not exactly the expected chain, set and rule for its
+  own uid in one `nft -f` transaction, with the ports of the live
+  sessions; it logs a warning with the old and the new uid. `rast doctor`
+  and `rast native-helper --check` warn about a table that does not match.
+  Restarting `rast-native.service` repairs an affected host.
+- `rast migrate home --rollback` refused every member of a migrated shared
+  folder: the `~/Shared/<name>` links that RAST keeps in one-HOME mode
+  belong to the account's identity, and the review F5 check stopped on
+  them. The rollback now removes those links (and `~/Shared` when RAST
+  made it and it is empty) and lists them (`sharedLinksRemoved`, and a
+  line in the CLI output); any other link, special file or multi-link file
+  of the identity still stops it. That check now also runs before the
+  rollback changes anything, so a refusal leaves the HOME exactly as it
+  was (before, the files were already given back to the `rast` service
+  while the HOME stayed the identity's, until the rollback was run
+  again). An account the rollback stopped that way is rolled back by
+  running the rollback again. After a new migration, the account gets its
+  `~/Shared` links again without a server restart.
 - `rast migrate shares` (and `rast migrate home`) no longer reports a
   shared folder or account as busy right after another migration step
   released it: the helper retries its migration lock for half a second (a

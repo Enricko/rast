@@ -822,6 +822,72 @@ Update it at the end of every session.
     rollback of a `t-` account with a link in its HOME; a cron job of a
     `t-` identity keeping a revoked `t-share` denied.
 
+- **Fix: stale `rast_native` nftables table** (found on production
+  1.0.1-alpha.1, 2026-11-17: a table from an earlier helper run exempted
+  uid 1000 while the helper runs with `RAST_NATIVE_ALLOWED_UID=993`, so
+  the server got a TCP reset from every Xpra port and uid 1000 could
+  reach them). `firewall.rs` reads the table back with `nft -j list
+  table inet rast_native` (strict JSON check, 256 KiB cap) at helper
+  start and before every session port is added; any difference (uid,
+  extra rule or object, missing reject, hook, priority, policy, table or
+  set flags, unreadable listing) is replaced in one `nft -f` transaction
+  (`add table` + `delete table` + full definition + the live ports), with
+  a warning naming the old and new uid. The startup reconcile of a
+  verified table is one transaction too (flush + add). Table changes are
+  serialised by a lock; ruleset files moved from `/tmp` to the root-only
+  `/run/rast-linux` (`O_NOFOLLOW`, 0600). `ping` reports the helper's view
+  (`displayFirewall`), which `rast doctor` shows; `rast native-helper
+  --check` (root) checks directly; both warn on a mismatch.
+  - Tests: 16 new in `firewall.rs` (parser: expected table, wrong uid,
+    extra rule/chain/object, missing reject, chain policy/hook/priority,
+    table and set flags, unreadable and oversized listings; one-transaction
+    script; ensure, session start and startup against a fake host; the
+    host's single `nft -f` call through a fake binary; doctor mapping),
+    `ping_reports_protocol_and_xpra` extended.
+  - Gates: fmt and clippy clean; `cargo test --workspace` 1152 passed, 0
+    failed; frontend 160 passed, build clean; no new dependency.
+  - Real listing: the production table as nftables 1.1.6 prints it is
+    embedded byte for byte in the test
+    `the_real_nftables_1_1_6_listing_is_parsed_exactly` (correct for uid
+    1000, a uid mismatch and a replacement for 993); no parser change was
+    needed (chain before set, no `elem` on an empty set).
+  - Pending on the test host (root): after the deploy, restart
+    `rast-native.service` once and check that `nft list table inet
+    rast_native` shows `meta skuid != 993` and a `t-` session becomes
+    ready.
+- **Fix: `rast migrate home --rollback` and RAST's `~/Shared` links**
+  (found on production 1.0.1-alpha.1, 2026-11-17: `t-alice`, member of
+  the migrated `t-share`, was refused on `Shared/t-share`, after the walk
+  had already given her files to `rast`). The rollback removes RAST's
+  share links (identity symlinks directly in `Shared` whose target is a
+  container directly below the canonical shared root, with a valid name;
+  `unlinkat` on the opened `Shared`), and `Shared` when it is then empty,
+  the identity's and not in the journal; report `sharedLinksRemoved` and
+  `sharedFolderRemoved`, and a CLI line. The F5 check now runs read-only
+  before anything changes (not counting the share links, merged app data
+  still in place and the HOME's recycle bin entries, which leave the HOME
+  first); the check after the walk stays as the backstop. The pure check
+  `share_target` moved from the agent to `homes::share_link_container`
+  (with `SHARED_DIR`) so both crates use it. Server: the link sync forgets
+  accounts that are no longer one-HOME (`links_due`), so a new migration
+  gets its links again; legacy accounts are never sent links (unchanged).
+  - Tests: 5 new `home_migrate` tests (links removed and `Shared` with
+    them; a link elsewhere, deeper in a shared folder or to the shared
+    root stops the rollback and a full snapshot of owners, modes, ACLs,
+    links and contents is unchanged; a file in `Shared` is kept with its
+    folder; a recorded `Shared` stays even when empty; a run stopped by
+    the backstop after its walk resumes and completes), the F5 test now
+    also checks that its refusal changed nothing, `share_link_container`,
+    `links_due`, CLI output line.
+  - Gates (with the nftables fix): fmt and clippy clean; `cargo test
+    --workspace` 1160 passed, 0 failed; frontend 160 passed, build clean;
+    no new dependency or migration.
+  - Pending on the test host: rerun `rast migrate home --rollback --user
+    t-alice` with the new build (her HOME is half rolled back by
+    1.0.1-alpha.1; the run continues from the journal and removes
+    `Shared/t-share`), then check owners (`rast:rast` inside, HOME as
+    recorded) and that a new apply brings the link back.
+
 ## Phase 1 checklist
 
 - [x] Task 1.1: one-HOME design, `docs/adr/0005-one-home.md` (accepted 2026-11-16)
@@ -854,7 +920,14 @@ permissions for this session are listed in "Testing on production"). Order:
    root command is logged in `~/rast-automation.log`.
 2. [ ] Rest of Phase 1: [x] task 1.5c (native pilot gate), [x] task 1.5b,
    [x] task 1.6 and its fixes (CI green again from `a13e829`), [x] app matrix
-   with responsiveness checks (task 0.6 scenario), [ ] `1.0.1-alpha.1` deploy,
+   with responsiveness checks (task 0.6 scenario), [x] `1.0.1-alpha.1`
+   deploy (2026-11-17 18:50–18:52 UTC, from 0.18.3, schema v15, `rast.db`
+   and `secret.key` moved into `private/` with links, health check passed;
+   cold backup `/root/rast-backups/20261117T185018Z-before-1.0.1-alpha.1/`,
+   `rast update`'s own snapshot
+   `/var/lib/rast/backups/rast-20261117-185218-db-config.tar.gz`, rollback
+   binary `/usr/local/bin/rast.rollback-0.18.3`; the real `admin` account
+   was still active after the 30-minute wait),
    [ ] app matrix baseline in legacy mode (replaces 0.6 on 0.18.3, A4),
    [ ] Phase 1 exit with test accounts.
 3. [ ] Native window latency investigation (before Phase 2).
