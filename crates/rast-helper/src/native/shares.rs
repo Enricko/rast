@@ -871,7 +871,7 @@ fn shared_root(options: &NativeOptions) -> PathBuf {
 
 /// Open `<storage>/shared/<container>`: a real folder (no link followed) on
 /// the file system of the shared root.
-fn open_container(
+pub(crate) fn open_container(
     options: &NativeOptions,
     container: &str,
 ) -> Result<(OwnedFd, libc::stat), NativeError> {
@@ -2091,6 +2091,14 @@ pub fn parse_proc_status(text: &str) -> Option<(u32, u32, Vec<u32>)> {
     Some((real, effective, groups?))
 }
 
+/// The saved set uid of a process, from its `/proc/<pid>/status`.
+pub fn parse_proc_saved_uid(text: &str) -> Option<u32> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().nth(2))
+        .and_then(|uid| uid.parse().ok())
+}
+
 /// The systemd unit of a process, from its `/proc/<pid>/cgroup`: the first
 /// component of its cgroup path (unified hierarchy, or the `name=systemd`
 /// one without it) that is not a slice. systemd names it (root); cgroups
@@ -2148,11 +2156,29 @@ pub(crate) fn read_proc_file(dir: &OwnedFd, name: &CStr) -> Option<String> {
     Some(text)
 }
 
+/// The processes of one user that carry share groups.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Holders {
+    /// Processes in one of the user's units, and the gids from the range
+    /// they carry.
+    processes: u64,
+    gids: BTreeSet<u32>,
+    /// Processes of the identity outside the user's units (a cron or `at`
+    /// job, or one whose unit is unknown), and their gids (review F3).
+    outside: u64,
+    outside_gids: BTreeSet<u32>,
+}
+
 /// Per user: how many processes run as the identity in one of the user's
 /// units ([`is_user_unit`]), and which gids from `range` they carry. A
 /// process counts only when its real and effective uid are both the
 /// identity's: a set-uid program of the identity run by someone else
 /// carries that person's groups, not the user's.
+///
+/// Every other process whose real, effective or saved uid is an identity's
+/// is a holder outside the units of that user (review F3): RAST cannot
+/// restart it, so the server only keeps the shared folders it lost denied
+/// while such a process carries their group.
 ///
 /// Both files of a process are read through one descriptor of its
 /// `/proc/<pid>` folder, which stays bound to that process: when it ends
@@ -2162,14 +2188,14 @@ fn scan_processes(
     proc: &std::path::Path,
     users: &HashMap<u32, i64>,
     range: &RangeInclusive<u32>,
-) -> Result<BTreeMap<i64, (u64, BTreeSet<u32>)>, NativeError> {
+) -> Result<BTreeMap<i64, Holders>, NativeError> {
     let entries = std::fs::read_dir(proc).map_err(|error| {
         NativeError::command_failed(format!("cannot list {}: {error}", proc.display()))
     })?;
     let proc_fd = open_dir(proc).map_err(|error| {
         NativeError::command_failed(format!("cannot open {}: {error}", proc.display()))
     })?;
-    let mut out: BTreeMap<i64, (u64, BTreeSet<u32>)> = BTreeMap::new();
+    let mut out: BTreeMap<i64, Holders> = BTreeMap::new();
     for entry in entries.take(MAX_PROCESSES) {
         let Ok(entry) = entry else { continue };
         let name = entry.file_name();
@@ -2185,24 +2211,41 @@ fn scan_processes(
         ) else {
             continue;
         };
-        let Some((ruid, euid, groups)) =
-            read_proc_file(&dir, c"status").and_then(|text| parse_proc_status(&text))
-        else {
+        let Some(text) = read_proc_file(&dir, c"status") else {
             continue;
         };
-        let Some(user_id) = users.get(&euid).filter(|_| ruid == euid) else {
+        let Some((ruid, euid, groups)) = parse_proc_status(&text) else {
             continue;
         };
-        let in_unit = read_proc_file(&dir, c"cgroup")
-            .and_then(|text| parse_proc_cgroup(&text))
-            .is_some_and(|unit| is_user_unit(&unit, *user_id, euid));
-        if !in_unit {
+        let suid = parse_proc_saved_uid(&text);
+        let carried = || groups.iter().copied().filter(|gid| range.contains(gid));
+        let unit = users
+            .get(&euid)
+            .filter(|_| ruid == euid)
+            .and_then(|user_id| {
+                read_proc_file(&dir, c"cgroup")
+                    .and_then(|text| parse_proc_cgroup(&text))
+                    .filter(|unit| is_user_unit(unit, *user_id, euid))
+                    .map(|_| *user_id)
+            });
+        if let Some(user_id) = unit {
+            let slot = out.entry(user_id).or_default();
+            slot.processes += 1;
+            slot.gids.extend(carried());
             continue;
         }
-        let slot = out.entry(*user_id).or_default();
-        slot.0 += 1;
-        slot.1
-            .extend(groups.into_iter().filter(|gid| range.contains(gid)));
+        let mut owners: Vec<i64> = [Some(ruid), Some(euid), suid]
+            .into_iter()
+            .flatten()
+            .filter_map(|uid| users.get(&uid).copied())
+            .collect();
+        owners.sort_unstable();
+        owners.dedup();
+        for user_id in owners {
+            let slot = out.entry(user_id).or_default();
+            slot.outside += 1;
+            slot.outside_gids.extend(carried());
+        }
     }
     Ok(out)
 }
@@ -2286,7 +2329,7 @@ pub(crate) async fn share_session_groups(
     let found = blocking(move || scan_processes(&proc, &users, &scan_range)).await?;
     let gids: BTreeSet<u32> = found
         .values()
-        .flat_map(|(_, gids)| gids.iter().copied())
+        .flat_map(|holders| holders.gids.iter().chain(&holders.outside_gids).copied())
         .collect();
     let names = if gids.is_empty() {
         BTreeMap::new()
@@ -2295,8 +2338,17 @@ pub(crate) async fn share_session_groups(
     };
     let users: Vec<Value> = found
         .into_iter()
-        .map(|(user_id, (processes, gids))| {
-            json!({"userId": user_id, "processes": processes, "gids": gids})
+        .map(|(user_id, holders)| {
+            let mut user = json!({
+                "userId": user_id,
+                "processes": holders.processes,
+                "gids": holders.gids,
+            });
+            if holders.outside > 0 {
+                user["outsideProcesses"] = json!(holders.outside);
+                user["outsideGids"] = json!(holders.outside_gids);
+            }
+            user
         })
         .collect();
     let groups: serde_json::Map<String, Value> = names
@@ -2457,6 +2509,12 @@ pub struct Record {
     pub acl: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dacl: Option<String>,
+    /// The inode generation (`FS_IOC_GETVERSION`), on file systems that
+    /// have one. It tells a reused inode number apart (review F15). Only
+    /// `rast migrate home` records it; journals without it match by device
+    /// and inode alone.
+    #[serde(default, rename = "gen", skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
 }
 
 pub(crate) fn record_of(path: &str, fd: RawFd, stat: &libc::stat) -> io::Result<Record> {
@@ -2472,6 +2530,7 @@ pub(crate) fn record_of(path: &str, fd: RawFd, stat: &libc::stat) -> io::Result<
         mode: now.mode,
         acl: now.access.map(hex::encode),
         dacl: now.default.map(hex::encode),
+        generation: None,
     })
 }
 

@@ -34,6 +34,7 @@ pub(crate) mod firewall;
 pub mod home_migrate;
 pub mod homes;
 pub mod identity;
+pub mod job_deny;
 pub mod protocol;
 pub mod quota;
 pub mod restore_files;
@@ -93,6 +94,9 @@ pub const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Maximum concurrent long-running helper operations.
 pub const MAX_CONCURRENT_OPS: usize = 4;
 
+/// The cron spool of user crontabs (Debian and Ubuntu).
+const CRON_SPOOL_DIR: &str = "/var/spool/cron/crontabs";
+
 /// Runtime options. Built from [`Config`] in production and directly in tests.
 #[derive(Debug, Clone)]
 pub struct NativeOptions {
@@ -143,6 +147,10 @@ pub struct NativeOptions {
     /// Present when the host has `setfacl` (package `acl`).
     pub setfacl_bin: Option<PathBuf>,
     pub nologin_shell: PathBuf,
+    /// `/etc`: where `cron.deny` and `at.deny` are ([`job_deny`]).
+    pub etc_dir: PathBuf,
+    /// The cron spool of user crontabs (`/var/spool/cron/crontabs`).
+    pub cron_spool_dir: PathBuf,
     /// Test-only switch: permits running the daemon as a non-root user and
     /// skips `chown` calls that the test account cannot perform.
     #[cfg(test)]
@@ -223,6 +231,8 @@ impl NativeOptions {
             gpasswd_bin: resolve_binary(GPASSWD_CANDIDATES),
             setfacl_bin: Some(PathBuf::from(SETFACL_BIN)).filter(|path| path.is_file()),
             nologin_shell: resolve_binary(NOLOGIN_CANDIDATES),
+            etc_dir: PathBuf::from("/etc"),
+            cron_spool_dir: PathBuf::from(CRON_SPOOL_DIR),
             #[cfg(test)]
             test_mode: false,
             #[cfg(test)]
@@ -241,6 +251,7 @@ impl NativeOptions {
             .parent()
             .map(|parent| parent.join("storage/homes"))
             .unwrap_or_else(|| data_dir.join("homes"));
+        let (etc_dir, cron_spool_dir) = (data_dir.join("etc"), data_dir.join("crontabs"));
         Self {
             socket_path,
             socket_gid: None,
@@ -274,6 +285,8 @@ impl NativeOptions {
             gpasswd_bin: PathBuf::from("/usr/bin/false"),
             setfacl_bin: None,
             nologin_shell: PathBuf::from("/usr/sbin/nologin"),
+            etc_dir,
+            cron_spool_dir,
             test_mode: true,
             test_identity_uid: None,
             test_proc_dir: None,
@@ -1100,6 +1113,15 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
         report.warnings += 1;
         report.lines.push(format!("[WARN] {message}"));
     };
+    // Review F11: native apps on without a pilot give the native features
+    // to every account and shared folder (ADR 0007, "Upgrade order").
+    if !cfg.native_pilot.is_active() {
+        warn(
+            &mut report,
+            "native apps are on and native_pilot_prefixes is not set: every account and every              shared folder has the native features (Linux apps, shared folder groups, kernel              limits, `rast migrate --all`). During a pilot, set native_pilot_prefixes first"
+                .to_string(),
+        );
+    }
 
     report.lines.push(format!(
         "        xpra binary: {}",
@@ -1553,6 +1575,27 @@ mod tests {
                     with \"t-\""),
             "{report:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_warns_when_native_apps_are_on_without_a_pilot() {
+        // Review F11.
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = config(&temp.path().join("data"), &temp.path().join("storage"));
+        let mentions_the_key = |report: &DoctorReport| {
+            report.lines.iter().any(|line| {
+                line.starts_with("[WARN] native apps are on and native_pilot_prefixes is not set")
+            })
+        };
+        let report = doctor_report(&cfg).await;
+        assert!(mentions_the_key(&report), "{report:?}");
+        cfg.native_pilot = crate::config::NativePilot::with_prefixes(["t-"]).unwrap();
+        assert!(!mentions_the_key(&doctor_report(&cfg).await));
+        cfg.native_pilot = crate::config::NativePilot::with_prefixes(Vec::<String>::new()).unwrap();
+        assert!(!mentions_the_key(&doctor_report(&cfg).await));
+        cfg.native_pilot = crate::config::NativePilot::off();
+        cfg.native_enabled = false;
+        assert!(!mentions_the_key(&doctor_report(&cfg).await));
     }
 
     #[tokio::test]

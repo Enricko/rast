@@ -172,7 +172,7 @@ pub(crate) fn mkdir_at(dir: RawFd, name: &str, mode: libc::mode_t) -> io::Result
 }
 
 #[cfg(test)]
-type MkdirHook = Box<dyn FnMut(RawFd, &str)>;
+pub(crate) type MkdirHook = Box<dyn FnMut(RawFd, &str)>;
 
 #[cfg(test)]
 thread_local! {
@@ -180,6 +180,13 @@ thread_local! {
     /// another directory into the place of the one just created.
     static AFTER_MKDIR: std::cell::RefCell<Option<MkdirHook>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// Set (or clear) this thread's [`AFTER_MKDIR`] hook, for the tests of
+/// other modules that create folders with [`mkdir_at`].
+#[cfg(test)]
+pub(crate) fn set_after_mkdir(hook: Option<MkdirHook>) {
+    AFTER_MKDIR.with(|slot| *slot.borrow_mut() = hook);
 }
 
 fn after_mkdir(_dir: RawFd, _name: &str) {

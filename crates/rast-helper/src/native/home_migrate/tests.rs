@@ -207,6 +207,7 @@ fn fixture() -> Fixture {
     options.test_owners = Some(owners.clone());
     std::fs::create_dir_all(root.join("proc")).unwrap();
     options.test_proc_dir = Some(root.join("proc"));
+    std::fs::create_dir_all(&options.etc_dir).unwrap();
     std::fs::write(
         root.join("passwd-home"),
         data.join("linux-users/7").display().to_string(),
@@ -788,6 +789,21 @@ fn entry(id: &str, path: &str, container: Option<&str>) -> LegacyTrashEntry {
     }
 }
 
+/// The rw group of the test shared folder (in the shared folder gid range
+/// of `linux_uid_base` 200 000).
+const TEAM_GID: u32 = 1_200_001;
+
+/// Give `container` the layout of `rast migrate shares`: root and the
+/// share's rw group, mode 2770.
+fn migrated_container(fx: &Fixture, container: &Path) {
+    std::fs::create_dir_all(container).unwrap();
+    std::fs::set_permissions(container, std::fs::Permissions::from_mode(0o2770)).unwrap();
+    fx.owners
+        .lock()
+        .unwrap()
+        .insert(key(container), (u32::MAX - 15, TEAM_GID));
+}
+
 async fn trash(fx: &Fixture, entries: Vec<LegacyTrashEntry>) -> Result<Value, NativeError> {
     home_migrate_trash(
         &fx.options,
@@ -824,12 +840,8 @@ async fn the_legacy_recycle_bin_moves_into_xdg_trash_and_back() {
     write(&legacy.join(ID4), "team");
     let team = fx.options.storage_dir.join("shared/team");
     std::fs::create_dir_all(&team).unwrap();
-    // A migrated shared folder: set-gid, with the rw group (3000 here).
-    std::fs::set_permissions(&team, std::fs::Permissions::from_mode(0o2770)).unwrap();
-    fx.owners
-        .lock()
-        .unwrap()
-        .insert(key(&team), (u32::MAX - 15, 3000));
+    // A migrated shared folder: set-gid, owned by root with its rw group.
+    migrated_container(&fx, &team);
     // Before the HOME is migrated, nothing moves.
     let error = trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
         .await
@@ -1116,6 +1128,7 @@ async fn a_recycle_bin_folder_made_by_another_member_fails_only_its_entries() {
     let team = fx.options.storage_dir.join("shared/team");
     let squat = team.join(rast_base::storage::xdg_trash::share_trash_name(UID));
     std::fs::create_dir_all(&squat).unwrap();
+    migrated_container(&fx, &team);
     fx.owners
         .lock()
         .unwrap()
@@ -1144,4 +1157,366 @@ async fn a_recycle_bin_folder_made_by_another_member_fails_only_its_entries() {
     assert!(legacy.join(ID2).is_file());
     assert_eq!(fx.owner(&squat), 200_008);
     assert_eq!(std::fs::read_dir(&squat).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_container_outside_the_group_layout_gets_no_recycle_bin() {
+    // Review F8: a container that `rast migrate shares` has not converted
+    // (here: owned by the service) is refused; nothing is created in it.
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    write(&legacy.join(ID2), "old");
+    let old = fx.options.storage_dir.join("shared/old");
+    std::fs::create_dir_all(&old).unwrap();
+    // A link to a migrated container is refused as well.
+    let team = fx.options.storage_dir.join("shared/team");
+    migrated_container(&fx, &team);
+    symlink(&team, fx.options.storage_dir.join("shared/link")).unwrap();
+    fx.apply().await.unwrap();
+    let reply = trash(
+        &fx,
+        vec![
+            entry(ID1, "a.txt", Some("link")),
+            entry(ID2, "b.txt", Some("old")),
+        ],
+    )
+    .await
+    .unwrap();
+    let results = reply["results"].as_array().unwrap();
+    assert_eq!(results[0]["status"], "failed", "{reply}");
+    assert_eq!(results[1]["status"], "failed", "{reply}");
+    assert!(
+        results[1]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not in the group layout"),
+        "{reply}"
+    );
+    assert!(legacy.join(ID1).is_file() && legacy.join(ID2).is_file());
+    assert_eq!(std::fs::read_dir(&old).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&team).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn a_folder_swapped_in_for_a_new_recycle_bin_folder_is_never_taken_over() {
+    // Review F4: another member of the shared folder renames one of its
+    // top folders into the place of `.Trash-<uid>` right after `mkdirat`.
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "team");
+    let team = fx.options.storage_dir.join("shared/team");
+    migrated_container(&fx, &team);
+    let projects = team.join("Projects");
+    write(&projects.join("plan.txt"), "plan");
+    std::fs::set_permissions(&projects, std::fs::Permissions::from_mode(0o2770)).unwrap();
+    set_acl(
+        &projects,
+        acl::ACCESS_XATTR,
+        vec![
+            acl_entry(Tag::UserObj, 7),
+            acl_entry(Tag::GroupObj, 7),
+            acl_entry(Tag::Group(TEAM_GID + 1), 5),
+            acl_entry(Tag::Mask, 7),
+            acl_entry(Tag::Other, 0),
+        ],
+    );
+    fx.owners
+        .lock()
+        .unwrap()
+        .insert(key(&projects), (200_008, TEAM_GID));
+    let acl_before = read_acl(&projects, acl::ACCESS_XATTR);
+    fx.apply().await.unwrap();
+
+    let trash_name = rast_base::storage::xdg_trash::share_trash_name(UID);
+    let swap_team = team.clone();
+    let swap_name = trash_name.clone();
+    homes::set_after_mkdir(Some(Box::new(move |_: RawFd, created: &str| {
+        if created == swap_name {
+            std::fs::rename(swap_team.join(&swap_name), swap_team.join("y")).unwrap();
+            std::fs::rename(swap_team.join("Projects"), swap_team.join(&swap_name)).unwrap();
+        }
+    })));
+    let account = Account::of(&fx.options, 7, USER).unwrap();
+    // `move_trash` runs on this thread, so the hook sees its `mkdirat`.
+    let results = move_trash(
+        &fx.options,
+        &account,
+        &[entry(ID1, "plans/q4.txt", Some("team"))],
+    );
+    homes::set_after_mkdir(None);
+    let results = results.unwrap();
+    assert_eq!(results[0].status, "failed", "{results:?}");
+    assert!(
+        results[0]
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("was replaced"),
+        "{results:?}"
+    );
+    // The entry stays; the swapped folder keeps its owner, mode, ACL and
+    // content.
+    assert!(legacy.join(ID1).is_file());
+    let swapped = team.join(&trash_name);
+    assert_eq!(fx.owner(&swapped), 200_008);
+    assert_eq!(mode(&swapped), 0o2770);
+    assert_eq!(read_acl(&swapped, acl::ACCESS_XATTR), acl_before);
+    assert_eq!(
+        std::fs::read_to_string(swapped.join("plan.txt")).unwrap(),
+        "plan"
+    );
+}
+
+/// A process of the identity outside every RAST unit (a cron job).
+fn cron_job_status() -> String {
+    format!("Name:\tsleep\nUid:\t{UID}\t{UID}\t{UID}\t{UID}\nGroups:\t\n")
+}
+
+/// `usermod` as in the fixture, which also starts a cron job of the
+/// identity when the file `spawn` exists (between the tree and the HOME
+/// step of apply and rollback).
+fn usermod_that_spawns(fx: &mut Fixture) {
+    let root = fx.root().to_path_buf();
+    std::fs::write(root.join("cron-status"), cron_job_status()).unwrap();
+    fx.options.usermod_bin = write_script(
+        &root,
+        "usermod-spawn",
+        &format!(
+            "#!/bin/sh\nprintf '%s' \"$2\" > '{root}/passwd-home'\n\
+             if [ -f '{root}/spawn' ]; then rm '{root}/spawn'; mkdir -p '{root}/proc/4343'; \
+             cp '{root}/cron-status' '{root}/proc/4343/status'; fi\n",
+            root = root.display()
+        ),
+    );
+}
+
+#[tokio::test]
+async fn a_process_that_starts_during_apply_or_rollback_stops_it_before_the_home_step() {
+    // Review F3: a cron job starts after the first check.
+    let mut fx = fixture();
+    populate(&fx);
+    usermod_that_spawns(&mut fx);
+    std::fs::write(fx.root().join("spawn"), b"").unwrap();
+    let error = fx.apply().await.unwrap_err();
+    assert_eq!(error.code, "identity_in_use", "{error:?}");
+    // The tree is done, the HOME itself is not, and the journal waits.
+    assert_eq!(fx.owner(&fx.home().join("docs")), UID);
+    assert_eq!(fx.owner(&fx.home()), euid());
+    let journals = fx.journals();
+    assert_eq!(journals.len(), 1);
+    assert!(!fx
+        .journal_root()
+        .join(&journals[0])
+        .join(APPLIED_FILE)
+        .exists());
+    std::fs::remove_dir_all(fx.root().join("proc/4343")).unwrap();
+    let resumed = fx.apply().await.unwrap();
+    assert_eq!(resumed["resumed"], true, "{resumed}");
+    assert_eq!(fx.owner(&fx.home()), UID);
+
+    std::fs::write(fx.root().join("spawn"), b"").unwrap();
+    let error = fx.rollback().await.unwrap_err();
+    assert_eq!(error.code, "identity_in_use", "{error:?}");
+    // The HOME itself is still the identity's; the journal is not rolled
+    // back.
+    assert_eq!(fx.owner(&fx.home()), UID);
+    assert!(!fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+    std::fs::remove_dir_all(fx.root().join("proc/4343")).unwrap();
+    fx.rollback().await.unwrap();
+    assert_eq!(fx.owner(&fx.home()), euid());
+    assert!(fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+}
+
+#[tokio::test]
+async fn a_process_that_starts_during_a_recycle_bin_batch_stops_it_and_the_next_batch_resumes() {
+    // Review F3, at the end of a trash batch.
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    fx.apply().await.unwrap();
+    let account = Account::of(&fx.options, 7, USER).unwrap();
+    let proc = fx.root().join("proc/4343");
+    let (spawn, status) = (proc.clone(), cron_job_status());
+    set_test_hook(Some(Box::new(move |point, _| {
+        if point == TestPoint::TrashBatchEnd {
+            std::fs::create_dir_all(&spawn).unwrap();
+            std::fs::write(spawn.join("status"), &status).unwrap();
+        }
+    })));
+    let outcome = move_trash(&fx.options, &account, &[entry(ID1, "docs/a.txt", None)]);
+    set_test_hook(None);
+    assert_eq!(outcome.unwrap_err().code, "identity_in_use");
+    std::fs::remove_dir_all(&proc).unwrap();
+    let again = trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    assert_eq!(statuses(&again), [("already".into(), "a.txt".into())]);
+}
+
+#[tokio::test]
+async fn a_rollback_resets_new_entries_and_stops_on_links_of_the_identity() {
+    // Review F5: in one-HOME mode the identity made a world-writable
+    // folder with a named write entry, and a link in it.
+    let fx = fixture();
+    populate(&fx);
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    fx.apply().await.unwrap();
+    let moved = trash(&fx, vec![entry(ID1, "docs/a.txt", None)])
+        .await
+        .unwrap();
+    assert_eq!(statuses(&moved), [("moved".into(), "a.txt".into())]);
+    let home = fx.home();
+    let drop = home.join("drop");
+    std::fs::create_dir(&drop).unwrap();
+    std::fs::set_permissions(&drop, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let grant = vec![
+        acl_entry(Tag::UserObj, 7),
+        acl_entry(Tag::User(UID), 7),
+        acl_entry(Tag::GroupObj, 7),
+        acl_entry(Tag::Mask, 7),
+        acl_entry(Tag::Other, 7),
+    ];
+    set_acl(&drop, acl::ACCESS_XATTR, grant.clone());
+    set_acl(&drop, acl::DEFAULT_XATTR, grant);
+    fx.give(&drop);
+    write(&drop.join("tool.sh"), "#!/bin/sh\n");
+    std::fs::set_permissions(drop.join("tool.sh"), std::fs::Permissions::from_mode(0o777)).unwrap();
+    fx.give(&drop.join("tool.sh"));
+    symlink(&fx.options.homes_dir, drop.join("l")).unwrap();
+    fx.give(&drop.join("l"));
+
+    let error = fx.rollback().await.unwrap_err();
+    assert_eq!(error.code, "identity_conflict", "{error:?}");
+    assert!(error.message.contains("drop/l"), "{error:?}");
+    // Stopped before the HOME step: the HOME is still the identity's.
+    assert_eq!(fx.owner(&home), UID);
+    assert!(!fx.journals()[0].ends_with(ROLLED_BACK_SUFFIX));
+
+    // The administrator moves the link out; the rollback continues.
+    std::fs::remove_file(drop.join("l")).unwrap();
+    let rolled = fx.rollback().await.unwrap();
+    // The recycle bin entry went back in the first run; its row comes
+    // back all the same.
+    assert_eq!(rolled["report"]["trashRestored"], json!([ID1]), "{rolled}");
+    assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "one");
+    for (path, expected) in [("drop", 0o755), ("drop/tool.sh", 0o755)] {
+        let path = home.join(path);
+        assert_eq!(fx.owner(&path), euid(), "{}", path.display());
+        assert_eq!(mode(&path), expected, "{}", path.display());
+        assert_eq!(read_acl(&path, acl::ACCESS_XATTR), None);
+    }
+    assert_eq!(read_acl(&drop, acl::DEFAULT_XATTR), None);
+    assert_eq!(fx.owner(&home), euid());
+}
+
+#[tokio::test]
+async fn a_reused_inode_number_is_reported_and_not_restored() {
+    // Review F15: same device and inode, another inode generation.
+    let fx = fixture();
+    populate(&fx);
+    let home = fx.home();
+    fx.apply().await.unwrap();
+    let journal = fx.journal_root().join(&fx.journals()[0]).join(JOURNAL_FILE);
+    let text = std::fs::read_to_string(&journal).unwrap();
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let mut record: Value = serde_json::from_str(line).unwrap();
+        if record["p"] == "docs/a.txt" {
+            let other = record["gen"]
+                .as_u64()
+                .map_or(1, |gen| (gen + 1) % (1 << 32));
+            record["gen"] = json!(other);
+        }
+        lines.push(record.to_string());
+    }
+    std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let rolled = fx.rollback().await.unwrap();
+    let report = &rolled["report"];
+    assert_eq!(
+        sample_paths(&report["changedSince"]),
+        ["docs/a.txt"],
+        "{report}"
+    );
+    // Not given the recorded ACL (the 0.18.3 grant) back: reset like a new
+    // entry.
+    assert_eq!(read_acl(&home.join("docs/a.txt"), acl::ACCESS_XATTR), None);
+    assert_eq!(mode(&home.join("docs/a.txt")), 0o644);
+    assert!(read_acl(&home.join("docs"), acl::ACCESS_XATTR).is_some());
+}
+
+#[tokio::test]
+async fn a_payload_swapped_after_planning_is_changed_and_never_given_away() {
+    // Review F14: the service swaps a payload for a hard link to another of
+    // its files, and links a second payload elsewhere, after the plan.
+    let fx = fixture();
+    let legacy = fx.legacy_trash();
+    write(&legacy.join(ID1), "one");
+    write(&legacy.join(ID2), "two");
+    let database = fx.options.storage_dir.join("service.db");
+    write(&database, "secret");
+    fx.apply().await.unwrap();
+    let account = Account::of(&fx.options, 7, USER).unwrap();
+    let (bin, db) = (legacy.clone(), database.clone());
+    set_test_hook(Some(Box::new(move |point, _| {
+        if point != TestPoint::BeforeTrashMove {
+            return;
+        }
+        if bin.join(ID1).exists() && !bin.join("swapped").exists() {
+            std::fs::remove_file(bin.join(ID1)).unwrap();
+            std::fs::hard_link(&db, bin.join(ID1)).unwrap();
+            std::fs::write(bin.join("swapped"), "").unwrap();
+        } else if !bin.join("linked").exists() {
+            std::fs::hard_link(bin.join(ID2), bin.join("linked")).unwrap();
+        }
+    })));
+    let results = move_trash(
+        &fx.options,
+        &account,
+        &[
+            entry(ID1, "docs/a.txt", None),
+            entry(ID2, "docs/b.txt", None),
+        ],
+    );
+    set_test_hook(None);
+    let results = results.unwrap();
+    let statuses: Vec<&str> = results.iter().map(|result| result.status).collect();
+    assert_eq!(statuses, ["changed", "changed"], "{results:?}");
+    // Back in the legacy recycle bin, owned as before; no info file left.
+    assert_eq!(std::fs::read_to_string(legacy.join(ID1)).unwrap(), "secret");
+    assert_eq!(std::fs::read_to_string(legacy.join(ID2)).unwrap(), "two");
+    for path in [legacy.join(ID1), legacy.join(ID2), database] {
+        assert_eq!(fx.owner(&path), euid(), "{}", path.display());
+    }
+    let bin = fx.home().join(".local/share/Trash");
+    assert_eq!(std::fs::read_dir(bin.join("files")).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(bin.join("info")).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn one_home_mode_keeps_cron_and_at_away_and_a_rollback_lets_them_back() {
+    // Review F3, decision A7: only identities in one-HOME mode are listed.
+    let fx = fixture();
+    populate(&fx);
+    let cron = fx.options.etc_dir.join(crate::native::job_deny::CRON_DENY);
+    let at = fx.options.etc_dir.join(crate::native::job_deny::AT_DENY);
+    std::fs::write(&at, "daemon\n").unwrap();
+    // A dry run and a refused apply list nobody.
+    fx.scan().await;
+    assert!(!cron.exists());
+    let applied = fx.apply().await.unwrap();
+    assert_eq!(applied["jobs"]["cronDeny"], "added", "{applied}");
+    assert_eq!(std::fs::read_to_string(&cron).unwrap(), "rast-u7\n");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), "daemon\nrast-u7\n");
+    // Run again (already one-HOME): listed once.
+    let again = fx.apply().await.unwrap();
+    assert_eq!(again["alreadyOneHome"], true);
+    assert_eq!(again["jobs"]["cronDeny"], "unchanged");
+    let rolled = fx.rollback().await.unwrap();
+    assert_eq!(rolled["jobs"]["cronDeny"], "removed", "{rolled}");
+    assert_eq!(std::fs::read_to_string(&cron).unwrap(), "");
+    assert_eq!(std::fs::read_to_string(&at).unwrap(), "daemon\n");
 }

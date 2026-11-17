@@ -45,7 +45,7 @@ use serde_json::{json, Value};
 use crate::native::acl::{self, Acl, Entry, Tag};
 use crate::native::daemon::{running_user_units, stop_unit};
 use crate::native::homes::{
-    c_name, fchmod, fchown, fstat, is_dir, is_symlink, open_dir, stop_files_agent, DIR_FLAGS,
+    self, c_name, fchmod, fchown, fstat, is_dir, is_symlink, open_dir, stop_files_agent, DIR_FLAGS,
 };
 use crate::native::identity::{check_existing_identity, getent_passwd, Identity, PasswdEntry};
 use crate::native::protocol::{
@@ -54,10 +54,11 @@ use crate::native::protocol::{
 };
 use crate::native::shares::{
     blocking, dev_of, dir_names, fd_mount_id, identity_uid_range, ino_of, is_regular,
-    journal_owner, lstat_at, mount_id, newest_journal, open_at, open_journal_dir,
-    open_journal_file, parse_proc_status, proc_dir, read_proc_file, record_of, root_uid,
-    same_inode, service_uid, show, valid_relative, write_synced, MigrationLock, Record, Sample,
-    FILE_FLAGS, JOURNAL_FILE, MAX_DEPTH, MAX_TREE_ENTRIES, ROLLED_BACK_SUFFIX,
+    journal_owner, lstat_at, mount_id, newest_journal, open_at, open_container, open_journal_dir,
+    open_journal_file, parse_proc_saved_uid, parse_proc_status, proc_dir, read_proc_file,
+    record_of, root_uid, same_inode, service_uid, share_gid_range, show, valid_relative,
+    write_synced, MigrationLock, Record, Sample, FILE_FLAGS, JOURNAL_FILE, MAX_DEPTH,
+    MAX_TREE_ENTRIES, ROLLED_BACK_SUFFIX,
 };
 use crate::native::{run_command, NativeOptions};
 
@@ -271,13 +272,26 @@ fn ensure_dir_in(
     keep_group: bool,
 ) -> Result<(OwnedFd, bool), NativeError> {
     let c = cname(name)?;
-    let created = match mkdir_at(parent.as_raw_fd(), &c) {
+    let created = match homes::mkdir_at(parent.as_raw_fd(), name, 0o700) {
         Ok(()) => true,
         Err(error) if error.raw_os_error() == Some(libc::EEXIST) => false,
         Err(error) => return Err(io_failed("create", path, error)),
     };
-    let fd = open_at(parent.as_raw_fd(), &c, DIR_FLAGS)
-        .map_err(|error| io_failed("open", path, error))?;
+    // A folder made here is checked to still be the one made (owned by the
+    // helper, empty) before it is given away: the parent may be a shared
+    // folder's container, whose members can rename entries at its top
+    // (review F4, as `home_ensure` since the task 1.2 review).
+    let fd = if created {
+        homes::open_created_dir(parent.as_raw_fd(), name).map_err(|error| {
+            NativeError::forbidden(format!(
+                "{} was replaced before it could be taken over; nothing was changed: {error}",
+                show(path)
+            ))
+        })?
+    } else {
+        open_at(parent.as_raw_fd(), &c, DIR_FLAGS)
+            .map_err(|error| io_failed("open", path, error))?
+    };
     let stat = fstat(fd.as_raw_fd()).map_err(|error| io_failed("inspect", path, error))?;
     if created {
         let (gid, mode) = if keep_group {
@@ -340,6 +354,10 @@ pub struct HomeTree {
     pub other_device: Sample,
     pub non_utf8: u64,
     pub changed_during_walk: Sample,
+    /// Links, special files and files with several links of the account's
+    /// identity (not visited). A rollback stops on them (review F5).
+    #[serde(skip)]
+    pub identity_unvisited: Sample,
 }
 
 /// What merging one source (the identity home or one app) does.
@@ -461,8 +479,15 @@ fn walk_tree(
             tree.changed_during_walk.add(&path);
             continue;
         };
+        let owner = owners.owner(&stat);
+        let identity_unvisited = |tree: &mut HomeTree| {
+            if owner.0 == owners.uid {
+                tree.identity_unvisited.add(&path);
+            }
+        };
         if is_symlink(&stat) {
             tree.symlinks.add(&path);
+            identity_unvisited(tree);
             continue;
         }
         if stat.st_dev != device {
@@ -483,7 +508,6 @@ fn walk_tree(
                 continue;
             }
         }
-        let owner = owners.owner(&stat);
         if is_dir(&stat) {
             let Ok(dir) = open_at(parent, &name, DIR_FLAGS) else {
                 tree.changed_during_walk.add(&path);
@@ -529,6 +553,7 @@ fn walk_tree(
         }
         if !is_regular(&stat) {
             tree.special.add(&path);
+            identity_unvisited(tree);
             continue;
         }
         tree.files += 1;
@@ -538,6 +563,7 @@ fn walk_tree(
             .saturating_add((stat.st_blocks.max(0) as u64).saturating_mul(512));
         if stat.st_nlink > 1 {
             tree.hard_links.add(&path);
+            identity_unvisited(tree);
         } else if owner.0 == owners.root {
             tree.root_owned.add(&path);
         } else if !owners.managed(owner.0) {
@@ -753,13 +779,46 @@ fn restore(fd: RawFd, stat: &libc::stat, record: &Record, owners: &Owners) -> io
     fchmod(fd, record.restored_mode() as libc::mode_t)
 }
 
-/// The record of an entry, with the owner the migration sees.
+/// The record of an entry, with the owner the migration sees and the
+/// inode generation.
 fn record(path: &str, fd: RawFd, stat: &libc::stat, owners: &Owners) -> io::Result<Record> {
     let mut record = record_of(path, fd, stat)?;
     let (uid, gid) = owners.owner(stat);
     record.uid = uid;
     record.gid = gid;
+    record.generation = generation(fd);
     Ok(record)
+}
+
+/// The inode generation of the entry open as `fd` (`FS_IOC_GETVERSION`),
+/// on file systems that have one (ext4, btrfs): a new inode that reuses
+/// an inode number gets another one (review F15).
+fn generation(fd: RawFd) -> Option<u32> {
+    // `_IOR('v', 1, long)`. The kernel writes an `int` at the address.
+    const FS_IOC_GETVERSION: libc::c_ulong = (2 << 30)
+        | ((std::mem::size_of::<libc::c_long>() as libc::c_ulong) << 16)
+        | ((b'v' as libc::c_ulong) << 8)
+        | 1;
+    let mut value: libc::c_long = 0;
+    // SAFETY: `value` is a live `long` the kernel may write to.
+    let rc = unsafe { libc::ioctl(fd, FS_IOC_GETVERSION as _, &mut value as *mut libc::c_long) };
+    if rc != 0 {
+        return None;
+    }
+    let bytes = value.to_ne_bytes();
+    Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// Whether the entry open as `fd` is the one `record` describes: the same
+/// device, inode and type, and the same inode generation when one was
+/// recorded.
+fn is_recorded(record: &Record, fd: RawFd, stat: &libc::stat) -> bool {
+    dev_of(stat) == record.dev
+        && ino_of(stat) == record.ino
+        && is_dir(stat) == record.d
+        && record
+            .generation
+            .is_none_or(|recorded| generation(fd) == Some(recorded))
 }
 
 /// A journal record is read back as untrusted input: only what the
@@ -888,7 +947,7 @@ impl Account {
     }
 }
 
-/// How many processes run as the identity (real or effective uid).
+/// How many processes run as the identity (real, effective or saved uid).
 fn identity_processes(options: &NativeOptions, uid: u32) -> Result<u64, NativeError> {
     let proc = proc_dir(options);
     let failed = |error: io::Error| {
@@ -906,12 +965,13 @@ fn identity_processes(options: &NativeOptions, uid: u32) -> Result<u64, NativeEr
         let Ok(dir) = open_at(proc_fd.as_raw_fd(), &name, DIR_FLAGS) else {
             continue;
         };
-        let Some((real, effective, _)) =
-            read_proc_file(&dir, c"status").and_then(|text| parse_proc_status(&text))
-        else {
+        let Some(text) = read_proc_file(&dir, c"status") else {
             continue;
         };
-        if real == uid || effective == uid {
+        let Some((real, effective, _)) = parse_proc_status(&text) else {
+            continue;
+        };
+        if real == uid || effective == uid || parse_proc_saved_uid(&text) == Some(uid) {
             count += 1;
         }
     }
@@ -2016,7 +2076,7 @@ fn apply_tree(options: &NativeOptions, account: &Account) -> Result<Applying, Na
         Some(journal) if journal.applied => return Ok(done(lock, journal.stamp)),
         Some(journal) => {
             let first = &journal.records[0];
-            if first.dev != dev_of(&home_stat) || first.ino != ino_of(&home_stat) {
+            if !is_recorded(first, home.as_raw_fd(), &home_stat) {
                 return Err(NativeError::forbidden(
                     "the HOME is not the folder the journal recorded",
                 ));
@@ -2103,6 +2163,9 @@ fn apply_tree(options: &NativeOptions, account: &Account) -> Result<Applying, Na
 /// Give the HOME itself to the identity (0700, no ACLs) and mark the
 /// journal as applied.
 fn finish(options: &NativeOptions, account: &Account, stamp: &str) -> Result<(), NativeError> {
+    // A process that started after the first check (a cron job: review
+    // F3) stops the migration here; the next run resumes the journal.
+    refuse_running(options, &account.identity)?;
     let owners = Owners::of(options, &account.identity)?;
     let (_, home) = account.open_home(options)?;
     let stat = fstat(home.as_raw_fd()).map_err(|error| {
@@ -2116,7 +2179,7 @@ fn finish(options: &NativeOptions, account: &Account, stamp: &str) -> Result<(),
     })?;
     let journal = read_journal(stamp.to_string(), dir, &owners)?;
     let first = &journal.records[0];
-    if first.dev != dev_of(&stat) || first.ino != ino_of(&stat) {
+    if !is_recorded(first, home.as_raw_fd(), &stat) {
         return Err(NativeError::forbidden(
             "the HOME is not the folder the journal recorded",
         ));
@@ -2160,11 +2223,13 @@ pub(crate) async fn home_migrate_apply(
     let (opts, acc) = (options.clone(), account.clone());
     let (mode, journal) = blocking(move || state(&opts, &acc)).await?;
     if mode == "oneHome" && journal != Some(false) && passwd.home == account.home {
+        let jobs = deny_jobs(options, &account, true).await?;
         return Ok(json!({
             "userId": op.user_id,
             "username": op.username,
             "alreadyOneHome": true,
             "stopped": [],
+            "jobs": jobs,
         }));
     }
     let stopped = stop_user_units(options, &account.identity).await?;
@@ -2174,12 +2239,14 @@ pub(crate) async fn home_migrate_apply(
         if passwd.home != account.home {
             set_passwd_home(options, &account.identity, &account.home).await?;
         }
+        let jobs = deny_jobs(options, &account, true).await?;
         return Ok(json!({
             "userId": op.user_id,
             "username": op.username,
             "alreadyOneHome": true,
             "journal": Some(applying.journal).filter(|stamp| !stamp.is_empty()),
             "stopped": stopped,
+            "jobs": jobs,
         }));
     }
     if passwd.home != account.home {
@@ -2187,6 +2254,9 @@ pub(crate) async fn home_migrate_apply(
     }
     let (opts, acc, stamp) = (options.clone(), account.clone(), applying.journal.clone());
     blocking(move || finish(&opts, &acc, &stamp)).await?;
+    // A failure here leaves the account migrated; the next run (already
+    // one-HOME) lists the identity again.
+    let jobs = deny_jobs(options, &account, true).await?;
     tracing::info!(
         user_id = op.user_id,
         journal = %applying.journal,
@@ -2204,7 +2274,19 @@ pub(crate) async fn home_migrate_apply(
         "tree": applying.tree,
         "merge": applying.merge,
         "steps": applying.steps,
+        "jobs": jobs,
     }))
+}
+
+/// List (`deny`) or unlist the identity in `cron.deny` and `at.deny`
+/// (review F3, decision A7).
+async fn deny_jobs(
+    options: &NativeOptions,
+    account: &Account,
+    deny: bool,
+) -> Result<Value, NativeError> {
+    let (opts, identity) = (options.clone(), account.identity.clone());
+    blocking(move || crate::native::job_deny::set(&opts, &identity, deny)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2317,23 +2399,36 @@ fn trash_rel(container: Option<&str>, uid: u32) -> String {
     }
 }
 
-/// The folder a trash folder lives in: the HOME or the container.
+/// The folder a trash folder lives in: the HOME or the container. A
+/// container must be a plain folder of the shared root (no link, no mount
+/// point) in the group layout of `rast migrate shares`: owned by root with
+/// a shared folder group (review F8, as the backup reader's `open_tree`).
+/// The CLI maps a row only to a shared folder the account can open; this
+/// check does not trust it. The undo of a rollback passes no `layout`: it
+/// only takes back what the migration put there, whatever the container's
+/// layout is now.
 fn trash_base(
     options: &NativeOptions,
     home: &OwnedFd,
     container: Option<&str>,
+    layout: Option<&Owners>,
 ) -> Result<OwnedFd, NativeError> {
     match container {
         None => open_at(home.as_raw_fd(), c".", DIR_FLAGS)
             .map_err(|error| NativeError::command_failed(format!("cannot open the HOME: {error}"))),
         Some(container) => {
-            let shared = options.storage_dir.join("shared");
-            let root = open_dir(&shared).map_err(|error| {
-                NativeError::command_failed(format!("cannot open {}: {error}", shared.display()))
-            })?;
-            open_at(root.as_raw_fd(), &cname(container)?, DIR_FLAGS).map_err(|error| {
-                NativeError::not_found(format!("the shared folder {container} is gone: {error}"))
-            })
+            let (fd, stat) = open_container(options, container)?;
+            let Some(owners) = layout else {
+                return Ok(fd);
+            };
+            let (uid, gid) = owners.owner(&stat);
+            if uid != owners.root || !share_gid_range(options.uid_base)?.contains(&gid) {
+                return Err(NativeError::forbidden(format!(
+                    "the shared folder {container} is not in the group layout (owner {uid}:{gid}); \
+                     run `rast migrate shares` for it first"
+                )));
+            }
+            Ok(fd)
         }
     }
 }
@@ -2508,16 +2603,25 @@ fn payload_records(
 }
 
 /// Give a moved payload to the identity, entry by entry, with the group
-/// `group`.
+/// `group`. Only what was planned (`records`, the payload first) changes
+/// owner: `Ok(false)` when the payload is not the planned entry (another
+/// inode or type, or a file with several links), and then nothing is
+/// changed (review F14). The service owns the legacy recycle bin, and the
+/// helper does not trust it.
 fn convert_payload(
     files: &OwnedFd,
     name: &CStr,
     owners: &Owners,
     group: u32,
-) -> Result<(), NativeError> {
+    records: &[Record],
+) -> Result<bool, NativeError> {
     let stat = lstat_at(files.as_raw_fd(), name).map_err(|error| {
         NativeError::command_failed(format!("cannot inspect an entry: {error}"))
     })?;
+    let first = &records[0];
+    if !(is_dir(&stat) || is_regular(&stat)) || is_dir(&stat) != first.d {
+        return Ok(false);
+    }
     let mut tree = HomeTree::default();
     let flags = if is_dir(&stat) { DIR_FLAGS } else { FILE_FLAGS };
     let fd = open_at(files.as_raw_fd(), name, flags)
@@ -2525,15 +2629,29 @@ fn convert_payload(
     let opened = fstat(fd.as_raw_fd()).map_err(|error| {
         NativeError::command_failed(format!("cannot inspect an entry: {error}"))
     })?;
-    if !same_inode(&opened, &stat) {
-        return Err(NativeError::forbidden(
-            "an entry changed while it was moved",
-        ));
+    let single = |stat: &libc::stat| is_dir(stat) || stat.st_nlink == 1;
+    if !same_inode(&opened, &stat)
+        || !single(&stat)
+        || !single(&opened)
+        || !is_recorded(first, fd.as_raw_fd(), &opened)
+    {
+        return Ok(false);
     }
     if is_dir(&stat) {
+        let planned: HashMap<&str, &Record> = records[1..]
+            .iter()
+            .map(|record| (record.p.as_str(), record))
+            .collect();
         walk_tree(&fd, owners, &mut tree, |visit, tree| {
             if let Some((fd, stat)) = visit.open() {
                 let (path, owner) = (visit.path, visit.owner);
+                // Entries added since the plan stay as they are.
+                if !planned
+                    .get(path)
+                    .is_some_and(|record| is_recorded(record, fd.as_raw_fd(), &stat))
+                {
+                    return Ok(());
+                }
                 convert_to(
                     fd.as_raw_fd(),
                     &stat,
@@ -2558,7 +2676,8 @@ fn convert_payload(
         group,
         &mut tree,
         true,
-    )
+    )?;
+    Ok(true)
 }
 
 /// The outcome of one entry of a batch.
@@ -2567,7 +2686,8 @@ fn convert_payload(
 pub struct TrashResult {
     pub id: String,
     /// `moved`, `already` (an earlier batch moved it), `missing` (no
-    /// payload) or `failed`.
+    /// payload), `changed` (the payload is not the planned entry any more:
+    /// it stays in the legacy recycle bin) or `failed`.
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -2707,6 +2827,7 @@ fn move_trash(
         moved: None,
     }];
     let mut moves = Vec::new();
+    let mut planned_records: HashMap<String, (Vec<Record>, libc::stat)> = HashMap::new();
     for (index, plan) in planned {
         let container = plan.entry.container.clone();
         let failed = |message: String| TrashResult {
@@ -2716,7 +2837,7 @@ fn move_trash(
             message: Some(message),
         };
         let pair = folders.entry(container.clone()).or_insert_with(|| {
-            trash_base(options, &home, container.as_deref())
+            trash_base(options, &home, container.as_deref(), Some(&owners))
                 .and_then(|base| ensure_trash(&base, container.as_deref(), &owners, &mut created))
                 .map_err(|error| error.message)
         });
@@ -2771,10 +2892,11 @@ fn move_trash(
                 id: plan.entry.id.clone(),
                 container: container.clone(),
                 name: name.clone(),
-                records: plan.records,
+                records: plan.records.clone(),
             }),
         });
-        moves.push((index, plan.entry, container, name, plan.stat));
+        planned_records.insert(plan.entry.id.clone(), (plan.records, plan.stat));
+        moves.push((index, plan.entry, container, name));
     }
     lines[0].created = created;
     if moves.is_empty() && lines[0].created.is_empty() {
@@ -2784,10 +2906,11 @@ fn move_trash(
     let batch = format!("{TRASH_PREFIX}{:04}.jsonl", batches.len() + 1);
     write_synced(&journal.dir, &batch, &lines)?;
 
-    for (index, entry, container, name, stat) in moves {
+    for (index, entry, container, name) in moves {
         let Some(Ok((files, info))) = folders.get(&container) else {
             continue;
         };
+        let (records, stat) = &planned_records[&entry.id];
         let from = cname(&entry.id)?;
         let to = cname(&name)?;
         let origin = match &container {
@@ -2813,7 +2936,7 @@ fn move_trash(
                 return Err(io_failed("write the trash info of", &name, error));
             }
         }
-        let still = lstat_at(legacy.as_raw_fd(), &from).is_ok_and(|now| same_inode(&now, &stat));
+        let still = lstat_at(legacy.as_raw_fd(), &from).is_ok_and(|now| same_inode(&now, stat));
         // An entry of a shared folder's bin keeps the folder's group.
         let group = match &container {
             Some(_) => fstat(files.as_raw_fd())
@@ -2821,22 +2944,48 @@ fn move_trash(
                 .unwrap_or(owners.gid),
             None => owners.gid,
         };
+        #[cfg(test)]
+        test_point(TestPoint::BeforeTrashMove, &legacy);
         let outcome = if still {
             rename_noreplace(legacy.as_raw_fd(), &from, files.as_raw_fd(), &to)
                 .map_err(|error| error.to_string())
                 .and_then(|()| {
-                    convert_payload(files, &to, &owners, group).map_err(|error| error.message)
+                    convert_payload(files, &to, &owners, group, records)
+                        .map_err(|error| error.message)
                 })
         } else {
-            Err("it changed".to_string())
+            Ok(false)
         };
         let result = match outcome {
-            Ok(()) => TrashResult {
+            Ok(true) => TrashResult {
                 id: entry.id.clone(),
                 status: "moved",
                 name: Some(name),
                 message: None,
             },
+            Ok(false) => {
+                // Not the payload that was planned: back where it was,
+                // unchanged.
+                let back = lstat_at(files.as_raw_fd(), &to).is_err()
+                    || rename_noreplace(files.as_raw_fd(), &to, legacy.as_raw_fd(), &from).is_ok();
+                let message = if back {
+                    let info_name = rast_base::storage::xdg_trash::info_name(&name);
+                    let _ = unlink_at(info.as_raw_fd(), &cname(&info_name)?, false);
+                    "it changed after it was planned; it stays in the legacy recycle bin"
+                        .to_string()
+                } else {
+                    format!(
+                        "it changed after it was planned and could not be moved back; it is \
+                         unchanged in the recycle bin as {name}"
+                    )
+                };
+                TrashResult {
+                    id: entry.id.clone(),
+                    status: "changed",
+                    name: None,
+                    message: Some(message),
+                }
+            }
             Err(message) => {
                 if lstat_at(files.as_raw_fd(), &to).is_err() {
                     // Nothing moved: give the name back.
@@ -2853,7 +3002,45 @@ fn move_trash(
         };
         results.insert(index, result);
     }
+    // A process that started during the batch (review F3) stops it here;
+    // the next batch finds the moved entries `already` there.
+    #[cfg(test)]
+    test_point(TestPoint::TrashBatchEnd, &legacy);
+    refuse_running(options, &account.identity)?;
     Ok(results.into_values().collect())
+}
+
+/// Places where a test changes the world in the middle of an operation
+/// (the operation must run on the test's thread).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TestPoint {
+    /// Before a payload moves out of the legacy recycle bin (open here).
+    BeforeTrashMove,
+    /// After the moves of a batch.
+    TrashBatchEnd,
+}
+
+#[cfg(test)]
+pub(crate) type TestHook = Box<dyn FnMut(TestPoint, &OwnedFd)>;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOOK: std::cell::RefCell<Option<TestHook>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_hook(hook: Option<TestHook>) {
+    TEST_HOOK.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(test)]
+fn test_point(point: TestPoint, dir: &OwnedFd) {
+    TEST_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().as_mut() {
+            hook(point, dir);
+        }
+    });
 }
 
 pub(crate) async fn home_migrate_trash(
@@ -2905,7 +3092,8 @@ pub struct HomeRollbackReport {
     /// Recorded entries that no longer exist.
     pub missing: Sample,
     pub steps: StepsReport,
-    /// Recycle bin entries moved back to the legacy recycle bin.
+    /// Recycle bin entries in the legacy recycle bin again (moved back now
+    /// or by an earlier run, or never moved).
     pub trash_restored: Vec<String>,
     /// Recycle bin entries that are gone (restored or deleted since).
     pub trash_gone: Vec<String>,
@@ -2930,9 +3118,22 @@ fn undo_trash(
         }
         for line in lines.iter().rev() {
             if let Some(moved) = &line.moved {
-                let gone =
-                    |report: &mut HomeRollbackReport| report.trash_gone.push(moved.id.clone());
-                let Ok(base) = trash_base(options, home, moved.container.as_deref()) else {
+                // Never moved (the batch stopped after its journal, or the
+                // payload changed and went back), or moved back by a
+                // rollback that stopped later: its row is restored either
+                // way (the CLI inserts it only when it is missing).
+                let id = cname(&moved.id)?;
+                let in_legacy = legacy
+                    .as_ref()
+                    .is_some_and(|legacy| lstat_at(legacy.as_raw_fd(), &id).is_ok());
+                let gone = |report: &mut HomeRollbackReport| {
+                    if !in_legacy {
+                        report.trash_gone.push(moved.id.clone());
+                    } else if !report.trash_restored.contains(&moved.id) {
+                        report.trash_restored.push(moved.id.clone());
+                    }
+                };
+                let Ok(base) = trash_base(options, home, moved.container.as_deref(), None) else {
                     gone(report);
                     continue;
                 };
@@ -2953,23 +3154,20 @@ fn undo_trash(
                         && is_dir(stat) == first.d
                 });
                 if here.is_none() {
-                    let id = cname(&moved.id)?;
-                    if lstat_at(legacy.as_raw_fd(), &id).is_ok() {
-                        // Never moved (the batch stopped after its journal):
-                        // only its info file, if made, is the migration's.
+                    if in_legacy {
+                        // Only its info file, if made, is the migration's.
                         remove_info(&trash, &moved.name)?;
-                    } else {
-                        gone(report);
                     }
+                    gone(report);
                     continue;
                 }
-                restore_payload(&files, &name, &moved.records, owners)?;
-                match rename_noreplace(
-                    files.as_raw_fd(),
-                    &name,
-                    legacy.as_raw_fd(),
-                    &cname(&moved.id)?,
-                ) {
+                if !restore_payload(&files, &name, &moved.records, owners)? {
+                    // Another entry with the same inode number: the
+                    // payload itself is gone.
+                    gone(report);
+                    continue;
+                }
+                match rename_noreplace(files.as_raw_fd(), &name, legacy.as_raw_fd(), &id) {
                     Ok(()) => {}
                     Err(error) => return Err(io_failed("move back", &moved.name, error)),
                 }
@@ -2978,7 +3176,7 @@ fn undo_trash(
             }
             // The folders the batch made, when they are empty again.
             for created in line.created.iter().rev() {
-                let Ok(base) = trash_base(options, home, created.container.as_deref()) else {
+                let Ok(base) = trash_base(options, home, created.container.as_deref(), None) else {
                     continue;
                 };
                 let (parent, name) = split(&created.path);
@@ -3004,13 +3202,14 @@ fn remove_info(trash: &OwnedFd, name: &str) -> Result<(), NativeError> {
     Ok(())
 }
 
-/// Give a payload back its recorded owners, modes and ACLs.
+/// Give a payload back its recorded owners, modes and ACLs. `Ok(false)`:
+/// the entry with its name is not the payload that moved (review F15).
 fn restore_payload(
     files: &OwnedFd,
     name: &CStr,
     records: &[Record],
     owners: &Owners,
-) -> Result<(), NativeError> {
+) -> Result<bool, NativeError> {
     let first = &records[0];
     let flags = if first.d { DIR_FLAGS } else { FILE_FLAGS };
     let fd = open_at(files.as_raw_fd(), name, flags)
@@ -3018,6 +3217,9 @@ fn restore_payload(
     let stat = fstat(fd.as_raw_fd()).map_err(|error| {
         NativeError::command_failed(format!("cannot inspect an entry: {error}"))
     })?;
+    if !is_recorded(first, fd.as_raw_fd(), &stat) {
+        return Ok(false);
+    }
     if first.d {
         let by_path: HashMap<&str, &Record> = records[1..]
             .iter()
@@ -3029,11 +3231,7 @@ fn restore_payload(
                 return Ok(());
             };
             match by_path.get(visit.path) {
-                Some(record)
-                    if dev_of(&stat) == record.dev
-                        && ino_of(&stat) == record.ino
-                        && is_dir(&stat) == record.d =>
-                {
+                Some(record) if is_recorded(record, entry.as_raw_fd(), &stat) => {
                     restore(entry.as_raw_fd(), &stat, record, owners)
                         .map_err(|error| io_failed("restore", visit.path, error))?;
                 }
@@ -3046,7 +3244,8 @@ fn restore_payload(
         })?;
     }
     restore(fd.as_raw_fd(), &stat, first, owners)
-        .map_err(|error| io_failed("restore", "a recycle bin entry", error))
+        .map_err(|error| io_failed("restore", "a recycle bin entry", error))?;
+    Ok(true)
 }
 
 struct RollingBack {
@@ -3070,7 +3269,7 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
         NativeError::command_failed(format!("cannot inspect the HOME: {error}"))
     })?;
     let home_record = journal.records[0].clone();
-    if home_record.dev != dev_of(&home_stat) || home_record.ino != ino_of(&home_stat) {
+    if !is_recorded(&home_record, home.as_raw_fd(), &home_stat) {
         return Err(NativeError::forbidden(
             "the HOME is not the folder the journal recorded",
         ));
@@ -3094,11 +3293,7 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
             return Ok(());
         };
         match by_path.remove(visit.path) {
-            Some(record)
-                if dev_of(&stat) == record.dev
-                    && ino_of(&stat) == record.ino
-                    && is_dir(&stat) == record.d =>
-            {
+            Some(record) if is_recorded(record, fd.as_raw_fd(), &stat) => {
                 restore(fd.as_raw_fd(), &stat, record, &owners)
                     .map_err(|error| io_failed("restore", visit.path, error))?;
                 restored += 1;
@@ -3107,17 +3302,40 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
                 if found.is_some() {
                     changed.add(visit.path);
                 }
-                // Made after the migration: the service serves it again.
-                if visit.owner.0 == owners.uid {
-                    owners
-                        .chown(fd.as_raw_fd(), &stat, owners.rast, home_record.gid)
-                        .map_err(|error| io_failed("chown", visit.path, error))?;
-                    returned.add(visit.path);
-                }
+                // Made after the migration, or changed since: the service
+                // serves it again, as the legacy File Station would have
+                // made it (review F5).
+                to_legacy(fd.as_raw_fd(), &stat, visit.owner, &owners, home_record.gid)
+                    .map_err(|error| io_failed("reset", visit.path, error))?;
+                returned.add(visit.path);
             }
         }
         Ok(())
     })?;
+    // The identity can reach a legacy HOME again (the 0.18.3 grant), so
+    // nothing in it may stay the identity's. RAST never deletes them: the
+    // administrator moves them out and runs the rollback again, which
+    // continues from here (review F5).
+    if tree.identity_unvisited.count > 0 {
+        return Err(NativeError::identity_conflict(format!(
+            "the HOME holds {} link(s), special file(s) or file(s) with several links of {}, \
+             which a legacy HOME must not keep: {}{}; move them out of the HOME and run the \
+             rollback again",
+            tree.identity_unvisited.count,
+            account.identity.username,
+            tree.identity_unvisited
+                .paths
+                .iter()
+                .map(|path| show(path))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if tree.identity_unvisited.count > tree.identity_unvisited.paths.len() as u64 {
+                ", …"
+            } else {
+                ""
+            },
+        )));
+    }
     report.restored = restored;
     report.returned = returned;
     report.changed_since = changed;
@@ -3133,6 +3351,31 @@ fn rollback_tree(options: &NativeOptions, account: &Account) -> Result<RollingBa
     })
 }
 
+/// Give an entry the journal has no record of to the service (`gid`: the
+/// group of the legacy HOME) with the modes the legacy File Station makes:
+/// no ACLs, 0755 for folders and executable files, else 0644.
+fn to_legacy(
+    fd: RawFd,
+    stat: &libc::stat,
+    owner: (u32, u32),
+    owners: &Owners,
+    gid: u32,
+) -> io::Result<()> {
+    if owner.0 != owners.rast || owner.1 != gid {
+        owners.chown(fd, stat, owners.rast, gid)?;
+    }
+    acl::remove(fd, acl::ACCESS_XATTR)?;
+    if is_dir(stat) {
+        acl::remove(fd, acl::DEFAULT_XATTR)?;
+    }
+    let mode = if is_dir(stat) || stat.st_mode & 0o100 != 0 {
+        0o755
+    } else {
+        0o644
+    };
+    fchmod(fd, mode)
+}
+
 /// Restore the HOME itself and mark the journal as rolled back.
 fn finish_rollback(
     options: &NativeOptions,
@@ -3140,12 +3383,14 @@ fn finish_rollback(
     stamp: &str,
     record: &Record,
 ) -> Result<(), NativeError> {
+    // As in `finish` (review F3): the next run continues the rollback.
+    refuse_running(options, &account.identity)?;
     let owners = Owners::of(options, &account.identity)?;
     let (_, home) = account.open_home(options)?;
     let stat = fstat(home.as_raw_fd()).map_err(|error| {
         NativeError::command_failed(format!("cannot inspect the HOME: {error}"))
     })?;
-    if record.dev != dev_of(&stat) || record.ino != ino_of(&stat) {
+    if !is_recorded(record, home.as_raw_fd(), &stat) {
         return Err(NativeError::forbidden(
             "the HOME is not the folder the journal recorded",
         ));
@@ -3182,6 +3427,9 @@ pub(crate) async fn home_migrate_rollback(
     if passwd.home != account.identity.home {
         set_passwd_home(options, &account.identity, &account.identity.home).await?;
     }
+    // Before the HOME step: the journal is renamed there, and a later run
+    // would find nothing to roll back.
+    let jobs = deny_jobs(options, &account, false).await?;
     let (opts, acc, stamp, record) = (
         options.clone(),
         account.clone(),
@@ -3201,6 +3449,7 @@ pub(crate) async fn home_migrate_rollback(
         "journal": rolling.journal,
         "stopped": stopped,
         "report": rolling.report,
+        "jobs": jobs,
     }))
 }
 

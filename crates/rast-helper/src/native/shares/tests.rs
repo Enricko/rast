@@ -1629,8 +1629,12 @@ async fn session_groups_name_the_share_groups_processes_carry() {
         reply,
         json!({
             "users": [
-                {"userId": 3, "processes": 2, "gids": [1_200_001, 1_200_002, 1_200_003]},
-                {"userId": 4, "processes": 1, "gids": []},
+                // Processes 106 to 109 run as user 3's identity outside
+                // user 3's units, and 106 also as user 4's (review F3).
+                {"userId": 3, "processes": 2, "gids": [1_200_001, 1_200_002, 1_200_003],
+                 "outsideProcesses": 4, "outsideGids": [1_200_004]},
+                {"userId": 4, "processes": 1, "gids": [],
+                 "outsideProcesses": 1, "outsideGids": [1_200_004]},
             ],
             // A gid of the range without a share group has no name.
             "groups": {"1200001": RW, "1200002": RO},
@@ -1642,6 +1646,52 @@ async fn session_groups_name_the_share_groups_processes_carry() {
             .unwrap_err();
         assert_eq!(error.code, "invalid_request");
     }
+}
+
+#[tokio::test]
+async fn processes_outside_rast_units_are_named_as_holders() {
+    // Review F3: a cron job of user 3's identity still carries the group of
+    // a shared folder it lost; RAST cannot restart it, but the helper names
+    // it so the server keeps the folder denied.
+    let mut fx = fixture();
+    fx.ensure_groups().await;
+    let proc = fx.root().join("proc");
+    let uid = identity_ids(&fx.options.validation_context(), 3)
+        .unwrap()
+        .uid;
+    for (pid, uids, cgroup) in [
+        (
+            "200",
+            format!("{uid}\t{uid}\t{uid}\t{uid}"),
+            "0::/system.slice/cron.service",
+        ),
+        // Only the saved uid is the identity's.
+        (
+            "201",
+            format!("1000\t1000\t{uid}\t1000"),
+            "0::/system.slice/atd.service",
+        ),
+    ] {
+        std::fs::create_dir_all(proc.join(pid)).unwrap();
+        std::fs::write(
+            proc.join(pid).join("status"),
+            format!("Name:\tsleep\nUid:\t{uids}\nGroups:\t1200002 27\n"),
+        )
+        .unwrap();
+        std::fs::write(proc.join(pid).join("cgroup"), format!("{cgroup}\n")).unwrap();
+    }
+    fx.options.test_proc_dir = Some(proc);
+    let reply = share_session_groups(&fx.options, ShareSessionGroupsOp { user_ids: vec![3] })
+        .await
+        .unwrap();
+    assert_eq!(
+        reply,
+        json!({
+            "users": [{"userId": 3, "processes": 0, "gids": [],
+                       "outsideProcesses": 2, "outsideGids": [1_200_002]}],
+            "groups": {"1200002": RO},
+        })
+    );
 }
 
 #[tokio::test]
