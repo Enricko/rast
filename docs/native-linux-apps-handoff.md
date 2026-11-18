@@ -89,15 +89,17 @@ rast-native.service (root: `rast native-helper`)
   running session; a restart of `rast.service` adopts the still-running units
   (state is persisted in `linux_sessions`/`linux_runs`, and systemd units are
   adopted by name), so a web-server restart does not kill applications.
-  Restarting `rast-native.service` stops all sessions (they are restarted
-  lazily).
+  Restarting `rast-native.service` does not stop sessions or apps either:
+  they are transient units in `rast-linux.slice`, not children of the helper
+  (see Recovery). Only helper-backed actions (launch, close, install) fail
+  while it is down.
 * **Limits**: session and application units get `MemoryMax`, `CPUQuota`,
   `TasksMax` from `linux_session_*`/`linux_app_*` inside `rast-linux.slice`.
   Admission checks `/proc/meminfo` `MemAvailable` against the app limit plus
   `linux_admission_reserve_mb` (replacing the old unconditional 4 GiB check).
 * **Window integration**: the frontend embeds the pinned Xpra HTML5 client once
   per user in a same-origin iframe. A shim injected by `native_proxy`
-  (`src/linux_apps/xpra_shim.js`) captures the client, hides its chrome and
+  (`crates/rast-server/src/xpra_shim.js`) captures the client, hides its chrome and
   exposes a narrow API (`window.RASTNative`) with the remote window list and
   commands. `frontend/src/shell/xpra-native.ts` adopts each remote window's DOM
   node into a RAST window body (no per-window pixel copy and no second
@@ -181,7 +183,7 @@ Rust server:
 | `src/linux_apps/native_proxy.rs` | Same-origin HTTP/WebSocket proxy with per-user authorization, shim serving/injection, CSP |
 | `src/linux_apps/native_apps.rs` | Native install/update/uninstall/migration service: previews, `.deb` via helper, archive/AppImage handling, package ownership, profiles, migration |
 | `src/linux_apps/native_archive.rs` | Path-safe archive extraction, `.desktop` parsing, launcher/icon discovery |
-| `src/linux_apps/native_proxy` shim | `src/linux_apps/xpra_shim.js` served to the session page |
+| `src/native_proxy` shim | `crates/rast-server/src/xpra_shim.js` served to the session page |
 | `src/native/*` | Privileged helper: protocol, client, daemon, identities, deployment; `src/native/firewall.rs` adds the nftables display-port restriction and reconciliation |
 | `src/api/users.rs` | Account deactivation stops that person's native sessions |
 | `tests/native_linux_e2e.rs`, `tests/e2e/*` | Authorization/lifecycle tests and the real-browser E2E harness (13 native scenarios, XSS/revocation checks) |

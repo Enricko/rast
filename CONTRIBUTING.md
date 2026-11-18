@@ -19,6 +19,10 @@ Prerequisites:
   [`rust-toolchain.toml`](rust-toolchain.toml) and installed automatically by
   `rustup` when you enter the directory;
 * Node.js **>= 22** and npm **>= 10** — only to build the frontend;
+* for the Leptos UI (`crates/rast-ui`): the `wasm32-unknown-unknown` target
+  (`rustup target add wasm32-unknown-unknown`) and Trunk 0.22
+  (`cargo install trunk --locked --version '~0.22'`); a release build fails
+  without them (debug builds, clippy and tests do not need them);
 * `sqlite3` CLI (optional, useful for inspecting dev databases).
 
 ```bash
@@ -28,6 +32,10 @@ rustup show                        # installs the pinned toolchain if needed
 
 # Build the frontend once (it is embedded by rust-embed)
 (cd frontend && npm ci && npm run build)
+
+# Build the Leptos/WASM UI (embedded the same way; needed for release builds)
+scripts/build-ui.sh
+scripts/check-wasm-size.sh
 
 # Build and run the server against throw-away directories
 source scripts/dev-source-env.sh
@@ -65,8 +73,8 @@ CI (and `cargo`-based review) runs:
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
 ```
 
 Additionally, packaging changes are checked with:
@@ -97,6 +105,10 @@ needs tests; bug fixes should add a regression test where practical.
 * Build: `cd frontend && npm ci && npm run build` (runs `tsc --noEmit` and
   produces `frontend/dist`, which is embedded into the binary — never edit
   `frontend/dist` by hand and never commit it; it is git-ignored).
+* The Leptos/WASM UI lives in `crates/rast-ui` and is built by
+  `scripts/build-ui.sh` (Trunk) into `crates/rast-ui/dist`, which is embedded
+  under `/ui/` and git-ignored like `frontend/dist`. `scripts/check-wasm-size.sh`
+  enforces the size budget in `crates/rast-ui/wasm-budget.txt`. See ADR 0003.
 * The installed server never needs Node.js; npm is a build-time tool only.
 * Keep the UI dependency-free unless there is a strong reason; new
   dependencies must be added to `package-lock.json` via `npm install` and are

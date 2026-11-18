@@ -9,6 +9,613 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+## [1.0.1] - Unreleased
+
+### Added
+
+- **E2E app matrix:** the `app-matrix` scenario (`node tests/e2e/run.mjs
+  --scenario=app-matrix`) runs the five app checks (launcher, RAST window,
+  typing, saved file visible in File Station, normal close) for Chrome,
+  Firefox, VS Code and LibreOffice, with typing, scroll and window-drag
+  responsiveness budgets, against the dev instance or against production
+  with a `t-` test account only.
+
+- **About RAST (Leptos)** app: the first window rendered by the new
+  `crates/rast-ui` crate (Leptos, compiled to WebAssembly and built with
+  Trunk). It shows the product name and version; the WASM module is fetched
+  from `/ui/` only when the window is first opened. See
+  `docs/adr/0003-rast-ui-leptos.md`.
+
+- **Per-user file agent (one HOME, ADR 0005), groundwork.** No account is
+  switched by this version; the HOME migration comes later.
+  - New privileged helper operations: `home_ensure` (prepares
+    `<storage>/homes/<username>` as the person's own Linux account's 0700
+    HOME with `~/.config`, `~/.cache` and `~/.local/…`, and sets it as the
+    account's home), `files_agent_start` and `files_agent_stop` (the
+    socket-activated unit `rast-files-u<uid>`, running as `rast-u<id>`).
+    Removing a Linux identity, or deactivating the account, also stops its
+    file agent.
+  - New hidden subcommand `rast file-agent`: File Station over one HOME,
+    with the same safe-path checks and JSON shapes, `writable` from the
+    Linux account, and a realtime stream of changes in the visible tree.
+    `/shared/<name>` is the container that the server reads from its
+    database and sends in a header only the server sets; the agent opens it
+    directly below the shared root, checks its owner and group, and never
+    follows `~/Shared/<name>` links (they are for apps).
+  - File Station forwards the requests of a one-HOME account (HOME owned by
+    its Linux identity, `native_enabled` on) to that account's agent after
+    the usual session, CSRF, path, shared-folder access, quota and audit
+    checks. `503` when the agent cannot be started. Legacy accounts are
+    unchanged.
+  - Hardening from the task 1.2 security review: chunked uploads of such
+    accounts have the in-process limits (8 at a time per account, 64 in
+    all, then `429`); downloads, previews and other streamed agent replies
+    reach the browser with the agent's file headers only, and the server
+    sets `X-Content-Type-Options: nosniff` and a sandboxing CSP itself; the
+    agent cannot be traced by the account's other processes; `home_ensure`
+    never takes over a folder that was swapped in while it was being
+    created.
+  - The file agent works through directory descriptors: every path is
+    opened below HOME or the shared folder with `openat2`
+    (`RESOLVE_BENEATH`, no symlinks; below a shared folder also
+    `RESOLVE_NO_XDEV`, so a mount inside a shared folder, such as a
+    member's FUSE mount, is never entered; searches, sizes, copies and
+    removals below a shared folder also leave out every entry on another
+    file system), new files are created with
+    `O_EXCL | O_NOFOLLOW`, and copy, move and upload keep the folders they
+    checked open. A symlink that another member of a shared folder swaps in
+    during an operation can no longer make the agent copy the account's own
+    files (`~/.ssh`) into the share or write into `~/.config/autostart`.
+  - Starting one account's file agent no longer holds up the File Station
+    requests of other accounts. Copy and move jobs and other forwarded
+    requests report the agent's `403`, `404`, `413`, `415` and `429` as
+    such (they were `400`). When an agent's socket unit was restarted with a
+    new token, the server asks the helper again once instead of answering
+    `403` until it restarts; an upload interrupted this way gets `503`.
+  - Files that the agent uploads or copies into a shared folder are
+    read-write for the folder's members (0660, 0770 for executables)
+    instead of keeping 0644 or the source's bits, which would have taken
+    write access away from the other members once shared folders use Linux
+    groups. A move between HOME and a shared folder, or between two shared
+    folders, is a copy followed by a delete, so the moved files get the
+    destination's group and permissions; moves inside one folder tree are
+    still renames.
+
+- **Shared folders as Linux groups (ADR 0005, task 1.3).**
+  - New privileged helper operations: `share_group_ensure`,
+    `share_group_remove` and `share_members_set` (one read-write group
+    `rast-s<h>-rw` and one read-only group `rast-s<h>-ro` per shared
+    folder, with gids from `linux_uid_base + 1000001` to
+    `linux_uid_base + 1999999`; members are replaced as a whole with
+    `gpasswd -M`, at most 8 000 per group; an account `rast-u<id>` whose
+    uid is not the identity's is never added, is taken out of the groups
+    and is reported, while the other members are still set, and
+    `rast doctor` lists such accounts); `share_dir_prepare` (the
+    container becomes `root:rast-s<h>-rw` 2770 with the ACL
+    `g:rast-s<h>-ro:r-x`, `u:rast:rwx` and the same default ACL, and with
+    `recursive` every folder and file in it gets the group, group write
+    and the ACL); `share_dir_remove`; and `shares_migrate_scan`,
+    `shares_migrate_apply` and `shares_migrate_rollback` for
+    `rast migrate shares`. None takes a path: containers are one folder
+    name in `<storage>/shared`.
+  - Further helper operations: `share_dir_repair` (the recursive prepare
+    of a container that already has the layout; legacy containers are
+    left for the migration), `share_deny_set` (the exact set of
+    `u:rast-u<id>:---` entries on a prepared container, at most 256,
+    which every prepare keeps) and the read-only `share_session_groups`
+    (which share groups the running processes of up to 200 users carry,
+    from `/proc/<pid>/status`). Only processes in the user's own units
+    (session, file agent, apps, terminals, from `/proc/<pid>/cgroup`)
+    whose real and effective uid are the identity count, so a set-uid
+    program of one user run by another no longer makes the first user's
+    session restart again and again; both files are read through one
+    descriptor of `/proc/<pid>`, so a reused pid is never read as the
+    process it replaced.
+  - The helper walks shared folders through directory descriptors and
+    changes entries with `fchown`, `fchmod` and `fsetxattr` on the open
+    descriptor, so a member who swaps an entry for a symlink cannot point
+    root anywhere else. Symlinks, special files, files with more than one
+    hard link, entries owned by root, entries owned by any account other
+    than `rast` and the RAST identities (such as a file another account
+    owns that was hard-linked in and whose original was since removed) and
+    other file systems and mounts are left unchanged and reported. Mounts
+    are told apart by mount id (`statx`, Linux 5.8 or later), so a bind
+    mount on the same file system inside a shared folder is never entered
+    or emptied, a container that is itself a mount point is refused, and
+    removing a shared folder stops at a mount point inside it. Operations
+    on one shared folder's container never overlap: each holds a per-share
+    lock in the helper (`share_busy` after 10 seconds, retried by the
+    server), and the migration apply and rollback also hold a `flock` in
+    the share's journal folder, so a rollback never runs beside an apply
+    whose CLI was killed. A walk holds at
+    most 1 000 000 names at a time: a member's folder with more names is
+    refused before they fill the helper's memory.
+  - `shares_migrate_apply` writes a journal of every group, mode and ACL
+    to `<data_dir>/migrations/shares/<shareId>/<stamp>/journal.jsonl`
+    (root, 0700/0600) and syncs it before changing anything; an apply that
+    stopped half way resumes with that journal. The rollback reads the
+    journal as untrusted input (root-owned folders only, no root owner or
+    group, set-uid bits dropped) and restores only entries that are still
+    the recorded inode with the recorded owner.
+
+- **`rast migrate shares` (ADR 0005, section 8).** Moves the shared folders
+  of an existing install to the group layout, before `rast migrate home`.
+  Run it as the service user: `sudo -u rast rast migrate shares --dry-run`
+  reports per shared folder what would change (entries, skipped symlinks,
+  hard-linked files, root-owned entries, old per-user ACL entries, and
+  every entry whose ACL holds entries RAST does not manage, with those
+  entries, since the apply replaces the whole ACL) and may
+  run while the server runs; `rast migrate shares` (apply) and
+  `rast migrate shares --rollback` need the server stopped. Every mode takes
+  `--share <name>` (one shared folder) or `--all` (every one), `--json`
+  gives a machine-readable report.
+  Each shared folder is migrated on its own and a failure does not stop the
+  others (exit code 1). The apply writes a journal first and resumes an
+  interrupted run; the rollback restores owners, modes and ACLs from it.
+  The rollback never restores set-uid bits, nor set-gid bits of regular
+  files (set-gid on folders is restored), and lists every entry that lost
+  a bit; the full list is kept next to the journal
+  (`<stamp>.rolled-back/dropped-bits.txt`). The command and the server's
+  repair pass wait up to an hour per shared folder for the helper (they
+  gave up after 15 seconds while the helper went on working, so a large
+  share was reported as failed in the middle of its apply).
+  Creating groups and setting their members waits up to two minutes.
+
+- **`rast migrate home` (ADR 0005, section 8, task 1.5).** Moves a legacy
+  account into one-HOME mode: its HOME, app data and recycle bin become its
+  Linux account's (`rast-u<id>`). Run it as the service user, after
+  `rast migrate shares`, for one account at a time
+  (`sudo -u rast rast migrate home --user <name> [--dry-run | --rollback]`)
+  or, only when asked, for every account (`--all`); `--json` gives a
+  machine-readable report.
+  - `--dry-run` (the server may run) reports the size of the HOME (and on
+    disk), the entries that change owner, the ACL entries of RAST
+    identities that are removed (the read grant of 0.18.3,
+    `u:rast-u<id>:rx` and `d:u:rast-u<id>:rx`, and terminal grants), other
+    ACL entries (kept), hard-linked files, links and mount points (left as
+    they are), the app data that is merged into the HOME per app, its
+    conflicts, the legacy recycle bin, the projected usage against the
+    quota, `~/Shared` name collisions, a stray `homes/rast-u<id>` folder,
+    running units and processes, and the shared folders that still need
+    `rast migrate shares`.
+  - The apply (server stopped) stops the account's session, apps,
+    terminals and file agent, refuses while a process of `rast-u<id>`
+    still runs or a shared folder the account can open is not migrated,
+    and writes a journal of every entry's owner, group, mode and ACLs and
+    of every move to `<data_dir>/migrations/home/<userId>/<stamp>/` (root,
+    0700/0600, synced) before it changes anything. It then gives the HOME's
+    entries to `rast-u<id>`, removes the identity ACL entries, merges the
+    legacy identity home and the app profiles into the HOME **per file**
+    (`config` → `~/.config`, `data` → `~/.local/share`, `state` →
+    `~/.local/state`, `cache` → `~/.cache`, `home` → `~/`; an entry the
+    HOME already has stays where it was and is reported), sets the passwd
+    home, and gives the HOME itself to the account last (0700, no ACL). The
+    legacy recycle bin moves into XDG Trash (`~/.local/share/Trash`, or the
+    shared folder's `.Trash-<uid>`) in batches; its rows are saved below
+    `<data_dir>/migrate-home/<userId>/` first. An interrupted run resumes
+    from its journal; a second run changes nothing and leaves the session
+    running. Hard-linked files are never given away and no link is ever
+    followed.
+  - `--rollback` (server stopped) moves the recycle bin and the merged app
+    data back, restores the recorded owners, modes and ACLs (the 0.18.3
+    grant included), gives entries made since to the service, and sets the
+    passwd home and the recycle bin rows back.
+  - New privileged helper operations `home_migrate_scan`,
+    `home_migrate_apply`, `home_migrate_trash` and `home_migrate_rollback`
+    take a user id and the HOME's name only; journals are read back as
+    untrusted input (no root owner, set-uid bits dropped).
+
+- **Shared folder groups follow Effective Access (ADR 0005, task 1.3).**
+  With the native backend, the server recomputes the members of every
+  shared folder's `rast-s<h>-rw` and `rast-s<h>-ro` groups whenever access
+  rules, groups, shares or accounts change (and every five minutes), from
+  Effective Access: write or admin → read-write group, read → read-only
+  group, deny, no access or a deactivated account → neither.
+  Administrators are in every read-write group. Only accounts that have a
+  Linux identity are members. A shared folder whose groups the helper
+  refuses is logged and skipped; the others are still updated, and their
+  revocations still restart sessions (one such folder used to stop every
+  update after it, so revoked members kept the groups of later folders).
+  - A new shared folder gets its groups and a `root:rast-s<h>-rw` 2770
+    container; a deleted one gets its container back as `rast:rast` 0700
+    (the data stays) and loses its groups.
+  - On any change the user's file agent restarts at once and the
+    `~/Shared/<name>` links of a one-HOME account are updated by the agent
+    (it only adds or removes links into the shared root; anything else in
+    `~/Shared` is left alone).
+  - Running apps and terminals keep the groups they started with: when
+    access is revoked they restart after a 60-second warning in the
+    desktop; when access is granted the desktop offers "Restart session
+    now". New endpoints `GET` and `POST /api/session/restart`, and the
+    `session.restart` and `session.restarted` events.
+  - While a revocation waits for its restart, every shared folder the
+    person lost entirely denies them by name (`u:rast-u<id>:---` on its
+    container), so new paths into it fail at once; the entry goes after
+    the restart or when access is granted again. A move from write to read
+    gets no entry; a move from read to write is no longer treated as a
+    revocation.
+  - A repair pass applies the group layout again to every migrated shared
+    folder when the server starts (so after every `rast migrate shares`)
+    and then daily: entries that kept a foreign group or mode (renamed in
+    from HOME, `chgrp`, `cp -p`, or moved in by the legacy in-process File
+    Station) get the rw group, group write and the ACL back. It logs each
+    shared folder where it changed entries or removed ACL entries that RAST
+    does not manage. File permissions inside a shared folder are therefore
+    managed by RAST: a member's `chmod 600` there is undone by the next
+    pass, so private files belong in HOME (documented in
+    `docs/NATIVE-LINUX-APPS.md` and `docs/OPERATIONS.md`).
+  - At start-up and every five minutes the server asks the helper which
+    share groups the running processes of each account carry. A session
+    that still holds a group its account lost (because the server
+    restarted during the warning, or a process survived the restart, or
+    the account was deactivated) is warned and restarted again.
+
+- **XDG Trash for one-HOME accounts (ADR 0005, task 1.4).** File Station's
+  recycle bin of an account with one HOME is the freedesktop Trash its
+  Linux apps use: `~/.local/share/Trash`, and `.Trash-<uid>` (private to
+  the person) at the top of a shared folder for deletions there. Entries
+  that apps trashed are listed and can be restored; what File Station
+  deletes appears in the apps' trash. `.trashinfo` files are treated as
+  untrusted: an entry goes back only to a place below HOME or below a
+  shared folder the person may write, and otherwise to the top of HOME (or
+  of the shared folder whose trash holds it). Names starting with `.Trash`
+  are reserved at the top of a shared folder, and those folders are hidden.
+  The usage view of such an account scans HOME and shows where the space
+  goes (files, apps, caches, recycle bin, shared folders).
+
+- **Quota backends (ADR 0005, task 1.4).** New helper operations
+  `quota_status`, `quota_set`, `share_quota_set` and `quota_report`
+  (`quotactl_fd`, ids only, never a path). When the homes filesystem has
+  user quota, one-HOME accounts get kernel limits (soft = quota, hard =
+  soft + max(5 %, 1 GiB), none for administrators) that limit every app
+  and Terminal too, and their usage comes from the kernel. Without kernel
+  quota RAST keeps its own accounting (File Station and App Center only)
+  and refreshes it from a HOME scan. `GET /api/files/usage` gains the
+  additive `byLocation` and `quotaBackend`, `GET /api/settings/storage` a
+  `quota` summary; `rast doctor` reports the filesystems, quota states,
+  grace times and the backend. RAST never turns quota on.
+
+- **Shared folder size limits (migration 0015).** Control Panel → Shared
+  folders has a "Size limit" (none by default). RAST checks it for File
+  Station uploads, copies, moves into the folder and restores from a
+  recycle bin (`413` "the shared folder's size limit would be exceeded",
+  nothing written); uploads hold their bytes while they run, and the
+  members' recycle bins in the folder count (new read-only helper
+  operation `share_trash_usage`). With group quota on the shared
+  filesystem the folder's read-write group also gets a kernel limit. Each
+  limited folder shows what enforces it: "filesystem, best effort" or
+  "RAST only". `/api/shares` gains the additive `quotaBytes` and
+  `quotaEnforcedBy`.
+
+- **Recycle bin folders in shared folders that are not their owner's.** A
+  `.Trash-<uid>` that another member made first (a link, a file or a
+  folder of someone else) is never used: that member's deletions there
+  answer `403` with a message to ask an administrator. The daily repair
+  pass logs such folders and `rast doctor` lists them; RAST does not
+  change them (see `docs/OPERATIONS.md`).
+
+- **File Station: "Show hidden files".** A new toolbar button next to the
+  list and grid view buttons shows or hides files and folders whose names
+  start with a dot. They are hidden by default (a one-HOME HOME holds
+  `~/.config`, `~/.cache` and `~/.local`), and the choice is remembered in
+  the browser. The folder picker always hides them. The API gained an
+  optional `hidden=false` parameter on `GET /api/files` and
+  `GET /api/files/search`; without it responses are unchanged.
+
+- **Native pilot (ADR 0007).** New optional configuration key
+  `native_pilot_prefixes` (env `RAST_NATIVE_PILOT_PREFIXES`, comma
+  separated), for example `["t-"]`. When set, the native features are
+  limited to accounts whose username, and shared folders whose name and
+  container, start with one of the prefixes; `[]` means nobody, and
+  without the key nothing changes. Outside the pilot, administrators
+  included: no Linux apps of any backend (the list is empty and
+  `linuxAppsEnabled`, `nativeEnabled` and `dockerEnabled` are `false`, the
+  management routes answer `403`, every other `/api/linux-apps*` route and
+  the Xpra proxy `404`, and no session is started), no one-HOME mode, no
+  Linux groups, no kernel quota and no helper call that names the account
+  or the shared folder. `rast migrate shares` and `rast migrate home` still
+  report everything with `--dry-run` (entries outside the pilot are
+  marked), refuse apply and `--rollback` of a `--share` or `--user` outside
+  it (exit code 1, nothing changed), and with `--all` cover only the pilot
+  (the others are listed as skipped). A shared folder renamed across the
+  boundary leaves the pilot and RAST leaves its container and groups as
+  they are. Terminal is unchanged. `rast doctor` and the server log at
+  start show the pilot. See "Testing on production with the native pilot"
+  in `docs/OPERATIONS.md`.
+
+- **Backup reader (ADR 0005, D12).** Backup Center's `users` scope now
+  includes HOMEs in one-HOME mode and migrated shared folders. The native
+  helper starts a read-only root unit, `rast-backup-reader` (new helper
+  operation `backup_reader_start`, internal command `rast backup-reader`),
+  that streams one HOME or one shared folder to the backup with numeric
+  owners, modes and POSIX ACLs. Symbolic links are stored as links and
+  never followed; other file systems, FIFOs, sockets and devices are left
+  out; `~/.cache`, `~/.local/share/Trash`, `~/.local/share/flatpak` and a
+  shared folder's recycle bins are excluded. The archive's `manifest.json`
+  marks those entries `ownersPreserved` and lists their folders in
+  `preservedTrees`; the verify result (`rast restore --dry-run`, the verify
+  API) shows both. Legacy HOMEs and shared folders are read by the service
+  as before. Accounts and shared folders outside the native pilot (ADR
+  0007) are not read through the reader.
+
+- **`rast restore-files`** (root): restores the user files of a `users`
+  backup (`--dry-run`, `--tree users/homes/<name>`, `--target <new
+  folder>`, `--to-storage`, `--json`). It checks every entry before it
+  writes anything and refuses the whole run on one bad entry: only files,
+  folders and links; owners only for HOMEs in one-HOME mode and migrated
+  shared folders, checked against the database and the host's accounts,
+  never against the manifest; no set-uid or set-gid file; nothing written
+  through a link or over an existing folder. By default it restores into a
+  new root-only folder `<storage_dir>/restore-<time>`; `--to-storage`
+  (service stopped) adds only folders that do not exist. The restore guide
+  (`docs/OPERATIONS.md`, `GET /api/backups/restore-guide`) uses it instead
+  of `tar` as root.
+
+### Security
+
+- The Content-Security-Policy of the web UI now allows `'wasm-unsafe-eval'` in
+  `script-src` (needed to compile WebAssembly). It does not allow JavaScript
+  `eval`, inline scripts or external hosts; everything else is unchanged.
+- The database (`rast.db` and its WAL files) and the master key
+  (`secret.key`) move into `<data_dir>/private` (`0700`), and `backups/` is
+  `0700` (ADR 0006). The data directory stays traversable for native app
+  identities and package users, so any account could name files directly
+  in it and, with `fs.protected_hardlinks = 0`, hard-link them into a
+  folder it owns. `rast doctor` warns when `fs.protected_hardlinks` is not
+  `1`, lists files that still wait for the move and fails on a conflict.
+- Phase 1 security review (task 1.6):
+  - F1: restoring user files with `tar` as root trusted owners, set-id
+    bits, device nodes and `preservedTrees` from an archive that the
+    `rast` service writes, so code running as `rast` could become root at
+    the next restore. The guide now uses `rast restore-files`, which trusts
+    none of it.
+  - F6: the backup reader streamed files of any owner below a HOME or a
+    shared folder (a hard link to a root-only file, on a host with
+    `fs.protected_hardlinks = 0`). It now stores only entries of the
+    folder's identity (any RAST identity in a shared folder) and of the
+    service; others are left out with a warning.
+  - F7: a sparse file could make a `users` backup arbitrarily large. The
+    reader leaves out sparse files once a folder's holes pass 1 GiB; each
+    folder stops at its quota plus max(10 %, 2 GiB) with an `incomplete`
+    warning; a `users` backup stops when the backup disk has less than
+    1 GiB free.
+  - F12: the backup reader lets the service read every one-HOME HOME and
+    migrated shared folder (ADR 0005, D12). This is now stated in ADR 0005
+    and the security invariants, and every folder the reader serves is
+    logged (`rast::backup_reader::audit` in the reader unit's journal).
+  - F2: with the native pilot, uninstalling a Linux app "with its data"
+    removed the settings of every account. It now removes those of pilot
+    accounts only (App Center says how many kept theirs, reply field
+    `keptOutsidePilot`); migrating or cleaning up a legacy Docker app, and
+    uninstalling a Docker app with its data, answer `409` while accounts
+    outside the pilot have data for it.
+  - F3: processes that cron or `at` start run outside RAST units. While
+    one of them carries the group of a shared folder its user lost, the
+    folder stays denied to that user (also after the session restart) and
+    the server logs it. `rast migrate home` checks again for processes of
+    the account before the HOME changes hands, at the end of every recycle
+    bin batch and before the HOME step of a rollback, and stops with the
+    journal kept. Accounts in one-HOME mode are listed in `/etc/cron.deny`
+    (and `/etc/at.deny` when it exists); a rollback takes them out, the
+    apply warns about an existing crontab, and `rast doctor` names one-HOME
+    identities that are missing.
+  - F4: a folder swapped in for a new recycle bin folder during
+    `rast migrate home` was given to the account; such a folder is now
+    refused, and a shared folder's recycle bin is only made in a container
+    with the group layout.
+  - F5: a rollback of `rast migrate home` left entries made in one-HOME
+    mode with the account's modes and ACLs, and its links in the HOME. Such
+    entries now get the modes the legacy File Station makes (0755/0644, no
+    ACLs), and links, special files and hard links of the account stop the
+    rollback before the HOME step with a list. A rollback that stopped can
+    be run again and still puts the recycle bin rows back.
+  - F8: recycle bin entries of a shared folder the account can no longer
+    open stay in the legacy recycle bin.
+  - F9: with the native pilot, renaming a shared folder into or out of the
+    pilot is refused (`400`).
+  - F10: with the native pilot, dry runs of accounts and shared folders
+    outside it print counts and sizes only; `--show-paths` (new option of
+    `rast migrate shares` and `rast migrate home`) prints paths and ACL
+    entries too.
+  - F11: `rast doctor` warns when native apps are on without
+    `native_pilot_prefixes`; the runbook sets the pilot before
+    `native_enabled`.
+  - F13: `rast doctor` names one-HOME accounts outside the pilot or on a
+    server with native apps off (File Station cannot open their HOME);
+    roll them back first.
+  - F14: a recycle bin payload that changed after its batch was planned
+    (another file, or a file with several links) is no longer given to the
+    account; it stays in the legacy recycle bin (status `changed`).
+  - F15: journals of `rast migrate home` record the inode generation; a
+    rollback no longer restores an entry whose inode number was reused.
+  - F16: the legacy Docker display proxy refuses accounts outside the
+    native pilot.
+
+### Upgrade note
+
+- **Migration 0015** (`shares.quota_bytes`, nullable; existing shared
+  folders keep no limit). After it has run, a 0.18.x binary refuses to
+  start ("migration 15 previously applied but missing"): a rollback to
+  0.18.x needs the database backup taken before the upgrade (`rast update`
+  makes one), not only the old binary. See "Rollback" in
+  `docs/OPERATIONS.md`.
+
+- For one-HOME accounts the quota now counts everything in HOME: apps,
+  caches and the recycle bin (ADR 0005, D2). Legacy accounts are unchanged
+  until `rast migrate home`.
+
+- **`rast migrate home`** moves accounts into one-HOME mode, one at a
+  time; nothing switches by itself and new accounts still start in legacy
+  mode. Order: back up `/etc/rast`, `/var/lib/rast` and `/srv/rast`; run
+  `rast migrate shares --share <name>` for every shared folder the account
+  can open; then `rast migrate home --user <name> --dry-run`, and with the
+  server stopped `rast migrate home --user <name>`. `--rollback` (server
+  stopped) undoes it from the journal. Afterwards the account's apps share
+  one HOME (settings of an app that conflicted stay in its old profile and
+  are listed), its quota counts app data, caches and the recycle bin, and
+  Backup Center reads its HOME through the backup reader. Scripts that
+  call `rast migrate shares` without arguments must add `--all` (or
+  `--share <name>`).
+
+- Add `native_pilot_prefixes` to `/etc/rast/rast.toml` only **after**
+  updating to a release that knows it: an older release refuses to start
+  with an unknown key. Remove it before a rollback to such a release.
+  Update with `native_enabled = false`, add the key and restart, check that
+  `rast doctor` shows the pilot, and only then set `native_enabled = true`.
+  Before removing a prefix or turning native apps off, roll back the
+  one-HOME accounts it covers (`rast doctor` names stranded ones).
+
+- `rast migrate home` now edits `/etc/cron.deny` (and `/etc/at.deny` when
+  it exists) for the accounts it moves to one HOME: it adds or removes the
+  line `rast-u<id>` only, and creates `/etc/cron.deny` as `root:root 0644`
+  when it is missing. Its rollback removes the line.
+
+- The first start of 1.0.1 moves `rast.db` (with `-wal`/`-shm`) and
+  `secret.key` into `/var/lib/rast/private/` and logs it; nothing to do.
+  The old names stay as links into `private/`, so scripts and a downgrade
+  keep working. After a downgrade, a restore by the older release replaces
+  the link with a file: the server then refuses to start until you keep one
+  of the two files (see "The private data folder" in `docs/OPERATIONS.md`).
+
+- Packagers and anyone building from source: a release build
+  (`cargo build --release`) now also needs the Leptos UI, built with
+  `scripts/build-ui.sh` (Rust target `wasm32-unknown-unknown` and Trunk 0.22).
+  It fails with a clear message when `crates/rast-ui/dist` is missing. Debug
+  builds, `cargo clippy` and `cargo test` are unaffected. Installed servers
+  need nothing new.
+
+- **Restoring user files** from a `users` backup: use
+  `sudo rast restore-files --from <archive> --dry-run`, then a restore
+  into a new folder, then `--to-storage` with the service stopped (see
+  "Restoring user files from an archive" in `docs/OPERATIONS.md`). Do not
+  extract a backup with `tar` as root any more, and never run
+  `chown -R rast:rast` over the homes or shared folder; keep the same
+  `linux_uid_base` on a new host and restore the database first. Older
+  archives restore the same way (their folders come back as the
+  service's). The backup reader needs no setup: the helper starts it when
+  a backup needs it.
+
+- A `users` backup now needs 1 GiB free on the backup folder's disk and
+  stops with an error below it. A folder with a quota is backed up up to
+  its quota plus max(10 %, 2 GiB); sparse files beyond 1 GiB of holes per
+  folder and entries of other owners are left out, each with a warning.
+
+### Changed
+
+- **`rast migrate shares` needs `--share <name>` or `--all`** in every mode
+  (dry-run, apply, rollback). Without one it now stops with an error
+  instead of covering every shared folder, so a run never migrates
+  everything by default; `rast migrate home` takes `--user <name>` or
+  `--all` the same way.
+
+- Native apps and terminals of one-HOME accounts use the HOME: apps start
+  there with `HOME` set to it and without per-app profile folders, the
+  `RAST` link or the per-launch `setfacl -R` grant; terminals get no ACL
+  grant and may start in the HOME or a shared folder. Legacy accounts keep
+  their app profiles, the `RAST` link and the grant until they are
+  migrated.
+
+- Backups of the `users` scope say what they left out: the archive's
+  manifest and the job result list `warnings`, and Backup Center shows them
+  after a backup. Folders that cannot be read are listed instead of being
+  left out silently, and so is a HOME in one-HOME mode that the backup
+  reader cannot read (native Linux apps off, helper or reader failure, an
+  account outside the native pilot); back such a HOME up as root.
+- The restore guide (Backup Center and `docs/OPERATIONS.md`) extracts user
+  files as root with `tar --numeric-owner --same-owner --acls --xattrs`,
+  so HOMEs in one-HOME mode and migrated shared folders keep their owners
+  and ACLs, and gives only legacy folders back to `rast`, one by one,
+  instead of `chown -R rast:rast` over every HOME and shared folder.
+
+- New `crates/rast-api` crate holds the shared File Station DTOs
+  (`EntryDto`, `ListingDto`, `BreadcrumbDto`, `QuotaDto`; JSON unchanged).
+  `ts-rs` generates their TypeScript into `frontend/src/generated/` during
+  `cargo test -p rast-api`, the frontend uses the generated types, and CI fails
+  when the committed files are stale. `EntryDto::new` became
+  `EntryDtoExt::new` in `rast-base`.
+
+- Version 1.0.1 is used for the whole remake line (`Remake` branch) and is not
+  bumped per phase. Remake instructions and the prompt pack are in
+  `CLAUDE.md` and `docs/remake/PROMPTS.md`. Releases from this branch must be
+  marked pre-release until the final remake gate passes.
+- Release workflow: a version with a `-suffix` (such as `1.0.1-alpha.1`) is
+  always published as a pre-release, also from a pushed tag, and never
+  becomes the latest release; a version without a suffix is refused unless
+  its commit is on `main` (`scripts/release-check.sh`). Release notes for an
+  `X.Y.Z-suffix` version come from the `[X.Y.Z]` section when it has no
+  section of its own. Pre-releases of the remake are `1.0.1-alpha.N`.
+- The code is split into a Cargo workspace (`crates/rast-base`, `rast-docker`,
+  `rast-apps`, `rast-helper`, `rast-agent`, `rast-session`, `rast-server`);
+  the binary, its name, its output path and its behaviour are unchanged. See
+  `docs/adr/0002-workspace-layout.md`. Run `cargo clippy` and `cargo test` with
+  `--workspace`.
+- A full disk quota (`EDQUOT`) in File Station is now the usual `413`
+  "storage quota exceeded", and a full disk (`ENOSPC`) says "not enough disk
+  space on the server", instead of a generic filesystem error.
+- `cargo build --release` now fails when `frontend/dist/index.html` is missing
+  or is the build placeholder (build the frontend first:
+  `npm --prefix frontend run build`). CI, the release workflow and
+  `scripts/build-release.sh` also check the finished binary.
+
+### Fixed
+
+- `rast update` no longer fails on slow links: the release binary was
+  downloaded under one 60 s budget for the whole transfer. It now uses
+  connect and response-header timeouts (30 s), an idle timeout (60 s without
+  a byte), an overall ceiling of 15 minutes and a 256 MiB size cap (also
+  checked against `Content-Length`). Small requests (release JSON,
+  `SHA256SUMS`) keep the 60 s limit. The checksum is still verified before
+  anything is replaced; the download prints progress every 10 % on a
+  terminal and how long it took.
+- Native helper display-port firewall (security relevant): the helper
+  trusted any existing nftables table `inet rast_native`, so a table left
+  by an earlier helper run with another uid was never corrected. On
+  1.0.1-alpha.1 such a table reset every connection of the RAST server to
+  the Xpra display ports (no native session became ready) and let the
+  other uid reach every display port. The helper now reads the table back
+  when it starts and before each session port is added, and replaces
+  anything that is not exactly the expected chain, set and rule for its
+  own uid in one `nft -f` transaction, with the ports of the live
+  sessions; it logs a warning with the old and the new uid. `rast doctor`
+  and `rast native-helper --check` warn about a table that does not match.
+  Restarting `rast-native.service` repairs an affected host.
+- `rast migrate home --rollback` refused every member of a migrated shared
+  folder: the `~/Shared/<name>` links that RAST keeps in one-HOME mode
+  belong to the account's identity, and the review F5 check stopped on
+  them. The rollback now removes those links (and `~/Shared` when RAST
+  made it and it is empty) and lists them (`sharedLinksRemoved`, and a
+  line in the CLI output); any other link, special file or multi-link file
+  of the identity still stops it. That check now also runs before the
+  rollback changes anything, so a refusal leaves the HOME exactly as it
+  was (before, the files were already given back to the `rast` service
+  while the HOME stayed the identity's, until the rollback was run
+  again). An account the rollback stopped that way is rolled back by
+  running the rollback again. After a new migration, the account gets its
+  `~/Shared` links again without a server restart.
+- `rast migrate shares` (and `rast migrate home`) no longer reports a
+  shared folder or account as busy right after another migration step
+  released it: the helper retries its migration lock for half a second (a
+  process it was starting still held a copy of the lock).
+- Recycle bin of one-HOME accounts (review of task 1.4): a restore never
+  lands on a `.Trash*` name at the top of a shared folder; an entry named
+  twice in one request is handled once; "Empty" reads large recycle bins
+  in bounded batches; a shared folder's own `.Trash-<uid>` is closed again
+  (`0700`, no ACL) whenever it is used.
+- Kernel quota (review of task 1.4): `quota_set` sets limits only on the
+  account `rast-u<id>` with the uid RAST expects (`identity_conflict`
+  otherwise); limits are whole KiB, so the periodic pass does not set them
+  again; a HOME scan that stopped at its entry limit no longer lowers the
+  usage; the shared folder size limit message from a file agent reaches
+  the browser.
+- File Station live updates: the server's file watcher now watches each
+  home on its own, so one home it cannot read no longer stops changes in
+  other homes from being reported. Homes of one-HOME accounts are left to
+  their file agent, so each change is reported once.
+- The weekly storage-usage recalculation no longer resets the usage of an
+  account whose HOME belongs to its Linux identity (one HOME) to zero: it
+  could not read that HOME and counted nothing. Such accounts are skipped;
+  their usage comes from a HOME scan or the kernel.
+
 ## [0.18.3] - 2026-11-16
 
 ### Fixed

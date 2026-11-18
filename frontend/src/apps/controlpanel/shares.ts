@@ -5,12 +5,13 @@
 import { ApiError, apiErrorMessage } from "../../core/api";
 import { badge, card } from "../../core/components";
 import { h } from "../../core/dom";
-import { formatDateTime } from "../../core/format";
+import { formatBytes, formatDateTime } from "../../core/format";
 import { debounceTask, getRealtime } from "../../core/realtime";
-import { formField, validateRequiredText } from "../../core/forms";
+import { bytesToGib, formField, gibToBytes, parseGib, validateGib, validateRequiredText } from "../../core/forms";
 import { iconSvg } from "../../core/icons";
 import type { Page, Share, ShareMember, User } from "../../core/types";
 import { confirmDialog, modal } from "../../core/ui";
+import { shareLimitHint } from "../files/usage";
 import { notifyError, type TabRenderContext } from "./common";
 
 type Perm = ShareMember["perms"];
@@ -188,6 +189,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
           { class: "share-foot small faint" },
           `${share.members.length} member${share.members.length === 1 ? "" : "s"} · created ${formatDateTime(share.createdAt)}`,
         ),
+        share.quotaBytes ? shareLimitLine(share) : null,
       ],
     });
   }
@@ -233,6 +235,18 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
       autocomplete: "off",
     });
     const descriptionField = formField({ label: "Description (optional)", control: descriptionInput });
+    const limitInput = h("input", {
+      class: "input",
+      type: "number",
+      min: "0",
+      step: "1",
+      value: String(bytesToGib(existing?.quotaBytes ?? 0)),
+    });
+    const limitField = formField({
+      label: "Size limit (GiB)",
+      control: limitInput,
+      hint: "0 means no limit.",
+    });
 
     let drafts: MemberDraft[] = (existing?.members ?? []).map((member) => ({ userId: member.userId, perms: member.perms }));
     const membersHost = h("div", { class: "member-editor" });
@@ -334,6 +348,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
       { class: "col" },
       nameField.el,
       descriptionField.el,
+      limitField.el,
       membersSection,
       existing ? h("div", { class: "small faint" }, `Files stay on disk at ${existing.path || `/shared/${existing.name}`}.`) : null,
       alert,
@@ -374,6 +389,14 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
               descriptionField.setError(descriptionError);
               return;
             }
+            limitField.setError(null);
+            const limitError = validateGib(limitInput.value, { allowZero: true });
+            if (limitError) {
+              limitField.setError(limitError);
+              limitInput.focus();
+              return;
+            }
+            const quotaBytes = gibToBytes(parseGib(limitInput.value));
             const members = knownUsers
               ? drafts.map((draft) => ({ userId: draft.userId, perms: draft.perms }))
               : undefined;
@@ -382,6 +405,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
                 await ctx.api.patch(`/api/shares/${encodeURIComponent(existing.id)}`, {
                   name,
                   description: descriptionInput.value.trim(),
+                  quotaBytes,
                   ...(members ? { members } : {}),
                 });
                 ctx.toast.success(`Shared folder ${name} updated`);
@@ -389,6 +413,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
                 await ctx.api.post("/api/shares", {
                   name,
                   description: descriptionInput.value.trim(),
+                  quotaBytes,
                   ...(members ? { members } : {}),
                 });
                 ctx.toast.success(`Shared folder ${name} created`);
@@ -432,4 +457,14 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
     unsubscribeResync();
     loadToken += 1;
   };
+}
+
+/** The size limit of a share and what enforces it, in one quiet line. */
+export function shareLimitLine(share: Share): HTMLElement {
+  const enforced = share.quotaEnforcedBy ?? "RAST only";
+  return h(
+    "div",
+    { class: "share-limit small faint", title: shareLimitHint(enforced) },
+    `Limit ${formatBytes(share.quotaBytes ?? 0)} · enforced by ${enforced}`,
+  );
 }

@@ -2,6 +2,7 @@
 
 import type { AppDefinition } from "../core/app";
 import type { Permissions } from "../core/types";
+import { aboutLeptosApp } from "./about-leptos";
 import { applicationsApp } from "./applications";
 import { backupApp } from "./backup";
 import { controlPanelApp } from "./controlpanel";
@@ -24,6 +25,7 @@ export const APPS: AppDefinition[] = [
   packagesApp,
   controlPanelApp,
   logsApp,
+  aboutLeptosApp,
 ];
 
 /** Built-in apps followed by the installed Linux apps (`linux:<id>`, administrators only). */

@@ -1,0 +1,12 @@
+<!doctype html>
+<!-- Build entry for Trunk only. This page is never served: rast-server embeds
+     the Trunk output without index.html, and the RAST frontend imports the
+     generated glue (rast-ui.js) itself. See docs/adr/0003-rast-ui-leptos.md. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>rast-ui</title>
+    <link data-trunk rel="rust" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-bulk-memory-opt --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-multivalue --enable-reference-types" data-cargo-profile-release="wasm-release" />
+  </head>
+  <body></body>
+</html>

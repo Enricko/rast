@@ -147,7 +147,7 @@ user. It is not a hostile-application sandbox.
 | --- | --- |
 | Authenticated proxy | Every HTML, asset and WebSocket request under `/linux-apps/session/<128-bit key>/` is authenticated as the signed-in RAST user and must own the session: another user's key is `403`, an expired/revoked session is `401`, and WebSocket upgrades require a same-origin `Origin`. The Xpra display port itself is never exposed beyond loopback. |
 | Live session revalidation | A live display WebSocket re-checks the RAST login session every **5 s** and closes within a few seconds on logout, session revocation, expiry or account deactivation. The browser loses the display; the person's applications keep running (see [lifecycle](#lifecycle-and-quitting)). |
-| Display-port firewall | Xpra's HTML5 transport is bound to `127.0.0.1:<ephemeral>` with Xpra-level authentication disabled, so RAST's authenticated proxy is the only intended path. Because loopback is not a security boundary between local uids, the helper installs one **nftables** rule at startup: table `inet rast_native`, set `xpra_ports`, output chain rule `ip daddr 127.0.0.1 tcp dport @xpra_ports meta skuid != <rast uid> reject with tcp reset`. Every session port is added before the session is usable and removed when it stops; the set is reconciled against live `rast-xpra-*` units when the helper starts. This is defence in depth behind the authenticated proxy. |
+| Display-port firewall | Xpra's HTML5 transport is bound to `127.0.0.1:<ephemeral>` with Xpra-level authentication disabled, so RAST's authenticated proxy is the only intended path. Because loopback is not a security boundary between local uids, the helper installs one **nftables** rule at startup: table `inet rast_native`, set `xpra_ports`, output chain rule `ip daddr 127.0.0.1 tcp dport @xpra_ports meta skuid != <rast uid> reject with tcp reset`. The helper owns the whole table and never trusts one it finds: when it starts and before it adds a session port it reads the table back (`nft -j list table inet rast_native`) and accepts it only when it is exactly this chain (hook `output`, priority 0, policy `accept`), this set (type `inet_service`) and this one rule for its own uid. Anything else, such as a table left by an earlier helper run with another `RAST_NATIVE_ALLOWED_UID`, is replaced in one `nft -f` transaction (`delete table` and the full definition, with the ports of the live sessions), so there is never a moment without the reject rule; the helper logs a warning with the old and the new uid. `rast doctor` (through the helper) and `sudo rast native-helper --check` warn about a table that does not match. Every session port is added before the session is usable and removed when it stops; the set is reconciled against live `rast-xpra-*` units when the helper starts. This is defence in depth behind the authenticated proxy. |
 | Account deactivation | Deactivating an account (Control Panel or `DELETE /api/users/{id}`) stops its native session and applications. Revoking only the *browser* sessions keeps the person's apps running under the retention policy. |
 | Per-user filesystem isolation | Distinct uids, 0700 homes/profiles, unique displays and sockets. Cross-user reads and connections fail (`EACCES`). |
 | Helper hardening | The helper is the only root component: socket 0660 root:rast, peer-uid allowlist, `deny_unknown_fields` JSON, strict per-field validation, no shell, bounded timeouts/output, serialized APT transactions. |
@@ -188,6 +188,13 @@ Consequences:
 
 ## Files and folders
 
+* **One-HOME accounts** (after `rast migrate home`, ADR 0005) have no app
+  profiles, `RAST` link or grant: every app starts in the person's HOME
+  `<storage_dir>/homes/<username>` with `HOME` set to it and the usual
+  `~/.config`, `~/.local/share`, `~/.cache`, so a file an app saves is in
+  File Station at once and every app sees the same settings. The rest of
+  this list describes **legacy accounts**, which keep their profiles until
+  they are migrated.
 * The person's **own RAST home** (`<storage_dir>/homes/<username>`) is linked
   into the app profile as `RAST` and granted a recursive read + traverse ACL
   (`rx`) for the app identity. Native apps can open and read files from it, but
@@ -214,11 +221,94 @@ Consequences:
   by the person's app identity (for example because it was copied into their
   home), the application can read or upload it wherever the app decides. Treat
   what a native app can read as shared with that app.
+* **One HOME (in progress, ADR 0005).** The helper can already prepare a
+  person's HOME `<storage_dir>/homes/<username>` as their own Linux account's
+  directory (`home_ensure`: 0700, owned by `rast-u<id>`, with `~/.config`,
+  `~/.cache`, `~/.local/…`) and start a per-user file agent for it
+  (`files_agent_start`, unit `rast-files-u<uid>`). File Station then serves
+  that person through the agent instead of the `rast` service. Accounts move
+  to one HOME one at a time with `rast migrate home` (dry-run, apply,
+  rollback; see [OPERATIONS.md](OPERATIONS.md)): the HOME's entries, the
+  legacy identity home and the app profiles become the person's, merged
+  into the HOME per file (`config` → `~/.config`, `data` →
+  `~/.local/share`, `state` → `~/.local/state`, `cache` → `~/.cache`,
+  `home` → `~/`; an entry the HOME already has stays in the old profile and
+  is reported), and the recycle bin moves into XDG Trash. New accounts
+  still start in legacy mode until the migration has been verified on
+  production (ADR 0005, D8).
+* **Shared folders as Linux groups (ADR 0005, section 4).** Every shared
+  folder has two Linux groups, `rast-s<h>-rw` (read-write) and
+  `rast-s<h>-ro` (read-only), where `<h>` is the first 16 hex digits of the
+  share id. The server keeps their members in line with Effective Access:
+  write or admin → `-rw`, read → `-ro`, deny, no access or a deactivated
+  account → neither. A migrated container is `root:rast-s<h>-rw` 2770 with
+  the ACL `g:rast-s<h>-ro:r-x` and `u:rast:rwx` (also as default ACL), so
+  apps and terminals of members reach it with the kernel's own checks, and
+  a one-HOME account finds it as `~/Shared/<name>` (a link its file agent
+  keeps). Existing shared folders move to this layout with
+  `rast migrate shares --share <name>` (dry-run, apply, rollback; see
+  [OPERATIONS.md](OPERATIONS.md)).
+  * Running apps and terminals keep the groups they started with. When an
+    administrator revokes access, the person sees a warning and their apps
+    and terminals restart after 60 seconds; when access is granted, the
+    desktop offers *Restart session now*. File Station is right at once
+    (its agent restarts immediately). During the warning, a shared folder
+    the person lost entirely denies them by name (`u:rast-u<id>:---` on
+    its container), which stops new paths into it but not a shell whose
+    working directory is already inside, or files that are already open:
+    the restart is what ends those. A session that still carries a lost
+    group later (after a server restart) is found and restarted again.
+  * **File permissions inside a shared folder are managed by RAST.** A
+    repair pass (when the server starts, then once a day) gives every
+    folder and file the shared folder's layout again: the read-write
+    group, group read and write (and execute where the owner may execute),
+    no access for other accounts, and the RAST ACL. The owner's own bits
+    and the owner stay. A `chmod`, `chgrp` or `setfacl` inside a shared
+    folder, from an app, a terminal or `cp -p`, therefore lasts only until
+    the next pass: a file saved with mode 0600 (many apps do this for
+    files they consider private) is readable and writable by every
+    read-write member afterwards, and readable by read-only members.
+    **Keep private files in HOME, not in a shared folder.** Until the
+    pass, such a file is narrower than the layout (the group loses write
+    access through the ACL mask, as on any Linux file server). The pass
+    never changes symlinks, files with several hard links, entries owned
+    by root or by accounts that are not RAST's, or other file systems and
+    mounts.
+* **Administrators reach every shared folder from their apps (D6).** An
+  administrator is a member of every shared folder's read-write group, which
+  keeps the File Station administrator bypass. The consequence is that
+  *every* app and terminal of an administrator account can open every
+  shared folder with the kernel's permission, not only File Station: a
+  compromised or misbehaving app in an administrator session reaches all
+  shared data. **Use a non-admin account for everyday app use** (browsing,
+  mail, chat, downloaded tools), and keep the administrator account for
+  administration.
 * Application installs live under `<data_dir>/linux-apps/apps/<id>/<version>/`
   (portable/AppImage, read-only to app users) and per-person profiles under
-  `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity).
-  Uninstalling with *Also delete its settings* removes only those profiles,
-  never files in RAST homes.
+  `<data_dir>/linux-apps/profiles/<app>/<user>/` (0700, owned by the identity;
+  legacy accounts only). Uninstalling with *Also delete its settings* removes
+  only those profiles, never files in RAST homes; a one-HOME account keeps
+  an app's settings in its HOME, where the app put them.
+
+### Recycle bin and quota (one-HOME accounts)
+
+For an account with one HOME (ADR 0005), File Station's recycle bin is the
+XDG Trash that its apps use: a file an app moves to the trash (GIO, KDE,
+Electron) appears in File Station's recycle bin and can be restored there,
+and what File Station deletes appears in the apps' trash. Deletions in a
+shared folder stay in that folder (`.Trash-<uid>`, private to the person).
+Entries whose original path points outside HOME or the person's shared
+folders are restored to the top of HOME.
+
+Apps, caches and the trash count against the quota. Without kernel quota
+(the RAST fallback) apps are not stopped at the quota, but File Station and
+App Center are; see "Recycle bin and quota of one-HOME accounts" in
+`docs/OPERATIONS.md`.
+
+Backup Center's `users` scope keeps a one-HOME account's owners, modes and
+ACLs, but leaves out `~/.cache`, the trash (`~/.local/share/Trash`) and
+Flatpak apps (`~/.local/share/flatpak`); see "What is in a backup archive"
+in `docs/OPERATIONS.md`.
 
 ## Windows and the desktop
 
@@ -354,14 +444,53 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
   units, not children of the helper. The display streams keep working (the
   proxy connects straight to the Xpra port); only helper-backed actions
   (launch, close, install) fail until the helper is back. On start the helper
-  reconciles the nftables display-port set against the live `rast-xpra-*`
-  units and the server adopts the still-running sessions.
+  checks its nftables table (and replaces it when it differs), reconciles the
+  display-port set against the live `rast-xpra-*` units and the server adopts
+  the still-running sessions.
+* **Per-user file agents** (`rast-files-u<uid>`, one-HOME accounts only) are
+  transient units in `rast-linux.slice` too. When the helper is down, a
+  stopped agent cannot be started again and File Station answers `503` for
+  that person until the helper is back.
+* **The backup reader** (`rast-backup-reader`, ADR 0005 D12) is a transient,
+  read-only root unit outside `rast-linux.slice`, started by the helper when
+  Backup Center backs up a HOME in one-HOME mode or a migrated shared folder,
+  and stopped after 5 idle minutes. When the helper is down, those folders
+  are skipped (HOMEs) or read without owners (shared folders), with a
+  warning in the backup result.
 * **To actually end everything:** stop `rast-linux.slice` (or the individual
   `rast-xpra-*`/`rast-app-*` units). A reboot also starts from fresh
   processes; profiles and installs stay on disk.
 * **App crash:** its RAST windows disappear; other apps and the session stay.
 * **Stuck app:** **End application** first; if the whole session is wedged,
   stop the session's unit or `rast-linux.slice` and launch again.
+
+## Native pilot
+
+`native_pilot_prefixes` (ADR 0007, [CONFIGURATION.md](CONFIGURATION.md))
+limits the native features to accounts whose username starts with one of
+its prefixes. For every other account, administrators included, and for
+every backend (native and legacy Docker):
+
+* `GET /api/linux-apps` answers without apps or sessions and with
+  `linuxAppsEnabled`, `nativeEnabled` and `dockerEnabled` set to `false`, so
+  the App Center section and the "Install Linux App" button disappear;
+* the management routes (install, preview, update, check, visibility,
+  uninstall, migrate and its rollback and cleanup) answer `403` with the
+  reason, and every other `/api/linux-apps*` route answers `404`, like an
+  app the account cannot see;
+* no Xpra session is started for it (`NativeSessions` refuses too), and the
+  display proxy answers `404` for any session key, also for a session left
+  from before the pilot; so does the legacy Docker display proxy;
+* it stays in the legacy HOME layout (no file agent, no one-HOME mode).
+
+App actions of a pilot administrator that touch the data of every account
+are scoped too: *Also delete its settings* removes the settings of pilot
+accounts only (App Center says how many accounts kept theirs), and
+migrating a legacy Docker app, cleaning up its retained data, or
+uninstalling a Docker app with its data is refused while accounts outside
+the pilot have data for it.
+
+Terminal is not part of the pilot. Without the key nothing changes.
 
 ## Limitations
 

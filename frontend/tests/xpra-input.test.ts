@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 // Execute the actual injected bridge, not a second implementation of its math.
-const source = readFileSync("../src/linux_apps/xpra_shim.js", "utf8");
+const source = readFileSync("../crates/rast-server/src/xpra_shim.js", "utf8");
 function bridge() {
   const content = {
     getBoundingClientRect: () => ({ left: 140, top: 90, width: 500, height: 300 }),

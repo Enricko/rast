@@ -7,7 +7,8 @@ import { h } from "../../core/dom";
 import { formatBytes, formatDateTime } from "../../core/format";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import { iconSvg } from "../../core/icons";
-import type { Page, StorageSettings, SystemInfo, User } from "../../core/types";
+import { quotaBackendHint } from "../files/usage";
+import type { Page, QuotaSummary, StorageSettings, SystemInfo, User } from "../../core/types";
 import { errorMessage } from "../../core/ui";
 import {
   attachTabRealtime,
@@ -171,6 +172,7 @@ export async function renderStorageTab(tab: TabRenderContext): Promise<() => voi
           { class: "muted small" },
           "Each account has a storage quota (0 means unlimited). RAST blocks writes that would exceed a user's quota and exposes usage here for administrators.",
         ),
+        storage?.quota ? quotaBackendLine(storage.quota) : null,
         h(
           "button",
           {
@@ -288,4 +290,9 @@ export async function renderStorageTab(tab: TabRenderContext): Promise<() => voi
     disposeTabRealtime(host);
     delete host.dataset.sectionScrolled;
   };
+}
+
+/** Which backend enforces quotas (ADR 0005, section 6). */
+export function quotaBackendLine(quota: QuotaSummary): HTMLElement {
+  return h("p", { class: "small", dataset: { quotaBackend: quota.backend } }, quotaBackendHint(quota.backend));
 }

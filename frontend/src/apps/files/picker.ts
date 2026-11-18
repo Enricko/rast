@@ -90,7 +90,7 @@ export function pickDestination(
       try {
         const listing = await ctx.api.get<FileListing>(
           "/api/files",
-          { path, page: 1, perPage: 200, sort: "name", order: "asc" },
+          { path, page: 1, perPage: 200, sort: "name", order: "asc", hidden: false },
           { signal: request.signal },
         );
         if (closed) return;

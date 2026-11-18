@@ -6,11 +6,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, without the leading v (e.g. 0.1.0)"
+        description: "Version without the leading v (e.g. 1.0.1-alpha.1; a -suffix is always a pre-release, no suffix needs a commit on main)"
         required: true
         type: string
       prerelease:
-        description: "Mark the release as a pre-release"
+        description: "Mark the release as a pre-release (automatic for a version with a -suffix)"
         required: false
         default: false
         type: boolean
@@ -44,27 +44,35 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history and origin/main, for the "final release is on main"
+          # check in scripts/release-check.sh.
+          fetch-depth: 0
 
       - name: Determine version
         id: version
+        # scripts/release-check.sh: a version with a -suffix is always a
+        # pre-release (tag push or manual run), and a version without one is
+        # refused unless its commit is on main, so a development branch never
+        # becomes /releases/latest (which `rast update` offers to every server).
         env:
+          EVENT_NAME: ${{ github.event_name }}
           INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease || false }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
             raw="$INPUT_VERSION"
+            prerelease="$INPUT_PRERELEASE"
           else
             raw="${GITHUB_REF_NAME}"
+            prerelease=false
           fi
-          version="${raw#v}"
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
-            echo "Invalid release version: '$raw' (expected vX.Y.Z or X.Y.Z)" >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          scripts/release-check.sh --prerelease "$prerelease" \
+            --commit "$GITHUB_SHA" --main-ref origin/main "$raw" | tee -a "$GITHUB_OUTPUT"
 
       - name: Cross-check Cargo.toml version
         run: |
@@ -73,7 +81,7 @@ jobs:
           expected="${{ steps.version.outputs.version }}"
           if [[ "$cargo_version" != "$expected" ]]; then
             echo "Cargo.toml version ($cargo_version) does not match the release version ($expected)" >&2
-            echo "Bump the version in Cargo.toml before tagging." >&2
+            echo "Set the version in Cargo.toml and Cargo.lock first (a 'chore(release): <version>' commit)." >&2
             exit 1
           fi
           echo "Version $expected matches Cargo.toml"
@@ -185,12 +193,62 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Leptos/WASM UI (crates/rast-ui): built once with Trunk and shared with the
+  # binary jobs. WebAssembly output does not depend on the runner architecture.
+  # ---------------------------------------------------------------------------
+  ui:
+    name: Leptos UI build
+    runs-on: ubuntu-24.04
+    env:
+      TRUNK_VERSION: "0.22.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain and the wasm32 target
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal --target wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk (pinned release binary)
+        run: |
+          set -euo pipefail
+          url="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$RUNNER_TEMP/trunk"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/trunk.tar.gz"
+          echo "2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1  $RUNNER_TEMP/trunk.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/trunk.tar.gz" -C "$RUNNER_TEMP/trunk"
+          echo "$RUNNER_TEMP/trunk" >> "$GITHUB_PATH"
+
+      - name: Build the Leptos UI
+        run: scripts/build-ui.sh
+
+      - name: WASM size budget
+        run: scripts/check-wasm-size.sh
+
+      - name: Upload Leptos UI assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: rast-ui-dist
+          path: crates/rast-ui/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Native builds: x86_64 on Ubuntu 22.04 (glibc 2.35), aarch64 on a real arm64
   # runner. Cross-compilation is explicitly not used.
   # ---------------------------------------------------------------------------
   build:
     name: Build ${{ matrix.arch }}
-    needs: [prepare, frontend]
+    needs: [prepare, frontend, ui]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -228,8 +286,29 @@ jobs:
           name: frontend-dist
           path: frontend/dist
 
+      - name: Download Leptos UI assets
+        uses: actions/download-artifact@v4
+        with:
+          name: rast-ui-dist
+          path: crates/rast-ui/dist
+
       - name: Build release binary
         run: cargo build --release --locked
+
+      - name: Verify the frontend is embedded
+        run: |
+          if grep -q "rast-placeholder-frontend" target/release/rast; then
+            echo "the release binary embeds the placeholder page, not the frontend" >&2
+            exit 1
+          fi
+
+      - name: Verify the Leptos UI is embedded
+        run: |
+          test -s crates/rast-ui/dist/rast-ui_bg.wasm
+          if grep -q "rast-placeholder-ui" target/release/rast; then
+            echo "the release binary embeds the placeholder Leptos UI, not the Trunk build" >&2
+            exit 1
+          fi
 
       - name: Verify binary version
         run: |
@@ -422,7 +501,9 @@ jobs:
           body_path: release-notes.md
           target_commitish: ${{ github.sha }}
           draft: ${{ inputs.draft || false }}
-          prerelease: ${{ inputs.prerelease || false }}
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          # A pre-release must never become /releases/latest.
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'true' && 'false' || 'true' }}
           fail_on_unmatched_files: true
           generate_release_notes: false
           files: |

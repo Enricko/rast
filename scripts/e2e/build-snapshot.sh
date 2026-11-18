@@ -10,7 +10,11 @@
 # cargo waits on its lock, but a transient compile error caused by an
 # in-flight edit is retried a few times.
 #
-# Usage: scripts/e2e/build-snapshot.sh [--release] [--no-frontend] [--attempts N]
+# The Leptos UI (crates/rast-ui) is built with Trunk the same way (served
+# from crates/rast-ui/dist at runtime); it is skipped, with a warning, when
+# Trunk is not installed. Pass --no-ui to skip it explicitly.
+#
+# Usage: scripts/e2e/build-snapshot.sh [--release] [--no-frontend] [--no-ui] [--attempts N]
 set -euo pipefail
 
 ROOT="${RAST_E2E_ROOT:-/tmp/rast-e2e}"
@@ -21,14 +25,16 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 profile=debug
 frontend=1
+ui=1
 attempts=3
 while [ $# -gt 0 ]; do
   case "$1" in
     --release) profile=release ;;
     --no-frontend) frontend=0 ;;
+    --no-ui) ui=0 ;;
     --attempts) attempts="${2:?--attempts needs a number}"; shift ;;
     -h | --help)
-      sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -50,6 +56,17 @@ if [ "$frontend" = 1 ]; then
     fi
   else
     warn "frontend/node_modules missing; skipping the frontend build (run npm --prefix frontend ci)"
+  fi
+fi
+
+if [ "$ui" = 1 ]; then
+  if command -v trunk >/dev/null 2>&1; then
+    say "building the Leptos UI into crates/rast-ui/dist"
+    if ! scripts/build-ui.sh >>"$ROOT/logs/ui-build.log" 2>&1; then
+      warn "Leptos UI build failed (see $ROOT/logs/ui-build.log); keeping the existing dist"
+    fi
+  else
+    warn "trunk is not installed; skipping the Leptos UI build (cargo install trunk --locked --version '~0.22')"
   fi
 fi
 

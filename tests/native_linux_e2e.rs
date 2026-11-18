@@ -485,22 +485,34 @@ async fn install_threads_the_visibility_to_the_new_native_app_row() {
     assert_eq!(body["installing"], true);
     assert!(body["jobId"].as_str().is_some(), "{body}");
 
-    // The job inserts the row before it touches the system; wait for it. The
-    // install itself then fails on the absent privileged helper, which is
-    // fine: the row must already carry the requested visibility.
-    let mut visibility = None;
-    for _ in 0..100 {
-        visibility = sqlx::query_scalar::<_, String>(
-            "SELECT visibility FROM linux_apps WHERE file_name = 'demo_1.0_amd64.deb'",
-        )
-        .fetch_optional(&server.state.db)
-        .await
-        .expect("visibility query");
-        if visibility.is_some() {
+    // Wait for the job to reach a terminal state (the install fails on the
+    // absent privileged helper, which is fine). Only then check the row: it
+    // is inserted before the job touches the system, so it must already carry
+    // the requested visibility. 30 s is a safety net, not an expected wait.
+    let job_id = body["jobId"].as_str().expect("job id").to_string();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let (_, _, job) = server
+            .request("GET", &format!("/api/jobs/{job_id}"), None, admin.headers())
+            .await;
+        if matches!(
+            job["status"].as_str(),
+            Some("done" | "failed" | "cancelled")
+        ) {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            std::time::Instant::now() < deadline,
+            "install job {job_id} did not finish within 30 s: {job}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+    let visibility = sqlx::query_scalar::<_, String>(
+        "SELECT visibility FROM linux_apps WHERE file_name = 'demo_1.0_amd64.deb'",
+    )
+    .fetch_optional(&server.state.db)
+    .await
+    .expect("visibility query");
     assert_eq!(
         visibility.as_deref(),
         Some("admins"),
@@ -884,6 +896,305 @@ async fn another_users_session_cookie_cannot_open_an_xpra_key() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     // Both accounts are valid server-side (sanity for the assertions above).
     assert_ne!(alice.user_id, bob.user_id);
+}
+
+/// The native pilot (ADR 0007): only `t-` accounts.
+async fn pilot_server() -> TestServer {
+    TestServer::start_with(|mut file| {
+        file.native_pilot_prefixes = Some(vec!["t-".into()]);
+        file
+    })
+    .await
+}
+
+#[tokio::test]
+async fn accounts_outside_the_native_pilot_see_no_linux_apps_admins_included() {
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    server.seed_app("native-app", "native", "ready", 1).await;
+    server.seed_app("docker-app", "docker", "ready", 1).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    for session in [&admin, &alice] {
+        // The list: no apps, no session and the feature off (the UI hides
+        // it), with the same limits.
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["apps"], json!([]), "{body}");
+        assert_eq!(body["sessions"], json!([]), "{body}");
+        assert!(body["session"].is_null(), "{body}");
+        for flag in ["linuxAppsEnabled", "nativeEnabled", "dockerEnabled"] {
+            assert_eq!(body[flag], false, "{flag}: {body}");
+        }
+        assert_eq!(body["limits"]["idleMinutes"], 2, "{body}");
+        // Every other route: like an app it cannot see.
+        for (method, path) in [
+            ("GET", "/api/linux-apps/native-app"),
+            ("GET", "/api/linux-apps/native-app/icon"),
+            ("POST", "/api/linux-apps/native-app/launch"),
+            ("POST", "/api/linux-apps/docker-app/open"),
+            ("GET", "/api/linux-apps/session"),
+            ("POST", "/api/linux-apps/session/close"),
+            ("POST", "/api/linux-apps/session/runs/0123456789abcdef"),
+            (
+                "POST",
+                "/api/linux-apps/session/runs/0123456789abcdef/close",
+            ),
+            ("GET", "/api/linux-apps/sessions/0123456789abcdef"),
+            ("POST", "/api/linux-apps/sessions/0123456789abcdef/close"),
+            ("GET", "/api/linux-apps/sessions/0123456789abcdef/windows"),
+        ] {
+            let body = (method == "POST").then(|| json!({}));
+            let (status, _, body) = server
+                .request(method, path, body, session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}: {body}");
+            assert_eq!(body["error"]["message"], "Linux app not found", "{path}");
+        }
+        // Management: 403 with the reason, before any validation.
+        for (method, path) in [
+            ("POST", "/api/linux-apps/install"),
+            ("POST", "/api/linux-apps/preview"),
+            ("PATCH", "/api/linux-apps/native-app"),
+            ("DELETE", "/api/linux-apps/native-app"),
+            ("POST", "/api/linux-apps/native-app/check"),
+            ("POST", "/api/linux-apps/native-app/update"),
+            ("POST", "/api/linux-apps/native-app/visibility"),
+            ("POST", "/api/linux-apps/native-app/migrate"),
+            ("POST", "/api/linux-apps/native-app/migration/rollback"),
+            ("POST", "/api/linux-apps/native-app/migration/cleanup"),
+        ] {
+            let (status, _, body) = server
+                .request(method, path, Some(json!({})), session.headers_with_csrf())
+                .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("native pilot"),
+                "{method} {path}: {body}"
+            );
+        }
+    }
+    // Nothing was installed or changed.
+    let apps: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM linux_apps")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(apps, 2);
+    // Terminal and the rest of the API are not part of the pilot.
+    let (status, _, body) = server
+        .request("GET", "/api/auth/me", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn accounts_in_the_native_pilot_keep_linux_apps() {
+    let server = pilot_server().await;
+    server
+        .create_user("t-admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    server.seed_app("native-app", "native", "ready", 1).await;
+    for (name, password) in [("t-admin", ADMIN_PASSWORD), ("t-carol", USER_PASSWORD)] {
+        let session = server.login(name, password).await;
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["linuxAppsEnabled"], true, "{body}");
+        assert_eq!(body["nativeEnabled"], true, "{body}");
+        assert_eq!(body["apps"].as_array().map(Vec::len), Some(1), "{body}");
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps/session", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, body) = server
+            .request("GET", "/api/linux-apps/native-app", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    // The administrator routes still check the role.
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/linux-apps/preview",
+            Some(json!({})),
+            carol.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert!(
+        !body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("native pilot"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn the_xpra_proxy_refuses_accounts_outside_the_native_pilot() {
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    // A session of each account (left from before the pilot, say).
+    let sessions = server.state.linux_apps.native_sessions();
+    for (key, user) in [
+        ("0123456789abcdef0123456789abcdef", admin.user_id),
+        ("fedcba9876543210fedcba9876543210", carol.user_id),
+    ] {
+        sessions.insert_for_test(rast::linux_apps::native_session::NativeSession::for_test(
+            key.to_string(),
+            user,
+        ));
+    }
+    let (status, _, _) = server
+        .request(
+            "GET",
+            "/linux-apps/session/0123456789abcdef0123456789abcdef/rast-shim.js",
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, body) = server
+        .request(
+            "GET",
+            "/linux-apps/session/fedcba9876543210fedcba9876543210/rast-shim.js",
+            None,
+            carol.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+#[tokio::test]
+async fn a_rename_across_the_native_pilot_boundary_is_refused() {
+    // Review F9, decision A8: while the pilot is set, a rename may not move
+    // a shared folder into or out of it; renames on one side still work.
+    let server = pilot_server().await;
+    server
+        .create_user("t-admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("t-admin", ADMIN_PASSWORD).await;
+    let mut ids = Vec::new();
+    for name in ["t-share", "Test"] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/shares",
+                Some(json!({"name": name})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+    let rename = |id: &str, name: &str| {
+        let path = format!("/api/shares/{id}");
+        let body = json!({"name": name});
+        let headers = admin.headers_with_csrf();
+        let server = &server;
+        async move { server.request("PATCH", &path, Some(body), headers).await }
+    };
+    // Out of the pilot, and back into it from outside: refused, name kept.
+    let (status, _, body) = rename(&ids[0], "team").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("out of the native pilot"), "{body}");
+    let (status, _, body) = rename(&ids[1], "t-test").await;
+    // "Test" keeps its container, so "t-test" stays outside the pilot.
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM shares ORDER BY name")
+        .fetch_all(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(names, ["t-share", "t-test"]);
+    // Inside the pilot: allowed.
+    let (status, _, body) = rename(&ids[0], "t-team").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "t-team", "{body}");
+    // A container that matches with a name that does not (renamed before
+    // the pilot): moving it into the pilot is refused as well.
+    sqlx::query("UPDATE shares SET name = 'team' WHERE id = ?")
+        .bind(&ids[0])
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let (status, _, body) = rename(&ids[0], "t-back").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("into the native pilot"), "{body}");
+}
+
+#[tokio::test]
+async fn the_legacy_display_proxy_refuses_accounts_outside_the_native_pilot() {
+    // Review F16: a legacy Docker copy of an account outside the pilot is
+    // unknown to `/linux-apps/<key>/`, as in the Xpra proxy.
+    let server = pilot_server().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("t-carol", USER_PASSWORD, Role::User)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let carol = server.login("t-carol", USER_PASSWORD).await;
+    // A fake app page that answers every request.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buffer = [0u8; 4096];
+            let _ = socket.read(&mut buffer).await;
+            let _ = socket
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\napp page")
+                .await;
+        }
+    });
+    let apps = &server.state.linux_apps;
+    let outside = "0123456789abcdef0123456789abcdef";
+    let inside = "fedcba9876543210fedcba9876543210";
+    apps.insert_legacy_session_for_test(outside, admin.user_id, "admin", port);
+    apps.insert_legacy_session_for_test(inside, carol.user_id, "t-carol", port);
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/linux-apps/{outside}/"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/linux-apps/{inside}/"),
+            None,
+            HeaderMap::new(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
 }
 
 fn assert_send_sync<T: Send + Sync>() {}

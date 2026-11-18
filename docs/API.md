@@ -25,7 +25,7 @@ Responses use this error shape and never leak internals:
 | 403 | authenticated but not allowed (or CSRF mismatch) |
 | 404 | object not found **or** not visible to this user |
 | 409 | conflict (name exists, job cancelled) |
-| 413 | upload too large |
+| 413 | upload too large, storage quota or shared folder size limit exceeded |
 | 429 | rate limited / account locked (`Retry-After` header) |
 | 503 | subsystem unavailable (e.g. Docker worker down) |
 
@@ -60,6 +60,8 @@ All list endpoints accept `page` and `perPage` (bounded server-side).
 | GET | `/api/auth/sessions` | own sessions `{id, ip, userAgent, createdAt, lastSeenAt, expiresAt, current}` |
 | DELETE | `/api/auth/sessions/{id}` | revoke one session |
 | DELETE | `/api/auth/sessions` | revoke all other sessions |
+| GET | `/api/session/restart` | the session restart the caller was warned about → `{pending: null \| {reason, forced, deadlineMs}}`. `reason` is `access_revoked` (forced at `deadlineMs`) or `access_granted` (only offered). Native backend only; shared folder access changes (ADR 0005, section 4) |
+| POST | `/api/session/restart` | restart the caller's Linux apps and terminals now, so they pick up their current shared folder groups → `{ok}`; publishes `session.restarted` |
 
 While `mustChangePassword` is set (administrator reset or temporary password),
 every protected endpoint except `/api/auth/me`, `/api/auth/password`,
@@ -120,9 +122,50 @@ recycle bin (delete is permanent). One request cannot mix `/@root` paths
 with storage paths (`400`). Anyone else gets `403`. `@root` is a reserved
 name in Home and shared folders.
 
+**One-HOME accounts** (ADR 0005; an account whose HOME directory belongs to
+its Linux identity, which needs `native_enabled`): their File Station
+requests are answered by their own file agent, which runs as that Linux
+account. The endpoints, JSON shapes and error codes are the same, with these
+differences:
+
+* `writable` in an entry is what the account's Linux user may write.
+* Chunked upload ids start with `usr-`.
+* `/shared/<name>` is the shared folder's container as RAST's database
+  records it (never the HOME link `~/Shared/<name>`, which is for apps);
+  RAST's access rules still apply (`404` for a hidden folder, `403` for
+  writes to a read-only one). `~/Shared` lists no shared folders: they are
+  listed by `GET /api/files/roots`, as for every account.
+* A copy or move into HOME that does not fit the quota fails as a whole
+  (`413` in the job), before anything is written. The same holds for a
+  shared folder with a size limit (uploads, copies, moves and restores).
+* A deletion in a shared folder whose `.Trash-<uid>` was made by someone
+  else answers `403` ("this recycle bin folder belongs to another account;
+  ask an administrator to remove it").
+* `503` when the account's file agent cannot be started or reached (the
+  privileged helper is down); the server never serves such an account
+  in-process instead.
+* The recycle bin is the freedesktop XDG Trash that the account's Linux
+  apps use too: `~/.local/share/Trash` for HOME and `<container>/.Trash-<uid>`
+  (private to the account) for a shared folder. Trash ids are opaque
+  (`h:…`, `s:<shareId>:…`); entries that apps put there are listed too.
+  Restoring a shared-folder entry needs write access to that folder; an
+  entry whose original place is outside HOME and the account's shared
+  folders is restored to the top of HOME (or of the shared folder whose
+  trash holds it). Names starting with `.Trash` are reserved at the top of
+  a shared folder (`400`), for every account.
+* The recycle bin counts against the quota (it is in HOME).
+* `GET /api/files/usage` scans HOME: `usedBytes` is everything the account
+  owns there (apps, caches and the recycle bin too), or the kernel's number
+  when user quota is on (then files the account owns in shared folders
+  count as well, `byLocation.shared`).
+
+Accounts are switched to one-HOME mode one at a time by an administrator
+with `rast migrate home` (see [OPERATIONS.md](OPERATIONS.md)); new accounts
+still start in legacy mode. The API is the same in both modes.
+
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |
+| GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=&hidden=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}`; `hidden=false` leaves out names that start with a dot (default: all names) |
 | GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]`; super administrators also get `{name:"Root file system", path:"/@root", kind:"system"}` |
 | GET | `/api/files/stat?path=` | single entry |
 | POST | `/api/files/mkdir` | `{path}` (parent + name) |
@@ -138,10 +181,10 @@ name in Home and shared folders.
 | POST | `/api/files/copy` | `{paths:[], destDir}` → `{jobId}` |
 | POST | `/api/files/move` | `{paths:[], destDir}` → `{jobId}` |
 | POST | `/api/files/delete` | `{paths:[]}` → moves to recycle bin, `{jobId}` |
-| GET | `/api/files/search?q=&path=&type=&page=` | recursive search (bounded) |
-| GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}}` |
+| GET | `/api/files/search?q=&path=&type=&page=&hidden=` | recursive search (bounded); `hidden=false` skips dot files and does not descend into dot folders |
+| GET | `/api/files/usage` | `{quotaBytes, usedBytes, trashBytes, byType:{...}, byLocation:{files, apps, caches, trash, shared}, quotaBackend:"filesystem|rast"}`; `byLocation` and `quotaBackend` are additive (legacy accounts: `files` and `trash`, `"rast"`); `quotaBackend` says what enforces `quotaBytes`: the kernel for File Station, Terminal and every app, or RAST for File Station and App Center only |
 | GET | `/api/files/trash?page=` | `{items:[{id, originalPath, sizeBytes, kind, deletedAt}], total}` |
-| POST | `/api/files/trash/restore` | `{ids:[]}` |
+| POST | `/api/files/trash/restore` | `{ids:[]}`; `409` when a destination exists, `413` when the entries going into a shared folder from another recycle bin do not fit its size limit (nothing is restored) |
 | POST | `/api/files/trash/delete` | `{ids:[]}` permanent delete (irreversible) |
 | DELETE | `/api/files/trash` | empty the bin |
 
@@ -157,9 +200,9 @@ Shared folders (admin CRUD; ACL enforced on every files endpoint):
 
 | Method | Path | Body |
 | --- | --- | --- |
-| GET | `/api/shares` | `[{id,name,path,description,members:[{userId,username,perms}],createdAt}]` |
-| POST | `/api/shares` | `{name, description?, members:[{userId, perms:"read|write|admin"}]}` |
-| PATCH | `/api/shares/{id}` | `{name?, description?, members?}` |
+| GET | `/api/shares` | `[{id,name,path,description,members:[{userId,username,perms}],createdAt,quotaBytes,quotaEnforcedBy?}]`; `quotaBytes` is the size limit in bytes (`null`: none); `quotaEnforcedBy` (only with a limit) is `"filesystem, best effort"` (group quota on the shared filesystem) or `"RAST only"` (File Station writes) |
+| POST | `/api/shares` | `{name, description?, members:[{userId, perms:"read|write|admin"}], quotaBytes?}` (`0` or absent: no limit) |
+| PATCH | `/api/shares/{id}` | `{name?, description?, members?, quotaBytes?}` (`0` removes the limit). With the native pilot (`native_pilot_prefixes`), a `name` that would move the shared folder into or out of the pilot is refused with `400 bad_request` (the message names the pilot) |
 | DELETE | `/api/shares/{id}` | removes the share definition, keeps data |
 
 ## Docker (admin; app id `applications`)
@@ -275,13 +318,13 @@ group grants. A read-only `backup` grant receives status metadata only:
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/backups?page=` | `{items:[{id,fileName,sizeBytes,sha256,scope:[],status,note,createdAt,finishedAt,error,downloadable}], total}` |
-| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}` |
+| POST | `/api/backups` | `{scope:["db","config","users","apps"], note?}` → `{jobId}`; the finished job's result is the backup (`fileName`, `sizeBytes`, `sha256`, …) with `warnings` (what was left out or is incomplete, such as a HOME in one-HOME mode when the backup reader is unavailable) when there are any. The archive's `manifest.json` marks entries read through the backup reader `ownersPreserved: true` (numeric owners, mode and ACLs kept) and lists their folders in `preservedTrees`; both are omitted when empty |
 | DELETE | `/api/backups/{id}` | delete archive |
 | GET | `/api/backups/{id}/download` | streamed archive (admin only, audited as `backup.download`) |
 | GET | `/api/backups/schedule` | `{enabled, frequency, timeOfDay, weekday, retentionCount, scopes, lastRunAt, nextRunAt}` |
 | PUT | `/api/backups/schedule` | update schedule |
-| POST | `/api/backups/{id}/verify` | integrity check |
-| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored into the storage roots, never `/` |
+| POST | `/api/backups/{id}/verify` | integrity check → `{ok, manifest:{…, entries, ownersPreserved, preservedTrees}, checks, mismatches, sizeBytes, path}` (`ownersPreserved` is the number of entries that keep their owners, `preservedTrees` the folders read through the backup reader) |
+| GET | `/api/backups/restore-guide?backupId=` | `{steps:[...], warning, rollback}` (admin only); user files are restored with `sudo rast restore-files` (`--dry-run`, a new root-only folder, then `--to-storage`), which checks every entry and keeps owners and ACLs only for HOMEs in one-HOME mode and migrated shared folders; never raw `tar` or `chown -R` as root |
 
 ## App Center (admins and granted groups)
 
@@ -351,14 +394,26 @@ can launch their own copy, list it and read its icon. Managing apps
 administrator-only. The shared app surface is not governed by the group
 policy's `applications` (Docker) rule.
 
+With the native pilot (`native_pilot_prefixes`, ADR 0007), an account whose
+username does not start with a pilot prefix, administrators included, gets
+`GET /api/linux-apps` with `apps:[]`, `sessions:[]`, `session:null`, the
+usual `limits` and `dockerEnabled`, `nativeEnabled` and `linuxAppsEnabled`
+all `false`; `403 forbidden` (the message names the native pilot) from
+`POST /api/linux-apps/install`, `POST /api/linux-apps/preview`,
+`PATCH`/`DELETE /api/linux-apps/{id}` and `POST /api/linux-apps/{id}/check`,
+`/update`, `/visibility`, `/migrate`, `/migration/rollback` and
+`/migration/cleanup`; and `404 not_found` ("Linux app not found") from every
+other `/api/linux-apps*` route. The Xpra proxy (`/linux-apps/session/{key}/`)
+answers 404 for such an account. Without the key nothing changes.
+
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled}` — the `limits` object is flat (no nested per-backend object) |
+| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled, linuxAppsEnabled}` — the `limits` object is flat (no nested per-backend object); the flags are `false` for an account outside the native pilot |
 | POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
 | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
 | GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |
 | PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; native apps apply it to the next application start |
-| DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: stops the app's runs, removes managed files and (for native `.deb` apps) only the packages RAST added and nothing else depends on; with `removeData` also removes every person's profile. Legacy apps remove their images/volumes as before. Files in RAST homes are never touched. 409 while installing or updating |
+| DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: stops the app's runs, removes managed files and (for native `.deb` apps) only the packages RAST added and nothing else depends on; with `removeData` also removes every person's profile. Legacy apps remove their images/volumes as before. Files in RAST homes are never touched. 409 while installing or updating. A native app → `{ok, removed:{ok, appId, removedPackages, removedProfiles, keptOutsidePilot}}` (user ids): with the native pilot, `removeData` removes the profiles of pilot accounts only, and `keptOutsidePilot` lists the user ids whose profiles were kept; a legacy Docker app with `removeData` is refused with 409 while accounts outside the pilot have data for it |
 | GET | `/api/linux-apps/{id}/icon` | any signed-in user: PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
 | POST | `/api/linux-apps/{id}/check` | administrator: ask the app's official source for a newer version now → the updated `LinuxApp` (`latestVersion`, `checkedAt`, `checkError`). A native `.deb` check may take up to a couple of minutes because it refreshes the package policy |
 | POST | `/api/linux-apps/{id}/update` | administrator: no body or `{}` (official source), `{path}` or `{url}` (update from a file/link) → `{jobId}`; job kind `linuxapps.update`. Portable updates are staged, validated and switched atomically; the previous version stays available for rollback. Legacy apps keep running copies on the old image. 400 when the app has no update source and no file was given |
@@ -368,9 +423,9 @@ policy's `applications` (Docker) rule.
 | GET | `/api/linux-apps/session` | any signed-in user: `{session:NativeSession\|null, limits}`; `limits` reports `idleMinutes`, `sessionMemoryMb/Cpus`, `appMemoryMb/Cpus` |
 | POST | `/api/linux-apps/session/close` | any signed-in user: stop the caller's whole native session (all their apps); 404 when none runs. There is no App Center action for this; run-level **End application** is the day-to-day force quit |
 | POST | `/api/linux-apps/session/runs/{run}/close` | any signed-in user: terminate one native application run of their own session (its whole process group); the session and all other apps keep running. Canonical path used by App Center's **End application**; the shorter `POST /api/linux-apps/session/runs/{run}` is accepted as a compatibility alias |
-| POST | `/api/linux-apps/{id}/migrate` | administrator: `{}` or `{path\|url}` (replacement install file when the original is gone) → `{jobId}`; job kind `linuxapps.migrate`. Copies every person's legacy Docker settings into native profiles (the Docker data is retained), keeps the app id and switches the backend after the native install validates |
+| POST | `/api/linux-apps/{id}/migrate` | administrator: `{}` or `{path\|url}` (replacement install file when the original is gone) → `{jobId}`; job kind `linuxapps.migrate`. Copies every person's legacy Docker settings into native profiles (the Docker data is retained), keeps the app id and switches the backend after the native install validates. With the native pilot: 409 while accounts outside it have Docker data for the app |
 | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return a migrated app to the Docker backend (the retained Docker data is still there) → `LinuxApp` |
-| POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: `{removeBackup:true}` → `LinuxApp`; deliberately removes the retained legacy Docker volumes/profiles backup after native operation was verified |
+| POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: `{removeBackup:true}` → `LinuxApp`; deliberately removes the retained legacy Docker volumes/profiles backup after native operation was verified. With the native pilot: 409 while the backup holds data of accounts outside it |
 | GET | `/api/linux-apps/sessions/{sid}` | legacy apps: one of the caller's own copies → `Session`; 404 once it is gone or for someone else's copy. `sid:"native"` returns the native session |
 | POST | `/api/linux-apps/sessions/{sid}/close` | legacy apps: stop their own copy now → `Session` (`sid:"native"` stops the native session) |
 | GET | `/api/linux-apps/sessions/{sid}/windows` | legacy images with per-window streaming → `{windows:[Window]}`; 503 when the app's image has no window service (use Reinstall) |
@@ -499,7 +554,7 @@ disablement or permission removal eventually closes the shell.
 | GET | `/api/system/components` | component health list (admin) |
 | GET | `/api/settings` | control panel settings |
 | PATCH | `/api/settings` | `{siteName?, loginMessage?, auditRetentionDays?, trashRetentionDays?, defaultQuotaBytes?}` |
-| GET | `/api/settings/storage` | storage dirs, usage, shares |
+| GET | `/api/settings/storage` | storage dirs, usage, shares; additive `quota: {backend:"filesystem|rast", userQuota, groupQuota:"off|accounting|enforced", shareLimits, checkedAt, error}` |
 
 ## Chunked uploads (large files behind proxies)
 

@@ -107,6 +107,56 @@ jobs:
           retention-days: 7
 
   # ---------------------------------------------------------------------------
+  # Leptos/WASM UI (crates/rast-ui): built once with Trunk and shared with the
+  # binary jobs. WebAssembly output does not depend on the runner architecture.
+  # ---------------------------------------------------------------------------
+  ui:
+    name: Leptos UI build
+    runs-on: ubuntu-24.04
+    env:
+      TRUNK_VERSION: "0.22.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain and the wasm32 target
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" \
+            --profile minimal --target wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Trunk (pinned release binary)
+        run: |
+          set -euo pipefail
+          url="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "$RUNNER_TEMP/trunk"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/trunk.tar.gz"
+          echo "2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1  $RUNNER_TEMP/trunk.tar.gz" | sha256sum --check -
+          tar -xzf "$RUNNER_TEMP/trunk.tar.gz" -C "$RUNNER_TEMP/trunk"
+          echo "$RUNNER_TEMP/trunk" >> "$GITHUB_PATH"
+
+      - name: Build the Leptos UI
+        run: scripts/build-ui.sh
+
+      - name: WASM size budget
+        run: scripts/check-wasm-size.sh
+
+      - name: Upload Leptos UI assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: rast-ui-dist
+          path: crates/rast-ui/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
   # Rust: formatting, lints and tests
   # ---------------------------------------------------------------------------
   rust:
@@ -133,10 +183,28 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets
+
+      - name: Generated TypeScript types are up to date
+        run: |
+          # Empties frontend/src/generated and regenerates it via ts-rs, so
+          # stale files from removed or renamed types show up too.
+          scripts/gen-api-types.sh
+          status="$(git status --porcelain -- frontend/src/generated)"
+          if [ -n "$status" ]; then
+            echo "Generated TypeScript types are out of date:"
+            echo "$status"
+            git diff -- frontend/src/generated
+            exit 1
+          fi
+
+      - name: rast-api builds for wasm32
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --locked --target wasm32-unknown-unknown -p rast-api
 
   # ---------------------------------------------------------------------------
   # Release-profile builds on native runners (arm64 is a real arm runner,
@@ -144,7 +212,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: Release build (${{ matrix.arch }})
-    needs: frontend
+    needs: [frontend, ui]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -177,12 +245,27 @@ jobs:
           name: frontend-dist
           path: frontend/dist
 
+      - name: Download Leptos UI assets
+        uses: actions/download-artifact@v4
+        with:
+          name: rast-ui-dist
+          path: crates/rast-ui/dist
+
       - name: Build release binary
         run: cargo build --release --locked
 
       - name: Smoke test
         run: |
           test -f frontend/dist/index.html
+          if grep -q "rast-placeholder-frontend" target/release/rast; then
+            echo "the release binary embeds the placeholder page, not the frontend" >&2
+            exit 1
+          fi
+          test -s crates/rast-ui/dist/rast-ui_bg.wasm
+          if grep -q "rast-placeholder-ui" target/release/rast; then
+            echo "the release binary embeds the placeholder Leptos UI, not the Trunk build" >&2
+            exit 1
+          fi
           ./target/release/rast version
 
       - name: Stage release asset

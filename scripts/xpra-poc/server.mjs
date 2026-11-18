@@ -1,6 +1,6 @@
 // Xpra PoC reverse proxy: serves a simulated RAST desktop wrapper page and
 // proxies HTTP + WebSocket to the live Xpra server (127.0.0.1:14591, display
-// :101), injecting the real RAST shim (src/linux_apps/xpra_shim.js) into the
+// :101), injecting the real RAST shim (crates/rast-server/src/xpra_shim.js) into the
 // proxied Xpra HTML page exactly like the Rust backend will.
 //
 // Usage: node scripts/xpra-poc/server.mjs [port]   (default 14592)
@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "../..");
-const SHIM_FILE = path.join(ROOT, "src/linux_apps/xpra_shim.js");
+const SHIM_FILE = path.join(ROOT, "crates/rast-server/src/xpra_shim.js");
 const XPRA_HOST = process.env.XPRA_HOST || "127.0.0.1";
 const XPRA_PORT = Number(process.env.XPRA_PORT || 14591);
 const PORT = Number(process.argv[2] || process.env.POC_PORT || 14592);

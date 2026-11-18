@@ -10,7 +10,7 @@
 //                            resize, minimize/maximize, close, transient
 //                            dialogs attached to their parent)
 //
-// The shim inside the iframe (`src/linux_apps/xpra_shim.js`) exposes
+// The shim inside the iframe (`crates/rast-server/src/xpra_shim.js`) exposes
 // `window.RASTNative`; it adopts each remote window's DOM node into the RAST
 // window body (one client connection, no per-window streams) and forwards
 // window commands, keyboard, mouse and clipboard. If adoption fails the shim

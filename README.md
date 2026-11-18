@@ -20,7 +20,6 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **App Center** | RAST's own apps (install or uninstall the optional ones) and verified Python, PHP CLI, Go, Node.js, Rust, Eclipse Temurin JDK, Bun, Deno, .NET SDK (C#), Clang/LLVM (C/C++), Flutter (with Dart), Composer, Zig, Kotlin, CMake, Gradle and Apache Maven runtimes from a signed catalog, side by side with a selectable default, updates with rollback, official runtime/app icons, and packages imported from GitHub releases (icons can be embedded by package authors; see [PACKAGE-ICONS.md](docs/PACKAGE-ICONS.md) and the [handoff](docs/package-center-handoff.md)). |
 | **Linux apps** | Install desktop Linux applications with the administrator-only **App Center → Install Linux App** workflow: upload a `.deb` or portable archive, or use the vendor's official HTTPS link; review the detected app, compatibility, package changes, saved profiles and who can use it; then follow Uploading → Validating → Installing → Registering → Ready (the job keeps running when App Center is closed). Existing host packages are registered honestly instead of reinstalled, and per-user profiles are preserved across uninstall/reinstall. Each person gets one unprivileged Linux identity and one lazily started Xpra seamless session shared by all their apps, with every normal window managed by the RAST desktop (dialogs/popups are attached transients). Legacy Docker-backed apps can be migrated in place. See [docs/NATIVE-LINUX-APPS.md](docs/NATIVE-LINUX-APPS.md) and [docs/INSTALL.md](docs/INSTALL.md#native-linux-apps-xpra). |
 | **Terminal** | First-class terminal app with real PTY shells: multiple tabs/windows, bash (sh fallback), full-screen TUI support, copy/paste/search/scrollback/font-size, reconnect after network drops, and a runtime environment panel (Python, PHP, Go, Node.js, Rust, Java, Bun, Deno, .NET/C#, Clang/LLVM C/C++, Flutter/Dart, Composer, Zig, Kotlin, CMake, Gradle, Maven) with per-user defaults and per-tab overrides. Administrators get a root shell by default (`terminal_admin_root`), while ordinary accounts must be granted access and always run as a mapped unprivileged `rast-u<id>` identity — no Docker, Xpra or graphical session — and File Station's **Open in Terminal** maps RAST folder permissions to OS ACLs. See [docs/TERMINAL.md](docs/TERMINAL.md). |
-| **Linux apps** | Install desktop Linux applications
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
 
 [![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)
@@ -28,9 +27,11 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platforms-linux%20x86__64%20%7C%20aarch64-informational)
 
-> **Status:** v0.13.3 — native Linux apps and the Install Linux App workflow are restored on top of the newer `main` line (desktop/File Station multi-selection, package app-type support), with per-window desktop integration and playback-only session audio (2026-11-14). APIs and data formats may still
-> change before v1.0; see [CHANGELOG.md](CHANGELOG.md) for upgrade requirements
-> and known limitations.
+> **Status:** v1.0.1, unreleased and in development on the `Remake` branch
+> (the latest release is v0.18.2). The remake splits the code into a Cargo
+> workspace of crates, adds shared `rast-api` types and renders the first
+> Leptos/WASM window (About RAST). APIs and data formats may still change; see
+> [CHANGELOG.md](CHANGELOG.md) for upgrade requirements and known limitations.
 
 ## Screenshots
 
@@ -93,12 +94,17 @@ and `/srv/rast/`, installs a `rast.service` systemd unit and starts it bound to
 
 Requirements: Rust stable (pinned in `rust-toolchain.toml`), Node.js 22+ and
 npm **for the frontend build only**. The installed server never needs Node.js.
+The Leptos UI (`crates/rast-ui`) also needs the `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`) and Trunk 0.22
+(`cargo install trunk --locked --version '~0.22'`); a release build fails
+without `crates/rast-ui/dist`.
 
 ```bash
 git clone https://github.com/Enricko/rast.git
 cd rast
 npm --prefix frontend ci
 npm --prefix frontend run build
+scripts/build-ui.sh    # Trunk build into crates/rast-ui/dist
 cargo build --release
 ./target/release/rast version
 ```

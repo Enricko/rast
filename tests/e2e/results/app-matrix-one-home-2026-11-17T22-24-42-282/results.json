@@ -1,0 +1,287 @@
+{
+  "schema": "rast-app-matrix/1",
+  "scenario": "app-matrix",
+  "mode": "native",
+  "homeMode": "one-home",
+  "baseUrl": "https://desktop.lufria.tech",
+  "user": "t-alice",
+  "production": true,
+  "runId": "101629",
+  "startedAt": "2026-11-17T22:24:42.282Z",
+  "finishedAt": "2026-11-17T22:25:44.692Z",
+  "options": {
+    "apps": [
+      "chrome"
+    ],
+    "keys": 30,
+    "budgets": "report",
+    "responsiveness": true
+  },
+  "environment": {
+    "devicePixelRatio": 1,
+    "viewport": "1480x920",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/156.0.0.0 Safari/537.36",
+    "rastVersion": "1.0.1-alpha.2"
+  },
+  "budgets": [
+    {
+      "id": "typing.p95",
+      "label": "typing p95, keydown to first changed pixel",
+      "unit": "ms",
+      "op": "<=",
+      "limit": 150
+    },
+    {
+      "id": "scroll.p95",
+      "label": "scroll p95, wheel to first changed frame",
+      "unit": "ms",
+      "op": "<=",
+      "limit": 200
+    },
+    {
+      "id": "scroll.fps",
+      "label": "changed frames per second while scrolling",
+      "unit": "fps",
+      "op": ">=",
+      "limit": 15
+    },
+    {
+      "id": "drag.fps",
+      "label": "RAST window frames per second while dragging",
+      "unit": "fps",
+      "op": ">=",
+      "limit": 30
+    },
+    {
+      "id": "drag.repaint",
+      "label": "app content repaint after the drop",
+      "unit": "ms",
+      "op": "<=",
+      "limit": 250
+    }
+  ],
+  "apps": [
+    {
+      "key": "chrome",
+      "label": "Google Chrome",
+      "appId": "google-chrome",
+      "appName": "Google Chrome",
+      "installed": true,
+      "checks": {
+        "launcher": {
+          "status": "pass"
+        },
+        "window": {
+          "status": "pass",
+          "ms": 5021
+        },
+        "typing": {
+          "status": "pass",
+          "ms": 85,
+          "detail": "pixels changed while typing; the typed text is verified in the saved file (check 4)"
+        },
+        "saved": {
+          "status": "pass",
+          "ms": 1596,
+          "detail": "visible after 1596 ms, typed text inside"
+        },
+        "closed": {
+          "status": "pass",
+          "ms": 4511,
+          "detail": "closed (2 windows)"
+        }
+      },
+      "window": {
+        "id": "win-2",
+        "appId": "linux:google-chrome:4194307",
+        "title": "New Tab - Google Chrome",
+        "rect": {
+          "x": 8,
+          "y": 8,
+          "width": 1464,
+          "height": 848
+        },
+        "firstPaintMs": 5119,
+        "paintedBytes": 5174
+      },
+      "savedFile": {
+        "name": "rast-matrix-101629-chrome.html",
+        "fsPath": "/rast-matrix/rast-matrix-101629-chrome.html",
+        "appPath": "/srv/rast/homes/t-alice/rast-matrix/rast-matrix-101629-chrome.html",
+        "visible": true,
+        "visibleMs": 1596,
+        "containsMarker": true,
+        "sizeBytes": 224
+      },
+      "responsiveness": {
+        "method": "canvas",
+        "typing": {
+          "method": "canvas",
+          "keys": 30,
+          "samples": [
+            308.8,
+            301.8,
+            271.7,
+            36.4,
+            17.6,
+            54.5,
+            36.4,
+            151.6,
+            309.3,
+            57.7,
+            40.6,
+            301.5,
+            120.5,
+            301.3,
+            301.9,
+            309.5,
+            313.7,
+            302.5,
+            301.9,
+            104.7,
+            324.7,
+            211.2,
+            224,
+            5.9,
+            37.5,
+            302.9,
+            327.3,
+            301.3,
+            301.6,
+            1000
+          ],
+          "missed": 16,
+          "stats": {
+            "n": 30,
+            "min": 5.9,
+            "p50": 301.3,
+            "p95": 327.3,
+            "max": 1000,
+            "mean": 232.7
+          }
+        },
+        "scroll": {
+          "method": "canvas",
+          "samples": [
+            721.3,
+            732.6,
+            734.3,
+            732.5,
+            732.6,
+            717.2,
+            732.8,
+            582.4,
+            46,
+            733.2,
+            734.3,
+            1000
+          ],
+          "missed": 10,
+          "latency": {
+            "n": 12,
+            "min": 46,
+            "p50": 732.6,
+            "p95": 1000,
+            "max": 1000,
+            "mean": 683.3
+          },
+          "fps": 1.2,
+          "changedFrames": 6,
+          "burstSpanMs": 4897.4
+        },
+        "drag": {
+          "method": "canvas",
+          "fps": 18,
+          "movedFrames": 37,
+          "durationMs": 1999.8,
+          "repaint": "repainted",
+          "repaintMs": 123.8,
+          "pageFrames": 213,
+          "path": {
+            "dx": -240,
+            "dy": 70,
+            "steps": 90
+          }
+        },
+        "environment": {
+          "devicePixelRatio": 1,
+          "windowSize": "740x864",
+          "bodySize": "738x824",
+          "xpra": {
+            "encoding": "auto",
+            "dpi": null,
+            "scale": 1,
+            "desktopWidth": 1720,
+            "desktopHeight": 1160,
+            "serverVersion": null,
+            "clientVersion": null
+          }
+        },
+        "budgets": [
+          {
+            "id": "typing.p95",
+            "label": "typing p95, keydown to first changed pixel",
+            "unit": "ms",
+            "op": "<=",
+            "limit": 150,
+            "value": 327.3,
+            "status": "fail"
+          },
+          {
+            "id": "scroll.p95",
+            "label": "scroll p95, wheel to first changed frame",
+            "unit": "ms",
+            "op": "<=",
+            "limit": 200,
+            "value": 1000,
+            "status": "fail"
+          },
+          {
+            "id": "scroll.fps",
+            "label": "changed frames per second while scrolling",
+            "unit": "fps",
+            "op": ">=",
+            "limit": 15,
+            "value": 1.2,
+            "status": "fail"
+          },
+          {
+            "id": "drag.fps",
+            "label": "RAST window frames per second while dragging",
+            "unit": "fps",
+            "op": ">=",
+            "limit": 30,
+            "value": 18,
+            "status": "fail"
+          },
+          {
+            "id": "drag.repaint",
+            "label": "app content repaint after the drop",
+            "unit": "ms",
+            "op": "<=",
+            "limit": 250,
+            "value": 123.8,
+            "status": "pass"
+          }
+        ],
+        "errors": []
+      }
+    }
+  ],
+  "summary": {
+    "checks": {
+      "pass": 5,
+      "fail": 0,
+      "expected-fail": 0,
+      "unexpected-pass": 0,
+      "skip": 0
+    },
+    "budgets": {
+      "pass": 1,
+      "fail": 4,
+      "unmeasured": 0
+    },
+    "budgetsMode": "report",
+    "ok": true
+  }
+}

@@ -18,6 +18,7 @@ import type { Backup, BackupSchedule, Permissions } from "../../core/types";
 import { confirmDialog, errorMessage, modal } from "../../core/ui";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel } from "../../components/jobs";
+import { backupWarnings } from "./warnings";
 import { Pager } from "../../components/pager";
 import {
   banner,
@@ -902,7 +903,16 @@ class BackupCenterApp {
                 });
                 if (outcome.status === "done") {
                   progress.update(1);
-                  this.ctx.toast.success("Backup created");
+                  const skipped = backupWarnings(outcome.result);
+                  if (skipped.length > 0) {
+                    // For example HOMEs in one-HOME mode, which the service
+                    // cannot read yet.
+                    this.ctx.toast.warning(
+                      `Backup created, but ${skipped.length} item(s) were left out: ${skipped.slice(0, 3).join("; ")}`,
+                    );
+                  } else {
+                    this.ctx.toast.success("Backup created");
+                  }
                   closeDialog();
                   await this.loadBackups();
                   return;

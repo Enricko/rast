@@ -46,3 +46,6 @@ tests/e2e/prod-*.png
 
 # Local admin-root Terminal verification screenshot
 tests/e2e/dev-*.png
+
+# rast-ui (Trunk) build output, embedded by rast-server
+/crates/rast-ui/dist/

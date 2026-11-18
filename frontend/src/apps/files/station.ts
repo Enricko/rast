@@ -36,11 +36,14 @@ import {
   ACCESS_CHANGED_ITEM_MESSAGE,
   ACCESS_CHANGED_MESSAGE,
   friendlyFileError,
+  hiddenParam,
+  HIDDEN_KEY,
   isAccessError,
   joinPath,
   listingItems,
   parentPath,
   previewKind,
+  readHiddenPreference,
   sortEntries,
   isSystemPath,
   systemPathLabel,
@@ -49,6 +52,7 @@ import {
   type TrashPage,
   type UsageStats,
 } from "./types";
+import { quotaBackendHint, usageChips } from "./usage";
 
 type Section = "files" | "trash";
 type ViewMode = "list" | "grid";
@@ -99,6 +103,7 @@ export class FileStation {
   private readonly searchInput: HTMLInputElement;
   private readonly listViewButton: HTMLButtonElement;
   private readonly gridViewButton: HTMLButtonElement;
+  private readonly hiddenButton: HTMLButtonElement;
   private readonly fileInput: HTMLInputElement;
   private readonly rootsNav: HTMLElement;
   private readonly trashNav: HTMLButtonElement;
@@ -133,6 +138,8 @@ export class FileStation {
   private perPage = PER_PAGE_DEFAULT;
   private total = 0;
   private view: ViewMode;
+  /** "Show hidden files": dot files are left out of listings unless on. */
+  private showHidden: boolean;
   private selection = new Set<string>();
   private anchorPath: string | null = null;
   private rowEls = new Map<string, HTMLElement>();
@@ -177,6 +184,7 @@ export class FileStation {
     this.ctx = ctx;
     this.lc = new AppLifecycle(ctx);
     this.view = readViewPreference();
+    this.showHidden = readHiddenPreference(safeLocalStorage());
     this.jobBar = progressBar();
     this.realtime = getRealtime(ctx.events);
     this.notice = new NoticeBar(this.lc);
@@ -263,6 +271,7 @@ export class FileStation {
       void this.loadListing();
     });
 
+    this.hiddenButton = viewButton("eyeOff", "Show hidden files", () => this.toggleHidden());
     this.listViewButton = viewButton("list", "List view", () => this.setView("list"));
     this.gridViewButton = viewButton("grid", "Grid view", () => this.setView("grid"));
 
@@ -274,6 +283,7 @@ export class FileStation {
       this.trashGroup,
       h("div", { class: "app-toolbar-spacer" }),
       this.searchInput,
+      this.hiddenButton,
       this.listViewButton,
       this.gridViewButton,
     );
@@ -367,6 +377,7 @@ export class FileStation {
     this.registerInteractions();
     this.subscribeRealtime();
     this.setView(this.view, false);
+    this.renderHiddenButton();
     this.renderChrome();
   }
 
@@ -630,7 +641,14 @@ export class FileStation {
     const quota = numberOr(data.quotaBytes, fallback?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0);
     const used = numberOr(data.usedBytes, fallback?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0);
     const trash = numberOr(data.trashBytes, fallback?.trashBytes ?? 0);
-    this.usage = { quotaBytes: quota, usedBytes: used, trashBytes: trash, byType: fallback?.byType };
+    this.usage = {
+      quotaBytes: quota,
+      usedBytes: used,
+      trashBytes: trash,
+      byType: fallback?.byType,
+      byLocation: fallback?.byLocation,
+      quotaBackend: fallback?.quotaBackend,
+    };
     this.usageError = null;
     this.renderUsage();
     this.scheduleUsageSync();
@@ -830,6 +848,7 @@ export class FileStation {
           sort: this.sort,
           order: this.order,
           q: this.query || undefined,
+          hidden: hiddenParam(this.showHidden),
         },
         { signal: request.signal },
       );
@@ -1167,16 +1186,20 @@ export class FileStation {
       this.usageHost.appendChild(h("div", { class: "fs-usage-line muted" }, `${formatBytes(free)} free`));
     }
     if (this.usage) {
+      if (quota > 0 && this.usage.quotaBackend) {
+        bar.title = quotaBackendHint(this.usage.quotaBackend);
+      }
       this.usageHost.appendChild(
         h("div", { class: "fs-usage-line muted" }, `Recycle bin: ${formatBytes(this.usage.trashBytes ?? 0)}`),
       );
-      const byType = Object.entries(this.usage.byType ?? {}).sort((a, b) => b[1] - a[1]);
-      if (byType.length > 0) {
-        const chips = h("div", { class: "fs-type-chips" });
-        for (const [label, bytes] of byType.slice(0, 4)) {
-          chips.appendChild(h("span", { class: "badge", title: label }, `${label} · ${formatBytes(bytes)}`));
+      // One-HOME accounts: where the bytes are (apps and caches count too).
+      const chips = usageChips(this.usage);
+      if (chips.length > 0) {
+        const host = h("div", { class: "fs-type-chips" });
+        for (const [label, bytes] of chips) {
+          host.appendChild(h("span", { class: "badge", title: label }, `${label} · ${formatBytes(bytes)}`));
         }
-        this.usageHost.appendChild(chips);
+        this.usageHost.appendChild(host);
       }
     }
   }
@@ -1720,6 +1743,30 @@ export class FileStation {
     }
   }
 
+  private toggleHidden(): void {
+    this.showHidden = !this.showHidden;
+    try {
+      window.localStorage.setItem(HIDDEN_KEY, this.showHidden ? "1" : "0");
+    } catch {
+      /* storage disabled */
+    }
+    this.renderHiddenButton();
+    if (this.section !== "files") return;
+    this.page = 1;
+    this.selection.clear();
+    void this.loadListing();
+  }
+
+  private renderHiddenButton(): void {
+    const label = this.showHidden ? "Hide hidden files" : "Show hidden files";
+    clear(this.hiddenButton);
+    this.hiddenButton.appendChild(iconSvg(this.showHidden ? "eye" : "eyeOff", 17));
+    this.hiddenButton.title = label;
+    this.hiddenButton.setAttribute("aria-label", label);
+    this.hiddenButton.setAttribute("aria-pressed", String(this.showHidden));
+    this.hiddenButton.classList.toggle("is-active", this.showHidden);
+  }
+
   private setView(view: ViewMode, rerender = true): void {
     this.view = view;
     try {
@@ -2140,6 +2187,14 @@ function hasFileDrag(event: DragEvent): boolean {
     if (types[i] === "Files") return true;
   }
   return false;
+}
+
+function safeLocalStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null; // storage disabled
+  }
 }
 
 function readViewPreference(): ViewMode {

@@ -3,6 +3,11 @@
 import { ApiError } from "../../core/api";
 import type { FileEntry, FileListing } from "../../core/types";
 
+// Generated from crates/rast-api; re-exported for File Station modules.
+export type { EntryDto } from "../../generated/EntryDto";
+export type { ListingDto } from "../../generated/ListingDto";
+export type { FileEntry, FileListing };
+
 /** Logical path of the server's own file system (super administrators only). */
 export const SYSTEM_ROOT = "/@root";
 
@@ -14,6 +19,23 @@ export function isSystemPath(path: string): boolean {
 /** The real server path behind a root file system logical path (`/@root/etc` → `/etc`). */
 export function systemPathLabel(path: string): string {
   return path.slice(SYSTEM_ROOT.length) || "/";
+}
+
+/** localStorage key of File Station's "Show hidden files" toggle. */
+export const HIDDEN_KEY = "rast.files.hidden";
+
+/** Whether File Station shows dot files: off unless the person turned it on. */
+export function readHiddenPreference(storage: Pick<Storage, "getItem"> | null | undefined): boolean {
+  try {
+    return storage?.getItem(HIDDEN_KEY) === "1";
+  } catch {
+    return false; // storage disabled
+  }
+}
+
+/** The `hidden` query parameter of a listing (omitted when dot files show). */
+export function hiddenParam(show: boolean): false | undefined {
+  return show ? undefined : false;
 }
 
 /** Friendly copy shown when a folder/share/file becomes inaccessible mid-session. */
@@ -50,6 +72,10 @@ export interface UsageStats {
   usedBytes: number;
   trashBytes: number;
   byType?: Record<string, number>;
+  /** Where the used bytes are: files, apps, caches, trash, shared. */
+  byLocation?: Record<string, number>;
+  /** What enforces quotaBytes: the kernel ("filesystem") or RAST ("rast"). */
+  quotaBackend?: "filesystem" | "rast";
 }
 
 /** GET /api/files/trash?page= */

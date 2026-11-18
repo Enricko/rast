@@ -138,6 +138,83 @@ enum Command {
         #[arg(long = "idle-seconds", default_value_t = 900)]
         idle_seconds: u64,
     },
+    /// Internal: per-user file agent (File Station for one HOME, ADR 0005)
+    #[command(hide = true)]
+    FileAgent {
+        /// The HOME to serve (`/` in File Station).
+        #[arg(long)]
+        home: PathBuf,
+        /// Root of the shared folders (`~/Shared/<name>` must point there).
+        #[arg(long = "shared-root")]
+        shared_root: PathBuf,
+        /// Only this uid may connect (the RAST service).
+        #[arg(long = "peer-uid")]
+        peer_uid: Option<u32>,
+        /// Bind this socket instead of the one systemd passes (development).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Token file (default: the systemd credential `token`).
+        #[arg(long = "token-file")]
+        token_file: Option<PathBuf>,
+        /// Exit after this many seconds without a request.
+        #[arg(long = "idle-seconds", default_value_t = 900)]
+        idle_seconds: u64,
+    },
+    /// Internal: read-only root reader of HOMEs and migrated shared folders
+    /// for Backup Center (ADR 0005, D12), started by the native helper
+    #[command(hide = true)]
+    BackupReader {
+        /// Root of the HOMEs (`<storage_dir>/homes`).
+        #[arg(long)]
+        homes: PathBuf,
+        /// Root of the shared folder containers (`<storage_dir>/shared`).
+        #[arg(long)]
+        shared: PathBuf,
+        /// `linux_uid_base`: which owners a HOME or a container may have.
+        #[arg(long = "uid-base")]
+        uid_base: u32,
+        /// Only this uid may connect (the RAST service).
+        #[arg(long = "peer-uid")]
+        peer_uid: Option<u32>,
+        /// Bind this socket instead of the one systemd passes (development).
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Token file (default: the systemd credential `token`).
+        #[arg(long = "token-file")]
+        token_file: Option<PathBuf>,
+        /// Exit after this many seconds without a connection.
+        #[arg(long = "idle-seconds", default_value_t = 300)]
+        idle_seconds: u64,
+    },
+    /// Move existing data to the one-HOME layout (ADR 0005)
+    Migrate {
+        #[command(subcommand)]
+        cmd: MigrateCommand,
+    },
+    /// Restore user files (HOMEs, shared folders) from a backup archive, as
+    /// root: every entry is checked, owners only as the layout allows
+    RestoreFiles {
+        /// Backup archive (Backup Center or `rast backup`, users scope)
+        #[arg(long, value_name = "FILE")]
+        from: PathBuf,
+        /// Only this folder: users/homes/<name> or users/shared/<container>
+        /// (repeatable; default: every folder in the archive)
+        #[arg(long = "tree", value_name = "FOLDER", value_parser = parse_restore_tree)]
+        trees: Vec<String>,
+        /// Check every entry and write nothing
+        #[arg(long, conflicts_with_all = ["target", "to_storage"])]
+        dry_run: bool,
+        /// New folder to restore into (default: <storage_dir>/restore-<time>)
+        #[arg(long, value_name = "DIR", conflicts_with = "to_storage")]
+        target: Option<PathBuf>,
+        /// Restore into the live storage (stop rast.service first); a folder
+        /// that exists there is never replaced
+        #[arg(long)]
+        to_storage: bool,
+        /// Machine-readable report
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -370,6 +447,61 @@ enum PathCommand {
 }
 
 #[derive(Subcommand, Debug)]
+enum MigrateCommand {
+    /// Shared folders: Linux groups, group-owned containers and ACLs. Run
+    /// as the `rast` user, before `rast migrate home`; apply and rollback
+    /// need the server stopped.
+    #[command(group(clap::ArgGroup::new("selection").required(true).args(["share", "all"])))]
+    Shares {
+        /// Only this shared folder (by name)
+        #[arg(long, value_name = "NAME")]
+        share: Option<String>,
+        /// Every shared folder
+        #[arg(long)]
+        all: bool,
+        /// Report what would change, change nothing
+        #[arg(long, conflicts_with = "rollback")]
+        dry_run: bool,
+        /// Restore owners, modes and ACLs from the migration journal
+        #[arg(long)]
+        rollback: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+        /// Also show paths and ACL entries of shared folders outside the
+        /// native pilot (a dry run shows only counts and sizes for them)
+        #[arg(long)]
+        show_paths: bool,
+    },
+    /// Accounts: move a legacy account into one-HOME mode (its HOME, app
+    /// profiles and recycle bin become its Linux identity's). Run as the
+    /// `rast` user, after `rast migrate shares`; apply and rollback need the
+    /// server stopped.
+    #[command(group(clap::ArgGroup::new("selection").required(true).args(["user", "all"])))]
+    Home {
+        /// Only this account (by RAST username)
+        #[arg(long, value_name = "NAME")]
+        user: Option<String>,
+        /// Every account
+        #[arg(long)]
+        all: bool,
+        /// Report what would change, change nothing
+        #[arg(long, conflicts_with = "rollback")]
+        dry_run: bool,
+        /// Undo the migration from its journal
+        #[arg(long)]
+        rollback: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+        /// Also show paths and ACL entries of accounts outside the native
+        /// pilot (a dry run shows only counts and sizes for them)
+        #[arg(long)]
+        show_paths: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum UserCommand {
     /// Create the first administrator account
     CreateAdmin {
@@ -456,6 +588,78 @@ async fn run(
             let _ = std::io::stdout().write_all(banner.as_bytes());
             Ok(ExitCode::SUCCESS)
         }
+        // The per-user file agent runs as the user's Linux account, which
+        // cannot read the server configuration; it needs none.
+        Command::FileAgent {
+            home,
+            shared_root,
+            peer_uid,
+            socket,
+            token_file,
+            idle_seconds,
+        } => {
+            init_tracing(log_level.as_deref().unwrap_or("info"));
+            // Before the token is read: the user's own processes must not
+            // be able to trace the agent and take it over.
+            rast::homefs::agent::forbid_tracing()
+                .map_err(|error| format!("file agent cannot protect itself: {error}"))?;
+            let token = rast::homefs::agent::token_from(token_file.as_deref())?;
+            rast::homefs::agent::run(rast::homefs::agent::RunOptions {
+                home,
+                shared_root,
+                listen: match socket {
+                    Some(path) => rast::homefs::agent::Listen::Path(path),
+                    None => rast::homefs::agent::Listen::Systemd,
+                },
+                token,
+                peer_uid,
+                idle: std::time::Duration::from_secs(idle_seconds.max(30)),
+                stay_while_user_runs: true,
+            })
+            .await
+            .map(|_| ExitCode::SUCCESS)
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                format!("file agent failed: {error}").into()
+            })
+        }
+        // The backup reader is started by the helper with everything it
+        // needs on its command line; it reads no configuration.
+        Command::BackupReader {
+            homes,
+            shared,
+            uid_base,
+            peer_uid,
+            socket,
+            token_file,
+            idle_seconds,
+        } => {
+            use rast::native::backup_reader;
+            init_tracing(log_level.as_deref().unwrap_or("info"));
+            // The peer is the `rast` service, which may own entries in a
+            // HOME or a container too (review F6).
+            let rules = backup_reader::OwnerRules::for_uid_base(uid_base, peer_uid)
+                .map_err(|error| format!("backup reader: {error}"))?;
+            let token = backup_reader::token_from(token_file.as_deref())?;
+            let options = backup_reader::ReaderOptions {
+                homes,
+                shared,
+                rules,
+                token,
+                peer_uid,
+                idle: std::time::Duration::from_secs(idle_seconds.max(30)),
+                listen: match socket {
+                    Some(path) => backup_reader::Listen::Path(path),
+                    None => backup_reader::Listen::Systemd,
+                },
+            };
+            tokio::task::spawn_blocking(move || backup_reader::run(options))
+                .await
+                .map_err(|error| format!("backup reader failed: {error}"))?
+                .map(|_| ExitCode::SUCCESS)
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    format!("backup reader failed: {error}").into()
+                })
+        }
         other => {
             let mut cfg = Config::load(config_path.as_deref())?;
             if let Some(level) = log_level {
@@ -511,6 +715,26 @@ async fn run(
                     Ok(ExitCode::SUCCESS)
                 }
                 Command::Restore { from, dry_run, yes } => restore(cfg, from, dry_run, yes).await,
+                Command::RestoreFiles {
+                    from,
+                    trees,
+                    dry_run,
+                    target,
+                    to_storage,
+                    json,
+                } => {
+                    let mode = if dry_run {
+                        backup::restore_files::Mode::DryRun
+                    } else if to_storage {
+                        backup::restore_files::Mode::Storage
+                    } else {
+                        backup::restore_files::Mode::Scratch(
+                            target.map(std::path::absolute).transpose()?,
+                        )
+                    };
+                    restore_files(cfg, from, trees, mode, json).await
+                }
+                Command::Migrate { cmd } => migrate_command(cfg, cmd).await,
                 Command::Update { version, check } => {
                     rast::update::run(cfg, version.as_deref(), check).await
                 }
@@ -545,6 +769,8 @@ async fn run(
                     format!("root file agent failed: {error}").into()
                 }),
                 Command::Serve { .. }
+                | Command::FileAgent { .. }
+                | Command::BackupReader { .. }
                 | Command::Version
                 | Command::Package { .. }
                 | Command::Catalog { .. } => unreachable!(),
@@ -916,6 +1142,11 @@ async fn serve(
     for warning in rast::config::warnings(&cfg) {
         tracing::warn!("{warning}");
     }
+    tracing::info!(
+        native_enabled = cfg.native_enabled,
+        "native pilot: {}",
+        cfg.native_pilot.describe()
+    );
 
     // One server per data directory; also lets `rast restore` detect a live
     // server regardless of how it was started.
@@ -930,6 +1161,21 @@ async fn serve(
                 db::InstanceLock::path(&cfg).display()
             )
         })?;
+    // The database and the key of an older release move into the private
+    // folder (ADR 0006) before anything opens them.
+    let moved = db::move_into_private(&cfg, &_instance).map_err(|e| {
+        format!(
+            "cannot move the database and the key into {}: {e}",
+            cfg.private_dir().display()
+        )
+    })?;
+    if !moved.is_empty() {
+        tracing::info!(
+            files = ?moved,
+            dir = %cfg.private_dir().display(),
+            "moved the database and the key into the private data folder"
+        );
+    }
 
     let state = AppState::new(cfg.clone()).await?;
     let app = rast::api::router(state.clone());
@@ -1106,8 +1352,24 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
 
     // Database
     print!("[    ] database ... ");
+    let mut user_ids = std::collections::BTreeSet::new();
+    let mut share_containers: Vec<(String, String)> = Vec::new();
+    let mut doctor_pool = None;
     match db::init(&cfg).await {
         Ok(pool) => {
+            doctor_pool = Some(pool.clone());
+            user_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM users")
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            share_containers = rast::storage::shares::list_records(&pool)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|record| (record.name, record.container_path))
+                .collect();
             let version = db::schema_version(&pool).await;
             println!("ok (schema v{version}, {})", cfg.db_path().display());
             let snapshot = sqlx::query("PRAGMA journal_mode")
@@ -1128,6 +1390,19 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
             println!("FAIL: {e}");
         }
     }
+
+    // The private data folder and hard-link protection (ADR 0006).
+    let (lines, private_warnings, private_failures) = db::private_report(
+        &cfg,
+        std::fs::read_to_string("/proc/sys/fs/protected_hardlinks")
+            .ok()
+            .as_deref(),
+    );
+    for line in lines {
+        println!("{line}");
+    }
+    warnings += private_warnings;
+    failures += private_failures;
 
     // Bind availability. If RAST itself is running, the address being in use is
     // the expected state rather than a failure.
@@ -1217,6 +1492,36 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     warnings += native_report.warnings;
     failures += native_report.failures;
+    let (quota_lines, quota_warnings) = rast::quota_sync::doctor_report(&cfg).await;
+    for line in &quota_lines {
+        println!("{line}");
+    }
+    warnings += quota_warnings;
+    if cfg.native_enabled && !user_ids.is_empty() {
+        let identities = rast::native::doctor_identities(&cfg, &user_ids).await;
+        for line in &identities.lines {
+            println!("{line}");
+        }
+        warnings += identities.warnings;
+    }
+    if cfg.native_enabled {
+        let (lines, trash_warnings) =
+            rast::share_groups::doctor_share_trash(&cfg, &share_containers);
+        for line in &lines {
+            println!("{line}");
+        }
+        warnings += trash_warnings;
+    }
+    // One-HOME accounts the pilot or native apps no longer cover, and
+    // identities cron or `at` may still run (review F13, F3).
+    if let Some(pool) = &doctor_pool {
+        let (lines, one_home_warnings) =
+            rast::migrate_home::doctor_report(&cfg, pool, std::path::Path::new("/etc")).await;
+        for line in &lines {
+            println!("{line}");
+        }
+        warnings += one_home_warnings;
+    }
 
     print!("[    ] time drift (system clock) ... ");
     println!(
@@ -1244,6 +1549,177 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
         println!("doctor: ok, {warnings} warning(s)");
         Ok(ExitCode::SUCCESS)
     }
+}
+
+async fn migrate_command(
+    cfg: Config,
+    cmd: MigrateCommand,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::migrate_shares::{self, Mode};
+    let (share, dry_run, rollback, json, show_paths) = match cmd {
+        MigrateCommand::Shares {
+            share,
+            all: _,
+            dry_run,
+            rollback,
+            json,
+            show_paths,
+        } => (share, dry_run, rollback, json, show_paths),
+        MigrateCommand::Home {
+            user,
+            all: _,
+            dry_run,
+            rollback,
+            json,
+            show_paths,
+        } => return migrate_home_command(cfg, user, dry_run, rollback, json, show_paths).await,
+    };
+    let mode = match (dry_run, rollback) {
+        (true, _) => Mode::DryRun,
+        (_, true) => Mode::Rollback,
+        _ => Mode::Apply,
+    };
+    if !cfg.native_enabled {
+        return Err("shared folder groups need the native backend (native_enabled = true)".into());
+    }
+    // Outside the native pilot: refused before the server must be stopped.
+    if let Some(refusal) = share
+        .as_deref()
+        .and_then(|name| migrate_shares::refuse_outside_pilot(&cfg.native_pilot, mode, name))
+    {
+        return Err(refusal.into());
+    }
+    // Apply and rollback change permissions under a running server's feet
+    // (D9): they need the server stopped.
+    let _instance = if mode == Mode::DryRun {
+        None
+    } else {
+        Some(db::InstanceLock::try_acquire(&cfg)?.ok_or_else(|| {
+            format!(
+                "the RAST server is running on {}; stop it first (systemctl stop rast)",
+                cfg.data_dir.display()
+            )
+        })?)
+    };
+    let pool = db::init(&cfg).await?;
+    let native = rast::native::client::NativeClient::from_config(&cfg);
+    let mut outcomes =
+        migrate_shares::run_in_pilot(&pool, &native, &cfg.native_pilot, mode, share.as_deref())
+            .await?;
+    if !show_paths {
+        migrate_shares::hide_paths_outside_pilot(&mut outcomes);
+    }
+    let failed = outcomes.iter().filter(|run| !run.outcome.ok).count();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": match mode {
+                    Mode::DryRun => "dry-run",
+                    Mode::Apply => "apply",
+                    Mode::Rollback => "rollback",
+                },
+                "shares": outcomes,
+                "failed": failed,
+            }))?
+        );
+    } else {
+        if outcomes.is_empty() {
+            println!("There are no shared folders.");
+        }
+        for outcome in &outcomes {
+            for line in migrate_shares::describe_in_pilot(mode, outcome) {
+                println!("{line}");
+            }
+        }
+        if failed > 0 {
+            eprintln!("rast: {failed} shared folder(s) failed; the others are done");
+        }
+    }
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
+async fn migrate_home_command(
+    cfg: Config,
+    user: Option<String>,
+    dry_run: bool,
+    rollback: bool,
+    json: bool,
+    show_paths: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::migrate_home::{self, Env, Mode, Selection};
+    let mode = match (dry_run, rollback) {
+        (true, _) => Mode::DryRun,
+        (_, true) => Mode::Rollback,
+        _ => Mode::Apply,
+    };
+    let selection = match user {
+        Some(name) => Selection::User(name),
+        None => Selection::All,
+    };
+    if !cfg.native_enabled {
+        return Err("one-HOME mode needs the native backend (native_enabled = true)".into());
+    }
+    // Outside the native pilot: refused before the server must be stopped.
+    if let Selection::User(name) = &selection {
+        if let Some(refusal) = migrate_home::refuse_outside_pilot(&cfg.native_pilot, mode, name) {
+            return Err(refusal.into());
+        }
+    }
+    // Apply and rollback change owners under a running server's feet (D9).
+    let _instance = if mode == Mode::DryRun {
+        None
+    } else {
+        Some(db::InstanceLock::try_acquire(&cfg)?.ok_or_else(|| {
+            format!(
+                "the RAST server is running on {}; stop it first (systemctl stop rast)",
+                cfg.data_dir.display()
+            )
+        })?)
+    };
+    let pool = db::init(&cfg).await?;
+    let native = rast::native::client::NativeClient::from_config(&cfg);
+    let env = Env {
+        cfg: &cfg,
+        pool: &pool,
+        native: &native,
+    };
+    let mut outcomes = migrate_home::run(&env, mode, &selection).await?;
+    if !show_paths {
+        migrate_home::hide_paths_outside_pilot(&mut outcomes);
+    }
+    let failed = outcomes.iter().filter(|outcome| !outcome.ok).count();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mode": mode.as_str(),
+                "users": outcomes,
+                "failed": failed,
+            }))?
+        );
+    } else {
+        if outcomes.is_empty() {
+            println!("There are no accounts.");
+        }
+        for outcome in &outcomes {
+            for line in migrate_home::describe(mode, outcome) {
+                println!("{line}");
+            }
+        }
+        if failed > 0 {
+            eprintln!("rast: {failed} account(s) failed; the others are done");
+        }
+    }
+    Ok(if failed > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 async fn user_command(
@@ -1407,10 +1883,208 @@ async fn restore(
     Ok(ExitCode::SUCCESS)
 }
 
+fn parse_restore_tree(text: &str) -> Result<String, String> {
+    rast::native::restore_files::parse_tree(text)
+}
+
+/// `rast restore-files` (review F1): root restores user files from an
+/// archive the service wrote, without trusting it.
+async fn restore_files(
+    cfg: Config,
+    from: PathBuf,
+    trees: Vec<String>,
+    mode: backup::restore_files::Mode,
+    json: bool,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::native::restore_files::{describe, take_service_lock, ServiceLock};
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(
+            "rast restore-files sets the owners of what it restores and runs as root: \
+                    sudo rast restore-files ..."
+                .into(),
+        );
+    }
+    // Into the live storage only while the service is stopped, and it
+    // cannot start until the restore ends.
+    let _lock = if matches!(mode, backup::restore_files::Mode::Storage) {
+        let path = rast::db::InstanceLock::path(&cfg);
+        match take_service_lock(&path)
+            .map_err(|error| format!("cannot check {}: {error}", path.display()))?
+        {
+            ServiceLock::Busy => {
+                return Err(format!(
+                    "rast.service is running ({} is locked); stop it first: \
+                     sudo systemctl stop rast.service",
+                    path.display()
+                )
+                .into())
+            }
+            lock => Some(lock),
+        }
+    } else {
+        None
+    };
+    let report = backup::restore_files::run(
+        &cfg,
+        backup::restore_files::RunOptions {
+            archive: from,
+            trees,
+            mode,
+        },
+    )
+    .await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in describe(&report) {
+            println!("{line}");
+        }
+    }
+    Ok(if report.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 #[allow(dead_code)]
 fn _assert_traits() {
     // Compile-time check that Config is Send + Sync for tokio::spawn.
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<Config>();
     assert_send_sync::<AppResult<()>>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<MigrateCommand, clap::Error> {
+        let mut argv = vec!["rast", "migrate"];
+        argv.extend_from_slice(args);
+        let cli = Cli::try_parse_from(argv)?;
+        match cli.command {
+            Some(Command::Migrate { cmd }) => Ok(cmd),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn restore_files_takes_one_target_and_valid_folders() {
+        let parse = |args: &[&str]| {
+            let mut argv = vec!["rast", "restore-files", "--from", "/b.tar.gz"];
+            argv.extend_from_slice(args);
+            Cli::try_parse_from(argv).map(|cli| cli.command)
+        };
+        for args in [
+            &["--dry-run", "--to-storage"][..],
+            &["--dry-run", "--target", "/x"],
+            &["--target", "/x", "--to-storage"],
+            &["--tree", "users/homes/../etc"],
+            &["--tree", "homes/alice"],
+            &["--tree", "users/other/alice"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["rast", "restore-files"]).is_err());
+        let command = parse(&[
+            "--tree",
+            "users/homes/t-alice",
+            "--tree",
+            "users/shared/team",
+            "--to-storage",
+            "--json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            command,
+            Some(Command::RestoreFiles { ref trees, dry_run: false, target: None, to_storage: true, json: true, .. })
+                if trees == &["users/homes/t-alice", "users/shared/team"]
+        ));
+        let command = parse(&[]).unwrap();
+        assert!(matches!(
+            command,
+            Some(Command::RestoreFiles { ref trees, dry_run: false, target: None, to_storage: false, .. })
+                if trees.is_empty()
+        ));
+    }
+
+    #[test]
+    fn migrations_name_one_share_or_account_or_all_of_them() {
+        // No selection is an error: a run never covers everything by
+        // default.
+        for args in [
+            &["shares"][..],
+            &["shares", "--dry-run"],
+            &["shares", "--rollback"],
+            &["home"],
+            &["home", "--dry-run"],
+            &["home", "--rollback"],
+            &["shares", "--share", "team", "--all"],
+            &["home", "--user", "t-alice", "--all"],
+            &["home", "--user", "t-alice", "--dry-run", "--rollback"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?}");
+        }
+        for mode in [None, Some("--dry-run"), Some("--rollback")] {
+            let with = |args: &[&'static str]| {
+                let mut args = args.to_vec();
+                args.extend(mode);
+                args
+            };
+            let cmd = parse(&with(&["shares", "--share", "team"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Shares { share: Some(ref name), all: false, dry_run, rollback, .. }
+                    if name == "team"
+                        && dry_run == (mode == Some("--dry-run"))
+                        && rollback == (mode == Some("--rollback"))
+            ));
+            let cmd = parse(&with(&["shares", "--all"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Shares {
+                    share: None,
+                    all: true,
+                    ..
+                }
+            ));
+            let cmd = parse(&with(&["home", "--user", "t-alice", "--json"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Home {
+                    user: Some(ref name), all: false, json: true, dry_run, rollback,
+                    show_paths: false,
+                }
+                    if name == "t-alice"
+                        && dry_run == (mode == Some("--dry-run"))
+                        && rollback == (mode == Some("--rollback"))
+            ));
+            // Review F10: paths outside the native pilot only on request.
+            for sub in ["shares", "home"] {
+                let selection = if sub == "shares" { "--share" } else { "--user" };
+                let cmd = parse(&with(&[sub, selection, "x", "--show-paths"])).unwrap();
+                assert!(matches!(
+                    cmd,
+                    MigrateCommand::Shares {
+                        show_paths: true,
+                        ..
+                    } | MigrateCommand::Home {
+                        show_paths: true,
+                        ..
+                    }
+                ));
+            }
+            let cmd = parse(&with(&["home", "--all"])).unwrap();
+            assert!(matches!(
+                cmd,
+                MigrateCommand::Home {
+                    user: None,
+                    all: true,
+                    ..
+                }
+            ));
+        }
+    }
 }

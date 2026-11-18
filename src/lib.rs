@@ -4,36 +4,26 @@
 //! file station, application deployment, resource monitoring, control panel,
 //! backups and audit logs — shipped as a single Rust binary.
 
-pub mod access;
-pub mod api;
-pub mod appearance;
-pub mod audit;
-pub mod auth;
-pub mod backup;
-pub mod config;
-pub mod db;
-pub mod docker;
-pub mod error;
-pub mod events;
-pub mod jobs;
-pub mod linux_apps;
-pub mod monitor;
-pub mod native;
-pub mod packages;
-pub mod realtime;
-pub mod rootfs;
-pub mod secrets;
-pub mod server;
-pub mod state;
-pub mod storage;
-pub mod terminal;
 pub mod update;
-pub mod users;
-pub mod worker;
 
-/// Product name.
-pub const NAME: &str = "RAST";
-/// Semantic version of this build (from Cargo.toml).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Product description used in UI/metadata.
-pub const DESCRIPTION: &str = "Resource Administration & Storage Toolkit";
+pub use rast_base::{
+    access, appearance, audit, auth, config, db, error, events, jobs, realtime, secrets, storage,
+    users,
+};
+
+pub use rast_base::{DESCRIPTION, NAME, VERSION};
+
+pub use rast_apps::packages;
+
+pub use rast_docker::{docker, worker};
+
+pub use rast_helper::native;
+
+pub use rast_agent::{fileagent, homefs, rootfs, terminal};
+
+pub use rast_session::linux_apps;
+
+pub use rast_server::{
+    api, backup, migrate_home, migrate_shares, monitor, native_proxy, quota_sync, server,
+    share_groups, state,
+};

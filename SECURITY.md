@@ -220,7 +220,10 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
   `..`, NUL, backslash and symlink escapes are rejected before any filesystem
   call.
 * `storage_dir` stays `0755` with per-user homes `0700`; the data directory is
-  `0750 rast:rast`; `secret.key` is `0600`.
+  `0750 rast:rast` (`0751` with native apps or the Package Center shell
+  PATH); the database and `secret.key` (`0600`) live in its `private/`
+  folder (`0700`), and `backups/` is `0700`, so no other account can name
+  them, nor hard-link them elsewhere (ADR 0006).
 * Master key with purpose-specific derived keys (HMAC for CSRF, AES-256-GCM for
   encrypted application secrets). Backups that include `config` contain
   `secret.key` and must be stored encrypted off-server.

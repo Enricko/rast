@@ -5,6 +5,15 @@
 //   node tests/e2e/run.mjs --mode=docker --scenario=all
 //   node tests/e2e/run.mjs --mode=native --scenario=a,c,d
 //   node tests/e2e/run.mjs --mode=docker --scenario=a --headless=false
+//   node tests/e2e/run.mjs --scenario=app-matrix --plan --user=t-alice --base-url=http://127.0.0.1:8720
+//   node tests/e2e/run.mjs --scenario=app-matrix --mode=native --base-url=http://127.0.0.1:8720 \
+//        --user=t-alice --password-file=$HOME/.config/rast-test/creds
+//
+// Scenarios flagged `standalone` (app-matrix) log in as their own account, need
+// no administrator and no dev-instance credentials, and write their own results.
+// Scenarios flagged `optIn` run only when named with --scenario. Against the
+// production RAST (port 8720/8721, desktop.lufria.tech) only scenarios flagged
+// `productionSafe` may run.
 //
 // Results are written to tests/e2e/results/<mode>-<timestamp>.json plus a
 // markdown summary; screenshots go to tests/e2e/screenshots/<mode>/<scenario>/.
@@ -32,12 +41,19 @@ const { loginClients } = await import("./lib/rast-api.mjs");
 const { launchBrowser, screenshot } = await import("./lib/browser.mjs");
 const host = await import("./lib/host.mjs");
 const { scenarios } = await import("./scenarios/index.mjs");
+const { MATRIX_OPTION_NAMES, isProductionTarget, redactUrl } = await import("./lib/app-matrix-core.mjs");
 
 class SkipError extends Error {
   constructor(reason) {
     super(reason);
     this.name = "SkipError";
   }
+}
+
+// `all` (or an empty list) means the default selection of the mode.
+function scenarioList(text) {
+  const list = text.split(",").map((s) => s.trim()).filter(Boolean);
+  return list.length === 0 || list.includes("all") ? null : list;
 }
 
 function parseArgs(argv) {
@@ -50,6 +66,8 @@ function parseArgs(argv) {
     list: false,
     verbose: false,
     instanceRoot: null,
+    scenarioArgs: [],
+    plan: false,
   };
   for (const item of argv) {
     if (item === "--list") args.list = true;
@@ -58,14 +76,18 @@ function parseArgs(argv) {
     else if (item === "--headless=false") args.headless = false;
     else if (item.startsWith("--headless=")) args.headless = item.split("=")[1] !== "false";
     else if (item.startsWith("--mode=")) args.mode = item.slice("--mode=".length);
-    else if (item.startsWith("--scenario=")) args.only = item.slice("--scenario=".length).split(",").map((s) => s.trim()).filter(Boolean);
-    else if (item.startsWith("--only=")) args.only = item.slice("--only=".length).split(",").map((s) => s.trim()).filter(Boolean);
+    else if (item.startsWith("--scenario=")) args.only = scenarioList(item.slice("--scenario=".length));
+    else if (item.startsWith("--only=")) args.only = scenarioList(item.slice("--only=".length));
     else if (item.startsWith("--timeout=")) args.timeoutMs = Number(item.split("=")[1]) * 1000;
     else if (item === "--instance-root") args.instanceRoot = argv[argv.indexOf(item) + 1];
     else if (item.startsWith("--instance-root=")) args.instanceRoot = item.slice("--instance-root=".length);
     else if (item === "--base-url") args.baseUrl = argv[argv.indexOf(item) + 1];
     else if (item.startsWith("--base-url=")) args.baseUrl = item.slice("--base-url=".length);
-    else {
+    else if (MATRIX_OPTION_NAMES.includes(item.split("=")[0])) {
+      // Options of the app-matrix scenario, parsed by the scenario itself.
+      args.scenarioArgs.push(item);
+      if (item === "--plan") args.plan = true;
+    } else {
       console.error(`unknown argument: ${item}`);
       process.exit(2);
     }
@@ -126,12 +148,51 @@ async function main() {
     return 0;
   }
 
-  const mode = args.mode || modeFromInstance();
+  const everyStandalone = (list) => list.length > 0 && list.every((scenario) => scenario.standalone);
+  const preselected = args.only ? scenarios.filter((scenario) => args.only.includes(scenario.id)) : null;
+  // A standalone scenario against an explicit base URL is a native run unless told otherwise.
+  const standaloneRun = preselected ? everyStandalone(preselected) : false;
+  const mode = args.mode || (standaloneRun && args.baseUrl ? "native" : modeFromInstance());
   if (!["docker", "native"].includes(mode)) {
     console.error(`invalid mode: ${mode} (docker|native)`);
     return 2;
   }
-  if (!config.admin.password) {
+
+  const selected =
+    preselected ??
+    scenarios.filter((scenario) => !scenario.optIn && scenario.modes.includes(mode));
+  if (selected.length === 0) {
+    console.error(`no scenarios selected (ids: ${scenarios.map((scenario) => scenario.id).join(", ")})`);
+    return 2;
+  }
+  const standalone = everyStandalone(selected);
+  if (!standalone && selected.some((scenario) => scenario.standalone)) {
+    console.error("standalone scenarios (app-matrix) cannot be mixed with the others in one run");
+    return 2;
+  }
+  if (isProductionTarget(config.baseUrl)) {
+    const unsafe = selected.filter((scenario) => !scenario.productionSafe).map((scenario) => scenario.id);
+    if (unsafe.length > 0) {
+      console.error(
+        `refusing to run ${unsafe.join(", ")} against ${redactUrl(config.baseUrl)}: it is the production RAST or not a local dev instance; only productionSafe scenarios (app-matrix) may run there`,
+      );
+      return 2;
+    }
+  }
+
+  if (args.plan) {
+    for (const scenario of selected) {
+      if (typeof scenario.plan !== "function") {
+        console.log(`${scenario.id}: no plan available`);
+        continue;
+      }
+      console.log(`plan for ${scenario.id} (${mode} mode), nothing is started or contacted:`);
+      for (const line of scenario.plan({ mode, config, options: args.scenarioArgs })) console.log(`  ${line}`);
+    }
+    return 0;
+  }
+
+  if (!standalone && !config.admin.password) {
     console.error(
       "No credentials in tests/e2e/.env.local — start the dev instance first:\n" +
         "  scripts/e2e/dev-instance.sh up docker|native",
@@ -139,25 +200,21 @@ async function main() {
     return 2;
   }
 
-  const selected = args.only
-    ? scenarios.filter((scenario) => args.only.includes(scenario.id))
-    : scenarios.filter((scenario) => scenario.modes.includes(mode));
-  if (selected.length === 0) {
-    console.error(`no scenarios selected (ids: ${scenarios.map((scenario) => scenario.id).join(", ")})`);
-    return 2;
-  }
-
   const stamp = timestamp();
+  // Standalone scenarios write their own results (app-matrix-<home>-<time>).
   const runDir = join(RESULTS_DIR, `${mode}-${stamp}`);
   const shotRoot = join(SCREENSHOTS_DIR, mode);
-  mkdirSync(runDir, { recursive: true });
-  mkdirSync(shotRoot, { recursive: true });
+  if (!standalone) {
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(shotRoot, { recursive: true });
+  }
 
   console.log(`\nRAST E2E — mode ${mode}, ${selected.length} scenario(s)`);
   console.log(`server: ${config.baseUrl}`);
-  console.log(`results: ${runDir}\n`);
+  console.log(standalone ? "results: written by the scenario\n" : `results: ${runDir}\n`);
 
-  const clients = await loginClients(config);
+  // Standalone scenarios log in as their own (test) account.
+  const clients = standalone ? { admin: null, users: [] } : await loginClients(config);
   let browser = await launchBrowser({ headless: args.headless });
 
   const shared = {};
@@ -173,7 +230,7 @@ async function main() {
       browser = await launchBrowser({ headless: args.headless });
     }
     const shotDir = join(shotRoot, scenario.id);
-    mkdirSync(shotDir, { recursive: true });
+    if (!standalone) mkdirSync(shotDir, { recursive: true });
     const result = {
       id: scenario.id,
       title: scenario.title,
@@ -199,6 +256,7 @@ async function main() {
       browser,
       host,
       fixtures: config.fixtures,
+      options: args.scenarioArgs,
       runDir,
       shotDir,
       log: (...parts) => {
@@ -255,6 +313,11 @@ async function main() {
   }
 
   await browser.close();
+
+  if (standalone) {
+    console.log("\n" + renderMatrix(results, mode));
+    return results.some((result) => result.status === "fail") ? 1 : 0;
+  }
 
   const runJson = {
     mode,
