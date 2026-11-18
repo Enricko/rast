@@ -898,21 +898,43 @@ Update it at the end of every session.
   `TcpListener` (slow but steady, stalled, over cap, truncated). No new
   dependency.
 
-- **Task 2.1 plan** (2026-11-17, docs only): `docs/adr/0008-systemd-user-session.md`
-  (status proposed). One-HOME accounts get a systemd user manager with
-  linger only while they use native apps or terminals (new helper
-  operations `user_manager_ensure`, `user_manager_release`,
-  `user_managers_list`); Xpra and apps become user units driven by the
-  helper as the identity (no `--machine=`, which runs the `login` PAM stack
-  per call); file agent and terminals stay system units in
-  `user-<uid>.slice`, which carries the `linux_session_*` limits; apps get
-  `MemoryHigh`, `OOMPolicy=continue` and the `rast app-reaper` subreaper
-  (no `ExitType=cgroup`); the account's own `pulseaudio.socket` and
-  `dbus.socket`; no new packages on production. Legacy native accounts are
-  unchanged. Found: identities can enable linger themselves today
-  (`set-self-linger` is `allow_any=yes`), which sidesteps the cron/at deny
-  lists (A7); the ADR proposes a deny-only polkit rule (maintainer
-  approval). Open questions are listed at the end of the ADR.
+- **Task 2.1 plan** (2026-11-17, revised 2026-11-18 after
+  `docs/remake/review-adr-0008.md`; docs only):
+  `docs/adr/0008-systemd-user-session.md`, status **accepted (agent
+  decision, pending maintainer confirmation)**. One-HOME accounts get a
+  systemd user manager with linger only while they use native apps or
+  terminals (helper operations `user_manager_ensure`, fail-closed on the
+  slice limits; `user_manager_release` with `idle`/`stop`/`remove` and a
+  bounded `wait`; `user_managers_list`; a linger fail-safe at helper start
+  that trusts only helper state). Xpra, a sound-sink keeper
+  (`rast-audio-u<id>`, `rast session-audio`) and apps become user units;
+  the helper runs only `systemctl --user` and `systemd-run --user` as the
+  identity (hardened runner; no `--machine=`). File agent and terminals
+  stay system units in `user-<uid>.slice`, which carries the
+  `linux_session_*` limits; apps get `MemoryHigh`, `OOMPolicy=continue` and
+  the `rast app-reaper` subreaper, which forwards no signal (no
+  `ExitType=cgroup`). Xpra ports get helper records, protected before the
+  unit starts and never dropped while something listens. The account's own
+  `pulseaudio.socket` and `dbus.socket`; no new packages on production.
+  Legacy native accounts are unchanged.
+  - Agent decisions (ADR section 0, to be confirmed by the maintainer):
+    (1) a deny-only polkit rule for linger changes by `rast-u*` identities
+    ships first in its own pre-release, installed by the installer and by
+    the helper at start (`rast update`'s asset refresh is decided by the
+    old binary, so it cannot deliver a new file on the first update; every
+    update restarts the helper), with a `pkcheck` gate test; (2) linger
+    only while RAST needs it, plus the helper fail-safe; (3)
+    `linux_session_memory_mb` and `linux_session_tasks` default to 8192
+    (explicit values win; installer-written `rast.toml` files keep 4096 and
+    2048); (4) the account's distro PulseAudio, with the sink kept across
+    idle exits and restarts; (5) the subreaper wrapper only; (6) a session
+    is admitted with `min(session, app memory)` plus the reserve.
+  - Two existing gaps found: identities can enable linger themselves
+    (`set-self-linger` is `allow_any=yes`, sidesteps A7), and the display
+    proxy connects viewers to whoever listens on a session's port. Both get
+    early commits (ADR section 12, commits 1–5).
+  - Not testable on production: the boot path (no reboot allowed); the
+    helper fail-safe's unit tests cover it.
 
 ## Phase 1 checklist
 
@@ -1063,6 +1085,34 @@ gives the least access and keeps data; the session went on with it.
   needed even for `--dry-run`. Reader budgets: sparse files are left out
   once a tree's holes pass 1 GiB; each tree may use quota + max(10 %,
   2 GiB); a `users` backup stops below 1 GiB free.
+- **A12, task 2.1 (ADR 0008, decision 1):** a deny-only polkit rule
+  stops `rast-u*` identities from enabling linger themselves
+  (`org.freedesktop.login1.set-self-linger` is `allow_any=yes` on Ubuntu,
+  which would sidestep the cron/at deny lists of A7). It ships first, in
+  its own pre-release. The new helper writes the one fixed rule file under
+  `/etc/polkit-1/rules.d/` at start, because `rast update` from an older
+  binary does not install new native assets; the installer embeds it too.
+- **A13, task 2.1 (decision 2):** linger only while RAST needs the user
+  manager (native apps or terminals), off after `linux_idle_minutes`, with a
+  helper-side fail-safe at start that trusts only helper state.
+- **A14, task 2.1 (decision 3):** the defaults of `linux_session_memory_mb`
+  and `linux_session_tasks` rise to 8192 (from 4096 and 2048), with an
+  upgrade note, because they now cap a whole account (session, apps,
+  terminals, file agent) and a lower cap would make apps opened by a
+  launcher run out of memory. Production does not set these keys (they are
+  commented out in `/etc/rast/rast.toml`), so the new defaults apply there.
+  A session start is admitted with `min(session, app memory)` plus the
+  reserve (decision 6), so hosts with less free memory still start
+  sessions.
+- **A15, task 2.1 (decision 4):** sound uses the account's own distro
+  PulseAudio (user `pulseaudio.socket`) with a RAST sink keeper unit
+  instead of today's playback-only PulseAudio child of Xpra, under the
+  conditions of `docs/remake/review-adr-0008.md` (no helper-run identity
+  program outside the user slice; `exit-idle-time` handled). Access between
+  accounts is unchanged.
+- **A16, task 2.1 (decision 5):** the subreaper wrapper (`rast app-reaper`)
+  is the only unit-lifetime mechanism; the review found no strong reason
+  for `ExitType=cgroup` (the maintainer's preference).
 
 ## Testing on production
 
