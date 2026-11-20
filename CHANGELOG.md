@@ -25,3 +25,27 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   the vendored-crate patch table.
 - CI: format, clippy, tests, headless render proof, wasm build, and a weekly
   check for a newer Rune revision.
+- **Client shell on the revive branch `revamp/remake`** (native Linux, Windows
+  and macOS, plus the WebGPU browser build):
+  - connects to the configured RAST server and shows *Connecting*,
+    *Connected*, *Server unreachable* or *Set up the server*;
+  - survives server downtime: it keeps running, retries on a backoff
+    (1 s → 2 s → 4 s → 8 s → 15 s → 30 s) and reconnects by itself when the
+    server answers again, re-checking every 10 s while connected;
+  - *Reconnect now* for an immediate attempt;
+  - Settings screen for the server address and for turning automatic
+    reconnection **off** (optional, persisted);
+  - per-OS settings file (`~/.config/rast/client.conf`,
+    `~/Library/Application Support/rast/client.conf`, `%APPDATA%\rast\client.conf`),
+    `RAST_CONFIG` to relocate it and `RAST_AUTO_RECONNECT=0` for one run.
+- CI matrix builds and tests the app on Linux, Windows and macOS, renders every
+  client screen headlessly, and packages release binaries for Linux and Windows
+  on demand.
+- `docs/CLIENT.md` (behaviour, settings, platforms) and `docs/DEPLOYMENT.md`
+  (deployment state and the staging-first plan).
+
+### Notes
+
+- The rewrite is **not deployed**. Production still runs the last released
+  build; `docs/DEPLOYMENT.md` explains what has to exist before it can be.
+

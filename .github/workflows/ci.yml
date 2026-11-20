@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [rune-rewrite, main]
+    branches: [revamp/remake, rune-rewrite, main]
   pull_request:
   schedule:
     # Mondays 03:00 UTC: did Rune's `dev` move past our pin?
@@ -41,15 +41,44 @@ jobs:
 
       - name: Headless render proof (software Vulkan)
         run: |
-          VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
-            cargo run --locked -p rast-ui --bin rast -- --snap target/rast-snap.png --scene opened
-          test -s target/rast-snap.png
+          set -eux
+          for scene in offline online settings setup; do
+            VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+              cargo run --locked -p rast-ui --bin rast -- \
+              --snap "target/snap-${scene}.png" --scene "${scene}"
+            test -s "target/snap-${scene}.png"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: rast-snap
-          path: target/rast-snap.png
+          name: rast-snapshots
+          path: target/snap-*.png
           if-no-files-found: error
+
+  cross-platform:
+    name: native build + tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --locked -p rast-ui
+      - run: cargo test --locked -p rast-ui
 
   web:
     name: wasm build
@@ -75,12 +104,54 @@ jobs:
           path: dist/web
           if-no-files-found: error
 
+  dist:
+    name: release artifacts (${{ matrix.label }})
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            label: linux-x86_64
+            artifact: rast
+          - os: windows-latest
+            label: windows-x86_64
+            artifact: rast.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        if: matrix.os == 'ubuntu-24.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --locked -p rast-ui
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p stage
+          cp "target/release/${{ matrix.artifact }}" "stage/rast-${{ matrix.label }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rast-${{ matrix.label }}
+          path: stage/*
+          if-no-files-found: error
+
   rune-pin:
     name: newer Rune on dev?
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
       - name: Compare the pinned Rune revision with dev
         run: scripts/check-rune-pin.sh
