@@ -1,8 +1,0 @@
-# False positives (fictional test-only credentials), by gitleaks fingerprint.
-# The test now passes the password through a constant; this entry keeps
-# full-history scans clean for the commit that had it inline.
-404faf3e71f37061a11a0a5334e1477e9a00f8ef:tests/packages_e2e.rs:generic-api-key:207
-# The native-apps POC mock backend uses a fixed, fictional session key so the
-# frontend can talk to the mock Xpra session; it is not a credential and does
-# not grant access to anything.
-c83dd620bd7785e4677c0bf0a7ac898d819e6dff:scripts/xpra-poc/mock-rast.mjs:generic-api-key:24
