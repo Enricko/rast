@@ -52,6 +52,8 @@ git switch -c chore/rune-<rev>
 scripts/update-rune.sh            # latest `dev`
 # or pin a specific revision:
 scripts/update-rune.sh <40-char-rev>
+# or preview the manifest changes without touching the lockfile:
+scripts/update-rune.sh --dry-run
 ```
 
 The script:
