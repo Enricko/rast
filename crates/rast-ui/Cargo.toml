@@ -1,0 +1,32 @@
+[package]
+name = "rast-ui"
+description = "RAST desktop shell — the Rune-rendered UI of the RAST Linux web desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# One crate, two targets: a native window binary and a wasm cdylib for the
+# browser (Rune's experimental WebGPU web target). The web entrypoint is the
+# `wasm_bindgen(start)` function at the bottom of src/lib.rs.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "rast"
+path = "src/main.rs"
+
+[features]
+# Headless `--snap`, `--tree` and `--script` runs in *release* builds. Debug
+# builds always have Rune's tooling; this feature is for CI and agent proof
+# runs of the release binary. See crates/rune/README.md, "Agent tooling".
+agent-tooling = ["rune/tooling"]
+
+[dependencies]
+rune = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true }
+
+[lints]
+workspace = true

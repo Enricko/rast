@@ -1,0 +1,57 @@
+# RAST — a self-hosted Linux web desktop, rebuilt from scratch on Rune.
+#
+# Rune is pre-release: it publishes no releases, no tags and no crates.io
+# package, so we consume it as a git dependency pinned to one `dev` revision
+# (Rune's own rule: pin a rev of `dev`; `dev` is never rewritten). Updating is
+# a deliberate, one-command operation: see docs/UPDATING-RUNE.md.
+[workspace]
+resolver = "3"
+members = ["crates/rast-ui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99.1"
+
+[workspace.dependencies]
+rune = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+
+# wasm-bindgen's CLI and its macro crate must be the same version; Rune's own
+# Cargo.lock pins 0.2.129. Install the CLI with:
+#   cargo install wasm-bindgen-cli --version 0.2.129 --locked
+wasm-bindgen = "=0.2.129"
+
+# Rune ships patched copies of these crates inside its repository (the
+# `[patch.crates-io]` table in Rune's root Cargo.toml at the pinned revision).
+# Cargo does not inherit patches through a git dependency, so every app that
+# builds Rune repeats them at the same revision. `scripts/update-rune.sh`
+# regenerates this table from Rune's manifest so it never drifts.
+#
+# Patch both `winit` and `sctk-adwaita`, from the same revision: Rune's winit
+# calls into the vendored Wayland frame, and a workspace that patches only one
+# of them does not compile.
+[patch.crates-io]
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "eff95e80c328943deeeef0355485c06c3d71ecf0" }
+
+# Rune's profile advice: full debug info made one of its test builds use 18–23 GB
+# of RAM; line tables keep backtraces and file:line at a fraction of that.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"

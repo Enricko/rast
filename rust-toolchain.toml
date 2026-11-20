@@ -1,0 +1,9 @@
+# Rune pins this exact stable release in its own rust-toolchain.toml; we follow
+# it so the framework, this workspace and CI build with the same compiler.
+# `rustup show` fetches/verifies the channel. When Rune's pin changes, update
+# this file in the same commit (docs/UPDATING-RUNE.md).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

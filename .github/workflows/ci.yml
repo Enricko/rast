@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [rune-rewrite, main]
+  pull_request:
+  schedule:
+    # Mondays 03:00 UTC: did Rune's `dev` move past our pin?
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: fmt, clippy, tests, headless render
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies (Rune's windowing stack)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+
+      - name: Headless render proof (software Vulkan)
+        run: |
+          VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+            cargo run --locked -p rast-ui --bin rast -- --snap target/rast-snap.png --scene opened
+          test -s target/rast-snap.png
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rast-snap
+          path: target/rast-snap.png
+          if-no-files-found: error
+
+  web:
+    name: wasm build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: wasm-bindgen-cli (version from Cargo.lock)
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+
+      - run: scripts/web-build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rast-web
+          path: dist/web
+          if-no-files-found: error
+
+  rune-pin:
+    name: newer Rune on dev?
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the pinned Rune revision with dev
+        run: scripts/check-rune-pin.sh

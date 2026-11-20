@@ -1,0 +1,20 @@
+# Rust build output.
+/target/
+
+# Local reference checkout of Rune's source (scripts/update-rune.sh refreshes it).
+/.rune-src/
+
+# Static output of scripts/web-build.sh.
+/dist/
+
+# Local environment files for the e2e/dev harness (credentials never get committed).
+**/.env.local
+*.log
+
+# Editor/OS noise.
+.DS_Store
+.idea/
+.vscode/
+
+# Cargo home kept inside the workspace: the build sandbox cannot write $HOME/.cargo.
+/.cargo-home/
