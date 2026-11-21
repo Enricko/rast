@@ -33,6 +33,26 @@ authenticate users itself once the server phase lands. The full recommendation
 (device file vs database, and why server accounts belong in SQLite) is in
 [docs/AUTH-STORAGE.md](AUTH-STORAGE.md).
 
+## Windows
+
+Apps open in windows that behave as on the classic RAST desktop
+(`crates/rast-ui/src/desktop/windows.rs` places them, `window.rs` draws them):
+
+- Drag the title to move a window. Dropping it within 18 pt of the top edge
+  maximizes it, of the left or right edge snaps it to that half; an outline
+  previews the drop. Dragging a maximized or snapped window restores its own
+  size under the pointer. Escape cancels a drag.
+- The eight strips just outside a floating window's edges and corners resize it,
+  down to the app's minimum (Control Panel: 420 × 380).
+- Double-clicking the title maximizes or restores. New windows open at their
+  app's size (Control Panel 1060 × 700) where it fits, cascading 26 pt down and
+  right, and stay grabbable: at least 120 pt on the left, 80 pt on the right and
+  the title bar under the top edge.
+- A taskbar button per open window, in opening order: a click minimizes the
+  front window, restores a minimized one or brings another to the front.
+- At 820 pt wide or less (or under 420 pt high) windows fill the screen above
+  the taskbar, only the front one shows, and they neither move nor resize.
+
 ## What it does today
 
 - Shows the connection state to the configured RAST server: *Connecting*,

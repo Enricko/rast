@@ -131,6 +131,23 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   - The audit log records IP addresses, lockouts, unlocks, ended sessions and
     profile changes. SQLite runs with `synchronous=FULL`, `secure_delete` and
     `trusted_schema=OFF`; schema version 3 upgrades in place.
+- **Movable windows, as on the classic RAST desktop** (step A of restoring the
+  classic look):
+  - Drag a window by its title; drop the title on the top edge to maximize it
+    or on the left or right edge to fill that half, with a preview while
+    dragging. Dragging a maximized or snapped window brings back its own size
+    under the pointer. Escape puts a dragged window back.
+  - Resize from any edge or corner (Control Panel stops at 420 × 380).
+  - Double-click a title to maximize or restore. Windows open at the classic
+    sizes (Control Panel 1060 × 700), each new one a step down and right, and
+    always keep enough of the title on screen to drag them back.
+  - The taskbar shows a button for each open window: the one in front is
+    tinted and marked with an accent pill. A click minimizes the front window,
+    restores a minimized one or brings another forward. The title shows the
+    page, e.g. *Control Panel — Users*.
+  - Screens up to 820 pt wide (phones) fill the screen with the window in
+    front, with finger-sized buttons and an icon-only taskbar. Control Panel
+    lays out by the width of its window, not of the screen.
 
 ### Fixed
 

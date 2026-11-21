@@ -4,6 +4,7 @@ pub(crate) mod control;
 mod panels;
 mod system;
 mod window;
+pub(crate) mod windows;
 
 use std::collections::HashMap;
 
@@ -12,23 +13,50 @@ use rune::{
     col, el, row, text,
 };
 
-use crate::{Screen, State, connection::Phase};
+use crate::{State, connection::Phase};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppId {
     Control,
+    /// A second window for the window manager's tests.
+    #[cfg(test)]
+    Probe,
 }
 
 impl AppId {
     pub(super) const fn key(self) -> &'static str {
-        "controlpanel"
+        match self {
+            Self::Control => "controlpanel",
+            #[cfg(test)]
+            Self::Probe => "probe",
+        }
     }
     pub(super) const fn label(self) -> &'static str {
-        "Control Panel"
+        match self {
+            Self::Control => "Control Panel",
+            #[cfg(test)]
+            Self::Probe => "Probe",
+        }
     }
     /// The id groups and rules use for this app (see the server's `access`).
     pub(crate) const fn access_id(self) -> &'static str {
-        "controlpanel"
+        self.key()
+    }
+    /// The size its window opens at where the screen has room (the old RAST's sizes).
+    pub(crate) const fn open_size(self) -> [f32; 2] {
+        match self {
+            Self::Control => [1060.0, 700.0],
+            #[cfg(test)]
+            Self::Probe => [940.0, 620.0],
+        }
+    }
+    /// The smallest its window resizes to.
+    pub(crate) const fn min_size(self) -> [f32; 2] {
+        match self {
+            Self::Control => [420.0, 380.0],
+            #[cfg(test)]
+            Self::Probe => [360.0, 260.0],
+        }
     }
 }
 
@@ -98,9 +126,7 @@ impl Wallpaper {
 pub(crate) struct Desktop {
     pub(crate) panel: Option<Panel>,
     pub(crate) search: TextEdit,
-    pub(crate) active: Option<AppId>,
-    opened: Vec<(AppId, bool)>,
-    pub(crate) maximized: bool,
+    pub(crate) windows: windows::Windows,
     dark: Option<bool>,
     pub(crate) wallpaper: Wallpaper,
     pub(crate) clock: system::Clock,
@@ -118,9 +144,7 @@ impl Default for Desktop {
         Self {
             panel: None,
             search: TextEdit::new(""),
-            active: None,
-            opened: Vec::new(),
-            maximized: false,
+            windows: windows::Windows::default(),
             dark: None,
             wallpaper: Wallpaper::load(),
             clock: system::Clock::sample(),
@@ -148,6 +172,11 @@ impl Desktop {
         self.dark.unwrap_or(true)
     }
 
+    /// The app whose window is in front and takes the keyboard.
+    pub(crate) fn active(&self) -> Option<AppId> {
+        self.windows.focused()
+    }
+
     /// Load the artwork, read this device and watch the browser's connection.
     pub(crate) fn load_art(&mut self, wake: Waker) {
         #[cfg(target_arch = "wasm32")]
@@ -173,9 +202,7 @@ impl Desktop {
     pub(crate) fn close_session(&mut self) {
         self.panel = None;
         self.search = TextEdit::new("");
-        self.active = None;
-        self.opened.clear();
-        self.maximized = false;
+        self.windows.clear();
     }
 
     pub(crate) fn tick(&mut self, tx: &mut Tx) -> bool {
@@ -231,54 +258,6 @@ impl State {
         #[cfg(target_arch = "wasm32")]
         if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
             let _ = storage.set_item("rast.wallpaper", wallpaper.key());
-        }
-    }
-
-    pub(crate) fn open_app(&mut self, app: AppId) {
-        self.dismiss_panel();
-        if self.desktop.active == Some(app) {
-            return;
-        }
-        self.desktop.maximized =
-            if let Some((_, maximized)) = self.desktop.opened.iter().find(|(id, _)| *id == app) {
-                *maximized
-            } else {
-                self.desktop.opened.push((app, false));
-                if app == AppId::Control {
-                    self.server_field = TextEdit::new(self.config.server.clone());
-                    self.settings_error = None;
-                    self.reset_control();
-                }
-                false
-            };
-        self.desktop.active = Some(app);
-        self.screen = if app == AppId::Control {
-            Screen::Settings
-        } else {
-            Screen::Desktop
-        };
-    }
-
-    pub(crate) fn minimize_app(&mut self) {
-        self.desktop.active = None;
-        self.desktop.maximized = false;
-        self.screen = Screen::Desktop;
-    }
-
-    pub(crate) fn close_app(&mut self) {
-        if let Some(app) = self.desktop.active {
-            self.desktop.opened.retain(|(id, _)| *id != app);
-        }
-        self.minimize_app();
-    }
-
-    pub(crate) fn toggle_app_maximized(&mut self) {
-        let Some(active) = self.desktop.active else {
-            return;
-        };
-        self.desktop.maximized = !self.desktop.maximized;
-        if let Some((_, maximized)) = self.desktop.opened.iter_mut().find(|(id, _)| *id == active) {
-            *maximized = self.desktop.maximized;
         }
     }
 }
@@ -419,6 +398,7 @@ fn rgb(value: &str) -> Color {
 }
 
 pub(super) struct Palette {
+    pub(super) dark: bool,
     pub(super) surface: Color,
     pub(super) surface_2: Color,
     pub(super) line: Color,
@@ -427,6 +407,7 @@ pub(super) struct Palette {
     pub(super) accent: Color,
     pub(super) accent_ink: Color,
     pub(super) hover: Color,
+    pub(super) danger: Color,
     bar: Color,
 }
 
@@ -434,6 +415,7 @@ impl Palette {
     fn new(dark: bool) -> Self {
         if dark {
             Self {
+                dark,
                 surface: rgb("#1e252e"),
                 surface_2: rgb("#29323c"),
                 line: rgb("#465360"),
@@ -442,10 +424,12 @@ impl Palette {
                 accent: rgb("#3d91ea"),
                 accent_ink: rgb("#0c1828"),
                 hover: rgb("#344b63"),
+                danger: rgb("#ef7d7d"),
                 bar: rgb("#232a32"),
             }
         } else {
             Self {
+                dark,
                 surface: rgb("#fbfcfe"),
                 surface_2: rgb("#edf2f7"),
                 line: rgb("#c6d2de"),
@@ -454,6 +438,7 @@ impl Palette {
                 accent: rgb("#2374be"),
                 accent_ink: Color::WHITE,
                 hover: rgb("#dcecff"),
+                danger: rgb("#c93b3b"),
                 bar: rgb("#edf2f8"),
             }
         }
@@ -493,8 +478,8 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
             el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .gradient(rgb("#192739").alpha(0.12), rgb("#142330").alpha(0.25)),
         );
-    if let Some(app) = state.desktop.active {
-        root = root.child(window::view(state, &p, app, width, height, compact));
+    for layer in window::view(state, &p, [width, (height - BAR).max(0.0)]) {
+        root = root.child(layer);
     }
     if let Some(panel) = panels::view(state, &p, width, height, compact) {
         root = root
@@ -704,8 +689,80 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .fill(p.bar.alpha(0.92))
         .border_sides([1.0, 0.0, 0.0, 0.0], p.line.alpha(0.7))
         .child(start)
+        .child(tasks(state, p, width))
         .child(el().grow(1.0).min_w(0.0))
         .child(tray)
+}
+
+const TASK: TextStyle = TextStyle::new(12.0, 450.0);
+const TASK_ACTIVE: TextStyle = TextStyle::new(12.0, 600.0);
+
+/// A button for each open window, in the order they opened: the one in front is tinted with
+/// the accent and marked with an accent pill, the others with a dot (dimmer when minimized).
+fn tasks(state: &State, p: &Palette, width: f32) -> El {
+    let wm = &state.desktop.windows;
+    let icons_only = width <= 820.0;
+    let mut strip = row().key("desktop-tasks").shrink().gap(4.0).center_y();
+    for window in wm.all() {
+        let app = window.app;
+        let active = wm.focused() == Some(app);
+        let marker = if active {
+            el().size(14.0, 4.0).radius(2.0).fill(p.accent)
+        } else {
+            el().size(4.0, 4.0)
+                .radius(2.0)
+                .fill(p.muted.alpha(if window.minimized { 0.55 } else { 0.9 }))
+        };
+        let title = window::title(state, app);
+        let mut button = row()
+            .key(format!("task-{}", app.key()))
+            .role("button")
+            .label(if window.minimized {
+                format!("{} (minimized)", app.label())
+            } else {
+                app.label().to_owned()
+            })
+            .help(if window.minimized {
+                format!("{title} (minimized)")
+            } else {
+                title
+            })
+            .h(CHIP)
+            .gap(7.0)
+            .radius(7.0)
+            .border(1.0, Color::TRANSPARENT)
+            .hover(p.accent.alpha(if p.dark { 0.16 } else { 0.10 }))
+            .child(icon(state, app.key(), 16.0).a11y_hidden())
+            .child(
+                row()
+                    .pin(Some(0.0), None, Some(0.0), Some(2.0))
+                    .h(4.0)
+                    .center()
+                    .a11y_hidden()
+                    .child(marker),
+            )
+            .on_press(move |s: &mut State| s.press_task(app));
+        button = if icons_only {
+            button.w(36.0).center()
+        } else {
+            button.px(10.0).max_w(210.0).shrink().center_y().child(
+                text(app.label())
+                    .font(if active { TASK_ACTIVE } else { TASK })
+                    .color(if window.minimized { p.muted } else { p.ink })
+                    .min_w(0.0)
+                    .truncate()
+                    .a11y_hidden(),
+            )
+        };
+        if active {
+            let (tint, edge) = if p.dark { (0.25, 0.52) } else { (0.17, 0.44) };
+            button = button
+                .fill(p.accent.alpha(tint))
+                .border(1.0, p.accent.alpha(edge));
+        }
+        strip = strip.child(button);
+    }
+    strip
 }
 
 /// A tray button: icon only, or icon and label when `labelled`.

@@ -216,6 +216,16 @@ fn tabs(state: &State) -> Vec<Tab> {
     }
 }
 
+/// The page Control Panel shows, which its window's title names.
+pub(super) fn page_title(state: &State) -> &'static str {
+    let tabs = tabs(state);
+    if tabs.contains(&state.control.tab) {
+        state.control.tab.label()
+    } else {
+        tabs[0].label()
+    }
+}
+
 // --- actions ------------------------------------------------------------------
 
 impl State {
@@ -268,9 +278,10 @@ impl State {
     /// The signed-in account's own access arrived: hide what it may not open.
     fn set_my_access(&mut self, access: Access) {
         self.access = Some(access);
-        if !self.may_open(AppId::Control.access_id()) && self.desktop.active == Some(AppId::Control)
+        if !self.may_open(AppId::Control.access_id())
+            && self.desktop.windows.get(AppId::Control).is_some()
         {
-            self.close_app();
+            self.close_window(AppId::Control);
         }
     }
 
@@ -2302,7 +2313,7 @@ mod tests {
         }
         rt.state
             .apply_reply(Reply::MyAccess(Ok(access)), &mut Tx::default());
-        assert_eq!(rt.state.desktop.active, None, "the open window closes");
+        assert_eq!(rt.state.desktop.active(), None, "the open window closes");
         rt.state.toggle_desktop_panel(crate::desktop::Panel::Start);
         after_frames(&mut rt);
         assert!(!shown(&rt, "start-control"));
