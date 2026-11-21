@@ -22,6 +22,7 @@ mod auth;
 mod browser;
 mod config;
 mod connection;
+mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
 mod login;
 mod ui;
@@ -33,7 +34,8 @@ use rune::{AppSpec, TextEdit, Tx, Waker};
 
 use auth::DeviceAccount;
 use config::Config;
-use connection::{Command, Link, Phase, ServerAddr, Status};
+use connection::{Command, Link, ServerAddr, Status};
+use desktop::{AppId, Desktop};
 
 /// Window title shown by the OS window manager and by the browser page.
 pub const TITLE: &str = "RAST";
@@ -60,6 +62,7 @@ pub struct State {
     pub server_field: TextEdit,
     pub settings_error: Option<String>,
     pub link: Option<Link>,
+    wake: Option<Waker>,
     /// Tests construct in-memory states; `false` keeps them off the real files.
     pub(crate) persist: bool,
     // --- device login -----------------------------------------------------
@@ -75,6 +78,7 @@ pub struct State {
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) login_art: Option<login::Art>,
     pub(crate) account_path: Option<PathBuf>,
+    pub(crate) desktop: Desktop,
 }
 
 impl State {
@@ -102,6 +106,7 @@ impl State {
             screen,
             settings_error: None,
             link: None,
+            wake: None,
             persist: true,
             account,
             signed_in: false,
@@ -115,6 +120,7 @@ impl State {
             #[cfg(not(target_arch = "wasm32"))]
             login_art: None,
             account_path,
+            desktop: Desktop::default(),
         }
     }
 
@@ -179,6 +185,7 @@ impl State {
         self.signed_in = false;
         self.screen = Screen::Login;
         self.login_error = None;
+        self.desktop.close_session();
         self.clear_secrets();
     }
 
@@ -195,13 +202,11 @@ impl State {
     // --- shell ------------------------------------------------------------
 
     pub fn open_settings(&mut self) {
-        self.screen = Screen::Settings;
-        self.server_field = TextEdit::new(self.config.server.clone());
-        self.settings_error = None;
+        self.open_app(AppId::Control);
     }
 
     pub fn close_settings(&mut self) {
-        self.screen = Screen::Desktop;
+        self.close_app();
         self.settings_error = None;
     }
 
@@ -211,12 +216,13 @@ impl State {
             Ok(addr) => {
                 self.config.server = self.server_field.text.trim().to_owned();
                 self.persist_config();
-                self.settings_error = None;
-                self.screen = Screen::Desktop;
+                self.close_settings();
                 self.status = Status::connecting();
                 if let Some(link) = &self.link {
                     link.send(Command::SetServer(addr));
                     link.send(Command::SetAuto(self.config.auto_reconnect));
+                } else if let Some(wake) = &self.wake {
+                    self.link = connection::spawn(&self.config, wake.clone());
                 }
             }
             Err(error) => self.settings_error = Some(error),
@@ -257,13 +263,13 @@ fn setup(state: &mut State, wake: Waker) {
     {
         state.login_art = Some(login::Art::load(wake.clone()));
     }
-    if state.status.phase == Phase::Setup {
-        return;
-    }
+    state.desktop.load_art(wake.clone());
+    state.wake = Some(wake.clone());
     state.link = connection::spawn(&state.config, wake);
 }
 
-fn poll(state: &mut State, _t: f64, _tx: &mut Tx) -> bool {
+fn poll(state: &mut State, _t: f64, tx: &mut Tx) -> bool {
+    let clock_changed = state.desktop.tick(tx) && state.signed_in;
     let mut latest = None;
     if let Some(link) = state.link.as_ref() {
         while let Ok(status) = link.statuses.try_recv() {
@@ -275,7 +281,7 @@ fn poll(state: &mut State, _t: f64, _tx: &mut Tx) -> bool {
             state.status = status;
             true
         }
-        _ => false,
+        _ => clock_changed,
     }
 }
 
@@ -311,11 +317,22 @@ fn scene_login_error(state: &mut State) {
 fn scene_offline(state: &mut State) {
     signed_in(state);
     state.status = Status::offline(2, Some(Duration::from_secs(4)), "connection refused");
+    state.open_app(AppId::Monitor);
 }
 
 fn scene_online(state: &mut State) {
     signed_in(state);
     state.status = Status::online();
+}
+
+fn scene_start(state: &mut State) {
+    scene_online(state);
+    state.toggle_desktop_panel(desktop::Panel::Start);
+}
+
+fn scene_files(state: &mut State) {
+    scene_online(state);
+    state.open_app(AppId::Files);
 }
 
 fn scene_settings(state: &mut State) {
@@ -326,6 +343,7 @@ fn scene_settings(state: &mut State) {
 fn scene_setup(state: &mut State) {
     signed_in(state);
     state.status = Status::setup_with("the server address is empty");
+    state.open_app(AppId::Monitor);
 }
 
 fn signed_in(state: &mut State) {
@@ -349,11 +367,14 @@ fn app_spec() -> AppSpec<State> {
             ("login-error", scene_login_error),
             ("offline", scene_offline),
             ("online", scene_online),
+            ("start", scene_start),
+            ("files", scene_files),
             ("settings", scene_settings),
             ("setup", scene_setup),
         ],
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(desktop::key),
         ..AppSpec::new(TITLE, SIZE, init, ui::view)
     }
 }
@@ -361,6 +382,7 @@ fn app_spec() -> AppSpec<State> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection::Phase;
     use rune::{Env, Runtime};
 
     fn test_env() -> Env {
@@ -470,6 +492,7 @@ mod tests {
         state.account = Some(DeviceAccount::create("admin", "correct horse").unwrap());
         let mut rt = Runtime::new(state, ui::view, SIZE, test_env());
         rt.frame(0.0);
+        press(&mut rt, "desktop-account");
         press(&mut rt, "sign-out");
         assert!(!rt.state.signed_in);
         assert_eq!(rt.state.screen, Screen::Login);
@@ -532,6 +555,7 @@ mod tests {
             test_env(),
         );
         rt.frame(0.0);
+        press(&mut rt, "desktop-monitor");
         press(&mut rt, "reconnect");
         assert_eq!(rt.state.status.phase, Phase::Connecting);
     }
