@@ -6,8 +6,12 @@
 
 mod groups;
 mod shell;
+mod users;
 
-use rune::{Color, El, Icon, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{
+    Color, El, Icon, ScrollSpec, TextEdit, TextStyle, Transition, Tx, col, el, row, text,
+    text_input,
+};
 
 use super::{AppId, Palette, glyphs, icon, initial};
 use crate::State;
@@ -105,62 +109,15 @@ impl Tab {
     }
 }
 
-/// Which accounts the Users list shows.
+/// A popup open over the Users table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Filter {
-    All,
-    Active,
-    Disabled,
-    Locked,
-}
-
-impl Filter {
-    const ALL: [Filter; 4] = [
-        Filter::All,
-        Filter::Active,
-        Filter::Disabled,
-        Filter::Locked,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Active => "Active",
-            Self::Disabled => "Disabled",
-            Self::Locked => "Locked",
-        }
-    }
-
-    fn key(self) -> &'static str {
-        match self {
-            Self::All => "users-filter-all",
-            Self::Active => "users-filter-active",
-            Self::Disabled => "users-filter-disabled",
-            Self::Locked => "users-filter-locked",
-        }
-    }
-
-    fn keeps(self, account: &Account) -> bool {
-        match self {
-            Self::All => true,
-            Self::Active => !account.disabled,
-            Self::Disabled => account.disabled,
-            Self::Locked => account.locked(),
-        }
-    }
-}
-
-/// Does `account` match a search? Names, role and groups, ignoring case.
-fn matches(account: &Account, query: &str) -> bool {
-    let query = query.trim().to_lowercase();
-    query.is_empty()
-        || account.username.contains(&query)
-        || account.display_name.to_lowercase().contains(&query)
-        || account.role.label().to_lowercase().contains(&query)
-        || account
-            .groups
-            .iter()
-            .any(|group| group.to_lowercase().contains(&query))
+pub(crate) enum Popup {
+    /// The actions menu of account `id`.
+    Actions(i64),
+    /// Its menu again, asking for a second press to disable the account.
+    ConfirmDisable(i64),
+    /// The rows-per-page choices.
+    PerPage,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,7 +159,11 @@ pub(crate) struct ControlPanel {
     pub(crate) group_name: TextEdit,
     pub(crate) group_description: TextEdit,
     pub(crate) search: TextEdit,
-    pub(crate) filter: Filter,
+    /// How many accounts the table shows a page.
+    pub(crate) per_page: usize,
+    /// The table's page, from 0. Editing the search goes back to the first.
+    pub(crate) list_page: usize,
+    pub(crate) popup: Option<Popup>,
     /// Your own sessions (Profile), once loaded.
     pub(crate) sessions: Option<Vec<SessionInfo>>,
     /// The open account's sessions, once loaded.
@@ -212,7 +173,7 @@ pub(crate) struct ControlPanel {
     /// A new account chooses its own password at the first sign-in.
     pub(crate) new_must_change: bool,
     /// What to say when the change on its way succeeds, instead of "Saved."
-    pending_notice: Option<&'static str>,
+    pending_notice: Option<String>,
 }
 
 impl Default for ControlPanel {
@@ -243,7 +204,9 @@ impl Default for ControlPanel {
             group_name: TextEdit::new(""),
             group_description: TextEdit::new(""),
             search: TextEdit::new(""),
-            filter: Filter::All,
+            per_page: users::DEFAULT_PER_PAGE,
+            list_page: 0,
+            popup: None,
             sessions: None,
             account_sessions: None,
             display_name: TextEdit::new(""),
@@ -312,6 +275,7 @@ impl State {
         }
         self.control.tab = tab;
         self.control.page = Page::List;
+        self.control.popup = None;
         self.control.error = None;
         self.control.notice = None;
         match tab {
@@ -368,6 +332,7 @@ impl State {
             .map(|a| a.display_name.clone())
             .unwrap_or_default();
         control.page = Page::Account(id);
+        control.popup = None;
         control.reset_password = TextEdit::new("").secure();
         control.display_name = TextEdit::new(name);
         control.account_sessions = None;
@@ -390,13 +355,10 @@ impl State {
         me.id != id && me.role.may_manage(account.role)
     }
 
-    pub(crate) fn set_user_filter(&mut self, filter: Filter) {
-        self.control.filter = filter;
-    }
-
     /// Back to the list. What was said about the page you leave goes with it.
     pub(crate) fn back_to_accounts(&mut self) {
         self.control.page = Page::List;
+        self.control.popup = None;
         self.control.error = None;
         self.control.notice = None;
         self.control.confirm_delete = false;
@@ -405,6 +367,7 @@ impl State {
     pub(crate) fn start_create_account(&mut self) {
         let control = &mut self.control;
         control.page = Page::Create;
+        control.popup = None;
         control.new_username = TextEdit::new("");
         control.new_display = TextEdit::new("");
         control.new_password = TextEdit::new("").secure();
@@ -444,12 +407,7 @@ impl State {
     }
 
     /// Send `change`; on success say `notice` instead of "Saved."
-    fn change_account_saying(
-        &mut self,
-        id: i64,
-        change: AccountChange,
-        notice: Option<&'static str>,
-    ) {
+    fn change_account_saying(&mut self, id: i64, change: AccountChange, notice: Option<String>) {
         if self.control.busy {
             return;
         }
@@ -479,11 +437,14 @@ impl State {
                 must_change_password: Some(on),
                 ..AccountChange::default()
             },
-            Some(if on {
-                "They choose a new password at their next sign-in, and were signed out."
-            } else {
-                "They keep their current password."
-            }),
+            Some(
+                if on {
+                    "They choose a new password at their next sign-in, and were signed out."
+                } else {
+                    "They keep their current password."
+                }
+                .to_owned(),
+            ),
         );
     }
 
@@ -494,7 +455,7 @@ impl State {
                 unlock: true,
                 ..AccountChange::default()
             },
-            Some("Unlocked. They can sign in again."),
+            Some("Unlocked. They can sign in again.".to_owned()),
         );
     }
 
@@ -506,7 +467,7 @@ impl State {
         self.control.busy = true;
         self.control.error = None;
         self.control.notice = None;
-        self.control.pending_notice = Some("Signed out everywhere.");
+        self.control.pending_notice = Some("Signed out everywhere.".to_owned());
         self.calls().end_user_sessions(id);
     }
 
@@ -528,7 +489,7 @@ impl State {
         self.control.busy = true;
         self.control.error = None;
         self.control.notice = None;
-        self.control.pending_notice = Some("Signed out of that session.");
+        self.control.pending_notice = Some("Signed out of that session.".to_owned());
         self.calls().end_my_session(id);
     }
 
@@ -539,7 +500,7 @@ impl State {
         self.control.busy = true;
         self.control.error = None;
         self.control.notice = None;
-        self.control.pending_notice = Some("Signed out everywhere else.");
+        self.control.pending_notice = Some("Signed out everywhere else.".to_owned());
         self.calls().end_my_other_sessions();
     }
 
@@ -577,7 +538,7 @@ impl State {
                 must_change_password: Some(true),
                 ..AccountChange::default()
             },
-            Some("Password set. They choose their own at the next sign-in."),
+            Some("Password set. They choose their own at the next sign-in.".to_owned()),
         );
     }
 
@@ -684,7 +645,7 @@ impl State {
                 result
                     .map(|account| {
                         self.control.reset_password = TextEdit::new("").secure();
-                        self.control.notice = Some(notice.unwrap_or("Saved.").to_owned());
+                        self.control.notice = Some(notice.unwrap_or_else(|| "Saved.".to_owned()));
                         let id = account.id;
                         if let Some(slot) = self.control.accounts.iter_mut().find(|a| a.id == id) {
                             *slot = account;
@@ -707,7 +668,7 @@ impl State {
                 result
                     .map(|sessions| {
                         if let Some(notice) = notice {
-                            self.control.notice = Some(notice.to_owned());
+                            self.control.notice = Some(notice);
                         }
                         self.control.sessions = Some(sessions);
                     })
@@ -723,7 +684,7 @@ impl State {
                 result
                     .map(|sessions| {
                         if let Some(notice) = notice {
-                            self.control.notice = Some(notice.to_owned());
+                            self.control.notice = Some(notice);
                         }
                         self.control.account_sessions = Some((id, sessions));
                     })
@@ -831,28 +792,39 @@ pub(super) fn view(state: &State, p: &Palette, width: f32, compact: bool) -> El 
     let tab = current(state);
     let margin = shell::margin(width);
     let narrow = shell::narrow(width);
+    // The room a page has beside the sidebar, inside the margins.
+    let room = (width - shell::nav_width(width) - 2.0 * margin).max(0.0);
     let page = match (tab, &state.session) {
-        (Tab::Users, Some(me)) => users_page(state, p, me, compact),
+        (Tab::Users, Some(me)) => users_page(state, p, me, compact, room),
         (Tab::Groups, Some(_)) => groups::page(state, p, compact),
         (Tab::Profile, Some(me)) => profile_page(state, p, me, compact),
-        (Tab::Appearance, _) => {
-            let page = width - shell::nav_width(width) - 2.0 * margin;
-            super::personalize::page(state, p, page.max(0.0), width)
-        }
+        (Tab::Appearance, _) => super::personalize::page(state, p, room, width),
         (Tab::Shares | Tab::Storage | Tab::Components | Tab::Settings, Some(_)) => {
             shell::not_yet(p, tab)
         }
         _ => crate::ui::settings_body(state),
     };
-    let content = scroller().child(
-        col()
-            .w_full()
-            .px(margin)
-            .pt(if narrow { margin } else { 18.0 })
-            .pb(if narrow { margin } else { 26.0 })
-            .gap(12.0)
-            .child(page),
-    );
+    // Keyed by the page, so each page scrolls on its own: an account, the list or another
+    // section opens at its top rather than where the last page was left. Pages swap at once,
+    // as classic RAST's did, rather than fading over each other.
+    let content = col()
+        .key(format!("control-page-{tab:?}-{:?}", state.control.page))
+        .transition(Transition::none())
+        .w_full()
+        .grow(1.0)
+        .min_w(0.0)
+        .min_h(0.0)
+        .child(
+            scroller().child(
+                col()
+                    .w_full()
+                    .px(margin)
+                    .pt(if narrow { margin } else { 18.0 })
+                    .pb(if narrow { margin } else { 26.0 })
+                    .gap(12.0)
+                    .child(page),
+            ),
+        );
     let listing = state.control.page == Page::List;
     let action = match tab {
         Tab::Users if listing => Some(shell::action(
@@ -898,198 +870,30 @@ fn scroller() -> El {
         })
 }
 
-fn users_page(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
+/// *Users*: the table, an account, its access, or a new account. `width` is the page's room.
+fn users_page(state: &State, p: &Palette, me: &Account, compact: bool, width: f32) -> El {
     let control = &state.control;
     let account = |id: i64| control.accounts.iter().find(|a| a.id == id);
     match control.page {
         Page::Create => create_page(state, p, me),
         Page::Account(id) => match account(id) {
             Some(account) => account_page(state, p, me, account, compact),
-            None => users_list(state, p, me, compact),
+            None => users::list(state, p, me, compact, width),
         },
         Page::Access(id) => match account(id) {
             Some(account) => groups::access_page(state, p, me, account, compact),
-            None => users_list(state, p, me, compact),
+            None => users::list(state, p, me, compact, width),
         },
-        Page::List | Page::CreateGroup | Page::Group(_) => users_list(state, p, me, compact),
+        Page::List | Page::CreateGroup | Page::Group(_) => {
+            users::list(state, p, me, compact, width)
+        }
     }
 }
 
-fn users_list(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
-    let control = &state.control;
-    let shown: Vec<&Account> = control
-        .accounts
-        .iter()
-        .filter(|a| control.filter.keeps(a) && matches(a, &control.search.text))
-        .collect();
-    let total = control.accounts.len();
-    let count = if !control.loaded {
-        "Loading accounts…".to_owned()
-    } else if shown.len() < total {
-        format!("{} of {total} accounts", shown.len())
-    } else {
-        let mut line = match total {
-            1 => "1 account".to_owned(),
-            n => format!("{n} accounts"),
-        };
-        let locked = control.accounts.iter().filter(|a| a.locked()).count();
-        if locked > 0 {
-            line.push_str(&format!(" · {locked} locked"));
-        }
-        line
-    };
-    let mut page = col().w_full().gap(12.0);
-    if sees_groups(state) {
-        page = page.child(shell::users_and_groups(p, Tab::Users));
-    }
-    page = page.child(shell::intro(
-        p,
-        Some("User accounts"),
-        "Create accounts, assign roles, reset passwords and end sessions. \
-         A disabled account is kept but can't sign in.",
-    ));
-    page = messages(page, state, p);
-    let count = text(count)
-        .key("users-count")
-        .font(DETAIL)
-        .color(p.muted)
-        .truncate();
-    let search = text_input(&control.search, BODY)
-        .key("users-search")
-        .label("Search users")
-        .single_line()
-        .h(32.0)
-        .px(10.0)
-        .py(7.0)
-        .radius(7.0)
-        .fill(p.surface_2)
-        .border(1.0, p.line)
-        .color(p.ink)
-        .placeholder("Search by name, role or group", p.muted)
-        .on_edit(search_model);
-    let mut chips = row()
-        .key("users-filter")
-        .role("radiogroup")
-        .label("Show")
-        .gap(4.0);
-    for filter in Filter::ALL {
-        let on = filter == control.filter;
-        chips = chips.child(
-            row()
-                .key(filter.key())
-                .role("radio")
-                .label(filter.label())
-                .checked(on)
-                .focusable(true)
-                .h(28.0)
-                .px(10.0)
-                .center()
-                .radius(14.0)
-                .fill(if on { p.accent } else { p.surface_2 })
-                .border(1.0, if on { p.accent } else { p.line })
-                .hover(if on { p.accent } else { p.hover })
-                .child(
-                    text(filter.label())
-                        .font(TextStyle::new(12.0, 500.0))
-                        .color(if on { p.accent_ink } else { p.ink }),
-                )
-                .on_press(move |s: &mut State| s.set_user_filter(filter)),
-        );
-    }
-    page = page.child(if compact {
-        // The count follows the chips, or takes its own line when they leave no room.
-        col().w_full().gap(8.0).child(search.w_full()).child(
-            row()
-                .w_full()
-                .flex_wrap()
-                .gap(8.0)
-                .center_y()
-                .child(chips)
-                .child(count.min_w(0.0).px(2.0)),
-        )
-    } else {
-        row()
-            .w_full()
-            .gap(10.0)
-            .center_y()
-            .child(search.grow(1.0).min_w(0.0).max_w(360.0))
-            .child(chips)
-            .child(el().grow(1.0))
-            .child(count.min_w(0.0))
-    });
-    let mut list = col().key("users-list").w_full().gap(2.0);
-    for account in &shown {
-        let id = account.id;
-        let mut line = format!("@{} · {}", account.username, account.role.label());
-        if !account.groups.is_empty() {
-            line.push_str(" · ");
-            line.push_str(&account.groups.join(", "));
-        }
-        if account.id == me.id {
-            line.push_str(" · You");
-        }
-        let mut entry = row()
-            .key(format!("user-{id}"))
-            .role("button")
-            .label(format!("{}, {}", account.name(), account.role.label()))
-            .w_full()
-            .h(50.0)
-            .px(10.0)
-            .gap(10.0)
-            .center_y()
-            .radius(8.0)
-            .hover(p.hover)
-            .child(avatar(p, account, 32.0))
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(2.0)
-                    .child(
-                        text(account.name().to_owned())
-                            .font(NAME)
-                            .color(p.ink)
-                            .truncate(),
-                    )
-                    .child(text(line).font(DETAIL).color(p.muted).truncate()),
-            );
-        if let Some(label) = status(account) {
-            entry = entry.child(badge(p, label));
-        }
-        list = list.child(
-            entry
-                .child(text("›").font(BODY).color(p.muted).a11y_hidden())
-                .on_press(move |s: &mut State| s.open_account(id)),
-        );
-    }
-    if control.loaded && shown.is_empty() {
-        list = list.child(
-            text("No accounts match.")
-                .key("users-none")
-                .font(DETAIL)
-                .color(p.muted)
-                .px(10.0)
-                .py(8.0),
-        );
-    }
-    page.child(list)
-}
-
-fn search_model(s: &mut State) -> &mut TextEdit {
-    &mut s.control.search
-}
-
-/// The one thing to know about an account at a glance, if any.
-fn status(account: &Account) -> Option<&'static str> {
-    if account.disabled {
-        Some("Disabled")
-    } else if account.locked() {
-        Some("Locked")
-    } else if account.must_change_password {
-        Some("New password due")
-    } else {
-        None
-    }
+/// Control Panel's popups (the Users table's menus), for the desktop to draw over its windows
+/// so the window doesn't clip them.
+pub(super) fn popups(state: &State, p: &Palette) -> Vec<El> {
+    users::popups(state, p)
 }
 
 fn account_page(state: &State, p: &Palette, me: &Account, account: &Account, compact: bool) -> El {
@@ -1232,7 +1036,7 @@ fn account_page(state: &State, p: &Palette, me: &Account, account: &Account, com
         }
 
         page = page
-            .child(section(p, "PASSWORD"))
+            .child(section(p, "PASSWORD").key("user-password-title"))
             .child(
                 row()
                     .w_full()
@@ -1264,7 +1068,7 @@ fn account_page(state: &State, p: &Palette, me: &Account, account: &Account, com
                     .wrap(),
             );
 
-        page = page.child(section(p, "SESSIONS"));
+        page = page.child(section(p, "SESSIONS").key("user-sessions-title"));
         page = match &control.account_sessions {
             Some((owner, sessions)) if *owner == id => {
                 let mut list = col().key("user-sessions").w_full().gap(10.0);
@@ -2163,20 +1967,35 @@ mod tests {
         rt.find(key).is_some()
     }
 
+    /// Double-click account `id`'s row of the users table, which opens the account.
+    fn open_row(rt: &mut Runtime<State>, id: i64) {
+        let key = format!("user-{id}");
+        let (x, y) = rt
+            .find(&key)
+            .unwrap_or_else(|| panic!("`{key}` is on screen"));
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        for _ in 0..4 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
     #[test]
     fn a_super_admin_changes_others_but_not_their_own_role() {
         let mut rt = signed_in_as(1);
         assert!(shown(&rt, "control-tab-users") && shown(&rt, "control-tab-profile"));
         assert!(shown(&rt, "user-4"), "every account is listed");
 
-        press(&mut rt, "user-2");
+        open_row(&mut rt, 2);
         for key in ["user-role-superadmin", "user-role-admin", "user-role-user"] {
             assert!(shown(&rt, key), "{key}");
         }
         assert!(shown(&rt, "user-enabled") && shown(&rt, "user-delete"));
 
         press(&mut rt, "users-back");
-        press(&mut rt, "user-1");
+        open_row(&mut rt, 1);
         assert!(!shown(&rt, "user-role-user"), "no changing your own role");
         assert!(!shown(&rt, "user-delete"), "no deleting yourself");
     }
@@ -2184,11 +2003,11 @@ mod tests {
     #[test]
     fn an_admin_manages_users_but_not_administrators() {
         let mut rt = signed_in_as(2);
-        press(&mut rt, "user-1");
+        open_row(&mut rt, 1);
         assert!(!shown(&rt, "user-enabled") && !shown(&rt, "user-delete"));
 
         press(&mut rt, "users-back");
-        press(&mut rt, "user-3");
+        open_row(&mut rt, 3);
         assert!(shown(&rt, "user-enabled") && shown(&rt, "user-delete"));
         assert!(!shown(&rt, "user-role-admin"), "admins can't promote");
 
@@ -2370,6 +2189,16 @@ mod tests {
             assert!(shown(&rt, key), "{key} stays one press away");
         }
         assert!(shown(&rt, "users-create") && shown(&rt, "user-4"));
+        assert!(
+            !shown(&rt, "users-col-groups") && !shown(&rt, "users-col-seen"),
+            "a phone's table leaves out Groups and Last sign-in"
+        );
+        let you = rt.presented("user-1-you").expect("your badge").0;
+        let role = rt.presented("users-col-role").expect("the Role column").0;
+        assert!(
+            you[0] + you[2] <= role[0],
+            "a name too long for the column ends in … and keeps its YOU before Role"
+        );
         press(&mut rt, "control-tab-appearance");
         assert_eq!(rt.state.control.tab, Tab::Appearance);
     }
@@ -2522,17 +2351,31 @@ mod tests {
         after_frames(rt);
     }
 
-    /// The keys of the listed accounts, in order.
+    /// The accounts the users table shows, in order.
     fn listed(rt: &Runtime<State>) -> Vec<i64> {
-        (1..=9)
+        rt.state
+            .control
+            .accounts
+            .iter()
+            .map(|a| a.id)
             .filter(|id| shown(rt, &format!("user-{id}")))
             .collect()
     }
 
     #[test]
-    fn the_users_list_searches_and_filters() {
+    fn the_users_table_searches_and_pages() {
         let mut rt = signed_in_as(1);
+        roomy(&mut rt);
         assert_eq!(listed(&rt), [1, 2, 3, 4, 5]);
+        for key in [
+            "users-head",
+            "users-col-groups",
+            "users-col-seen",
+            "user-1-you",
+        ] {
+            assert!(shown(&rt, key), "{key}");
+        }
+        assert!(!shown(&rt, "user-2-you"), "You marks only your own row");
         rt.state.control.search = TextEdit::new("staff");
         after_frames(&mut rt);
         assert_eq!(listed(&rt), [3, 4], "groups count");
@@ -2542,23 +2385,211 @@ mod tests {
         rt.state.control.search = TextEdit::new("nobody");
         after_frames(&mut rt);
         assert!(listed(&rt).is_empty() && shown(&rt, "users-none"));
-
         rt.state.control.search = TextEdit::new("");
+
+        // Thirty more accounts: 25 a page, as on classic RAST.
+        let bob = rt.state.control.accounts[2].clone();
+        for id in 10..40 {
+            rt.state.control.accounts.push(Account {
+                id,
+                username: format!("user{id}"),
+                ..bob.clone()
+            });
+        }
+        sort(&mut rt.state.control.accounts);
         after_frames(&mut rt);
-        press(&mut rt, "users-filter-locked");
-        assert_eq!(listed(&rt), [5]);
-        press(&mut rt, "users-filter-disabled");
-        assert_eq!(listed(&rt), [4]);
-        press(&mut rt, "users-filter-active");
-        assert_eq!(listed(&rt), [1, 2, 3, 5]);
-        press(&mut rt, "users-filter-all");
-        assert_eq!(listed(&rt), [1, 2, 3, 4, 5]);
+        assert_eq!(listed(&rt).len(), 25);
+        assert!(shown(&rt, "users-next"));
+        press(&mut rt, "users-next");
+        assert_eq!(listed(&rt).len(), 10, "the rest on the second page");
+
+        // Typing a search starts again on the first page.
+        press(&mut rt, "users-search");
+        rt.paste("user1");
+        after_frames(&mut rt);
+        assert_eq!(rt.state.control.list_page, 0);
+        assert_eq!(listed(&rt).len(), 10, "user10 to user19");
+
+        press(&mut rt, "users-per-page");
+        assert!(shown(&rt, "users-per-page-menu"));
+        press(&mut rt, "users-per-page-10");
+        assert_eq!(rt.state.control.per_page, 10);
+        assert!(
+            !shown(&rt, "users-per-page-menu"),
+            "choosing closes the list"
+        );
+    }
+
+    #[test]
+    fn a_rows_menu_disables_after_asking_and_opens_the_account() {
+        let mut rt = signed_in_as(1);
+        roomy(&mut rt);
+        press(&mut rt, "user-3-actions");
+        for key in [
+            "user-menu",
+            "user-menu-edit",
+            "user-menu-password",
+            "user-menu-sessions",
+            "user-menu-disable",
+        ] {
+            assert!(shown(&rt, key), "{key}");
+        }
+        press(&mut rt, "user-menu-disable");
+        assert_eq!(
+            rt.state.control.popup,
+            Some(Popup::ConfirmDisable(3)),
+            "the first press asks"
+        );
+        assert!(sent(&rt.state).is_empty(), "nothing sent yet");
+        press(&mut rt, "user-menu-disable");
+        assert_eq!(rt.state.control.popup, None);
+        assert!(matches!(sent(&rt.state)[..], [Reply::Updated(_)]));
+        let mut bob = rt.state.control.accounts[2].clone();
+        bob.disabled = true;
+        rt.state
+            .apply_reply(Reply::Updated(Ok(bob)), &mut Tx::default());
+        assert_eq!(
+            rt.state.control.notice.as_deref(),
+            Some("Disabled bob. They were signed out everywhere.")
+        );
+        after_frames(&mut rt);
+        press(&mut rt, "user-3-actions");
+        assert!(shown(&rt, "user-menu-enable") && !shown(&rt, "user-menu-disable"));
+
+        press(&mut rt, "user-menu-password");
+        assert_eq!(rt.state.control.page, Page::Account(3));
+        assert!(!shown(&rt, "user-menu"), "the menu closes with the list");
+        after_frames(&mut rt);
+        assert!(
+            rt.state.control.reset_password.focused,
+            "Reset password lands in the temporary password field"
+        );
+    }
+
+    /// Signed in as the Super Admin on a screen short enough that an account's page scrolls,
+    /// the window settled to it. The table's first rows still show whole.
+    fn on_a_short_screen() -> Runtime<State> {
+        let mut rt = signed_in_as(1);
+        rt.set_viewport((SIZE.0, 620.0), 2.0);
+        rt.invalidate();
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt
+    }
+
+    /// Whether the element keyed `key` is wholly inside Control Panel's scrolling page, once
+    /// it settles.
+    fn in_page_view(rt: &mut Runtime<State>, key: &str) -> bool {
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+        }
+        let [_, top, _, tall] = rt.presented("control-content").expect("the page").0;
+        let [_, y, _, h] = rt
+            .presented(key)
+            .unwrap_or_else(|| panic!("`{key}` is laid out"))
+            .0;
+        y >= top && y + h <= top + tall
+    }
+
+    #[test]
+    fn view_sessions_scrolls_the_account_to_them() {
+        let mut rt = on_a_short_screen();
+        press(&mut rt, "user-2-actions");
+        press(&mut rt, "user-menu-edit");
+        assert!(
+            !in_page_view(&mut rt, "user-sessions-title"),
+            "Edit user opens at the top, the sessions below the fold"
+        );
+        press(&mut rt, "users-back");
+        press(&mut rt, "user-2-actions");
+        press(&mut rt, "user-menu-sessions");
+        assert_eq!(rt.state.control.page, Page::Account(2));
+        assert!(
+            in_page_view(&mut rt, "user-sessions-title"),
+            "View sessions scrolls to them"
+        );
+    }
+
+    #[test]
+    fn reset_password_scrolls_to_the_field_and_focuses_it() {
+        let mut rt = on_a_short_screen();
+        press(&mut rt, "user-2-actions");
+        press(&mut rt, "user-menu-edit");
+        assert!(
+            !in_page_view(&mut rt, "user-new-password"),
+            "Edit user opens at the top, the password below the fold"
+        );
+        press(&mut rt, "users-back");
+        press(&mut rt, "user-2-actions");
+        press(&mut rt, "user-menu-password");
+        assert!(
+            in_page_view(&mut rt, "user-new-password"),
+            "Reset password scrolls to the field"
+        );
+        assert!(rt.state.control.reset_password.focused, "and types into it");
+    }
+
+    #[test]
+    fn each_page_opens_at_its_top() {
+        let mut rt = on_a_short_screen();
+        press(&mut rt, "user-2-actions");
+        press(&mut rt, "user-menu-sessions");
+        assert!(
+            !in_page_view(&mut rt, "users-back"),
+            "the account scrolled down to its sessions"
+        );
+        rt.state.back_to_accounts();
+        after_frames(&mut rt);
+        assert!(
+            in_page_view(&mut rt, "control-sub"),
+            "the list opens at its top"
+        );
+
+        // A negative delta moves the content up, toward the list's end.
+        let (x, y) = rt.find("users-table").expect("the table");
+        rt.wheel(x, y, -2000.0);
+        assert!(
+            !in_page_view(&mut rt, "control-sub"),
+            "the list scrolled to its end"
+        );
+        open_row(&mut rt, 5);
+        assert_eq!(rt.state.control.page, Page::Account(5));
+        assert!(
+            in_page_view(&mut rt, "users-back"),
+            "an account opens at its top"
+        );
+    }
+
+    #[test]
+    fn an_admins_menu_on_a_super_admin_only_opens_it() {
+        let mut rt = signed_in_as(2);
+        press(&mut rt, "user-1-actions");
+        press(&mut rt, "user-menu-disable");
+        press(&mut rt, "user-menu-password");
+        assert_eq!(
+            rt.state.control.popup,
+            Some(Popup::Actions(1)),
+            "dimmed entries do nothing"
+        );
+        assert!(sent(&rt.state).is_empty());
+        press(&mut rt, "user-menu-edit");
+        assert_eq!(rt.state.control.page, Page::Account(1));
+    }
+
+    #[test]
+    fn the_last_active_super_admin_is_called_out() {
+        let mut rt = signed_in_as(1);
+        assert!(shown(&rt, "users-one-super-admin"));
+        rt.state.control.accounts[1].role = Role::SuperAdmin;
+        after_frames(&mut rt);
+        assert!(!shown(&rt, "users-one-super-admin"));
     }
 
     #[test]
     fn a_locked_account_is_unlocked_by_its_administrator() {
         let mut rt = signed_in_as(1);
-        press(&mut rt, "user-5");
+        open_row(&mut rt, 5);
         assert!(
             matches!(sent(&rt.state)[..], [Reply::UserSessions(5, _, false)]),
             "its sessions load"
@@ -2609,12 +2640,12 @@ mod tests {
     fn administrators_see_sessions_only_of_accounts_they_manage() {
         let mut rt = signed_in_as(2);
         roomy(&mut rt);
-        press(&mut rt, "user-1");
+        open_row(&mut rt, 1);
         assert!(sent(&rt.state).is_empty(), "no asking about a Super Admin");
         assert!(!shown(&rt, "user-sign-out") && !shown(&rt, "user-unlock"));
 
         press(&mut rt, "users-back");
-        press(&mut rt, "user-3");
+        open_row(&mut rt, 3);
         assert!(matches!(
             sent(&rt.state)[..],
             [Reply::UserSessions(3, _, false)]

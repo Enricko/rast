@@ -9,8 +9,9 @@ which RAST server it belongs to and survives that server going away.
 In the browser the shell signs in to the **RAST server** (accounts with the
 roles Super Admin, Admin and User, an `HttpOnly` session cookie, and a one-time
 setup token for the first Super Admin; see [docs/AUTH-STORAGE.md](AUTH-STORAGE.md)).
-Administrators manage accounts in **Control Panel → Users & Groups** (search,
-filters, temporary passwords, unlocking, signing an account out everywhere).
+Administrators manage accounts in **Control Panel → Users & Groups** (classic
+RAST's users table with search and paging, and a menu per account for
+temporary passwords, sessions, unlocking and disabling).
 Super Admins also allow or deny apps for groups in its **Groups** view and per
 account under **Apps & groups**. Under **Profile** everyone changes their name
 and password, sees which apps they may open, and ends sessions on other devices.
@@ -60,7 +61,7 @@ Apps open in windows that behave as on the classic RAST desktop
 ## Control Panel
 
 Control Panel is laid out as classic RAST's (`desktop/control/shell.rs` draws the
-frame, `control.rs` and `control/groups.rs` the pages):
+frame, `control.rs`, `control/users.rs` and `control/groups.rs` the pages):
 
 - A 214 pt sidebar of sections in the classic order: Profile and Appearance for
   everyone; Users & Groups, Shared folders, Storage, Components and Settings for
@@ -77,6 +78,34 @@ frame, `control.rs` and `control/groups.rs` the pages):
   plainly that the server doesn't offer them yet rather than show invented
   numbers. Without a server session the desktop app shows Connection and
   Appearance instead.
+- Each page scrolls on its own and opens at its top: an account opened from a
+  scrolled list, or the list after an account, doesn't open part-way down.
+
+### Users table
+
+*Users & Groups → Users* is classic RAST's table (`control/users.rs`):
+
+- Columns: **User** (avatar, name, a *YOU* badge on your own row, `@username`),
+  **Role** (Super Admin in the warning tone, Admin in the accent), **Groups**
+  (two chips, then *+N*), **Status** (*Active*, *Disabled*, *Locked*, or
+  *Password due* for someone holding a temporary password), **Last sign-in**
+  (*just now*, *5 min ago*, *3 h ago*, *2 d ago*, then the date from 30 days;
+  the exact time as a tooltip) and a **⋮** button. Classic RAST's Quota column waits until the
+  server has storage.
+- Above it: a search over username, display name, role and groups; the count
+  (*1–25 of 40*); and rows per page (10, 25, 50 or 100). Each new search starts
+  on the first page. Below it: *Page 1 of 2 · 40 items* with *Previous* and
+  *Next*. When exactly one active Super Admin is left, a banner says RAST won't
+  let it be demoted, disabled or deleted.
+- **⋮** opens the account's menu: *Edit user*, *Reset password* (the account,
+  scrolled to its temporary password field and ready to type), *View sessions*
+  (the account, scrolled to its sessions), *Unlock account* for a locked one, and
+  *Enable account* or *Disable account*, which asks for a second press. What you
+  may not do (an Admin on a Super Admin, anyone on their own account) is dimmed.
+  Double-clicking a row opens the account.
+- In a Control Panel narrower than 680 pt, and on a phone, the table leaves out
+  Groups and Last sign-in and scrolls sideways; a name too long for its column
+  ends in "…" and keeps its *YOU*.
 
 ## Personalize
 

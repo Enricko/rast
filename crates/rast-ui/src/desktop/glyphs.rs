@@ -143,3 +143,62 @@ pub(super) static PLUS: Icon = Icon {
     view: 24.0,
     body: r#"<path d="M12 5.2v13.6M5.2 12h13.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>"#,
 };
+
+// The Users table: its search field, row actions and their menu.
+
+pub(super) static SEARCH: Icon = Icon {
+    name: "rast-search",
+    view: 24.0,
+    body: r#"<circle cx="10.8" cy="10.8" r="6.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m15.4 15.4 4.4 4.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#,
+};
+
+/// A row's actions: three dots, one above the other.
+pub(super) static MORE: Icon = Icon {
+    name: "rast-more",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="5.2" r="1.5" fill="currentColor"/><circle cx="12" cy="12" r="1.5" fill="currentColor"/><circle cx="12" cy="18.8" r="1.5" fill="currentColor"/>"#,
+};
+
+pub(super) static SHIELD_ALERT: Icon = Icon {
+    name: "rast-shield-alert",
+    view: 24.0,
+    body: r#"<path d="M12 3.2 19 6v5.6c0 4.3-2.9 7.4-7 9.2-4.1-1.8-7-4.9-7-9.2V6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M12 7.8v4.6M12 16.4v.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>"#,
+};
+
+pub(super) static EDIT: Icon = Icon {
+    name: "rast-edit",
+    view: 24.0,
+    body: r#"<path d="M4.6 19.4h3.1L19 8.1a2 2 0 0 0 0-2.8l-.3-.3a2 2 0 0 0-2.8 0L4.6 16.3z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="m13.9 7.2 2.9 2.9" stroke="currentColor" stroke-width="1.6"/>"#,
+};
+
+pub(super) static KEY: Icon = Icon {
+    name: "rast-key",
+    view: 24.0,
+    body: r#"<circle cx="8.4" cy="15.6" r="4.1" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m11.3 12.7 8.2-8.2M16.6 7.4l2.2 2.2M14.1 9.9l2.2 2.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+pub(super) static SESSIONS: Icon = Icon {
+    name: "rast-sessions",
+    view: 24.0,
+    body: r#"<rect x="3.6" y="5.2" width="12.8" height="9.2" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7.6 18.6h12.8V9.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>"#,
+};
+
+pub(super) static POWER: Icon = Icon {
+    name: "rast-power",
+    view: 24.0,
+    body: r#"<path d="M12 3.6v8.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M6.6 6.6a7.6 7.6 0 1 0 10.8 0" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>"#,
+};
+
+/// *Unlock account*: classic RAST's lock with its shackle open.
+pub(super) static UNLOCK: Icon = Icon {
+    name: "rast-unlock",
+    view: 24.0,
+    body: r#"<rect x="5.4" y="10.4" width="13.2" height="9.4" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8.4 10.4V7.8a3.6 3.6 0 0 1 7-1.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"#,
+};
+
+/// A select's arrow, as classic RAST's fields drew it: a small solid triangle.
+pub(super) static CARET_DOWN: Icon = Icon {
+    name: "rast-caret-down",
+    view: 10.0,
+    body: r#"<path d="M0 2.5h10L5 7.5z" fill="currentColor"/>"#,
+};

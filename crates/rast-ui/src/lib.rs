@@ -680,6 +680,18 @@ fn scene_users(state: &mut State) {
     state.control.accounts = accounts;
 }
 
+/// The users table in the dark.
+fn scene_users_dark(state: &mut State) {
+    scene_users(state);
+    state.desktop.look.saved.theme = desktop::appearance::Theme::Dark;
+}
+
+/// A row's actions menu, open on a locked account the Super Admin manages.
+fn scene_user_menu(state: &mut State) {
+    scene_users(state);
+    state.open_row_actions(5);
+}
+
 fn scene_user(state: &mut State) {
     scene_users(state);
     state.open_account(2);
@@ -805,6 +817,8 @@ fn app_spec() -> AppSpec<State> {
             ("settings", scene_settings),
             ("setup", scene_setup),
             ("users", scene_users),
+            ("users-dark", scene_users_dark),
+            ("user-menu", scene_user_menu),
             ("user", scene_user),
             ("locked-user", scene_locked_user),
             ("create-user", scene_create_user),

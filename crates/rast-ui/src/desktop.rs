@@ -572,6 +572,9 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
             .child(panel);
     }
     root = root.child(taskbar(state, &p, dark, width));
+    for layer in control::popups(state, &p) {
+        root = root.child(layer);
+    }
     if let Some(at) = state.desktop.menu {
         for layer in menu::view(state, &p, at, [width, height]) {
             root = root.child(layer);

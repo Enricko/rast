@@ -192,8 +192,31 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   - A window's 1 pt border now takes room, as the classic CSS border did: the
     title bar and the app lay out inside it, so a filled header or sidebar no
     longer paints over the border at the window's edge.
+- **Users table as on classic RAST** (Control Panel → Users & Groups → Users):
+  - Columns User (avatar, name, *YOU*, `@username`), Role, Groups (two chips,
+    then *+N*), Status (*Active*, *Disabled*, *Locked*, *Password due*), Last
+    sign-in (*just now*, *5 min ago* … then the date, exact time as a tooltip)
+    and a ⋮ button. Classic RAST's Quota column waits until the server has
+    storage.
+  - A toolbar with the search (username, display name, role, groups), the
+    *1–25 of 40* count and rows per page (10, 25, 50, 100); a new search starts
+    on the first page. Below the table, *Page 1 of 2 · 40 items* with
+    *Previous* and *Next*. A banner says so when only one active Super Admin is
+    left.
+  - ⋮ opens the account's menu: *Edit user*, *Reset password* (the account,
+    scrolled to its temporary password field and ready to type), *View
+    sessions*, *Unlock account*, and *Enable* or *Disable account*, which asks
+    for a second press. Entries you may not use are dimmed. Double-clicking a
+    row opens the account.
+  - The Active / Disabled / Locked filter chips are gone, as classic RAST had
+    none: search and the Status column cover them.
+  - In a narrow Control Panel or on a phone the table leaves out Groups and Last
+    sign-in and scrolls sideways; a long name ends in "…" and keeps its *YOU*.
 
 ### Fixed
+
+- Control Panel pages open at their top: an account opened from a scrolled list,
+  or the list after an account, no longer opens part-way down.
 
 - Going back from an account or group page no longer repeats its last notice
   above the list, which pushed the rows down under the pointer.

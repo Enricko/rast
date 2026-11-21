@@ -146,26 +146,81 @@ pub(super) fn view(state: &State, p: &Palette, at: [f32; 2], [width, height]: [f
     ]
 }
 
-fn item(
+/// A menu entry: its icon and label, `ink` colouring both when it isn't the plain text colour
+/// (a danger entry).
+pub(super) fn item(
     p: &Palette,
-    key: &'static str,
+    key: impl Into<String>,
     glyph: &'static Icon,
-    label: &'static str,
+    label: impl Into<String>,
     ink: Color,
 ) -> El {
     let tint = if ink == p.ink { p.muted } else { ink };
+    entry(key, glyph, label.into(), ink, tint)
+        .focusable(true)
+        .hover(p.neutral)
+}
+
+/// An entry that can't be used now: faint, skipped by focus, and inert.
+pub(super) fn dimmed(
+    p: &Palette,
+    key: impl Into<String>,
+    glyph: &'static Icon,
+    label: impl Into<String>,
+) -> El {
+    entry(key, glyph, label.into(), p.faint, p.faint).disabled(true)
+}
+
+fn entry(
+    key: impl Into<String>,
+    glyph: &'static Icon,
+    label: String,
+    ink: Color,
+    tint: Color,
+) -> El {
     row()
         .key(key)
         .role("menuitem")
-        .label(label)
-        .focusable(true)
+        .label(label.clone())
         .w_full()
         .h(ITEM_H)
         .px(8.0)
         .gap(9.0)
         .center_y()
         .radius(5.0)
-        .hover(p.neutral)
         .child(icon(glyph, 16.0).color(tint).a11y_hidden())
         .child(text(label).font(ITEM).color(ink).truncate())
+}
+
+/// A popup menu as classic RAST's `.context-menu`: 4 pt inside a hairline border, under a
+/// soft shadow, at least 180 pt wide. Place it with `El::anchored`.
+pub(super) fn sheet(p: &Palette, key: &'static str, label: &str) -> El {
+    col()
+        .key(key)
+        .role("menu")
+        .label(label.to_owned())
+        .min_w(180.0)
+        .padding(4.0)
+        .radius(7.0)
+        .border(1.0, p.subtle)
+        .fill(p.surface)
+        .shadow(
+            if p.dark { 14.0 } else { 12.0 },
+            if p.dark { 32.0 } else { 28.0 },
+            if p.dark {
+                Color::BLACK.alpha(0.5)
+            } else {
+                super::rgb("#101822").alpha(0.16)
+            },
+        )
+}
+
+/// The line between a menu's groups of entries (`.menu-sep`).
+pub(super) fn separator(line: Color) -> El {
+    el().w_full()
+        .h(11.0)
+        .px(4.0)
+        .center()
+        .a11y_hidden()
+        .child(el().w_full().h(1.0).fill(line))
 }
