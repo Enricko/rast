@@ -5,7 +5,7 @@ use rune::{Color, El, ScrollSpec, Shape, TextStyle, col, el, row, text};
 use super::{AppId, Palette, icon};
 use crate::State;
 
-const TASKBAR: f32 = 54.0;
+const TASKBAR: f32 = super::BAR;
 const LABEL: TextStyle = TextStyle::new(12.0, 580.0);
 
 pub(super) fn view(

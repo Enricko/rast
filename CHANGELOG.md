@@ -89,6 +89,18 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   1100 pt layout, a 432 pt card, compact fields and the classic copy. The
   startup and unlock covers show the classic splash (wallpaper, logo tile and
   progress bar) instead of a spinner on a plain background.
+- Slimmer, responsive taskbar (44 pt instead of 54 pt). Wide windows label the
+  device, internet status and account; narrow ones show icons only, and phones
+  reach every detail from the account panel. New tray items:
+  - **This device**: the browser and system (or the host name natively), screen,
+    language and time zone, read locally and never sent anywhere.
+  - **Network**: online or offline from the browser, updated by its
+    `online`/`offline` events, with the connection type and speed estimate where
+    Chromium reports them. The native app shows server reachability.
+  - **Date and time**: weekday and date under the clock, with the full date and
+    time zone in its panel.
+  - **Account**: the profile panel lists the local credentials (username,
+    device password, where it is stored, Argon2id, no linked server account).
 
 ### Notes
 

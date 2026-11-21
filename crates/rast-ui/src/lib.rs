@@ -270,6 +270,8 @@ fn setup(state: &mut State, wake: Waker) {
 
 fn poll(state: &mut State, _t: f64, tx: &mut Tx) -> bool {
     let clock_changed = state.desktop.tick(tx) && state.signed_in;
+    #[cfg(target_arch = "wasm32")]
+    let clock_changed = (state.desktop.refresh_network() && state.signed_in) || clock_changed;
     let mut latest = None;
     if let Some(link) = state.link.as_ref() {
         while let Ok(status) = link.statuses.try_recv() {
@@ -330,6 +332,21 @@ fn scene_start(state: &mut State) {
     state.toggle_desktop_panel(desktop::Panel::Start);
 }
 
+fn scene_account(state: &mut State) {
+    scene_online(state);
+    state.toggle_desktop_panel(desktop::Panel::Account);
+}
+
+fn scene_device(state: &mut State) {
+    scene_online(state);
+    state.toggle_desktop_panel(desktop::Panel::Device);
+}
+
+fn scene_clock(state: &mut State) {
+    scene_online(state);
+    state.toggle_desktop_panel(desktop::Panel::Clock);
+}
+
 fn scene_settings(state: &mut State) {
     signed_in(state);
     state.open_settings();
@@ -363,6 +380,9 @@ fn app_spec() -> AppSpec<State> {
             ("offline", scene_offline),
             ("online", scene_online),
             ("start", scene_start),
+            ("account", scene_account),
+            ("device", scene_device),
+            ("clock", scene_clock),
             ("settings", scene_settings),
             ("setup", scene_setup),
         ],

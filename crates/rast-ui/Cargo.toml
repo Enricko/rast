@@ -35,7 +35,10 @@ getrandom = "0.2"
 wasm-bindgen = { workspace = true }
 # Web Crypto for the salt, and localStorage for the per-browser device account.
 getrandom = { version = "0.2", features = ["js"] }
-web-sys = { version = "0.3", features = ["Window", "Storage", "Event"] }
+# Navigator, Screen and the online/offline events for the taskbar's device and
+# network status; js-sys reads `navigator.connection` and the time zone.
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Storage", "Event", "EventTarget", "Navigator", "Screen"] }
 
 [lints]
 workspace = true

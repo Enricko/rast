@@ -1,6 +1,7 @@
 //! The classic RAST desktop, rebuilt with Rune. Backend apps are previews.
 
 mod panels;
+mod system;
 mod window;
 
 use std::collections::HashMap;
@@ -31,6 +32,7 @@ pub(crate) enum Panel {
     Start,
     Account,
     Status,
+    Device,
     Clock,
     Appearance,
     Shortcuts,
@@ -96,10 +98,14 @@ pub(crate) struct Desktop {
     pub(crate) maximized: bool,
     dark: Option<bool>,
     pub(crate) wallpaper: Wallpaper,
-    pub(crate) clock: String,
-    pub(crate) date: String,
+    pub(crate) clock: system::Clock,
+    pub(crate) device: system::Device,
+    /// Browser connectivity; natively the taskbar shows server reachability.
+    pub(crate) network: system::Network,
     next_clock: f64,
     art: Option<Art>,
+    #[cfg(target_arch = "wasm32")]
+    watch: Option<system::Watch>,
 }
 
 impl Default for Desktop {
@@ -112,10 +118,22 @@ impl Default for Desktop {
             maximized: false,
             dark: None,
             wallpaper: Wallpaper::load(),
-            clock: "09:41".into(),
-            date: "21 Nov".into(),
+            clock: system::Clock::sample(),
+            #[cfg(target_arch = "wasm32")]
+            device: system::device(),
+            #[cfg(not(target_arch = "wasm32"))]
+            device: system::sample_device(),
+            #[cfg(target_arch = "wasm32")]
+            network: system::network(),
+            #[cfg(not(target_arch = "wasm32"))]
+            network: system::Network {
+                online: true,
+                ..system::Network::default()
+            },
             next_clock: 0.0,
             art: None,
+            #[cfg(target_arch = "wasm32")]
+            watch: None,
         }
     }
 }
@@ -125,8 +143,26 @@ impl Desktop {
         self.dark.unwrap_or(true)
     }
 
+    /// Load the artwork, read this device and watch the browser's connection.
     pub(crate) fn load_art(&mut self, wake: Waker) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.watch = system::Watch::new(wake.clone());
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.device = system::device();
+        }
         self.art = Some(Art::load(wake));
+    }
+
+    /// Re-read the browser's connection after an online, offline or change event.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn refresh_network(&mut self) -> bool {
+        let network = system::network();
+        let changed = network != self.network;
+        self.network = network;
+        changed
     }
 
     pub(crate) fn close_session(&mut self) {
@@ -146,16 +182,18 @@ impl Desktop {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis() as i64);
         let local = LocalTime::at(ms);
-        let month = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let time = format!("{:02}:{:02}", local.hour, local.minute);
-        let date = format!("{} {}", local.day, month[(local.month - 1) as usize]);
+        let clock = system::Clock::at(
+            local.year,
+            local.month,
+            local.day,
+            local.hour,
+            local.minute,
+            local.offset,
+        );
         self.next_clock = tx.clock() + f64::from(60 - local.second);
         tx.wake_at(self.next_clock);
-        let changed = time != self.clock || date != self.date;
-        self.clock = time;
-        self.date = date;
+        let changed = clock != self.clock;
+        self.clock = clock;
         changed
     }
 }
@@ -290,7 +328,8 @@ impl Art {
             "moon",
             "info",
             "keyboard",
-            "wallpaper"
+            "wallpaper",
+            "device"
         )
         .into();
         icons.insert("settings", icons["controlpanel"].clone());
@@ -373,8 +412,13 @@ impl Palette {
 }
 
 const BODY: TextStyle = TextStyle::new(13.0, 550.0);
-const SMALL: TextStyle = TextStyle::new(11.0, 580.0);
-const BAR: f32 = 54.0;
+/// The taskbar height. Popovers and windows stay above it.
+pub(super) const BAR: f32 = 44.0;
+const CHIP: f32 = 32.0;
+const LABEL: TextStyle = TextStyle::new(12.0, 560.0);
+const NAME: TextStyle = TextStyle::new(12.0, 620.0);
+const TIME: TextStyle = TextStyle::new(12.5, 620.0).features("'tnum' 1");
+const CAPTION: TextStyle = TextStyle::new(10.5, 500.0);
 
 pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     cx.web_focus();
@@ -417,81 +461,138 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     root.child(taskbar(state, &p, dark, width))
 }
 
+/// Which tray details fit the window: labels on wide screens, icons on narrow ones.
+struct Fit {
+    device: bool,
+    device_label: bool,
+    network_label: bool,
+    theme: bool,
+    date: bool,
+    name: bool,
+    role: bool,
+}
+
+impl Fit {
+    fn new(width: f32) -> Self {
+        Self {
+            device: width >= 560.0,
+            device_label: width >= 1024.0,
+            network_label: width >= 820.0,
+            theme: width >= 400.0,
+            date: width >= 340.0,
+            name: width >= 700.0,
+            role: width >= 1024.0,
+        }
+    }
+}
+
+/// The internet (browser) or server (native) connection as the tray shows it.
+pub(super) struct Connectivity {
+    pub(super) label: &'static str,
+    pub(super) color: Color,
+}
+
+pub(super) fn connectivity(state: &State) -> Connectivity {
+    let (label, color) = if cfg!(target_arch = "wasm32") {
+        if state.desktop.network.online {
+            ("Online", "#66daa3")
+        } else {
+            ("Offline", "#f18e8d")
+        }
+    } else {
+        match state.status.phase {
+            Phase::Online => ("Online", "#66daa3"),
+            Phase::Connecting => ("Connecting", "#f1c773"),
+            Phase::Setup => ("Not set up", "#f1c773"),
+            Phase::Offline => ("Offline", "#f18e8d"),
+        }
+    };
+    Connectivity {
+        label,
+        color: rgb(color),
+    }
+}
+
+pub(super) fn initial(name: &str) -> String {
+    name.chars()
+        .next()
+        .map_or_else(|| "?".to_owned(), |c| c.to_uppercase().collect())
+}
+
 fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
-    let compact = width < 680.0;
-    let tiny = width < 360.0;
+    let fit = Fit::new(width);
+    let open = state.desktop.panel;
     let start = el()
         .key("desktop-start")
         .role("button")
         .label("Start")
-        .expanded(state.desktop.panel == Some(Panel::Start))
-        .size(38.0, 38.0)
-        .radius(9.0)
+        .expanded(open == Some(Panel::Start))
+        .size(CHIP, CHIP)
+        .radius(8.0)
         .center()
         .fill(p.accent)
         .hover(p.accent.mix(p.surface, 0.2))
-        .child(icon(state, "logo", 22.0))
+        .child(icon(state, "logo", 19.0))
         .on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Start));
-    let who = state
-        .account
-        .as_ref()
-        .map_or("Local user", |a| a.username.as_str());
-    let initial = who
-        .chars()
-        .next()
-        .map(|c| c.to_uppercase().collect::<String>())
-        .unwrap_or_else(|| "?".into());
-    let account = row()
-        .key("desktop-account")
-        .role("button")
-        .label("Local account")
-        .h(40.0)
-        .px(4.0)
-        .center()
-        .gap(8.0)
-        .radius(7.0)
-        .hover(p.hover)
-        .child(
-            el().size(29.0, 29.0)
-                .radius(15.0)
-                .fill(p.accent)
-                .center()
-                .child(text(initial).font(BODY).color(p.accent_ink)),
-        );
-    let account = if compact {
-        account
-    } else {
-        account.child(
-            col()
-                .w(76.0)
-                .gap(2.0)
-                .child(text(short_name(who)).font(BODY).color(p.ink))
-                .child(text("LOCAL").font(SMALL).color(p.muted)),
+
+    let mut tray = row().gap(2.0).center_y();
+
+    if fit.device {
+        let device = &state.desktop.device;
+        let mut chip = chip(
+            p,
+            "desktop-device",
+            format!("This device: {}", device.name),
+            open == Some(Panel::Device),
+            fit.device_label,
         )
-    };
-    let clock = col()
-        .key("desktop-clock")
-        .role("button")
-        .label("Local time")
-        .h(38.0)
-        .px(5.0)
-        .center()
-        .radius(6.0)
-        .hover(p.hover)
-        .child(text(state.desktop.clock.clone()).font(BODY).color(p.ink));
-    let clock = if compact {
-        clock
+        .child(icon(state, "device", 16.0).a11y_hidden());
+        if fit.device_label {
+            chip = chip.child(
+                text(device.name.clone())
+                    .font(LABEL)
+                    .color(p.ink)
+                    .max_w(180.0)
+                    .truncate()
+                    .a11y_hidden(),
+            );
+        }
+        tray = tray.child(chip.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Device)));
+    }
+
+    let net = connectivity(state);
+    let kind = if cfg!(target_arch = "wasm32") {
+        "Internet"
     } else {
-        clock.child(text(state.desktop.date.clone()).font(SMALL).color(p.muted))
+        "Server"
     };
-    let mut tray = row().gap(if compact { 2.0 } else { 6.0 }).center_y().child(
-        tray_icon(state, p, "desktop-status", "Connection status", "network")
-            .on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Status)),
+    let mut network = chip(
+        p,
+        "desktop-status",
+        format!("{kind}: {}", net.label),
+        open == Some(Panel::Status),
+        fit.network_label,
+    )
+    .child(
+        el().size(16.0, 16.0)
+            .a11y_hidden()
+            .child(icon(state, "network", 16.0))
+            .child(
+                el().size(7.0, 7.0)
+                    .radius(4.0)
+                    .fill(net.color)
+                    .border(1.0, p.bar)
+                    .pin(None, Some(-2.0), Some(-3.0), None),
+            ),
     );
-    if !tiny {
+    if fit.network_label {
+        network = network.child(text(net.label).font(LABEL).color(p.ink).a11y_hidden());
+    }
+    tray = tray.child(network.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Status)));
+
+    if fit.theme {
         tray = tray.child(
-            tray_icon(
-                state,
+            chip(
                 p,
                 "desktop-theme",
                 if dark {
@@ -499,71 +600,126 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
                 } else {
                     "Switch to dark theme"
                 },
-                if dark { "theme" } else { "moon" },
+                false,
+                false,
             )
+            .child(icon(state, if dark { "theme" } else { "moon" }, 16.0).a11y_hidden())
             .on_press(State::toggle_desktop_theme),
         );
     }
-    let tray = tray
-        .child(clock.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Clock)))
-        .child(account.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Account)));
+
+    tray = tray.child(separator(p));
+
+    let clock = &state.desktop.clock;
+    let mut time = col()
+        .key("desktop-clock")
+        .role("button")
+        .label(format!("{}, {}", clock.time, clock.long_date))
+        .expanded(open == Some(Panel::Clock))
+        .h(CHIP)
+        .px(8.0)
+        .center()
+        .radius(7.0)
+        .hover(p.hover)
+        .child(
+            text(clock.time.clone())
+                .font(TIME)
+                .color(p.ink)
+                .a11y_hidden(),
+        );
+    if open == Some(Panel::Clock) {
+        time = time.fill(p.hover);
+    }
+    if fit.date {
+        time = time.child(
+            text(clock.short_date.clone())
+                .font(CAPTION)
+                .color(p.muted)
+                .a11y_hidden(),
+        );
+    }
+    tray = tray.child(time.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Clock)));
+
+    let who = state
+        .account
+        .as_ref()
+        .map_or("Local user", |a| a.username.as_str());
+    let mut account = chip(
+        p,
+        "desktop-account",
+        format!("Account: {who}"),
+        open == Some(Panel::Account),
+        fit.name,
+    )
+    .child(
+        el().size(24.0, 24.0)
+            .radius(12.0)
+            .fill(p.accent)
+            .center()
+            .a11y_hidden()
+            .child(
+                text(initial(who))
+                    .font(TextStyle::new(11.5, 700.0))
+                    .color(p.accent_ink),
+            ),
+    );
+    if fit.name {
+        let mut names = col()
+            .max_w(120.0)
+            .a11y_hidden()
+            .child(text(who.to_owned()).font(NAME).color(p.ink).truncate());
+        if fit.role {
+            names = names.child(text("Local account").font(CAPTION).color(p.muted));
+        }
+        account = account.child(names);
+    }
+    tray = tray.child(account.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Account)));
+
     row()
         .key("desktop-taskbar")
         .pin(Some(0.0), None, Some(0.0), Some(0.0))
         .h(BAR)
-        .px(if compact { 6.0 } else { 12.0 })
+        .px(if width < 480.0 { 4.0 } else { 6.0 })
         .center_y()
-        .gap(if compact { 4.0 } else { 9.0 })
-        .fill(p.bar)
-        .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
+        .gap(4.0)
+        .fill(p.bar.alpha(0.92))
+        .border_sides([1.0, 0.0, 0.0, 0.0], p.line.alpha(0.7))
         .child(start)
         .child(el().grow(1.0).min_w(0.0))
         .child(tray)
 }
 
-fn short_name(value: &str) -> String {
-    let mut chars = value.chars();
-    let mut name: String = chars.by_ref().take(10).collect();
-    if chars.next().is_some() {
-        name.push('…');
-    }
-    name
-}
-
-fn tray_icon(
-    state: &State,
+/// A tray button: icon only, or icon and label when `labelled`.
+fn chip(
     p: &Palette,
-    id: &'static str,
-    label: &'static str,
-    mark: &'static str,
+    key: &'static str,
+    label: impl Into<String>,
+    open: bool,
+    labelled: bool,
 ) -> El {
-    let mut item = el()
-        .key(id)
+    let item = row()
+        .key(key)
         .role("button")
         .label(label)
-        .size(30.0, 38.0)
-        .radius(6.0)
+        .h(CHIP)
+        .gap(6.0)
+        .radius(7.0)
         .hover(p.hover)
-        .center()
-        .child(icon(state, mark, 17.0));
-    if id == "desktop-status" {
-        let color = if cfg!(target_arch = "wasm32") {
-            p.muted
-        } else {
-            match state.status.phase {
-                Phase::Online => rgb("#66daa3"),
-                Phase::Connecting | Phase::Setup => rgb("#f1c773"),
-                Phase::Offline => rgb("#f18e8d"),
-            }
-        };
-        item = item.child(el().size(6.0, 6.0).radius(4.0).fill(color).pin(
-            None,
-            Some(7.0),
-            Some(3.0),
-            None,
-        ));
-    }
-    item
+        .expanded(open);
+    let item = if labelled {
+        item.px(8.0).center_y()
+    } else {
+        item.w(CHIP).center()
+    };
+    if open { item.fill(p.hover) } else { item }
+}
+
+fn separator(p: &Palette) -> El {
+    el().w(1.0)
+        .h(18.0)
+        .mx(4.0)
+        .fill(p.line.alpha(0.8))
+        .a11y_hidden()
 }
 
 pub(super) fn sign_out_button(p: &Palette) -> El {

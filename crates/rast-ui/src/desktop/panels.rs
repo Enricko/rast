@@ -7,7 +7,9 @@ use crate::State;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::connection::Phase;
 
-use super::{AppId, Palette, Panel, Wallpaper, icon, sign_out_button, wallpaper};
+use super::{
+    AppId, Palette, Panel, Wallpaper, connectivity, icon, initial, sign_out_button, wallpaper,
+};
 
 const TITLE: TextStyle = TextStyle::new(14.0, 680.0);
 const BODY: TextStyle = TextStyle::new(13.0, 440.0);
@@ -24,7 +26,7 @@ pub(super) fn view(
 ) -> Option<El> {
     let panel = state.desktop.panel?;
     let margin = if compact { 8.0 } else { 12.0 };
-    let bottom = 54.0 + if compact { 8.0 } else { 10.0 };
+    let bottom = super::BAR + if compact { 6.0 } else { 8.0 };
     let space = height - bottom - margin;
     let available = width - 2.0 * margin;
     if space <= 0.0 || available <= 0.0 {
@@ -40,13 +42,9 @@ pub(super) fn view(
             292.0,
             account_menu(state, p),
         ),
-        Panel::Status => (
-            "status-panel",
-            "Connection status",
-            300.0,
-            status_panel(state, p),
-        ),
-        Panel::Clock => ("clock-panel", "Date and time", 300.0, clock_panel(state, p)),
+        Panel::Status => ("status-panel", "Network", 300.0, status_panel(state, p)),
+        Panel::Device => ("device-panel", "This device", 312.0, device_panel(state, p)),
+        Panel::Clock => ("clock-panel", "Date and time", 320.0, clock_panel(state, p)),
         Panel::Appearance => (
             "appearance-panel",
             "Personalize",
@@ -166,10 +164,11 @@ fn account_menu(state: &State, p: &Palette) -> El {
         .account
         .as_ref()
         .map_or("Device user", |account| account.username.as_str());
-    let initial = username
-        .chars()
-        .next()
-        .map_or_else(|| "?".to_owned(), |ch| ch.to_uppercase().collect());
+    let stored = if cfg!(target_arch = "wasm32") {
+        "In this browser only"
+    } else {
+        "On this device only"
+    };
     col()
         .gap(8.0)
         .child(
@@ -184,7 +183,7 @@ fn account_menu(state: &State, p: &Palette) -> El {
                         .radius(20.0)
                         .fill(p.accent)
                         .center()
-                        .child(text(initial).font(TITLE).color(p.accent_ink)),
+                        .child(text(initial(username)).font(TITLE).color(p.accent_ink)),
                 )
                 .child(
                     col()
@@ -195,6 +194,28 @@ fn account_menu(state: &State, p: &Palette) -> El {
                         .child(detail(p, "Local device account")),
                 ),
         )
+        .child(divider(p))
+        .child(section(p, "CREDENTIALS"))
+        .child(
+            col()
+                .key("account-credentials")
+                .w_full()
+                .gap(6.0)
+                .px(5.0)
+                .child(key_value(p, "Username", username))
+                .child(key_value(p, "Sign-in", "Device password"))
+                .child(key_value(p, "Stored", stored))
+                .child(key_value(p, "Protection", "Argon2id hash"))
+                .child(key_value(p, "Server account", "Not linked")),
+        )
+        .child(open_panel_action(
+            state,
+            p,
+            "account-device",
+            "device",
+            &format!("This device: {}", state.desktop.device.name),
+            Panel::Device,
+        ))
         .child(divider(p))
         .child(section(p, "APPEARANCE"))
         .child(theme_action(state, p, "account-theme"))
@@ -304,30 +325,70 @@ fn about_panel(state: &State, p: &Palette) -> El {
 }
 
 fn status_panel(state: &State, p: &Palette) -> El {
+    let net = connectivity(state);
     #[cfg(target_arch = "wasm32")]
-    let (status, note) = (
-        "Local workspace",
-        "This browser workspace does not connect to a RAST server or display live telemetry.",
-    );
+    let mut content = {
+        let network = &state.desktop.network;
+        let mut content = col()
+            .gap(9.0)
+            .child(header(
+                state,
+                p,
+                "network",
+                "Network",
+                if network.online {
+                    "Connected to the internet"
+                } else {
+                    "No internet connection"
+                },
+            ))
+            .child(key_value(p, "Internet", net.label));
+        if network.online {
+            if let Some(link) = network.link_label() {
+                content = content.child(key_value(p, "Connection", &link));
+            }
+            if let Some(downlink) = network.downlink.filter(|d| *d > 0.0) {
+                content = content.child(key_value(
+                    p,
+                    "Bandwidth",
+                    &format!("about {downlink:.1} Mb/s"),
+                ));
+            }
+            if let Some(rtt) = network.rtt.filter(|r| *r > 0.0) {
+                content = content.child(key_value(p, "Latency", &format!("about {rtt:.0} ms")));
+            }
+            if network.save_data {
+                content = content.child(key_value(p, "Data saver", "On"));
+            }
+        }
+        content
+            .child(key_value(p, "RAST server", "Not connected in this preview"))
+            .child(
+                detail(
+                    p,
+                    "Reported by this browser. Speed and latency are its estimates.",
+                )
+                .wrap_anywhere(),
+            )
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    let (status, note) = (
-        match state.status.phase {
-            Phase::Setup => "Not configured",
-            Phase::Connecting => "Connecting…",
-            Phase::Online => "Server reachable",
-            Phase::Offline => "Server unreachable",
-        },
-        "Connection status reflects server reachability, not an authenticated server session.",
-    );
-    let mut content = col()
-        .gap(9.0)
-        .child(header(state, p, "network", "Connection & session", "RAST"))
-        .child(key_value(p, "Connection", status))
-        .child(key_value(p, "Session", "Device unlock"))
-        .child(key_value(p, "Version", VERSION));
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        content = content.child(key_value(p, "Server", &state.config.server));
+    let mut content = {
+        let mut content = col()
+            .gap(9.0)
+            .child(header(
+                state,
+                p,
+                "network",
+                "Network",
+                match state.status.phase {
+                    Phase::Setup => "Server not configured",
+                    Phase::Connecting => "Connecting to the server…",
+                    Phase::Online => "Server reachable",
+                    Phase::Offline => "Server unreachable",
+                },
+            ))
+            .child(key_value(p, "Server", net.label))
+            .child(key_value(p, "Address", &state.config.server));
         if let Some(error) = &state.status.error {
             content = content.child(detail(p, error.as_str()).wrap_anywhere());
         }
@@ -337,29 +398,71 @@ fn status_panel(state: &State, p: &Palette) -> El {
                     .on_press(State::retry_now),
             );
         }
-    }
-    content = content
-        .child(detail(p, note).wrap_anywhere())
-        .child(divider(p));
+        content.child(
+            detail(
+                p,
+                "Shows whether the RAST server answers, not an authenticated server session.",
+            )
+            .wrap_anywhere(),
+        )
+    };
+    content = content.child(divider(p));
     content
         .child(control_panel_action(state, p, "status-control"))
         .child(close_action(p))
 }
 
+fn device_panel(state: &State, p: &Palette) -> El {
+    let device = &state.desktop.device;
+    let mut content = col()
+        .gap(9.0)
+        .child(header(state, p, "device", &device.name, device.kind))
+        .child(key_value(p, "System", &device.system))
+        .child(key_value(
+            p,
+            if cfg!(target_arch = "wasm32") {
+                "Browser"
+            } else {
+                "App"
+            },
+            &device.client,
+        ));
+    for (label, value) in [
+        ("Screen", &device.screen),
+        ("Language", &device.language),
+        ("Time zone", &device.time_zone),
+    ] {
+        if let Some(value) = value {
+            content = content.child(key_value(p, label, value));
+        }
+    }
+    content
+        .child(detail(p, "Read on this device. RAST does not send it anywhere.").wrap_anywhere())
+        .child(divider(p))
+        .child(close_action(p))
+}
+
 fn clock_panel(state: &State, p: &Palette) -> El {
+    let clock = &state.desktop.clock;
+    let zone = match &state.desktop.device.time_zone {
+        Some(zone) => format!("{zone} ({})", clock.offset),
+        None => clock.offset.clone(),
+    };
     col()
         .gap(8.0)
         .child(header(state, p, "clock", "Date and time", "Local time"))
         .child(
-            text(if state.desktop.clock.is_empty() {
-                "—"
-            } else {
-                &state.desktop.clock
-            })
-            .font(TextStyle::new(30.0, 700.0).features("'tnum' 1"))
-            .color(p.ink),
+            text(clock.time.clone())
+                .font(TextStyle::new(30.0, 700.0).features("'tnum' 1"))
+                .color(p.ink),
         )
-        .child(detail(p, state.desktop.date.as_str()).wrap_anywhere())
+        .child(
+            text(clock.long_date.clone())
+                .font(BODY)
+                .color(p.ink)
+                .wrap_anywhere(),
+        )
+        .child(key_value(p, "Time zone", &zone))
         .child(divider(p))
         .child(close_action(p))
 }
@@ -497,6 +600,113 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         rt
+    }
+
+    fn rect(rt: &Runtime<State>, key: &str) -> Option<[f32; 4]> {
+        rt.presented(key).map(|(rect, _)| rect)
+    }
+
+    #[test]
+    fn the_taskbar_is_slim_and_fits_from_phone_to_desktop_widths() {
+        for width in [320.0, 390.0, 700.0, 900.0, 1440.0] {
+            let height = 700.0;
+            let mut state = State::with_account(Config::default(), None);
+            state.signed_in = true;
+            let mut rt = Runtime::new(
+                state,
+                super::super::view,
+                (width, height),
+                Env::new(true, 1.0),
+            );
+            rt.frame(1.0 / 60.0);
+            let bar = rect(&rt, "desktop-taskbar").expect("the taskbar is drawn");
+            assert_eq!(
+                bar[3],
+                super::super::BAR,
+                "{width}: the taskbar is {} pt tall",
+                bar[3]
+            );
+            assert!(bar[3] <= 44.0);
+            let start = rect(&rt, "desktop-start").expect("Start is drawn");
+            let mut right = start[0] + start[2];
+            for key in [
+                "desktop-device",
+                "desktop-status",
+                "desktop-theme",
+                "desktop-clock",
+                "desktop-account",
+            ] {
+                let Some(item) = rect(&rt, key) else {
+                    assert!(
+                        matches!(key, "desktop-device" | "desktop-theme"),
+                        "{width}: {key} is always in the tray"
+                    );
+                    continue;
+                };
+                assert!(
+                    item[0] >= right,
+                    "{width}: {key} overlaps the item before it"
+                );
+                assert!(
+                    item[1] >= bar[1] && item[1] + item[3] <= bar[1] + bar[3],
+                    "{width}: {key} fits the bar's height"
+                );
+                right = item[0] + item[2];
+            }
+            assert!(
+                right <= width,
+                "{width}: the tray ends at {right}, past the window"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_taskbars_label_the_device_network_and_account() {
+        let mut state = State::with_account(Config::default(), None);
+        state.signed_in = true;
+        let mut rt = Runtime::new(
+            state,
+            super::super::view,
+            (1440.0, 900.0),
+            Env::new(true, 1.0),
+        );
+        rt.frame(1.0 / 60.0);
+        let wide = |key| rect(&rt, key).map_or(0.0, |r| r[2]);
+        assert!(wide("desktop-device") > 60.0, "the device has a name");
+        assert!(wide("desktop-status") > 50.0, "the network has a label");
+        assert!(
+            wide("desktop-account") > 60.0,
+            "the account shows the user name"
+        );
+
+        let mut state = State::with_account(Config::default(), None);
+        state.signed_in = true;
+        let mut rt = Runtime::new(
+            state,
+            super::super::view,
+            (390.0, 700.0),
+            Env::new(true, 1.0),
+        );
+        rt.frame(1.0 / 60.0);
+        assert!(
+            rect(&rt, "desktop-device").is_none(),
+            "phones reach the device from the account panel"
+        );
+        assert_eq!(
+            rect(&rt, "desktop-status").map(|r| r[2]),
+            Some(32.0),
+            "icon only"
+        );
+        assert_eq!(
+            rect(&rt, "desktop-account").map(|r| r[2]),
+            Some(32.0),
+            "avatar only"
+        );
+        let rt = mounted(Panel::Account, (390.0, 700.0));
+        assert!(
+            rect(&rt, "account-device").is_some(),
+            "the account panel links the device"
+        );
     }
 
     #[test]
