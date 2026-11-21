@@ -27,6 +27,9 @@ rune = { workspace = true }
 # Device-local login: Argon2id password hashing (never a plaintext password).
 # Pure Rust, so it runs natively and in the browser.
 argon2 = "0.5"
+# The RAST server's JSON account API.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.2"
@@ -38,7 +41,9 @@ getrandom = { version = "0.2", features = ["js"] }
 # Navigator, Screen and the online/offline events for the taskbar's device and
 # network status; js-sys reads `navigator.connection` and the time zone.
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Event", "EventTarget", "Navigator", "Screen"] }
+# Same-origin fetch to the RAST server's /api (the session is an HttpOnly cookie).
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = ["Window", "Storage", "Event", "EventTarget", "Navigator", "Screen", "Headers", "Request", "RequestInit", "Response"] }
 
 [lints]
 workspace = true

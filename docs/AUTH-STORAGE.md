@@ -7,8 +7,9 @@ Short version:
 
 | Data | Where | Why |
 | --- | --- | --- |
-| Server accounts, password hashes, sessions, audit trail | **SQLite on the server** (`rast-server`, later) | Many rows, concurrent writers, queries, migrations, one-file backup. A real (embedded) relational database is the right "normal DB". |
-| This device's unlock password | **One small file**, `0600`, Argon2id hash only (native) / `localStorage` (browser) | Exactly one record, read once at startup, written once. A database would be a dependency and a corruption surface for no benefit. |
+| Server accounts, password hashes, sessions, audit trail | **SQLite on the server** (`rast-server`, implemented) | Many rows, concurrent writers, queries, migrations, one-file backup. A real (embedded) relational database is the right "normal DB". |
+| Browser session | **`HttpOnly; Secure; SameSite=Strict` cookie** set by `rast-server` | JavaScript never sees it, so an injected script cannot copy it. |
+| This device's unlock password (native client) | **One small file**, `0600`, Argon2id hash only | Exactly one record, read once at startup, written once. A database would be a dependency and a corruption surface for no benefit. |
 | Server session token / refresh token (later) | **OS secret store** — Keychain, Credential Manager, Secret Service | It is a bearer credential; it must not sit in a plain file or in `localStorage`. |
 | Cached app data (window layouts, recents, offline lists, later) | **SQLite** (native) / IndexedDB (browser) — only when it exists | When data becomes relational, queried or concurrently mutated, hand-rolled files stop being worth it. |
 
@@ -16,7 +17,43 @@ So: **normal DB on the server, file on the device, OS keychain for secrets.** A
 custom "file DB like a game save" is not the right tool for a login record; a
 file is, and that is what is implemented today.
 
-## What is implemented now
+## Server accounts (implemented)
+
+`crates/rast-server` serves `/api` behind nginx and keeps `rast.db` (SQLite,
+schema versioned with `PRAGMA user_version`) in its data directory, which it
+makes owner-only:
+
+- **Roles.** *Super Admin* manages everyone; *Admin* creates and manages
+  *Users* only; *User* uses the desktop. Nobody changes their own role or status
+  or deletes themselves, and the last active Super Admin cannot be demoted,
+  disabled or deleted. The server enforces this; the desktop only hides the
+  controls a role cannot use.
+- **Passwords.** Argon2id PHC strings (8–1024 bytes); unknown usernames are
+  checked against a dummy hash so timing does not reveal which accounts exist,
+  and the error never says which part was wrong.
+- **Sessions.** 256 random bits in the `rast_session` cookie (`HttpOnly; Secure;
+  SameSite=Strict`, 7 days). The database keeps only the SHA-256 of the token.
+  Signing out deletes it; disabling an account or resetting its password ends
+  all of its sessions; changing your own password ends your other sessions.
+- **CSRF.** Every request except `GET`/`HEAD` must send `X-RAST: 1`. Browsers
+  only send custom headers cross-site after a CORS preflight, which the server
+  never approves.
+- **Throttling.** After 5 failed sign-ins per username or visitor IP, the next
+  attempt waits 30 s, doubling up to 15 min.
+- **First run.** With no accounts the server writes a random setup token to
+  `<data>/setup-token` (`0600`). Creating the first account, always a Super
+  Admin, needs it, so whoever opens a fresh public site first cannot claim it.
+- **Audit log.** Sign-ins, failed sign-ins, setup and account changes are
+  recorded in `audit_log`.
+
+API: `GET /api/auth/state`, `POST /api/auth/{setup,login,logout,password}`,
+`GET|POST /api/users`, `PATCH|DELETE /api/users/{id}`. Errors are
+`{"error": "…"}` with a sentence meant for the user.
+
+Next: groups made by Super Admins that allow or deny apps (and later folders),
+with deny winning, as on a Synology NAS.
+
+## Device login (native client)
 
 `crates/rast-ui/src/auth.rs` — the *device login*:
 
@@ -30,10 +67,8 @@ file is, and that is what is implemented today.
 - sign out returns to the login screen; the device account stays;
 - the plaintext password is never stored, never logged and never leaves the
   process. Password buffers are dropped when the shell moves on;
-- in the browser build the same record goes to this browser's `localStorage`
-  (one "device" per browser profile, and no file permissions to protect it).
-  That is fine for the preview, but a real deployment should move to the
-  server's `HttpOnly` session cookie — a browser origin is not a trust boundary.
+- the browser build no longer uses it: it signs in to `rast-server` instead.
+  An old preview's `rast.device-account` entry in `localStorage` is ignored.
 
 Default locations (`RAST_ACCOUNT` overrides the file path):
 
@@ -42,7 +77,6 @@ Default locations (`RAST_ACCOUNT` overrides the file path):
 | Linux | `$XDG_CONFIG_HOME/rast/device-account` (or `~/.config/rast/device-account`) |
 | macOS | `~/Library/Application Support/rast/device-account` |
 | Windows | `%APPDATA%\rast\device-account` |
-| Browser | this browser's `localStorage` (`rast.device-account`); a real deployment should use the server's HttpOnly session cookie |
 
 File format — deliberately readable, with nothing secret in it beyond the hash:
 

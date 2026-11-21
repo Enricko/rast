@@ -1,0 +1,50 @@
+# The RAST revamp account server: accounts, roles and sign-in sessions for
+# https://desktop-revamp.lufria.tech/. nginx forwards /api/ to it; it listens
+# on loopback only and keeps its database in /var/lib/rast-revamp.
+#
+# Installed by deploy/install-revamp.sh. First run: the server writes a
+# one-time setup token for creating the Super Admin:
+#     sudo cat /var/lib/rast-revamp/setup-token
+
+[Unit]
+Description=RAST revamp account server
+After=network.target
+
+[Service]
+ExecStart=/opt/rast-revamp/bin/rast-server --listen 127.0.0.1:8723 --data /var/lib/rast-revamp
+Restart=on-failure
+RestartSec=2
+
+DynamicUser=yes
+StateDirectory=rast-revamp
+StateDirectoryMode=0700
+UMask=0077
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

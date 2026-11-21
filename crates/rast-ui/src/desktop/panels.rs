@@ -103,10 +103,11 @@ pub(super) fn view(
 }
 
 fn start_menu(state: &State, p: &Palette) -> El {
-    let who = state.account.as_ref().map_or_else(
-        || VERSION.to_owned(),
-        |account| format!("{VERSION} · signed in as {}", account.username),
-    );
+    let who = if state.session.is_some() || state.account.is_some() {
+        format!("{VERSION} · signed in as {}", state.user_name())
+    } else {
+        VERSION.to_owned()
+    };
     let header = row()
         .w_full()
         .h(46.0)
@@ -130,6 +131,12 @@ fn start_menu(state: &State, p: &Palette) -> El {
         .child(
             col()
                 .w_full()
+                .child(control_panel_action(
+                    state,
+                    p,
+                    "start-control",
+                    "Control Panel",
+                ))
                 .child(open_panel_action(
                     state,
                     p,
@@ -160,16 +167,49 @@ fn start_menu(state: &State, p: &Palette) -> El {
 }
 
 fn account_menu(state: &State, p: &Palette) -> El {
-    let username = state
-        .account
-        .as_ref()
-        .map_or("Device user", |account| account.username.as_str());
-    let stored = if cfg!(target_arch = "wasm32") {
-        "In this browser only"
-    } else {
-        "On this device only"
+    let name = state.user_name();
+    let (subtitle, credentials, manage) = match &state.session {
+        Some(session) => (
+            format!("{} · RAST server", session.role.label()),
+            col()
+                .key("account-credentials")
+                .w_full()
+                .gap(6.0)
+                .px(5.0)
+                .child(key_value(p, "Username", &session.username))
+                .child(key_value(p, "Role", session.role.label()))
+                .child(key_value(p, "Sign-in", "RAST server password"))
+                .child(key_value(p, "Session", "Secure cookie, 7 days"))
+                .child(key_value(p, "Protection", "Argon2id hash")),
+            Some(if session.role.is_admin() {
+                "Users & accounts…"
+            } else {
+                "Profile & password…"
+            }),
+        ),
+        None => {
+            let stored = if cfg!(target_arch = "wasm32") {
+                "In this browser only"
+            } else {
+                "On this device only"
+            };
+            (
+                "Local device account".to_owned(),
+                col()
+                    .key("account-credentials")
+                    .w_full()
+                    .gap(6.0)
+                    .px(5.0)
+                    .child(key_value(p, "Username", name))
+                    .child(key_value(p, "Sign-in", "Device password"))
+                    .child(key_value(p, "Stored", stored))
+                    .child(key_value(p, "Protection", "Argon2id hash"))
+                    .child(key_value(p, "Server account", "Not linked")),
+                None,
+            )
+        }
     };
-    col()
+    let mut menu = col()
         .gap(8.0)
         .child(
             row()
@@ -183,73 +223,65 @@ fn account_menu(state: &State, p: &Palette) -> El {
                         .radius(20.0)
                         .fill(p.accent)
                         .center()
-                        .child(text(initial(username)).font(TITLE).color(p.accent_ink)),
+                        .child(text(initial(name)).font(TITLE).color(p.accent_ink)),
                 )
                 .child(
                     col()
                         .grow(1.0)
                         .min_w(0.0)
                         .gap(2.0)
-                        .child(title(p, username).wrap_anywhere())
-                        .child(detail(p, "Local device account")),
+                        .child(title(p, name.to_owned()).wrap_anywhere())
+                        .child(detail(p, subtitle)),
                 ),
         )
         .child(divider(p))
         .child(section(p, "CREDENTIALS"))
-        .child(
-            col()
-                .key("account-credentials")
-                .w_full()
-                .gap(6.0)
-                .px(5.0)
-                .child(key_value(p, "Username", username))
-                .child(key_value(p, "Sign-in", "Device password"))
-                .child(key_value(p, "Stored", stored))
-                .child(key_value(p, "Protection", "Argon2id hash"))
-                .child(key_value(p, "Server account", "Not linked")),
-        )
-        .child(open_panel_action(
-            state,
-            p,
-            "account-device",
-            "device",
-            "This device",
-            Panel::Device,
-        ))
-        .child(divider(p))
-        .child(section(p, "APPEARANCE"))
-        .child(theme_action(state, p, "account-theme"))
-        .child(open_panel_action(
-            state,
-            p,
-            "account-personalize",
-            "wallpaper",
-            "Personalize wallpaper…",
-            Panel::Appearance,
-        ))
-        .child(divider(p))
-        .child(
-            col()
-                .w_full()
-                .child(open_panel_action(
-                    state,
-                    p,
-                    "account-shortcuts",
-                    "keyboard",
-                    "Keyboard shortcuts",
-                    Panel::Shortcuts,
-                ))
-                .child(open_panel_action(
-                    state,
-                    p,
-                    "account-about",
-                    "info",
-                    "About RAST",
-                    Panel::About,
-                )),
-        )
-        .child(divider(p))
-        .child(sign_out_button(p))
+        .child(credentials);
+    if let Some(label) = manage {
+        menu = menu.child(control_panel_action(state, p, "account-manage", label));
+    }
+    menu.child(open_panel_action(
+        state,
+        p,
+        "account-device",
+        "device",
+        "This device",
+        Panel::Device,
+    ))
+    .child(divider(p))
+    .child(section(p, "APPEARANCE"))
+    .child(theme_action(state, p, "account-theme"))
+    .child(open_panel_action(
+        state,
+        p,
+        "account-personalize",
+        "wallpaper",
+        "Personalize wallpaper…",
+        Panel::Appearance,
+    ))
+    .child(divider(p))
+    .child(
+        col()
+            .w_full()
+            .child(open_panel_action(
+                state,
+                p,
+                "account-shortcuts",
+                "keyboard",
+                "Keyboard shortcuts",
+                Panel::Shortcuts,
+            ))
+            .child(open_panel_action(
+                state,
+                p,
+                "account-about",
+                "info",
+                "About RAST",
+                Panel::About,
+            )),
+    )
+    .child(divider(p))
+    .child(sign_out_button(p))
 }
 
 fn appearance_panel(state: &State, p: &Palette) -> El {
@@ -408,7 +440,12 @@ fn status_panel(state: &State, p: &Palette) -> El {
     };
     content = content.child(divider(p));
     content
-        .child(control_panel_action(state, p, "status-control"))
+        .child(control_panel_action(
+            state,
+            p,
+            "status-control",
+            "Control Panel",
+        ))
         .child(close_action(p))
 }
 
@@ -561,8 +598,8 @@ fn icon_action(state: &State, p: &Palette, key: &str, name: &str, label: &str) -
         .child(text(label).font(BODY).color(p.ink).truncate())
 }
 
-fn control_panel_action(state: &State, p: &Palette, key: &str) -> El {
-    icon_action(state, p, key, "settings", "Control Panel")
+fn control_panel_action(state: &State, p: &Palette, key: &str, label: &str) -> El {
+    icon_action(state, p, key, "settings", label)
         .on_press(|s: &mut State| s.open_app(AppId::Control))
 }
 

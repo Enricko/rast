@@ -71,6 +71,28 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
 - `desktop-revamp.lufria.tech` is live: the installer added the nginx site on
   `127.0.0.1:8722` and the Cloudflare Tunnel ingress; the old
   `desktop.lufria.tech` keeps serving the released RAST.
+- **Multiple accounts with roles** (step 1 of Synology-style users and groups):
+  - `crates/rast-server`: the account server (axum + SQLite) behind nginx at
+    `/api/`. Roles Super Admin, Admin and User, enforced on the server: Super
+    Admins manage everyone, Admins manage Users, and nobody changes their own
+    role or removes the last Super Admin. Argon2id passwords, `HttpOnly;
+    Secure; SameSite=Strict` session cookies (only their SHA-256 is stored),
+    an `X-RAST` header against cross-site requests, sign-in throttling, an
+    audit log, and a one-time setup token for creating the first Super Admin.
+  - The browser sign-in now uses the server instead of a local password in
+    `localStorage`. It opens in *Set up RAST* mode until the Super Admin exists,
+    has no public sign-up, remembers the last username, and reopens the desktop
+    while the session lasts.
+  - **Control Panel** (Start menu and account menu): *Users* lists accounts
+    with one line each; an account's page changes its role, enables or
+    disables sign-in, sets a new password, or deletes it (press twice).
+    *Profile* changes your own password. The taskbar and account menu show the
+    server account and role. The native client keeps the device login and its
+    *Connection* settings.
+  - Deployment: `rast-revamp.service` (sandboxed, `DynamicUser`, loopback only,
+    data in `/var/lib/rast-revamp`), the nginx `/api/` proxy, and a server step
+    in `deploy/install-revamp.sh`. `scripts/serve-web.py` forwards `/api/` to a
+    local `rast-server`.
 
 ### Fixed
 

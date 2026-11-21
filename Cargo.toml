@@ -6,7 +6,7 @@
 # a deliberate, one-command operation: see docs/UPDATING-RUNE.md.
 [workspace]
 resolver = "3"
-members = ["crates/rast-ui"]
+members = ["crates/rast-ui", "crates/rast-server"]
 
 [workspace.package]
 version = "0.1.0"

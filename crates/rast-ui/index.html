@@ -1,7 +1,8 @@
 <!doctype html>
 <!--
   The web build resolves the stylesheet and bootstrap URLs to the matching
-  release. The browser handles the local unlock form; Rune renders the workspace.
+  release. The browser handles the sign-in form against the RAST server; Rune
+  renders the workspace.
 -->
 <html lang="en">
 <head>
@@ -85,8 +86,12 @@
         <form id="login-form" method="post" aria-labelledby="login-title" aria-describedby="login-subtitle">
           <h1 id="login-title">Welcome back</h1>
           <p id="login-subtitle">Sign in to your server workspace.</p>
-          <!-- No credential names: only the local JS handler can read these values. -->
+          <!-- No credential names: only the sign-in script sends these, to the server. -->
           <fieldset id="login-fields" disabled>
+            <div id="token-row" class="login-field" hidden>
+              <label for="setup-token">Setup token</label>
+              <input id="setup-token" type="text" placeholder="from the server" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+            </div>
             <div class="login-field">
               <label for="username">Username</label>
               <input id="username" type="text" placeholder="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
@@ -105,16 +110,16 @@
             <p id="login-error" role="alert"></p>
             <button id="submit-login" type="submit">Sign in</button>
           </fieldset>
-          <p class="login-local-note">Unlocks RAST only in this browser. No server sign-in.</p>
+          <p id="login-note" class="login-local-note">No public sign-up. Ask an administrator for an account.</p>
           <p id="status" role="status" hidden></p>
         </form>
         <footer class="login-footer">
           <span>RAST · Revamp</span>
-          <span>Local unlock · No server session</span>
+          <span>Secure sign-in · HttpOnly session</span>
         </footer>
       </div>
     </div>
-    <p class="login-print">RAST — Browser-only workspace unlock.</p>
+    <p class="login-print">RAST — Server sign-in.</p>
   </main>
   <div id="workspace-cover" class="loading-cover" hidden>
     <div class="loading-logo" aria-hidden="true">

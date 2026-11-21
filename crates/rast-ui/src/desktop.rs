@@ -1,5 +1,6 @@
 //! The classic RAST desktop, rebuilt with Rune. Backend apps are previews.
 
+pub(crate) mod control;
 mod panels;
 mod system;
 mod window;
@@ -23,7 +24,7 @@ impl AppId {
         "controlpanel"
     }
     pub(super) const fn label(self) -> &'static str {
-        "Connection settings"
+        "Control Panel"
     }
 }
 
@@ -237,6 +238,7 @@ impl State {
                 if app == AppId::Control {
                     self.server_field = TextEdit::new(self.config.server.clone());
                     self.settings_error = None;
+                    self.reset_control();
                 }
                 false
             };
@@ -332,7 +334,7 @@ impl Art {
         macro_rules! icons {
             ($($name:literal),+ $(,)?) => { [$(($name, &include_bytes!(concat!("../assets/desktop/", $name, ".svg"))[..])),+] };
         }
-        let sources: [(&'static str, &'static [u8]); 16] = icons!(
+        let sources: [(&'static str, &'static [u8]); 18] = icons!(
             "files",
             "applications",
             "monitor",
@@ -348,7 +350,9 @@ impl Art {
             "info",
             "keyboard",
             "wallpaper",
-            "device"
+            "device",
+            "users",
+            "profile"
         );
         let mut icons: HashMap<_, _> = sources
             .iter()
@@ -648,10 +652,7 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
     }
     tray = tray.child(time.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Clock)));
 
-    let who = state
-        .account
-        .as_ref()
-        .map_or("Local user", |a| a.username.as_str());
+    let who = state.user_name();
     let mut account = chip(
         p,
         "desktop-account",
@@ -677,7 +678,7 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
             .a11y_hidden()
             .child(text(who.to_owned()).font(NAME).color(p.ink).truncate());
         if fit.role {
-            names = names.child(text("Local account").font(CAPTION).color(p.muted));
+            names = names.child(text(state.role_label()).font(CAPTION).color(p.muted));
         }
         account = account.child(names);
     }

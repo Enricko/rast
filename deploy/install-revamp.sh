@@ -6,19 +6,26 @@
 #     sudo deploy/install-revamp.sh [--dry-run]
 #     deploy/install-revamp.sh --web-only [--dry-run] [--web-root DIR]
 #
-# --web-only skips nginx and the tunnel and needs no root in a writable web root.
-# The full install does one thing per step, each with a check:
+# --web-only skips the server, nginx and the tunnel and needs no root in a
+# writable web root. The full install does one thing per step, each with a check:
 #   1. publishes the new assets from dist/web, then atomically replaces index.html
-#   2. installs the nginx site that serves it on 127.0.0.1:8722
-#   3. adds the Cloudflare Tunnel ingress rule
+#   2. installs the account server (build it first, as yourself:
+#      cargo build --release -p rast-server) to /opt/rast-revamp/bin and
+#      restarts rast-revamp.service; its data stays in /var/lib/rast-revamp
+#   3. installs the nginx site that serves it on 127.0.0.1:8722 and forwards
+#      /api/ to the server on 127.0.0.1:8723
+#   4. adds the Cloudflare Tunnel ingress rule
 #      desktop-revamp.lufria.tech -> http://127.0.0.1:8722 (backup first)
-#   4. reloads nginx, restarts cloudflared, then checks the site locally and
+#   5. reloads nginx, restarts cloudflared, then checks the site locally and
 #      from the public URL
 #
 # The running desktop at https://desktop.lufria.tech/ is a different nginx
 # server block and a different tunnel hostname, so it keeps serving old RAST.
 #
 # Undo:
+#   systemctl disable --now rast-revamp
+#   rm /etc/systemd/system/rast-revamp.service /opt/rast-revamp/bin/rast-server
+#   (the accounts stay in /var/lib/rast-revamp until you remove them)
 #   rm /etc/nginx/sites-enabled/revamp /etc/nginx/sites-available/revamp
 #   nginx -t && systemctl reload nginx
 #   remove the desktop-revamp.lufria.tech ingress from /etc/cloudflared/config.yml
@@ -36,6 +43,9 @@ WEB_ROOT=/srv/rast-static/revamp
 NGINX_SITE=/etc/nginx/sites-available/revamp
 TUNNEL_CONFIG=/etc/cloudflared/config.yml
 TUNNEL_LINE="  - hostname: $DOMAIN"
+API_PORT=8723
+SERVER_BIN=/opt/rast-revamp/bin/rast-server
+SERVER_UNIT=/etc/systemd/system/rast-revamp.service
 
 dry_run=false
 web_only=false
@@ -50,7 +60,7 @@ while (($#)); do
             custom_root=true
             shift
             ;;
-        -h | --help) sed -n '2,32p' "$0"; exit 0 ;;
+        -h | --help) sed -n '2,39p' "$0"; exit 0 ;;
         *) echo "unknown argument: $1 (try --dry-run or --web-only)" >&2; exit 2 ;;
     esac
     shift
@@ -58,6 +68,10 @@ done
 if $custom_root && ! $web_only; then
     echo "--web-root is only for --web-only; the nginx site uses a fixed document root" >&2
     exit 2
+fi
+if ! $web_only && [[ ! -x "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/target/release/rast-server" ]]; then
+    echo "build the account server first: cargo build --release -p rast-server" >&2
+    exit 1
 fi
 if ! $dry_run && ! $web_only && [[ $(id -u) -ne 0 ]]; then
     echo "run as root: sudo deploy/install-revamp.sh (or use --web-only)" >&2
@@ -189,16 +203,16 @@ PY
 
 if $dry_run; then
     if $web_only; then
-        say "(web files only; nginx and the tunnel are left alone)."
+        say "(web files only; the server, nginx and the tunnel are left alone)."
     else
-        say "and ensure the nginx site on 127.0.0.1:$SITE_PORT and the tunnel"
-        say "rule for $DOMAIN."
+        say "and install $SERVER_BIN with rast-revamp.service on 127.0.0.1:$API_PORT,"
+        say "the nginx site on 127.0.0.1:$SITE_PORT and the tunnel rule for $DOMAIN."
     fi
     exit 0
 fi
 
 if $web_only; then
-    say "==> web files updated; nginx and the tunnel were not touched"
+    say "==> web files updated; the server, nginx and the tunnel were not touched"
     if ! $custom_root; then
         say "Done. https://$DOMAIN/"
     fi
@@ -207,7 +221,34 @@ fi
 
 cd "$repo_root"
 
-# --- 2. nginx site ---------------------------------------------------------
+# --- 2. account server -----------------------------------------------------
+say "==> installing the account server"
+install -d -m 0755 "$(dirname "$SERVER_BIN")"
+install -m 0755 target/release/rast-server "$SERVER_BIN.new"
+mv -f "$SERVER_BIN.new" "$SERVER_BIN"
+install -m 0644 deploy/rast-revamp.service "$SERVER_UNIT"
+systemctl daemon-reload
+systemctl enable rast-revamp.service >/dev/null 2>&1
+systemctl restart rast-revamp.service
+api_ok=false
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -fs -o /dev/null "http://127.0.0.1:$API_PORT/api/auth/state"; then
+        api_ok=true
+        break
+    fi
+    sleep 0.5
+done
+if ! $api_ok; then
+    say "    the account server did not answer; see: journalctl -u rast-revamp -n 50"
+    exit 1
+fi
+say "    rast-server answers on 127.0.0.1:$API_PORT"
+if [[ -s /var/lib/rast-revamp/setup-token ]]; then
+    say "    no accounts yet: create the Super Admin at https://$DOMAIN/ with"
+    say "    the token from: sudo cat /var/lib/rast-revamp/setup-token"
+fi
+
+# --- 3. nginx site ---------------------------------------------------------
 say "==> installing nginx site for $DOMAIN"
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -m 0644 deploy/nginx-revamp-site.conf "$NGINX_SITE"
@@ -220,7 +261,7 @@ fi
 systemctl reload nginx
 say "    nginx serves $WEB_ROOT on 127.0.0.1:$SITE_PORT"
 
-# --- 3. Cloudflare Tunnel ingress -----------------------------------------
+# --- 4. Cloudflare Tunnel ingress -----------------------------------------
 say "==> ensuring the tunnel route for $DOMAIN"
 tunnel_changed=false
 if grep -qF "$TUNNEL_LINE" "$TUNNEL_CONFIG"; then
@@ -260,10 +301,11 @@ else
     say "    cloudflared left running (configuration unchanged)"
 fi
 
-# --- 4. checks -------------------------------------------------------------
+# --- 5. checks -------------------------------------------------------------
 say "==> local check"
 curl -fsS -o /dev/null -H "Host: $DOMAIN" "http://127.0.0.1:$SITE_PORT/"
-say "    nginx answered"
+curl -fsS -o /dev/null -H "Host: $DOMAIN" "http://127.0.0.1:$SITE_PORT/api/auth/state"
+say "    nginx answered for the page and the API"
 say "==> public check (Cloudflare may need a few seconds)"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     if code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/" 2>/dev/null) && [[ $code == 200 ]]; then

@@ -25,6 +25,7 @@ mod connection;
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
 mod login;
+mod server;
 mod ui;
 
 use std::path::PathBuf;
@@ -62,7 +63,7 @@ pub struct State {
     pub server_field: TextEdit,
     pub settings_error: Option<String>,
     pub link: Option<Link>,
-    wake: Option<Waker>,
+    pub(crate) wake: Option<Waker>,
     /// Tests construct in-memory states; `false` keeps them off the real files.
     pub(crate) persist: bool,
     // --- device login -----------------------------------------------------
@@ -79,6 +80,11 @@ pub struct State {
     pub(crate) login_art: Option<login::Art>,
     pub(crate) account_path: Option<PathBuf>,
     pub(crate) desktop: Desktop,
+    // --- server account (browser) ------------------------------------------
+    /// The account signed in to the RAST server, if any.
+    pub(crate) session: Option<server::Account>,
+    pub(crate) control: desktop::control::ControlPanel,
+    pub(crate) inbox: server::Inbox,
 }
 
 impl State {
@@ -121,6 +127,42 @@ impl State {
             login_art: None,
             account_path,
             desktop: Desktop::default(),
+            session: None,
+            control: desktop::control::ControlPanel::default(),
+            inbox: server::Inbox::default(),
+        }
+    }
+
+    /// The desktop of an account signed in to the RAST server.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn with_session(config: Config, account: server::Account) -> Self {
+        let mut state = Self::with_account(config, None);
+        state.session = Some(account);
+        state.signed_in = true;
+        state.screen = Screen::Desktop;
+        state
+    }
+
+    /// The name the desktop greets: the server account's, else the device login's.
+    pub(crate) fn user_name(&self) -> &str {
+        match (&self.session, &self.account) {
+            (Some(session), _) => session.name(),
+            (None, Some(account)) => &account.username,
+            (None, None) => "Local user",
+        }
+    }
+
+    /// "Super Admin", "Admin" or "User" on the server; "Local account" otherwise.
+    pub(crate) fn role_label(&self) -> &'static str {
+        self.session
+            .as_ref()
+            .map_or("Local account", |session| session.role.label())
+    }
+
+    pub(crate) fn calls(&self) -> server::Calls<'_> {
+        server::Calls {
+            inbox: &self.inbox,
+            wake: self.wake.clone(),
         }
     }
 
@@ -278,12 +320,17 @@ fn poll(state: &mut State, _t: f64, tx: &mut Tx) -> bool {
             latest = Some(status);
         }
     }
+    let mut replied = false;
+    while let Ok(reply) = state.inbox.rx.try_recv() {
+        state.apply_reply(reply, tx);
+        replied = true;
+    }
     match latest {
         Some(status) if status != state.status => {
             state.status = status;
             true
         }
-        _ => clock_changed,
+        _ => clock_changed || replied,
     }
 }
 
@@ -363,6 +410,74 @@ fn scene_setup(state: &mut State) {
     state.toggle_desktop_panel(desktop::Panel::Status);
 }
 
+fn sample_accounts() -> Vec<server::Account> {
+    let account =
+        |id, username: &str, display_name: &str, role, disabled, last_login_at| server::Account {
+            id,
+            username: username.to_owned(),
+            display_name: display_name.to_owned(),
+            role,
+            disabled,
+            created_at: 1_762_000_000 + id * 86_400,
+            last_login_at,
+        };
+    vec![
+        account(
+            1,
+            "root",
+            "Server owner",
+            server::Role::SuperAdmin,
+            false,
+            Some(1_763_700_000),
+        ),
+        account(
+            2,
+            "ada",
+            "Ada Lovelace",
+            server::Role::Admin,
+            false,
+            Some(1_763_600_000),
+        ),
+        account(3, "bob", "", server::Role::User, false, None),
+        account(
+            4,
+            "cat",
+            "Cat Rivera",
+            server::Role::User,
+            true,
+            Some(1_763_100_000),
+        ),
+    ]
+}
+
+/// A Super Admin signed in to the server with Control Panel open on Users.
+fn scene_users(state: &mut State) {
+    let accounts = sample_accounts();
+    state.session = Some(accounts[0].clone());
+    state.signed_in = true;
+    state.screen = Screen::Desktop;
+    state.open_app(AppId::Control);
+    while state.inbox.rx.try_recv().is_ok() {}
+    state.control.busy = false;
+    state.control.loaded = true;
+    state.control.accounts = accounts;
+}
+
+fn scene_user(state: &mut State) {
+    scene_users(state);
+    state.open_account(2);
+}
+
+fn scene_create_user(state: &mut State) {
+    scene_users(state);
+    state.start_create_account();
+}
+
+fn scene_profile(state: &mut State) {
+    scene_users(state);
+    state.open_control_tab(desktop::control::Tab::Profile);
+}
+
 fn signed_in(state: &mut State) {
     state.account = Some(fake_account());
     state.signed_in = true;
@@ -403,6 +518,10 @@ fn app_spec() -> AppSpec<State> {
             ("light", scene_light),
             ("settings", scene_settings),
             ("setup", scene_setup),
+            ("users", scene_users),
+            ("user", scene_user),
+            ("create-user", scene_create_user),
+            ("profile", scene_profile),
         ],
         setup: Some(setup),
         poll: Some(poll),

@@ -6,7 +6,13 @@ which RAST server it belongs to and survives that server going away.
 
 ## Device login
 
-The shell opens on a **device login**: the first launch asks for a username and a
+In the browser the shell signs in to the **RAST server** (accounts with the
+roles Super Admin, Admin and User, an `HttpOnly` session cookie, and a one-time
+setup token for the first Super Admin; see [docs/AUTH-STORAGE.md](AUTH-STORAGE.md)).
+Administrators manage accounts in **Control Panel → Users**; everyone can change
+their password under **Profile**.
+
+The native shell opens on a **device login**: the first launch asks for a username and a
 password (8+ characters), later launches prefill the username, and *Sign out*
 returns to the login screen. The classic RAST layout uses the original Alpine
 Dawn wallpaper (CC0-1.0), a two-panel desktop view, and a single-column compact
@@ -15,9 +21,7 @@ scrolling do not resize or clear a Rune canvas. The Rune workspace opens only
 after the local login succeeds. The password is hashed with **Argon2id** and
 never stored in plaintext:
 
-- natively: one `0600` file per OS (paths below),
-- in the browser: this browser's `localStorage` (preview; a real deployment
-  should use the server's `HttpOnly` session cookie).
+- natively: one `0600` file per OS (paths below).
 
 This is the *device* unlock, not server authentication: the server will
 authenticate users itself once the server phase lands. The full recommendation

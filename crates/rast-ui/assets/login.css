@@ -274,7 +274,7 @@ body:has(#login-screen:not([hidden])) > :is(canvas, [data-rune-a11y]) {
   font-weight: 600;
 }
 
-.login-field label:is([for="password"], [for="confirm"])::after {
+.login-field label:is([for="password"], [for="confirm"], [for="setup-token"])::after {
   content: " *";
   color: var(--error);
 }

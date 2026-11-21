@@ -3,15 +3,22 @@
 
     python3 scripts/serve-web.py [DIR] [PORT]
 
-DIR defaults to dist/web, PORT to 8765, bound to 127.0.0.1. Development only:
-for a real deployment serve the same folder with nginx (deploy/nginx-revamp.conf).
+DIR defaults to dist/web, PORT to 8765, bound to 127.0.0.1. Requests under
+/api/ go to the account server at RAST_API (default http://127.0.0.1:8723), as
+nginx does in production; start it with `cargo run -p rast-server`.
+Development only: for a real deployment serve the same folder with nginx
+(deploy/nginx-revamp-site.conf).
 """
 import functools
 import http.server
+import os
 import sys
+import urllib.error
+import urllib.request
 
 directory = sys.argv[1] if len(sys.argv) > 1 else "dist/web"
 port = int(sys.argv[2]) if len(sys.argv) > 2 else 8765
+api = os.environ.get("RAST_API", "http://127.0.0.1:8723").rstrip("/")
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -36,6 +43,54 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             "base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         )
         super().end_headers()
+
+    def do_GET(self):
+        if self.path.startswith("/api/"):
+            self.proxy()
+        else:
+            super().do_GET()
+
+    def do_POST(self):
+        self.proxy_or_refuse()
+
+    def do_PATCH(self):
+        self.proxy_or_refuse()
+
+    def do_DELETE(self):
+        self.proxy_or_refuse()
+
+    def proxy_or_refuse(self):
+        if self.path.startswith("/api/"):
+            self.proxy()
+        else:
+            self.send_error(405)
+
+    def proxy(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+        headers = {
+            name: value
+            for name, value in self.headers.items()
+            if name.lower() in ("content-type", "cookie", "x-rast")
+        }
+        headers["X-Client-IP"] = self.client_address[0]
+        request = urllib.request.Request(api + self.path, data=body, headers=headers, method=self.command)
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            response = error
+        except OSError:
+            self.send_error(502, f"the account server is not running at {api}")
+            return
+        with response:
+            data = response.read()
+            self.send_response(response.status)
+            for name, value in response.headers.items():
+                if name.lower() in ("content-type", "set-cookie", "retry-after"):
+                    self.send_header(name, value)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
 
 handler = functools.partial(Handler, directory=directory)

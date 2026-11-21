@@ -1,6 +1,6 @@
 //! Classic desktop window chrome and the client-side application views.
 
-use rune::{Color, El, ScrollSpec, Shape, TextStyle, col, el, row, text};
+use rune::{Color, El, Shape, TextStyle, col, el, row, text};
 
 use super::{AppId, Palette, icon};
 use crate::State;
@@ -51,7 +51,7 @@ pub(super) fn view(
                 .a11y_hidden(),
         )
         .child(controls);
-    let body = crate::ui::settings_body(state);
+    let body = super::control::view(state, p, compact);
     let frame = col()
         .key("app-window")
         .role("dialog")
@@ -80,9 +80,6 @@ pub(super) fn view(
                 .min_h(0.0)
                 .corners([0.0, 0.0, radius, radius])
                 .clip_rounded(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
                 .child(body),
         );
     if maximized {
