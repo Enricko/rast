@@ -53,6 +53,33 @@ Apps open in windows that behave as on the classic RAST desktop
 - At 820 pt wide or less (or under 420 pt high) windows fill the screen above
   the taskbar, only the front one shows, and they neither move nor resize.
 
+## Personalize
+
+The desktop's look belongs to the signed-in account and is stored on the server
+(`GET|PUT /api/appearance`, see [AUTH-STORAGE.md](AUTH-STORAGE.md#appearance)):
+
+- **Colour mode**: Light, Dark, or System, which follows the browser's
+  `prefers-color-scheme` live. The taskbar's sun/moon button flips the mode and
+  saves it.
+- **Accent**: ten presets (`crates/rast-ui/src/desktop/appearance.rs`), each with
+  a light and a dark shade. The `Palette` in `desktop.rs` derives the soft fill,
+  border, hover and text tints the way the classic CSS `color-mix()` did.
+- **Wallpaper**: one of five bundled pictures or a solid colour (`#RRGGBB`), with
+  fit (Cover, Contain, Center), one of nine positions and a 0–60 % dark overlay.
+
+*Personalize…* (Start menu, account menu, or the desktop's right-click menu)
+opens a dialog that previews every change on the live desktop; *Apply* saves,
+*Cancel*, Escape or a click outside restores the saved look. Control Panel →
+*Appearance* shows the same cards on a page with a sticky save bar. While a
+save is in flight the controls wait for its answer; a refused save keeps the
+preview and offers *Try again*. The browser build keeps the last saved look in
+`localStorage` (`rast.appearance.v1.<account id>`) so the next sign-in paints it
+before the server answers; the server's copy wins.
+
+Right-click the desktop for *Personalize…*, *Show desktop*, *Open Control
+Panel* (when the account may open it), *Keyboard shortcuts*, *About RAST* and
+*Sign out* (`desktop/menu.rs`).
+
 ## What it does today
 
 - Shows the connection state to the configured RAST server: *Connecting*,

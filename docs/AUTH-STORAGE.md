@@ -117,6 +117,20 @@ its rule. Errors are `{"error": "…"}` with a sentence meant for the user.
 
 Next: folder permissions per group and account, with the same deny-wins rule.
 
+### Appearance
+
+Each account's *Personalize* choices live in `user_appearance`, one row per
+account (schema version 4, removed with the account). `GET /api/appearance`
+returns the signed-in account's look, or the defaults (Light, Ocean Blue, Alpine
+Dawn, cover, centred, 20 % overlay) until it saves one, as
+`{"appearance": {"theme", "accent", "wallpaper": {"kind", "builtinId", "color",
+"fit", "position", "overlay"}}}`. `PUT /api/appearance` takes the same shape with
+only the fields to change; each must be one of the offered values (`color` is
+`#RRGGBB`, `overlay` 0–60), unknown fields are refused, and nothing is stored when
+any field is wrong. An account reads and changes only its own; nothing here
+needs a role. A stored value a later version no longer offers reads back as its
+default. `crates/rast-server/src/appearance.rs` holds the lists.
+
 ### Is SQLite enough for an enterprise?
 
 For one server, yes. SQLite is an embedded library, not a network service:

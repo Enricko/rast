@@ -11,6 +11,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use serde::{Deserialize, Serialize};
 
+use crate::desktop::appearance::{self, Appearance};
+
 /// The three built-in roles (see the server's `Role`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Role {
@@ -316,6 +318,10 @@ pub(crate) enum Reply {
     UserSessions(i64, Result<Vec<SessionInfo>, Failure>, bool),
     /// Your own display name was saved.
     ProfileSaved(Result<Account, Failure>),
+    /// Your appearance, after loading it or changing only the colour mode.
+    Appearance(Result<Appearance, Failure>),
+    /// Personalize's Apply (or Save changes) finished.
+    AppearanceSaved(Result<Appearance, Failure>),
 }
 
 /// Where finished calls wait for `poll`.
@@ -390,6 +396,10 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, Failure> {
         message: "The RAST server sent an answer this desktop doesn't understand. Reload the page."
             .to_owned(),
     })
+}
+
+fn parse_appearance(body: &str) -> Result<Appearance, Failure> {
+    parse::<appearance::Body>(body).map(Appearance::from_body)
 }
 
 /// Starts calls; each finishes later as a `Reply` in the inbox.
@@ -552,6 +562,30 @@ impl Calls<'_> {
     pub(crate) fn my_access(&self) {
         self.run("GET", "/api/access/me".to_owned(), None, |result| {
             Reply::MyAccess(result.and_then(|body| parse::<Access>(&body)))
+        });
+    }
+
+    pub(crate) fn appearance(&self) {
+        self.run("GET", "/api/appearance".to_owned(), None, |result| {
+            Reply::Appearance(result.and_then(|body| parse_appearance(&body)))
+        });
+    }
+
+    /// Save everything Personalize shows.
+    pub(crate) fn save_appearance(&self, look: &Appearance) {
+        self.run(
+            "PUT",
+            "/api/appearance".to_owned(),
+            Some(look.to_json()),
+            |result| Reply::AppearanceSaved(result.and_then(|body| parse_appearance(&body))),
+        );
+    }
+
+    /// The taskbar's light/dark button: only the colour mode changes.
+    pub(crate) fn save_theme(&self, theme: &str) {
+        let body = serde_json::json!({ "theme": theme }).to_string();
+        self.run("PUT", "/api/appearance".to_owned(), Some(body), |result| {
+            Reply::Appearance(result.and_then(|body| parse_appearance(&body)))
         });
     }
 

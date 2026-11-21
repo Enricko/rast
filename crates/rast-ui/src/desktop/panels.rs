@@ -1,15 +1,13 @@
 //! The Start launcher and taskbar popovers. These expose local desktop state,
 //! not the classic web shell's server-side sessions or live event stream.
 
-use rune::{Color, El, ScrollSpec, SurfaceFit, TextStyle, col, el, row, text};
+use rune::{Color, El, ScrollSpec, TextStyle, col, el, row, text};
 
 use crate::State;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::connection::Phase;
 
-use super::{
-    AppId, Palette, Panel, Wallpaper, connectivity, icon, initial, sign_out_button, wallpaper,
-};
+use super::{AppId, Palette, Panel, connectivity, icon, initial, sign_out_button};
 
 const TITLE: TextStyle = TextStyle::new(13.5, 600.0);
 const BODY: TextStyle = TextStyle::new(13.0, 400.0);
@@ -45,12 +43,6 @@ pub(super) fn view(
         Panel::Status => ("status-panel", "Network", 300.0, status_panel(state, p)),
         Panel::Device => ("device-panel", "This device", 312.0, device_panel(state, p)),
         Panel::Clock => ("clock-panel", "Date and time", 320.0, clock_panel(state, p)),
-        Panel::Appearance => (
-            "appearance-panel",
-            "Personalize",
-            332.0,
-            appearance_panel(state, p),
-        ),
         Panel::Shortcuts => (
             "shortcuts-panel",
             "Keyboard shortcuts",
@@ -64,8 +56,7 @@ pub(super) fn view(
     } else {
         preferred_width.min(available)
     };
-    let align_left =
-        compact || start || matches!(panel, Panel::Appearance | Panel::Shortcuts | Panel::About);
+    let align_left = compact || start || matches!(panel, Panel::Shortcuts | Panel::About);
     let (left, right) = if align_left {
         (Some(margin), None)
     } else {
@@ -130,14 +121,10 @@ fn start_menu(state: &State, p: &Palette) -> El {
         .child(divider(p))
         .child(
             control_panel_entry(state, p, col().w_full(), "start-control", "Control Panel")
-                .child(open_panel_action(
-                    state,
-                    p,
-                    "start-personalize",
-                    "wallpaper",
-                    "Personalize…",
-                    Panel::Appearance,
-                ))
+                .child(
+                    icon_action(state, p, "start-personalize", "wallpaper", "Personalize…")
+                        .on_press(State::open_personalize),
+                )
                 .child(open_panel_action(
                     state,
                     p,
@@ -244,14 +231,16 @@ fn account_menu(state: &State, p: &Palette) -> El {
     .child(divider(p))
     .child(section(p, "APPEARANCE"))
     .child(theme_action(state, p, "account-theme"))
-    .child(open_panel_action(
-        state,
-        p,
-        "account-personalize",
-        "wallpaper",
-        "Personalize wallpaper…",
-        Panel::Appearance,
-    ))
+    .child(
+        icon_action(
+            state,
+            p,
+            "account-personalize",
+            "wallpaper",
+            "Personalize wallpaper…",
+        )
+        .on_press(State::open_personalize),
+    )
     .child(divider(p))
     .child(
         col()
@@ -275,54 +264,6 @@ fn account_menu(state: &State, p: &Palette) -> El {
     )
     .child(divider(p))
     .child(sign_out_button(p))
-}
-
-fn appearance_panel(state: &State, p: &Palette) -> El {
-    let mut content = col()
-        .gap(8.0)
-        .child(header(
-            state,
-            p,
-            "wallpaper",
-            "Personalize",
-            "Desktop appearance",
-        ))
-        .child(theme_action(state, p, "appearance-theme"))
-        .child(divider(p))
-        .child(section(p, "WALLPAPER"));
-    for &choice in Wallpaper::ALL.iter() {
-        let selected = state.desktop.wallpaper == choice;
-        let mut preview = el()
-            .size(52.0, 30.0)
-            .radius(5.0)
-            .fill(p.surface_2)
-            .clip_rounded(5.0)
-            .a11y_hidden();
-        if let Some(image) = wallpaper(state, choice) {
-            preview = preview.pixels_fit(image.pixels(), SurfaceFit::Fill);
-        }
-        content = content.child(
-            action(p, format!("wallpaper-{}", choice.key()), choice.label())
-                .role("radio")
-                .checked(selected)
-                .h(43.0)
-                .child(preview)
-                .child(
-                    text(choice.label())
-                        .font(BODY)
-                        .color(p.ink)
-                        .grow(1.0)
-                        .truncate(),
-                )
-                .child(if selected {
-                    detail(p, "Selected")
-                } else {
-                    el()
-                })
-                .on_press(move |s: &mut State| s.set_wallpaper(choice)),
-        );
-    }
-    content.child(divider(p)).child(close_action(p))
 }
 
 fn shortcuts_panel(state: &State, p: &Palette) -> El {

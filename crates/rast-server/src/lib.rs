@@ -19,6 +19,7 @@
 
 pub mod access;
 mod api;
+mod appearance;
 mod auth;
 mod db;
 mod groups;

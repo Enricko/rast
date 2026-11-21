@@ -337,6 +337,7 @@ fn setup(state: &mut State, wake: Waker) {
     state.desktop.load_art(wake.clone());
     state.wake = Some(wake.clone());
     state.refresh_access();
+    state.load_appearance();
     state.link = connection::spawn(&state.config, wake);
 }
 
@@ -426,7 +427,47 @@ fn scene_clock(state: &mut State) {
 
 fn scene_light(state: &mut State) {
     scene_online(state);
-    state.toggle_desktop_theme();
+    state.desktop.look.saved.theme = desktop::appearance::Theme::Light;
+}
+
+fn scene_dark(state: &mut State) {
+    scene_online(state);
+    state.desktop.look.saved.theme = desktop::appearance::Theme::Dark;
+}
+
+/// Personalize over the desktop, nothing changed yet.
+fn scene_personalize(state: &mut State) {
+    scene_users(state);
+    state.open_personalize();
+}
+
+/// Personalize previewing a dark, Plum desktop on Forest Mist.
+fn scene_personalize_dark(state: &mut State) {
+    use desktop::appearance::{Accent, Theme};
+    scene_users(state);
+    state.open_personalize();
+    state.edit_appearance(|look| {
+        look.theme = Theme::Dark;
+        look.accent = Accent::Plum;
+        look.picture = desktop::Wallpaper::Forest;
+        look.overlay = 30;
+    });
+}
+
+/// Control Panel → Appearance with an unsaved change.
+fn scene_appearance(state: &mut State) {
+    scene_users(state);
+    state.open_control_tab(desktop::control::Tab::Appearance);
+    state.edit_appearance(|look| look.accent = desktop::appearance::Accent::Teal);
+}
+
+/// A solid colour wallpaper and the desktop's right-click menu.
+fn scene_desktop_menu(state: &mut State) {
+    scene_online(state);
+    let look = &mut state.desktop.look.saved;
+    look.kind = desktop::appearance::Kind::Color;
+    look.color = "#2E4756".to_owned();
+    state.open_desktop_menu([980.0, 220.0]);
 }
 
 fn scene_settings(state: &mut State) {
@@ -748,6 +789,11 @@ fn app_spec() -> AppSpec<State> {
             ("device", scene_device),
             ("clock", scene_clock),
             ("light", scene_light),
+            ("dark", scene_dark),
+            ("personalize", scene_personalize),
+            ("personalize-dark", scene_personalize_dark),
+            ("appearance", scene_appearance),
+            ("desktop-menu", scene_desktop_menu),
             ("settings", scene_settings),
             ("setup", scene_setup),
             ("users", scene_users),

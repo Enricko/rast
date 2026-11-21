@@ -122,7 +122,7 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
         });
 
     let body = match app {
-        AppId::Control => super::control::view(state, p, phone || w < NARROW),
+        AppId::Control => super::control::view(state, p, w, phone || w < NARROW),
         #[cfg(test)]
         AppId::Probe => el().w_full().grow(1.0),
     };

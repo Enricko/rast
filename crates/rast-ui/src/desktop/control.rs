@@ -21,12 +21,16 @@ const DETAIL: TextStyle = TextStyle::new(11.5, 400.0);
 const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 const SECTION: TextStyle = TextStyle::new(10.5, 500.0).tracking(0.7);
 const BUTTON: TextStyle = TextStyle::new(12.5, 500.0);
+/// The sidebar's width.
+const NAV: f32 = 168.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
     Users,
     Groups,
     Profile,
+    /// Personalize's cards, for everyone.
+    Appearance,
     Connection,
 }
 
@@ -36,6 +40,7 @@ impl Tab {
             Self::Users => "control-tab-users",
             Self::Groups => "control-tab-groups",
             Self::Profile => "control-tab-profile",
+            Self::Appearance => "control-tab-appearance",
             Self::Connection => "control-tab-connection",
         }
     }
@@ -44,6 +49,7 @@ impl Tab {
             Self::Users => "Users",
             Self::Groups => "Groups",
             Self::Profile => "Profile",
+            Self::Appearance => "Appearance",
             Self::Connection => "Connection",
         }
     }
@@ -52,6 +58,7 @@ impl Tab {
             Self::Users => "users",
             Self::Groups => "groups",
             Self::Profile => "profile",
+            Self::Appearance => "wallpaper",
             Self::Connection => "network",
         }
     }
@@ -208,11 +215,13 @@ impl Default for ControlPanel {
 fn tabs(state: &State) -> Vec<Tab> {
     match &state.session {
         Some(session) if session.role == Role::SuperAdmin => {
-            vec![Tab::Users, Tab::Groups, Tab::Profile]
+            vec![Tab::Users, Tab::Groups, Tab::Profile, Tab::Appearance]
         }
-        Some(session) if session.role.is_admin() => vec![Tab::Users, Tab::Profile],
-        Some(_) => vec![Tab::Profile],
-        None => vec![Tab::Connection],
+        Some(session) if session.role.is_admin() => {
+            vec![Tab::Users, Tab::Profile, Tab::Appearance]
+        }
+        Some(_) => vec![Tab::Profile, Tab::Appearance],
+        None => vec![Tab::Connection, Tab::Appearance],
     }
 }
 
@@ -237,6 +246,10 @@ impl State {
     }
 
     pub(crate) fn open_control_tab(&mut self, tab: Tab) {
+        if self.control.tab == Tab::Appearance && !self.desktop.look.dialog {
+            // Leaving the page puts back the saved look.
+            self.discard_appearance();
+        }
         self.control.tab = tab;
         self.control.page = Page::List;
         self.control.error = None;
@@ -257,6 +270,7 @@ impl State {
                 self.control.sessions = None;
                 self.calls().my_sessions();
             }
+            Tab::Appearance => self.desktop.look.sync_hex(),
             Tab::Connection => {}
         }
     }
@@ -717,6 +731,8 @@ impl State {
                 self.control.busy = false;
                 result.map(|()| self.group_deleted(id)).err()
             }
+            Reply::Appearance(result) => self.appearance_loaded(result),
+            Reply::AppearanceSaved(result) => self.appearance_saved(result),
         };
         if let Some(failure) = failure {
             self.failed(failure, tx);
@@ -749,26 +765,26 @@ fn sort(accounts: &mut [Account]) {
 
 // --- views --------------------------------------------------------------------
 
-pub(super) fn view(state: &State, p: &Palette, compact: bool) -> El {
+/// Control Panel in a window `width` points wide; `compact` puts the tabs on top.
+pub(super) fn view(state: &State, p: &Palette, width: f32, compact: bool) -> El {
     let tabs = tabs(state);
     let tab = if tabs.contains(&state.control.tab) {
         state.control.tab
     } else {
         tabs[0]
     };
+    let padding = if compact { 14.0 } else { 18.0 };
     let content = match (tab, &state.session) {
         (Tab::Users, Some(me)) => users_page(state, p, me, compact),
         (Tab::Groups, Some(_)) => groups::page(state, p, compact),
         (Tab::Profile, Some(me)) => profile_page(state, p, me, compact),
-        _ => return scroller().child(crate::ui::settings_body(state)),
+        (Tab::Appearance, _) => {
+            let page = if compact { width } else { width - NAV - 1.0 } - 2.0 * padding;
+            super::personalize::page(state, p, page.max(0.0), width)
+        }
+        _ => crate::ui::settings_body(state),
     };
-    let content = scroller().child(
-        col()
-            .w_full()
-            .padding(if compact { 14.0 } else { 18.0 })
-            .gap(12.0)
-            .child(content),
-    );
+    let content = scroller().child(col().w_full().padding(padding).gap(12.0).child(content));
     let nav_item = |item: Tab| {
         let selected = item == tab;
         let mut entry = row()
@@ -804,7 +820,7 @@ pub(super) fn view(state: &State, p: &Palette, compact: bool) -> El {
     }
     let mut nav = col()
         .key("control-nav")
-        .w(168.0)
+        .w(NAV)
         .padding(10.0)
         .gap(2.0)
         .border_sides([0.0, 1.0, 0.0, 0.0], p.line);

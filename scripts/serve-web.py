@@ -56,6 +56,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_PATCH(self):
         self.proxy_or_refuse()
 
+    def do_PUT(self):
+        self.proxy_or_refuse()
+
     def do_DELETE(self):
         self.proxy_or_refuse()
 

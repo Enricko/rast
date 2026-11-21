@@ -470,7 +470,24 @@ impl State {
     }
 
     pub(crate) fn close_window(&mut self, app: AppId) {
+        if app == AppId::Control
+            && self.control.tab == super::control::Tab::Appearance
+            && !self.desktop.look.dialog
+        {
+            // An unsaved preview leaves with its page.
+            self.discard_appearance();
+        }
         self.desktop.windows.close(app);
+        self.sync_screen();
+    }
+
+    /// Every window out of the way (the desktop menu's *Show desktop*).
+    pub(crate) fn show_desktop(&mut self) {
+        self.desktop.menu = None;
+        let apps: Vec<AppId> = self.desktop.windows.all().iter().map(|w| w.app).collect();
+        for app in apps {
+            self.desktop.windows.minimize(app);
+        }
         self.sync_screen();
     }
 

@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::auth::{self, Signed};
 use crate::db::{self, NewUser, User, UserChange};
-use crate::{AppState, Role, access, groups, sessions};
+use crate::{AppState, Role, access, appearance, groups, sessions};
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
@@ -27,6 +27,10 @@ pub(crate) fn router(state: AppState) -> Router {
         )
         .route("/api/auth/sessions/{id}", delete(sessions::end_mine))
         .route("/api/access/me", get(groups::my_access))
+        .route(
+            "/api/appearance",
+            get(appearance::mine).put(appearance::update),
+        )
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", patch(update_user).delete(delete_user))
         .route(

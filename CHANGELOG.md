@@ -148,6 +148,30 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   - Screens up to 820 pt wide (phones) fill the screen with the window in
     front, with finger-sized buttons and an icon-only taskbar. Control Panel
     lays out by the width of its window, not of the screen.
+- **Personalize, as on the classic RAST desktop** (step B of restoring the
+  classic look):
+  - Each account's colour mode (Light, Dark or System), accent (ten presets,
+    Ocean Blue to Graphite) and wallpaper (five bundled pictures or a solid
+    colour, with fit, position and a 0–60 % dark overlay) are saved on the
+    server, so the desktop looks the same in every browser the account signs in
+    from. The last saved look is cached in the browser so it shows at once.
+  - *Personalize…* in the Start menu, the account menu and the new desktop
+    right-click menu opens the classic dialog: every change previews on the live
+    desktop and its open windows, *Apply* saves it, *Cancel* (or Escape, or a
+    click outside) restores the saved look, and *Reset to default* goes back to
+    Alpine Dawn without touching the mode or accent.
+  - Control Panel gets an *Appearance* page with the same cards and a sticky
+    *Save changes* bar that says whether changes are unsaved, saving or failed.
+    Leaving the page or closing the window discards an unsaved preview.
+  - Right-click the desktop for *Personalize…*, *Show desktop* (minimizes every
+    window), *Open Control Panel*, *Keyboard shortcuts*, *About RAST* and
+    *Sign out*.
+  - The accent now colours the Start button, selections, links, focus rings and
+    primary buttons in both modes, with the classic per-mode shades and text
+    that keeps 4.5:1 contrast. The taskbar's theme button saves the mode too.
+  - Server: `GET /api/appearance` and `PUT /api/appearance` (only the fields
+    sent change; each is checked against the offered choices). Schema version 4
+    adds `user_appearance` in place.
 
 ### Fixed
 

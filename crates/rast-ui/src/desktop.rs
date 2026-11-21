@@ -1,11 +1,16 @@
 //! The classic RAST desktop, rebuilt with Rune. Backend apps are previews.
 
+pub(crate) mod appearance;
 pub(crate) mod control;
+mod glyphs;
+mod menu;
 mod panels;
+mod personalize;
 mod system;
 mod window;
 pub(crate) mod windows;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use rune::{
@@ -14,6 +19,7 @@ use rune::{
 };
 
 use crate::{State, connection::Phase};
+use appearance::{Accent, Appearance, Fit, Kind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppId {
@@ -67,7 +73,6 @@ pub(crate) enum Panel {
     Status,
     Device,
     Clock,
-    Appearance,
     Shortcuts,
     About,
 }
@@ -90,19 +95,6 @@ impl Wallpaper {
         Self::Desert,
         Self::Mountain,
     ];
-    fn load() -> Self {
-        #[cfg(target_arch = "wasm32")]
-        if let Some(key) = web_sys::window()
-            .and_then(|w| w.local_storage().ok().flatten())
-            .and_then(|storage| storage.get_item("rast.wallpaper").ok().flatten())
-        {
-            return Self::ALL
-                .into_iter()
-                .find(|item| item.key() == key)
-                .unwrap_or_default();
-        }
-        Self::default()
-    }
     pub(super) const fn key(self) -> &'static str {
         match self {
             Self::Alpine => "alpine-dawn",
@@ -121,14 +113,28 @@ impl Wallpaper {
             Self::Mountain => "Mountain Valley",
         }
     }
+    /// The line under its thumbnail in Personalize.
+    pub(super) const fn caption(self) -> &'static str {
+        match self {
+            Self::Alpine => "Calm lake below snow-capped peaks at sunrise",
+            Self::Forest => "Pine forest with soft morning light rays",
+            Self::Coast => "Turquoise water, smooth rocks and a pale sky",
+            Self::Desert => "Warm dunes under a violet evening sky",
+            Self::Mountain => "A river winding through pines below snowy peaks",
+        }
+    }
 }
 
 pub(crate) struct Desktop {
     pub(crate) panel: Option<Panel>,
     pub(crate) search: TextEdit,
     pub(crate) windows: windows::Windows,
-    dark: Option<bool>,
-    pub(crate) wallpaper: Wallpaper,
+    /// The account's appearance and Personalize's draft.
+    pub(crate) look: appearance::Personalize,
+    /// The operating system's colour mode as last drawn, for *System*.
+    system_dark: Cell<bool>,
+    /// The desktop's right-click menu, open at this point.
+    pub(crate) menu: Option<[f32; 2]>,
     pub(crate) clock: system::Clock,
     pub(crate) device: system::Device,
     /// Browser connectivity; natively the taskbar shows server reachability.
@@ -145,8 +151,9 @@ impl Default for Desktop {
             panel: None,
             search: TextEdit::new(""),
             windows: windows::Windows::default(),
-            dark: None,
-            wallpaper: Wallpaper::load(),
+            look: appearance::Personalize::default(),
+            system_dark: Cell::new(false),
+            menu: None,
             clock: system::Clock::sample(),
             #[cfg(target_arch = "wasm32")]
             device: system::device(),
@@ -168,8 +175,10 @@ impl Default for Desktop {
 }
 
 impl Desktop {
+    /// Dark colours, as the shown appearance (the draft while Personalize previews one)
+    /// resolves them.
     pub(crate) fn is_dark(&self) -> bool {
-        self.dark.unwrap_or(true)
+        self.look.shown().dark(self.system_dark.get())
     }
 
     /// The app whose window is in front and takes the keyboard.
@@ -201,8 +210,13 @@ impl Desktop {
 
     pub(crate) fn close_session(&mut self) {
         self.panel = None;
+        self.menu = None;
         self.search = TextEdit::new("");
         self.windows.clear();
+        let look = &mut self.look;
+        look.draft = None;
+        look.dialog = false;
+        look.failed = None;
     }
 
     pub(crate) fn tick(&mut self, tx: &mut Tx) -> bool {
@@ -250,20 +264,21 @@ impl State {
     pub(crate) fn dismiss_panel(&mut self) {
         self.desktop.panel = None;
     }
-    pub(crate) fn toggle_desktop_theme(&mut self) {
-        self.desktop.dark = Some(!self.desktop.dark.unwrap_or(true));
+
+    /// Right-click on the desktop: its menu, at the pointer.
+    pub(crate) fn open_desktop_menu(&mut self, at: [f32; 2]) {
+        self.dismiss_panel();
+        self.desktop.menu = Some(at);
     }
-    pub(crate) fn set_wallpaper(&mut self, wallpaper: Wallpaper) {
-        self.desktop.wallpaper = wallpaper;
-        #[cfg(target_arch = "wasm32")]
-        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-            let _ = storage.set_item("rast.wallpaper", wallpaper.key());
-        }
+
+    pub(crate) fn close_desktop_menu(&mut self) {
+        self.desktop.menu = None;
     }
 }
 
 pub(crate) fn key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
-    if !state.signed_in {
+    // Personalize and the desktop's menu take their own keys (Escape closes them).
+    if !state.signed_in || state.desktop.look.dialog || state.desktop.menu.is_some() {
         return false;
     }
     if (event.mods.ctrl || event.mods.cmd)
@@ -397,50 +412,124 @@ fn rgb(value: &str) -> Color {
     rune::color::hex(value).expect("valid desktop palette")
 }
 
+/// `t` of the way from `a` to `b`, mixed as CSS `color-mix(in srgb, …)` does.
+fn srgb_mix(a: Color, b: Color, t: f32) -> Color {
+    use rune::color::{srgb_decode, srgb_encode};
+    let m = |x: f32, y: f32| srgb_decode(srgb_encode(x) + (srgb_encode(y) - srgb_encode(x)) * t);
+    Color {
+        r: m(a.r, b.r),
+        g: m(a.g, b.g),
+        b: m(a.b, b.b),
+        a: a.a + (b.a - a.a) * t,
+    }
+}
+
+/// `t` of the way from `a` to `b` in Oklab, as CSS `color-mix(in oklab, …)` does.
+fn oklab_mix(a: Color, b: Color, t: f32) -> Color {
+    let (x, y) = (a.to_oklab(), b.to_oklab());
+    Color::from_oklab([0, 1, 2, 3].map(|i| x[i] + (y[i] - x[i]) * t))
+}
+
+/// Classic RAST's colours for one mode and accent.
 pub(super) struct Palette {
     pub(super) dark: bool,
+    /// Windows, menus and dialogs.
     pub(super) surface: Color,
+    /// Title bars, cards and quiet fills.
     pub(super) surface_2: Color,
+    /// Pressed controls and empty picture frames.
+    pub(super) surface_3: Color,
+    /// Fields, buttons and the window frame.
     pub(super) line: Color,
+    /// Cards and dividers.
+    pub(super) subtle: Color,
     pub(super) ink: Color,
     pub(super) muted: Color,
+    /// Hints and captions.
+    pub(super) faint: Color,
     pub(super) accent: Color,
+    /// Text and icons on the accent.
     pub(super) accent_ink: Color,
+    pub(super) accent_hover: Color,
+    /// Links and selected labels.
+    pub(super) accent_text: Color,
+    /// The accent's soft tint: selected and hovered items.
     pub(super) hover: Color,
+    /// The border of a selected item.
+    pub(super) accent_line: Color,
+    /// A neutral hover for plain buttons and menu rows.
+    pub(super) neutral: Color,
     pub(super) danger: Color,
+    /// Status text: saved, unsaved, failed.
+    pub(super) ok_text: Color,
+    pub(super) warn_text: Color,
+    pub(super) danger_text: Color,
     bar: Color,
 }
 
 impl Palette {
-    fn new(dark: bool) -> Self {
-        if dark {
-            Self {
-                dark,
-                surface: rgb("#1e252e"),
-                surface_2: rgb("#29323c"),
-                line: rgb("#465360"),
-                ink: rgb("#eff4fa"),
-                muted: rgb("#afbfce"),
-                accent: rgb("#3d91ea"),
-                accent_ink: rgb("#0c1828"),
-                hover: rgb("#344b63"),
-                danger: rgb("#ef7d7d"),
-                bar: rgb("#232a32"),
-            }
+    pub(super) fn new(dark: bool, accent: Accent) -> Self {
+        let (accent, accent_ink) = accent.colors(dark);
+        let [
+            surface,
+            surface_2,
+            surface_3,
+            neutral,
+            subtle,
+            line,
+            ink,
+            muted,
+            faint,
+            danger,
+            ok_text,
+            warn_text,
+            danger_text,
+        ] = if dark {
+            [
+                "#20262e", "#29323d", "#333c47", "#2d3641", "#3b4551", "#4a5563", "#e8edf3",
+                "#b3bdc9", "#9aa8b6", "#ef7d7d", "#6bd297", "#f0c67a", "#f59a9a",
+            ]
         } else {
-            Self {
-                dark,
-                surface: rgb("#fbfcfe"),
-                surface_2: rgb("#edf2f7"),
-                line: rgb("#c6d2de"),
-                ink: rgb("#233447"),
-                muted: rgb("#50677c"),
-                accent: rgb("#2374be"),
-                accent_ink: Color::WHITE,
-                hover: rgb("#dcecff"),
-                danger: rgb("#c93b3b"),
-                bar: rgb("#edf2f8"),
-            }
+            [
+                "#ffffff", "#f3f5f7", "#e9edf1", "#eef1f4", "#dce1e7", "#c7cfd8", "#26323f",
+                "#4e5a67", "#5f6b78", "#c93b3b", "#1d7a42", "#7f5008", "#a92f2f",
+            ]
+        }
+        .map(rgb);
+        Self {
+            dark,
+            surface,
+            surface_2,
+            surface_3,
+            line,
+            subtle,
+            ink,
+            muted,
+            faint,
+            accent,
+            accent_ink,
+            accent_hover: if dark {
+                oklab_mix(accent, Color::WHITE, 0.12)
+            } else {
+                oklab_mix(accent, Color::BLACK, 0.14)
+            },
+            accent_text: if dark {
+                accent
+            } else {
+                oklab_mix(accent, ink, 0.18)
+            },
+            hover: srgb_mix(surface, accent, if dark { 0.18 } else { 0.12 }),
+            accent_line: srgb_mix(subtle, accent, 0.42),
+            neutral,
+            danger,
+            ok_text,
+            warn_text,
+            danger_text,
+            bar: if dark {
+                rgb("#232a32").alpha(0.92)
+            } else {
+                Color::WHITE.alpha(0.9)
+            },
         }
     }
 }
@@ -456,28 +545,18 @@ const CAPTION: TextStyle = TextStyle::new(10.5, 400.0);
 
 pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     cx.web_focus();
-    let dark = state.desktop.dark.unwrap_or(true);
-    let p = Palette::new(dark);
+    state.desktop.system_dark.set(cx.system_dark());
+    let look = state.desktop.look.shown();
+    let dark = state.desktop.is_dark();
+    let p = Palette::new(dark, look.accent);
     cx.focus_ring(2.0, -2.0, p.accent);
     let [width, height] = cx.layout_size("workspace-root").unwrap_or([1280.0, 800.0]);
     let compact = width < 680.0;
-    let backdrop = el()
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .fill(rgb("#435668"));
-    let backdrop = if let Some(photo) = wallpaper(state, state.desktop.wallpaper) {
-        backdrop.pixels_fit(photo.pixels(), SurfaceFit::Fill)
-    } else {
-        backdrop
-    };
     let mut root = col()
         .key("workspace-root")
         .w_full()
         .h_full()
-        .child(backdrop)
-        .child(
-            el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-                .gradient(rgb("#192739").alpha(0.12), rgb("#142330").alpha(0.25)),
-        );
+        .child(backdrop(state, look, [width, height]));
     for layer in window::view(state, &p, [width, (height - BAR).max(0.0)]) {
         root = root.child(layer);
     }
@@ -492,11 +571,63 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
             )
             .child(panel);
     }
-    root.child(taskbar(state, &p, dark, width))
+    root = root.child(taskbar(state, &p, dark, width));
+    if let Some(at) = state.desktop.menu {
+        for layer in menu::view(state, &p, at, [width, height]) {
+            root = root.child(layer);
+        }
+    }
+    if state.desktop.look.dialog {
+        for layer in personalize::dialog(state, &p, [width, height]) {
+            root = root.child(layer);
+        }
+    }
+    root
+}
+
+/// The wallpaper: a picture fitted and placed as chosen, or one colour, under the dark
+/// overlay. A right-click on it opens the desktop's menu.
+fn backdrop(state: &State, look: &Appearance, [width, height]: [f32; 2]) -> El {
+    let mut backdrop = el()
+        .key("desktop-wallpaper")
+        .focusable(false)
+        .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+        .fill(appearance::hex(&look.color));
+    if look.kind == Kind::Picture
+        && let Some(photo) = wallpaper(state, look.picture)
+    {
+        let (column, line) = look.position.align();
+        backdrop = match look.fit {
+            Fit::Cover => backdrop
+                .pixels_fit(photo.pixels(), SurfaceFit::Fill)
+                .surface_anchor(column, line),
+            Fit::Contain => backdrop
+                .pixels_fit(photo.pixels(), SurfaceFit::Fit)
+                .surface_anchor(column, line),
+            // The picture at its own size (a point per pixel), in the middle.
+            Fit::Center => {
+                let [w, h] = photo
+                    .size()
+                    .map_or([1920.0, 1080.0], |[w, h]| [w as f32, h as f32]);
+                backdrop.child(
+                    el().size(w, h)
+                        .absolute(((width - w) / 2.0).round(), ((height - h) / 2.0).round())
+                        .pixels_fit(photo.pixels(), SurfaceFit::Fill),
+                )
+            }
+        };
+    }
+    backdrop
+        .child(
+            el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .fill(rgb("#0a0f16").alpha(f32::from(look.overlay) / 100.0)),
+        )
+        .on_press(State::close_desktop_menu)
+        .on_secondary_press(|s: &mut State, at, _: &mut Tx| s.open_desktop_menu([at.x, at.y]))
 }
 
 /// Which tray details fit the window: labels on wide screens, icons on narrow ones.
-struct Fit {
+struct TrayFit {
     network_label: bool,
     theme: bool,
     date: bool,
@@ -504,7 +635,7 @@ struct Fit {
     role: bool,
 }
 
-impl Fit {
+impl TrayFit {
     fn new(width: f32) -> Self {
         Self {
             network_label: width >= 820.0,
@@ -550,7 +681,7 @@ pub(super) fn initial(name: &str) -> String {
 }
 
 fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
-    let fit = Fit::new(width);
+    let fit = TrayFit::new(width);
     let open = state.desktop.panel;
     let start = el()
         .key("desktop-start")
@@ -561,8 +692,12 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .radius(8.0)
         .center()
         .fill(p.accent)
-        .hover(p.accent.mix(p.surface, 0.2))
-        .child(icon(state, "logo", 19.0))
+        .hover(p.accent_hover)
+        .child(
+            rune::icon(&glyphs::LOGO, 19.0)
+                .color(p.accent_ink)
+                .a11y_hidden(),
+        )
         .on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Start));
 
     let mut tray = row().gap(2.0).center_y();
@@ -588,7 +723,7 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
                 el().size(7.0, 7.0)
                     .radius(4.0)
                     .fill(net.color)
-                    .border(1.0, p.bar)
+                    .border(1.0, p.bar.alpha(1.0))
                     .pin(None, Some(-2.0), Some(-3.0), None),
             ),
     );
@@ -686,8 +821,15 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .px(if width < 480.0 { 4.0 } else { 6.0 })
         .center_y()
         .gap(4.0)
-        .fill(p.bar.alpha(0.92))
-        .border_sides([1.0, 0.0, 0.0, 0.0], p.line.alpha(0.7))
+        .fill(p.bar)
+        .border_sides(
+            [1.0, 0.0, 0.0, 0.0],
+            if p.dark {
+                Color::WHITE.alpha(0.07)
+            } else {
+                p.subtle
+            },
+        )
         .child(start)
         .child(tasks(state, p, width))
         .child(el().grow(1.0).min_w(0.0))

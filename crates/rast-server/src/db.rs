@@ -1,4 +1,5 @@
-//! SQLite storage: accounts, sessions, groups with app rules, and an audit trail.
+//! SQLite storage: accounts, sessions, groups with app rules, each account's
+//! appearance, and an audit trail.
 //!
 //! Every connection runs with `foreign_keys`, `synchronous = FULL` (a committed
 //! change survives a power cut), `secure_delete` (deleted rows such as ended
@@ -18,6 +19,7 @@ use sqlx::{Row, SqlitePool};
 
 use crate::Role;
 use crate::access::Rule;
+use crate::appearance::{Appearance, Wallpaper};
 
 const SCHEMA_V1: &str = "
 CREATE TABLE users (
@@ -112,6 +114,25 @@ ALTER TABLE audit_log ADD COLUMN ip TEXT NOT NULL DEFAULT '';
 PRAGMA user_version = 3;
 ";
 
+/// Classic RAST's *Personalize* (its `0002_appearance` and `0003_appearance_accent`,
+/// without uploaded wallpapers yet): each account's colour mode, accent and wallpaper.
+const SCHEMA_V4: &str = "
+CREATE TABLE user_appearance (
+    user_id        INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    theme          TEXT    NOT NULL DEFAULT 'light',
+    accent         TEXT    NOT NULL DEFAULT 'ocean',
+    wallpaper_kind TEXT    NOT NULL DEFAULT 'builtin',
+    builtin_id     TEXT    NOT NULL DEFAULT 'alpine-dawn',
+    color          TEXT    NOT NULL DEFAULT '#1B2430',
+    fit            TEXT    NOT NULL DEFAULT 'cover',
+    position       TEXT    NOT NULL DEFAULT 'center',
+    overlay        INTEGER NOT NULL DEFAULT 20 CHECK (overlay BETWEEN 0 AND 60),
+    updated_at     INTEGER NOT NULL
+);
+
+PRAGMA user_version = 4;
+";
+
 /// Wrong passwords within this many seconds count towards a lockout.
 pub(crate) const FAILURE_WINDOW: i64 = 30 * 60;
 /// Failed sign-ins in a row that lock an account.
@@ -170,7 +191,7 @@ async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         sqlx::raw_sql(SCHEMA_V1).execute(&mut *tx).await?;
         tx.commit().await?;
     }
-    for (target, schema) in [(2, SCHEMA_V2), (3, SCHEMA_V3)] {
+    for (target, schema) in [(2, SCHEMA_V2), (3, SCHEMA_V3), (4, SCHEMA_V4)] {
         if version < target {
             let mut tx = pool.begin().await?;
             sqlx::raw_sql(schema).execute(&mut *tx).await?;
@@ -390,6 +411,72 @@ pub(crate) async fn update_user(
     .bind(change.unlock)
     .bind(now())
     .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// An account's saved appearance; `None` until it saves one.
+pub(crate) async fn appearance_of(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<Appearance>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT theme, accent, wallpaper_kind, builtin_id, color, fit, position, overlay
+         FROM user_appearance WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|row| {
+        Appearance {
+            theme: row.get("theme"),
+            accent: row.get("accent"),
+            wallpaper: Wallpaper {
+                kind: row.get("wallpaper_kind"),
+                builtin_id: row.get("builtin_id"),
+                color: row.get("color"),
+                fit: row.get("fit"),
+                position: row.get("position"),
+                overlay: row.get("overlay"),
+            },
+        }
+        .sanitized()
+    }))
+}
+
+pub(crate) async fn save_appearance(
+    pool: &SqlitePool,
+    user_id: i64,
+    appearance: &Appearance,
+) -> Result<(), sqlx::Error> {
+    let wallpaper = &appearance.wallpaper;
+    sqlx::query(
+        "INSERT INTO user_appearance
+            (user_id, theme, accent, wallpaper_kind, builtin_id, color, fit, position, overlay,
+             updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE SET
+            theme = excluded.theme,
+            accent = excluded.accent,
+            wallpaper_kind = excluded.wallpaper_kind,
+            builtin_id = excluded.builtin_id,
+            color = excluded.color,
+            fit = excluded.fit,
+            position = excluded.position,
+            overlay = excluded.overlay,
+            updated_at = excluded.updated_at",
+    )
+    .bind(user_id)
+    .bind(&appearance.theme)
+    .bind(&appearance.accent)
+    .bind(&wallpaper.kind)
+    .bind(&wallpaper.builtin_id)
+    .bind(&wallpaper.color)
+    .bind(&wallpaper.fit)
+    .bind(&wallpaper.position)
+    .bind(wallpaper.overlay)
+    .bind(now())
     .execute(pool)
     .await?;
     Ok(())
@@ -969,7 +1056,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         assert_eq!(user_count(&pool).await.unwrap(), 1);
         let id = insert_group(&pool, "Staff", "").await.unwrap().unwrap();
         let change = GroupChange {
@@ -1072,6 +1159,54 @@ mod tests {
         touch_login(&pool, id).await.unwrap();
         let bob = user_by_id(&pool, id).await.unwrap().unwrap();
         assert_eq!(bob.recent_failures(now()), 0, "a sign-in forgets failures");
+    }
+
+    #[tokio::test]
+    async fn appearance_is_kept_per_account_and_goes_with_it() {
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")
+            .unwrap()
+            .foreign_keys(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for schema in [SCHEMA_V1, SCHEMA_V2, SCHEMA_V3] {
+            sqlx::raw_sql(schema).execute(&pool).await.unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO users (username, role, password_hash, created_at, updated_at)
+             VALUES ('root', 'superadmin', 'x', 1, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        migrate(&pool).await.unwrap();
+        assert_eq!(appearance_of(&pool, 1).await.unwrap(), None);
+
+        let defaults = Appearance::default();
+        let look = Appearance {
+            theme: "dark".to_owned(),
+            wallpaper: Wallpaper {
+                builtin_id: "desert-dusk".to_owned(),
+                ..defaults.wallpaper
+            },
+            ..Appearance::default()
+        };
+        save_appearance(&pool, 1, &look).await.unwrap();
+        let look = Appearance {
+            accent: "rose".to_owned(),
+            ..look
+        };
+        save_appearance(&pool, 1, &look).await.unwrap();
+        assert_eq!(appearance_of(&pool, 1).await.unwrap(), Some(look));
+
+        delete_user(&pool, 1).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_appearance")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "deleting an account deletes its appearance");
     }
 
     #[tokio::test]
