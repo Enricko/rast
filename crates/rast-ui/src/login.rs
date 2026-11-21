@@ -18,12 +18,14 @@ fn rgb(hex: u32) -> Color {
 }
 
 const SKY: u32 = 0x354659;
+const ACCENT: u32 = 0x2785d8;
 const BLUE: u32 = 0x2276b6;
 const FOCUS: u32 = 0x57b3ee;
-const PALE: u32 = 0xd1dae3;
+const MIST: u32 = 0xeef2f6;
 const SMALL: TextStyle = TextStyle::new(12.0, 470.0);
+const TINY: TextStyle = TextStyle::new(11.0, 470.0);
 const BODY: TextStyle = TextStyle::new(13.0, 440.0);
-const LABEL: TextStyle = TextStyle::new(12.0, 560.0);
+const LABEL: TextStyle = TextStyle::new(12.0, 600.0);
 
 macro_rules! svg {
     ($($part:literal),+ $(,)?) => {
@@ -123,7 +125,7 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     let tint = el()
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
-        .gradient(rgb(0x131b27).alpha(0.39), rgb(0x0e1c28).alpha(0.59));
+        .fill(rgb(0x0c121a).alpha(0.32));
     let theme_label = if dark {
         "Switch to light mode"
     } else {
@@ -146,29 +148,27 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
 
     let card = auth_card(state, &p, creating, wide, short);
     let layout = if wide {
-        let right = col()
-            .w((width * 0.46).min(480.0))
-            .h_full()
-            .px(28.0)
-            .center()
-            .child(card)
-            .child(
-                row()
-                    .key("auth-footer")
-                    .pin(Some(28.0), None, Some(28.0), Some(32.0))
-                    .justify_between()
-                    .child(text("RAST · Revamp").font(SMALL).color(rgb(PALE)))
-                    .child(
-                        text("Local unlock · No server session")
-                            .font(SMALL)
-                            .color(rgb(PALE)),
-                    ),
-            );
+        // Classic proportions: a 1100 pt layout, brand 1.05fr and a 400–480 pt panel.
+        let shell = width.min(1100.0);
+        let panel = (shell * 0.46).clamp(400.0, 480.0);
+        let foot = rgb(0xf4f7fa).alpha(0.82);
+        let right = col().w(panel).h_full().px(28.0).center().child(card).child(
+            row()
+                .key("auth-footer")
+                .pin(Some(28.0), None, Some(28.0), Some(36.0))
+                .justify_between()
+                .child(text("RAST · Revamp").font(TINY).color(foot))
+                .child(
+                    text("Local unlock · No server session")
+                        .font(TINY)
+                        .color(foot),
+                ),
+        );
         row()
             .w_full()
-            .max_w(1072.0)
+            .max_w(1100.0)
             .h_full()
-            .child(brand_panel(art))
+            .child(brand_panel(art, width))
             .child(right)
     } else {
         let content = col()
@@ -217,89 +217,104 @@ fn symbol(image: Option<&Image>, fallback: &'static str, width: f32) -> El {
 }
 
 fn brand_lockup(art: Option<&Art>, compact: bool) -> El {
-    let size = if compact { 42.0 } else { 56.0 };
+    let size = if compact { 40.0 } else { 56.0 };
+    let name = if compact { 18.0 } else { 24.0 };
     row()
         .key("auth-brand")
-        .gap(14.0)
+        .gap(if compact { 10.0 } else { 14.0 })
         .center_y()
         .child(
             el().size(size, size)
-                .radius(if compact { 13.0 } else { 17.0 })
+                .radius(if compact { 12.0 } else { 17.0 })
                 .center()
-                .gradient(rgb(0x45a7eb), rgb(0x3089cf))
-                .border(1.0, Color::WHITE.alpha(0.24))
+                .fill(rgb(ACCENT))
+                .border(1.0, Color::WHITE.alpha(0.20))
                 .child(symbol(
                     art.map(|a| &a.logo),
                     "⬡",
-                    if compact { 23.0 } else { 30.0 },
+                    if compact { 22.0 } else { 30.0 },
                 )),
         )
         .child(
             col()
-                .gap(3.0)
+                .gap(2.0)
                 .shrink()
                 .child(
-                    text("R A S T")
-                        .font(TextStyle::new(if compact { 17.0 } else { 24.0 }, 780.0))
+                    text("RAST")
+                        .font(
+                            TextStyle::new(name, 780.0)
+                                .tracking(name * if compact { 0.22 } else { 0.26 }),
+                        )
                         .color(Color::WHITE),
                 )
                 .child(
                     text("Resource Administration & Storage Toolkit")
                         .wrap()
-                        .font(SMALL)
-                        .color(rgb(PALE)),
+                        .font(TINY.tracking(0.22))
+                        .color(rgb(MIST).alpha(0.62)),
                 ),
         )
 }
 
-fn brand_panel(art: Option<&Art>) -> El {
-    col().key("auth-brand-panel").grow(1.0).min_w(0.0).h_full().px(54.0).center()
-        .gradient(rgb(0x111722).alpha(0.65), rgb(0x101923).alpha(0.82))
-        .child(col().w_full().max_w(430.0).gap(24.0)
+fn brand_panel(art: Option<&Art>, width: f32) -> El {
+    // CSS: padding 56px clamp(28px, 6vw, 78px); tagline clamp(22px, 2.5vw, 30px).
+    let pad = (width * 0.06).clamp(28.0, 78.0);
+    let tagline = (width * 0.025).clamp(22.0, 30.0);
+    col().key("auth-brand-panel").grow(1.0).min_w(0.0).h_full().px(pad).py(56.0).center()
+        .fill(rgb(0x161d26).alpha(0.68))
+        .border_sides([0.0, 1.0, 0.0, 0.0], Color::WHITE.alpha(0.10))
+        .child(col().w_full().max_w(440.0).gap(26.0)
             .child(brand_lockup(art, false))
             .child(text("A calm, fast home for your self‑hosted server. Everything stays on your hardware.")
-                .w_full().wrap().font(TextStyle::new(28.0, 690.0)).color(rgb(0xe1e7ee)))
+                .w_full().max_w(430.0).wrap()
+                .font(TextStyle::new(tagline, 660.0).lh(tagline * 1.25).tracking(tagline * -0.02))
+                .color(rgb(MIST).alpha(0.80)))
             .child(col().w_full().gap(14.0)
                 .child(feature(art.map(|a| &a.files), "Files & shared folders", "Browse, upload and manage server storage."))
                 .child(feature(art.map(|a| &a.people), "People & permissions", "Accounts, quotas, roles and an audit trail."))
                 .child(feature(art.map(|a| &a.activity), "Live operations", "Monitoring, containers and backups in one place.")))
-            .child(text("Self-hosted · No telemetry · Revamp preview").w_full().wrap().mt(6.0).font(SMALL).color(rgb(PALE))))
+            .child(text("Self-hosted · No telemetry · Original interface design").w_full().wrap().mt(8.0).font(SMALL).color(rgb(MIST).alpha(0.50))))
 }
 
 fn feature(image: Option<&Image>, title: &'static str, detail: &'static str) -> El {
     row()
         .w_full()
         .gap(12.0)
-        .center_y()
         .child(
             el().size(34.0, 34.0)
                 .radius(10.0)
                 .center()
-                .fill(Color::WHITE.alpha(0.11))
-                .border(1.0, Color::WHITE.alpha(0.17))
+                .fill(Color::WHITE.alpha(0.10))
+                .border(1.0, Color::WHITE.alpha(0.12))
                 .child(symbol(image, "·", 18.0)),
         )
         .child(
             col()
                 .grow(1.0)
                 .min_w(0.0)
-                .gap(3.0)
+                .gap(1.0)
                 .child(
                     text(title)
                         .w_full()
                         .wrap()
-                        .font(TextStyle::new(13.0, 650.0))
-                        .color(Color::WHITE),
+                        .font(TextStyle::new(13.0, 600.0))
+                        .color(rgb(0xf2f5f8)),
                 )
-                .child(text(detail).w_full().wrap().font(SMALL).color(rgb(PALE))),
+                .child(
+                    text(detail)
+                        .w_full()
+                        .wrap()
+                        .font(SMALL.lh(16.8))
+                        .color(rgb(MIST).alpha(0.62)),
+                ),
         )
 }
 
 fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool) -> El {
-    let platform = if cfg!(target_arch = "wasm32") {
-        "browser"
+    let (platform, scope) = if cfg!(target_arch = "wasm32") {
+        ("browser", "in this browser")
     } else {
-        "device"
+        ("device", "on this device")
     };
     let (title, subtitle) = if creating {
         (
@@ -307,7 +322,10 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
             format!("Set up a local login for this {platform}."),
         )
     } else {
-        ("Welcome back", "Sign in to your RAST workspace.".to_owned())
+        (
+            "Welcome back",
+            "Sign in to your server workspace.".to_owned(),
+        )
     };
     let pad = if wide && !short { 32.0 } else { 22.0 };
     let username = field(&state.username_field, p, "username", "Username", "username")
@@ -359,25 +377,26 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
         })
         .role("button")
         .label(format!("{show} password"))
-        .size(56.0, 32.0)
+        .size(52.0, 28.0)
         .center()
         .radius(5.0)
         .hover(p.line.alpha(0.35))
-        .pin(None, Some(4.0), Some(4.0), None)
+        .pin(None, Some(3.0), Some(3.0), None)
         .preserve_focus_on_press(true)
         .child(text(show).font(LABEL).color(p.muted))
         .on_press(State::toggle_password_visibility);
     let fields = col()
         .w_full()
         .gap(if short { 9.0 } else { 12.0 })
-        .child(labeled(p, "Username", username))
+        .child(labeled(p, "Username", false, username))
         .child(labeled(
             p,
             "Password",
+            true,
             col().w_full().child(password).child(reveal),
         ));
     let fields = if creating {
-        fields.child(labeled(p, "Confirm password", confirm))
+        fields.child(labeled(p, "Confirm password", true, confirm))
     } else {
         fields
     };
@@ -394,7 +413,8 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
         .center()
         .gap(7.0)
         .w_full()
-        .h(38.0)
+        .h(40.0)
+        .mt(4.0)
         .radius(6.0)
         .fill(rgb(BLUE))
         .hover(rgb(0x226da7))
@@ -406,7 +426,7 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
         )
         .child(
             text(submit_label)
-                .font(TextStyle::new(13.0, 650.0))
+                .font(TextStyle::new(13.5, 650.0))
                 .color(Color::WHITE),
         )
         .on_press(submit_action);
@@ -414,17 +434,24 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
         .key("auth-card")
         .w_full()
         .max_w(432.0)
-        .padding(pad)
-        .gap(if short { 11.0 } else { 16.0 })
+        .px(pad)
+        .pt(if wide && !short { 34.0 } else { pad })
+        .pb(if wide && !short { 28.0 } else { pad })
+        .gap(if short { 11.0 } else { 12.0 })
         .radius(12.0)
         .fill(p.card)
         .border(1.0, p.line.alpha(0.62))
-        .shadow(14.0, 34.0, rgb(0x07121c).alpha(0.48))
+        .shadow(18.0, 46.0, rgb(0x080c12).alpha(0.30))
         .child(
             col()
                 .w_full()
-                .gap(6.0)
-                .child(text(title).font(TextStyle::new(22.0, 720.0)).color(p.ink))
+                .gap(3.0)
+                .mb(if short { 0.0 } else { 8.0 })
+                .child(
+                    text(title)
+                        .font(TextStyle::new(18.0, 650.0).tracking(-0.36))
+                        .color(p.ink),
+                )
                 .child(text(subtitle).w_full().wrap().font(BODY).color(p.muted)),
         )
         .child(fields);
@@ -439,13 +466,12 @@ fn auth_card(state: &State, p: &Palette, creating: bool, wide: bool, short: bool
         );
     }
     card.child(submit).child(
-        text(format!(
-            "This unlocks only this {platform}. It does not sign you in to a server."
-        ))
-        .w_full()
-        .wrap()
-        .font(SMALL)
-        .color(p.muted),
+        text(format!("Unlocks RAST only {scope}. No server sign-in."))
+            .w_full()
+            .wrap()
+            .mt(4.0)
+            .font(SMALL.lh(17.4))
+            .color(p.muted),
     )
 }
 
@@ -461,9 +487,9 @@ fn field(
         .label(label)
         .single_line()
         .w_full()
-        .h(40.0)
-        .px(11.0)
-        .py(10.0)
+        .h(34.0)
+        .px(10.0)
+        .py(8.0)
         .radius(6.0)
         .fill(p.field)
         .border(1.0, p.line)
@@ -471,10 +497,15 @@ fn field(
         .placeholder(placeholder, p.muted)
 }
 
-fn labeled(p: &Palette, label: &'static str, control: El) -> El {
-    col()
-        .w_full()
-        .gap(6.0)
-        .child(text(label).font(LABEL).color(p.muted))
-        .child(control)
+fn labeled(p: &Palette, label: &'static str, required: bool, control: El) -> El {
+    let caption = text(label).font(LABEL).color(p.muted);
+    let caption = if required {
+        row()
+            .gap(3.0)
+            .child(caption)
+            .child(text("*").font(LABEL).color(p.error).inert())
+    } else {
+        caption
+    };
+    col().w_full().gap(5.0).child(caption).child(control)
 }

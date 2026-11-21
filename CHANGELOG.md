@@ -85,6 +85,10 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   canvas. Browser zoom and mobile scrolling work without reinitializing a
   render surface. Rune still renders the unlocked workspace; saved local
   credentials and native sign-in are unchanged.
+- The browser and native logins now use the classic proportions: a centered
+  1100 pt layout, a 432 pt card, compact fields and the classic copy. The
+  startup and unlock covers show the classic splash (wallpaper, logo tile and
+  progress bar) instead of a spinner on a plain background.
 
 ### Notes
 

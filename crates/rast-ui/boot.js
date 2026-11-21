@@ -30,12 +30,12 @@ function resetLogin() {
   creating = saved == null;
   $('login-title').textContent = creating ? 'Welcome to RAST' : 'Welcome back';
   $('login-subtitle').textContent = creating
-    ? 'Set up a local login for this browser.' : 'Sign in to your RAST workspace.';
+    ? 'Set up a local login for this browser.' : 'Sign in to your server workspace.';
   $('confirm-row').hidden = !creating;
   confirm.required = creating;
   password.autocomplete = creating ? 'new-password' : 'current-password';
   password.minLength = creating ? 8 : 0;
-  password.placeholder = creating ? 'At least 8 characters' : 'Password';
+  password.placeholder = creating ? 'At least 8 characters' : 'password';
   username.value = saved ?? '';
   password.value = confirm.value = '';
   setRevealed(false);

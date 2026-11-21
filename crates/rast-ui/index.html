@@ -13,11 +13,13 @@
 </head>
 <body>
   <div id="startup-cover" class="loading-cover">
-    <div class="loading-content">
-      <p class="loading-brand">RAST</p>
-      <p class="loading-status" role="status"><span class="loading-spinner" aria-hidden="true"></span>Loading RAST…</p>
-      <noscript><p>Enable JavaScript and reload to open RAST.</p></noscript>
+    <div class="loading-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 7.2 15.8 9.4v4.4L12 16l-3.8-2.2V9.4z" fill="currentColor"/></svg>
     </div>
+    <p class="loading-brand">RAST</p>
+    <p class="loading-status" role="status">Starting server workspace</p>
+    <div class="loading-bar" aria-hidden="true"></div>
+    <noscript><p>Enable JavaScript and reload to open RAST.</p></noscript>
   </div>
   <main id="login-screen" data-theme="dark" hidden>
     <div class="login-shell">
@@ -74,7 +76,7 @@
                 <div><strong>Live operations</strong><br>Monitoring, containers and backups in one place.</div>
               </li>
             </ul>
-            <p class="login-brand-note">Self-hosted · No telemetry · Revamp preview</p>
+            <p class="login-brand-note">Self-hosted · No telemetry · Original interface design</p>
           </div>
         </div>
       </header>
@@ -82,7 +84,7 @@
       <div class="login-entry">
         <form id="login-form" method="post" aria-labelledby="login-title" aria-describedby="login-subtitle">
           <h1 id="login-title">Welcome back</h1>
-          <p id="login-subtitle">Sign in to your RAST workspace.</p>
+          <p id="login-subtitle">Sign in to your server workspace.</p>
           <!-- No credential names: only the local JS handler can read these values. -->
           <fieldset id="login-fields" disabled>
             <div class="login-field">
@@ -92,7 +94,7 @@
             <div class="login-field">
               <label for="password">Password</label>
               <div class="login-password-control">
-                <input id="password" type="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+                <input id="password" type="password" placeholder="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" required>
                 <button id="password-toggle" type="button" aria-label="Show password" aria-controls="password confirm">Show</button>
               </div>
             </div>
@@ -115,10 +117,12 @@
     <p class="login-print">RAST — Browser-only workspace unlock.</p>
   </main>
   <div id="workspace-cover" class="loading-cover" hidden>
-    <div class="loading-content">
-      <p class="loading-brand">RAST</p>
-      <p id="workspace-status" class="loading-status" role="status"><span class="loading-spinner" aria-hidden="true"></span>Opening your workspace…</p>
+    <div class="loading-logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M12 7.2 15.8 9.4v4.4L12 16l-3.8-2.2V9.4z" fill="currentColor"/></svg>
     </div>
+    <p class="loading-brand">RAST</p>
+    <p id="workspace-status" class="loading-status" role="status">Opening your workspace</p>
+    <div class="loading-bar" aria-hidden="true"></div>
   </div>
   <script type="module" src="./boot.js"></script>
 </body>
