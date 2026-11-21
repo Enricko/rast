@@ -25,6 +25,8 @@ const UNREACHABLE = "The RAST server can't be reached. Check your connection and
 let wasm;
 let mode = 'login';
 let opening = false;
+// The password just used to sign in, while its replacement is chosen.
+let current = '';
 
 // Every call carries X-RAST: the server refuses changes without it, and
 // browsers only send it cross-site after a preflight the server never allows.
@@ -67,27 +69,43 @@ function setRevealed(show) {
 
 // "setup": no accounts yet, create the first Super Admin with the token.
 // "login": sign in; accounts are made by administrators, never here.
+// "change": signed in with a password an administrator set; choose your own
+// before the workspace opens. The username stays in the (hidden) field so
+// password managers save the new password for the right account.
 function setMode(next) {
   mode = next;
   const setup = mode === 'setup';
-  $('login-title').textContent = setup ? 'Set up RAST' : 'Welcome back';
+  const change = mode === 'change';
+  const choosing = setup || change;
+  $('login-title').textContent = setup ? 'Set up RAST' : change ? 'Choose a new password' : 'Welcome back';
   $('login-subtitle').textContent = setup
-    ? 'Create the first Super Admin for this server.' : 'Sign in to your server workspace.';
+    ? 'Create the first Super Admin for this server.'
+    : change
+      ? 'An administrator set your password. Choose your own to continue.'
+      : 'Sign in to your server workspace.';
   $('token-row').hidden = !setup;
   token.required = setup;
-  $('confirm-row').hidden = !setup;
-  confirm.required = setup;
-  password.autocomplete = setup ? 'new-password' : 'current-password';
-  password.minLength = setup ? 8 : 0;
-  password.placeholder = setup ? 'At least 8 characters' : 'password';
+  $('username-row').hidden = change;
+  username.required = !change;
+  $('password-label').textContent = change ? 'New password' : 'Password';
+  $('confirm-row').hidden = !choosing;
+  confirm.required = choosing;
+  $('confirm-label').textContent = change ? 'Confirm new password' : 'Confirm password';
+  password.autocomplete = choosing ? 'new-password' : 'current-password';
+  password.minLength = choosing ? 8 : 0;
+  password.placeholder = choosing ? 'At least 8 characters' : 'password';
   username.placeholder = setup ? 'e.g. admin' : 'username';
-  username.value = setup ? '' : remembered();
+  if (!change) username.value = setup ? '' : remembered();
+  if (!change) current = '';
   password.value = confirm.value = token.value = '';
   setRevealed(false);
-  submit.textContent = setup ? 'Create Super Admin' : 'Sign in';
+  submit.textContent = setup ? 'Create Super Admin' : change ? 'Save and continue' : 'Sign in';
   note.textContent = setup
     ? 'The setup token is on the server: sudo cat /var/lib/rast-revamp/setup-token'
-    : 'No public sign-up. Ask an administrator for an account.';
+    : change
+      ? `Signed in as ${username.value}. Your other sessions will be signed out.`
+      : 'No public sign-up. Ask an administrator for an account.';
+  $('change-cancel').hidden = !change;
   error.textContent = '';
   status.hidden = true;
   fields.disabled = false;
@@ -175,8 +193,63 @@ async function openWorkspace(user) {
 }
 
 function focusLogin() {
-  const input = mode === 'setup' ? token : username.value ? password : username;
+  const input = mode === 'setup' ? token : mode === 'change' || username.value ? password : username;
   input.focus({ preventScroll: true });
+}
+
+// Back to the sign-in form, ending the session that still owes a new password.
+async function leaveChange(reason) {
+  fields.disabled = true;
+  try { await api('/api/auth/logout', {}); } catch { /* already signed out */ }
+  setMode('login');
+  error.textContent = reason;
+  focusLogin();
+}
+
+// Replace the password an administrator set, then open the workspace.
+async function choosePassword() {
+  if (password.value !== confirm.value) {
+    error.textContent = 'The passwords do not match.';
+    confirm.focus();
+    return;
+  }
+  opening = true;
+  fields.disabled = true;
+  error.textContent = '';
+  status.textContent = 'Saving your new password…';
+  status.hidden = false;
+  try {
+    try {
+      await api('/api/auth/password', { current, new: password.value });
+    } finally {
+      password.value = confirm.value = '';
+      setRevealed(false);
+    }
+    current = '';
+    const state = await api('/api/auth/state');
+    if (!state.user) throw 'Your session ended. Sign in with your new password.';
+    status.textContent = 'Opening your workspace…';
+    await openWorkspace(state.user);
+  } catch (cause) {
+    status.hidden = true;
+    fields.disabled = false;
+    error.textContent = message(cause, 'RAST could not save your new password.');
+    // A session that ended meanwhile can't finish the change.
+    try {
+      const state = await api('/api/auth/state');
+      if (!state.user) {
+        const shown = error.textContent;
+        setMode('login');
+        error.textContent = shown;
+      } else if (!state.user.mustChangePassword) {
+        await openWorkspace(state.user);
+        return;
+      }
+    } catch { /* keep the form as it is */ }
+    focusLogin();
+  } finally {
+    opening = false;
+  }
 }
 
 reveal.addEventListener('click', () => setRevealed(password.type === 'password'));
@@ -186,9 +259,17 @@ theme.addEventListener('click', () => {
   theme.setAttribute('aria-label', light ? 'Switch to dark mode' : 'Switch to light mode');
 });
 
+$('change-cancel').addEventListener('click', () => {
+  if (!opening) leaveChange('');
+});
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!wasm || fields.disabled || opening) return;
+  if (mode === 'change') {
+    await choosePassword();
+    return;
+  }
   const setup = mode === 'setup';
   if (setup && password.value !== confirm.value) {
     error.textContent = 'The passwords do not match.';
@@ -206,18 +287,26 @@ form.addEventListener('submit', async (event) => {
   status.textContent = setup ? 'Creating the Super Admin…' : 'Signing in…';
   status.hidden = false;
   const name = username.value.trim().toLowerCase();
+  const typed = password.value;
   try {
     let reply;
     try {
       reply = setup
-        ? await api('/api/auth/setup', { username: name, password: password.value, token: token.value.trim() })
-        : await api('/api/auth/login', { username: name, password: password.value });
+        ? await api('/api/auth/setup', { username: name, password: typed, token: token.value.trim() })
+        : await api('/api/auth/login', { username: name, password: typed });
     } finally {
       password.value = confirm.value = '';
       setRevealed(false);
     }
     token.value = '';
     remember(reply.user.username);
+    if (reply.user.mustChangePassword) {
+      username.value = reply.user.username;
+      current = typed;
+      setMode('change');
+      focusLogin();
+      return;
+    }
     status.textContent = 'Opening your workspace…';
     await openWorkspace(reply.user);
   } catch (cause) {
@@ -287,7 +376,13 @@ try {
 }
 
 // Still signed in from before (the cookie is HttpOnly; the server says who).
-if (session && navigator.gpu) {
+// A session that still owes a new password can't finish here: the password it
+// signed in with is gone, so sign in again.
+if (session && session.mustChangePassword) {
+  screen.hidden = false;
+  startup.hidden = true;
+  await leaveChange('Sign in again to choose your new password.');
+} else if (session && navigator.gpu) {
   startup.hidden = true;
   cover.hidden = false;
   opening = true;

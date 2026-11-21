@@ -12,6 +12,13 @@ pub(crate) const COOKIE: &str = "rast_session";
 pub(crate) const MIN_PASSWORD: usize = 8;
 pub(crate) const MAX_PASSWORD: usize = 1024;
 
+/// Lowercase hex from `bytes` random bytes: public ids such as a session's.
+pub(crate) fn random_id(bytes: usize) -> String {
+    let mut buffer = vec![0u8; bytes];
+    getrandom::getrandom(&mut buffer).expect("the OS random source works");
+    buffer.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// URL-safe random text from `bytes` random bytes.
 pub(crate) fn random_token(bytes: usize) -> String {
     let mut buffer = vec![0u8; bytes];
@@ -47,10 +54,38 @@ pub(crate) fn cookie_token(headers: &HeaderMap) -> Option<String> {
         .filter(|value| !value.is_empty() && value.len() <= 128)
 }
 
-/// The signed-in account and the hash of its session.
+/// The client's address as nginx passes it (`X-Client-IP`, from Cloudflare's
+/// `CF-Connecting-IP`); empty when unknown or not an IP address.
+pub(crate) fn client_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-client-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+        .map(|ip| ip.to_string())
+        .unwrap_or_default()
+}
+
+/// Where a request comes from, for a new session.
+pub(crate) fn origin(headers: &HeaderMap) -> db::Origin {
+    let user_agent: String = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(256)
+        .collect();
+    db::Origin {
+        ip: client_ip(headers),
+        user_agent,
+    }
+}
+
+/// The signed-in account, the hash of its session token and the session's id.
 pub(crate) struct Signed {
     pub(crate) user: User,
     pub(crate) session: String,
+    pub(crate) session_id: String,
 }
 
 pub(crate) async fn signed_in(
@@ -61,15 +96,79 @@ pub(crate) async fn signed_in(
         return Ok(None);
     };
     let session = token_hash(&token);
-    Ok(db::session_user(&state.pool, &session)
-        .await?
-        .map(|user| Signed { user, session }))
+    let Some((user, session_id, last_seen)) = db::session_user(&state.pool, &session).await? else {
+        return Ok(None);
+    };
+    if db::now() - last_seen >= 60 {
+        db::touch_session(&state.pool, &session).await?;
+    }
+    Ok(Some(Signed {
+        user,
+        session,
+        session_id,
+    }))
 }
 
+/// A signed-in account that may use RAST: one whose password an administrator
+/// set must choose its own first (see [`require_any`]).
 pub(crate) async fn require(state: &AppState, headers: &HeaderMap) -> Result<Signed, ApiError> {
+    let signed = require_any(state, headers).await?;
+    if signed.user.must_change_password {
+        return Err(ApiError::forbidden(
+            "Choose a new password before you continue.",
+        ));
+    }
+    Ok(signed)
+}
+
+/// Any signed-in account, including one that still has to choose a password.
+pub(crate) async fn require_any(state: &AppState, headers: &HeaderMap) -> Result<Signed, ApiError> {
     signed_in(state, headers)
         .await?
         .ok_or_else(|| ApiError::unauthorized("Sign in to continue."))
+}
+
+/// A short name for the browser and system in a User-Agent, such as
+/// "Chrome on Windows". Order matters: Edge and Opera also say Chrome, and
+/// Chrome also says Safari.
+pub(crate) fn device(user_agent: &str) -> String {
+    let ua = user_agent;
+    let browser = if ua.contains("Edg/") || ua.contains("EdgA/") || ua.contains("EdgiOS/") {
+        "Edge"
+    } else if ua.contains("OPR/") || ua.contains("Opera") {
+        "Opera"
+    } else if ua.contains("Firefox/") || ua.contains("FxiOS/") {
+        "Firefox"
+    } else if ua.contains("Chrome/") || ua.contains("CriOS/") || ua.contains("Chromium/") {
+        "Chrome"
+    } else if ua.contains("Safari/") {
+        "Safari"
+    } else if ua.contains("curl/") {
+        "curl"
+    } else {
+        ""
+    };
+    let system = if ua.contains("iPhone") || ua.contains("iPad") || ua.contains("iPod") {
+        "iOS"
+    } else if ua.contains("Android") {
+        "Android"
+    } else if ua.contains("CrOS") {
+        "ChromeOS"
+    } else if ua.contains("Windows") {
+        "Windows"
+    } else if ua.contains("Mac OS X") || ua.contains("Macintosh") {
+        "macOS"
+    } else if ua.contains("Linux") || ua.contains("X11") {
+        "Linux"
+    } else {
+        ""
+    };
+    match (browser, system) {
+        ("", "") => "Unknown device".to_owned(),
+        (browser, "") => browser.to_owned(),
+        ("", system) => system.to_owned(),
+        (browser, system) => format!("{browser} on {system}"),
+    }
 }
 
 pub(crate) async fn hash_password(password: String) -> Result<String, ApiError> {
@@ -168,6 +267,30 @@ mod tests {
         for bad in ["", "-dash", "has space", "émile", &"a".repeat(33)] {
             assert!(validate_username(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn devices_are_named_from_the_user_agent() {
+        let chrome = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
+        let edge = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 Edg/140.0";
+        let safari = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+        let firefox =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.5; rv:130.0) Gecko/20100101 Firefox/130.0";
+        assert_eq!(device(chrome), "Chrome on Linux");
+        assert_eq!(device(edge), "Edge on Windows");
+        assert_eq!(device(safari), "Safari on iOS");
+        assert_eq!(device(firefox), "Firefox on macOS");
+        assert_eq!(device(""), "Unknown device");
+    }
+
+    #[test]
+    fn client_addresses_must_be_ip_addresses() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(client_ip(&headers), "");
+        headers.insert("x-client-ip", "203.0.113.7".parse().unwrap());
+        assert_eq!(client_ip(&headers), "203.0.113.7");
+        headers.insert("x-client-ip", "<script>".parse().unwrap());
+        assert_eq!(client_ip(&headers), "");
     }
 
     #[test]

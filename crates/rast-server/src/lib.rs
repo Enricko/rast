@@ -3,7 +3,12 @@
 //! * Passwords: Argon2id PHC strings; the password itself is never stored.
 //! * Sessions: a random 256-bit token in an `HttpOnly; Secure; SameSite=Strict`
 //!   cookie. The database keeps only its SHA-256, so a leaked database cannot be
-//!   replayed as a session.
+//!   replayed as a session. Each session records the client address and browser
+//!   it signed in from; people end their own, administrators end others'.
+//! * Lockout: wrong passwords are throttled per account and address; ten in
+//!   half an hour lock the account for 15 minutes, until an administrator
+//!   unlocks it. A password an administrator set must be replaced at the next
+//!   sign-in before anything else is allowed.
 //! * CSRF: every request that changes state must carry `X-RAST: 1`. Browsers
 //!   only send custom headers cross-origin after a CORS preflight, which this
 //!   server never approves; together with `SameSite=Strict` that blocks
@@ -19,6 +24,9 @@ mod db;
 mod groups;
 mod limit;
 mod roles;
+mod sessions;
+#[cfg(test)]
+mod tests;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

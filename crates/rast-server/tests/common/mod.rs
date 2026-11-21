@@ -46,9 +46,37 @@ impl Client {
         body: Option<Value>,
         marked: bool,
     ) -> Reply {
+        self.send(method, path, session, body, marked, &[]).await
+    }
+
+    /// A call with extra headers, such as a browser's `user-agent` or the
+    /// `x-client-ip` nginx adds.
+    pub async fn call_from(
+        &self,
+        method: &str,
+        path: &str,
+        session: Option<&str>,
+        body: Option<Value>,
+        headers: &[(&str, &str)],
+    ) -> Reply {
+        self.send(method, path, session, body, true, headers).await
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        session: Option<&str>,
+        body: Option<Value>,
+        marked: bool,
+        headers: &[(&str, &str)],
+    ) -> Reply {
         let mut request = Request::builder().method(method).uri(path);
         if marked {
             request = request.header("x-rast", "1");
+        }
+        for (name, value) in headers {
+            request = request.header(*name, *value);
         }
         if let Some(session) = session {
             request = request.header(header::COOKIE, format!("rast_session={session}"));
@@ -100,6 +128,19 @@ impl Client {
             Some(json!({"username": username, "password": "a good password", "role": role})),
         )
         .await
+    }
+
+    /// The id of account `username`, as the Super Admin session `root` lists it.
+    pub async fn id_of(&self, root: &str, username: &str) -> i64 {
+        let list = self.call("GET", "/api/users", Some(root), None).await;
+        list.body["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|u| u["username"] == username)
+            .unwrap()["id"]
+            .as_i64()
+            .unwrap()
     }
 
     pub async fn login(&self, username: &str, password: &str) -> Reply {

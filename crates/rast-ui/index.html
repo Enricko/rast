@@ -92,25 +92,26 @@
               <label for="setup-token">Setup token</label>
               <input id="setup-token" type="text" placeholder="from the server" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
             </div>
-            <div class="login-field">
+            <div id="username-row" class="login-field">
               <label for="username">Username</label>
               <input id="username" type="text" placeholder="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
             </div>
             <div class="login-field">
-              <label for="password">Password</label>
+              <label id="password-label" for="password">Password</label>
               <div class="login-password-control">
                 <input id="password" type="password" placeholder="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" required>
                 <button id="password-toggle" type="button" aria-label="Show password" aria-controls="password confirm">Show</button>
               </div>
             </div>
             <div id="confirm-row" class="login-field" hidden>
-              <label for="confirm">Confirm password</label>
+              <label id="confirm-label" for="confirm">Confirm password</label>
               <input id="confirm" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
             </div>
             <p id="login-error" role="alert"></p>
             <button id="submit-login" type="submit">Sign in</button>
           </fieldset>
           <p id="login-note" class="login-local-note">No public sign-up. Ask an administrator for an account.</p>
+          <button id="change-cancel" type="button" hidden>Use another account</button>
           <p id="status" role="status" hidden></p>
         </form>
         <footer class="login-footer">

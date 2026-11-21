@@ -9,10 +9,13 @@ which RAST server it belongs to and survives that server going away.
 In the browser the shell signs in to the **RAST server** (accounts with the
 roles Super Admin, Admin and User, an `HttpOnly` session cookie, and a one-time
 setup token for the first Super Admin; see [docs/AUTH-STORAGE.md](AUTH-STORAGE.md)).
-Administrators manage accounts in **Control Panel → Users**. Super Admins also
-allow or deny apps for groups under **Control Panel → Groups** and per account
-under **Apps & groups**. Everyone can change their password and see which apps
-they may open under **Profile**.
+Administrators manage accounts in **Control Panel → Users** (search, filters,
+temporary passwords, unlocking, signing an account out everywhere). Super Admins
+also allow or deny apps for groups under **Control Panel → Groups** and per
+account under **Apps & groups**. Under **Profile** everyone changes their name
+and password, sees which apps they may open, and ends sessions on other devices.
+Someone given a temporary password chooses their own on the sign-in page before
+the desktop opens.
 
 The native shell opens on a **device login**: the first launch asks for a username and a
 password (8+ characters), later launches prefill the username, and *Sign out*

@@ -46,7 +46,12 @@ Admins and Admins create accounts in Control Panel → Users. Super Admins set
 up groups and their app rules under Control Panel → Groups.
 
 Logs: `journalctl -u rast-revamp`. Failed sign-ins are throttled per username
-and per visitor IP (Cloudflare's `CF-Connecting-IP`, passed as `X-Client-IP`).
+and per visitor IP (Cloudflare's `CF-Connecting-IP`, passed as `X-Client-IP`),
+and 10 wrong passwords within 30 minutes lock the account for 15 minutes; an
+administrator can unlock it on the account's page. The installer upgrades the
+database schema in place when the server starts. Dump it first
+(`sudo sqlite3 -readonly /var/lib/rast-revamp/rast.db .dump > backup.sql`, kept
+owner-only: it holds password hashes) so an upgrade can be undone.
 
 ### Caching, updates and rollback
 

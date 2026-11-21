@@ -32,9 +32,11 @@ impl State {
         control.notice = None;
     }
 
+    /// Back to the list. What was said about the page you leave goes with it.
     pub(crate) fn back_to_groups(&mut self) {
         self.control.page = Page::List;
         self.control.error = None;
+        self.control.notice = None;
         self.control.confirm_delete = false;
     }
 

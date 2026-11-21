@@ -186,7 +186,14 @@ pub(crate) async fn create(
             "There is already a group called {name}."
         )));
     };
-    db::audit(&state.pool, Some(actor.id), "group.created", &name).await;
+    db::audit_from(
+        &state.pool,
+        Some(actor.id),
+        "group.created",
+        &name,
+        &auth::client_ip(&headers),
+    )
+    .await;
     let group = db::group_by_id(&state.pool, id)
         .await?
         .ok_or_else(group_gone)?;
@@ -248,11 +255,12 @@ pub(crate) async fn update(
     if let Some(members) = &change.members {
         what.push(format!("{} members", members.len()));
     }
-    db::audit(
+    db::audit_from(
         &state.pool,
         Some(actor.id),
         "group.updated",
         &format!("{}: {}", group.name, what.join(", ")),
+        &auth::client_ip(&headers),
     )
     .await;
     let group = db::group_by_id(&state.pool, id)
@@ -271,11 +279,12 @@ pub(crate) async fn delete(
         .await?
         .ok_or_else(group_gone)?;
     db::delete_group(&state.pool, id).await?;
-    db::audit(
+    db::audit_from(
         &state.pool,
         Some(actor.id),
         "group.deleted",
         &format!("{} ({} members)", group.name, group.member_ids.len()),
+        &auth::client_ip(&headers),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
@@ -332,11 +341,12 @@ pub(crate) async fn update_user_access(
     if let Some(groups) = &groups {
         what.push(format!("{} groups", groups.len()));
     }
-    db::audit(
+    db::audit_from(
         &state.pool,
         Some(actor.id),
         "user.access_updated",
         &format!("{}: {}", user.username, what.join(", ")),
+        &auth::client_ip(&headers),
     )
     .await;
     access_body(&state, &user).await.map(Json)

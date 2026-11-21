@@ -450,6 +450,10 @@ fn sample_accounts() -> Vec<server::Account> {
             disabled,
             created_at: 1_762_000_000 + id * 86_400,
             last_login_at,
+            must_change_password: false,
+            locked_until: None,
+            failed_attempts: 0,
+            groups: Vec::new(),
         };
     vec![
         account(
@@ -468,16 +472,67 @@ fn sample_accounts() -> Vec<server::Account> {
             false,
             Some(1_763_600_000),
         ),
-        account(3, "bob", "", server::Role::User, false, None),
-        account(
-            4,
-            "cat",
-            "Cat Rivera",
-            server::Role::User,
-            true,
-            Some(1_763_100_000),
-        ),
+        server::Account {
+            must_change_password: true,
+            groups: vec!["Staff".to_owned()],
+            ..account(3, "bob", "", server::Role::User, false, None)
+        },
+        server::Account {
+            groups: vec!["Interns".to_owned(), "Staff".to_owned()],
+            ..account(
+                4,
+                "cat",
+                "Cat Rivera",
+                server::Role::User,
+                true,
+                Some(1_763_100_000),
+            )
+        },
+        server::Account {
+            locked_until: Some(now_secs() + 11 * 60),
+            failed_attempts: 10,
+            ..account(
+                5,
+                "dan",
+                "Dan Okafor",
+                server::Role::User,
+                false,
+                Some(1_763_500_000),
+            )
+        },
     ]
+}
+
+fn now_secs() -> i64 {
+    rune::time::system_now()
+        .duration_since(rune::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Where an account is signed in: this browser, a laptop and a phone.
+fn sample_sessions() -> Vec<server::SessionInfo> {
+    let now = now_secs();
+    [
+        ("3f9a", true, "Chrome on Windows", "203.0.113.5", 2 * 3_600),
+        (
+            "7c21",
+            false,
+            "Firefox on Linux",
+            "198.51.100.9",
+            3 * 86_400,
+        ),
+        ("b604", false, "Safari on iOS", "", 9 * 86_400),
+    ]
+    .into_iter()
+    .map(|(id, current, device, ip, age)| server::SessionInfo {
+        id: id.to_owned(),
+        current,
+        device: device.to_owned(),
+        ip: ip.to_owned(),
+        created_at: now - age,
+        last_seen_at: if current { now } else { now - age / 3 },
+    })
+    .collect()
 }
 
 fn sample_apps() -> Vec<server::AppInfo> {
@@ -586,6 +641,18 @@ fn scene_users(state: &mut State) {
 fn scene_user(state: &mut State) {
     scene_users(state);
     state.open_account(2);
+    while state.inbox.rx.try_recv().is_ok() {}
+    state.control.account_sessions = Some((2, sample_sessions()[1..].to_vec()));
+    state.toggle_app_maximized();
+}
+
+/// An account locked after wrong passwords, as its administrator sees it.
+fn scene_locked_user(state: &mut State) {
+    scene_users(state);
+    state.open_account(5);
+    while state.inbox.rx.try_recv().is_ok() {}
+    state.control.account_sessions = Some((5, Vec::new()));
+    state.toggle_app_maximized();
 }
 
 fn scene_create_user(state: &mut State) {
@@ -596,6 +663,9 @@ fn scene_create_user(state: &mut State) {
 fn scene_profile(state: &mut State) {
     scene_users(state);
     state.open_control_tab(desktop::control::Tab::Profile);
+    while state.inbox.rx.try_recv().is_ok() {}
+    state.control.sessions = Some(sample_sessions());
+    state.toggle_app_maximized();
 }
 
 fn with_groups(state: &mut State) {
@@ -682,6 +752,7 @@ fn app_spec() -> AppSpec<State> {
             ("setup", scene_setup),
             ("users", scene_users),
             ("user", scene_user),
+            ("locked-user", scene_locked_user),
             ("create-user", scene_create_user),
             ("profile", scene_profile),
             ("groups", scene_groups),

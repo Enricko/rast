@@ -110,8 +110,32 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   - On pages full of controls (an account, a group, *Apps & groups*) *Saved.*
     and errors appear in the page header, so the controls under the pointer
     stay where they are.
+- **Account protection and session control** (step 3, porting the classic
+  RAST and Remake *Users* features):
+  - Temporary passwords: a password set when creating an account or later is
+    temporary by default. The sign-in page then asks for a new one before the
+    desktop opens, and the server refuses everything else until it is chosen.
+    The Remake stored this flag but never enforced it.
+  - Lockout: 10 wrong passwords within 30 minutes lock the account for 15
+    minutes, across restarts. A locked account gets the same answer as a
+    throttled one even with the right password. Administrators see *Locked
+    until …* and *Unlock* on the account's page.
+  - Sessions: each records its device and IP. *Profile → Sessions* ends one
+    session or all others. An account's page lists its sessions and has *Sign
+    out everywhere*. Resets, disabling and requiring a new password sign the
+    account out.
+  - *Users* gets search (name, role or group), *All / Active / Disabled /
+    Locked* filters, group names on each row and one status badge. An
+    account's page edits its display name and toggles *New password at next
+    sign-in*. *Profile* edits your own display name.
+  - The audit log records IP addresses, lockouts, unlocks, ended sessions and
+    profile changes. SQLite runs with `synchronous=FULL`, `secure_delete` and
+    `trusted_schema=OFF`; schema version 3 upgrades in place.
 
 ### Fixed
+
+- Going back from an account or group page no longer repeats its last notice
+  above the list, which pushed the rows down under the pointer.
 
 - The revamp web build publishes matching JavaScript and WebAssembly under a
   content-addressed URL. The installer switches the HTML only after all assets

@@ -71,7 +71,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         headers = {
             name: value
             for name, value in self.headers.items()
-            if name.lower() in ("content-type", "cookie", "x-rast")
+            # The user agent names the device in the session list, as nginx passes it.
+            if name.lower() in ("content-type", "cookie", "x-rast", "user-agent")
         }
         headers["X-Client-IP"] = self.client_address[0]
         request = urllib.request.Request(api + self.path, data=body, headers=headers, method=self.command)

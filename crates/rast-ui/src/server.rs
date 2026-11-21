@@ -70,6 +70,18 @@ pub(crate) struct Account {
     pub(crate) created_at: i64,
     #[serde(default)]
     pub(crate) last_login_at: Option<i64>,
+    /// An administrator set the password; a new one is due at the next sign-in.
+    #[serde(default)]
+    pub(crate) must_change_password: bool,
+    /// Sign-in is refused until then after repeated wrong passwords.
+    #[serde(default)]
+    pub(crate) locked_until: Option<i64>,
+    /// Recent wrong passwords.
+    #[serde(default)]
+    pub(crate) failed_attempts: i64,
+    /// Group names.
+    #[serde(default)]
+    pub(crate) groups: Vec<String>,
 }
 
 impl Account {
@@ -81,6 +93,29 @@ impl Account {
             &self.display_name
         }
     }
+
+    pub(crate) fn locked(&self) -> bool {
+        self.locked_until.is_some()
+    }
+}
+
+/// A device an account is signed in on.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionInfo {
+    pub(crate) id: String,
+    /// The session this desktop uses.
+    #[serde(default)]
+    pub(crate) current: bool,
+    /// "Chrome on Windows".
+    #[serde(default)]
+    pub(crate) device: String,
+    #[serde(default)]
+    pub(crate) ip: String,
+    #[serde(default)]
+    pub(crate) created_at: i64,
+    #[serde(default)]
+    pub(crate) last_seen_at: i64,
 }
 
 /// A failed call: the HTTP status (0 when the server was unreachable) and a
@@ -275,6 +310,12 @@ pub(crate) enum Reply {
     UserAccess(i64, Result<Access, Failure>),
     /// The signed-in account's own access.
     MyAccess(Result<Access, Failure>),
+    /// Your sessions, after loading them or (`true`) ending some.
+    MySessions(Result<Vec<SessionInfo>, Failure>, bool),
+    /// An account's sessions, after loading them or (`true`) ending them.
+    UserSessions(i64, Result<Vec<SessionInfo>, Failure>, bool),
+    /// Your own display name was saved.
+    ProfileSaved(Result<Account, Failure>),
 }
 
 /// Where finished calls wait for `poll`.
@@ -297,17 +338,24 @@ pub(crate) struct NewAccount {
     pub(crate) display_name: String,
     pub(crate) password: String,
     pub(crate) role: Role,
+    pub(crate) must_change_password: bool,
 }
 
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AccountChange {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) role: Option<Role>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) disabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) password: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) must_change_password: Option<bool>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) unlock: bool,
 }
 
 #[derive(Deserialize)]
@@ -318,6 +366,11 @@ struct AccountsBody {
 #[derive(Deserialize)]
 struct AccountBody {
     user: Account,
+}
+
+#[derive(Deserialize)]
+struct SessionsBody {
+    sessions: Vec<SessionInfo>,
 }
 
 #[derive(Deserialize)]
@@ -387,6 +440,66 @@ impl Calls<'_> {
             Some(body),
             |result| Reply::PasswordChanged(result.map(|_| ())),
         );
+    }
+
+    pub(crate) fn save_profile(&self, display_name: &str) {
+        let body = serde_json::json!({ "displayName": display_name }).to_string();
+        self.run(
+            "PATCH",
+            "/api/auth/profile".to_owned(),
+            Some(body),
+            |result| {
+                Reply::ProfileSaved(
+                    result.and_then(|body| parse::<AccountBody>(&body).map(|b| b.user)),
+                )
+            },
+        );
+    }
+
+    fn sessions_call(&self, method: &'static str, path: String) {
+        let changed = method != "GET";
+        self.run(method, path, None, move |result| {
+            Reply::MySessions(
+                result.and_then(|body| parse::<SessionsBody>(&body).map(|b| b.sessions)),
+                changed,
+            )
+        });
+    }
+
+    pub(crate) fn my_sessions(&self) {
+        self.sessions_call("GET", "/api/auth/sessions".to_owned());
+    }
+
+    pub(crate) fn end_my_session(&self, id: &str) {
+        self.sessions_call("DELETE", format!("/api/auth/sessions/{id}"));
+    }
+
+    pub(crate) fn end_my_other_sessions(&self) {
+        self.sessions_call("DELETE", "/api/auth/sessions".to_owned());
+    }
+
+    fn user_sessions_call(&self, method: &'static str, id: i64) {
+        let changed = method != "GET";
+        self.run(
+            method,
+            format!("/api/users/{id}/sessions"),
+            None,
+            move |result| {
+                Reply::UserSessions(
+                    id,
+                    result.and_then(|body| parse::<SessionsBody>(&body).map(|b| b.sessions)),
+                    changed,
+                )
+            },
+        );
+    }
+
+    pub(crate) fn user_sessions(&self, id: i64) {
+        self.user_sessions_call("GET", id);
+    }
+
+    pub(crate) fn end_user_sessions(&self, id: i64) {
+        self.user_sessions_call("DELETE", id);
     }
 
     pub(crate) fn groups(&self) {
@@ -556,6 +669,56 @@ mod tests {
         assert_eq!(users[0].name(), "root");
         assert_eq!(users[1].name(), "Bob B");
         assert!(users[1].disabled);
+    }
+
+    #[test]
+    fn protection_fields_and_sessions_parse() {
+        let body = r#"{"users":[{"id":3,"username":"cat","role":"user","mustChangePassword":true,
+            "lockedUntil":1800000000,"failedAttempts":10,"groups":["Staff"]}]}"#;
+        let cat = &parse::<AccountsBody>(body).unwrap().users[0];
+        assert!(cat.must_change_password && cat.locked());
+        assert_eq!(cat.groups, ["Staff"]);
+        let older = r#"{"users":[{"id":1,"username":"root","role":"superadmin"}]}"#;
+        let root = &parse::<AccountsBody>(older).unwrap().users[0];
+        assert!(
+            !root.locked() && root.groups.is_empty(),
+            "fields are optional"
+        );
+
+        let sessions = r#"{"sessions":[{"id":"ab","current":true,"device":"Chrome on Linux",
+            "ip":"203.0.113.5","createdAt":1,"lastSeenAt":2,"expiresAt":3},
+            {"id":"cd","current":false,"device":"Safari on iOS","ip":"","createdAt":1,"lastSeenAt":1}]}"#;
+        let sessions = parse::<SessionsBody>(sessions).unwrap().sessions;
+        assert!(sessions[0].current && !sessions[1].current);
+        assert_eq!(
+            (sessions[0].device.as_str(), sessions[0].ip.as_str()),
+            ("Chrome on Linux", "203.0.113.5")
+        );
+        assert_eq!(
+            (sessions[1].id.as_str(), sessions[1].last_seen_at),
+            ("cd", 1)
+        );
+    }
+
+    #[test]
+    fn unlocking_and_forced_changes_serialize() {
+        let change = AccountChange {
+            unlock: true,
+            ..AccountChange::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&change).unwrap(),
+            r#"{"unlock":true}"#
+        );
+        let reset = AccountChange {
+            password: Some("temporary pass".to_owned()),
+            must_change_password: Some(true),
+            ..AccountChange::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&reset).unwrap(),
+            r#"{"password":"temporary pass","mustChangePassword":true}"#
+        );
     }
 
     #[test]
