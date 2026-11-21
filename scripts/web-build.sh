@@ -108,6 +108,7 @@ $dev || bindgen_args+=(--remove-name-section)
 wasm-bindgen "${bindgen_args[@]}" "$artifact"
 
 cp "crates/$package/index.html" "$out/index.html"
+cp "crates/$package/boot.js" "$out/boot.js"
 
 # Rune embeds a Latin/Greek/Cyrillic cut of Inter and fetches the full faces from
 # beside app.js after the first frame. Copy the ones the build embedded, if any;

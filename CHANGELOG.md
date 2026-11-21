@@ -47,6 +47,14 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   at `/revamp/` next to the running desktop without replacing it),
   `scripts/publish-web.sh` (build + print the root commands) and
   `scripts/serve-web.py` (dev server with the right `.wasm` MIME type).
+- `deploy/install-revamp.sh`: one idempotent root command that publishes the
+  browser build at the new `desktop-revamp.lufria.tech` (static files, nginx
+  site on `127.0.0.1:8722`, Cloudflare Tunnel ingress with a config backup,
+  local and public checks). The old `desktop.lufria.tech` is untouched.
+- The page bootstrap moved to `crates/rast-ui/boot.js` so the deployed page
+  works under the production CSP (`script-src 'self' 'wasm-unsafe-eval'`, no
+  inline script); `scripts/serve-web.py` now mirrors the production headers, and
+  the browser build was verified booting in headless Chromium with WebGPU.
 
 ### Notes
 

@@ -3,6 +3,49 @@
 This page is the honest state of deploying the rewrite. Read it before touching
 `desktop.lufria.tech`.
 
+## desktop-revamp.lufria.tech (the new hostname)
+
+The maintainer created `desktop-revamp.lufria.tech`. Checked on 2026-11-21: DNS
+resolves through Cloudflare, but the edge answers **404** because the tunnel's
+ingress has no rule for the hostname (`/etc/cloudflared/config.yml` has no
+`desktop-revamp` entry and still ends with the catch-all `http_status:404`).
+
+This session cannot add it: the host filesystem is read-only outside the
+checkout and `sudo` is blocked, so `/etc/cloudflared` and `/etc/nginx` are out of
+reach. The last step is **one root command** on the host:
+
+```sh
+cd /home/lufria/RAST && git pull
+scripts/web-build.sh          # rebuild the browser bundle (needs wasm-bindgen-cli)
+sudo deploy/install-revamp.sh
+```
+
+`deploy/install-revamp.sh` is idempotent and does, with a check after each step:
+
+1. copies `dist/web` to `/srv/rast-static/revamp`;
+2. installs `deploy/nginx-revamp-site.conf` as an nginx site on
+   `127.0.0.1:8722` and reloads nginx;
+3. inserts `desktop-revamp.lufria.tech -> http://127.0.0.1:8722` into the
+   Cloudflare Tunnel ingress (backs up `config.yml` first, then
+   `cloudflared tunnel ingress validate`, then `systemctl reload-or-restart cloudflared`);
+4. checks the site on `127.0.0.1:8722` and then on
+   `https://desktop-revamp.lufria.tech/`.
+
+`https://desktop.lufria.tech/` keeps serving the released RAST: it is a
+different nginx server block and a different tunnel hostname. Undo steps are in
+the script's header.
+
+DNS must already point the hostname at the tunnel (Cloudflare dashboard: a
+proxied `CNAME` to `<tunnel-id>.cfargotunnel.com`, or
+`cloudflared tunnel route dns <tunnel-name> desktop-revamp.lufria.tech`). The
+script's last step fails with that hint if the public URL does not come up.
+
+Until that runs, the browser build is verified locally: the wasm page boots
+under the production CSP with WebGPU (headless Chromium, SwiftShader) and shows
+the client shell.
+
+![The browser build booting under the production CSP](screenshots/2026-11-21-browser-preview.png)
+
 ## Current production is not this code
 
 `desktop.lufria.tech` still runs the **last released RAST 1.0.1-alpha.2** from

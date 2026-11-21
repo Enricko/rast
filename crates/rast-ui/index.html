@@ -29,18 +29,6 @@
 </head>
 <body>
 <div id="status">Loading RAST…</div>
-<script type="module">
-  import init from './app.js';
-  try {
-    if (!navigator.gpu) {
-      throw new Error('RAST needs a browser with WebGPU (Chrome/Edge 113+, Safari 26+, Firefox with WebGPU enabled) over HTTPS.');
-    }
-    await init();
-    document.querySelector('#status').remove();
-  } catch (error) {
-    document.querySelector('#status').textContent = String(error);
-    console.error(error);
-  }
-</script>
+<script type="module" src="./boot.js"></script>
 </body>
 </html>

@@ -23,8 +23,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     }
 
     def end_headers(self):
+        # Mirror the production headers in deploy/nginx-revamp-site.conf, so a
+        # local smoke test also proves the strict CSP lets the page boot.
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Cross-Origin-Opener-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+            "font-src 'self' data:; connect-src 'self'; object-src 'none'; "
+            "base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        )
         super().end_headers()
 
 
