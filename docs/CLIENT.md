@@ -10,7 +10,10 @@ The shell opens on a **device login**: the first launch asks for a username and 
 password (8+ characters), later launches prefill the username, and *Sign out*
 returns to the login screen. The classic RAST layout uses the original Alpine
 Dawn wallpaper (CC0-1.0), a two-panel desktop view, and a single-column compact
-view. The password is hashed with **Argon2id** and never stored in plaintext:
+view. In the browser, the form is built with HTML and CSS so zoom and mobile
+scrolling do not resize or clear a Rune canvas. The Rune workspace opens only
+after the local login succeeds. The password is hashed with **Argon2id** and
+never stored in plaintext:
 
 - natively: one `0600` file per OS (paths below),
 - in the browser: this browser's `localStorage` (preview; a real deployment

@@ -63,8 +63,7 @@ impl DeviceAccount {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = path;
-            let text = browser_storage()?.get_item(BROWSER_KEY).ok()??;
-            Self::parse(&text)
+            Self::load_browser().ok().flatten()
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -124,11 +123,7 @@ impl DeviceAccount {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = path;
-            let storage = browser_storage()
-                .ok_or_else(|| io::Error::other("browser storage is unavailable"))?;
-            return storage
-                .set_item(BROWSER_KEY, &self.render())
-                .map_err(|_| io::Error::other("the browser refused to store the device login"));
+            self.save_browser()
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -149,15 +144,33 @@ impl DeviceAccount {
             fs::rename(&temp, path)
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    pub fn load_browser() -> io::Result<Option<Self>> {
+        let raw = browser_storage()?
+            .get_item("rast.device-account")
+            .map_err(|_| io::Error::other("Could not read the local login."))?;
+        raw.map(|record| {
+            Self::parse(&record)
+                .ok_or_else(|| io::Error::other("The saved local login could not be read."))
+        })
+        .transpose()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn save_browser(&self) -> io::Result<()> {
+        browser_storage()?
+            .set_item("rast.device-account", &self.render())
+            .map_err(|_| io::Error::other("The browser refused to save the local login."))
+    }
 }
 
-/// localStorage key of the per-browser device account.
 #[cfg(target_arch = "wasm32")]
-const BROWSER_KEY: &str = "rast.device-account";
-
-#[cfg(target_arch = "wasm32")]
-fn browser_storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok()?
+fn browser_storage() -> io::Result<web_sys::Storage> {
+    web_sys::window()
+        .and_then(|window| window.local_storage().ok().flatten())
+        .ok_or_else(|| {
+            io::Error::other("Browser storage is unavailable. Allow site data for RAST and reload.")
+        })
 }
 
 fn validate_username(username: &str) -> Result<String, String> {

@@ -7,8 +7,8 @@ license.workspace = true
 rust-version.workspace = true
 
 # One crate, two targets: a native window binary and a wasm cdylib for the
-# browser (Rune's experimental WebGPU web target). The web entrypoint is the
-# `wasm_bindgen(start)` function at the bottom of src/lib.rs.
+# browser (Rune's experimental WebGPU web target). The HTML login calls the
+# exported browser bridge; Rune starts only after the device is unlocked.
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -35,7 +35,7 @@ getrandom = "0.2"
 wasm-bindgen = { workspace = true }
 # Web Crypto for the salt, and localStorage for the per-browser device account.
 getrandom = { version = "0.2", features = ["js"] }
-web-sys = { version = "0.3", features = ["Window", "Storage"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Event"] }
 
 [lints]
 workspace = true

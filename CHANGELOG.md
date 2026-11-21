@@ -81,6 +81,10 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
 - Restored RAST's classic login in Rune: Alpine Dawn wallpaper, the brand panel,
   blue sign-in action, and a light/dark switch. Small windows use a scrollable
   single column. Existing local accounts keep working without migration.
+- The classic browser login uses a responsive HTML form instead of a GPU
+  canvas. Browser zoom and mobile scrolling work without reinitializing a
+  render surface. Rune still renders the unlocked workspace; saved local
+  credentials and native sign-in are unchanged.
 
 ### Notes
 

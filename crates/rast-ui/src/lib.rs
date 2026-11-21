@@ -18,8 +18,11 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+#[cfg(target_arch = "wasm32")]
+mod browser;
 mod config;
 mod connection;
+#[cfg(not(target_arch = "wasm32"))]
 mod login;
 mod ui;
 
@@ -67,19 +70,24 @@ pub struct State {
     pub confirm_field: TextEdit,
     pub reveal_password: bool,
     pub login_error: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) login_dark: bool,
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) login_art: Option<login::Art>,
     pub(crate) account_path: Option<PathBuf>,
 }
 
 impl State {
     pub fn new(config: Config) -> Self {
+        Self::with_account(config, DeviceAccount::load())
+    }
+
+    fn with_account(config: Config, account: Option<DeviceAccount>) -> Self {
         let status = match ServerAddr::parse(&config.server) {
             Ok(_) => Status::connecting(),
             Err(error) => Status::setup_with(error),
         };
         let account_path = DeviceAccount::path();
-        let account = account_path.as_deref().and_then(DeviceAccount::load_from);
         let screen = if account.is_some() {
             Screen::Login
         } else {
@@ -102,7 +110,9 @@ impl State {
             confirm_field: TextEdit::new("").secure(),
             reveal_password: false,
             login_error: None,
+            #[cfg(not(target_arch = "wasm32"))]
             login_dark: true,
+            #[cfg(not(target_arch = "wasm32"))]
             login_art: None,
             account_path,
         }
@@ -243,7 +253,10 @@ fn init() -> State {
 }
 
 fn setup(state: &mut State, wake: Waker) {
-    state.login_art = Some(login::Art::load(wake.clone()));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        state.login_art = Some(login::Art::load(wake.clone()));
+    }
     if state.status.phase == Phase::Setup {
         return;
     }
@@ -321,11 +334,14 @@ fn signed_in(state: &mut State) {
     state.screen = Screen::Desktop;
 }
 
-/// Mount the shell: a native window on desktop targets, a canvas on the page in
-/// the browser (`wasm32-unknown-unknown`).
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
+/// Mount the native shell. Browser login mounts Rune separately after unlock.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start() {
-    rune::run(AppSpec::<State> {
+    rune::run(app_spec());
+}
+
+fn app_spec() -> AppSpec<State> {
+    AppSpec::<State> {
         min_size: Some((720.0, 480.0)),
         scenes: &[
             ("create-account", scene_create_account),
@@ -339,7 +355,7 @@ pub fn start() {
         setup: Some(setup),
         poll: Some(poll),
         ..AppSpec::new(TITLE, SIZE, init, ui::view)
-    });
+    }
 }
 
 #[cfg(test)]

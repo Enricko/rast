@@ -31,7 +31,10 @@ pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     match state.screen {
         Screen::Desktop if state.signed_in => desktop(state, &t),
         Screen::Settings if state.signed_in => settings(state, dark, &t),
+        #[cfg(not(target_arch = "wasm32"))]
         _ => crate::login::view(state, cx),
+        #[cfg(target_arch = "wasm32")]
+        _ => el().w_full().h_full().fill(t.bg),
     }
 }
 
@@ -125,7 +128,7 @@ fn desktop(state: &State, t: &tok::Theme) -> El {
                 .center_y()
                 .child(text("RAST").font(type_::TITLE).color(t.text).grow(1.0))
                 .child(text(who).font(type_::LABEL).color(t.text_secondary))
-                .child(button(t, "sign-out", "Sign out", false, State::sign_out))
+                .child(sign_out_button(t))
                 .child(button(
                     t,
                     "open-settings",
@@ -212,6 +215,15 @@ fn settings(state: &State, dark: bool, t: &tok::Theme) -> El {
     col().w_full().h_full().fill(t.bg).padding(32.0).child(card)
 }
 
+fn sign_out_button(t: &tok::Theme) -> El {
+    let button = button_look(t, "sign-out", "Sign out", false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let button = button.on_press(State::sign_out);
+    #[cfg(target_arch = "wasm32")]
+    let button = button.on_press_tx(crate::browser::sign_out);
+    button
+}
+
 fn button(
     t: &tok::Theme,
     key: &'static str,
@@ -219,6 +231,10 @@ fn button(
     primary: bool,
     on_press: fn(&mut State),
 ) -> El {
+    button_look(t, key, label, primary).on_press(on_press)
+}
+
+fn button_look(t: &tok::Theme, key: &'static str, label: &'static str, primary: bool) -> El {
     let fill = if primary {
         t.control_track
     } else {
@@ -236,7 +252,6 @@ fn button(
         .fill(fill)
         .motion(motion::SNAPPY)
         .child(text(label).font(type_::LABEL).color(color))
-        .on_press(on_press)
 }
 
 fn switch(

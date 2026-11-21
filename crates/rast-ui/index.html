@@ -1,33 +1,115 @@
 <!doctype html>
 <!--
-  RAST web shell. scripts/web-build.sh resolves the bootstrap URL to the
-  matching release. Rune renders the app in one canvas using WebGPU.
+  The web build resolves the stylesheet and bootstrap URLs to the matching
+  release. The browser handles the local unlock form; Rune renders the workspace.
 -->
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="color-scheme" content="dark light">
-<title>RAST</title>
-<style>
-  html, body {
-    margin: 0;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-    overscroll-behavior: none;
-    touch-action: none;
-    background: #101014;
-  }
-  #status {
-    font: 16px system-ui, sans-serif;
-    color: #c9c9d1;
-    padding: 24px;
-  }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark light">
+  <title>RAST</title>
+  <link rel="stylesheet" href="./login.css">
 </head>
 <body>
-<div id="status">Loading RAST…</div>
-<script type="module" src="./boot.js"></script>
+  <main id="login-screen" data-theme="dark">
+    <div class="login-shell">
+      <button id="theme-toggle" type="button" aria-label="Switch to light mode">
+        <svg class="login-icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 2.8v2.4m0 13.6v2.4M2.8 12h2.4m13.6 0h2.4M5.5 5.5l1.7 1.7m9.6 9.6 1.7 1.7m0-13-1.7 1.7m-9.6 9.6-1.7 1.7"/>
+        </svg>
+        <svg class="login-icon-moon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round">
+          <path d="M20.2 14.6A8.4 8.4 0 0 1 9.4 3.8a8.4 8.4 0 1 0 10.8 10.8z"/>
+        </svg>
+      </button>
+
+      <header class="login-brand">
+        <div class="login-brand-content">
+          <div class="login-lockup">
+            <span class="login-logo" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linejoin="round">
+                <path d="M12 2.6 20.4 7v10L12 21.4 3.6 17V7z"/>
+                <path fill="currentColor" stroke="none" d="M12 7.2 15.8 9.4v4.4L12 16l-3.8-2.2V9.4z"/>
+              </svg>
+            </span>
+            <div>
+              <p class="login-brand-name">RAST</p>
+              <p class="login-brand-definition">Resource Administration &amp; Storage Toolkit</p>
+            </div>
+          </div>
+          <div class="login-brand-intro">
+            <p class="login-tagline">A calm, fast home for your self-hosted server. Everything stays on your hardware.</p>
+            <ul class="login-features" role="list">
+              <li>
+                <span class="login-feature-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3.5 6.2h5.1l1.8 2.3h10.1v9.9a1.6 1.6 0 0 1-1.6 1.6H3.5zm0 6.4h17"/>
+                  </svg>
+                </span>
+                <div><strong>Files &amp; shared folders</strong><br>Browse, upload and manage server storage.</div>
+              </li>
+              <li>
+                <span class="login-feature-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="9.2" cy="8.6" r="3.2"/>
+                    <path d="M3.4 19.4c.7-3.2 3-4.9 5.8-4.9s5.1 1.7 5.8 4.9M15.4 5.9a3 3 0 0 1 0 5.6M17 14.9c2 .5 3.3 2 3.6 4.5"/>
+                  </svg>
+                </span>
+                <div><strong>People &amp; permissions</strong><br>Accounts, quotas, roles and an audit trail.</div>
+              </li>
+              <li>
+                <span class="login-feature-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3.4 12.4h4l2.6-6.8 4.1 13 2.5-6.2h4"/>
+                  </svg>
+                </span>
+                <div><strong>Live operations</strong><br>Monitoring, containers and backups in one place.</div>
+              </li>
+            </ul>
+            <p class="login-brand-note">Self-hosted · No telemetry · Revamp preview</p>
+          </div>
+        </div>
+      </header>
+
+      <div class="login-entry">
+        <form id="login-form" method="post" aria-labelledby="login-title" aria-describedby="login-subtitle">
+          <h1 id="login-title">Welcome back</h1>
+          <p id="login-subtitle">Sign in to your RAST workspace.</p>
+          <!-- No credential names: only the local JS handler can read these values. -->
+          <fieldset id="login-fields" disabled>
+            <div class="login-field">
+              <label for="username">Username</label>
+              <input id="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+            </div>
+            <div class="login-field">
+              <label for="password">Password</label>
+              <div class="login-password-control">
+                <input id="password" type="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" required>
+                <button id="password-toggle" type="button" aria-label="Show password" aria-controls="password confirm">Show</button>
+              </div>
+            </div>
+            <div id="confirm-row" class="login-field" hidden>
+              <label for="confirm">Confirm password</label>
+              <input id="confirm" type="password" autocomplete="new-password" autocapitalize="none" autocorrect="off" spellcheck="false">
+            </div>
+            <p id="login-error" role="alert"></p>
+            <button id="submit-login" type="submit">Sign in</button>
+          </fieldset>
+          <p class="login-local-note">Unlocks RAST only in this browser. No server sign-in.</p>
+          <p id="status" role="status" aria-live="polite">Loading RAST…</p>
+        </form>
+        <footer class="login-footer">
+          <span>RAST · Revamp</span>
+          <span>Local unlock · No server session</span>
+        </footer>
+      </div>
+    </div>
+    <p class="login-print">RAST — Browser-only workspace unlock.</p>
+  </main>
+  <div id="workspace-cover" hidden>
+    <p id="workspace-status" role="status">Opening your workspace…</p>
+  </div>
+  <script type="module" src="./boot.js"></script>
 </body>
 </html>
