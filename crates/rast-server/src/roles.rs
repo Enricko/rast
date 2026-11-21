@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Built-in roles. Groups (a later step) grant or deny apps on top of these.
+/// Built-in roles. Groups and account rules allow or deny apps for Users
+/// (see `access`); administrators open every app.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {

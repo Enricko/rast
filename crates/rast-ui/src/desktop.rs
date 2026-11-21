@@ -26,6 +26,10 @@ impl AppId {
     pub(super) const fn label(self) -> &'static str {
         "Control Panel"
     }
+    /// The id groups and rules use for this app (see the server's `access`).
+    pub(crate) const fn access_id(self) -> &'static str {
+        "controlpanel"
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +212,11 @@ impl State {
             if panel == Panel::Start {
                 self.desktop.search = TextEdit::new("");
             }
+            // The menus list Control Panel only when it may be opened, so ask
+            // again in case a Super Admin changed this account's groups.
+            if matches!(panel, Panel::Start | Panel::Account) {
+                self.refresh_access();
+            }
         }
     }
 
@@ -334,7 +343,7 @@ impl Art {
         macro_rules! icons {
             ($($name:literal),+ $(,)?) => { [$(($name, &include_bytes!(concat!("../assets/desktop/", $name, ".svg"))[..])),+] };
         }
-        let sources: [(&'static str, &'static [u8]); 18] = icons!(
+        let sources: [(&'static str, &'static [u8]); 19] = icons!(
             "files",
             "applications",
             "monitor",
@@ -352,7 +361,8 @@ impl Art {
             "wallpaper",
             "device",
             "users",
-            "profile"
+            "profile",
+            "groups"
         );
         let mut icons: HashMap<_, _> = sources
             .iter()

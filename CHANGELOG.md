@@ -93,6 +93,23 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
     data in `/var/lib/rast-revamp`), the nginx `/api/` proxy, and a server step
     in `deploy/install-revamp.sh`. `scripts/serve-web.py` forwards `/api/` to a
     local `rast-server`.
+- **Groups with app allow and deny** (step 2, as in classic RAST and Synology):
+  - Control Panel → *Groups* (Super Admin): create, rename and delete groups,
+    switch members on and off, and set every app to *Inherit*, *Allow* or
+    *Deny*.
+  - An account's *Apps & groups* page lists its groups and every app with
+    *Allowed* or *Denied* and the reason, and lets a Super Admin add rules on
+    the account itself. Admins see it read-only.
+  - A deny from any group or from the account wins, then any allow, then the
+    app's default. Super Admins and Admins open every app.
+  - *Profile → Your apps* shows each User what they may open. The Start and
+    account menus hide Control Panel when it is denied.
+  - The server enforces the rules on each app's API prefix, records group and
+    access changes and refused requests in the audit log, and upgrades the
+    database to schema version 2 in place.
+  - On pages full of controls (an account, a group, *Apps & groups*) *Saved.*
+    and errors appear in the page header, so the controls under the pointer
+    stay where they are.
 
 ### Fixed
 

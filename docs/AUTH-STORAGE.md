@@ -43,15 +43,46 @@ makes owner-only:
 - **First run.** With no accounts the server writes a random setup token to
   `<data>/setup-token` (`0600`). Creating the first account, always a Super
   Admin, needs it, so whoever opens a fresh public site first cannot claim it.
-- **Audit log.** Sign-ins, failed sign-ins, setup and account changes are
-  recorded in `audit_log`.
+- **Audit log.** Sign-ins, failed sign-ins, setup, account, group and access
+  changes, and refused app requests are recorded in `audit_log`.
+
+### Groups and app access
+
+Super Admins create **groups**, add accounts to them, and set each app to
+*Inherit*, *Allow* or *Deny* for the group. An account can carry rules of its
+own too. What an account may open is decided the same way as in classic RAST
+and Synology DSM:
+
+1. Super Admins and Admins open every app.
+2. Any **deny** wins, whether it is on the account or comes from any of its groups.
+3. Otherwise any **allow** grants the app.
+4. Otherwise the app's default applies: File Station, Resource Monitor,
+   Activity Logs and Control Panel are on for Users; Docker, Backup Center and
+   App Center are off.
+
+`crates/rast-server/src/access.rs` holds the app list and the one evaluator.
+Control Panel shows its answer with the reason (*Denied by Interns, which
+overrides an allow*) on an account's *Apps & groups* page and under
+*Profile → Your apps*. The server enforces the decision itself: every request
+under an app's prefix (`/api/files`, `/api/monitor`, `/api/logs`, `/api/docker`,
+`/api/backups`, `/api/packages`) needs a session, and a denied account gets
+`403` before any handler runs. The desktop only hides what is denied, such as
+Control Panel's entries in the Start and account menus.
+
+Admins can read groups and an account's access. Only Super Admins change them.
+Deleting a group or an account removes the memberships and rules with it
+(`ON DELETE CASCADE`). Schema version 2 adds `groups`, `group_members`,
+`group_app_rules` and `user_app_rules` to a version 1 database without
+touching its accounts.
 
 API: `GET /api/auth/state`, `POST /api/auth/{setup,login,logout,password}`,
-`GET|POST /api/users`, `PATCH|DELETE /api/users/{id}`. Errors are
-`{"error": "…"}` with a sentence meant for the user.
+`GET|POST /api/users`, `PATCH|DELETE /api/users/{id}`,
+`GET|PATCH /api/users/{id}/access`, `GET|POST /api/groups`,
+`PATCH|DELETE /api/groups/{id}` and `GET /api/access/me`. In a `PATCH`, an app
+set to `"inherit"` removes its rule. Errors are `{"error": "…"}` with a sentence
+meant for the user.
 
-Next: groups made by Super Admins that allow or deny apps (and later folders),
-with deny winning, as on a Synology NAS.
+Next: folder permissions per group and account, with the same deny-wins rule.
 
 ## Device login (native client)
 

@@ -85,6 +85,8 @@ pub struct State {
     pub(crate) session: Option<server::Account>,
     pub(crate) control: desktop::control::ControlPanel,
     pub(crate) inbox: server::Inbox,
+    /// What the server account may open, once the server has said.
+    pub(crate) access: Option<server::Access>,
 }
 
 impl State {
@@ -130,6 +132,7 @@ impl State {
             session: None,
             control: desktop::control::ControlPanel::default(),
             inbox: server::Inbox::default(),
+            access: None,
         }
     }
 
@@ -157,6 +160,32 @@ impl State {
         self.session
             .as_ref()
             .map_or("Local account", |session| session.role.label())
+    }
+
+    /// May the signed-in account open `app` (a server app id)? Without a server
+    /// session, and for administrators, everything is open. Until the server
+    /// answers, nothing is hidden; the server enforces the rules either way.
+    pub(crate) fn may_open(&self, app: &str) -> bool {
+        match &self.session {
+            None => true,
+            Some(session) if session.role.is_admin() => true,
+            Some(_) => self
+                .access
+                .as_ref()
+                .and_then(|access| access.allows(app))
+                .unwrap_or(true),
+        }
+    }
+
+    /// Ask the server again what this account may open (Users only).
+    pub(crate) fn refresh_access(&self) {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.role.is_admin())
+        {
+            self.calls().my_access();
+        }
     }
 
     pub(crate) fn calls(&self) -> server::Calls<'_> {
@@ -307,6 +336,7 @@ fn setup(state: &mut State, wake: Waker) {
     }
     state.desktop.load_art(wake.clone());
     state.wake = Some(wake.clone());
+    state.refresh_access();
     state.link = connection::spawn(&state.config, wake);
 }
 
@@ -450,6 +480,96 @@ fn sample_accounts() -> Vec<server::Account> {
     ]
 }
 
+fn sample_apps() -> Vec<server::AppInfo> {
+    [
+        ("files", "File Station", true),
+        ("monitor", "Resource Monitor", true),
+        ("logs", "Activity Logs", true),
+        ("controlpanel", "Control Panel", true),
+        ("applications", "Docker", false),
+        ("backup", "Backup Center", false),
+        ("packages", "App Center", false),
+    ]
+    .into_iter()
+    .map(|(id, label, default_allowed)| server::AppInfo {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        default_allowed,
+    })
+    .collect()
+}
+
+fn sample_groups() -> Vec<server::Group> {
+    use server::Rule::{Allow, Deny};
+    vec![
+        server::Group {
+            id: 2,
+            name: "Interns".to_owned(),
+            description: "Short-term accounts".to_owned(),
+            member_ids: vec![4],
+            apps: [("applications", Deny), ("logs", Deny)]
+                .into_iter()
+                .map(|(app, rule)| (app.to_owned(), rule))
+                .collect(),
+        },
+        server::Group {
+            id: 1,
+            name: "Staff".to_owned(),
+            description: "Everyone on the team".to_owned(),
+            member_ids: vec![3, 4],
+            apps: [("applications", Allow), ("backup", Allow)]
+                .into_iter()
+                .map(|(app, rule)| (app.to_owned(), rule))
+                .collect(),
+        },
+    ]
+}
+
+/// What `cat` (in Staff and Interns, with Backup Center denied on the account)
+/// may open, as the server would explain it.
+fn sample_access() -> server::Access {
+    use server::Source;
+    let decision = |id: &str, allowed, source, groups: &[&str], overridden| {
+        let label = sample_apps()
+            .into_iter()
+            .find(|app| app.id == id)
+            .map_or_else(String::new, |app| app.label);
+        server::Decision {
+            id: id.to_owned(),
+            label,
+            allowed,
+            source,
+            groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+            overridden,
+        }
+    };
+    server::Access {
+        groups: vec![
+            server::GroupRef {
+                id: 2,
+                name: "Interns".to_owned(),
+            },
+            server::GroupRef {
+                id: 1,
+                name: "Staff".to_owned(),
+            },
+        ],
+        group_ids: vec![1, 2],
+        rules: [("backup".to_owned(), server::Rule::Deny)]
+            .into_iter()
+            .collect(),
+        apps: vec![
+            decision("files", true, Source::Default, &[], false),
+            decision("monitor", true, Source::Default, &[], false),
+            decision("logs", false, Source::Group, &["Interns"], false),
+            decision("controlpanel", true, Source::Default, &[], false),
+            decision("applications", false, Source::Group, &["Interns"], true),
+            decision("backup", false, Source::Account, &[], true),
+            decision("packages", false, Source::Default, &[], false),
+        ],
+    }
+}
+
 /// A Super Admin signed in to the server with Control Panel open on Users.
 fn scene_users(state: &mut State) {
     let accounts = sample_accounts();
@@ -476,6 +596,48 @@ fn scene_create_user(state: &mut State) {
 fn scene_profile(state: &mut State) {
     scene_users(state);
     state.open_control_tab(desktop::control::Tab::Profile);
+}
+
+fn with_groups(state: &mut State) {
+    while state.inbox.rx.try_recv().is_ok() {}
+    state.control.groups = sample_groups();
+    state.control.groups.sort_by_key(|g| g.name.to_lowercase());
+    state.control.apps = sample_apps();
+    state.control.groups_loaded = true;
+}
+
+fn scene_groups(state: &mut State) {
+    scene_users(state);
+    state.open_control_tab(desktop::control::Tab::Groups);
+    with_groups(state);
+}
+
+fn scene_group(state: &mut State) {
+    scene_groups(state);
+    state.open_group(1);
+    state.toggle_app_maximized();
+}
+
+fn scene_user_access(state: &mut State) {
+    scene_users(state);
+    state.open_access(4);
+    with_groups(state);
+    state.control.access = Some((4, sample_access()));
+    state.toggle_app_maximized();
+}
+
+/// A User (cat) whose groups deny some apps, on Profile.
+fn scene_my_apps(state: &mut State) {
+    let accounts = sample_accounts();
+    state.session = Some(server::Account {
+        disabled: false,
+        ..accounts[3].clone()
+    });
+    state.access = Some(sample_access());
+    state.signed_in = true;
+    state.screen = Screen::Desktop;
+    state.open_app(AppId::Control);
+    while state.inbox.rx.try_recv().is_ok() {}
 }
 
 fn signed_in(state: &mut State) {
@@ -522,6 +684,10 @@ fn app_spec() -> AppSpec<State> {
             ("user", scene_user),
             ("create-user", scene_create_user),
             ("profile", scene_profile),
+            ("groups", scene_groups),
+            ("group", scene_group),
+            ("user-access", scene_user_access),
+            ("my-apps", scene_my_apps),
         ],
         setup: Some(setup),
         poll: Some(poll),

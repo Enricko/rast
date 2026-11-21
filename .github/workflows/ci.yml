@@ -42,7 +42,7 @@ jobs:
       - name: Headless render proof (software Vulkan)
         run: |
           set -eux
-          for scene in login login-error create-account offline online start account device clock light settings setup users user create-user profile; do
+          for scene in login login-error create-account offline online start account device clock light settings setup users user create-user profile groups group user-access my-apps; do
             VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
               cargo run --locked -p rast-ui --bin rast -- \
               --snap "target/snap-${scene}.png" --scene "${scene}"

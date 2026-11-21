@@ -11,7 +11,7 @@ use serde_json::json;
 
 use crate::auth::{self, Signed};
 use crate::db::{self, NewUser, User, UserChange};
-use crate::{AppState, Role};
+use crate::{AppState, Role, access, groups};
 
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
@@ -20,10 +20,55 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/password", post(change_password))
+        .route("/api/access/me", get(groups::my_access))
         .route("/api/users", get(list_users).post(create_user))
         .route("/api/users/{id}", patch(update_user).delete(delete_user))
+        .route(
+            "/api/users/{id}/access",
+            get(groups::user_access).patch(groups::update_user_access),
+        )
+        .route("/api/groups", get(groups::list).post(groups::create))
+        .route(
+            "/api/groups/{id}",
+            patch(groups::update).delete(groups::delete),
+        )
+        .fallback(no_route)
+        .layer(middleware::from_fn_with_state(state.clone(), app_gate))
         .layer(middleware::from_fn(guard))
         .with_state(state)
+}
+
+async fn no_route() -> ApiError {
+    ApiError::not_found_with("There is nothing at this address.")
+}
+
+/// Close an app's routes to accounts its rules deny (see `access`).
+async fn app_gate(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let Some(app) = access::app_for_path(request.uri().path()) else {
+        return next.run(request).await;
+    };
+    let user = match auth::require(&state, request.headers()).await {
+        Ok(signed) => signed.user,
+        Err(error) => return error.into_response(),
+    };
+    match access::allowed(&state.pool, &user, app).await {
+        Ok(true) => next.run(request).await,
+        Ok(false) => {
+            db::audit(
+                &state.pool,
+                Some(user.id),
+                "access.denied",
+                &format!("{} {}", user.username, app.id),
+            )
+            .await;
+            ApiError::forbidden(format!(
+                "{} isn't available to your account. Ask a Super Admin.",
+                app.label
+            ))
+            .into_response()
+        }
+        Err(error) => ApiError::from(error).into_response(),
+    }
 }
 
 /// Require `X-RAST: 1` on every request that changes state (see the crate docs)
@@ -71,9 +116,12 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, message)
     }
     fn not_found() -> Self {
-        Self::new(StatusCode::NOT_FOUND, "That account no longer exists.")
+        Self::not_found_with("That account no longer exists.")
     }
-    fn conflict(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found_with(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, message)
+    }
+    pub(crate) fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, message)
     }
     fn too_many(seconds: u64) -> Self {
@@ -120,7 +168,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-type ApiResult<T> = Result<T, ApiError>;
+pub(crate) type ApiResult<T> = Result<T, ApiError>;
 
 // --- shapes -------------------------------------------------------------------
 
@@ -343,7 +391,7 @@ async fn change_password(
 
 // --- accounts -------------------------------------------------------------------
 
-async fn admin(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
+pub(crate) async fn admin(state: &AppState, headers: &HeaderMap) -> ApiResult<User> {
     let signed = auth::require(state, headers).await?;
     if !signed.user.role.is_admin() {
         return Err(ApiError::forbidden(

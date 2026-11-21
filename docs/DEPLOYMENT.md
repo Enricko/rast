@@ -42,7 +42,8 @@ running server.
 the site; it shows *Set up RAST*. Read the token on the host with
 `sudo cat /var/lib/rast-revamp/setup-token` and create the Super Admin. The
 token file is deleted once used. After that there is no public sign-up: Super
-Admins and Admins create accounts in Control Panel → Users.
+Admins and Admins create accounts in Control Panel → Users. Super Admins set
+up groups and their app rules under Control Panel → Groups.
 
 Logs: `journalctl -u rast-revamp`. Failed sign-ins are throttled per username
 and per visitor IP (Cloudflare's `CF-Connecting-IP`, passed as `X-Client-IP`).

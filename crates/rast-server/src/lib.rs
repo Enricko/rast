@@ -12,9 +12,11 @@
 //!   `<data>/setup-token`. Creating the first account (a Super Admin) needs it,
 //!   so whoever reaches a fresh public site first cannot claim it.
 
+pub mod access;
 mod api;
 mod auth;
 mod db;
+mod groups;
 mod limit;
 mod roles;
 

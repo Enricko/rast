@@ -129,14 +129,7 @@ fn start_menu(state: &State, p: &Palette) -> El {
         .child(header)
         .child(divider(p))
         .child(
-            col()
-                .w_full()
-                .child(control_panel_action(
-                    state,
-                    p,
-                    "start-control",
-                    "Control Panel",
-                ))
+            control_panel_entry(state, p, col().w_full(), "start-control", "Control Panel")
                 .child(open_panel_action(
                     state,
                     p,
@@ -238,7 +231,7 @@ fn account_menu(state: &State, p: &Palette) -> El {
         .child(section(p, "CREDENTIALS"))
         .child(credentials);
     if let Some(label) = manage {
-        menu = menu.child(control_panel_action(state, p, "account-manage", label));
+        menu = control_panel_entry(state, p, menu, "account-manage", label);
     }
     menu.child(open_panel_action(
         state,
@@ -439,14 +432,7 @@ fn status_panel(state: &State, p: &Palette) -> El {
         )
     };
     content = content.child(divider(p));
-    content
-        .child(control_panel_action(
-            state,
-            p,
-            "status-control",
-            "Control Panel",
-        ))
-        .child(close_action(p))
+    control_panel_entry(state, p, content, "status-control", "Control Panel").child(close_action(p))
 }
 
 fn device_panel(state: &State, p: &Palette) -> El {
@@ -598,9 +584,15 @@ fn icon_action(state: &State, p: &Palette, key: &str, name: &str, label: &str) -
         .child(text(label).font(BODY).color(p.ink).truncate())
 }
 
-fn control_panel_action(state: &State, p: &Palette, key: &str, label: &str) -> El {
-    icon_action(state, p, key, "settings", label)
-        .on_press(|s: &mut State| s.open_app(AppId::Control))
+/// Add the Control Panel entry to `list`, unless this account's groups deny it.
+fn control_panel_entry(state: &State, p: &Palette, list: El, key: &str, label: &str) -> El {
+    if !state.may_open(AppId::Control.access_id()) {
+        return list;
+    }
+    list.child(
+        icon_action(state, p, key, "settings", label)
+            .on_press(|s: &mut State| s.open_app(AppId::Control)),
+    )
 }
 
 fn open_panel_action(

@@ -6,6 +6,7 @@
 //! The native client does not sign in to a server yet, so there every call
 //! answers at once that it needs the server.
 
+use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use serde::{Deserialize, Serialize};
@@ -97,12 +98,183 @@ impl Failure {
     }
 }
 
+// --- groups and app access -------------------------------------------------------
+
+/// A stored app rule; no rule means "inherit".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Rule {
+    Allow,
+    Deny,
+}
+
+/// What Control Panel offers for one app: inherit, allow or deny.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Choice {
+    Inherit,
+    Allow,
+    Deny,
+}
+
+impl Choice {
+    pub(crate) const ALL: [Choice; 3] = [Choice::Inherit, Choice::Allow, Choice::Deny];
+
+    pub(crate) fn of(rule: Option<Rule>) -> Self {
+        match rule {
+            None => Self::Inherit,
+            Some(Rule::Allow) => Self::Allow,
+            Some(Rule::Deny) => Self::Deny,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Inherit => "Inherit",
+            Self::Allow => "Allow",
+            Self::Deny => "Deny",
+        }
+    }
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Allow => "allow",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+/// An app whose use groups and rules control.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AppInfo {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    #[serde(default)]
+    pub(crate) default_allowed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Group {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) description: String,
+    #[serde(default)]
+    pub(crate) member_ids: Vec<i64>,
+    #[serde(default)]
+    pub(crate) apps: BTreeMap<String, Rule>,
+}
+
+/// What decided an app for an account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Source {
+    Administrator,
+    Account,
+    Group,
+    Default,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Decision {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) allowed: bool,
+    pub(crate) source: Source,
+    #[serde(default)]
+    pub(crate) groups: Vec<String>,
+    #[serde(default)]
+    pub(crate) overridden: bool,
+}
+
+impl Decision {
+    /// Why, in a few words: "Denied by Interns", "Off by default".
+    pub(crate) fn reason(&self) -> String {
+        let verdict = if self.allowed { "Allowed" } else { "Denied" };
+        let reason = match self.source {
+            Source::Administrator => "Administrators open every app".to_owned(),
+            Source::Account => format!("{verdict} on this account"),
+            Source::Group => format!("{verdict} by {}", self.groups.join(", ")),
+            Source::Default if self.allowed => "On by default".to_owned(),
+            Source::Default => "Off by default".to_owned(),
+        };
+        if self.overridden {
+            format!("{reason}, which overrides an allow")
+        } else {
+            reason
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub(crate) struct GroupRef {
+    pub(crate) id: i64,
+    pub(crate) name: String,
+}
+
+/// An account's groups, its own rules and what it may open.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Access {
+    #[serde(default)]
+    pub(crate) groups: Vec<GroupRef>,
+    #[serde(default)]
+    pub(crate) group_ids: Vec<i64>,
+    #[serde(default)]
+    pub(crate) rules: BTreeMap<String, Rule>,
+    #[serde(default)]
+    pub(crate) apps: Vec<Decision>,
+}
+
+impl Access {
+    pub(crate) fn allows(&self, app: &str) -> Option<bool> {
+        self.apps
+            .iter()
+            .find(|decision| decision.id == app)
+            .map(|decision| decision.allowed)
+    }
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GroupChange {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) member_ids: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) apps: BTreeMap<String, Choice>,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AccessChange {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) group_ids: Option<Vec<i64>>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) apps: BTreeMap<String, Choice>,
+}
+
 pub(crate) enum Reply {
     Accounts(Result<Vec<Account>, Failure>),
     Created(Result<Account, Failure>),
     Updated(Result<Account, Failure>),
     Deleted(i64, Result<(), Failure>),
     PasswordChanged(Result<(), Failure>),
+    Groups(Result<(Vec<Group>, Vec<AppInfo>), Failure>),
+    GroupCreated(Result<Group, Failure>),
+    GroupSaved(Result<Group, Failure>),
+    GroupDeleted(i64, Result<(), Failure>),
+    /// An account's access, after loading it or changing it.
+    UserAccess(i64, Result<Access, Failure>),
+    /// The signed-in account's own access.
+    MyAccess(Result<Access, Failure>),
 }
 
 /// Where finished calls wait for `poll`.
@@ -146,6 +318,17 @@ struct AccountsBody {
 #[derive(Deserialize)]
 struct AccountBody {
     user: Account,
+}
+
+#[derive(Deserialize)]
+struct GroupsBody {
+    groups: Vec<Group>,
+    apps: Vec<AppInfo>,
+}
+
+#[derive(Deserialize)]
+struct GroupBody {
+    group: Group,
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, Failure> {
@@ -204,6 +387,59 @@ impl Calls<'_> {
             Some(body),
             |result| Reply::PasswordChanged(result.map(|_| ())),
         );
+    }
+
+    pub(crate) fn groups(&self) {
+        self.run("GET", "/api/groups".to_owned(), None, |result| {
+            Reply::Groups(
+                result.and_then(|body| parse::<GroupsBody>(&body).map(|b| (b.groups, b.apps))),
+            )
+        });
+    }
+
+    pub(crate) fn create_group(&self, name: &str, description: &str) {
+        let body = serde_json::json!({ "name": name, "description": description }).to_string();
+        self.run("POST", "/api/groups".to_owned(), Some(body), |result| {
+            Reply::GroupCreated(result.and_then(|body| parse::<GroupBody>(&body).map(|b| b.group)))
+        });
+    }
+
+    pub(crate) fn update_group(&self, id: i64, change: &GroupChange) {
+        let body = serde_json::to_string(change).ok();
+        self.run("PATCH", format!("/api/groups/{id}"), body, |result| {
+            Reply::GroupSaved(result.and_then(|body| parse::<GroupBody>(&body).map(|b| b.group)))
+        });
+    }
+
+    pub(crate) fn delete_group(&self, id: i64) {
+        self.run("DELETE", format!("/api/groups/{id}"), None, move |result| {
+            Reply::GroupDeleted(id, result.map(|_| ()))
+        });
+    }
+
+    pub(crate) fn user_access(&self, id: i64) {
+        self.run(
+            "GET",
+            format!("/api/users/{id}/access"),
+            None,
+            move |result| Reply::UserAccess(id, result.and_then(|body| parse::<Access>(&body))),
+        );
+    }
+
+    pub(crate) fn update_user_access(&self, id: i64, change: &AccessChange) {
+        let body = serde_json::to_string(change).ok();
+        self.run(
+            "PATCH",
+            format!("/api/users/{id}/access"),
+            body,
+            move |result| Reply::UserAccess(id, result.and_then(|body| parse::<Access>(&body))),
+        );
+    }
+
+    pub(crate) fn my_access(&self) {
+        self.run("GET", "/api/access/me".to_owned(), None, |result| {
+            Reply::MyAccess(result.and_then(|body| parse::<Access>(&body)))
+        });
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -337,6 +573,42 @@ mod tests {
             ..AccountChange::default()
         };
         assert_eq!(serde_json::to_string(&role).unwrap(), r#"{"role":"admin"}"#);
+    }
+
+    #[test]
+    fn access_parses_and_explains_itself() {
+        let body = r#"{"groups":[{"id":1,"name":"Interns"}],"groupIds":[1],"rules":{"files":"allow"},
+            "apps":[{"id":"applications","label":"Docker","allowed":false,"source":"group","groups":["Interns"],"overridden":true},
+                    {"id":"files","label":"File Station","allowed":true,"source":"account","groups":[],"overridden":false},
+                    {"id":"backup","label":"Backup Center","allowed":false,"source":"default"}]}"#;
+        let access = parse::<Access>(body).unwrap();
+        assert_eq!(access.rules["files"], Rule::Allow);
+        assert_eq!(access.allows("applications"), Some(false));
+        assert_eq!(access.allows("nope"), None);
+        assert_eq!(
+            access.apps[0].reason(),
+            "Denied by Interns, which overrides an allow"
+        );
+        assert_eq!(access.apps[1].reason(), "Allowed on this account");
+        assert_eq!(access.apps[2].reason(), "Off by default");
+    }
+
+    #[test]
+    fn group_changes_send_inherit_to_clear_a_rule() {
+        let mut change = GroupChange::default();
+        change.apps.insert("files".to_owned(), Choice::Inherit);
+        assert_eq!(
+            serde_json::to_string(&change).unwrap(),
+            r#"{"apps":{"files":"inherit"}}"#
+        );
+        let members = GroupChange {
+            member_ids: Some(vec![2, 3]),
+            ..GroupChange::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&members).unwrap(),
+            r#"{"memberIds":[2,3]}"#
+        );
     }
 
     #[test]

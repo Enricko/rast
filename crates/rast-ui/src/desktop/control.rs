@@ -1,12 +1,17 @@
-//! Control Panel: Users (for administrators), Profile, and, natively, the
-//! connection settings. Lists stay calm (an icon, a name, one line, one
-//! action); everything about one account is on its own page.
+//! Control Panel: Users (for administrators), Groups (for Super Admins),
+//! Profile, and, natively, the connection settings. Lists stay calm (an icon,
+//! a name, one line, one action); everything about one account or group is on
+//! its own page.
+
+mod groups;
 
 use rune::{Color, El, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
-use super::{Palette, icon, initial};
+use super::{AppId, Palette, icon, initial};
 use crate::State;
-use crate::server::{Account, AccountChange, Failure, NewAccount, Reply, Role};
+use crate::server::{
+    Access, Account, AccountChange, AppInfo, Choice, Failure, Group, NewAccount, Reply, Role,
+};
 
 const TITLE: TextStyle = TextStyle::new(15.0, 600.0);
 const BODY: TextStyle = TextStyle::new(13.0, 400.0);
@@ -19,6 +24,7 @@ const BUTTON: TextStyle = TextStyle::new(12.5, 500.0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
     Users,
+    Groups,
     Profile,
     Connection,
 }
@@ -27,6 +33,7 @@ impl Tab {
     fn key(self) -> &'static str {
         match self {
             Self::Users => "control-tab-users",
+            Self::Groups => "control-tab-groups",
             Self::Profile => "control-tab-profile",
             Self::Connection => "control-tab-connection",
         }
@@ -34,6 +41,7 @@ impl Tab {
     fn label(self) -> &'static str {
         match self {
             Self::Users => "Users",
+            Self::Groups => "Groups",
             Self::Profile => "Profile",
             Self::Connection => "Connection",
         }
@@ -41,6 +49,7 @@ impl Tab {
     fn icon(self) -> &'static str {
         match self {
             Self::Users => "users",
+            Self::Groups => "groups",
             Self::Profile => "profile",
             Self::Connection => "network",
         }
@@ -52,6 +61,10 @@ pub(crate) enum Page {
     List,
     Create,
     Account(i64),
+    /// An account's groups, rules and what it may open.
+    Access(i64),
+    CreateGroup,
+    Group(i64),
 }
 
 pub(crate) struct ControlPanel {
@@ -59,6 +72,14 @@ pub(crate) struct ControlPanel {
     pub(crate) page: Page,
     pub(crate) accounts: Vec<Account>,
     pub(crate) loaded: bool,
+    loading_accounts: bool,
+    pub(crate) groups: Vec<Group>,
+    pub(crate) apps: Vec<AppInfo>,
+    pub(crate) groups_loaded: bool,
+    loading_groups: bool,
+    /// The account whose access page is open, once loaded.
+    pub(crate) access: Option<(i64, Access)>,
+    /// A change is on its way to the server.
     pub(crate) busy: bool,
     pub(crate) error: Option<String>,
     pub(crate) notice: Option<String>,
@@ -71,6 +92,8 @@ pub(crate) struct ControlPanel {
     pub(crate) current_password: TextEdit,
     pub(crate) next_password: TextEdit,
     pub(crate) confirm_password: TextEdit,
+    pub(crate) group_name: TextEdit,
+    pub(crate) group_description: TextEdit,
 }
 
 impl Default for ControlPanel {
@@ -80,6 +103,12 @@ impl Default for ControlPanel {
             page: Page::List,
             accounts: Vec::new(),
             loaded: false,
+            loading_accounts: false,
+            groups: Vec::new(),
+            apps: Vec::new(),
+            groups_loaded: false,
+            loading_groups: false,
+            access: None,
             busy: false,
             error: None,
             notice: None,
@@ -92,12 +121,17 @@ impl Default for ControlPanel {
             current_password: TextEdit::new("").secure(),
             next_password: TextEdit::new("").secure(),
             confirm_password: TextEdit::new("").secure(),
+            group_name: TextEdit::new(""),
+            group_description: TextEdit::new(""),
         }
     }
 }
 
 fn tabs(state: &State) -> Vec<Tab> {
     match &state.session {
+        Some(session) if session.role == Role::SuperAdmin => {
+            vec![Tab::Users, Tab::Groups, Tab::Profile]
+        }
         Some(session) if session.role.is_admin() => vec![Tab::Users, Tab::Profile],
         Some(_) => vec![Tab::Profile],
         None => vec![Tab::Connection],
@@ -119,9 +153,36 @@ impl State {
         self.control.page = Page::List;
         self.control.error = None;
         self.control.notice = None;
-        if tab == Tab::Users && !self.control.loaded && !self.control.busy {
-            self.control.busy = true;
+        match tab {
+            Tab::Users => self.load_accounts(),
+            Tab::Groups => {
+                self.load_accounts();
+                self.load_groups();
+            }
+            Tab::Profile | Tab::Connection => {}
+        }
+    }
+
+    fn load_accounts(&mut self) {
+        if !self.control.loaded && !self.control.loading_accounts {
+            self.control.loading_accounts = true;
             self.calls().accounts();
+        }
+    }
+
+    fn load_groups(&mut self) {
+        if !self.control.groups_loaded && !self.control.loading_groups {
+            self.control.loading_groups = true;
+            self.calls().groups();
+        }
+    }
+
+    /// The signed-in account's own access arrived: hide what it may not open.
+    fn set_my_access(&mut self, access: Access) {
+        self.access = Some(access);
+        if !self.may_open(AppId::Control.access_id()) && self.desktop.active == Some(AppId::Control)
+        {
+            self.close_app();
         }
     }
 
@@ -259,57 +320,124 @@ impl State {
 
     /// Apply a finished server call.
     pub(crate) fn apply_reply(&mut self, reply: Reply, tx: &mut Tx) {
-        self.control.busy = false;
         let failure = match reply {
-            Reply::Accounts(Ok(accounts)) => {
-                self.control.accounts = accounts;
-                self.control.loaded = true;
-                None
+            Reply::Accounts(result) => {
+                self.control.loading_accounts = false;
+                result
+                    .map(|accounts| {
+                        self.control.accounts = accounts;
+                        self.control.loaded = true;
+                    })
+                    .err()
             }
-            Reply::Created(Ok(account)) => {
-                self.control.notice = Some(format!("Created {}.", account.username));
-                self.control.accounts.push(account);
-                sort(&mut self.control.accounts);
-                self.control.page = Page::List;
-                None
+            Reply::Groups(result) => {
+                self.control.loading_groups = false;
+                result
+                    .map(|(groups, apps)| {
+                        self.control.groups = groups;
+                        self.control.apps = apps;
+                        self.control.groups_loaded = true;
+                    })
+                    .err()
             }
-            Reply::Updated(Ok(account)) => {
-                self.control.reset_password = TextEdit::new("").secure();
-                self.control.notice = Some("Saved.".to_owned());
-                if let Some(slot) = self
-                    .control
-                    .accounts
-                    .iter_mut()
-                    .find(|a| a.id == account.id)
-                {
-                    *slot = account;
+            Reply::MyAccess(result) => match result {
+                Ok(access) => {
+                    self.set_my_access(access);
+                    None
                 }
-                sort(&mut self.control.accounts);
-                None
+                // Keep what is known; only an ended session matters here.
+                Err(failure) => failure.signed_out().then_some(failure),
+            },
+            Reply::UserAccess(id, result) => {
+                let saved = std::mem::take(&mut self.control.busy);
+                result
+                    .map(|access| {
+                        if saved {
+                            self.control.notice = Some("Saved.".to_owned());
+                        }
+                        // Keep the Groups tab in step with memberships changed here.
+                        for group in &mut self.control.groups {
+                            group.member_ids.retain(|member| *member != id);
+                            if access.group_ids.contains(&group.id) {
+                                group.member_ids.push(id);
+                                group.member_ids.sort_unstable();
+                            }
+                        }
+                        self.control.access = Some((id, access));
+                    })
+                    .err()
             }
-            Reply::Deleted(id, Ok(())) => {
-                if let Some(gone) = self.control.accounts.iter().find(|a| a.id == id) {
-                    self.control.notice = Some(format!("Deleted {}.", gone.username));
-                }
-                self.control.accounts.retain(|a| a.id != id);
-                self.control.page = Page::List;
-                self.control.confirm_delete = false;
-                None
+            Reply::Created(result) => {
+                self.control.busy = false;
+                result
+                    .map(|account| {
+                        self.control.notice = Some(format!("Created {}.", account.username));
+                        self.control.accounts.push(account);
+                        sort(&mut self.control.accounts);
+                        self.control.page = Page::List;
+                    })
+                    .err()
             }
-            Reply::PasswordChanged(Ok(())) => {
-                self.control.current_password = TextEdit::new("").secure();
-                self.control.next_password = TextEdit::new("").secure();
-                self.control.confirm_password = TextEdit::new("").secure();
-                self.control.notice = Some(
-                    "Password changed. Other sessions of your account were signed out.".to_owned(),
-                );
-                None
+            Reply::Updated(result) => {
+                self.control.busy = false;
+                result
+                    .map(|account| {
+                        self.control.reset_password = TextEdit::new("").secure();
+                        self.control.notice = Some("Saved.".to_owned());
+                        if let Some(slot) = self
+                            .control
+                            .accounts
+                            .iter_mut()
+                            .find(|a| a.id == account.id)
+                        {
+                            *slot = account;
+                        }
+                        sort(&mut self.control.accounts);
+                    })
+                    .err()
             }
-            Reply::Accounts(Err(failure))
-            | Reply::Created(Err(failure))
-            | Reply::Updated(Err(failure))
-            | Reply::Deleted(_, Err(failure))
-            | Reply::PasswordChanged(Err(failure)) => Some(failure),
+            Reply::Deleted(id, result) => {
+                self.control.busy = false;
+                result
+                    .map(|()| {
+                        if let Some(gone) = self.control.accounts.iter().find(|a| a.id == id) {
+                            self.control.notice = Some(format!("Deleted {}.", gone.username));
+                        }
+                        self.control.accounts.retain(|a| a.id != id);
+                        for group in &mut self.control.groups {
+                            group.member_ids.retain(|member| *member != id);
+                        }
+                        self.control.page = Page::List;
+                        self.control.confirm_delete = false;
+                    })
+                    .err()
+            }
+            Reply::PasswordChanged(result) => {
+                self.control.busy = false;
+                result
+                    .map(|()| {
+                        self.control.current_password = TextEdit::new("").secure();
+                        self.control.next_password = TextEdit::new("").secure();
+                        self.control.confirm_password = TextEdit::new("").secure();
+                        self.control.notice = Some(
+                            "Password changed. Other sessions of your account were signed out."
+                                .to_owned(),
+                        );
+                    })
+                    .err()
+            }
+            Reply::GroupCreated(result) => {
+                self.control.busy = false;
+                result.map(|group| self.group_created(group)).err()
+            }
+            Reply::GroupSaved(result) => {
+                self.control.busy = false;
+                result.map(|group| self.group_saved(group)).err()
+            }
+            Reply::GroupDeleted(id, result) => {
+                self.control.busy = false;
+                result.map(|()| self.group_deleted(id)).err()
+            }
         };
         if let Some(failure) = failure {
             self.failed(failure, tx);
@@ -349,7 +477,8 @@ pub(super) fn view(state: &State, p: &Palette, compact: bool) -> El {
         tabs[0]
     };
     let content = match (tab, &state.session) {
-        (Tab::Users, Some(me)) => users_page(state, p, me),
+        (Tab::Users, Some(me)) => users_page(state, p, me, compact),
+        (Tab::Groups, Some(_)) => groups::page(state, p, compact),
         (Tab::Profile, Some(me)) => profile_page(state, p, me),
         _ => return scroller().child(crate::ui::settings_body(state)),
     };
@@ -423,15 +552,20 @@ fn scroller() -> El {
         })
 }
 
-fn users_page(state: &State, p: &Palette, me: &Account) -> El {
+fn users_page(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
     let control = &state.control;
+    let account = |id: i64| control.accounts.iter().find(|a| a.id == id);
     match control.page {
         Page::Create => create_page(state, p, me),
-        Page::Account(id) => match control.accounts.iter().find(|a| a.id == id) {
-            Some(account) => account_page(state, p, me, account),
+        Page::Account(id) => match account(id) {
+            Some(account) => account_page(state, p, me, account, compact),
             None => users_list(state, p, me),
         },
-        Page::List => users_list(state, p, me),
+        Page::Access(id) => match account(id) {
+            Some(account) => groups::access_page(state, p, me, account, compact),
+            None => users_list(state, p, me),
+        },
+        Page::List | Page::CreateGroup | Page::Group(_) => users_list(state, p, me),
     }
 }
 
@@ -508,36 +642,38 @@ fn users_list(state: &State, p: &Palette, me: &Account) -> El {
     page.child(list)
 }
 
-fn account_page(state: &State, p: &Palette, me: &Account, account: &Account) -> El {
+fn account_page(state: &State, p: &Palette, me: &Account, account: &Account, compact: bool) -> El {
     let control = &state.control;
     let id = account.id;
     let yourself = account.id == me.id;
     let manage = !yourself && me.role.may_manage(account.role);
-    let mut page = col().w_full().gap(12.0).child(back(p)).child(
-        row()
-            .w_full()
-            .gap(12.0)
-            .center_y()
-            .child(avatar(p, account, 44.0))
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(2.0)
-                    .child(
-                        text(account.name().to_owned())
-                            .font(TITLE)
-                            .color(p.ink)
-                            .truncate(),
-                    )
-                    .child(
-                        text(format!("@{} · {}", account.username, account.role.label()))
-                            .font(DETAIL)
-                            .color(p.muted),
-                    ),
-            ),
-    );
-    page = messages(page, state, p);
+    let header = row()
+        .w_full()
+        .gap(12.0)
+        .center_y()
+        .child(avatar(p, account, 44.0))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text(account.name().to_owned())
+                        .font(TITLE)
+                        .color(p.ink)
+                        .truncate(),
+                )
+                .child(
+                    text(format!("@{} · {}", account.username, account.role.label()))
+                        .font(DETAIL)
+                        .color(p.muted),
+                ),
+        );
+    let mut page = col()
+        .w_full()
+        .gap(12.0)
+        .child(back(p))
+        .child(header_message(header, state, p, compact));
 
     page = page.child(section(p, "ROLE"));
     let roles: Vec<Role> = Role::ALL
@@ -624,6 +760,22 @@ fn account_page(state: &State, p: &Palette, me: &Account, account: &Account) -> 
     }
 
     page = page
+        .child(section(p, "ACCESS"))
+        .child(
+            link_row(
+                state,
+                p,
+                "user-access",
+                "groups",
+                "Apps & groups",
+                if account.role.is_admin() {
+                    "Administrators open every app"
+                } else {
+                    "Groups, app rules and what this account can open"
+                },
+            )
+            .on_press(move |s: &mut State| s.open_access(id)),
+        )
         .child(section(p, "DETAILS"))
         .child(fact(p, "Created", &when(Some(account.created_at))))
         .child(fact(p, "Last sign-in", &when(account.last_login_at)));
@@ -752,6 +904,8 @@ fn profile_page(state: &State, p: &Palette, me: &Account) -> El {
                         ),
                 ),
         )
+        .child(section(p, "YOUR APPS"))
+        .child(my_apps(state, p, me))
         .child(section(p, "CHANGE PASSWORD"))
         .child(field(
             p,
@@ -804,28 +958,43 @@ fn profile_page(state: &State, p: &Palette, me: &Account) -> El {
 
 // --- pieces -------------------------------------------------------------------
 
-fn messages(page: El, state: &State, p: &Palette) -> El {
+/// The latest error, else the latest notice.
+fn message(state: &State, p: &Palette) -> Option<El> {
     let control = &state.control;
     if let Some(error) = &control.error {
-        page.child(
+        Some(
             text(error.clone())
                 .key("control-error")
-                .w_full()
                 .wrap()
                 .font(DETAIL)
                 .color(danger(p)),
         )
-    } else if let Some(notice) = &control.notice {
-        page.child(
+    } else {
+        control.notice.as_ref().map(|notice| {
             text(notice.clone())
                 .key("control-notice")
-                .w_full()
                 .wrap()
                 .font(DETAIL)
-                .color(p.ink),
-        )
-    } else {
-        page
+                .color(p.ink)
+        })
+    }
+}
+
+/// The message on its own line under the page's heading.
+fn messages(page: El, state: &State, p: &Palette) -> El {
+    match message(state, p) {
+        Some(line) => page.child(line.w_full()),
+        None => page,
+    }
+}
+
+/// The message at the end of a page's header row. Pages with many controls
+/// use it so that *Saved.* appears without moving the controls under the
+/// pointer.
+fn header_message(header: El, state: &State, p: &Palette, compact: bool) -> El {
+    match message(state, p) {
+        Some(line) => header.child(line.max_w(if compact { 140.0 } else { 300.0 })),
+        None => header,
     }
 }
 
@@ -837,19 +1006,205 @@ fn danger(p: &Palette) -> Color {
     }
 }
 
+/// What the signed-in account may open, and why.
+fn my_apps(state: &State, p: &Palette, me: &Account) -> El {
+    if me.role.is_admin() {
+        return text("Administrators open every app.")
+            .font(DETAIL)
+            .color(p.muted);
+    }
+    let Some(access) = &state.access else {
+        return text("Loading…").font(DETAIL).color(p.muted);
+    };
+    let mut list = col().key("my-apps").w_full().gap(8.0);
+    for decision in &access.apps {
+        list = list.child(app_row(
+            p,
+            &decision.label,
+            decision.reason(),
+            Some(decision.allowed),
+            None,
+        ));
+    }
+    let groups: Vec<&str> = access.groups.iter().map(|g| g.name.as_str()).collect();
+    list.child(
+        text(if groups.is_empty() {
+            "You are not in any group.".to_owned()
+        } else {
+            format!("Your groups: {}", groups.join(", "))
+        })
+        .font(DETAIL)
+        .color(p.muted)
+        .w_full()
+        .wrap(),
+    )
+}
+
 fn back(p: &Palette) -> El {
+    back_link(p, "users-back", "All users").on_press(State::back_to_accounts)
+}
+
+fn back_link(p: &Palette, key: &'static str, label: &str) -> El {
     row()
-        .key("users-back")
+        .key(key)
         .role("button")
-        .label("All users")
+        .label(label.to_owned())
         .h(28.0)
         .px(6.0)
         .gap(4.0)
         .center_y()
         .radius(6.0)
         .hover(p.hover)
-        .child(text("‹ All users").font(LABEL).color(p.muted))
-        .on_press(State::back_to_accounts)
+        .child(text(format!("‹ {label}")).font(LABEL).color(p.muted))
+}
+
+/// A row that opens a page: icon, title, one line, chevron.
+fn link_row(
+    state: &State,
+    p: &Palette,
+    key: &'static str,
+    icon_name: &str,
+    title: &str,
+    line: &str,
+) -> El {
+    row()
+        .key(key)
+        .role("button")
+        .label(title.to_owned())
+        .w_full()
+        .h(50.0)
+        .px(10.0)
+        .gap(10.0)
+        .center_y()
+        .radius(8.0)
+        .fill(p.surface_2.alpha(0.5))
+        .border(1.0, p.line.alpha(0.7))
+        .hover(p.hover)
+        .child(tile(state, p, icon_name, 32.0))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(title.to_owned()).font(NAME).color(p.ink).truncate())
+                .child(text(line.to_owned()).font(DETAIL).color(p.muted).truncate()),
+        )
+        .child(text("›").font(BODY).color(p.muted).a11y_hidden())
+}
+
+/// An icon on a small rounded square.
+fn tile(state: &State, p: &Palette, icon_name: &str, size: f32) -> El {
+    el().size(size, size)
+        .radius(size / 4.0)
+        .fill(p.surface_2)
+        .border(1.0, p.line)
+        .center()
+        .a11y_hidden()
+        .child(icon(state, icon_name, size * 0.56))
+}
+
+/// "Allowed" or "Denied".
+fn verdict(p: &Palette, allowed: bool) -> El {
+    let (label, color) = if allowed {
+        ("Allowed", allowed_color(p))
+    } else {
+        ("Denied", danger(p))
+    };
+    el().h(18.0)
+        .px(7.0)
+        .center()
+        .radius(9.0)
+        .fill(color.alpha(0.16))
+        .child(text(label).font(TextStyle::new(10.5, 600.0)).color(color))
+}
+
+fn allowed_color(p: &Palette) -> Color {
+    if p.ink.r > 0.5 {
+        rune::color::hex("#66daa3").expect("valid colour")
+    } else {
+        rune::color::hex("#1d8a60").expect("valid colour")
+    }
+}
+
+/// One app: its name, a line about it, optionally its verdict and a control.
+fn app_row(
+    p: &Palette,
+    label: &str,
+    line: String,
+    allowed: Option<bool>,
+    control: Option<El>,
+) -> El {
+    let mut name = row()
+        .gap(6.0)
+        .center_y()
+        .child(text(label.to_owned()).font(NAME).color(p.ink));
+    if let Some(allowed) = allowed {
+        name = name.child(verdict(p, allowed));
+    }
+    let info = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(2.0)
+        .child(name)
+        .child(text(line).font(DETAIL).color(p.muted).w_full().wrap());
+    let mut item = row().w_full().gap(10.0).center_y().child(info);
+    if let Some(control) = control {
+        item = item.child(control);
+    }
+    item
+}
+
+/// Inherit / Allow / Deny for one app; `action(choice)` applies a choice.
+fn choice_bar<F>(
+    p: &Palette,
+    key: String,
+    label: &str,
+    selected: Choice,
+    action: impl Fn(Choice) -> F,
+) -> El
+where
+    F: Fn(&mut State) + 'static,
+{
+    let mut bar = row()
+        .key(key.clone())
+        .role("radiogroup")
+        .label(label.to_owned())
+        .gap(2.0)
+        .padding(2.0)
+        .radius(8.0)
+        .fill(p.surface_2)
+        .border(1.0, p.line);
+    for choice in Choice::ALL {
+        let on = choice == selected;
+        let (fill, ink) = match choice {
+            _ if !on => (None, p.muted),
+            Choice::Inherit => (Some(p.hover), p.ink),
+            Choice::Allow => (Some(p.accent), p.accent_ink),
+            Choice::Deny => (Some(danger(p).alpha(0.2)), danger(p)),
+        };
+        let mut item = row()
+            .key(format!("{key}-{}", choice.key()))
+            .role("radio")
+            .label(choice.label())
+            .checked(on)
+            .focusable(true)
+            .h(26.0)
+            .px(10.0)
+            .center()
+            .radius(6.0)
+            .child(
+                text(choice.label())
+                    .font(TextStyle::new(12.0, 500.0))
+                    .color(ink),
+            )
+            .on_press(action(choice));
+        item = match fill {
+            Some(fill) => item.fill(fill),
+            None => item.hover(p.hover),
+        };
+        bar = bar.child(item);
+    }
+    bar
 }
 
 fn avatar(p: &Palette, account: &Account, size: f32) -> El {
@@ -938,7 +1293,7 @@ fn button(p: &Palette, key: &'static str, label: &str, look: Look) -> El {
         .child(text(label.to_owned()).font(BUTTON).color(ink))
 }
 
-fn switch(p: &Palette, key: &'static str, label: &'static str, on: bool) -> El {
+fn switch(p: &Palette, key: impl Into<String>, label: impl Into<String>, on: bool) -> El {
     let knob = el()
         .size(16.0, 16.0)
         .radius(8.0)
@@ -1059,6 +1414,7 @@ mod tests {
 
     use super::*;
     use crate::config::Config;
+    use crate::server::Rule;
     use crate::{SIZE, Screen};
 
     /// Signed in to the server as account `me` of the sample list, Control Panel open.
@@ -1213,6 +1569,155 @@ mod tests {
             })),
             &mut Tx::default(),
         );
+        assert!(!rt.state.signed_in);
+    }
+
+    /// Every call sent since the last drain.
+    fn sent(state: &State) -> Vec<Reply> {
+        std::iter::from_fn(|| state.inbox.rx.try_recv().ok()).collect()
+    }
+
+    /// Rebuild the view after changing state directly.
+    fn after_frames(rt: &mut Runtime<State>) {
+        rt.invalidate();
+        for _ in 0..2 {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    #[test]
+    fn only_a_super_admin_has_the_groups_tab() {
+        assert!(shown(&signed_in_as(1), "control-tab-groups"));
+        assert!(!shown(&signed_in_as(2), "control-tab-groups"));
+        assert!(!shown(&signed_in_as(3), "control-tab-groups"));
+    }
+
+    #[test]
+    fn a_super_admin_sets_a_groups_apps_and_members() {
+        let mut rt = signed_in_as(1);
+        press(&mut rt, "control-tab-groups");
+        assert!(
+            sent(&rt.state)
+                .iter()
+                .any(|reply| matches!(reply, Reply::Groups(_))),
+            "opening the tab loads the groups"
+        );
+        crate::with_groups(&mut rt.state);
+        after_frames(&mut rt);
+        assert!(shown(&rt, "group-1") && shown(&rt, "group-2"));
+
+        press(&mut rt, "group-1");
+        for choice in ["inherit", "allow", "deny"] {
+            assert!(shown(&rt, &format!("group-app-backup-{choice}")));
+        }
+        assert!(shown(&rt, "group-member-3") && shown(&rt, "group-delete"));
+
+        press(&mut rt, "group-app-backup-deny");
+        assert!(rt.state.control.busy);
+        assert!(matches!(sent(&rt.state)[..], [Reply::GroupSaved(_)]));
+        press(&mut rt, "group-member-1");
+        assert!(sent(&rt.state).is_empty(), "one change at a time");
+
+        let mut staff = rt.state.control.groups[1].clone();
+        staff.apps.insert("backup".to_owned(), Rule::Deny);
+        rt.state
+            .apply_reply(Reply::GroupSaved(Ok(staff)), &mut Tx::default());
+        assert!(!rt.state.control.busy);
+        assert_eq!(rt.state.control.notice.as_deref(), Some("Saved."));
+        assert_eq!(
+            rt.state.control.groups[1].apps.get("backup"),
+            Some(&Rule::Deny)
+        );
+    }
+
+    #[test]
+    fn deleting_a_group_asks_twice() {
+        let mut rt = signed_in_as(1);
+        crate::with_groups(&mut rt.state);
+        rt.state.open_control_tab(Tab::Groups);
+        rt.state.open_group(2);
+        rt.state.delete_group(2);
+        assert!(sent(&rt.state).is_empty(), "first press asks");
+        rt.state.delete_group(2);
+        assert!(matches!(sent(&rt.state)[..], [Reply::GroupDeleted(2, _)]));
+
+        rt.state
+            .apply_reply(Reply::GroupDeleted(2, Ok(())), &mut Tx::default());
+        assert_eq!(rt.state.control.page, Page::List);
+        assert_eq!(rt.state.control.groups.len(), 1);
+        assert_eq!(
+            rt.state.control.notice.as_deref(),
+            Some("Deleted the group Interns.")
+        );
+    }
+
+    /// Account `me`'s Control Panel on cat's *Apps & groups* page.
+    fn cats_access_as(me: i64) -> Runtime<State> {
+        let mut rt = signed_in_as(me);
+        rt.state.open_access(4);
+        crate::with_groups(&mut rt.state);
+        rt.state.control.access = Some((4, crate::sample_access()));
+        after_frames(&mut rt);
+        rt
+    }
+
+    #[test]
+    fn a_super_admin_changes_an_accounts_groups_and_rules() {
+        let mut rt = cats_access_as(1);
+        assert!(shown(&rt, "access-group-1") && shown(&rt, "access-group-2"));
+        assert!(shown(&rt, "access-app-files-deny"));
+
+        press(&mut rt, "access-group-2");
+        assert!(matches!(sent(&rt.state)[..], [Reply::UserAccess(4, _)]));
+        let mut left = crate::sample_access();
+        left.group_ids = vec![1];
+        left.groups.retain(|group| group.id == 1);
+        rt.state
+            .apply_reply(Reply::UserAccess(4, Ok(left)), &mut Tx::default());
+        assert_eq!(rt.state.control.notice.as_deref(), Some("Saved."));
+        let interns = rt.state.control.groups.iter().find(|g| g.id == 2).unwrap();
+        assert!(
+            !interns.member_ids.contains(&4),
+            "the Groups tab follows the change"
+        );
+        let staff = rt.state.control.groups.iter().find(|g| g.id == 1).unwrap();
+        assert!(staff.member_ids.contains(&4));
+    }
+
+    #[test]
+    fn an_admin_reads_an_accounts_access_without_changing_it() {
+        let rt = cats_access_as(2);
+        assert!(shown(&rt, "access-groups") && shown(&rt, "access-apps"));
+        assert!(!shown(&rt, "access-group-1"));
+        assert!(!shown(&rt, "access-app-files-deny"));
+    }
+
+    #[test]
+    fn a_user_denied_control_panel_loses_it() {
+        let mut rt = signed_in_as(4);
+        let mut access = crate::sample_access();
+        for decision in &mut access.apps {
+            if decision.id == "controlpanel" {
+                decision.allowed = false;
+            }
+        }
+        rt.state
+            .apply_reply(Reply::MyAccess(Ok(access)), &mut Tx::default());
+        assert_eq!(rt.state.desktop.active, None, "the open window closes");
+        rt.state.toggle_desktop_panel(crate::desktop::Panel::Start);
+        after_frames(&mut rt);
+        assert!(!shown(&rt, "start-control"));
+
+        // A failed refresh keeps what is known; only an ended session signs out.
+        let failure = |status| Failure {
+            status,
+            message: String::new(),
+        };
+        rt.state
+            .apply_reply(Reply::MyAccess(Err(failure(0))), &mut Tx::default());
+        assert!(rt.state.signed_in && !rt.state.may_open("controlpanel"));
+        rt.state
+            .apply_reply(Reply::MyAccess(Err(failure(401))), &mut Tx::default());
         assert!(!rt.state.signed_in);
     }
 
