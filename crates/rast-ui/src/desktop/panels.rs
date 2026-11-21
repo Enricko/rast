@@ -1,7 +1,7 @@
 //! The Start launcher and taskbar popovers. These expose local desktop state,
 //! not the classic web shell's server-side sessions or live event stream.
 
-use rune::{Color, El, Key, ScrollSpec, SurfaceFit, TextStyle, col, el, row, text, text_input};
+use rune::{Color, El, ScrollSpec, SurfaceFit, TextStyle, col, el, row, text};
 
 use crate::State;
 #[cfg(not(target_arch = "wasm32"))]
@@ -33,12 +33,7 @@ pub(super) fn view(
 
     let start = matches!(panel, Panel::Start);
     let (key, label, preferred_width, content) = match panel {
-        Panel::Start => (
-            "start-panel",
-            "Start menu",
-            472.0_f32,
-            start_menu(state, p, compact),
-        ),
+        Panel::Start => ("start-panel", "Start menu", 472.0_f32, start_menu(state, p)),
         Panel::Account => (
             "account-panel",
             "Account menu",
@@ -109,61 +104,7 @@ pub(super) fn view(
     )
 }
 
-fn start_menu(state: &State, p: &Palette, compact: bool) -> El {
-    let query = &state.desktop.search.text;
-    let matches: Vec<_> = matching_apps(query).collect();
-    let columns = if compact { 1 } else { 2 };
-    let mut grid = col()
-        .w_full()
-        .gap(4.0)
-        .role("grid")
-        .label("Applications")
-        .focus_group();
-    for apps in matches.chunks(columns) {
-        let mut tiles = row().w_full().equal_columns(columns).gap(4.0);
-        for &app in apps {
-            tiles = tiles.child(app_tile(state, p, app, compact));
-        }
-        grid = grid.child(tiles);
-    }
-    if matches.is_empty() {
-        grid = grid.child(
-            text(format!("No applications match “{}”.", query.trim()))
-                .font(BODY)
-                .color(p.muted)
-                .wrap_anywhere()
-                .padding(10.0),
-        );
-    }
-    let search = text_input(&state.desktop.search, BODY)
-        .key("start-search")
-        .label("Search applications")
-        .single_line()
-        .w_full()
-        .h(36.0)
-        .padding(10.0)
-        .radius(8.0)
-        .fill(p.surface_2)
-        .border(1.0, p.line)
-        .focus_within_ring(2.0, 1.0, p.accent)
-        .color(p.ink)
-        .placeholder("Search applications…", p.muted)
-        .on_edit(|s: &mut State| &mut s.desktop.search)
-        .on_submit(|s: &mut State, _| {
-            if let Some(app) = matching_apps(&s.desktop.search.text).next() {
-                s.open_app(app);
-            }
-        })
-        .on_key(|s: &mut State, ev, tx| {
-            if ev.key != Key::Down {
-                return false;
-            }
-            if let Some(app) = matching_apps(&s.desktop.search.text).next() {
-                tx.focus(app_tile_key(app), true);
-                return true;
-            }
-            false
-        });
+fn start_menu(state: &State, p: &Palette) -> El {
     let who = state.account.as_ref().map_or_else(
         || VERSION.to_owned(),
         |account| format!("{VERSION} · signed in as {}", account.username),
@@ -187,14 +128,10 @@ fn start_menu(state: &State, p: &Palette, compact: bool) -> El {
     col()
         .gap(9.0)
         .child(header)
-        .child(search)
-        .child(section(p, "APPLICATIONS").mt(8.0))
-        .child(grid)
         .child(divider(p))
         .child(
             col()
                 .w_full()
-                .child(control_panel_action(state, p, "start-control"))
                 .child(open_panel_action(
                     state,
                     p,
@@ -222,52 +159,6 @@ fn start_menu(state: &State, p: &Palette, compact: bool) -> El {
         )
         .child(divider(p))
         .child(sign_out_button(p))
-}
-
-fn matching_apps(query: &str) -> impl Iterator<Item = AppId> + use<> {
-    let query = query.trim().to_lowercase();
-    AppId::ALL.iter().copied().filter(move |app| {
-        query.is_empty()
-            || app.label().to_lowercase().contains(&query)
-            || app.description().to_lowercase().contains(&query)
-            || app.key().to_lowercase().contains(&query)
-    })
-}
-
-fn app_tile_key(app: AppId) -> String {
-    format!("start-app-{}", app.key())
-}
-
-fn app_tile(state: &State, p: &Palette, app: AppId, compact: bool) -> El {
-    row()
-        .key(app_tile_key(app))
-        .role("button")
-        .label(app.label())
-        .description(app.description())
-        .focusable(true)
-        .focus_ring(2.0, -2.0, p.accent)
-        .w_full()
-        .h(if compact { 59.0 } else { 61.0 })
-        .px(6.0)
-        .gap(8.0)
-        .center_y()
-        .radius(8.0)
-        .hover(p.hover)
-        .press(p.hover)
-        .child(badge(state, p, app.key(), 36.0, false))
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(1.0)
-                .child(title(p, app.label()).truncate())
-                .child(if compact {
-                    detail(p, app.description()).truncate()
-                } else {
-                    detail(p, app.description()).wrap_anywhere().max_lines(2)
-                }),
-        )
-        .on_press(move |s: &mut State| s.open_app(app))
 }
 
 fn account_menu(state: &State, p: &Palette) -> El {
@@ -319,7 +210,6 @@ fn account_menu(state: &State, p: &Palette) -> El {
         .child(
             col()
                 .w_full()
-                .child(control_panel_action(state, p, "account-control"))
                 .child(open_panel_action(
                     state,
                     p,
@@ -401,8 +291,6 @@ fn shortcuts_panel(state: &State, p: &Palette) -> El {
         ))
         .child(key_value(p, "Open Start", "Ctrl+Space"))
         .child(key_value(p, "Close a popover", "Esc"))
-        .child(key_value(p, "Open first search result", "Enter"))
-        .child(key_value(p, "Visit a search result", "↓"))
         .child(divider(p))
         .child(close_action(p))
 }
@@ -595,7 +483,7 @@ fn close_action(p: &Palette) -> El {
 
 #[cfg(test)]
 mod tests {
-    use rune::{Env, KeyEvent, Mods, Runtime};
+    use rune::{Env, Runtime};
 
     use super::*;
     use crate::config::Config;
@@ -609,39 +497,6 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         rt
-    }
-
-    #[test]
-    fn launcher_search_is_case_insensitive_and_keeps_default_order() {
-        assert_eq!(
-            matching_apps("  ").collect::<Vec<_>>().as_slice(),
-            &AppId::ALL[..]
-        );
-        assert!(matches!(
-            matching_apps("  fIlE sTaTiOn ").next(),
-            Some(AppId::Files)
-        ));
-        assert_eq!(matching_apps("unlikely-no-match").count(), 0);
-    }
-
-    #[test]
-    fn launcher_enter_opens_the_first_filtered_result() {
-        let mut rt = mounted(Panel::Start, (390.0, 844.0));
-        let (x, y) = rt.find("start-search").expect("search field is visible");
-        rt.pointer_down(x, y);
-        rt.pointer_up(x, y);
-        rt.frame(1.0 / 60.0);
-        rt.paste("BACKUP");
-        rt.frame(1.0 / 60.0);
-        assert!(rt.find("start-app-files").is_none());
-        assert!(rt.find("start-app-backup").is_some());
-        rt.key(KeyEvent {
-            key: Key::Enter,
-            mods: Mods::default(),
-        });
-        rt.frame(1.0 / 60.0);
-        assert_eq!(rt.state.desktop.active, Some(AppId::Backup));
-        assert_eq!(rt.state.desktop.panel, None);
     }
 
     #[test]

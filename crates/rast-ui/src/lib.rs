@@ -317,7 +317,7 @@ fn scene_login_error(state: &mut State) {
 fn scene_offline(state: &mut State) {
     signed_in(state);
     state.status = Status::offline(2, Some(Duration::from_secs(4)), "connection refused");
-    state.open_app(AppId::Monitor);
+    state.toggle_desktop_panel(desktop::Panel::Status);
 }
 
 fn scene_online(state: &mut State) {
@@ -330,11 +330,6 @@ fn scene_start(state: &mut State) {
     state.toggle_desktop_panel(desktop::Panel::Start);
 }
 
-fn scene_files(state: &mut State) {
-    scene_online(state);
-    state.open_app(AppId::Files);
-}
-
 fn scene_settings(state: &mut State) {
     signed_in(state);
     state.open_settings();
@@ -343,7 +338,7 @@ fn scene_settings(state: &mut State) {
 fn scene_setup(state: &mut State) {
     signed_in(state);
     state.status = Status::setup_with("the server address is empty");
-    state.open_app(AppId::Monitor);
+    state.toggle_desktop_panel(desktop::Panel::Status);
 }
 
 fn signed_in(state: &mut State) {
@@ -368,7 +363,6 @@ fn app_spec() -> AppSpec<State> {
             ("offline", scene_offline),
             ("online", scene_online),
             ("start", scene_start),
-            ("files", scene_files),
             ("settings", scene_settings),
             ("setup", scene_setup),
         ],
@@ -518,7 +512,8 @@ mod tests {
     fn settings_opens_toggles_and_cancels() {
         let mut rt = Runtime::new(state_with(Status::online()), ui::view, SIZE, test_env());
         rt.frame(0.0);
-        press(&mut rt, "open-settings");
+        press(&mut rt, "desktop-status");
+        press(&mut rt, "status-control");
         assert_eq!(rt.state.screen, Screen::Settings);
 
         assert!(rt.state.config.auto_reconnect);
@@ -535,7 +530,8 @@ mod tests {
     fn apply_with_a_bad_address_stays_in_settings_and_explains() {
         let mut rt = Runtime::new(state_with(Status::online()), ui::view, SIZE, test_env());
         rt.frame(0.0);
-        press(&mut rt, "open-settings");
+        press(&mut rt, "desktop-status");
+        press(&mut rt, "status-control");
         rt.state.server_field.text = "not a host name".to_owned();
         press(&mut rt, "apply");
         assert_eq!(rt.state.screen, Screen::Settings);
@@ -555,8 +551,7 @@ mod tests {
             test_env(),
         );
         rt.frame(0.0);
-        press(&mut rt, "desktop-monitor");
-        press(&mut rt, "reconnect");
+        rt.state.retry_now();
         assert_eq!(rt.state.status.phase, Phase::Connecting);
     }
 }

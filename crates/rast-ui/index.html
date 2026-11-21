@@ -12,7 +12,14 @@
   <link rel="stylesheet" href="./login.css">
 </head>
 <body>
-  <main id="login-screen" data-theme="dark">
+  <div id="startup-cover" class="loading-cover">
+    <div class="loading-content">
+      <p class="loading-brand">RAST</p>
+      <p class="loading-status" role="status"><span class="loading-spinner" aria-hidden="true"></span>Loading RAST…</p>
+      <noscript><p>Enable JavaScript and reload to open RAST.</p></noscript>
+    </div>
+  </div>
+  <main id="login-screen" data-theme="dark" hidden>
     <div class="login-shell">
       <button id="theme-toggle" type="button" aria-label="Switch to light mode">
         <svg class="login-icon-sun" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round">
@@ -97,7 +104,7 @@
             <button id="submit-login" type="submit">Sign in</button>
           </fieldset>
           <p class="login-local-note">Unlocks RAST only in this browser. No server sign-in.</p>
-          <p id="status" role="status" aria-live="polite">Loading RAST…</p>
+          <p id="status" role="status" hidden></p>
         </form>
         <footer class="login-footer">
           <span>RAST · Revamp</span>
@@ -107,8 +114,11 @@
     </div>
     <p class="login-print">RAST — Browser-only workspace unlock.</p>
   </main>
-  <div id="workspace-cover" hidden>
-    <p id="workspace-status" role="status">Opening your workspace…</p>
+  <div id="workspace-cover" class="loading-cover" hidden>
+    <div class="loading-content">
+      <p class="loading-brand">RAST</p>
+      <p id="workspace-status" class="loading-status" role="status"><span class="loading-spinner" aria-hidden="true"></span>Opening your workspace…</p>
+    </div>
   </div>
   <script type="module" src="./boot.js"></script>
 </body>

@@ -14,56 +14,15 @@ use crate::{Screen, State, connection::Phase};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AppId {
-    Files,
-    Applications,
-    Monitor,
-    Backup,
     Control,
-    Logs,
 }
 
 impl AppId {
-    pub(super) const ALL: [Self; 6] = [
-        Self::Files,
-        Self::Applications,
-        Self::Monitor,
-        Self::Backup,
-        Self::Control,
-        Self::Logs,
-    ];
-    const PINS: [Self; 3] = [Self::Files, Self::Monitor, Self::Control];
-
     pub(super) const fn key(self) -> &'static str {
-        match self {
-            Self::Files => "files",
-            Self::Applications => "applications",
-            Self::Monitor => "monitor",
-            Self::Backup => "backup",
-            Self::Control => "controlpanel",
-            Self::Logs => "logs",
-        }
+        "controlpanel"
     }
-
     pub(super) const fn label(self) -> &'static str {
-        match self {
-            Self::Files => "File Station",
-            Self::Applications => "Applications",
-            Self::Monitor => "Resource Monitor",
-            Self::Backup => "Backup Center",
-            Self::Control => "Control Panel",
-            Self::Logs => "Activity Logs",
-        }
-    }
-
-    pub(super) const fn description(self) -> &'static str {
-        match self {
-            Self::Files => "Browse and organize server files",
-            Self::Applications => "Browse workspace applications",
-            Self::Monitor => "Check the configured server connection",
-            Self::Backup => "Back up RAST configuration and data",
-            Self::Control => "Change server and reconnect settings",
-            Self::Logs => "Review sign-ins and server activity",
-        }
+        "Connection settings"
     }
 }
 
@@ -85,16 +44,37 @@ pub(crate) enum Wallpaper {
     Forest,
     Coast,
     Desert,
+    Mountain,
 }
 
 impl Wallpaper {
-    pub(super) const ALL: [Self; 4] = [Self::Alpine, Self::Forest, Self::Coast, Self::Desert];
+    pub(super) const ALL: [Self; 5] = [
+        Self::Alpine,
+        Self::Forest,
+        Self::Coast,
+        Self::Desert,
+        Self::Mountain,
+    ];
+    fn load() -> Self {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(key) = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .and_then(|storage| storage.get_item("rast.wallpaper").ok().flatten())
+        {
+            return Self::ALL
+                .into_iter()
+                .find(|item| item.key() == key)
+                .unwrap_or_default();
+        }
+        Self::default()
+    }
     pub(super) const fn key(self) -> &'static str {
         match self {
             Self::Alpine => "alpine-dawn",
             Self::Forest => "forest-mist",
             Self::Coast => "coastal-calm",
             Self::Desert => "desert-dusk",
+            Self::Mountain => "mountain-valley",
         }
     }
     pub(super) const fn label(self) -> &'static str {
@@ -103,6 +83,7 @@ impl Wallpaper {
             Self::Forest => "Forest Mist",
             Self::Coast => "Coastal Calm",
             Self::Desert => "Desert Dusk",
+            Self::Mountain => "Mountain Valley",
         }
     }
 }
@@ -130,7 +111,7 @@ impl Default for Desktop {
             opened: Vec::new(),
             maximized: false,
             dark: None,
-            wallpaper: Wallpaper::default(),
+            wallpaper: Wallpaper::load(),
             clock: "09:41".into(),
             date: "21 Nov".into(),
             next_clock: 0.0,
@@ -199,6 +180,10 @@ impl State {
     }
     pub(crate) fn set_wallpaper(&mut self, wallpaper: Wallpaper) {
         self.desktop.wallpaper = wallpaper;
+        #[cfg(target_arch = "wasm32")]
+        if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+            let _ = storage.set_item("rast.wallpaper", wallpaper.key());
+        }
     }
 
     pub(crate) fn open_app(&mut self, app: AppId) {
@@ -261,7 +246,7 @@ pub(crate) fn key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         if state.desktop.panel != Some(Panel::Start) {
             state.toggle_desktop_panel(Panel::Start);
         }
-        tx.focus("start-search", true);
+        tx.focus("start-personalize", true);
         return true;
     }
     if event.key == Key::Escape && state.desktop.panel.is_some() {
@@ -273,7 +258,7 @@ pub(crate) fn key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 struct Art {
-    wallpapers: [Image; 4],
+    wallpapers: [Image; 5],
     icons: HashMap<&'static str, Image>,
 }
 
@@ -285,6 +270,7 @@ impl Art {
             cache.load(&include_bytes!("../assets/desktop/forest-mist.jpg")[..]),
             cache.load(&include_bytes!("../assets/desktop/coastal-calm.jpg")[..]),
             cache.load(&include_bytes!("../assets/desktop/desert-dusk.jpg")[..]),
+            cache.load(&include_bytes!("../assets/desktop/mountain-valley.jpg")[..]),
         ];
         macro_rules! icons {
             ($($name:literal),+ $(,)?) => { [$(($name, cache.svg(&include_bytes!(concat!("../assets/desktop/", $name, ".svg"))[..], 34.0, 2.0))),+] };
@@ -405,15 +391,6 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     } else {
         backdrop
     };
-    let area = col()
-        .pin(Some(0.0), Some(0.0), Some(0.0), Some(BAR))
-        .center()
-        .child(shortcuts(state, &p, height, compact));
-    let area = if state.desktop.active.is_none() && !compact && height > 440.0 {
-        area.child(empty_card(state))
-    } else {
-        area
-    };
     let mut root = col()
         .key("workspace-root")
         .w_full()
@@ -422,8 +399,7 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
         .child(
             el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
                 .gradient(rgb("#192739").alpha(0.12), rgb("#142330").alpha(0.25)),
-        )
-        .child(area);
+        );
     if let Some(app) = state.desktop.active {
         root = root.child(window::view(state, &p, app, width, height, compact));
     }
@@ -431,119 +407,14 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
         root = root
             .child(
                 el().key("desktop-dismiss-panel")
+                    .label("Dismiss panel")
+                    .focusable(false)
                     .pin(Some(0.0), Some(0.0), Some(0.0), Some(BAR))
                     .on_press(State::dismiss_panel),
             )
             .child(panel);
     }
     root.child(taskbar(state, &p, dark, width))
-}
-
-fn shortcuts(state: &State, p: &Palette, height: f32, compact: bool) -> El {
-    let across = compact || height < 650.0;
-    let mut list = if across {
-        row()
-            .flex_wrap()
-            .gap(3.0)
-            .pin(Some(10.0), Some(14.0), Some(10.0), None)
-    } else {
-        col().gap(4.0).absolute(12.0, 16.0)
-    };
-    for app in AppId::ALL {
-        let active = state.desktop.active == Some(app);
-        let pin = col()
-            .key(format!("desktop-{}", app.key()))
-            .role("button")
-            .label(app.label())
-            .w(if compact { 70.0 } else { 104.0 })
-            .h(if compact { 77.0 } else { 98.0 })
-            .pt(6.0)
-            .center_y()
-            .gap(6.0)
-            .radius(8.0)
-            .fill(if active {
-                rgb("#4075ac").alpha(0.5)
-            } else {
-                Color::TRANSPARENT
-            })
-            .hover(rgb("#4075ac").alpha(0.48))
-            .child(
-                el().size(
-                    if compact { 38.0 } else { 46.0 },
-                    if compact { 38.0 } else { 46.0 },
-                )
-                .radius(11.0)
-                .center()
-                .fill(p.surface)
-                .border(1.0, p.line.alpha(0.65))
-                .shadow(2.0, 7.0, Color::BLACK.alpha(0.25))
-                .child(icon(state, app.key(), 27.0)),
-            )
-            .child(
-                text(app.label())
-                    .w(if compact { 61.0 } else { 86.0 })
-                    .wrap()
-                    .align(rune::Align::Center)
-                    .padding(3.0)
-                    .radius(4.0)
-                    .fill(rgb("#15202d").alpha(0.72))
-                    .font(SMALL)
-                    .color(Color::WHITE),
-            )
-            .on_press(move |s: &mut State| s.open_app(app));
-        list = list.child(pin);
-    }
-    list
-}
-
-fn empty_card(state: &State) -> El {
-    let mut card = col()
-        .key("desktop-empty")
-        .w(320.0)
-        .padding(16.0)
-        .center_y()
-        .gap(9.0)
-        .radius(13.0)
-        .fill(rgb("#172330").alpha(0.72))
-        .border(1.0, Color::WHITE.alpha(0.17))
-        .child(icon(state, "logo", 25.0))
-        .child(
-            text("No applications open")
-                .font(TextStyle::new(14.0, 730.0))
-                .color(Color::WHITE),
-        )
-        .child(
-            text("Open an application using a desktop shortcut or the Start menu.")
-                .w_full()
-                .wrap()
-                .align(rune::Align::Center)
-                .font(BODY)
-                .color(rgb("#d6e0eb")),
-        );
-    for app in AppId::PINS {
-        card = card.child(
-            row()
-                .key(format!("quick-{}", app.key()))
-                .label(app.label())
-                .role("button")
-                .h(30.0)
-                .px(9.0)
-                .center()
-                .gap(7.0)
-                .radius(6.0)
-                .fill(Color::WHITE.alpha(0.1))
-                .hover(Color::WHITE.alpha(0.22))
-                .border(1.0, Color::WHITE.alpha(0.17))
-                .child(icon(state, app.key(), 15.0))
-                .child(text(app.label()).font(BODY).color(Color::WHITE))
-                .on_press(move |s: &mut State| s.open_app(app)),
-        );
-    }
-    card.child(
-        text("Tip: Ctrl+Space opens Start.")
-            .font(SMALL)
-            .color(rgb("#ccd9e5")),
-    )
 }
 
 fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
@@ -561,61 +432,6 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .hover(p.accent.mix(p.surface, 0.2))
         .child(icon(state, "logo", 22.0))
         .on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Start));
-    let mut apps = row().gap(if compact { 2.0 } else { 4.0 }).center_y();
-    for app in AppId::PINS.into_iter().chain(
-        state
-            .desktop
-            .opened
-            .iter()
-            .map(|(app, _)| *app)
-            .filter(|app| !AppId::PINS.contains(app))
-            .filter(|app| !compact || Some(*app) == state.desktop.active),
-    ) {
-        let active = state.desktop.active == Some(app);
-        let opened = state.desktop.opened.iter().any(|(id, _)| *id == app);
-        let button = row()
-            .key(if app == AppId::Control {
-                "open-settings".into()
-            } else {
-                format!("task-{}", app.key())
-            })
-            .role("button")
-            .label(app.label())
-            .h(36.0)
-            .px(if compact { 7.0 } else { 9.0 })
-            .center()
-            .gap(6.0)
-            .radius(7.0)
-            .fill(if active { p.hover } else { Color::TRANSPARENT })
-            .hover(p.hover)
-            .child(icon(state, app.key(), if compact { 18.0 } else { 16.0 }));
-        let button = if compact {
-            button
-        } else {
-            button.child(
-                text(app.label())
-                    .font(BODY)
-                    .color(if active { p.ink } else { p.muted }),
-            )
-        };
-        let button = if opened {
-            button.child(el().size(10.0, 3.0).radius(2.0).fill(p.accent).pin(
-                Some(7.0),
-                None,
-                None,
-                Some(1.0),
-            ))
-        } else {
-            button
-        };
-        apps = apps.child(button.on_press(move |s: &mut State| {
-            if s.desktop.active == Some(app) {
-                s.minimize_app();
-            } else {
-                s.open_app(app);
-            }
-        }));
-    }
     let who = state
         .account
         .as_ref()
@@ -701,7 +517,6 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .fill(p.bar)
         .border_sides([1.0, 0.0, 0.0, 0.0], p.line)
         .child(start)
-        .child(apps)
         .child(el().grow(1.0).min_w(0.0))
         .child(tray)
 }

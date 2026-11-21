@@ -32,7 +32,7 @@ body:has(#login-screen:not([hidden])) > :is(canvas, [data-rune-a11y]) {
 
 #login-screen[hidden],
 #login-screen [hidden],
-#workspace-cover[hidden] {
+.loading-cover[hidden] {
   display: none !important;
 }
 
@@ -477,7 +477,7 @@ body:has(#login-screen:not([hidden])) > :is(canvas, [data-rune-a11y]) {
   display: none;
 }
 
-#workspace-cover {
+.loading-cover {
   position: fixed;
   z-index: 20;
   inset: 0;
@@ -489,6 +489,46 @@ body:has(#login-screen:not([hidden])) > :is(canvas, [data-rune-a11y]) {
   color: #f0f5fb;
   font: 1rem / 1.5 system-ui, sans-serif;
   text-align: center;
+}
+
+.loading-content {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.loading-content p {
+  margin: 0;
+}
+
+.loading-brand {
+  color: #83ceff;
+  font-size: 1.5rem;
+  font-weight: 780;
+  letter-spacing: 0.27em;
+}
+
+.loading-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.625rem;
+}
+
+.loading-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border: 2px solid #495665;
+  border-inline-start-color: #83ceff;
+  border-radius: 50%;
+  animation: loading-spin 0.8s linear infinite;
+}
+
+@keyframes loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner { animation: none; }
 }
 
 /* Never print form controls, even if a password is currently revealed. */

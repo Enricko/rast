@@ -13,6 +13,7 @@ const theme = $('theme-toggle');
 const status = $('status');
 const error = $('login-error');
 const cover = $('workspace-cover');
+const startup = $('startup-cover');
 
 let wasm;
 let creating = false;
@@ -71,7 +72,14 @@ function startWorkspace(start) {
     };
     const began = performance.now();
     function check() {
-      const failure = wasm.workspace_error();
+      let failure;
+      try {
+        failure = wasm.workspace_error();
+      } catch (cause) {
+        clean();
+        reject(cause);
+        return;
+      }
       if (failure || performance.now() - began >= 15000) {
         clean();
         reject(failure || 'The workspace did not start. Please try again.');
@@ -142,7 +150,9 @@ form.addEventListener('submit', async (event) => {
     cover.hidden = true;
     canvas.focus({ preventScroll: true });
   } catch (cause) {
-    if (started) wasm.close_workspace();
+    if (started) {
+      try { wasm.close_workspace(); } catch (closeError) { console.error(closeError); }
+    }
     cover.hidden = true;
     screen.hidden = false;
     status.hidden = true;
@@ -169,11 +179,27 @@ window.addEventListener('rastsignout', () => {
   }
 });
 
-try {
+async function loadBindings() {
   const bindings = await import('./app.js');
   await bindings.default();
-  wasm = bindings;
+  return bindings;
+}
+
+let startupTimer;
+try {
+  wasm = await Promise.race([
+    loadBindings(),
+    new Promise((_, reject) => {
+      startupTimer = setTimeout(() => reject('RAST took too long to load. Reload the page and try again.'), 30000);
+    }),
+  ]);
+  // A full reload discards the in-memory unlock. Never restore it from a
+  // browser storage flag: the local password verifier must still be checked.
   resetLogin();
 } catch (cause) {
   reportStartupError(cause);
+} finally {
+  clearTimeout(startupTimer);
+  screen.hidden = false;
+  startup.hidden = true;
 }
