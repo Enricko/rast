@@ -12,8 +12,9 @@ The previous implementation (0.18.x → 1.0.1 remake) was **removed on
 
 - The old tree is still reachable from branch `Remake` and tag
   `archive/pre-rune-rewrite-2026-11-21`. Production keeps running the last
-  released build (`1.0.1-alpha.2`) until the rewrite ships; **this branch is not
-  deployable yet** — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+  released build (`1.0.1-alpha.2`) until the rewrite ships. The browser preview
+  is live at [desktop-revamp.lufria.tech](https://desktop-revamp.lufria.tech/);
+  see [deployment](docs/DEPLOYMENT.md).
 - Work happens on `revamp/remake`.
 - What exists today: a **cross-platform client shell** (Linux, Windows, macOS,
   plus a WebGPU browser build) that knows its RAST server and survives the
@@ -43,7 +44,7 @@ The previous implementation (0.18.x → 1.0.1 remake) was **removed on
   reasoning and the server-side plan are in
   [docs/AUTH-STORAGE.md](docs/AUTH-STORAGE.md).
 
-![The device login screen](docs/screenshots/2026-11-21-client-login.png)
+![The classic RAST login screen](docs/screenshots/2026-11-21-classic-login.png)
 ![The client settings screen](docs/screenshots/2026-11-21-client-settings.png)
 
 ## Build and run

@@ -72,8 +72,18 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   `127.0.0.1:8722` and the Cloudflare Tunnel ingress; the old
   `desktop.lufria.tech` keeps serving the released RAST.
 
+### Fixed
+
+- The revamp web build publishes matching JavaScript and WebAssembly under a
+  content-addressed URL. The installer switches the HTML only after all assets
+  are ready and keeps old release files, so deploys no longer mix cached glue
+  with a different Wasm binary.
+- Restored RAST's classic login in Rune: Alpine Dawn wallpaper, the brand panel,
+  blue sign-in action, and a light/dark switch. Small windows use a scrollable
+  single column. Existing local accounts keep working without migration.
+
 ### Notes
 
-- The rewrite is **not deployed**. Production still runs the last released
-  build; `docs/DEPLOYMENT.md` explains what has to exist before it can be.
+- The preview runs at `desktop-revamp.lufria.tech`; production at
+  `desktop.lufria.tech` still runs the previous release.
 

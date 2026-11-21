@@ -1,8 +1,7 @@
 <!doctype html>
 <!--
-  RAST web shell. Committed by hand; scripts/web-build.sh copies it next to the
-  wasm-bindgen output (app.js, app_bg.wasm). The page needs WebGPU: Rune's web
-  target renders one canvas through it, with no WebGL fallback.
+  RAST web shell. scripts/web-build.sh resolves the bootstrap URL to the
+  matching release. Rune renders the app in one canvas using WebGPU.
 -->
 <html lang="en">
 <head>

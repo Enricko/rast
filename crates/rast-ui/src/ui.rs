@@ -2,7 +2,7 @@
 //! and the settings form.
 
 use rune::tok::{self, motion, type_};
-use rune::{Color, Cx, El, Tx, col, el, row, text, text_input};
+use rune::{Color, Cx, El, col, el, row, text, text_input};
 
 use crate::connection::Phase;
 use crate::{Screen, State};
@@ -25,195 +25,14 @@ const WAITING: Color = Color {
     b: 0.25,
     a: 1.0,
 };
-#[cfg(not(target_arch = "wasm32"))]
-const HINT: &str = "Device login: the password is stored on this device as an Argon2id hash, never in plain text. Server accounts arrive with the server phase.";
-#[cfg(target_arch = "wasm32")]
-const HINT: &str = "Device login: the password is stored in this browser as an Argon2id hash, never in plain text. Server accounts arrive with the server phase.";
-
 pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let dark = cx.system_dark();
     let t = tok::theme(dark);
     match state.screen {
-        Screen::CreateAccount => create_account(state, &t),
-        Screen::Login => login(state, &t),
         Screen::Desktop if state.signed_in => desktop(state, &t),
         Screen::Settings if state.signed_in => settings(state, dark, &t),
-        Screen::Desktop | Screen::Settings => login(state, &t),
+        _ => crate::login::view(state, cx),
     }
-}
-
-// --- device login -------------------------------------------------------------
-
-fn create_account(state: &State, t: &tok::Theme) -> El {
-    let username = text_input(&state.username_field, type_::BODY)
-        .key("username")
-        .single_line()
-        .h(42.0)
-        .padding(10.0)
-        .radius(9.0)
-        .fill(t.control_off)
-        .color(t.text)
-        .placeholder("username", t.text_secondary)
-        .on_edit(|state: &mut State| &mut state.username_field);
-
-    let mut password = text_input(&state.password_field, type_::BODY)
-        .key("password")
-        .single_line()
-        .h(42.0)
-        .padding(10.0)
-        .radius(9.0)
-        .fill(t.control_off)
-        .color(t.text)
-        .placeholder("device password (8+ characters)", t.text_secondary)
-        .on_edit(|state: &mut State| &mut state.password_field);
-    if !state.reveal_password {
-        password = password.secure();
-    }
-
-    let mut confirm = text_input(&state.confirm_field, type_::BODY)
-        .key("confirm")
-        .single_line()
-        .h(42.0)
-        .padding(10.0)
-        .radius(9.0)
-        .fill(t.control_off)
-        .color(t.text)
-        .placeholder("repeat the password", t.text_secondary)
-        .on_edit(|state: &mut State| &mut state.confirm_field)
-        .on_submit(|state: &mut State, _tx: &mut Tx| state.submit_create());
-    if !state.reveal_password {
-        confirm = confirm.secure();
-    }
-
-    let mut card = auth_card(t)
-        .child(text("Welcome to RAST").font(type_::TITLE).color(t.text))
-        .child(
-            text(if cfg!(target_arch = "wasm32") {
-                "Set up the login for this browser."
-            } else {
-                "Set up the login for this device."
-            })
-            .font(type_::BODY)
-            .color(t.text_secondary),
-        )
-        .child(labeled(t, "Username", username))
-        .child(labeled(t, "Device password", password))
-        .child(labeled(t, "Confirm password", confirm))
-        .child(show_password_button(state, t));
-    card = with_error(card, state);
-    card = card
-        .child(button(
-            t,
-            "create-account",
-            "Create device login",
-            true,
-            State::submit_create,
-        ))
-        .child(
-            text(HINT)
-                .w(384.0)
-                .wrap()
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
-
-    centered(card, t)
-}
-
-fn login(state: &State, t: &tok::Theme) -> El {
-    let username = match &state.account {
-        Some(account) => account.username.clone(),
-        None => "no device login".to_owned(),
-    };
-
-    let mut password = text_input(&state.password_field, type_::BODY)
-        .key("password")
-        .single_line()
-        .h(42.0)
-        .padding(10.0)
-        .radius(9.0)
-        .fill(t.control_off)
-        .color(t.text)
-        .placeholder("password", t.text_secondary)
-        .on_edit(|state: &mut State| &mut state.password_field)
-        .on_submit(|state: &mut State, _tx: &mut Tx| state.submit_login());
-    if !state.reveal_password {
-        password = password.secure();
-    }
-
-    let mut card = auth_card(t)
-        .child(text("RAST").font(type_::TITLE).color(t.text))
-        .child(
-            text("Sign in to your workspace.")
-                .font(type_::BODY)
-                .color(t.text_secondary),
-        )
-        .child(
-            row().w_full().center_y().child(
-                text(format!("Device account: {username}"))
-                    .font(type_::LABEL)
-                    .color(t.text_secondary)
-                    .grow(1.0),
-            ),
-        )
-        .child(labeled(t, "Password", password))
-        .child(show_password_button(state, t));
-    card = with_error(card, state);
-    card = card
-        .child(button(t, "sign-in", "Sign in", true, State::submit_login))
-        .child(
-            text(HINT)
-                .w(384.0)
-                .wrap()
-                .font(type_::LABEL)
-                .color(t.text_secondary),
-        );
-
-    centered(card, t)
-}
-
-fn auth_card(t: &tok::Theme) -> El {
-    col()
-        .key("auth-card")
-        .w(440.0)
-        .gap(14.0)
-        .padding(28.0)
-        .radius(16.0)
-        .fill(t.card)
-}
-
-fn centered(card: El, t: &tok::Theme) -> El {
-    col()
-        .w_full()
-        .h_full()
-        .fill(t.bg)
-        .center()
-        .padding(32.0)
-        .child(card)
-}
-
-fn labeled(t: &tok::Theme, label: &'static str, input: El) -> El {
-    col()
-        .w_full()
-        .gap(6.0)
-        .child(text(label).font(type_::LABEL).color(t.text_secondary))
-        .child(input)
-}
-
-fn show_password_button(state: &State, t: &tok::Theme) -> El {
-    let (key, label) = if state.reveal_password {
-        ("hide-password", "Hide password")
-    } else {
-        ("show-password", "Show password")
-    };
-    button(t, key, label, false, State::toggle_password_visibility)
-}
-
-fn with_error(mut card: El, state: &State) -> El {
-    if let Some(error) = &state.login_error {
-        card = card.child(text(error.clone()).font(type_::LABEL).color(OFFLINE));
-    }
-    card
 }
 
 // --- shell --------------------------------------------------------------------

@@ -7,9 +7,9 @@
 #   rustup target add wasm32-unknown-unknown
 #   cargo install wasm-bindgen-cli --version 0.2.129 --locked
 #
-# The output folder is a plain static site. Serve it over HTTPS (plain HTTP works
-# on localhost) and serve `.wasm` as `application/wasm`. The page needs WebGPU:
-# Rune's web target renders one canvas through it.
+# The static site has a stable index.html and immutable assets/<sha256>/ trees.
+# Serve it over HTTPS (plain HTTP works on localhost), serve `.wasm` as
+# `application/wasm`, and don't cache index.html. The page needs WebGPU.
 #
 # WebGPU caveat: Chrome/Edge 113+, Safari 26+, Firefox behind its WebGPU flag.
 # There is no WebGL fallback.
@@ -28,7 +28,7 @@ while (($#)); do
     case $1 in
         --dev) dev=true ;;
         --out)
-            [[ $# -ge 2 ]] || { echo "--out needs a directory" >&2; exit 2; }
+            [[ $# -ge 2 && -n $2 ]] || { echo "--out needs a directory" >&2; exit 2; }
             out=$2
             shift
             ;;
@@ -97,37 +97,132 @@ if [[ ! -f $artifact ]]; then
     exit 1
 fi
 
-rm -rf "$out"
-mkdir -p "$out"
-
-# wasm-bindgen writes app.js + app_bg.wasm (+ snippets/) for a `--target web`
-# module. The page imports app.js and awaits its default export. A release build
-# drops the wasm function-name section (over 40% of an unoptimized build).
-bindgen_args=(--target web --out-dir "$out" --out-name app)
-$dev || bindgen_args+=(--remove-name-section)
-wasm-bindgen "${bindgen_args[@]}" "$artifact"
-
-cp "crates/$package/index.html" "$out/index.html"
-cp "crates/$package/boot.js" "$out/boot.js"
-
-# Rune embeds a Latin/Greek/Cyrillic cut of Inter and fetches the full faces from
-# beside app.js after the first frame. Copy the ones the build embedded, if any;
-# without them text outside the cut draws in fallback fonts.
-cut=$(tr ' ' '\n' <"${artifact%.wasm}.d" 2>/dev/null | grep -m1 '/assets/web/first/Inter-Regular\.ttf$' || true)
-if [[ -n $cut ]]; then
-    cp "${cut%/first/*}"/Inter-*.ttf "$out/"
-fi
-
-python3 - "$out/app_bg.wasm" <<'PY'
+# Stage on the output filesystems, never deleting the requested --out. All
+# wasm-bindgen outputs keep their relative paths (including snippets/). Old
+# releases and any preexisting legacy files are not touched.
+python3 - "$out" "crates/$package" "$artifact" "$profile_dir" <<'PY'
+import errno
 import gzip
-import pathlib
+import hashlib
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
+from urllib.parse import unquote, urlsplit
 
-path = pathlib.Path(sys.argv[1])
-data = path.read_bytes()
-print(f"{path}: {len(data):,} bytes raw, {len(gzip.compress(data, mtime=0)):,} bytes gzip")
+
+def bundle_digest(root):
+    """Hash sorted file paths and bytes. Keep in sync with install-revamp.sh."""
+    if root.is_symlink() or not root.is_dir():
+        raise SystemExit(f"Expected a regular release directory: {root}")
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            raise SystemExit(f"Unsupported bundle entry: {path}")
+        if path.is_file():
+            digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+            with path.open("rb") as file:
+                digest.update(hashlib.file_digest(file, "sha256").digest())
+    return digest.hexdigest()
+
+
+def render_index(template, bundle, digest):
+    # This is a hand-authored template: use quoted ./ paths for local src/href
+    # resources. Keep transitive CSS/JS references relative to their own files.
+    entrypoints = 0
+
+    def rewrite(match):
+        nonlocal entrypoints
+        attribute, quote, url = match.groups()
+        path = unquote(urlsplit(url).path).removeprefix("./")
+        if ".." in Path(path).parts or path.startswith("/") or not (bundle / path).is_file():
+            raise SystemExit(f"Missing or invalid index.html asset: {url}")
+        if attribute.strip().lower().startswith("src") and url == "./boot.js":
+            entrypoints += 1
+        return f"{attribute}{quote}./assets/{digest}/{url[2:]}{quote}"
+
+    result = re.sub(r'''(?<![\w:-])((?:src|href)\s*=\s*)(["'])(\./[^"']+)\2''',
+                    rewrite, template, flags=re.IGNORECASE)
+    if entrypoints != 1:
+        raise SystemExit('index.html must have one src="./boot.js" entrypoint')
+    return result
+
+
+def copy_fonts(artifact, bundle):
+    # Rune fetches the full Inter faces beside app.js after the first frame.
+    # These paths may appear only in rune-text's own rustc dependency record.
+    depfiles = [artifact.with_suffix(".d")]
+    depfiles.extend(sorted((artifact.parent / "deps").glob("rune_text-*.d"),
+                           key=lambda path: path.stat().st_mtime_ns, reverse=True))
+    for path in depfiles:
+        if not path.is_file():
+            continue
+        cut = next((item for item in path.read_text().split()
+                    if item.endswith("/assets/web/first/Inter-Regular.ttf") and Path(item).is_file()), None)
+        if cut:
+            for font in Path(cut).parent.parent.glob("Inter-*.ttf"):
+                shutil.copyfile(font, bundle / font.name)
+            return
+
+
+out, package, artifact = map(Path, sys.argv[1:4])
+profile = sys.argv[4]
+out = out.resolve()
+out.mkdir(parents=True, exist_ok=True)
+assets = out / "assets"
+assets.mkdir(exist_ok=True)
+if assets.is_symlink() or not assets.is_dir():
+    raise SystemExit(f"Expected a regular assets directory: {assets}")
+
+with tempfile.TemporaryDirectory(prefix=".build-", dir=assets) as stage:
+    bundle = Path(stage) / "bundle"
+    bundle.mkdir()
+    args = ["wasm-bindgen", "--target", "web", "--out-dir", bundle, "--out-name", "app"]
+    if profile == "release":
+        args.append("--remove-name-section")
+    subprocess.run([*args, artifact], check=True)
+    for name in ("app.js", "app_bg.wasm"):
+        if not (bundle / name).is_file():
+            raise SystemExit(f"wasm-bindgen did not produce {name}")
+    shutil.copyfile(package / "boot.js", bundle / "boot.js")
+    copy_fonts(artifact, bundle)
+    if (package / "assets").is_dir():
+        for source in sorted((package / "assets").iterdir()):
+            target = bundle / source.name
+            if target.exists():
+                raise SystemExit(f"Static asset conflicts with generated output: {source}")
+            if source.is_dir():
+                shutil.copytree(source, target, symlinks=True)
+            else:
+                shutil.copyfile(source, target, follow_symlinks=False)
+
+    digest = bundle_digest(bundle)
+    index = render_index((package / "index.html").read_text(encoding="utf-8"), bundle, digest)
+    release = assets / digest
+    # Rename the complete asset tree into place. A concurrent build may have
+    # published the same digest; verify it and use it without rewriting files.
+    try:
+        if not os.path.lexists(release):
+            bundle.rename(release)
+    except OSError as error:
+        if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+            raise
+    if bundle.exists() and bundle_digest(release) != digest:
+        raise SystemExit(f"Existing release does not match its digest: {release}")
+
+    with tempfile.TemporaryDirectory(prefix=".index-", dir=out) as stage_index:
+        entry = Path(stage_index) / "index.html"
+        entry.write_text(index, encoding="utf-8")
+        entry.replace(out / "index.html")
+
+wasm = release / "app_bg.wasm"
+data = wasm.read_bytes()
+print(f"{wasm}: {len(data):,} bytes raw, {len(gzip.compress(data, mtime=0)):,} bytes gzip")
 PY
 
 echo
 echo "Built $profile_dir -> $out"
-echo "Serve it, for example: python3 -m http.server 8000 -d $out"
+printf 'Serve it, for example: python3 scripts/serve-web.py %q 8000\n' "$out"

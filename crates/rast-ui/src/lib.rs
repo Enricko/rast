@@ -20,6 +20,7 @@
 mod auth;
 mod config;
 mod connection;
+mod login;
 mod ui;
 
 use std::path::PathBuf;
@@ -66,6 +67,8 @@ pub struct State {
     pub confirm_field: TextEdit,
     pub reveal_password: bool,
     pub login_error: Option<String>,
+    pub(crate) login_dark: bool,
+    pub(crate) login_art: Option<login::Art>,
     pub(crate) account_path: Option<PathBuf>,
 }
 
@@ -82,6 +85,8 @@ impl State {
         } else {
             Screen::CreateAccount
         };
+        let username = account.as_ref().map_or("", |account| &account.username);
+        let username_field = TextEdit::new(username);
         Self {
             server_field: TextEdit::new(config.server.clone()),
             config,
@@ -92,11 +97,13 @@ impl State {
             persist: true,
             account,
             signed_in: false,
-            username_field: TextEdit::new(""),
-            password_field: TextEdit::new(""),
-            confirm_field: TextEdit::new(""),
+            username_field,
+            password_field: TextEdit::new("").secure(),
+            confirm_field: TextEdit::new("").secure(),
             reveal_password: false,
             login_error: None,
+            login_dark: true,
+            login_art: None,
             account_path,
         }
     }
@@ -117,6 +124,7 @@ impl State {
                     self.login_error = Some(format!("Could not save the device login: {error}"));
                     return;
                 }
+                self.username_field = TextEdit::new(account.username.clone());
                 self.account = Some(account);
                 self.signed_in = true;
                 self.screen = Screen::Desktop;
@@ -134,7 +142,12 @@ impl State {
             self.screen = Screen::CreateAccount;
             return;
         };
-        match account.verify(&self.password_field.text) {
+        let result = if self.username_field.text.trim() == account.username {
+            account.verify(&self.password_field.text)
+        } else {
+            Ok(false)
+        };
+        match result {
             Ok(true) => {
                 self.signed_in = true;
                 self.screen = Screen::Desktop;
@@ -142,14 +155,17 @@ impl State {
                 self.clear_secrets();
             }
             Ok(false) => {
-                self.login_error = Some("Wrong password.".to_owned());
-                self.password_field = TextEdit::new("");
+                self.login_error = Some("The username or password is incorrect.".to_owned());
+                self.clear_secrets();
             }
             Err(error) => self.login_error = Some(error),
         }
     }
 
     pub fn sign_out(&mut self) {
+        if let Some(account) = &self.account {
+            self.username_field = TextEdit::new(account.username.clone());
+        }
         self.signed_in = false;
         self.screen = Screen::Login;
         self.login_error = None;
@@ -161,8 +177,9 @@ impl State {
     }
 
     fn clear_secrets(&mut self) {
-        self.password_field = TextEdit::new("");
-        self.confirm_field = TextEdit::new("");
+        self.password_field = TextEdit::new("").secure();
+        self.confirm_field = TextEdit::new("").secure();
+        self.reveal_password = false;
     }
 
     // --- shell ------------------------------------------------------------
@@ -226,6 +243,7 @@ fn init() -> State {
 }
 
 fn setup(state: &mut State, wake: Waker) {
+    state.login_art = Some(login::Art::load(wake.clone()));
     if state.status.phase == Phase::Setup {
         return;
     }
@@ -265,14 +283,16 @@ fn scene_create_account(state: &mut State) {
 }
 
 fn scene_login(state: &mut State) {
-    state.account = Some(fake_account());
+    let account = fake_account();
+    state.username_field = TextEdit::new(account.username.clone());
+    state.account = Some(account);
     state.signed_in = false;
     state.screen = Screen::Login;
 }
 
 fn scene_login_error(state: &mut State) {
     scene_login(state);
-    state.login_error = Some("Wrong password.".to_owned());
+    state.login_error = Some("The username or password is incorrect.".to_owned());
 }
 
 fn scene_offline(state: &mut State) {
@@ -407,6 +427,7 @@ mod tests {
         state.account = Some(DeviceAccount::create("admin", "correct horse").unwrap());
         state.signed_in = false;
         state.screen = Screen::Login;
+        state.username_field = TextEdit::new("admin");
         let mut rt = Runtime::new(state, ui::view, SIZE, test_env());
         rt.frame(0.0);
 
@@ -415,6 +436,12 @@ mod tests {
         assert!(!rt.state.signed_in);
         assert!(rt.state.login_error.is_some());
 
+        rt.state.username_field.text = "wrong user".to_owned();
+        rt.state.password_field.text = "correct horse".to_owned();
+        press(&mut rt, "sign-in");
+        assert!(!rt.state.signed_in);
+
+        rt.state.username_field.text = "admin".to_owned();
         rt.state.password_field.text = "correct horse".to_owned();
         press(&mut rt, "sign-in");
         assert!(rt.state.signed_in);

@@ -7,9 +7,10 @@ which RAST server it belongs to and survives that server going away.
 ## Device login
 
 The shell opens on a **device login**: the first launch asks for a username and a
-password (8+ characters), later launches ask only for the password before the
-shell opens, and *Sign out* returns to the login screen. The password is hashed
-with **Argon2id** and only the hash is stored:
+password (8+ characters), later launches prefill the username, and *Sign out*
+returns to the login screen. The classic RAST layout uses the original Alpine
+Dawn wallpaper (CC0-1.0), a two-panel desktop view, and a single-column compact
+view. The password is hashed with **Argon2id** and never stored in plaintext:
 
 - natively: one `0600` file per OS (paths below),
 - in the browser: this browser's `localStorage` (preview; a real deployment
