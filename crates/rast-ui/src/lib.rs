@@ -347,6 +347,11 @@ fn scene_clock(state: &mut State) {
     state.toggle_desktop_panel(desktop::Panel::Clock);
 }
 
+fn scene_light(state: &mut State) {
+    scene_online(state);
+    state.toggle_desktop_theme();
+}
+
 fn scene_settings(state: &mut State) {
     signed_in(state);
     state.open_settings();
@@ -367,7 +372,19 @@ fn signed_in(state: &mut State) {
 /// Mount the native shell. Browser login mounts Rune separately after unlock.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start() {
-    rune::run(app_spec());
+    rune::App::new(app_spec())
+        .font_smoothing(font_smoothing())
+        .run();
+}
+
+/// macOS font smoothing thickens light text on dark surfaces, so the desktop's
+/// labels look bold. Draw them as `-webkit-font-smoothing: antialiased` does there;
+/// other platforms keep Rune's default.
+pub(crate) fn font_smoothing() -> rune::FontSmoothing {
+    match rune::FontSmoothing::default() {
+        rune::FontSmoothing::On => rune::FontSmoothing::Off,
+        other => other,
+    }
 }
 
 fn app_spec() -> AppSpec<State> {
@@ -383,6 +400,7 @@ fn app_spec() -> AppSpec<State> {
             ("account", scene_account),
             ("device", scene_device),
             ("clock", scene_clock),
+            ("light", scene_light),
             ("settings", scene_settings),
             ("setup", scene_setup),
         ],

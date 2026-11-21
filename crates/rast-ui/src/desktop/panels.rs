@@ -11,10 +11,10 @@ use super::{
     AppId, Palette, Panel, Wallpaper, connectivity, icon, initial, sign_out_button, wallpaper,
 };
 
-const TITLE: TextStyle = TextStyle::new(14.0, 680.0);
-const BODY: TextStyle = TextStyle::new(13.0, 440.0);
-const DETAIL: TextStyle = TextStyle::new(11.5, 440.0);
-const SECTION: TextStyle = TextStyle::new(10.5, 560.0).tracking(0.7);
+const TITLE: TextStyle = TextStyle::new(13.5, 600.0);
+const BODY: TextStyle = TextStyle::new(13.0, 400.0);
+const DETAIL: TextStyle = TextStyle::new(11.5, 400.0);
+const SECTION: TextStyle = TextStyle::new(10.5, 500.0).tracking(0.7);
 const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 pub(super) fn view(
@@ -213,7 +213,7 @@ fn account_menu(state: &State, p: &Palette) -> El {
             p,
             "account-device",
             "device",
-            &format!("This device: {}", state.desktop.device.name),
+            "This device",
             Panel::Device,
         ))
         .child(divider(p))
@@ -416,7 +416,11 @@ fn device_panel(state: &State, p: &Palette) -> El {
     let device = &state.desktop.device;
     let mut content = col()
         .gap(9.0)
-        .child(header(state, p, "device", &device.name, device.kind))
+        .child(header(state, p, "device", "This device", device.kind));
+    if let Some(name) = &device.name {
+        content = content.child(key_value(p, "Name", name));
+    }
+    content = content
         .child(key_value(p, "System", &device.system))
         .child(key_value(
             p,
@@ -453,7 +457,7 @@ fn clock_panel(state: &State, p: &Palette) -> El {
         .child(header(state, p, "clock", "Date and time", "Local time"))
         .child(
             text(clock.time.clone())
-                .font(TextStyle::new(30.0, 700.0).features("'tnum' 1"))
+                .font(TextStyle::new(28.0, 550.0).features("'tnum' 1"))
                 .color(p.ink),
         )
         .child(
@@ -629,8 +633,11 @@ mod tests {
             assert!(bar[3] <= 44.0);
             let start = rect(&rt, "desktop-start").expect("Start is drawn");
             let mut right = start[0] + start[2];
+            assert!(
+                rect(&rt, "desktop-device").is_none(),
+                "{width}: the taskbar does not name the browser"
+            );
             for key in [
-                "desktop-device",
                 "desktop-status",
                 "desktop-theme",
                 "desktop-clock",
@@ -638,7 +645,7 @@ mod tests {
             ] {
                 let Some(item) = rect(&rt, key) else {
                     assert!(
-                        matches!(key, "desktop-device" | "desktop-theme"),
+                        key == "desktop-theme",
                         "{width}: {key} is always in the tray"
                     );
                     continue;
@@ -661,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_taskbars_label_the_device_network_and_account() {
+    fn wide_taskbars_label_the_network_and_account() {
         let mut state = State::with_account(Config::default(), None);
         state.signed_in = true;
         let mut rt = Runtime::new(
@@ -672,7 +679,6 @@ mod tests {
         );
         rt.frame(1.0 / 60.0);
         let wide = |key| rect(&rt, key).map_or(0.0, |r| r[2]);
-        assert!(wide("desktop-device") > 60.0, "the device has a name");
         assert!(wide("desktop-status") > 50.0, "the network has a label");
         assert!(
             wide("desktop-account") > 60.0,
@@ -688,10 +694,6 @@ mod tests {
             Env::new(true, 1.0),
         );
         rt.frame(1.0 / 60.0);
-        assert!(
-            rect(&rt, "desktop-device").is_none(),
-            "phones reach the device from the account panel"
-        );
         assert_eq!(
             rect(&rt, "desktop-status").map(|r| r[2]),
             Some(32.0),

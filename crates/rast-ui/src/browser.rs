@@ -27,12 +27,14 @@ pub fn unlock_workspace(username: String, password: String, creating: bool) -> R
     if WORKSPACE.with_borrow(Option::is_some) {
         return Err(JsValue::from_str("The workspace is already open."));
     }
-    let app = App::new(app_spec()).init(move || {
-        let mut state = State::with_account(Config::load(), Some(account));
-        state.signed_in = true;
-        state.screen = Screen::Desktop;
-        state
-    });
+    let app = App::new(app_spec())
+        .font_smoothing(crate::font_smoothing())
+        .init(move || {
+            let mut state = State::with_account(Config::load(), Some(account));
+            state.signed_in = true;
+            state.screen = Screen::Desktop;
+            state
+        });
     let handle = app.handle();
     app.try_run()
         .map_err(|message| JsValue::from_str(&message))?;

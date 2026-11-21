@@ -4,8 +4,8 @@
 /// The device RAST is running on: the browser on the web, the computer natively.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Device {
-    /// "Chrome on macOS" in a browser, the host name natively.
-    pub(crate) name: String,
+    /// The computer's host name; browsers don't reveal it.
+    pub(crate) name: Option<String>,
     /// "Computer", "Phone" or "Tablet".
     pub(crate) kind: &'static str,
     pub(crate) system: String,
@@ -183,7 +183,7 @@ pub(crate) fn system_from_agent(agent: &str, touch_points: i32) -> (&'static str
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sample_device() -> Device {
     Device {
-        name: "Chrome on macOS".into(),
+        name: None,
         kind: "Computer",
         system: "macOS".into(),
         client: "Chrome 142".into(),
@@ -238,7 +238,7 @@ mod web {
             get(&format.resolved_options(), "timeZone").and_then(|zone| zone.as_string())
         };
         Device {
-            name: format!("{browser} on {system}"),
+            name: None,
             kind,
             system: system.to_owned(),
             client: match version {
@@ -323,7 +323,7 @@ pub(crate) fn device() -> Device {
         return sample_device();
     }
     let system = os_name();
-    let name = host_name().unwrap_or_else(|| "This computer".to_owned());
+    let name = host_name();
     let language = std::env::var("LC_ALL")
         .ok()
         .or_else(|| std::env::var("LANG").ok())

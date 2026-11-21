@@ -6,7 +6,7 @@ use super::{AppId, Palette, icon};
 use crate::State;
 
 const TASKBAR: f32 = super::BAR;
-const LABEL: TextStyle = TextStyle::new(12.0, 580.0);
+const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 
 pub(super) fn view(
     state: &State,

@@ -298,6 +298,25 @@ pub(crate) fn key(state: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 struct Art {
     wallpapers: [Image; 5],
     icons: HashMap<&'static str, Image>,
+    /// Darker versions of the pale line icons for the light theme.
+    icons_light: HashMap<&'static str, Image>,
+}
+
+/// The line icons' pale strokes and the darker inks they take on light surfaces.
+const LIGHT_INKS: [(&str, &str); 3] = [
+    ("#a8b9c9", "#41566b"),
+    ("#8DA3B8", "#4a6178"),
+    ("#80c6ab", "#1d8a60"),
+];
+
+/// An icon's light-theme version, or `None` when it has no pale strokes.
+fn for_light(svg: &[u8]) -> Option<Vec<u8>> {
+    let source = std::str::from_utf8(svg).ok()?;
+    let mut light = source.to_owned();
+    for (pale, ink) in LIGHT_INKS {
+        light = light.replace(pale, ink);
+    }
+    (light != source).then(|| light.into_bytes())
 }
 
 impl Art {
@@ -311,9 +330,9 @@ impl Art {
             cache.load(&include_bytes!("../assets/desktop/mountain-valley.jpg")[..]),
         ];
         macro_rules! icons {
-            ($($name:literal),+ $(,)?) => { [$(($name, cache.svg(&include_bytes!(concat!("../assets/desktop/", $name, ".svg"))[..], 34.0, 2.0))),+] };
+            ($($name:literal),+ $(,)?) => { [$(($name, &include_bytes!(concat!("../assets/desktop/", $name, ".svg"))[..])),+] };
         }
-        let mut icons: HashMap<_, _> = icons!(
+        let sources: [(&'static str, &'static [u8]); 16] = icons!(
             "files",
             "applications",
             "monitor",
@@ -330,16 +349,31 @@ impl Art {
             "keyboard",
             "wallpaper",
             "device"
-        )
-        .into();
+        );
+        let mut icons: HashMap<_, _> = sources
+            .iter()
+            .map(|&(name, svg)| (name, cache.svg(svg, 34.0, 2.0)))
+            .collect();
         icons.insert("settings", icons["controlpanel"].clone());
+        let icons_light: HashMap<_, _> = sources
+            .iter()
+            .filter_map(|&(name, svg)| Some((name, cache.svg(for_light(svg)?, 34.0, 2.0))))
+            .collect();
         #[cfg(not(target_arch = "wasm32"))]
         if rune::is_headless() {
-            for image in wallpapers.iter().chain(icons.values()) {
+            for image in wallpapers
+                .iter()
+                .chain(icons.values())
+                .chain(icons_light.values())
+            {
                 let _ = image.wait();
             }
         }
-        Self { wallpapers, icons }
+        Self {
+            wallpapers,
+            icons,
+            icons_light,
+        }
     }
 }
 
@@ -352,12 +386,13 @@ pub(super) fn wallpaper(state: &State, selected: Wallpaper) -> Option<&Image> {
 }
 
 pub(super) fn icon(state: &State, key: &str, size: f32) -> El {
-    if let Some(mark) = state
-        .desktop
-        .art
-        .as_ref()
-        .and_then(|art| art.icons.get(key))
-    {
+    let light = !state.desktop.is_dark();
+    if let Some(mark) = state.desktop.art.as_ref().and_then(|art| {
+        light
+            .then(|| art.icons_light.get(key))
+            .flatten()
+            .or_else(|| art.icons.get(key))
+    }) {
         el().size(size, size)
             .pixels_fit(mark.pixels(), SurfaceFit::Fit)
     } else {
@@ -411,14 +446,14 @@ impl Palette {
     }
 }
 
-const BODY: TextStyle = TextStyle::new(13.0, 550.0);
+const BODY: TextStyle = TextStyle::new(13.0, 450.0);
 /// The taskbar height. Popovers and windows stay above it.
 pub(super) const BAR: f32 = 44.0;
 const CHIP: f32 = 32.0;
-const LABEL: TextStyle = TextStyle::new(12.0, 560.0);
-const NAME: TextStyle = TextStyle::new(12.0, 620.0);
-const TIME: TextStyle = TextStyle::new(12.5, 620.0).features("'tnum' 1");
-const CAPTION: TextStyle = TextStyle::new(10.5, 500.0);
+const LABEL: TextStyle = TextStyle::new(12.0, 450.0);
+const NAME: TextStyle = TextStyle::new(12.0, 500.0);
+const TIME: TextStyle = TextStyle::new(12.0, 500.0).features("'tnum' 1");
+const CAPTION: TextStyle = TextStyle::new(10.5, 400.0);
 
 pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
     cx.web_focus();
@@ -463,8 +498,6 @@ pub(crate) fn view(state: &State, cx: &mut Cx<State>) -> El {
 
 /// Which tray details fit the window: labels on wide screens, icons on narrow ones.
 struct Fit {
-    device: bool,
-    device_label: bool,
     network_label: bool,
     theme: bool,
     date: bool,
@@ -475,8 +508,6 @@ struct Fit {
 impl Fit {
     fn new(width: f32) -> Self {
         Self {
-            device: width >= 560.0,
-            device_label: width >= 1024.0,
             network_label: width >= 820.0,
             theme: width >= 400.0,
             date: width >= 340.0,
@@ -536,29 +567,6 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
         .on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Start));
 
     let mut tray = row().gap(2.0).center_y();
-
-    if fit.device {
-        let device = &state.desktop.device;
-        let mut chip = chip(
-            p,
-            "desktop-device",
-            format!("This device: {}", device.name),
-            open == Some(Panel::Device),
-            fit.device_label,
-        )
-        .child(icon(state, "device", 16.0).a11y_hidden());
-        if fit.device_label {
-            chip = chip.child(
-                text(device.name.clone())
-                    .font(LABEL)
-                    .color(p.ink)
-                    .max_w(180.0)
-                    .truncate()
-                    .a11y_hidden(),
-            );
-        }
-        tray = tray.child(chip.on_press(|s: &mut State| s.toggle_desktop_panel(Panel::Device)));
-    }
 
     let net = connectivity(state);
     let kind = if cfg!(target_arch = "wasm32") {
@@ -659,7 +667,7 @@ fn taskbar(state: &State, p: &Palette, dark: bool, width: f32) -> El {
             .a11y_hidden()
             .child(
                 text(initial(who))
-                    .font(TextStyle::new(11.5, 700.0))
+                    .font(TextStyle::new(11.5, 600.0))
                     .color(p.accent_ink),
             ),
     );
