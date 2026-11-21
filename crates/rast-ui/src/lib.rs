@@ -48,6 +48,13 @@ pub struct State {
 
 impl State {
     pub fn new(config: Config) -> Self {
+        // In the browser build there is no socket to probe and no server API yet,
+        // so the shell says what it is instead of pretending to connect forever.
+        #[cfg(target_arch = "wasm32")]
+        let status = Status::setup_with(
+            "Browser preview: this is the RAST client shell. The server connection and the desktop arrive in the next phase.",
+        );
+        #[cfg(not(target_arch = "wasm32"))]
         let status = match ServerAddr::parse(&config.server) {
             Ok(_) => Status::connecting(),
             Err(error) => Status::setup_with(error),

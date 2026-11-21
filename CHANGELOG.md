@@ -42,7 +42,11 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   client screen headlessly, and packages release binaries for Linux and Windows
   on demand.
 - `docs/CLIENT.md` (behaviour, settings, platforms) and `docs/DEPLOYMENT.md`
-  (deployment state and the staging-first plan).
+  (deployment state, what the sandbox cannot do, and the safe staging-first plan).
+- Deployment pieces for the browser build: `deploy/nginx-revamp.conf` (serve it
+  at `/revamp/` next to the running desktop without replacing it),
+  `scripts/publish-web.sh` (build + print the root commands) and
+  `scripts/serve-web.py` (dev server with the right `.wasm` MIME type).
 
 ### Notes
 
