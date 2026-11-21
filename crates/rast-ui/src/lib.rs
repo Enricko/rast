@@ -3,21 +3,31 @@
 //! Runs as a native window on Linux, Windows and macOS, and as a canvas in the
 //! browser (`wasm32-unknown-unknown`, Rune's WebGPU target).
 //!
-//! The shell is resilient to the server being away: it keeps running, probes the
-//! configured RAST server on a backoff, and turns back into the connected state by
-//! itself as soon as the server answers again. That behaviour is on by default and
-//! can be turned off in Settings (or per run with `RAST_AUTO_RECONNECT=0`).
+//! Two independent things live here:
+//!
+//! 1. **Device login.** Before the shell opens, the user unlocks it with a
+//!    password that belongs to *this device*. The password is stored as an
+//!    Argon2id hash in a 0600 file; the plaintext is never stored or sent. This
+//!    is the offline/standalone unlock, not server authentication — the server
+//!    authenticates users itself when the server phase lands
+//!    (see `docs/AUTH-STORAGE.md`).
+//! 2. **Server connection.** The shell probes the configured RAST server, keeps
+//!    running while it is down and reconnects by itself when it returns. Turning
+//!    that off is an optional, persisted setting.
 
 #![forbid(unsafe_code)]
 
+mod auth;
 mod config;
 mod connection;
 mod ui;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use rune::{AppSpec, TextEdit, Tx, Waker};
 
+use auth::DeviceAccount;
 use config::Config;
 use connection::{Command, Link, Phase, ServerAddr, Status};
 
@@ -29,6 +39,10 @@ pub const SIZE: (f32, f32) = (1280.0, 800.0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
+    /// First run on this device: choose a username and a device password.
+    CreateAccount,
+    /// A device account exists; unlock the shell.
+    Login,
     Desktop,
     Settings,
 }
@@ -42,33 +56,116 @@ pub struct State {
     pub server_field: TextEdit,
     pub settings_error: Option<String>,
     pub link: Option<Link>,
-    /// Tests construct in-memory states; `false` keeps them off the real config file.
+    /// Tests construct in-memory states; `false` keeps them off the real files.
     pub(crate) persist: bool,
+    // --- device login -----------------------------------------------------
+    pub account: Option<DeviceAccount>,
+    pub signed_in: bool,
+    pub username_field: TextEdit,
+    pub password_field: TextEdit,
+    pub confirm_field: TextEdit,
+    pub reveal_password: bool,
+    pub login_error: Option<String>,
+    pub(crate) account_path: Option<PathBuf>,
 }
 
 impl State {
     pub fn new(config: Config) -> Self {
-        // In the browser build there is no socket to probe and no server API yet,
-        // so the shell says what it is instead of pretending to connect forever.
-        #[cfg(target_arch = "wasm32")]
-        let status = Status::setup_with(
-            "Browser preview: this is the RAST client shell. The server connection and the desktop arrive in the next phase.",
-        );
-        #[cfg(not(target_arch = "wasm32"))]
         let status = match ServerAddr::parse(&config.server) {
             Ok(_) => Status::connecting(),
             Err(error) => Status::setup_with(error),
+        };
+        let account_path = DeviceAccount::path();
+        let account = account_path.as_deref().and_then(DeviceAccount::load_from);
+        let screen = if account.is_some() {
+            Screen::Login
+        } else {
+            Screen::CreateAccount
         };
         Self {
             server_field: TextEdit::new(config.server.clone()),
             config,
             status,
-            screen: Screen::Desktop,
+            screen,
             settings_error: None,
             link: None,
             persist: true,
+            account,
+            signed_in: false,
+            username_field: TextEdit::new(""),
+            password_field: TextEdit::new(""),
+            confirm_field: TextEdit::new(""),
+            reveal_password: false,
+            login_error: None,
+            account_path,
         }
     }
+
+    // --- device login -----------------------------------------------------
+
+    /// First-run: hash the chosen password, store the device account, open the shell.
+    pub fn submit_create(&mut self) {
+        if self.password_field.text != self.confirm_field.text {
+            self.login_error = Some("The passwords do not match.".to_owned());
+            return;
+        }
+        match DeviceAccount::create(&self.username_field.text, &self.password_field.text) {
+            Ok(account) => {
+                if let Some(path) = &self.account_path
+                    && let Err(error) = account.save_to(path)
+                {
+                    self.login_error = Some(format!("Could not save the device login: {error}"));
+                    return;
+                }
+                self.account = Some(account);
+                self.signed_in = true;
+                self.screen = Screen::Desktop;
+                self.login_error = None;
+                self.clear_secrets();
+            }
+            Err(error) => self.login_error = Some(error),
+        }
+    }
+
+    /// Unlock the shell with the device password.
+    pub fn submit_login(&mut self) {
+        let Some(account) = self.account.clone() else {
+            self.login_error = Some("No device login on this device; create one.".to_owned());
+            self.screen = Screen::CreateAccount;
+            return;
+        };
+        match account.verify(&self.password_field.text) {
+            Ok(true) => {
+                self.signed_in = true;
+                self.screen = Screen::Desktop;
+                self.login_error = None;
+                self.clear_secrets();
+            }
+            Ok(false) => {
+                self.login_error = Some("Wrong password.".to_owned());
+                self.password_field = TextEdit::new("");
+            }
+            Err(error) => self.login_error = Some(error),
+        }
+    }
+
+    pub fn sign_out(&mut self) {
+        self.signed_in = false;
+        self.screen = Screen::Login;
+        self.login_error = None;
+        self.clear_secrets();
+    }
+
+    pub fn toggle_password_visibility(&mut self) {
+        self.reveal_password = !self.reveal_password;
+    }
+
+    fn clear_secrets(&mut self) {
+        self.password_field = TextEdit::new("");
+        self.confirm_field = TextEdit::new("");
+    }
+
+    // --- shell ------------------------------------------------------------
 
     pub fn open_settings(&mut self) {
         self.screen = Screen::Settings;
@@ -125,7 +222,19 @@ impl State {
 }
 
 fn init() -> State {
-    State::new(Config::load())
+    // The browser build has neither a device store nor a server yet, so it opens
+    // the preview shell directly instead of asking for a login it cannot keep.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let mut state = State::new(Config::load());
+        state.signed_in = true;
+        state.screen = Screen::Desktop;
+        state
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        State::new(Config::load())
+    }
 }
 
 fn setup(state: &mut State, wake: Waker) {
@@ -151,20 +260,57 @@ fn poll(state: &mut State, _t: f64, _tx: &mut Tx) -> bool {
     }
 }
 
+// --- scenes (headless snapshots) ---------------------------------------------
+
+fn fake_account() -> DeviceAccount {
+    DeviceAccount {
+        username: "admin".to_owned(),
+        phc: "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHRzYWx0c2FsdA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+            .to_owned(),
+    }
+}
+
+fn scene_create_account(state: &mut State) {
+    state.account = None;
+    state.signed_in = false;
+    state.screen = Screen::CreateAccount;
+}
+
+fn scene_login(state: &mut State) {
+    state.account = Some(fake_account());
+    state.signed_in = false;
+    state.screen = Screen::Login;
+}
+
+fn scene_login_error(state: &mut State) {
+    scene_login(state);
+    state.login_error = Some("Wrong password.".to_owned());
+}
+
 fn scene_offline(state: &mut State) {
+    signed_in(state);
     state.status = Status::offline(2, Some(Duration::from_secs(4)), "connection refused");
 }
 
 fn scene_online(state: &mut State) {
+    signed_in(state);
     state.status = Status::online();
 }
 
 fn scene_settings(state: &mut State) {
+    signed_in(state);
     state.open_settings();
 }
 
 fn scene_setup(state: &mut State) {
+    signed_in(state);
     state.status = Status::setup_with("the server address is empty");
+}
+
+fn signed_in(state: &mut State) {
+    state.account = Some(fake_account());
+    state.signed_in = true;
+    state.screen = Screen::Desktop;
 }
 
 /// Mount the shell: a native window on desktop targets, a canvas on the page in
@@ -174,6 +320,9 @@ pub fn start() {
     rune::run(AppSpec::<State> {
         min_size: Some((720.0, 480.0)),
         scenes: &[
+            ("create-account", scene_create_account),
+            ("login", scene_login),
+            ("login-error", scene_login_error),
             ("offline", scene_offline),
             ("online", scene_online),
             ("settings", scene_settings),
@@ -190,10 +339,34 @@ mod tests {
     use super::*;
     use rune::{Env, Runtime};
 
+    fn test_env() -> Env {
+        Env {
+            system_dark: true,
+            scale: 2.0,
+        }
+    }
+
     fn state_with(status: Status) -> State {
         let mut state = State::new(Config::default());
         state.status = status;
+        state.signed_in = true;
+        state.screen = Screen::Desktop;
         state.persist = false;
+        state
+    }
+
+    /// First run: no device account, so the shell starts on the create screen.
+    fn state_for_creation() -> State {
+        let mut state = State::new(Config::default());
+        state.account = None;
+        state.signed_in = false;
+        state.screen = Screen::CreateAccount;
+        state.persist = false;
+        state.account_path = Some(
+            std::env::temp_dir()
+                .join(format!("rast-ui-test-{}", std::process::id()))
+                .join("device-account"),
+        );
         state
     }
 
@@ -213,17 +386,83 @@ mod tests {
     }
 
     #[test]
-    fn settings_opens_toggles_and_cancels() {
-        let env = Env {
-            system_dark: true,
-            scale: 2.0,
-        };
-        let mut rt = Runtime::new(
-            state_with(Status::offline(1, Some(Duration::from_secs(1)), "refused")),
-            ui::view,
-            SIZE,
-            env,
+    fn a_new_device_creates_an_account_and_opens_the_shell() {
+        let path = std::env::temp_dir().join(format!(
+            "rast-ui-create-{}/device-account",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut rt = Runtime::new(state_for_creation(), ui::view, SIZE, test_env());
+        rt.state.account_path = Some(path.clone());
+        rt.frame(0.0);
+
+        rt.state.username_field.text = "admin".to_owned();
+        rt.state.password_field.text = "correct horse".to_owned();
+        rt.state.confirm_field.text = "correct horse".to_owned();
+        press(&mut rt, "create-account");
+
+        assert!(rt.state.signed_in, "creating an account opens the shell");
+        assert_eq!(rt.state.screen, Screen::Desktop);
+        assert!(path.exists(), "the device account is saved on this device");
+        assert_eq!(
+            DeviceAccount::load_from(&path)
+                .expect("the account loads")
+                .username,
+            "admin"
         );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn the_login_screen_rejects_a_wrong_password_and_accepts_the_right_one() {
+        let mut state = state_with(Status::online());
+        state.account = Some(DeviceAccount::create("admin", "correct horse").unwrap());
+        state.signed_in = false;
+        state.screen = Screen::Login;
+        let mut rt = Runtime::new(state, ui::view, SIZE, test_env());
+        rt.frame(0.0);
+
+        rt.state.password_field.text = "wrong horse".to_owned();
+        press(&mut rt, "sign-in");
+        assert!(!rt.state.signed_in);
+        assert!(rt.state.login_error.is_some());
+
+        rt.state.password_field.text = "correct horse".to_owned();
+        press(&mut rt, "sign-in");
+        assert!(rt.state.signed_in);
+        assert_eq!(rt.state.screen, Screen::Desktop);
+    }
+
+    #[test]
+    fn signing_out_keeps_the_device_account_and_returns_to_the_login_screen() {
+        let mut state = state_with(Status::online());
+        state.account = Some(DeviceAccount::create("admin", "correct horse").unwrap());
+        let mut rt = Runtime::new(state, ui::view, SIZE, test_env());
+        rt.frame(0.0);
+        press(&mut rt, "sign-out");
+        assert!(!rt.state.signed_in);
+        assert_eq!(rt.state.screen, Screen::Login);
+        assert!(
+            rt.state.account.is_some(),
+            "signing out does not delete the account"
+        );
+    }
+
+    #[test]
+    fn a_mismatched_confirmation_does_not_create_an_account() {
+        let mut rt = Runtime::new(state_for_creation(), ui::view, SIZE, test_env());
+        rt.frame(0.0);
+        rt.state.username_field.text = "admin".to_owned();
+        rt.state.password_field.text = "correct horse".to_owned();
+        rt.state.confirm_field.text = "different horse".to_owned();
+        press(&mut rt, "create-account");
+        assert!(!rt.state.signed_in);
+        assert!(rt.state.login_error.is_some());
+    }
+
+    #[test]
+    fn settings_opens_toggles_and_cancels() {
+        let mut rt = Runtime::new(state_with(Status::online()), ui::view, SIZE, test_env());
         rt.frame(0.0);
         press(&mut rt, "open-settings");
         assert_eq!(rt.state.screen, Screen::Settings);
@@ -240,11 +479,7 @@ mod tests {
 
     #[test]
     fn apply_with_a_bad_address_stays_in_settings_and_explains() {
-        let env = Env {
-            system_dark: true,
-            scale: 2.0,
-        };
-        let mut rt = Runtime::new(state_with(Status::online()), ui::view, SIZE, env);
+        let mut rt = Runtime::new(state_with(Status::online()), ui::view, SIZE, test_env());
         rt.frame(0.0);
         press(&mut rt, "open-settings");
         rt.state.server_field.text = "not a host name".to_owned();
@@ -255,10 +490,6 @@ mod tests {
 
     #[test]
     fn reconnect_now_in_offline_state_returns_to_connecting() {
-        let env = Env {
-            system_dark: true,
-            scale: 2.0,
-        };
         let mut rt = Runtime::new(
             state_with(Status::offline(
                 3,
@@ -267,7 +498,7 @@ mod tests {
             )),
             ui::view,
             SIZE,
-            env,
+            test_env(),
         );
         rt.frame(0.0);
         press(&mut rt, "reconnect");

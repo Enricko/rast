@@ -24,6 +24,10 @@ The previous implementation (0.18.x → 1.0.1 remake) was **removed on
 ## What the client does
 
 - Native window on Linux, Windows and macOS; wasm build for the browser.
+- **Device login**: first launch creates a local account, later launches ask for
+  its password before the shell opens. The password is stored as an **Argon2id
+  hash** in a `0600` file — never in plain text — and can be shown/hidden while
+  typing. Sign out returns to the login screen.
 - Connects to the configured RAST server and shows *Connecting*, *Connected*,
   *Server unreachable* or *Set up the server*.
 - **Survives server downtime**: it keeps running, retries on a backoff
@@ -35,7 +39,11 @@ The previous implementation (0.18.x → 1.0.1 remake) was **removed on
   `RAST_AUTO_RECONNECT=0` does the same for a single run.
 - Configuration is a small text file per OS — see [docs/CLIENT.md](docs/CLIENT.md)
   for paths, format and overrides.
+- The login lives on the device as one hash-only file, not a database; the
+  reasoning and the server-side plan are in
+  [docs/AUTH-STORAGE.md](docs/AUTH-STORAGE.md).
 
+![The device login screen](docs/screenshots/2026-11-21-client-login.png)
 ![The client settings screen](docs/screenshots/2026-11-21-client-settings.png)
 
 ## Build and run
@@ -101,6 +109,7 @@ The full procedure, gotchas and rollback are in
 | Path | What it is |
 | --- | --- |
 | `crates/rast-ui/src/lib.rs` | Client shell: app wiring, state, screens routing, headless tests |
+| `crates/rast-ui/src/auth.rs` | Device login: Argon2id hashing, 0600 file, no plaintext |
 | `crates/rast-ui/src/connection.rs` | Server address parsing, retry policy, background prober |
 | `crates/rast-ui/src/config.rs` | Settings file, platform paths, `RAST_AUTO_RECONNECT` |
 | `crates/rast-ui/src/ui.rs` | The desktop status card and the settings screen |
@@ -108,6 +117,7 @@ The full procedure, gotchas and rollback are in
 | `scripts/check-rune-pin.sh` | Compares the pinned Rune revision with Rune's `dev` |
 | `scripts/update-rune.sh` | Bumps the pin and the matched `[patch.crates-io]` table |
 | `docs/CLIENT.md` | Client behaviour, settings, build and platform notes |
+| `docs/AUTH-STORAGE.md` | Where the login lives: device file vs database, and why |
 | `docs/DEPLOYMENT.md` | Deployment state and the safe staging-first plan |
 | `docs/UPDATING-RUNE.md` | How Rune updates work, gates, rollback |
 

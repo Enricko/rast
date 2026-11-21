@@ -55,6 +55,18 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   works under the production CSP (`script-src 'self' 'wasm-unsafe-eval'`, no
   inline script); `scripts/serve-web.py` now mirrors the production headers, and
   the browser build was verified booting in headless Chromium with WebGPU.
+- **Device login** in the client shell: first launch creates a local account
+  (username, 8+ character password, confirmation), later launches open on a
+  sign-in screen, and *Sign out* returns to it. The password is hashed with
+  Argon2id and stored in a `0600` file per OS; the plaintext is never stored,
+  logged or sent. Argon2id parameters, file paths and the recommended split
+  between the device file and the server's future SQLite database are in
+  `docs/AUTH-STORAGE.md`.
+- `deploy/install-revamp.sh --web-only`: republish the static browser build
+  without touching nginx or the tunnel (fast path after the first deployment).
+- `desktop-revamp.lufria.tech` is live: the installer added the nginx site on
+  `127.0.0.1:8722` and the Cloudflare Tunnel ingress; the old
+  `desktop.lufria.tech` keeps serving the released RAST.
 
 ### Notes
 

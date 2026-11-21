@@ -40,7 +40,14 @@ proxied `CNAME` to `<tunnel-id>.cfargotunnel.com`, or
 `cloudflared tunnel route dns <tunnel-name> desktop-revamp.lufria.tech`). The
 script's last step fails with that hint if the public URL does not come up.
 
-Until that runs, the browser build is verified locally: the wasm page boots
+Once the site exists, republishing after a UI change is just:
+
+```sh
+scripts/web-build.sh
+sudo deploy/install-revamp.sh --web-only     # static files only; no nginx/tunnel work
+```
+
+The browser build was verified locally before the first publish: the wasm page boots
 under the production CSP with WebGPU (headless Chromium, SwiftShader) and shows
 the client shell.
 

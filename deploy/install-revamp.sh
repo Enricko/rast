@@ -36,12 +36,15 @@ TUNNEL_CONFIG=/etc/cloudflared/config.yml
 TUNNEL_LINE="  - hostname: $DOMAIN"
 
 dry_run=false
-case "${1:-}" in
-    --dry-run) dry_run=true ;;
-    -h | --help) sed -n '2,30p' "$0"; exit 0 ;;
-    "") ;;
-    *) echo "unknown argument: $1 (try --dry-run)" >&2; exit 2 ;;
-esac
+web_only=false
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) dry_run=true ;;
+        --web-only) web_only=true ;;
+        -h | --help) sed -n '2,30p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $arg (try --dry-run or --web-only)" >&2; exit 2 ;;
+    esac
+done
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
@@ -57,9 +60,13 @@ say() {
 }
 
 if $dry_run; then
-    say "dry run: would publish $repo_root/dist/web to $WEB_ROOT,"
-    say "install the nginx site on 127.0.0.1:$SITE_PORT, add the tunnel rule"
-    say "for $DOMAIN and restart cloudflared."
+    say "dry run: would publish $repo_root/dist/web to $WEB_ROOT"
+    if $web_only; then
+        say "(web files only; nginx and the tunnel are left alone)."
+    else
+        say "and ensure the nginx site on 127.0.0.1:$SITE_PORT and the tunnel"
+        say "rule for $DOMAIN."
+    fi
     exit 0
 fi
 
@@ -79,6 +86,12 @@ else
 fi
 chmod -R a+rX "$WEB_ROOT"
 
+if $web_only; then
+    say "==> web files updated; nginx and the tunnel were not touched"
+    say "Done. https://$DOMAIN/"
+    exit 0
+fi
+
 # --- 2. nginx site ---------------------------------------------------------
 say "==> installing nginx site for $DOMAIN"
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
@@ -94,6 +107,7 @@ say "    nginx serves $WEB_ROOT on 127.0.0.1:$SITE_PORT"
 
 # --- 3. Cloudflare Tunnel ingress -----------------------------------------
 say "==> ensuring the tunnel route for $DOMAIN"
+tunnel_changed=false
 if grep -qF "$TUNNEL_LINE" "$TUNNEL_CONFIG"; then
     say "    route already present"
 else
@@ -121,10 +135,15 @@ PY
         cp -a "$backup" "$TUNNEL_CONFIG"
         exit 1
     fi
+    tunnel_changed=true
 fi
-say "==> applying the tunnel configuration"
-systemctl reload-or-restart cloudflared
-sleep 2
+if $tunnel_changed; then
+    say "==> applying the tunnel configuration"
+    systemctl reload-or-restart cloudflared
+    sleep 2
+else
+    say "    cloudflared left running (configuration unchanged)"
+fi
 
 # --- 4. checks -------------------------------------------------------------
 say "==> local check"
