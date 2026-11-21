@@ -85,3 +85,61 @@ pub(super) static SIGN_OUT: Icon = Icon {
     view: 24.0,
     body: r#"<g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4.5h3.5a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H14"/><path d="M10 16.5 5.5 12 10 7.5M5.5 12H15"/></g>"#,
 };
+
+// Control Panel's sections and actions, drawn as classic RAST's icon set drew them.
+
+pub(super) static USER: Icon = Icon {
+    name: "rast-user",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="8.4" r="3.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.8 20.2c.9-3.8 3.7-5.8 7.2-5.8s6.3 2 7.2 5.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"#,
+};
+
+pub(super) static USERS: Icon = Icon {
+    name: "rast-users",
+    view: 24.0,
+    body: r#"<circle cx="9.2" cy="8.6" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.4 19.4c.7-3.2 3-4.9 5.8-4.9s5.1 1.7 5.8 4.9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M15.4 5.9a3 3 0 0 1 0 5.6M17 14.9c2 .5 3.3 2 3.6 4.2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
+};
+
+pub(super) static WALLPAPER: Icon = Icon {
+    name: "rast-wallpaper",
+    view: 24.0,
+    body: r#"<rect x="3.6" y="4.8" width="16.8" height="14.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="9.6" r="1.7" fill="currentColor"/><path d="m4.8 17.2 4.8-4.9 3.2 3 2.5-2.6 3.9 4.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>"#,
+};
+
+/// Shared folders, and the Groups view of *Users & Groups*.
+pub(super) static SHARE: Icon = Icon {
+    name: "rast-share",
+    view: 24.0,
+    body: r#"<circle cx="7.2" cy="12" r="2.7" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="6.2" r="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="17" cy="17.8" r="2.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m9.6 10.8 5-3.2M9.6 13.2l5 3.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"#,
+};
+
+pub(super) static DISK: Icon = Icon {
+    name: "rast-disk",
+    view: 24.0,
+    body: r#"<ellipse cx="12" cy="6.4" rx="7.4" ry="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.6 6.4v11.2c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9V6.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.6 12c0 1.6 3.3 2.9 7.4 2.9s7.4-1.3 7.4-2.9" fill="none" stroke="currentColor" stroke-width="1.4"/>"#,
+};
+
+pub(super) static ACTIVITY: Icon = Icon {
+    name: "rast-activity",
+    view: 24.0,
+    body: r#"<path d="M3.4 12.4h4l2.6-6.8 4.1 13 2.5-6.2h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+pub(super) static SETTINGS: Icon = Icon {
+    name: "rast-settings",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 3.4v2.4M12 18.2v2.4M3.4 12h2.4M18.2 12h2.4M5.9 5.9l1.7 1.7M16.4 16.4l1.7 1.7M18.1 5.9l-1.7 1.7M7.6 16.4l-1.7 1.7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>"#,
+};
+
+/// The connection to the RAST server, in the desktop app without a server session.
+pub(super) static NETWORK: Icon = Icon {
+    name: "rast-network",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M3.8 12h16.4M12 3.6c2.4 2.4 3.6 5.3 3.6 8.4s-1.2 6-3.6 8.4c-2.4-2.4-3.6-5.3-3.6-8.4S9.6 6 12 3.6z" fill="none" stroke="currentColor" stroke-width="1.4"/>"#,
+};
+
+pub(super) static PLUS: Icon = Icon {
+    name: "rast-plus",
+    view: 24.0,
+    body: r#"<path d="M12 5.2v13.6M5.2 12h13.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>"#,
+};

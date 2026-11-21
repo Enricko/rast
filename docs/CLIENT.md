@@ -9,9 +9,9 @@ which RAST server it belongs to and survives that server going away.
 In the browser the shell signs in to the **RAST server** (accounts with the
 roles Super Admin, Admin and User, an `HttpOnly` session cookie, and a one-time
 setup token for the first Super Admin; see [docs/AUTH-STORAGE.md](AUTH-STORAGE.md)).
-Administrators manage accounts in **Control Panel → Users** (search, filters,
-temporary passwords, unlocking, signing an account out everywhere). Super Admins
-also allow or deny apps for groups under **Control Panel → Groups** and per
+Administrators manage accounts in **Control Panel → Users & Groups** (search,
+filters, temporary passwords, unlocking, signing an account out everywhere).
+Super Admins also allow or deny apps for groups in its **Groups** view and per
 account under **Apps & groups**. Under **Profile** everyone changes their name
 and password, sees which apps they may open, and ends sessions on other devices.
 Someone given a temporary password chooses their own on the sign-in page before
@@ -52,6 +52,31 @@ Apps open in windows that behave as on the classic RAST desktop
   front window, restores a minimized one or brings another to the front.
 - At 820 pt wide or less (or under 420 pt high) windows fill the screen above
   the taskbar, only the front one shows, and they neither move nor resize.
+- A 1 pt border rings a floating or maximized window, tinted with the accent on
+  the front one; a snapped half keeps only its left and right sides and a
+  phone's window has none. It takes room as the classic CSS border did: the
+  title bar and the app lay out inside it, so nothing filled paints over it.
+
+## Control Panel
+
+Control Panel is laid out as classic RAST's (`desktop/control/shell.rs` draws the
+frame, `control.rs` and `control/groups.rs` the pages):
+
+- A 214 pt sidebar of sections in the classic order: Profile and Appearance for
+  everyone; Users & Groups, Shared folders, Storage, Components and Settings for
+  administrators (a User sees a note that administrator sections are hidden).
+  The open section is tinted with the accent and outlined; the others take a
+  neutral tint under the pointer.
+- When Control Panel is 820 pt wide or narrower, phones included, the sidebar
+  becomes a 56 pt icon rail; the names stay the buttons' labels and show as
+  tooltips.
+- A header names the section, says what it holds and carries its action
+  (*Add user*, *Create group*); the page scrolls under it. Users & Groups
+  switches between its Users and Groups views (Groups for Super Admins).
+- It opens on Profile. Shared folders, Storage, Components and Settings say
+  plainly that the server doesn't offer them yet rather than show invented
+  numbers. Without a server session the desktop app shows Connection and
+  Appearance instead.
 
 ## Personalize
 

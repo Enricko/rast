@@ -14,9 +14,9 @@ use super::{Palette, Wallpaper, glyphs, rgb, wallpaper};
 use crate::State;
 
 const TITLE: TextStyle = TextStyle::new(14.0, 650.0);
-const PAGE_TITLE: TextStyle = TextStyle::new(18.0, 650.0);
 const INTRO: TextStyle = TextStyle::new(12.0, 400.0);
-const PAGE_INTRO: TextStyle = TextStyle::new(13.0, 400.0);
+/// Control Panel's page intro, as classic RAST set it (12.8 px, 1.5 line height).
+const PAGE_INTRO: TextStyle = TextStyle::new(12.8, 400.0).lh(19.2);
 const CARD_TITLE: TextStyle = TextStyle::new(12.0, 650.0).tracking(0.24);
 const HINT: TextStyle = TextStyle::new(11.5, 400.0);
 const OPTION: TextStyle = TextStyle::new(12.0, 550.0);
@@ -163,22 +163,18 @@ fn close_button(p: &Palette) -> El {
 /// Control Panel → Appearance, `width` points wide in a window `window` points wide: the
 /// intro, the save bar (held at the top while the cards scroll) and the cards.
 pub(super) fn page(state: &State, p: &Palette, width: f32, window: f32) -> El {
+    // Control Panel's header already names the page, so it leads with the intro alone.
     col()
         .key("appearance-page")
         .w_full()
         .gap(14.0)
         .child(
-            col()
+            text(PAGE_INTRO_TEXT)
+                .font(PAGE_INTRO)
+                .color(p.muted)
                 .w_full()
-                .gap(6.0)
-                .child(text("Appearance").font(PAGE_TITLE).color(p.ink))
-                .child(
-                    text(PAGE_INTRO_TEXT)
-                        .font(PAGE_INTRO)
-                        .color(p.muted)
-                        .w_full()
-                        .wrap(),
-                ),
+                .max_w(760.0)
+                .wrap(),
         )
         .child(save_bar(state, p, Place::Page, width).sticky_top(0.0))
         .child(cards(state, p, width, window))

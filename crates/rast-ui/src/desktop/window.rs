@@ -73,7 +73,12 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
     let tiled = !phone && !window.maximized && window.snapped.is_some();
     let square = phone || window.maximized || tiled;
     let radius = if square { 0.0 } else { RADIUS };
+    // The ring takes room as the classic CSS border did, so the title bar and the app lay out
+    // inside it and a filled header can't paint over it. A phone's window has no ring.
+    let ring = if phone { 0.0 } else { 1.0 };
+    let inner_radius = (radius - ring).max(0.0);
     let [x, y, w, h] = window.frame(area);
+    let inner_w = w - 2.0 * ring;
     let title = title(state, app);
 
     let mut buttons = row()
@@ -100,7 +105,7 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
         .pr(6.0)
         .gap(8.0)
         .center_y()
-        .corners([radius, radius, 0.0, 0.0])
+        .corners([inner_radius, inner_radius, 0.0, 0.0])
         .fill(p.surface_2)
         .border_sides([0.0, 0.0, 1.0, 0.0], p.line)
         .child(icon(state, app.key(), 16.0).a11y_hidden())
@@ -122,7 +127,7 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
         });
 
     let body = match app {
-        AppId::Control => super::control::view(state, p, w, phone || w < NARROW),
+        AppId::Control => super::control::view(state, p, inner_w, phone || inner_w < NARROW),
         #[cfg(test)]
         AppId::Probe => el().w_full().grow(1.0),
     };
@@ -131,7 +136,7 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .corners([0.0, 0.0, radius, radius])
+        .corners([0.0, 0.0, inner_radius, inner_radius])
         .clip_rounded(0.0)
         .child(body);
     if !focused {
@@ -145,7 +150,7 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
         );
     }
 
-    let ring = if focused {
+    let ring_color = if focused {
         p.line.mix(p.accent, 0.45)
     } else {
         p.line
@@ -171,9 +176,11 @@ fn frame(state: &State, p: &Palette, window: &Window, area: Area, focused: bool)
     frame = if phone {
         frame
     } else if tiled {
-        frame.border_sides([0.0, 1.0, 0.0, 1.0], ring)
+        frame
+            .border_sides([0.0, ring, 0.0, ring], ring_color)
+            .border_layout()
     } else {
-        frame.border(1.0, ring)
+        frame.border(ring, ring_color).border_layout()
     };
     if square {
         return frame;
@@ -470,5 +477,28 @@ mod tests {
         );
         assert!(!shown(&rt, "window-controlpanel-maximize"));
         assert!(!shown(&rt, "window-controlpanel-edge-se"));
+    }
+
+    #[test]
+    fn the_title_bar_and_the_app_sit_inside_the_window_ring() {
+        let mut rt = desktop();
+        let [x, y, w, _] = rect(&rt, "window-controlpanel");
+        let [tx, ty, tw, _] = rect(&rt, "window-controlpanel-title");
+        assert_eq!(
+            [tx, ty, tw],
+            [x + 1.0, y + 1.0, w - 2.0],
+            "the filled title bar leaves the ring showing"
+        );
+        let [bx, _, bw, _] = rect(&rt, "window-controlpanel-body");
+        assert_eq!([bx, bw], [x + 1.0, w - 2.0], "so does the app");
+
+        rt.set_viewport((390.0, 844.0), 3.0);
+        settle(&mut rt);
+        let [tx, ty, tw, _] = rect(&rt, "window-controlpanel-title");
+        assert_eq!(
+            [tx, ty, tw],
+            [0.0, 0.0, 390.0],
+            "a phone's window has no ring"
+        );
     }
 }

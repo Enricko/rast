@@ -172,6 +172,26 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   - Server: `GET /api/appearance` and `PUT /api/appearance` (only the fields
     sent change; each is checked against the offered choices). Schema version 4
     adds `user_appearance` in place.
+- **Control Panel laid out as on classic RAST** (step C of restoring the classic
+  look):
+  - The classic 214 pt sidebar: Profile, Appearance, Users & Groups, Shared
+    folders, Storage, Components and Settings, each with its classic icon. The
+    open section is tinted with the accent and outlined; the others take a
+    neutral tint under the pointer. Users see Profile and Appearance and a note
+    that administrator sections are hidden.
+  - When Control Panel is 820 pt wide or narrower, phones included, the sidebar
+    becomes a 56 pt icon rail with the names as tooltips.
+  - A header names the section, says what it holds and carries its action
+    (*Add user*, *Create group*); the page scrolls under it. Users and Groups are
+    one section with a Users | Groups switch (Groups for Super Admins), and
+    pages open with the classic intro (*User accounts*, *Groups*, *Your
+    profile*).
+  - Control Panel opens on Profile, as classic RAST did.
+  - Shared folders, Storage, Components and Settings say plainly that this
+    server doesn't offer them yet instead of showing invented numbers.
+  - A window's 1 pt border now takes room, as the classic CSS border did: the
+    title bar and the app lay out inside it, so a filled header or sidebar no
+    longer paints over the border at the window's edge.
 
 ### Fixed
 

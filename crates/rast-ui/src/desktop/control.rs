@@ -1,13 +1,15 @@
-//! Control Panel: Users (for administrators), Groups (for Super Admins),
-//! Profile, and, natively, the connection settings. Lists stay calm (an icon,
-//! a name, one line, one action); everything about one account or group is on
-//! its own page.
+//! Control Panel, laid out as classic RAST's: Profile and Appearance for everyone;
+//! Users & Groups (Groups for Super Admins), Shared folders, Storage, Components and
+//! Settings for administrators; natively, without a server session, the connection
+//! settings. `shell` draws the sidebar and header. Lists stay calm (an icon, a name,
+//! one line, one action); everything about one account or group is on its own page.
 
 mod groups;
+mod shell;
 
-use rune::{Color, El, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
+use rune::{Color, El, Icon, ScrollSpec, TextEdit, TextStyle, Tx, col, el, row, text, text_input};
 
-use super::{AppId, Palette, icon, initial};
+use super::{AppId, Palette, glyphs, icon, initial};
 use crate::State;
 use crate::server::{
     Access, Account, AccountChange, AppInfo, Choice, Failure, Group, NewAccount, Reply, Role,
@@ -21,45 +23,84 @@ const DETAIL: TextStyle = TextStyle::new(11.5, 400.0);
 const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 const SECTION: TextStyle = TextStyle::new(10.5, 500.0).tracking(0.7);
 const BUTTON: TextStyle = TextStyle::new(12.5, 500.0);
-/// The sidebar's width.
-const NAV: f32 = 168.0;
 
+/// What Control Panel shows. `Users` and `Groups` are the two views of one section,
+/// *Users & Groups*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tab {
-    Users,
-    Groups,
     Profile,
     /// Personalize's cards, for everyone.
     Appearance,
+    Users,
+    Groups,
+    Shares,
+    Storage,
+    Components,
+    Settings,
     Connection,
 }
 
 impl Tab {
+    /// The sidebar entry's key. Groups has none of its own: it is a view of Users.
     fn key(self) -> &'static str {
         match self {
-            Self::Users => "control-tab-users",
-            Self::Groups => "control-tab-groups",
             Self::Profile => "control-tab-profile",
             Self::Appearance => "control-tab-appearance",
+            Self::Users | Self::Groups => "control-tab-users",
+            Self::Shares => "control-tab-shares",
+            Self::Storage => "control-tab-storage",
+            Self::Components => "control-tab-components",
+            Self::Settings => "control-tab-settings",
             Self::Connection => "control-tab-connection",
         }
     }
+
+    /// The section's name: in the sidebar, the header and the window's title.
     fn label(self) -> &'static str {
         match self {
-            Self::Users => "Users",
-            Self::Groups => "Groups",
             Self::Profile => "Profile",
             Self::Appearance => "Appearance",
+            Self::Users | Self::Groups => "Users & Groups",
+            Self::Shares => "Shared folders",
+            Self::Storage => "Storage",
+            Self::Components => "Components",
+            Self::Settings => "Settings",
             Self::Connection => "Connection",
         }
     }
-    fn icon(self) -> &'static str {
+
+    /// The line under the header's name, worded as classic RAST worded it.
+    fn detail(self) -> &'static str {
         match self {
-            Self::Users => "users",
-            Self::Groups => "groups",
-            Self::Profile => "profile",
-            Self::Appearance => "wallpaper",
-            Self::Connection => "network",
+            Self::Profile => "Your account, password and active sessions",
+            Self::Appearance => "",
+            Self::Users | Self::Groups => "Accounts, groups, sign-in activity and access rules",
+            Self::Shares => "Shared folders and access permissions",
+            Self::Storage => "Storage locations, capacity and per-user usage",
+            Self::Components => "System health, host resources and database",
+            Self::Settings => "Server-wide preferences and read-only configuration",
+            Self::Connection => "The RAST server this desktop connects to",
+        }
+    }
+
+    fn glyph(self) -> &'static Icon {
+        match self {
+            Self::Profile => &glyphs::USER,
+            Self::Appearance => &glyphs::WALLPAPER,
+            Self::Users | Self::Groups => &glyphs::USERS,
+            Self::Shares => &glyphs::SHARE,
+            Self::Storage => &glyphs::DISK,
+            Self::Components => &glyphs::ACTIVITY,
+            Self::Settings => &glyphs::SETTINGS,
+            Self::Connection => &glyphs::NETWORK,
+        }
+    }
+
+    /// The sidebar entry this shows under.
+    fn section(self) -> Tab {
+        match self {
+            Self::Groups => Self::Users,
+            other => other,
         }
     }
 }
@@ -212,33 +253,52 @@ impl Default for ControlPanel {
     }
 }
 
+/// The sidebar's sections, in classic RAST's order.
 fn tabs(state: &State) -> Vec<Tab> {
     match &state.session {
-        Some(session) if session.role == Role::SuperAdmin => {
-            vec![Tab::Users, Tab::Groups, Tab::Profile, Tab::Appearance]
-        }
-        Some(session) if session.role.is_admin() => {
-            vec![Tab::Users, Tab::Profile, Tab::Appearance]
-        }
+        Some(session) if session.role.is_admin() => vec![
+            Tab::Profile,
+            Tab::Appearance,
+            Tab::Users,
+            Tab::Shares,
+            Tab::Storage,
+            Tab::Components,
+            Tab::Settings,
+        ],
         Some(_) => vec![Tab::Profile, Tab::Appearance],
         None => vec![Tab::Connection, Tab::Appearance],
     }
 }
 
-/// The page Control Panel shows, which its window's title names.
-pub(super) fn page_title(state: &State) -> &'static str {
+/// Super Admins also see the Groups view of *Users & Groups*.
+fn sees_groups(state: &State) -> bool {
+    state
+        .session
+        .as_ref()
+        .is_some_and(|session| session.role == Role::SuperAdmin)
+}
+
+/// What Control Panel shows: the chosen tab while this account may see it, else the first.
+fn current(state: &State) -> Tab {
+    let tab = state.control.tab;
     let tabs = tabs(state);
-    if tabs.contains(&state.control.tab) {
-        state.control.tab.label()
+    if tabs.contains(&tab) || (tab == Tab::Groups && sees_groups(state)) {
+        tab
     } else {
-        tabs[0].label()
+        tabs[0]
     }
+}
+
+/// The section Control Panel shows, which its window's title names.
+pub(super) fn page_title(state: &State) -> &'static str {
+    current(state).label()
 }
 
 // --- actions ------------------------------------------------------------------
 
 impl State {
-    /// Opening Control Panel lands on Users for administrators, else Profile.
+    /// Opening Control Panel lands on Profile, as on classic RAST (on the connection
+    /// settings without a server session).
     pub(crate) fn reset_control(&mut self) {
         let tab = tabs(self)[0];
         self.control = ControlPanel::default();
@@ -271,7 +331,7 @@ impl State {
                 self.calls().my_sessions();
             }
             Tab::Appearance => self.desktop.look.sync_hex(),
-            Tab::Connection => {}
+            Tab::Shares | Tab::Storage | Tab::Components | Tab::Settings | Tab::Connection => {}
         }
     }
 
@@ -765,74 +825,64 @@ fn sort(accounts: &mut [Account]) {
 
 // --- views --------------------------------------------------------------------
 
-/// Control Panel in a window `width` points wide; `compact` puts the tabs on top.
+/// Control Panel, `width` points wide inside its window's border: the sections on the left,
+/// the open one's header, and its page, which scrolls. `compact` lays pages out for a phone.
 pub(super) fn view(state: &State, p: &Palette, width: f32, compact: bool) -> El {
-    let tabs = tabs(state);
-    let tab = if tabs.contains(&state.control.tab) {
-        state.control.tab
-    } else {
-        tabs[0]
-    };
-    let padding = if compact { 14.0 } else { 18.0 };
-    let content = match (tab, &state.session) {
+    let tab = current(state);
+    let margin = shell::margin(width);
+    let narrow = shell::narrow(width);
+    let page = match (tab, &state.session) {
         (Tab::Users, Some(me)) => users_page(state, p, me, compact),
         (Tab::Groups, Some(_)) => groups::page(state, p, compact),
         (Tab::Profile, Some(me)) => profile_page(state, p, me, compact),
         (Tab::Appearance, _) => {
-            let page = if compact { width } else { width - NAV - 1.0 } - 2.0 * padding;
+            let page = width - shell::nav_width(width) - 2.0 * margin;
             super::personalize::page(state, p, page.max(0.0), width)
+        }
+        (Tab::Shares | Tab::Storage | Tab::Components | Tab::Settings, Some(_)) => {
+            shell::not_yet(p, tab)
         }
         _ => crate::ui::settings_body(state),
     };
-    let content = scroller().child(col().w_full().padding(padding).gap(12.0).child(content));
-    let nav_item = |item: Tab| {
-        let selected = item == tab;
-        let mut entry = row()
-            .key(item.key())
-            .role("tab")
-            .label(item.label())
-            .checked(selected)
-            .h(34.0)
-            .px(10.0)
-            .gap(8.0)
-            .center_y()
-            .radius(7.0)
-            .hover(p.hover)
-            .child(icon(state, item.icon(), 16.0).a11y_hidden())
-            .child(text(item.label()).font(LABEL).color(p.ink))
-            .on_press(move |s: &mut State| s.open_control_tab(item));
-        if selected {
-            entry = entry.fill(p.hover);
-        }
-        entry
-    };
-    if compact {
-        let mut strip = row().w_full().gap(4.0).px(10.0).pt(10.0);
-        for item in tabs {
-            strip = strip.child(nav_item(item));
-        }
-        return col()
+    let content = scroller().child(
+        col()
             .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(strip)
-            .child(content);
-    }
-    let mut nav = col()
-        .key("control-nav")
-        .w(NAV)
-        .padding(10.0)
-        .gap(2.0)
-        .border_sides([0.0, 1.0, 0.0, 0.0], p.line);
-    for item in tabs {
-        nav = nav.child(nav_item(item));
-    }
+            .px(margin)
+            .pt(if narrow { margin } else { 18.0 })
+            .pb(if narrow { margin } else { 26.0 })
+            .gap(12.0)
+            .child(page),
+    );
+    let listing = state.control.page == Page::List;
+    let action = match tab {
+        Tab::Users if listing => Some(shell::action(
+            p,
+            "users-create",
+            "Add user",
+            State::start_create_account,
+        )),
+        Tab::Groups if listing => Some(shell::action(
+            p,
+            "groups-create",
+            "Create group",
+            State::start_create_group,
+        )),
+        _ => None,
+    };
     row()
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(nav)
-        .child(content)
+        .child(shell::nav(state, p, tab, width))
+        .child(
+            col()
+                .key("control-main")
+                .grow(1.0)
+                .min_w(0.0)
+                .min_h(0.0)
+                .child(shell::header(p, tab, action, width))
+                .child(content),
+        )
 }
 
 /// The part of the window that scrolls; the sidebar stays put.
@@ -888,25 +938,22 @@ fn users_list(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
         }
         line
     };
-    let mut page = col().w_full().gap(12.0).child(
-        row()
-            .w_full()
-            .gap(10.0)
-            .center_y()
-            .child(
-                col()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .gap(2.0)
-                    .child(text("Users").font(TITLE).color(p.ink))
-                    .child(text(count).font(DETAIL).color(p.muted)),
-            )
-            .child(
-                button(p, "users-create", "Create user", Look::Primary)
-                    .on_press(State::start_create_account),
-            ),
-    );
+    let mut page = col().w_full().gap(12.0);
+    if sees_groups(state) {
+        page = page.child(shell::users_and_groups(p, Tab::Users));
+    }
+    page = page.child(shell::intro(
+        p,
+        Some("User accounts"),
+        "Create accounts, assign roles, reset passwords and end sessions. \
+         A disabled account is kept but can't sign in.",
+    ));
     page = messages(page, state, p);
+    let count = text(count)
+        .key("users-count")
+        .font(DETAIL)
+        .color(p.muted)
+        .truncate();
     let search = text_input(&control.search, BODY)
         .key("users-search")
         .label("Search users")
@@ -950,14 +997,25 @@ fn users_list(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
         );
     }
     page = page.child(if compact {
-        col().w_full().gap(8.0).child(search.w_full()).child(chips)
+        // The count follows the chips, or takes its own line when they leave no room.
+        col().w_full().gap(8.0).child(search.w_full()).child(
+            row()
+                .w_full()
+                .flex_wrap()
+                .gap(8.0)
+                .center_y()
+                .child(chips)
+                .child(count.min_w(0.0).px(2.0)),
+        )
     } else {
         row()
             .w_full()
             .gap(10.0)
             .center_y()
-            .child(search.grow(1.0).min_w(0.0))
+            .child(search.grow(1.0).min_w(0.0).max_w(360.0))
             .child(chips)
+            .child(el().grow(1.0))
+            .child(count.min_w(0.0))
     });
     let mut list = col().key("users-list").w_full().gap(2.0);
     for account in &shown {
@@ -1382,6 +1440,12 @@ fn profile_page(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
                         .color(p.muted),
                 ),
         );
+    let intro = shell::intro(
+        p,
+        Some("Your profile"),
+        "Update how you appear on RAST, change your password and review where you are \
+         signed in. Wallpaper and theme live in the Appearance section.",
+    );
     let page = col()
         .key("profile")
         .w_full()
@@ -1456,13 +1520,15 @@ fn profile_page(state: &State, p: &Palette, me: &Account, compact: bool) -> El {
         )
         .child(section(p, "SESSIONS"))
         .child(my_sessions(p, control.sessions.as_deref()));
-    page.child(divider(p))
+    let page = page
+        .child(divider(p))
         .child(row().child(crate::ui::bind_sign_out(button(
             p,
             "profile-sign-out",
             "Sign out",
             Look::Plain,
-        ))))
+        ))));
+    col().w_full().gap(12.0).child(intro).child(page)
 }
 
 /// Where you are signed in; every session but this one can be ended here.
@@ -2043,8 +2109,21 @@ mod tests {
     use crate::server::Rule;
     use crate::{SIZE, Screen};
 
-    /// Signed in to the server as account `me` of the sample list, Control Panel open.
+    /// Signed in to the server as account `me` of the sample list, Control Panel open
+    /// (administrators on *Users & Groups*, where most of these tests start).
     fn signed_in_as(me: i64) -> Runtime<State> {
+        let mut rt = opened_as(me);
+        if rt.state.session.as_ref().is_some_and(|s| s.role.is_admin()) {
+            rt.state.open_control_tab(Tab::Users);
+            while rt.state.inbox.rx.try_recv().is_ok() {}
+            rt.state.control.busy = false;
+            after_frames(&mut rt);
+        }
+        rt
+    }
+
+    /// Signed in as account `me` of the sample list, Control Panel just opened.
+    fn opened_as(me: i64) -> Runtime<State> {
         let accounts = crate::sample_accounts();
         let mut state = State::new(Config::default());
         state.persist = false;
@@ -2213,15 +2292,92 @@ mod tests {
 
     #[test]
     fn only_a_super_admin_has_the_groups_tab() {
-        assert!(shown(&signed_in_as(1), "control-tab-groups"));
-        assert!(!shown(&signed_in_as(2), "control-tab-groups"));
-        assert!(!shown(&signed_in_as(3), "control-tab-groups"));
+        assert!(shown(&signed_in_as(1), "control-sub-groups"));
+        assert!(!shown(&signed_in_as(2), "control-sub-groups"));
+        assert!(!shown(&signed_in_as(3), "control-sub-groups"));
+    }
+
+    #[test]
+    fn control_panel_opens_on_profile_with_the_classic_sections() {
+        let sections = [
+            "control-tab-profile",
+            "control-tab-appearance",
+            "control-tab-users",
+            "control-tab-shares",
+            "control-tab-storage",
+            "control-tab-components",
+            "control-tab-settings",
+        ];
+        let mut rt = opened_as(1);
+        assert_eq!(rt.state.control.tab, Tab::Profile);
+        assert!(shown(&rt, "profile-current"));
+        assert_eq!(page_title(&rt.state), "Profile");
+        for key in sections {
+            assert!(shown(&rt, key), "{key}");
+        }
+        assert!(
+            !shown(&rt, "control-nav-note"),
+            "administrators see everything"
+        );
+
+        press(&mut rt, "control-tab-users");
+        assert_eq!(page_title(&rt.state), "Users & Groups");
+        assert!(shown(&rt, "users-create"), "the header carries the action");
+        press(&mut rt, "control-sub-groups");
+        assert_eq!(rt.state.control.tab, Tab::Groups);
+        assert_eq!(page_title(&rt.state), "Users & Groups");
+        assert!(shown(&rt, "groups-create") && !shown(&rt, "users-create"));
+
+        press(&mut rt, "control-tab-storage");
+        assert_eq!(page_title(&rt.state), "Storage");
+        assert!(shown(&rt, "control-not-yet"), "no made-up numbers");
+
+        let user = opened_as(3);
+        assert!(shown(&user, "control-tab-profile") && shown(&user, "control-tab-appearance"));
+        for key in &sections[2..] {
+            assert!(!shown(&user, key), "{key} is for administrators");
+        }
+        assert!(shown(&user, "control-nav-note"));
+    }
+
+    #[test]
+    fn a_narrow_window_turns_the_sidebar_into_an_icon_rail() {
+        let width = |rt: &Runtime<State>| rt.presented("control-nav").expect("the sidebar").0[2];
+        let mut rt = signed_in_as(1);
+        assert!(
+            (width(&rt) - 214.0).abs() < 0.5,
+            "classic sidebar, got {}",
+            width(&rt)
+        );
+        assert!(shown(&rt, "control-header"));
+
+        // A phone: the window fills the screen, 390 points wide, once its move settles.
+        rt.set_viewport((390.0, 844.0), 2.0);
+        after_frames(&mut rt);
+        for _ in 0..90 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(
+            (width(&rt) - 56.0).abs() < 0.5,
+            "icon rail, got {}",
+            width(&rt)
+        );
+        for key in [
+            "control-tab-profile",
+            "control-tab-users",
+            "control-tab-settings",
+        ] {
+            assert!(shown(&rt, key), "{key} stays one press away");
+        }
+        assert!(shown(&rt, "users-create") && shown(&rt, "user-4"));
+        press(&mut rt, "control-tab-appearance");
+        assert_eq!(rt.state.control.tab, Tab::Appearance);
     }
 
     #[test]
     fn a_super_admin_sets_a_groups_apps_and_members() {
         let mut rt = signed_in_as(1);
-        press(&mut rt, "control-tab-groups");
+        press(&mut rt, "control-sub-groups");
         assert!(
             sent(&rt.state)
                 .iter()

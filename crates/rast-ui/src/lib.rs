@@ -673,6 +673,7 @@ fn scene_users(state: &mut State) {
     state.signed_in = true;
     state.screen = Screen::Desktop;
     state.open_app(AppId::Control);
+    state.open_control_tab(desktop::control::Tab::Users);
     while state.inbox.rx.try_recv().is_ok() {}
     state.control.busy = false;
     state.control.loaded = true;
@@ -721,6 +722,13 @@ fn scene_groups(state: &mut State) {
     scene_users(state);
     state.open_control_tab(desktop::control::Tab::Groups);
     with_groups(state);
+}
+
+/// A section this server doesn't offer yet, in the dark.
+fn scene_storage(state: &mut State) {
+    scene_users(state);
+    state.desktop.look.saved.theme = desktop::appearance::Theme::Dark;
+    state.open_control_tab(desktop::control::Tab::Storage);
 }
 
 fn scene_group(state: &mut State) {
@@ -805,6 +813,7 @@ fn app_spec() -> AppSpec<State> {
             ("group", scene_group),
             ("user-access", scene_user_access),
             ("my-apps", scene_my_apps),
+            ("storage", scene_storage),
         ],
         setup: Some(setup),
         poll: Some(poll),

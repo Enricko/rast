@@ -8,7 +8,7 @@
 use rune::{El, TextEdit, col, row, text};
 
 use super::{
-    BODY, DETAIL, Look, NAME, Page, Palette, State, TITLE, app_row, avatar, back_link, button,
+    BODY, DETAIL, Look, NAME, Page, Palette, State, TITLE, Tab, app_row, avatar, back_link, button,
     choice_bar, divider, field, header_message, messages, section, switch, tile,
 };
 use crate::server::{Access, AccessChange, Account, Choice, Group, GroupChange, Role};
@@ -257,32 +257,15 @@ fn list(state: &State, p: &Palette) -> El {
     let mut page = col()
         .w_full()
         .gap(12.0)
-        .child(
-            row()
-                .w_full()
-                .gap(10.0)
-                .center_y()
-                .child(
-                    col()
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .gap(2.0)
-                        .child(text("Groups").font(TITLE).color(p.ink))
-                        .child(text(count).font(DETAIL).color(p.muted)),
-                )
-                .child(
-                    button(p, "groups-create", "Create group", Look::Primary)
-                        .on_press(State::start_create_group),
-                ),
-        )
-        .child(
-            text("Members get the apps a group allows. A deny, from any group or on the account, always wins. Administrators open every app.")
-                .font(DETAIL)
-                .color(p.muted)
-                .w_full()
-                .wrap(),
-        );
+        .child(super::shell::users_and_groups(p, Tab::Groups))
+        .child(super::shell::intro(
+            p,
+            Some("Groups"),
+            "Members get the apps a group allows. A deny, from any group or on the \
+             account, always wins; Super Admins and Admins open every app.",
+        ));
     page = messages(page, state, p);
+    page = page.child(text(count).key("groups-count").font(DETAIL).color(p.muted));
     if control.groups_loaded && control.groups.is_empty() {
         return page.child(
             text("No groups yet. Create one to allow or deny apps for several people at once.")
