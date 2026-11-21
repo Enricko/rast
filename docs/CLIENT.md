@@ -4,6 +4,22 @@ The first real slice of the rewrite is the **client shell**: a native Rune windo
 for Linux, Windows and macOS (and a WebGPU wasm build for the browser) that knows
 which RAST server it belongs to and survives that server going away.
 
+## Device login
+
+The shell opens on a **device login**: the first launch asks for a username and a
+password (8+ characters), later launches ask only for the password before the
+shell opens, and *Sign out* returns to the login screen. The password is hashed
+with **Argon2id** and only the hash is stored:
+
+- natively: one `0600` file per OS (paths below),
+- in the browser: this browser's `localStorage` (preview; a real deployment
+  should use the server's `HttpOnly` session cookie).
+
+This is the *device* unlock, not server authentication: the server will
+authenticate users itself once the server phase lands. The full recommendation
+(device file vs database, and why server accounts belong in SQLite) is in
+[docs/AUTH-STORAGE.md](AUTH-STORAGE.md).
+
 ## What it does today
 
 - Shows the connection state to the configured RAST server: *Connecting*,
@@ -41,11 +57,11 @@ off. Nothing polls in the background in that mode.
 
 ## Settings file
 
-| OS | Path |
-| --- | --- |
-| Linux | `$XDG_CONFIG_HOME/rast/client.conf` (usually `~/.config/rast/client.conf`) |
-| macOS | `~/Library/Application Support/rast/client.conf` |
-| Windows | `%APPDATA%\rast\client.conf` |
+| OS | Settings file | Device login |
+| --- | --- | --- |
+| Linux | `$XDG_CONFIG_HOME/rast/client.conf` (usually `~/.config/rast/client.conf`) | `~/.config/rast/device-account` (0600) |
+| macOS | `~/Library/Application Support/rast/client.conf` | `~/Library/Application Support/rast/device-account` |
+| Windows | `%APPDATA%\rast\client.conf` | `%APPDATA%\rast\device-account` |
 
 `RAST_CONFIG=/path/to/client.conf` overrides the location — useful for portable
 setups, test machines and packaging.

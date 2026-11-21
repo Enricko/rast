@@ -25,7 +25,10 @@ const WAITING: Color = Color {
     b: 0.25,
     a: 1.0,
 };
+#[cfg(not(target_arch = "wasm32"))]
 const HINT: &str = "Device login: the password is stored on this device as an Argon2id hash, never in plain text. Server accounts arrive with the server phase.";
+#[cfg(target_arch = "wasm32")]
+const HINT: &str = "Device login: the password is stored in this browser as an Argon2id hash, never in plain text. Server accounts arrive with the server phase.";
 
 pub fn view(state: &State, cx: &mut Cx<State>) -> El {
     let dark = cx.system_dark();
@@ -85,9 +88,13 @@ fn create_account(state: &State, t: &tok::Theme) -> El {
     let mut card = auth_card(t)
         .child(text("Welcome to RAST").font(type_::TITLE).color(t.text))
         .child(
-            text("Set up the login for this device.")
-                .font(type_::BODY)
-                .color(t.text_secondary),
+            text(if cfg!(target_arch = "wasm32") {
+                "Set up the login for this browser."
+            } else {
+                "Set up the login for this device."
+            })
+            .font(type_::BODY)
+            .color(t.text_secondary),
         )
         .child(labeled(t, "Username", username))
         .child(labeled(t, "Device password", password))

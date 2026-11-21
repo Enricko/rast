@@ -18,22 +18,24 @@ path = "src/main.rs"
 
 [features]
 # Headless `--snap`, `--tree` and `--script` runs in *release* builds. Debug
-# builds always have Rune's tooling; this feature is for CI and agent proof
-# runs of the release binary. See crates/rune/README.md, "Agent tooling".
+# builds always have them; this feature is for CI and agent proof runs of the
+# release binary. See crates/rune/README.md, "Agent tooling".
 agent-tooling = ["rune/tooling"]
 
 [dependencies]
 rune = { workspace = true }
-
 # Device-local login: Argon2id password hashing (never a plaintext password).
-# Native only; the browser build has no device store yet and uses the server
-# session instead when that lands.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Pure Rust, so it runs natively and in the browser.
 argon2 = "0.5"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 getrandom = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }
+# Web Crypto for the salt, and localStorage for the per-browser device account.
+getrandom = { version = "0.2", features = ["js"] }
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
 
 [lints]
 workspace = true

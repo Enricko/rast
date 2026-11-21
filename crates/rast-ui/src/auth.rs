@@ -5,14 +5,19 @@
 //! the local unlock for the standalone/offline shell (the app must be usable
 //! when the server is away, and the browser preview has no server at all).
 //!
-//! Storage: one small file holding the username and an **Argon2id** PHC hash.
-//! The password itself is never stored, never logged and never sent anywhere.
-//! On Unix the file is written with mode 0600. Rationale, alternatives and the
-//! server-side recommendation are in docs/AUTH-STORAGE.md.
+//! Storage: the username and an **Argon2id** PHC hash. The password itself is
+//! never stored, never logged and never sent anywhere. Natively that is one
+//! small file, mode 0600 on Unix; in the browser it is this browser's
+//! `localStorage` (a per-browser device, weakened by the lack of file
+//! permissions — a real deployment should use the server's HttpOnly session
+//! cookie once it exists). Rationale and the server-side recommendation are in
+//! docs/AUTH-STORAGE.md.
 
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
 
 /// Minimum local password length. Device unlock, not a server credential.
 pub const MIN_PASSWORD_LEN: usize = 8;
@@ -36,7 +41,16 @@ impl DeviceAccount {
         if let Some(path) = std::env::var_os("RAST_ACCOUNT") {
             return Some(PathBuf::from(path));
         }
-        crate::config::Config::path().map(|config| config.with_file_name("device-account"))
+        #[cfg(target_arch = "wasm32")]
+        {
+            // No files in the browser: the account lives in localStorage. The
+            // marker path keeps the caller's Option<PathBuf> shape unchanged.
+            Some(PathBuf::from("browser-local-storage"))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            crate::config::Config::path().map(|config| config.with_file_name("device-account"))
+        }
     }
 
     /// Load the account from its default location.
@@ -44,10 +58,19 @@ impl DeviceAccount {
         Self::path().and_then(|path| Self::load_from(&path))
     }
 
-    /// Read one account file. `None` when it does not exist or is malformed.
+    /// Read the device account. `None` when none exists or it is malformed.
     pub fn load_from(path: &Path) -> Option<Self> {
-        let text = fs::read_to_string(path).ok()?;
-        Self::parse(&text)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = path;
+            let text = browser_storage()?.get_item(BROWSER_KEY).ok()??;
+            Self::parse(&text)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let text = fs::read_to_string(path).ok()?;
+            Self::parse(&text)
+        }
     }
 
     /// Parse the small `key = value` format; unknown keys and comments are ignored.
@@ -95,24 +118,46 @@ impl DeviceAccount {
         verify_password(password, &self.phc)
     }
 
-    /// Save atomically (temp file + rename) with owner-only permissions on Unix.
+    /// Save the account. Natively atomic (temp file + rename) with owner-only
+    /// permissions on Unix; in the browser to this browser's localStorage.
     pub fn save_to(&self, path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
+        #[cfg(target_arch = "wasm32")]
         {
-            fs::create_dir_all(parent)?;
+            let _ = path;
+            let storage = browser_storage()
+                .ok_or_else(|| io::Error::other("browser storage is unavailable"))?;
+            return storage
+                .set_item(BROWSER_KEY, &self.render())
+                .map_err(|_| io::Error::other("the browser refused to store the device login"));
         }
-        let temp = path.with_extension("account.tmp");
-        fs::write(&temp, self.render())?;
-        #[cfg(unix)]
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&temp)?.permissions();
-            permissions.set_mode(0o600);
-            fs::set_permissions(&temp, permissions)?;
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                fs::create_dir_all(parent)?;
+            }
+            let temp = path.with_extension("account.tmp");
+            fs::write(&temp, self.render())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = fs::metadata(&temp)?.permissions();
+                permissions.set_mode(0o600);
+                fs::set_permissions(&temp, permissions)?;
+            }
+            fs::rename(&temp, path)
         }
-        fs::rename(&temp, path)
     }
+}
+
+/// localStorage key of the per-browser device account.
+#[cfg(target_arch = "wasm32")]
+const BROWSER_KEY: &str = "rast.device-account";
+
+#[cfg(target_arch = "wasm32")]
+fn browser_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok()?
 }
 
 fn validate_username(username: &str) -> Result<String, String> {
@@ -146,7 +191,6 @@ fn validate_password(password: &str) -> Result<(), String> {
 }
 
 /// Argon2id with the crate defaults (m=19456 KiB, t=2, p=1).
-#[cfg(not(target_arch = "wasm32"))]
 pub fn hash_password(password: &str) -> Result<String, String> {
     use argon2::Argon2;
     use argon2::password_hash::{PasswordHasher, SaltString};
@@ -162,17 +206,6 @@ pub fn hash_password(password: &str) -> Result<String, String> {
         .map_err(|error| format!("cannot hash the password: {error}"))
 }
 
-/// The browser build has no device store yet: it will use the server session
-/// once that exists, so device login is deliberately unavailable there.
-#[cfg(target_arch = "wasm32")]
-pub fn hash_password(_password: &str) -> Result<String, String> {
-    Err(
-        "Device login is native-only for now; the browser build will use the server session."
-            .to_owned(),
-    )
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 pub fn verify_password(password: &str, phc: &str) -> Result<bool, String> {
     use argon2::Argon2;
     use argon2::password_hash::{PasswordHash, PasswordVerifier};
@@ -182,14 +215,6 @@ pub fn verify_password(password: &str, phc: &str) -> Result<bool, String> {
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn verify_password(_password: &str, _phc: &str) -> Result<bool, String> {
-    Err(
-        "Device login is native-only for now; the browser build will use the server session."
-            .to_owned(),
-    )
 }
 
 #[cfg(test)]

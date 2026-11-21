@@ -222,19 +222,7 @@ impl State {
 }
 
 fn init() -> State {
-    // The browser build has neither a device store nor a server yet, so it opens
-    // the preview shell directly instead of asking for a login it cannot keep.
-    #[cfg(target_arch = "wasm32")]
-    {
-        let mut state = State::new(Config::load());
-        state.signed_in = true;
-        state.screen = Screen::Desktop;
-        state
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        State::new(Config::load())
-    }
+    State::new(Config::load())
 }
 
 fn setup(state: &mut State, wake: Waker) {

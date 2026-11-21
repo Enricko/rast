@@ -64,6 +64,10 @@ follow semantic versioning yet (the rewrite starts at `0.1.0`).
   `docs/AUTH-STORAGE.md`.
 - `deploy/install-revamp.sh --web-only`: republish the static browser build
   without touching nginx or the tunnel (fast path after the first deployment).
+- Browser login: the wasm build now opens on the same device login, storing only
+  the Argon2id hash in this browser's `localStorage` (native builds keep the
+  `0600` file). `desktop-revamp.lufria.tech` was republished with it and verified
+  in headless Chromium.
 - `desktop-revamp.lufria.tech` is live: the installer added the nginx site on
   `127.0.0.1:8722` and the Cloudflare Tunnel ingress; the old
   `desktop.lufria.tech` keeps serving the released RAST.

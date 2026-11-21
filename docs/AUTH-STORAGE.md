@@ -8,7 +8,7 @@ Short version:
 | Data | Where | Why |
 | --- | --- | --- |
 | Server accounts, password hashes, sessions, audit trail | **SQLite on the server** (`rast-server`, later) | Many rows, concurrent writers, queries, migrations, one-file backup. A real (embedded) relational database is the right "normal DB". |
-| This device's unlock password | **One small file**, `0600`, Argon2id hash only | Exactly one record, read once at startup, written once. A database would be a dependency and a corruption surface for no benefit. |
+| This device's unlock password | **One small file**, `0600`, Argon2id hash only (native) / `localStorage` (browser) | Exactly one record, read once at startup, written once. A database would be a dependency and a corruption surface for no benefit. |
 | Server session token / refresh token (later) | **OS secret store** — Keychain, Credential Manager, Secret Service | It is a bearer credential; it must not sit in a plain file or in `localStorage`. |
 | Cached app data (window layouts, recents, offline lists, later) | **SQLite** (native) / IndexedDB (browser) — only when it exists | When data becomes relational, queried or concurrently mutated, hand-rolled files stop being worth it. |
 
@@ -29,7 +29,11 @@ file is, and that is what is implemented today.
   not deleted;
 - sign out returns to the login screen; the device account stays;
 - the plaintext password is never stored, never logged and never leaves the
-  process. Password buffers are dropped when the shell moves on.
+  process. Password buffers are dropped when the shell moves on;
+- in the browser build the same record goes to this browser's `localStorage`
+  (one "device" per browser profile, and no file permissions to protect it).
+  That is fine for the preview, but a real deployment should move to the
+  server's `HttpOnly` session cookie — a browser origin is not a trust boundary.
 
 Default locations (`RAST_ACCOUNT` overrides the file path):
 
@@ -38,7 +42,7 @@ Default locations (`RAST_ACCOUNT` overrides the file path):
 | Linux | `$XDG_CONFIG_HOME/rast/device-account` (or `~/.config/rast/device-account`) |
 | macOS | `~/Library/Application Support/rast/device-account` |
 | Windows | `%APPDATA%\rast\device-account` |
-| Browser | not stored today — the browser build will use the server's HttpOnly session cookie |
+| Browser | this browser's `localStorage` (`rast.device-account`); a real deployment should use the server's HttpOnly session cookie |
 
 File format — deliberately readable, with nothing secret in it beyond the hash:
 
