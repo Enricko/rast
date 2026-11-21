@@ -119,7 +119,7 @@ def bundle_digest(root):
     if root.is_symlink() or not root.is_dir():
         raise SystemExit(f"Expected a regular release directory: {root}")
     digest = hashlib.sha256()
-    for path in sorted(root.rglob("*")):
+    for path in sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix()):
         if path.is_symlink() or not (path.is_dir() or path.is_file()):
             raise SystemExit(f"Unsupported bundle entry: {path}")
         if path.is_file():
