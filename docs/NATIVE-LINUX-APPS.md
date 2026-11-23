@@ -225,6 +225,19 @@ Consequences:
 * Every normal remote top-level window becomes **one RAST window** with its own
   title, focus, resize, minimize, maximize, close and taskbar entry — including
   additional Chrome windows.
+* **Only the application windows are rendered.** Xpra runs in seamless mode:
+  the remote desktop itself (its background, Xpra's own toolbar and any remote
+  window decorations) is never shown. The session page stays in a hidden,
+  off-screen transport frame, and each adopted window's content is moved into a
+  RAST window body — no nested viewer, no second title bar, no remote desktop
+  background.
+* **App Center is a package manager and launcher, not a viewer.** Installing,
+  updating, configuring and launching happen there; a launch opens the
+  application's individual RAST window(s), and App Center can be closed without
+  closing the application.
+* There is no fallback that embeds a remote desktop in a RAST window. If a
+  session ever reported a non-seamless (desktop/shadow) mode, RAST refuses to
+  render it and asks for the session to be restarted instead.
 * Dialogs, popups, menus and other transient/override-redirect windows are
   attached to their parent RAST window: they never get their own taskbar entry
   and follow the parent's minimize/close. A dialog that appears for a popup is

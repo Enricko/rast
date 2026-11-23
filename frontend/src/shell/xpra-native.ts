@@ -188,11 +188,6 @@ interface StartingWindow {
   timer: number;
 }
 
-interface WholeSessionWindow {
-  handle: WindowHandle | null;
-  separate: boolean;
-}
-
 const clamp = (value: number, min: number, max: number): number => {
   if (!Number.isFinite(value) || value <= 0) return min;
   return Math.min(max, Math.max(min, Math.round(value)));
@@ -218,7 +213,10 @@ export class NativeLinuxHost {
   private iframe: HTMLIFrameElement | null = null;
   private shim: NativeShimApi | null = null;
   private session: NativeSession | null = null;
-  private wholeSession: WholeSessionWindow | null = null;
+  /** URL of a session that reported a non-seamless (desktop/shadow) mode.
+   * Such a session is never rendered in a RAST window (see
+   * onNonSeamlessSnapshot); reset when the session URL changes or it ends. */
+  private nonSeamlessNotice = "";
   private lastSnapshot: NativeShimState | null = null;
   private pollTimer = 0;
   private reconnectTimer = 0;
@@ -319,7 +317,6 @@ export class NativeLinuxHost {
       }
     }
     this.closeAllWindows(true);
-    this.closeWholeSession(true);
     this.removeIframe();
     setLinuxNativeSession(null);
   }
@@ -380,9 +377,9 @@ export class NativeLinuxHost {
     }
 
     if (!session || session.status === "ended") {
-      const wasAlive = this.frames.size > 0 || this.starting.size > 0 || this.wholeSession !== null;
+      const wasAlive = this.frames.size > 0 || this.starting.size > 0;
       this.closeAllWindows(false);
-      this.closeWholeSession(false);
+      this.nonSeamlessNotice = "";
       this.removeIframe();
       this.shim = null;
       this.lastSnapshot = null;
@@ -395,9 +392,12 @@ export class NativeLinuxHost {
       if (this.iframe && !this.shim) this.removeIframe();
       return;
     }
-    if (previous?.url !== session.url && this.iframe) {
-      this.removeIframe();
-      this.shim = null;
+    if (previous?.url !== session.url) {
+      this.nonSeamlessNotice = "";
+      if (this.iframe) {
+        this.removeIframe();
+        this.shim = null;
+      }
     }
     if (session.url && !this.iframe) this.createIframe(session.url);
     else if (this.iframe && !this.shim) this.attachShim(0);
@@ -592,10 +592,10 @@ export class NativeLinuxHost {
     if (this.disposed || !snapshot?.ready) return;
     this.lastSnapshot = snapshot;
     if (snapshot.separate === false) {
-      this.openWholeSession();
+      this.onNonSeamlessSnapshot(snapshot);
       return;
     }
-    if (this.wholeSession) this.closeWholeSession(false);
+    this.nonSeamlessNotice = "";
     const seen = new Set<string>();
     const deferred: NativeShimWindow[] = [];
     const ordered = [...snapshot.windows].sort((a, b) => a.stacking - b.stacking);
@@ -1039,10 +1039,6 @@ export class NativeLinuxHost {
       }
       return;
     }
-    if (this.wholeSession) {
-      this.wholeSession.handle?.focus();
-      return;
-    }
     void this.launch(app);
   }
 
@@ -1073,9 +1069,12 @@ export class NativeLinuxHost {
     } catch (error) {
       this.closeStarting(app.id);
       if (isHttpStatus(error, 404) || isHttpStatus(error, 405) || isHttpStatus(error, 501)) {
-        // Partial backend: keep the old Docker-backed behaviour.
+        // This server does not serve the native launch API. A native app is
+        // never downgraded to the legacy viewer: state the misconfiguration.
         this.nativeUnavailable = true;
-        this.fallbackToLegacy(app);
+        this.deps.toast.error(
+          `${app.name} needs native window support, which this server does not offer. Ask an administrator to enable it.`,
+        );
         return;
       }
       this.deps.toast.error(errorMessage(error));
@@ -1083,6 +1082,15 @@ export class NativeLinuxHost {
   }
 
   private fallbackToLegacy(app: LinuxApp): void {
+    // Never downgrade a native app to the legacy whole-session viewer: that
+    // path embeds a remote desktop (and Xpra's own chrome) inside a RAST
+    // window, which this desktop never allows. Refuse with a clear message.
+    if (isNativeApp(app)) {
+      this.deps.toast.error(
+        `${app.name} could not be opened as an individual window. Check that the native helper is running, then try again.`,
+      );
+      return;
+    }
     const definition = this.deps.findApp(`${LINUX_PREFIX}${app.id}`);
     if (!definition) {
       this.deps.toast.error("This app cannot be started: native apps are not available on this server.");
@@ -1145,57 +1153,27 @@ export class NativeLinuxHost {
     }
   }
 
-  /* ---------------------------------------------------------- whole session */
+  /* --------------------------------------------------- non-seamless guard */
 
   /**
-   * Fallback for a session that is not seamless (desktop/shadow Xpra mode):
-   * show the one whole-desktop stream in a single RAST window.
+   * The Xpra session runs in seamless mode, so every normal X11 top-level
+   * window is adopted as its own RAST window. A desktop/shadow session
+   * (`separate === false`) would need a whole remote desktop, including
+   * Xpra's own toolbar and remote decorations, inside a RAST window. RAST
+   * never renders that: the RAST window manager stays the single visible
+   * window-manager authority. Explain the anomaly once per session instead.
    */
-  private openWholeSession(): void {
-    if (this.wholeSession) return;
-    for (const frame of [...this.frames.values()]) this.destroyFrame(frame, true);
-    const state: WholeSessionWindow = { handle: null, separate: false };
-    this.wholeSession = state;
-    state.handle = this.deps.wm.open(
-      {
-        id: "linuxnative-session",
-        name: "Native desktop",
-        icon: "box",
-        defaultSize: { w: 1100, h: 720 },
-        minSize: { w: 480, h: 320 },
-      },
-      undefined,
-      (ctx) => {
-        const iframe = this.iframe;
-        if (!iframe) return;
-        iframe.classList.remove("linux-native-session-frame");
-        iframe.style.cssText = "position:absolute;inset:0;width:100%;height:100%;border:0;background:#000;";
-        ctx.contentEl.appendChild(iframe);
-        ctx.onDispose(() => {
-          const whole = this.wholeSession;
-          this.wholeSession = null;
-          if (iframe.parentElement) {
-            iframe.classList.add("linux-native-session-frame");
-            iframe.style.cssText = "";
-            this.deps.host.appendChild(iframe);
-          }
-          if (whole && !this.quiet && !this.disposed) void this.endSession();
-        });
-      },
-      { taskbar: true },
+  private onNonSeamlessSnapshot(snapshot: NativeShimState): void {
+    const key = this.session?.url || "native";
+    if (this.nonSeamlessNotice === key) return;
+    this.nonSeamlessNotice = key;
+    // The hidden transport viewer is kept off-screen; no RAST window is
+    // created for it and no remote window is adopted from a desktop session.
+    for (const slug of [...this.starting.keys()]) this.closeStarting(slug);
+    console.error("native session is not seamless; the remote desktop will not be rendered", snapshot.size);
+    this.deps.toast.error(
+      "The native session started in desktop mode, so it has no individual windows. RAST will not show the remote desktop. Restart the session from App Center, then open the app again.",
     );
-  }
-
-  private closeWholeSession(quiet: boolean): void {
-    const whole = this.wholeSession;
-    if (!whole) return;
-    this.wholeSession = null;
-    if (whole.handle && !whole.handle.isClosed()) {
-      const previous = this.quiet;
-      this.quiet = quiet;
-      whole.handle.close();
-      this.quiet = previous;
-    }
   }
 
   /* -------------------------------------------------------------- clipboard */

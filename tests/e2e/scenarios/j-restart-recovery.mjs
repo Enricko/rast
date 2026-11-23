@@ -7,6 +7,7 @@
 // launch returns the same run instead of duplicating it.
 
 import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import * as browser from "../lib/browser.mjs";
@@ -24,19 +25,57 @@ import { RastApi, sleep } from "../lib/rast-api.mjs";
 
 const execFileAsync = promisify(execFile);
 
+/** The binary the running dev server was started from (null if unknown). */
+async function runningServerBinary(ctx) {
+  try {
+    const pidFile = `${ctx.config.instanceRoot}/pids/server.pid`;
+    const pid = (await readFile(pidFile, "utf8")).trim();
+    if (!/^\d+$/.test(pid)) return null;
+    const result = await ctx.host.sudo("readlink", ["-f", `/proc/${pid}/exe`]);
+    const path = result.ok ? result.stdout.trim().replace(/ \(deleted\)$/, "") : "";
+    return path || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Restart-server must start the same binary the instance was launched with.
+ * The dev-instance script's default is <root>/bin/rast (a snapshot built by
+ * scripts/e2e/build-snapshot.sh), but a disposable instance may legitimately
+ * run the release binary from /usr/local/bin/rast instead. Passing no
+ * RAST_E2E_BIN then fails ("snapshot binary not found") or, worse, restarts a
+ * different build. Resolve it from the live server process first, then the
+ * usual locations.
+ */
+async function resolveInstanceBinary(ctx) {
+  const candidates = [
+    await runningServerBinary(ctx),
+    process.env.RAST_E2E_BIN,
+    `${ctx.config.instanceRoot}/bin/rast`,
+    "/usr/local/bin/rast",
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    const check = await ctx.host.run("test", ["-x", candidate]);
+    if (check.ok) return candidate;
+  }
+  return `${ctx.config.instanceRoot}/bin/rast`;
+}
+
 async function restartDevServer(ctx) {
   // The dev-instance script needs the same instance selection as this run:
   // without RAST_E2E_BIND it would health-check the default port instead of
   // the port this instance is actually bound to.
   const script = "/home/lufria/RAST/scripts/e2e/dev-instance.sh";
   const bind = new URL(ctx.config.baseUrl).host;
+  const bin = await resolveInstanceBinary(ctx);
   const env = {
     ...process.env,
     RAST_E2E_ROOT: ctx.config.instanceRoot,
-    RAST_E2E_BIN: `${ctx.config.instanceRoot}/bin/rast`,
+    RAST_E2E_BIN: bin,
     RAST_E2E_BIND: bind,
   };
-  ctx.record(`restarting the dev server: ${script} restart-server (${bind})`);
+  ctx.record(`restarting the dev server: ${script} restart-server (${bind}, bin ${bin})`);
   const { stdout, stderr } = await execFileAsync("bash", [script, "restart-server"], {
     timeout: 180_000,
     maxBuffer: 4 * 1024 * 1024,

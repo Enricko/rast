@@ -42,3 +42,80 @@ test("a replacement session uses its new viewer URL", () => {
   assert.equal(host.shim, null);
   setLinuxNativeSession(null);
 });
+
+test("a non-seamless session never renders the remote desktop in a RAST window", () => {
+  const errors: string[] = [];
+  const opened: unknown[] = [];
+  const host: any = {
+    disposed: false,
+    frames: new Map(),
+    starting: new Map(),
+    session: { url: "/linux-apps/session/0123456789abcdef0123456789abcdef/" },
+    nonSeamlessNotice: "",
+    deps: {
+      toast: { error: (message: string) => errors.push(message) },
+      wm: {
+        open: (...args: unknown[]) => {
+          opened.push(args);
+          return null;
+        },
+      },
+    },
+  };
+  const snapshot = {
+    ready: true,
+    separate: false,
+    windows: [],
+    size: [1280, 720],
+    connected: true,
+    version: 1,
+    key: null,
+    error: null,
+    disconnectReason: null,
+    desktopWidth: 1280,
+    desktopHeight: 720,
+    clipboardEnabled: false,
+    captureKeyboard: false,
+    audio: { enabled: false, state: "", codec: null },
+  };
+  host.onNonSeamlessSnapshot = (NativeLinuxHost.prototype as any).onNonSeamlessSnapshot;
+  const applySnapshot = (NativeLinuxHost.prototype as any).applySnapshot;
+  applySnapshot.call(host, snapshot);
+  assert.equal(opened.length, 0, "a non-seamless session must not open a window");
+  assert.equal(errors.length, 1, "the anomaly is reported once");
+  assert.match(errors[0], /desktop mode/);
+  // The transport viewer may keep publishing snapshots: never spam the person.
+  applySnapshot.call(host, snapshot);
+  assert.equal(errors.length, 1);
+  assert.equal(opened.length, 0);
+});
+
+test("a native app is never downgraded to the legacy whole-session viewer", () => {
+  const errors: string[] = [];
+  const legacy: unknown[] = [];
+  const host: any = {
+    deps: {
+      findApp: () => ({ id: "linux:chrome" }),
+      openLegacy: (definition: unknown) => legacy.push(definition),
+      toast: { error: (message: string) => errors.push(message) },
+    },
+  };
+  const nativeApp = { id: "chrome", name: "Google Chrome", backend: "native" };
+  (NativeLinuxHost.prototype as any).fallbackToLegacy.call(host, nativeApp);
+  assert.equal(legacy.length, 0, "the legacy viewer must never receive a native app");
+  assert.equal(errors.length, 1, "the person is told why it did not open");
+});
+
+test("a docker-backed app keeps its documented legacy window", () => {
+  const legacy: unknown[] = [];
+  const host: any = {
+    deps: {
+      findApp: () => ({ id: "linux:legacy" }),
+      openLegacy: (definition: unknown) => legacy.push(definition),
+      toast: { error: () => undefined },
+    },
+  };
+  const dockerApp = { id: "legacy", name: "Legacy app", backend: "docker" };
+  (NativeLinuxHost.prototype as any).fallbackToLegacy.call(host, dockerApp);
+  assert.equal(legacy.length, 1);
+});

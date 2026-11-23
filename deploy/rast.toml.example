@@ -138,6 +138,9 @@ docker_enabled = false
 # seamless session per RAST user (see docs/INSTALL.md "Native Linux apps
 # (Xpra)"). Needs rast-native.service (root), rast-linux.slice and Xpra.
 # Set to false to keep installing legacy Docker-backed apps instead.
+# Native apps run in one shared Xpra seamless session per person; every remote
+# top-level window becomes its own RAST window. The remote desktop itself is
+# never rendered (no viewer window, no Xpra toolbar or background).
 # env: RAST_NATIVE_ENABLED
 native_enabled = true
 # Offer the Linux apps workflow at all (default: on). Set to false to

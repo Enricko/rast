@@ -9,6 +9,25 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Native Linux apps always open as individual RAST windows.** The desktop no
+  longer has a fallback that renders the whole Xpra remote desktop (its
+  background, Xpra toolbar and remote decorations) inside a RAST window: a
+  session that is not seamless is reported instead of embedded. A native app is
+  also never downgraded to the legacy whole-session viewer when the native
+  backend or helper is unavailable — the launch fails with an actionable
+  message, so the RAST window manager stays the only visible window manager.
+- **Opening a Linux app before the installed-app list finished loading** no
+  longer falls back to the legacy Docker viewer: the list is loaded and the
+  launch retried, or the app is reported as not installed.
+
+### Changed
+
+- **The legacy in-window Linux-app viewer is limited to Docker-backed apps.**
+  A native app routed to that legacy path re-routes to the shared native
+  session instead of mounting a remote desktop inside a RAST window.
+
 ## [0.18.3] - 2026-11-16
 
 ### Fixed

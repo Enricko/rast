@@ -619,9 +619,22 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     // image supports it (`linux:<app>`; per-window ids have a third part).
     // Native apps run in the user's shared Xpra session instead.
     if (app.id.startsWith(LINUX_PREFIX) && app.id.split(":").length === 2) {
-      const linuxApp = linuxAppById(app.id.slice(LINUX_PREFIX.length));
-      if (isNativeApp(linuxApp)) nativeLinux.open(app.id.slice(LINUX_PREFIX.length));
-      else linuxWindows.open(app);
+      const slug = app.id.slice(LINUX_PREFIX.length);
+      const linuxApp = linuxAppById(slug);
+      if (linuxApp) {
+        if (isNativeApp(linuxApp)) nativeLinux.open(slug);
+        else linuxWindows.open(app);
+        return;
+      }
+      // The installed-app list is not loaded yet (slow start, or an app that
+      // was just installed). Never route an unknown Linux app into the legacy
+      // Docker viewer: load the list and retry once, or report it unavailable.
+      void fetchLinuxApps(deps.api)
+        .then(() => {
+          if (linuxAppById(slug)) openApp(appId, params, restore);
+          else toast.error(`${app.name} is not installed for this account.`);
+        })
+        .catch(() => toast.error(`Could not check whether ${app.name} is available.`));
       return;
     }
     openDefinitionWindow(app, params, restore);

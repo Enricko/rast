@@ -10,6 +10,7 @@ import { getRealtime } from "../../core/realtime";
 import { errorMessage } from "../../core/ui";
 import { AppLifecycle } from "../../components/lifecycle";
 import {
+  isNativeApp,
   isOpenable,
   LINUX_PREFIX,
   linuxAppById,
@@ -90,6 +91,14 @@ class LinuxWindow {
 
   start(): void {
     this.ctx.setTitle(this.name);
+    if (isNativeApp(linuxAppById(this.appId))) {
+      // Native apps never use this legacy whole-session viewer: every remote
+      // top-level window becomes its own RAST window through the shared native
+      // session. Re-route defensively if an old path tries to mount this.
+      this.ctx.openApp(`${LINUX_PREFIX}${this.appId}`);
+      this.ctx.window.close();
+      return;
+    }
     void this.open();
   }
 

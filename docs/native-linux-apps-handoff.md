@@ -1,6 +1,6 @@
 # Native Linux apps — migration handoff
 
-Status: **final on `main`, v0.13.3.** This document is the engineering handoff
+Status: **final on `main`, v0.13.3; repaired and re-enabled on 2026-11-24.** This document is the engineering handoff
 for the migration from Docker-streamed desktop apps to native host execution
 with one shared Xpra session per RAST user. The behaviour described here is the
 shipped implementation; the user/operator guide is
@@ -494,3 +494,115 @@ that tree: 119 passed; Rust: `cargo fmt`/`clippy` clean, `cargo test
 --all-targets` 715 passed (Rust code unchanged by these fixes).
 
 <!-- /LEAD-VERIFICATION -->
+
+## 2026-11-24 — viewer elimination and production re-enable (0.18.3, `f69a454` + repairs)
+
+### Root cause of the reported "remote viewer inside App Center"
+
+The native-window integration on `main` itself was intact: `src/linux_apps/native_session.rs`
+starts Xpra with `xpra start :<n>` (seamless mode, `--html=on`), `src/linux_apps/native_proxy.rs`
+injects `src/linux_apps/xpra_shim.js`, and `frontend/src/shell/xpra-native.ts` adopts each
+remote top-level window's DOM node into its own RAST window. The bad experience was produced
+by three compounding causes, none of which was a missing backend:
+
+1. **The `revamp/remake` line replaced this integration.** That branch (deleted 2026-11-23,
+   full history kept in `.git/revamp-archive-2026-11-24/revamp-refs.bundle`) rewrote the shell
+   and hosted a whole-session Xpra viewer inside its App Center window — the blue background,
+   Xpra toolbar, nested decorations and multiple title bars reported in the problem statement.
+   `main` never had that architecture.
+2. **The production deployment had the feature quarantined.** `/etc/rast/rast.toml` carried
+   `native_enabled = false` and `linux_apps_enabled = false` since 2026-11-17 (added after the
+   remake pilot), so App Center hid the Linux-apps workflow and the native window path was not
+   served to anyone; only older/legacy code paths were reachable there.
+3. **`main` still had fail-open viewer fallbacks for native apps.** Even with the feature
+   enabled, three paths could still present the raw Xpra viewer instead of an individual
+   window: `openWholeSession()` moved the HTML5 client (toolbar + desktop background) into a
+   RAST window when the shim reported a non-seamless session; `fallbackToLegacy()` (and the
+   404/405/501 launch catch) could open the legacy whole-session iframe for a native app; and
+   the legacy `frontend/src/apps/linuxapp` window would mount that iframe if it was reached
+   before the installed-app list had loaded.
+
+### Repairs (2026-11-24)
+
+| File | Change |
+| --- | --- |
+| `frontend/src/shell/xpra-native.ts` | Deleted the whole-session renderer (`openWholeSession`/`closeWholeSession`/`WholeSessionWindow`). A non-seamless snapshot is now reported once per session and never rendered; the hidden transport iframe can no longer be adopted into a RAST window. `fallbackToLegacy()` and the 404/405/501 launch catch refuse a native app with an actionable error instead of opening the legacy viewer. |
+| `frontend/src/shell/desktop.ts` | A `linux:<slug>` launch before the installed-app list has loaded now loads the list and retries once (or reports the app unavailable); it can no longer fall through to the legacy Docker viewer. |
+| `frontend/src/apps/linuxapp/index.ts` | Defensive guard: the legacy whole-session window re-routes a native app to the shared native session instead of mounting a viewer. |
+| `frontend/tests/native-viewer.test.ts` | Three regression tests: non-seamless sessions never open a window, native apps are never downgraded to the legacy viewer, Docker-backed apps keep their documented legacy window. |
+| `tests/e2e/scenarios/_helpers.mjs`, `tests/e2e/scenarios/j-restart-recovery.mjs` | Harness reliability: window waits ignore the "Starting <app>…" placeholder (the c race), and scenario j restarts the exact binary the instance runs. |
+| `tests/e2e/live/verify-production.mjs`, `tests/e2e/live/README.md` | New read-only production verifier (Playwright + host introspection). |
+| `docs/NATIVE-LINUX-APPS.md`, `CHANGELOG.md`, `deploy/rast.toml.example` | Documented the "individual windows only, never a remote viewer" contract and the fix; changelog entry under Unreleased. |
+
+### Verification (all on the final tree, 2026-11-24)
+
+Automated:
+
+| Check | Result |
+| --- | --- |
+| `cd frontend && npx tsc --noEmit` | clean |
+| `cd frontend && npm test` | **152 passed, 0 failed** (3 new regression tests) |
+| Native E2E matrix, patched debug build, disposable instance (`tests/e2e/run.mjs --mode=native`) | **13 passed, 0 failed, 1 skipped (m, needs a Docker-phase run)** in 4 m 29 s; `tests/e2e/results/native-2026-11-23T19-56-56-247/` |
+| Focused DOM guard checks (adopted canvas, no iframe in the window body, no Xpra chrome, transport iframe off-screen, no stray remote surface) | **6/6 passed** |
+| Live production verification, https://desktop.lufria.tech, real accounts t-alice/t-bob/t-admin (`node tests/e2e/live/verify-production.mjs`) | **36 passed, 0 failed, 0 skipped**; `tests/e2e/live/results/live-2026-11-23T20-23-25-049/` |
+
+The live run proves the reported symptoms are gone: Applications → Google Chrome gives one
+`win-2` whose body is `.linux-native-window` with an adopted `[data-rast-native-wid]` canvas,
+**0 iframes inside the window**, no Xpra toolbar/decoration (transport iframe off-screen at
+`x=-30000`), no remote surface outside the window. App Center opens, lists the app, launches a
+**separate** window and **contains no viewer** (`0 iframes, 0 embedded native windows`); closing
+App Center leaves the Chrome window alive. Ctrl+N creates a second independent window with its
+own taskbar entry; drag/resize/minimize/maximize/close-one work (`resize: 1444x428 -> 1334x428
+(remote 1332x386)`); a page reload re-adopts the same remote wids with the same session
+MainPID (2556687) and 14 Chrome processes (no duplicates); t-bob gets **403** and an anonymous
+browser **401** for t-alice's session URL. Screenshots:
+`docs/screenshots/native-windows-live-single-chrome-2026-11-24.png` (Applications launch,
+after the reload re-adopted the same remote window), `native-windows-live-two-chrome-2026-11-24.png`
+(two independent windows/taskbar entries), `native-windows-live-appcenter-closed-2026-11-24.png`
+(launched from App Center's tile; App Center closed, Chrome still running), plus the
+deterministic dev-matrix captures `native-windows-two-apps-2026-11-24.png`,
+`native-windows-three-chrome-2026-11-24.png`, `native-windows-resized-focus-2026-11-24.png`.
+
+Measured on production during the verified run (same host, Xpra 6.5.5, Chrome 158,
+software rendering via `llvmpipe`, loopback/Cloudflare-tunneled browser, headless Playwright;
+no GPU claim):
+
+| Metric | Value |
+| --- | ---: |
+| Applications click → first adopted Chrome window | **537 ms** |
+| App Center tile launch → adopted window | **1.32 s** (first launch provisions the identity) |
+| Warm launch on the dev matrix | 215 ms (scenario a metric) |
+| Resize: RAST rect → remote Xpra geometry settled | 90 ms debounce + remote apply (asserted in scenario d) |
+| Session cgroup memory, two Chrome windows open | 542–557 MB (26 tasks) |
+| Chrome processes / app units | 14 / 1 (one shared session; no per-window process or connection) |
+| Page reload → windows re-adopted | 2.57 s, same wids/PIDs, no duplicates |
+
+### Production re-enable
+
+- Deployed binary: `target/release/rast` = `sha256 d00a8963…71fc8` installed as
+  `/usr/local/bin/rast`; previous binary kept as
+  `/usr/local/bin/rast.rollback-0.18.3-20261123-200547`.
+- `/etc/rast/rast.toml`: `native_enabled = true`, `linux_apps_enabled = true` (backup:
+  `/etc/rast/rast.toml.before-native-on-20261123-200547`); the quarantine comment was replaced
+  with the re-enable rationale.
+- `rast-native.service`, `rast-worker.service` and `rast.service` restarted on the new binary;
+  `rast doctor` reports the native helper socket and Xpra 6.5.5; `https://desktop.lufria.tech/health`
+  200. Test sessions were closed after verification; no native units remain idle.
+- Rollback: reinstall the backup binary, restore the config backup, restart the three units.
+
+### Limitations and explicitly not verified in this round
+
+* **Audio**: the session starts with `--audio=yes`, a PulseAudio null sink and speaker enabled
+  (verified in the unit command line), but actual audible output was not captured by headless
+  automation; no claim is made that sound was heard.
+* **Clipboard**: best-effort by design (see [Clipboard](#clipboard)); not exercised end-to-end
+  by the automated live run.
+* **Remote fullscreen**: a remote full-screen window is mirrored as a maximized RAST window;
+  RAST does not take over the browser's own fullscreen mode.
+* **Performance scope**: one host, software rendering (`llvmpipe`), loopback/Cloudflare tunnel,
+  12 cores; no WAN, bandwidth, GPU/NVENC, HiDPI or sustained multi-user soak measurements.
+  Steady-state session CPU/memory are unchanged from the earlier (2026-11-14) measurements
+  because the same single Xpra WebSocket feeds the adopted canvases.
+* **aarch64** end-to-end not re-run; **Docker→native migration (scenario m)** still requires a
+  Docker-phase instance and remains covered by unit tests plus the documented two-phase procedure.
+

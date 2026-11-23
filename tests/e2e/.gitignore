@@ -10,3 +10,7 @@ screenshots/
 tmp/
 perf/raw/
 results/latest/
+
+# Live production verification artifacts (screenshots + per-run reports).
+live/screenshots/
+live/results/

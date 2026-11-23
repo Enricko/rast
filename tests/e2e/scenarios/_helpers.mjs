@@ -326,8 +326,12 @@ export function isRealAppWindow(window) {
 export function waitForAppWindows(ctx, page, app, { timeoutMs = 150_000, what } = {}) {
   return browser.waitForWindows(
     page,
-    (windows) => windows.some((window) => appWindowMatches(window, app)),
-    { timeoutMs, what: what || `a window for ${app.name}` },
+    // The launcher first opens a "Starting <app>…" placeholder whose title
+    // matches appWindowMatches(). Waiting on that returned before the adopted
+    // native window existed, so callers raced against a placeholder that is
+    // removed a moment later. Only a real app window counts.
+    (windows) => windows.some((window) => appWindowMatches(window, app) && isRealAppWindow(window)),
+    { timeoutMs, what: what || `a real window for ${app.name}` },
   );
 }
 
@@ -454,7 +458,10 @@ export function summaryOfApp(app) {
 // Multi-window helpers
 // ---------------------------------------------------------------------------
 export function appWindowsFromList(windows, app) {
-  return windows.filter((window) => appWindowMatches(window, app));
+  // Ignore the "Starting <app>…" launcher placeholders: they disappear once
+  // the real (adopted native) window arrives, so counting/closing them races
+  // the adoption and can target a detached element.
+  return windows.filter((window) => appWindowMatches(window, app) && isRealAppWindow(window));
 }
 
 export async function allAppWindows(page, app) {
