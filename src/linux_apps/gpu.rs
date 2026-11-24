@@ -309,9 +309,10 @@ fn build_report(config: &Config) -> RuntimeReport {
     }
     if gpu.vendor == "nvidia" && !gpu.xpra_nvidia_codecs {
         notes.push(
-            "NVIDIA GPU present, but Xpra's NVIDIA codec module is not installed: sessions encode \
-             with software codecs (x264/webp/jpeg). Install the xpra-codecs-nvidia package that \
-             matches the installed Xpra version to enable NVENC/NVDEC."
+            "NVIDIA GPU present; sessions encode with software codecs (x264/webp/jpeg). NVENC \
+             through Xpra requires a codec module built for the driver's NVENC SDK - check \
+             docs/GPU-ACCELERATION.md before installing xpra-codecs-nvidia (on driver 595.99.02 \
+             with Xpra 6.5.5 the packaged module is incompatible)."
                 .to_string(),
         );
     }
