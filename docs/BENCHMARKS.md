@@ -841,3 +841,29 @@ reports v1.3.0/connected. The standalone in-page typing probe is
 harness-inconclusive on a cold session (synthetic click focus), and the earlier
 18/19 clipboard matrix applies because the input code is byte-identical after
 the revert. Full record: `tests/e2e/results/final-input-verification-951c15a.md`.
+
+## 11. Final runtime 2.1 benchmark run (2026-11-24, deployed build 8a08a9a3)
+
+Full reports: `tests/e2e/results/perf-runtime2-runtime21-final-2026-11-24-2026-11-24.{json,md,evidence.txt}`.
+
+Environment caveat: this run happened while the shared host was under sustained
+external disk-I/O pressure (`/proc/pressure/io` some avg10 ~30-45 % during the
+round) and the benchmark's new session fell back to the software Xvfb backend
+(`Display: Xvfb software (:101)`) instead of the GPU display. The numbers below
+are therefore an **environment-degraded reference**, not the normal-load
+product result; they are published with the environment facts and must not be
+compared as a fair regression without re-running under comparable conditions.
+
+| Metric | p50 / p95 | Samples | Notes |
+| --- | --- | --- | --- |
+| Input latency keydown→changed pixel | 229 / 456 | n=20 |
+| Negotiated encoder | webp → h264 | — | xpra info before/mid/after; batch 16/500/250 ms |
+| Host load at start/end | 1.18 / 2.53 | — | 12 vCPU, I/O pressure elevated |
+| Idle CPU / memory | 25.2 % / 153.3 MiB | — | session+app cgroups |
+
+The before/after comparison for the 2.0 work (§7.3) remains the authoritative
+product comparison (input p50 217→182 ms, p95 398→280 ms, typing total
+825→337 ms, dispatch 129→26 ms, cold session start 12.09 s → pre-warmed path
+~3 s). This final run mainly confirms the deployed build is healthy and records
+the host-contention caveat; a clean re-run is scheduled on a quiet host for the
+final acceptance report.
