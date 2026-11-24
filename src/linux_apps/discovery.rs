@@ -685,7 +685,9 @@ pub fn sniff_icon_bytes(bytes: &[u8]) -> Option<&'static str> {
         return Some("png");
     }
     let head = &bytes[..bytes.len().min(2048)];
-    String::from_utf8_lossy(head).contains("<svg").then_some("svg")
+    String::from_utf8_lossy(head)
+        .contains("<svg")
+        .then_some("svg")
 }
 
 /// Decode and validate the base64 icon payload a scan carried back. The helper
@@ -913,10 +915,17 @@ pub struct IconResolver {
 
 impl IconResolver {
     pub fn new(search: Vec<PathBuf>, allowed: Vec<PathBuf>) -> Self {
-        let mut search: Vec<PathBuf> = search
-            .into_iter()
-            .filter(|path| path.is_dir())
-            .collect();
+        // A theme parent (`/usr/share/icons`, a profile's `data/icons`) is
+        // searched together with its conventional `hicolor` theme.
+        let mut expanded = Vec::with_capacity(search.len() * 2);
+        for root in search {
+            let hicolor = root.join("hicolor");
+            expanded.push(root);
+            if hicolor.is_dir() {
+                expanded.push(hicolor);
+            }
+        }
+        let mut search: Vec<PathBuf> = expanded.into_iter().filter(|path| path.is_dir()).collect();
         search.sort();
         search.dedup();
         let mut allowed: Vec<PathBuf> = allowed
@@ -1064,8 +1073,7 @@ fn capture_scan_icons(entries: &mut [ScanEntry], roots: &[ScanRoot]) {
     let candidates = entries
         .iter()
         .filter(|entry| {
-            entry.icon.is_some()
-                && (!agent_scan || entry.scope != Scope::System.as_str())
+            entry.icon.is_some() && (!agent_scan || entry.scope != Scope::System.as_str())
         })
         .count();
     if candidates == 0 {
@@ -1301,10 +1309,7 @@ pub async fn reconcile(
         let categories =
             serde_json::to_string(&entry.categories).unwrap_or_else(|_| "[]".to_string());
         // Re-validate the (trusted) captured icon before storing it.
-        let icon = entry
-            .icon_data
-            .as_deref()
-            .and_then(decode_captured_icon);
+        let icon = entry.icon_data.as_deref().and_then(decode_captured_icon);
         let (icon_type, icon_data) = match &icon {
             Some(icon) => (Some(icon.kind), Some(icon.bytes.clone())),
             None => (None, None),
@@ -2197,5 +2202,216 @@ mod tests {
     fn user_struct_is_used_for_visibility_expectations() {
         // Keep the AuthUser helper honest: it is what the API passes in tests.
         assert!(!user(5).is_admin());
+    }
+
+    // -----------------------------------------------------------------------
+    // Icons and manual imports
+    // -----------------------------------------------------------------------
+
+    /// A tiny but structurally valid PNG (magic plus a 16x16 IHDR).
+    fn png_bytes() -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(&[0, 0, 0, 13]);
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&[0, 0, 0, 16, 0, 0, 0, 16, 8, 6, 0, 0, 0]);
+        bytes
+    }
+
+    fn write_icon(dir: &Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, png_bytes()).unwrap();
+        path
+    }
+
+    #[test]
+    fn desktop_working_directory_is_parsed() {
+        let entry = parse_desktop_entry(&desktop("Name=App\nExec=/bin/true\nPath=/opt/app/share"))
+            .expect("entry");
+        assert_eq!(entry.working_dir.as_deref(), Some("/opt/app/share"));
+    }
+
+    #[test]
+    fn import_values_are_validated() {
+        assert!(validate_icon_value("utilities-terminal").is_ok());
+        assert!(validate_icon_value("ai.storyteller.wordcraft").is_ok());
+        assert!(validate_icon_value("/usr/share/pixmaps/app.png").is_ok());
+        assert!(validate_icon_value("/opt/app/app.svg").is_ok());
+        assert!(validate_icon_value("../etc/passwd").is_err());
+        assert!(validate_icon_value("theme/sub").is_err());
+        assert!(validate_icon_value("/usr/share/pixmaps/app.gif").is_err());
+        assert!(validate_icon_value("/usr/../etc/app.png").is_err());
+        assert!(validate_icon_value("bad\nname").is_err());
+        assert!(validate_icon_value(&"a".repeat(MAX_ICON_VALUE_CHARS + 1)).is_err());
+
+        assert!(validate_working_dir("/tmp").is_ok());
+        assert!(validate_working_dir("relative/dir").is_err());
+        assert!(validate_working_dir("/tmp/../etc").is_err());
+        assert!(validate_working_dir("/definitely/not/here").is_err());
+
+        assert!(validate_import_args(&["--flag".into(), "a b".into()]).is_ok());
+        assert!(validate_import_args(&vec!["x".to_string(); MAX_EXEC_ARGS + 1]).is_err());
+        assert!(validate_import_args(&["a\0b".to_string()]).is_err());
+    }
+
+    #[test]
+    fn icons_resolve_by_theme_name_and_absolute_path_within_allowed_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("apps");
+        let icons = dir.path().join("icons");
+        std::fs::create_dir_all(&app).unwrap();
+        let icon = write_icon(
+            &icons.join("hicolor").join("128x128").join("apps"),
+            "wordcraft.png",
+        );
+        let (search, allowed) = scan_icon_roots(&[ScanRoot {
+            scope: Scope::ManagedProfile,
+            path: app,
+        }]);
+        let mut resolver = IconResolver::new(search, allowed);
+        let by_name = resolver.resolve("wordcraft").expect("theme name resolves");
+        assert_eq!(by_name.kind, "png");
+        assert_eq!(by_name.bytes, png_bytes());
+        let by_path = resolver
+            .resolve(&icon.display().to_string())
+            .expect("absolute path inside the roots resolves");
+        assert_eq!(by_path.bytes, by_name.bytes);
+        // A PNG outside the allowed roots is refused even though it exists.
+        let outside = dir.path().join("outside.png");
+        std::fs::write(&outside, png_bytes()).unwrap();
+        assert!(resolver.resolve(&outside.display().to_string()).is_none());
+        assert!(resolver.resolve("../outside.png").is_none());
+        assert!(resolver.resolve("/etc/passwd").is_none());
+        assert!(resolver.resolve("wordcraft/../../outside.png").is_none());
+    }
+
+    #[test]
+    fn oversized_and_non_image_icons_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let icons = dir.path().join("icons");
+        let apps = icons.join("hicolor/128x128/apps");
+        std::fs::create_dir_all(&apps).unwrap();
+        let mut huge = png_bytes();
+        huge.resize(MAX_CAPTURED_ICON_BYTES as usize + 1, 0);
+        std::fs::write(apps.join("huge.png"), &huge).unwrap();
+        std::fs::write(apps.join("fake.png"), b"<html>not an icon</html>").unwrap();
+        let mut resolver = IconResolver::new(vec![icons.clone()], vec![icons]);
+        assert!(resolver.resolve("huge").is_none());
+        assert!(resolver.resolve("fake").is_none());
+        assert!(decode_captured_icon("not base64!").is_none());
+        assert!(decode_captured_icon("<html>").is_none());
+    }
+
+    #[test]
+    fn a_scan_captures_icons_and_the_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let apps = dir.path().join("data").join("applications");
+        std::fs::create_dir_all(&apps).unwrap();
+        write_icon(
+            &dir.path().join("data/icons/hicolor/128x128/apps"),
+            "wordcraft.png",
+        );
+        std::fs::write(
+            apps.join("wordcraft.desktop"),
+            desktop("Name=WordCraft\nExec=/bin/true\nIcon=wordcraft\nPath=/tmp"),
+        )
+        .unwrap();
+        let scan = scan_roots(
+            &[ScanRoot {
+                scope: Scope::ManagedProfile,
+                path: apps,
+            }],
+            DEFAULT_SCAN_PATH,
+        );
+        assert_eq!(scan.entries.len(), 1, "{:?}", scan.entries);
+        let entry = &scan.entries[0];
+        assert_eq!(entry.working_dir.as_deref(), Some("/tmp"));
+        let captured = decode_captured_icon(entry.icon_data.as_deref().expect("icon captured"))
+            .expect("valid captured icon");
+        assert_eq!(captured.kind, "png");
+        assert_eq!(captured.bytes, png_bytes());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_stores_the_captured_icon_and_working_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_pool(dir.path()).await;
+        let mut system = entry("/usr/share/applications/app.desktop", "App");
+        system.scope = "system".into();
+        system.icon = Some("app".into());
+        system.working_dir = Some("/tmp".into());
+        system.icon_data = Some(base64::engine::general_purpose::STANDARD.encode(png_bytes()));
+        reconcile(
+            &pool,
+            Scope::System,
+            None,
+            DiscoverySystemApps::Auto,
+            &[system],
+        )
+        .await
+        .unwrap();
+        let rows = list(&pool, 1, true).await.unwrap();
+        let row = &rows[0];
+        assert_eq!(row.working_dir.as_deref(), Some("/tmp"));
+        assert!(stored_icon_ids(&pool).await.unwrap().contains(&row.id));
+        let (kind, bytes) = icon(&pool, &row.id).await.unwrap().expect("stored icon");
+        assert_eq!(kind, "png");
+        assert_eq!(bytes, png_bytes());
+        assert!(row.json(1, true, true)["iconUrl"].is_string());
+        assert!(row.json(1, true, false)["iconUrl"].is_null());
+        assert_eq!(row.json(1, true, true)["workingDir"], "/tmp");
+    }
+
+    #[tokio::test]
+    async fn manual_import_stores_args_working_dir_and_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = test_pool(dir.path()).await;
+        let binary = dir.path().join("tool");
+        std::fs::copy("/bin/true", &binary).unwrap();
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let row = import(
+            &pool,
+            &ManualImport {
+                path: binary.display().to_string(),
+                name: Some("My Tool".into()),
+                args: vec!["--flag".into(), "value with spaces".into()],
+                working_dir: Some(dir.path().display().to_string()),
+                icon: Some("tool".into()),
+                owner_user_id: None,
+            },
+            Some(DiscoveredIcon {
+                kind: "png",
+                bytes: png_bytes(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            row.exec(),
+            vec![
+                binary.display().to_string(),
+                "--flag".into(),
+                "value with spaces".into(),
+            ]
+        );
+        assert_eq!(
+            row.working_dir.as_deref(),
+            Some(dir.path().to_str().unwrap())
+        );
+        assert_eq!(row.icon.as_deref(), Some("tool"));
+        assert!(stored_icon_ids(&pool).await.unwrap().contains(&row.id));
+        assert!(row.json(row.owner_user_id.unwrap_or(0), true, true)["iconUrl"].is_string());
+        // Relative executables and non-image icons are request errors.
+        assert!(import(
+            &pool,
+            &ManualImport {
+                path: "relative/tool".into(),
+                ..ManualImport::default()
+            },
+            None
+        )
+        .await
+        .is_err());
+        assert!(validate_icon_value("/tmp/not-an-icon.txt").is_err());
     }
 }

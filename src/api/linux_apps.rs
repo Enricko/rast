@@ -114,10 +114,7 @@ pub fn routes() -> Router<AppState> {
             "/api/linux-apps/discovered/{id}/launch",
             post(discovered_launch),
         )
-        .route(
-            "/api/linux-apps/discovered/{id}/icon",
-            get(discovered_icon),
-        )
+        .route("/api/linux-apps/discovered/{id}/icon", get(discovered_icon))
         .route("/api/linux-apps/{id}/migrate", post(migrate))
         .route(
             "/api/linux-apps/{id}/migration/rollback",

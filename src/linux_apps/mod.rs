@@ -801,15 +801,17 @@ impl LinuxApps {
 
     /// Administrator: register an existing executable without running an
     /// installer (the "Import existing application" action).
-    pub async fn discovered_import(
-        &self,
-        request: &discovery::ManualImport,
-    ) -> AppResult<Value> {
+    pub async fn discovered_import(&self, request: &discovery::ManualImport) -> AppResult<Value> {
         self.ensure_linux_apps_enabled()?;
         // Resolve the icon the administrator named before the row is stored:
         // only the server-readable icon roots are used here (a rescan or the
         // icon endpoint can still resolve an identity-owned path later).
-        let icon = match request.icon.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let icon = match request
+            .icon
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
             Some(value) => {
                 let home = match request.owner_user_id {
                     Some(owner) => self.identity_home(owner).await,
@@ -836,11 +838,7 @@ impl LinuxApps {
 
     /// The stored (or, as a fallback, freshly resolved) icon of one discovered
     /// entry. Only entries visible to the caller are served.
-    pub async fn discovered_icon(
-        &self,
-        user: &AuthUser,
-        id: &str,
-    ) -> AppResult<(String, Vec<u8>)> {
+    pub async fn discovered_icon(&self, user: &AuthUser, id: &str) -> AppResult<(String, Vec<u8>)> {
         self.ensure_linux_apps_enabled()?;
         let row = discovery::get(&self.db, id).await?;
         if !row.visible_to(user.id, user.is_admin()) {
