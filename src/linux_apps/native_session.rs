@@ -1060,8 +1060,15 @@ impl NativeSessions {
                     return Err(AppError::unavailable(message));
                 }
             }
+            let ready_timeout = session_ready_timeout();
+            if ready_timeout > READY_TIMEOUT {
+                tracing::warn!(
+                    user_id = user.id,
+                    "host disk I/O pressure is high; allowing a longer bounded session startup"
+                );
+            }
             match self
-                .wait_ready_or_session_failed(port, &unit, READY_TIMEOUT)
+                .wait_ready_or_session_failed(port, &unit, ready_timeout)
                 .await
             {
                 Ok(()) => {
@@ -2687,6 +2694,31 @@ async fn probe_http(port: u16) -> bool {
 }
 
 /// Wait until the Xpra HTML5 page is served, up to `timeout`.
+/// Read the `some avg10=` value of `/proc/pressure/io` (0 when unavailable).
+fn io_pressure_avg10(text: &str) -> Option<f64> {
+    let line = text.lines().find(|line| line.starts_with("some"))?;
+    line.split_whitespace()
+        .find_map(|token| token.strip_prefix("avg10="))
+        .and_then(|value| value.parse::<f64>().ok())
+}
+
+/// Readiness timeout for a session start. Xpra startup is mostly file I/O
+/// (Python imports, profile scanning); when other host workloads saturate the
+/// disk, 30 s is not enough and the session would be killed and retried even
+/// though it was making progress. Extend the deadline under measured I/O
+/// pressure (still bounded) instead of failing both attempts.
+fn session_ready_timeout() -> Duration {
+    let pressure = std::fs::read_to_string("/proc/pressure/io")
+        .ok()
+        .and_then(|text| io_pressure_avg10(&text))
+        .unwrap_or(0.0);
+    if pressure >= 25.0 {
+        Duration::from_secs(75)
+    } else {
+        READY_TIMEOUT
+    }
+}
+
 async fn wait_ready(port: u16, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -3183,6 +3215,17 @@ mod tests {
             tasks: 256,
             chromium: false,
         }
+    }
+
+    #[test]
+    fn io_pressure_is_parsed_from_proc_pressure() {
+        let sample = "some avg10=12.34 avg60=5.00 avg300=1.00 total=123\nfull avg10=11.00 avg60=4.00 avg300=0.50 total=100\n";
+        assert_eq!(io_pressure_avg10(sample), Some(12.34));
+        assert_eq!(io_pressure_avg10("full avg10=1.0\n"), None);
+        assert_eq!(io_pressure_avg10(""), None);
+        // The timeout helper must stay within its documented bounds.
+        let timeout = session_ready_timeout();
+        assert!(timeout == READY_TIMEOUT || timeout == Duration::from_secs(75));
     }
 
     #[test]
