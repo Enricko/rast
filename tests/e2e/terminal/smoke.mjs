@@ -8,6 +8,8 @@ const arg = (name, fallback) => {
   const found = process.argv.find((item) => item.startsWith(`--${name}=`));
   return found ? found.split("=").slice(1).join("=") : fallback;
 };
+const SMOKE_SCALE = Math.max(1, Number(process.env.RAST_SMOKE_SCALE || 1) || 1);
+const scaled = (ms) => Math.round(ms * SMOKE_SCALE);
 const baseUrl = (arg("base-url", process.env.RAST_BASE_URL || "https://desktop.lufria.tech")).replace(/\/$/, "");
 const user = arg("user", "t-admin");
 const credsPath = process.env.RAST_CREDS || "/home/lufria/.config/rast-test/creds";
@@ -35,19 +37,19 @@ const browser = await chromium.launch({
 let ok = false;
 const context = await browser.newContext({ viewport: { width: 1480, height: 920 }, ignoreHTTPSErrors: true });
 const page = await context.newPage();
-page.setDefaultTimeout(30_000);
+page.setDefaultTimeout(scaled(30_000));
 try {
   await page.goto(`${baseUrl}/`, { waitUntil: "domcontentloaded" });
-  await page.waitForSelector('.auth-form, input[name="username"], .taskbar', { timeout: 30_000 });
+  await page.waitForSelector('.auth-form, input[name="username"], .taskbar', { timeout: scaled(30_000) });
   if (await page.locator('input[name="username"]').count()) {
     await page.fill('input[name="username"]', user);
     await page.fill('input[type="password"]', password);
     await page.click('.auth-form button[type="submit"], button:has-text("Sign in")');
   }
-  await page.waitForSelector(".taskbar", { timeout: 30_000 });
+  await page.waitForSelector(".taskbar", { timeout: scaled(30_000) });
   // Open Terminal from the start menu (Applications).
   await page.locator(".taskbar-start").click();
-  await page.waitForSelector(".start-menu", { timeout: 15_000 });
+  await page.waitForSelector(".start-menu", { timeout: scaled(15_000) });
   const menu = page.locator(".start-menu");
   const search = menu.locator(".menu-search");
   if (await search.count()) {
@@ -55,16 +57,16 @@ try {
     await page.waitForTimeout(300);
   }
   const tile = menu.locator(".menu-app", { hasText: "Terminal" }).first();
-  await tile.waitFor({ timeout: 20_000 });
+  await tile.waitFor({ timeout: scaled(20_000) });
   await tile.click();
-  await page.waitForSelector(".xterm, .terminal, .win-body canvas", { timeout: 45_000 });
+  await page.waitForSelector(".xterm, .terminal, .win-body canvas", { timeout: scaled(45_000) });
   const terminal = page.locator(".xterm").first();
   if (await terminal.count()) {
     await terminal.click();
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(scaled(1500));
     await page.keyboard.type(`echo ${marker}`);
     await page.keyboard.press("Enter");
-    await page.waitForTimeout(2500);
+    await page.waitForTimeout(scaled(2500));
     const text = await page.locator("body").innerText();
     ok = text.includes(marker);
     if (!ok) {

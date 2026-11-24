@@ -196,8 +196,16 @@ if [ "$SMOKE_TERMINAL" = 1 ]; then
         # handshake; retry once after a short pause before treating it as a real
         # regression (the rollback path is still exercised on repeated failure).
         SMOKE_OK=0
+        # Browser smoke timing depends on host I/O; scale it when the disk is
+        # under pressure (the smoke is a functional gate, not a latency gate).
+        SMOKE_SCALE=${RAST_SMOKE_SCALE:-1}
+        PRESSURE=$(awk '/^some/ {for (i = 1; i <= NF; i++) if ($i ~ /^avg10=/) {split($i, a, "="); print a[2]}}' /proc/pressure/io 2>/dev/null || true)
+        if [ -n "$PRESSURE" ] && awk -v p="$PRESSURE" 'BEGIN { exit !(p >= 25) }'; then
+            SMOKE_SCALE=3
+            say "host I/O pressure detected; using a 3x Terminal smoke timeout"
+        fi
         for attempt in 1 2; do
-            if (cd "$ROOT/tests/e2e" && node terminal/smoke.mjs --user="$SMOKE_USER"); then
+            if (cd "$ROOT/tests/e2e" && RAST_SMOKE_SCALE="$SMOKE_SCALE" node terminal/smoke.mjs --user="$SMOKE_USER"); then
                 SMOKE_OK=1
                 break
             fi
