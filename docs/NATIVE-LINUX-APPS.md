@@ -151,7 +151,8 @@ session.
   (`linux_discovery_system_apps = "approval"`, the default; `"auto"` approves
   everything, `"hidden"` records it without ever showing it). Administrators
   can also hide an entry, rename it, forget it (registry only) or import an
-  existing executable manually.
+  existing executable manually (name, absolute executable path, optional
+  arguments, working directory and icon) — see **Importing by hand** below.
 * **Launching and windows.** A discovered application starts in the person's
   shared Xpra session exactly like a managed native app (one run record per
   app id, idempotent launch, cgroup limits). Its X11 windows are adopted by the
@@ -178,10 +179,34 @@ session.
   (`native_enabled`, the default when Xpra is installed); the legacy Docker
   backend is unaffected.
 
-Limitations: discovered icons are not served yet (a generic icon is shown); the
-inventory is per file path, so an app reinstalled at a different path appears as
-a new entry; `Terminal=true` entries are started as-is and need their own
-terminal emulator window.
+* **Icons.** Each entry's `.desktop` `Icon=` value (a theme name or an
+  absolute PNG/SVG path) is resolved while the scan or importer can read it:
+  the identity's XDG icon directories (`~/.local/share/icons`, `~/.icons`), the
+  system icon themes (`/usr/share/icons/hicolor/<size>/apps`, …) and a managed
+  profile's `data/icons` tree. Resolution is bounded to those known roots,
+  accepts only regular PNG/SVG files up to 96 KiB, and canonicalises the path
+  before the root check, so neither `..` nor a symlink can escape. The bytes
+  are stored with the entry and served by the authenticated
+  `GET /api/linux-apps/discovered/{id}/icon` endpoint (stable URL, cache
+  headers, no file-system access through the URL); App Center and the desktop
+  use it and fall back to the generic application icon.
+* **Importing by hand.** Besides automatic discovery, an administrator can
+  register an already-installed executable from App Center → Discovered
+  applications → **Import existing application**: name, absolute executable
+  path and optional arguments, working directory and icon. The arguments field
+  is parsed into an argv array (quotes group spaces) and executed without a
+  shell. An imported working directory (or a `.desktop` entry's `Path=`) is
+  honoured when it is inside the managed application trees
+  (`<data_dir>/linux-apps`); anything else keeps using the app profile home.
+
+Limitations: an entry whose icon file cannot be read during a scan (for example
+a profile created before the application was installed) shows the generic icon
+until a later scan resolves it. Icons are stored as bytes, so a theme update
+only reaches RAST on the next rescan. The inventory is per file path, so an app
+reinstalled at a different path appears as a new entry; `Terminal=true` entries
+are started as-is and need their own terminal emulator window. There is no
+`.deb`/AppImage extraction UI: RAST launches what the external installer already
+put on disk.
 
 ## Requirements
 
@@ -572,9 +597,10 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
   RAST.
 * Source archives are rejected by design: install a prebuilt `.deb`/AppImage or
   a prepared portable archive.
-* Discovered applications are listed with a generic icon (their own icons are
-  not served yet), and an application reinstalled at a different path appears
-  as a new entry — see [Discovered applications](#discovered-applications).
+* A discovered application whose icon cannot be read while scanning shows the
+  generic icon; an application reinstalled at a different path appears as a new
+  entry. Imported working directories apply only inside the managed application
+  trees — see [Discovered applications](#discovered-applications).
 * One RAST instance per host may use the native backend (unit names are keyed
   by RAST user id).
 * `.deb` uninstall fidelity depends on the host package manager: RAST removes

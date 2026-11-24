@@ -56,6 +56,21 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **Discovered-application icons and the "Import existing application"
+  dialog.** Applications installed outside App Center now show their own icon:
+  the identity-scoped scan (or a manual import) resolves the desktop entry's
+  `Icon=` theme name or absolute path only inside known icon roots (identity
+  XDG icon directories, system icon themes, a managed profile's `data/icons`),
+  stores validated PNG/SVG bytes (≤96 KiB) on the inventory row (migration 17
+  adds `working_dir`, `icon_type`, `icon_data` to `discovered_apps`), and the
+  authenticated `GET /api/linux-apps/discovered/{id}/icon` serves them with
+  cache headers. The URL contains no path and the endpoint only serves stored
+  bytes, so no path traversal or symlink escape is possible. Administrators can
+  register an already-installed executable from App Center with name, absolute
+  path, optional arguments, working directory and icon; an imported working
+  directory (or a `.desktop` `Path=`) is honoured when it is inside the managed
+  application trees. App Center rows and desktop shortcuts use the icon with
+  the existing generic fallback.
 - **Discovered applications (installed outside App Center).** RAST now finds
   desktop applications that were not installed through App Center — `.desktop`
   entries in XDG directories, AppImages, portable programs, and applications an
