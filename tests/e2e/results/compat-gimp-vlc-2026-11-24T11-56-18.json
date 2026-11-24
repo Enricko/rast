@@ -1,0 +1,56 @@
+{
+  "generatedAt": "2026-11-24T11:56:18.750281+00:00",
+  "results": [
+    {
+      "name": "GIMP",
+      "importHttp": 200,
+      "entry": {
+        "id": "d-281777e2877d9a21",
+        "status": "ready",
+        "canLaunch": true
+      },
+      "launchHttp": 200,
+      "launchError": null,
+      "run": {
+        "status": "running",
+        "error": null
+      },
+      "session": {
+        "display": 103,
+        "backend": "gpu",
+        "gpuVerified": true
+      },
+      "windows": [
+        "0x600003 \"GIMP Startup\": (\"gimp\" \"Gimp\")  796x544+0+0  +0+0",
+        "0x600001 \"GNU Image Manipulation Program\": (\"gimp\" \"Gimp\")  10x10+10+10  +10+10"
+      ],
+      "launchMs": 5143
+    },
+    {
+      "name": "VLC media player",
+      "importHttp": 200,
+      "entry": {
+        "id": "d-4a0785e82b682fff",
+        "status": "ready",
+        "canLaunch": true
+      },
+      "launchHttp": 200,
+      "launchError": null,
+      "run": {
+        "status": "running",
+        "error": null
+      },
+      "session": {
+        "display": 103,
+        "backend": "gpu",
+        "gpuVerified": true
+      },
+      "windows": [
+        "0x400006 \"VLC media player\": (\"vlc\" \"vlc\")  600x420+0+0  +660+330",
+        "0x400010 \"vlc\": (\"vlc\" \"vlc\")  22x22+0+0  +-200+-200",
+        "0x400009 \"Privacy and Network Access Policy\": (\"vlc\" \"vlc\")  405x344+0+0  +108+28"
+      ],
+      "launchMs": 3088
+    }
+  ]
+}

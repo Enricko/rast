@@ -39,14 +39,15 @@ identical source code (later commits are tests/docs only).
    ready ~2 s and click→window ~3 s on a quiet host, versus ~12 s cold path.
 6. **Input/clipboard** — single-owner keyboard focus, macOS Command translation
    (emulated/partial), two-way text clipboard with explicit failure fallbacks;
-   18/19 controlled-page matrix items pass on the equivalent input code; full
-   matrix on the GPU build is harness-inconsistent and documented as such;
-   real macOS verification remains not-proven; text-only by design.
+   controlled-page matrix on the **final GPU build passes 18/18 tested checks
+   with 0 failures** (macOS emulation recorded as not-tested); real macOS
+   verification remains not-proven; text-only by design.
 7. **Compatibility** — Chrome (full earlier matrix), Firefox tarball
    (window/adoption PASS; keyboard limited without a window manager), VS Code
    tarball (Electron, PASS), LibreOffice Writer (PASS), XTerm/UXTerm/Alacritty
    (Rust/OpenGL)/obconf (GTK2)/Zenity (GTK)/QTerminal (Qt)/MPV (video)/ArtCraft/
-   WordCraft AppImage windows verified on the GPU display. Snap packages are
+   WordCraft AppImage windows verified on the GPU display. GIMP and VLC also
+   launch with real windows in verified GPU sessions. Snap packages are
    **not supported** for identity users (snapd policy) and are documented as
    such; GIMP/VLC/other untested applications are listed honestly.
 8. **Multi-user / resources** — production isolation checks 6/6 (cross-user 403,
@@ -83,9 +84,11 @@ identical source code (later commits are tests/docs only).
 - WordCraft launch inside the real u1 account was not attempted (no credentials/
   policy); the generic pipeline is proven with the real AppImage on a test account.
 - Snap-packaged apps cannot run for identity users (snapd restriction).
-- GIMP/VLC/Blender (non-snap), LibreOffice document-window interactions, VS Code
-  typing, large-session (>2 windows) adoption with long settle times, and audio
-  audible verification are follow-ups.
+- Firefox keyboard focus requires a minimal internal window manager/focus
+  helper; fully overlapping adopted windows should be cascaded or raised on
+  click (the harness now raises them via the RAST window DOM like a taskbar
+  click); LibreOffice document-window interactions, VS Code typing, audio
+  audible verification and very large-session adoption are follow-ups.
 - Host disk I/O pressure from co-located workloads can slow cold session starts;
   the runtime adapts with a bounded 75 s readiness window and scaled deploy smoke,
   but normal-load numbers are the representative ones.

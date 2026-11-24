@@ -504,19 +504,30 @@ normalization, clipboard token filtering, deferred clipboard requests with the
 timeout fallback, echoed-token loop prevention, and the pinned
 `swap_keys`/`capture_keyboard` contract.
 
-## Final-build (runtime 2.1) matrix status
+## Final-build (runtime 2.1) matrix status — PASS
 
-The controlled-page clipboard matrix was re-run on the final GPU/pre-warm build.
-A same-build direct diagnostic proved key forwarding into the remote page works
-(clicking the adopted window centre and typing changed the remote page title to
-`T:CLICKTYPED9`), and navigation (Alt+D), window adoption, focus ownership and
-transport checks pass. The full automated matrix is currently inconsistent on
-this build because the harness's synthetic clicks can leave the remote Chrome
-address bar as the DOM-focused element (its Ctrl+A/C then selects the URL and
-`PASTED:`/`INPUT:` title assertions fail) — a harness/geometry issue, not a
-confirmed product regression; the same harness passed 18/19 on the pre-GPU
-build with byte-identical input code (`docs/BENCHMARKS.md` §7.6). A
-window-centre click fallback was added to the harness; a full clean rerun is a
-follow-up. Rich text/image clipboard remains unsupported by design and real
-macOS Command behaviour is still not provable on this host.
+The controlled-page clipboard/input matrix was re-run on the final GPU/pre-warm
+build (`RAST 0.18.3 (8a08a9a39c7d)`) and finished **PASS: 18/18 tested checks,
+0 failures, 1 not-tested** (macOS Command-key emulation, see below). The earlier
+GPU-build inconsistency was a harness problem: calibrated pixel-origin clicks
+could land on the page body and leave the browser address bar as the
+DOM-focused element, and a fully overlapping second RAST window blocked the
+focus-switch step. Both are fixed in the harness (window-centre field click;
+raise a covered window through the RAST window DOM, the same path a taskbar
+click uses).
+
+Verified in the final run: local→remote paste (ASCII 406 ms, Unicode 465 ms,
+exact text), remote→local copy (exact browser clipboard + independent host
+`xclip`, 3 ms title latency), select-all, cut, typing exactly-once,
+undo/redo, second window 1:1, focus switching between adopted windows,
+remote→remote copy/paste (browser clipboard exact + B paste exact, 347 ms;
+A's title can race to BLUR when focus moves, reported as supporting evidence),
+reconnect after desktop reload, and a clean console. Text-only remains by
+design; HTML/image clipboard is unsupported. Evidence:
+`tests/e2e/clipboard/results/<final-run>/report.{json,md}` and screenshots.
+
+**Not-tested / not-proven:** macOS Command-key emulation is partial — the shim
+enables `keyboardSwap`, Cmd+A/Cmd+C were observed, but the automated synthetic
+Cmd+V paste cannot produce a trusted browser paste event and no real macOS
+hardware is available here. This is recorded as **not-tested**, not as a pass.
 

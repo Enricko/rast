@@ -41,11 +41,15 @@ below combines them; automation variance is not claimed as product failure.
 | Google Chrome | browser | **PASS** (earlier matrices) | PASS — adopted window, typing/navigation, GPU hardware acceleration | full behaviour covered by the clipboard/input/benchmark harnesses |
 | Firefox (tarball 160) | browser | **PASS** | **PASS** — `"Welcome to Firefox — Mozilla Firefox"` 1280x972 (`Navigator`/`firefox`), adopted by the RAST desktop | snap-distributed Firefox cannot run for RAST identities (snapd refusal), so the official Mozilla tarball was installed at `/opt/rast-apps/firefox-tarball` and imported. **Keyboard interaction is limited:** even host-level `xdotool` typing directly into the Firefox window does not reach its page/address bar in the bare-Xorg session without a window manager (Chrome's X11 input handling works in the same session). Root cause: no WM sets X input focus for Firefox; follow-up = minimal internal WM or explicit focus path. Window/adoption compatibility passes. |
 | VS Code (tarball, **Electron**) | development | **PASS** (first launch ~39 s under load) | **PASS** — `"Welcome - Visual Studio Code"` 1200x800 (`code`/`code`), adopted by the RAST desktop | official Microsoft tarball at `/opt/rast-apps/vscode`, root-owned SUID `chrome-sandbox`; covers the Electron toolkit category |
+| GIMP 3.0 | graphics | **PASS** (5.1 s) | **PASS** — `"GIMP Startup"` 796x544 (`gimp`/`Gimp`) | installed from Ubuntu (archive mirror) |
+| VLC media player | multimedia | **PASS** (3.1 s) | **PASS** — `"VLC media player"` 600x420 (`vlc`/`vlc`) + first-run dialog | installed from Ubuntu |
 | LibreOffice Writer | productivity | **PASS** (after allowing `/usr/lib/libreoffice`) | **PASS** — `"LibreOffice"` window created (startup window; Writer document window follow-up) | installed from Ubuntu (apt mirror switched to archive.ubuntu.com after the regional mirror returned 403) |
 | LibreOffice Writer | productivity | **NOT TESTED** | — | install failed twice: Ubuntu mirror returned HTTP 403 for `libgpgmepp7`; honest gap (retry on a different mirror) |
 | VS Code / Code OSS | development | **NOT TESTED** | — | not installed |
-| GIMP / Inkscape | graphics | **NOT TESTED** | — | not installed |
-| VLC | multimedia | **NOT TESTED** | — | not installed (mpv used instead) |
+| GIMP 3.0 | graphics | **PASS** (5.1 s) | **PASS** — `"GIMP Startup"` 796x544 (`gimp`/`Gimp`) on the GPU display | installed from Ubuntu (archive mirror); first-run startup window verified |
+| Inkscape | graphics | **NOT TESTED** | — | not installed |
+| VLC media player | multimedia | **PASS** (3.1 s) | **PASS** — `"VLC media player"` 600x420 (`vlc`/`vlc`) + first-run privacy dialog | installed from Ubuntu; window verified |
+| LibreOffice Calc/Impress | productivity | **NOT TESTED** | — | Writer verified only |
 | Electron app | toolkit | **NOT TESTED** | — | no Electron fixture installed; not claimed |
 
 ## Windows and adoption
