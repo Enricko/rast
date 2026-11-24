@@ -1494,6 +1494,9 @@ const ARGV0_PREFIXES: &[&str] = &[
     // canonical target lives under `/snap/<name>/<revision>/...`, so the whole
     // root-owned snap tree must be allowed for canonicalisation to succeed.
     "/snap",
+    // Snap wrapper scripts are symlinks through /usr/bin/snap to the root-owned
+    // snapd binary, so allow its canonical location as well.
+    "/usr/lib/snapd",
 ];
 
 /// Validate `argv[0]`: absolute, inside an allow-listed prefix, and after
