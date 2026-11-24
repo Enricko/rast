@@ -561,3 +561,258 @@ Check notes:
 * **Performance caveat:** the launch number in the matrix is a single cold
   launch (no running session) and is therefore ~12 s; the user-visible per-app
   (warm) launch cost measured by the benchmark is ~767 ms (§7.3).
+
+---
+
+## 8. Input and clipboard latency stage profile (2026-11-24, production)
+
+This section decomposes the input path that §4/§7 measure end-to-end. The
+"input latency" in the earlier benchmark is a screenshot-polling upper bound
+and does not say where the time goes. The profile below was measured with
+`tests/e2e/perf/latency.mjs` against the public production URL
+(`https://desktop.lufria.tech`) while the tester typed into the controlled
+remote page used by the clipboard matrix.
+
+> **Status:** stream-path numbers captured on production build
+> `RAST 0.18.3 (93585ba2c0ce)`; the deployed final build at commit time is
+> `RAST 0.18.3 (02c1722e731f)` (binary sha256
+> `90e61351b038b47e515f06be7698ff3e66f598515190da27f1be0ae5a6b9c591`). The
+> final deploys changed prewarm/discovery/terminal code only; the
+> input/clipboard/stream path is unchanged. The re-run attempt on the final
+> build aborted in the harness focus handshake (see §8.3) and is kept as an
+> attempt log, not as data. Single host: browser, RAST, Xpra and remote Chrome
+> all run on the measurement host, so the public leg crosses the real
+> Cloudflare tunnel but not an end user's last mile.
+
+Harness files (committed):
+
+| Path | Purpose |
+|---|---|
+| `tests/e2e/perf/latency.mjs` | Stage profiler: rAF counters (desktop + hidden viewer iframe), Event Timing + shim `sendKey` instrumentation, Playwright WebSocket frame timing, `xpra info` snapshots, loopback-vs-public HTTP RTT. Includes a focus handshake that aborts instead of reporting meaningless samples. |
+| `tests/e2e/clipboard/clipboard-page.html` | Controlled remote page whose `document.title` reports application state. |
+| `tests/e2e/clipboard/lib.mjs` | Shared production harness helpers. |
+| `tests/e2e/results/perf-input-latency-2026-11-24-evidence.txt` | Raw `xpra info` snapshots (idle / mid-typing / after) + tunnel data of the valid run. |
+| `tests/e2e/results/perf-input-latency-2026-11-24-summary.md` | Valid-run summary + list of non-measurement attempts. |
+| `tests/e2e/results/perf-input-latency-2026-11-24-*.log` | Console logs of the valid run, the earlier same-day run and the aborted final-build attempt. |
+| `tests/e2e/results/perf-input-latency-2026-11-24-02c1722e731f-handshake-failed.{json,md}` | Aborted final-build attempt (evidence of the guard, not latency data). |
+
+Exact commands:
+
+```bash
+cd tests/e2e
+node perf/latency.mjs                 # production, t-alice, default 24 keys
+node perf/latency.mjs --keys=30 --idle=5
+node perf/latency.mjs --keep-session  # leave the test session up
+```
+
+The profiler uses only the test account's own session and closes it through
+the RAST API at the end; the live user session and the RAST services are never
+touched.
+
+### 8.1 What is measured
+
+| Stage | Method | Honesty note |
+|---|---|---|
+| **input dispatch + RAST handler** | Chromium Event Timing entries for `keydown` + a page-only runtime wrapper around the shim's `sendKey` + a raw capture-phase `keydown` listener (product code untouched) | browser dispatch + RAST policy/handler + the `sendKey` call; not the socket write |
+| **handler → WebSocket frame** | Playwright `page.on("websocket")` `framesent` / `framereceived` wall times, correlated per keystroke | local client ↔ RAST server leg only |
+| **application acknowledgement** | keypress → `document.title` change mirrored into the adopted window title (MutationObserver) | full keypress → application → client round trip; can include Xpra window-metadata propagation, so an upper bound for app acknowledgement, not screen paint. **Not reported from this run** (see §8.3). |
+| **hidden-viewer rAF throttling** | rAF counters in the desktop document **and** the off-screen same-origin `.linux-native-session-frame` viewer iframe, idle and during typing | directly tests the suspected render-throttling contributor |
+| **Xpra transport / damage** | `sudo -u rast-u<id> xpra info --socket-dir=… :<display>` of the test identity's own session | instantaneous adaptive-state snapshots; mid-typing snapshot taken while the burst is in flight |
+| **Cloudflare tunnel RTT** | 40 keep-alive HTTP requests to `http://127.0.0.1:8720/healthz` (loopback) vs `https://desktop.lufria.tech/healthz` (public) | measured on the RAST host; no end-user last-mile |
+| **estimated floor** | sum of measured stages with stated assumptions | an estimate, not an individual keystroke measurement |
+
+### 8.2 Hidden-viewer rAF vs main-document rAF
+
+| Condition | Main document | Off-screen viewer iframe | Throttled? |
+|---|---|---|---|
+| idle (5 s) | **60.0 fps** | **60.0 fps** | no |
+| during typing burst | **59.9 fps** | **59.9 fps** | no |
+
+**Finding:** the off-screen `.linux-native-session-frame` (same origin, laid
+out at `position: fixed; left: -30000px`) is **not render-throttled**: it runs
+at the same ~60 fps as the visible desktop document both while idle and while
+keys are forwarded. Hidden-viewer rAF throttling is therefore **not a latency
+contributor** in this deployment. (The iframe must stay laid out — not
+`display:none` — for the Xpra client to keep painting; that is what the shell
+does.) The earlier same-day run measured 59.4/59.4 idle and 59.0/59.0 typing;
+the conclusion is identical.
+
+### 8.3 Stage latencies (one typed burst, n = keys)
+
+| Stage | p50 | p95 | n |
+|---|---|---|---|
+| input delay (event start → handler start) | 0.25 ms | 0.55 ms | 6 |
+| RAST handler processing (Event Timing processing span) | 0.15 ms | 0.53 ms | 6 |
+| dispatch to capture listener (raw listener) | 0.30 ms | 0.99 ms | 24 |
+| keydown event timestamp → shim `sendKey` call (raw listener) | 0.25 ms | 0.79 ms | 24 |
+| keypress (Node) → outgoing WebSocket frame | 11.0 ms | 16.9 ms | 24 |
+| keypress → incoming WebSocket frame | 21.0 ms | 32.2 ms | 24 |
+| keypress → application acknowledgement (title) | *not reported* | — | — |
+
+The browser-side stages are **sub-millisecond**: key dispatch, RAST key policy,
+focus routing and the shim `sendKey` call are not the bottleneck. The client
+WebSocket send happens ~11 ms after the keypress (includes Xpra client
+encoding/queue) and the first inbound frame ~21 ms after it.
+
+**Application acknowledgement is not reported from this run.** In the
+automated post-prewarm runs the fixture stopped receiving keystrokes (the title
+channel produced no fresh entry while `shim.sendKey` was still called 24×;
+`perf-input-latency-2026-11-24-02c1722e731f-handshake-failed.json` records the
+handshake evidence), so any number would be meaningless. The pre-deploy
+clipboard matrix proves the title channel works end-to-end (exact
+`PASTED`/`COPIED` titles, 313–352 ms per paste/copy round trip; §8.7 and
+INPUT-CLIPBOARD.md). `latency.mjs` now performs a focus handshake and aborts
+instead of emitting wrong values.
+
+### 8.4 Xpra transport and damage latency (test identity's own session)
+
+| Metric | idle | mid-typing | after |
+|---|---|---|---|
+| client ping latency p50 / p90 | 62 / 101 ms | 62 / 101 ms | 57 / 68 ms |
+| damage client-latency | 104 ms | 94 ms | 94 ms |
+| damage frame-total latency | 104 ms | 94 ms | 94 ms |
+| damage target-latency (window) | 71 ms | 71 ms | 71 ms |
+| batch delay avg / max (cur) | 8 / 21 (2) ms | 8 / 21 (2) ms | 8 / 21 (2) ms |
+| batch config min / max / expire | 16 / 500 / 250 ms | 16 / 500 / 250 ms | 16 / 500 / 250 ms |
+| compressor / encoder | lz4 / openh264 | lz4 / openh264 | lz4 / openh264 |
+
+**Finding:** the transport round trip over the public path is ~55–62 ms p50
+(p90 up to 101 ms on the measured run), and Xpra's own server-side damage→frame
+pipeline (`frame-total latency`) is ~94–119 ms for this text/edit workload.
+Adaptive batching stays at its ~8–15 ms level (discrete keystrokes, no
+continuous damage), so the **transport + server damage pipeline dominates**,
+not batching. This matches the §7 finding that the `responsive` profile's batch
+cap did not change typing latency.
+
+### 8.5 Cloudflare tunnel overhead (HTTP RTT from the RAST host)
+
+| Path | p50 | p95 | n |
+|---|---|---|---|
+| loopback `http://127.0.0.1:8720/healthz` | **2.14 ms** | 3.10 ms | 40 |
+| public `https://desktop.lufria.tech/healthz` | **67.33 ms** | 95.10 ms | 40 |
+| **inferred tunnel overhead** | **≈ 65.19 ms** | — | — |
+
+Cloudflare colo for the public leg: `cf-ray a5f68928187f68b7-SIN` (Singapore
+edge). The earlier same-day run measured 2.30 vs 67.7 ms → 65.4 ms overhead,
+i.e. the same value. Fresh-connection `curl` components are in the evidence
+file (loopback DNS 0.05 ms / connect 0.3 ms / TTFB ~1 ms).
+
+**Interpretation:** the tunnel adds ~65 ms of HTTP round-trip latency; the Xpra
+WebSocket transport RTT measured by the client (~55–62 ms p50) is the same
+order, i.e. the transport RTT is dominated by the public tunnel path and
+roughly half of it (~27–31 ms) is the one-way delay a keystroke and its
+resulting frame each pay.
+
+### 8.6 Estimated floor
+
+Using the measured stages with stated assumptions:
+
+```
+floor ≈ RAST handler (0.25 ms)
+      + one-way client→server (ping p50 / 2 = 31 ms)
+      + server damage→frame (frame-total latency mid-typing = 94 ms)
+      + one-way server→client (31 ms)
+      + client decode/paint (~one viewer frame at 59.9 fps = 16.7 ms)
+       ≈ 173 ms
+```
+
+Assumptions and caveats:
+
+* one-way transport ≈ `xpra info` client ping p50 / 2 in each direction;
+* server damage→encoded-frame time = mid-typing
+  `client.0.damage.frame-total-latency` snapshot;
+* client paint ≈ one hidden-viewer rAF interval at the measured viewer rate;
+* the RAST handler stage is measured event→`sendKey`; the client WebSocket send
+  queue is not included;
+* this is an *estimate for one keystroke to become a painted frame*; Xpra
+  batching can add up to `batch.max-delay` under continuous damage.
+
+The same-day pre-deploy run gave ≈164 ms with the older ping/damage sample.
+The earlier §4/§7 "keydown → changed pixel" p50 of ~182–217 ms and the clipboard
+matrix paste/copy round trips (313–352 ms, which include a complete clipboard
+handshake plus app acknowledgement) are consistent with this floor: a large
+part of the user-visible lag is the transport RTT plus the Xpra damage/encode
+pipeline (~94 ms), not the browser/RAST key handling (sub-millisecond).
+
+### 8.7 Clipboard/input matrix classification (same day, pre-deploy build `ab9b821d18cb`)
+
+`tests/e2e/clipboard/verify.mjs` run `2026-11-24T06-18-48-986`: **18 of 19
+checks pass**. Machine report: `tests/e2e/clipboard/results/2026-11-24T06-18-48-986/report.{json,md}`;
+classification addendum: `…/classification-note.md`.
+
+| # | Check | Result |
+|---|---|---|
+| 1 | local browser → remote app (ASCII) | pass (`PASTED:RAST-LOCAL-TO-REMOTE-48-986`, 313.8 ms) |
+| 2 | local browser → remote app (unicode) | pass (`PASTED:RAST ⇄ Linux ✓ — ünïcødé テスト 日本語 🚀 Ω≈ç√∫ -986`, 345.5 ms) |
+| 3 | remote app → local browser clipboard | pass (exact unicode + independent `xclip` evidence on `:101`) |
+| 4 | select-all / cut | pass (`SEL:46`, `CUT:de568410\|0`, clipboard received) |
+| 5 | typing exactly once / undo / redo | pass (`INPUT:typed-marker-48-986`, `UNDO:…`, `REDO:…`) |
+| 6 | second window 1:1 + focus switching | pass (1 → 2 adopted windows, focus follows clicks) |
+| 7 | remote window A → remote window B | pass (`PASTED:remote-to-remote-48-986`, 316.1 ms) |
+| 8 | desktop reload/reconnect → paste | pass (`PASTED:after-reconnect-48-986`, 351.6 ms) |
+| 9 | macOS `keyboardSwap` emulation | **partial / not proven**: `keyboardSwap=true` and Cmd+A/Cmd+C proven end-to-end; the automated Cmd+V pass did not surface the new text (see INPUT-CLIPBOARD.md limitations — no trusted browser paste event via automation, no real Apple hardware) |
+| 10 | image/HTML clipboard | not tested (text-only by design) |
+
+No product bugs were found by the clipboard probes. One real product bug WAS
+found and fixed during the deploy window: the hidden Xpra transport could steal
+keyboard focus after a prewarmed session connected (fixed in `93585ba2`); that
+matches the class of focus-ownership edge that the automated post-prewarm
+latency runs hit (keys forwarded while the fixture received none), which is why
+the profiler now aborts via its focus handshake instead of reporting a title
+round trip.
+
+### 8.8 Honest limitations
+
+* Single host: browser, RAST, Xpra and remote Chrome on the measurement host;
+  the public leg crosses the real Cloudflare tunnel but not a remote user's
+  last mile.
+* `xpra info` snapshots are instantaneous samples of adaptive state; the batch
+  delay statistics are windowed and the mid-typing snapshot is taken while the
+  burst is in flight.
+* The application-acknowledgement stage is reported as *not measured* in the
+  final post-prewarm runs (see §8.3); the clipboard matrix proves the title
+  channel works on the pre-deploy build at the same URL.
+* rAF numbers are for headless Chromium with background timer/renderer
+  throttling disabled; a headed browser and a real monitor may differ.
+* The clipboard matrix's own limitations (no trusted paste event via
+  automation, no real macOS hardware) are documented in
+  [INPUT-CLIPBOARD.md § End-to-end verification](INPUT-CLIPBOARD.md#end-to-end-verification-production-2026-11-24).
+
+---
+
+## 9. Prewarm and multi-user isolation (final build, 2026-11-24)
+
+Both items were measured by the Lead on a quiet production window with the
+dedicated test accounts; they are recorded here because they change the
+performance and security envelope of the native runtime.
+
+### 9.1 Session prewarm
+
+The server now starts the user's shared native session in the background right
+after the desktop loads the app list (`/api/linux-apps/session/prewarm`), i.e.
+**outside the app-click path**.
+
+| Measurement | Value | Notes |
+|---|---|---|
+| Background native session ready after desktop load | **9.2 s** | scheduled by the server after the app list loads; not in the click path |
+| Click → adopted Chrome window (prewarm enabled) | **3.1 s** | warm-equivalent path when the session is already prepared |
+| Click → adopted Chrome window (cold launch, no prewarm) | ~12 s | §7.5 / §7.3 cold path (session start + Chrome start) |
+
+Runner: `tests/e2e/prewarm/measure.mjs`. The user-visible win is the first
+native-app launch of a session: it drops from the ~12 s cold path to ~3.1 s.
+Prewarm does not change the stream/input path measured in §8.
+
+### 9.2 Multi-user isolation
+
+Runner: `tests/e2e/multiuser/verify.mjs` (production, quiet window):
+**6/6 PASS**.
+
+* another user's session URL/key is rejected (**403**);
+* anonymous access is rejected (**401**);
+* three distinct `rast-xpra-u<id>` units exist per user (one per account);
+* no raw display ports are exposed on the host network;
+* the nftables display firewall is present.
+
+These are guardrails for the per-user shared Xpra session model, and they were
+re-verified after the prewarm change (the prewarmed session is still scoped to
+its own identity).

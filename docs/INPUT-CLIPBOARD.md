@@ -438,6 +438,28 @@ run. Latency stage numbers for the same path (rAF rates, Xpra ping/damage,
 tunnel RTT, estimated floor) are in
 [BENCHMARKS.md §8](BENCHMARKS.md#8-input-and-clipboard-latency-stage-profile-2026-11-24-production).
 
+### Focus-ownership incident during the deploy window (product bug, fixed)
+
+While the prewarm feature was being deployed, the hidden Xpra transport could
+steal keyboard focus after the prewarmed session connected: the desktop
+document lost keyboard ownership, so a user's keystrokes could stop reaching
+the native application. This is exactly the failure class the clipboard/input
+matrix is built to catch (focus probe: `document.activeElement` must be
+`.win-body.linux-native-window`, never the hidden viewer iframe). It was found
+and fixed during the deploy window (build `93585ba2`), and the Terminal smoke
+test passes again on the final build. The latency profiler was additionally
+given a focus handshake that aborts a measurement when a forwarded key does not
+provably reach the controlled remote page, instead of reporting a wrong number.
+
+### Matrix classification addendum
+
+The machine report of the canonical matrix run marks the macOS-emulation check
+`fail` because the exact Cmd+V content assertion did not hold; the reviewed
+classification is **partial / not proven** (Cmd+A/Cmd+C and
+`keyboardSwap=true` are proven, Cmd+V is not). The evidence and reasoning are in
+`tests/e2e/clipboard/results/2026-11-24T06-18-48-986/classification-note.md`.
+No other check failed and no product bug was found by the clipboard probes.
+
 ## Frontend unit tests
 
 `frontend/tests/input-clipboard.test.ts` covers the pure policy:

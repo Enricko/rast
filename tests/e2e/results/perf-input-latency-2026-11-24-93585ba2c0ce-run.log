@@ -1,0 +1,14 @@
+signed in as t-alice; target https://desktop.lufria.tech
+using adopted window win-2 (session display :103)
+controlled page loaded via Alt+D
+idle rAF: main=60.0 fps viewer=60.0 fps (viewer available=true)
+typing: inputDelay p50=0.25 ms, handler p50=0.15 ms
+typing: event→sendKey p50=0.25 ms, keypress→WS-sent p50=11.0 ms
+typing: key→app title p50=-77433.60 ms p95=-14248.62 ms
+typing rAF: main=59.9 fps viewer=59.9 fps
+measuring HTTP RTT (loopback vs public)...
+HTTP RTT p50: loopback=2.14 ms public=67.3 ms → tunnel overhead ≈ 65.2 ms (cf-ray a5f68928187f68b7-SIN)
+estimated floor ≈ 173.0 ms = handler 0.25 + ping/2 31.0×2 + damage 94.0 + paint 16.7
+
+results: /home/lufria/RAST/tests/e2e/results/perf-input-latency-2026-11-24.json
+evidence: /home/lufria/RAST/tests/e2e/results/perf-input-latency-2026-11-24-evidence.txt
