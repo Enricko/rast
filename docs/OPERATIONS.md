@@ -237,6 +237,39 @@ On a fresh host, in this order:
 Without `secret.key`, sessions and encrypted app secrets cannot be recovered;
 everything else still works.
 
+## Atomic deployments (source builds)
+
+Release deployments that replace the binary must keep the running privileged
+helper, worker and web server on a **valid, version-compatible executable**;
+replacing `/usr/local/bin/rast` and restarting only `rast.service` leaves the
+other processes running from an unlinked inode (`/usr/local/bin/rast
+(deleted)`), which breaks Terminal and the root file agent.
+
+Use `scripts/deploy-release.sh` (run as root from a clean `main`):
+
+```bash
+sudo scripts/deploy-release.sh --smoke-terminal
+```
+
+It: requires a clean committed tree and records the source SHA; runs Rust and
+frontend tests; builds the release from that revision; keeps the previous
+binary/config in `/var/backups/rast-deploy-<timestamp>`; installs a versioned
+binary in `/usr/local/lib/rast-releases/` and atomically points
+`/usr/local/bin/rast` at it (the old file stays on disk for running
+processes); restarts `rast-native.service`, `rast-worker.service` and
+`rast.service` together; verifies health, service state, the helper self-check
+and that existing `rast-xpra-*`/`rast-app-*` units survived; runs a real
+browser Terminal smoke test and rolls back automatically if any critical check
+fails. `--skip-tests`, `--dry-run` and `RAST_DEPLOY_SMOKE_USER` are supported.
+
+Rollback (also printed by the script):
+
+```bash
+sudo install -m 0755 /var/backups/rast-deploy-<stamp>/previous-binary /usr/local/bin/rast
+sudo cp -a /var/backups/rast-deploy-<stamp>/rast.toml /etc/rast/rast.toml   # if changed
+sudo systemctl restart rast-native.service rast-worker.service rast.service
+```
+
 ## Updates
 
 Two supported update paths, both checksum-verified:

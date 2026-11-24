@@ -73,7 +73,25 @@ struct Agent {
 }
 
 /// Run the agent until it has been idle for `idle`.
-pub async fn run(socket: PathBuf, token_file: PathBuf, idle: Duration) -> io::Result<()> {
+pub async fn run(
+    socket: PathBuf,
+    token_file: PathBuf,
+    idle: Duration,
+    expected_build: Option<String>,
+) -> io::Result<()> {
+    if let Some(expected) = expected_build.as_deref() {
+        let actual = crate::executable::build_id();
+        if expected != actual {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the root file agent build ({actual}) does not match the running \
+                     rast-native.service helper ({expected}); restart rast-native.service to \
+                     finish the upgrade"
+                ),
+            ));
+        }
+    }
     let token = std::fs::read_to_string(&token_file)?.trim().to_string();
     if token.len() < 32 {
         return Err(io::Error::new(

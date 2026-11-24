@@ -9,6 +9,21 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terminal failed after a binary upgrade with "Failed to find executable
+  /usr/local/bin/rast (deleted)".** The privileged helper passed
+  `std::env::current_exe()` — which the kernel reports with a `" (deleted)"`
+  suffix after the on-disk binary has been replaced — to `systemd-run` for the
+  terminal and root-file agents. The helper now captures its resolved
+  executable at start-up, the child refuses to run when its build differs from
+  the helper that spawned it, and `scripts/deploy-release.sh` installs
+  versioned binaries behind a stable symlink, restarts the three services
+  together, preserves running-session units, smoke-tests Terminal and rolls
+  back on failure.
+- **Root file agent** (File Station's root file system) had the same stale
+  executable path and is fixed by the same resolver.
+
 ### Added
 
 - **Adaptive native session performance profiles.** `linux_profile` selects

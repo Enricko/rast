@@ -124,6 +124,9 @@ enum Command {
         /// Working directory for the shell.
         #[arg(long)]
         cwd: PathBuf,
+        /// Build id of the helper that started this agent; refuses to run on mismatch.
+        #[arg(long = "expected-build")]
+        expected_build: Option<String>,
     },
     /// Internal: root file agent (File Station's root file system)
     #[command(hide = true)]
@@ -137,6 +140,9 @@ enum Command {
         /// Exit after this many seconds without a request.
         #[arg(long = "idle-seconds", default_value_t = 900)]
         idle_seconds: u64,
+        /// Build id of the helper that started this agent; refuses to run on mismatch.
+        #[arg(long = "expected-build")]
+        expected_build: Option<String>,
     },
     /// Restore a database from a backup archive (offline operation)
     Restore {
@@ -524,7 +530,8 @@ async fn run(
                     token_file,
                     shell,
                     cwd,
-                } => rast::terminal::agent::run(socket, token_file, shell, cwd)
+                    expected_build,
+                } => rast::terminal::agent::run(socket, token_file, shell, cwd, expected_build)
                     .await
                     .map(|_| ExitCode::SUCCESS)
                     .map_err(|error| -> Box<dyn std::error::Error> {
@@ -534,10 +541,12 @@ async fn run(
                     socket,
                     token_file,
                     idle_seconds,
+                    expected_build,
                 } => rast::rootfs::agent::run(
                     socket,
                     token_file,
                     std::time::Duration::from_secs(idle_seconds.max(30)),
+                    expected_build,
                 )
                 .await
                 .map(|_| ExitCode::SUCCESS)

@@ -47,7 +47,9 @@ pub async fn run(
     token_file: std::path::PathBuf,
     shell: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    expected_build: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    verify_helper_build(expected_build.as_deref())?;
     let token = read_token(&token_file)?;
     // The token is single-use: remove it before accepting a connection.
     let _ = std::fs::remove_file(&token_file);
@@ -76,6 +78,26 @@ pub async fn run(
     let (cols, rows) = handshake(&mut stream, &token).await?;
     session(stream, &shell, &cwd, cols, rows).await?;
     Ok(())
+}
+
+/// Refuse to run when the helper that started us is a different build: an
+/// upgraded helper must not silently spawn an old agent (or vice versa).
+fn verify_helper_build(
+    expected: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = crate::executable::build_id();
+    if expected == actual {
+        return Ok(());
+    }
+    Err(format!(
+        "the terminal agent build ({actual}) does not match the running rast-native.service \
+         helper ({expected}); restart rast-native.service to finish the upgrade, then open \
+         the terminal again"
+    )
+    .into())
 }
 
 fn read_token(path: &Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -575,7 +597,7 @@ mod tests {
         std::fs::write(&token_file, test_token()).unwrap();
         let shell = PathBuf::from("/bin/sh");
         let cwd = temp.path().to_path_buf();
-        let handle = tokio::spawn(run(socket.clone(), token_file, shell, cwd));
+        let handle = tokio::spawn(run(socket.clone(), token_file, shell, cwd, None));
         wait_for_socket(&socket).await;
         let (mut stream, reply) = connect_agent(&socket, &test_token(), 100, 30).await;
         assert!(reply.ok);
@@ -657,6 +679,7 @@ mod tests {
             token_file,
             PathBuf::from("/bin/sh"),
             temp.path().to_path_buf(),
+            None,
         ));
         wait_for_socket(&socket).await;
         let (mut stream, reply) = connect_agent(&socket, &"b".repeat(64), 80, 24).await;
@@ -682,6 +705,7 @@ mod tests {
             token_file,
             PathBuf::from("/bin/sh"),
             temp.path().to_path_buf(),
+            None,
         ));
         wait_for_socket(&socket).await;
         let (mut stream, _reply) = connect_agent(&socket, &test_token(), 100, 30).await;

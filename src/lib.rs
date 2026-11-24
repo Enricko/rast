@@ -15,6 +15,7 @@ pub mod db;
 pub mod docker;
 pub mod error;
 pub mod events;
+pub mod executable;
 pub mod jobs;
 pub mod linux_apps;
 pub mod monitor;

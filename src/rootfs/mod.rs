@@ -258,6 +258,7 @@ mod tests {
             socket.clone(),
             token_file,
             std::time::Duration::from_secs(600),
+            None,
         ));
         for _ in 0..100 {
             if socket.exists() {

@@ -96,6 +96,11 @@ fn is_root() -> bool {
 
 /// Run the helper until `shutdown` resolves.
 pub async fn serve(options: NativeOptions, shutdown: impl Future<Output = ()>) -> io::Result<()> {
+    // Capture our own executable before an upgrade can replace the on-disk
+    // file: the terminal and root-file agents are spawned from this path after
+    // the binary has been swapped, and `/proc/self/exe` would otherwise report
+    // a "(deleted)" path that systemd-run refuses to execute.
+    crate::executable::capture();
     if options.require_root && !is_root() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -2118,11 +2123,7 @@ async fn terminal_start(
         Some(account) => account_environment(account, &op.shell),
         None => terminal_environment(&home, &username, &session_dir, &op.shell, &op.env)?,
     };
-    let exe = std::env::current_exe().map_err(|error| {
-        NativeError::command_failed(format!(
-            "cannot locate the RAST binary for the terminal agent: {error}"
-        ))
-    })?;
+    let exe = crate::executable::agent_executable().map_err(NativeError::command_failed)?;
     let argv = vec![
         exe.display().to_string(),
         "terminal-agent".into(),
@@ -2134,6 +2135,8 @@ async fn terminal_start(
         op.shell.clone(),
         "--cwd".into(),
         cwd.display().to_string(),
+        "--expected-build".into(),
+        crate::executable::build_id().to_string(),
     ];
     // Administrator shells keep the uid-0 unit name whichever account they
     // run as, so `terminal_stop` finds them from `root` alone.
@@ -2258,11 +2261,7 @@ async fn rootfs_start(options: &NativeOptions) -> Result<Value, NativeError> {
         file.write_all(token.as_bytes())
             .map_err(|error| failed("write the token in", error))?;
     }
-    let exe = std::env::current_exe().map_err(|error| {
-        NativeError::command_failed(format!(
-            "cannot locate the RAST binary for the root file agent: {error}"
-        ))
-    })?;
+    let exe = crate::executable::agent_executable().map_err(NativeError::command_failed)?;
     let args: Vec<OsString> = [
         format!("--unit={ROOTFS_UNIT}"),
         "--collect".into(),
@@ -2280,6 +2279,8 @@ async fn rootfs_start(options: &NativeOptions) -> Result<Value, NativeError> {
         token_file.display().to_string(),
         "--idle-seconds".into(),
         ROOTFS_IDLE_SECONDS.to_string(),
+        "--expected-build".into(),
+        crate::executable::build_id().into(),
     ]
     .into_iter()
     .map(OsString::from)
