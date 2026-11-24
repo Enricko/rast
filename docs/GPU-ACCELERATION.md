@@ -372,3 +372,37 @@ DISPLAY=:110 glxinfo -B
 DISPLAY=:110 scripts/gpu/chrome-gpu-check.sh :110
 scripts/gpu/nvenc-bench.sh 1920x1080 60 6
 ```
+
+## 2026-11-24 (runtime 2.1) — integration mechanics re-validated
+
+Additional host measurements for the privileged-display milestone:
+
+| Check | Result |
+| --- | --- |
+| Two concurrent headless NVIDIA Xorg displays on the single GTX 1660 Ti (displays :120 and :121) | **Both work**: `glxinfo -B` reports `NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2` on each; the earlier concern that one GPU could only back one X server is disproved |
+| Identity access to a GPU display | `rast-u127` connecting to a headless NVIDIA Xorg with an identity-owned `-auth` cookie gets `OpenGL renderer string: NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2` |
+| GTK application rendering on the GPU display | `xterm -e 'glxinfo -B'` run as `rast-u127` inside the NVIDIA display reports the **NVIDIA renderer**, i.e. application GL is genuinely hardware-accelerated (not llvmpipe) |
+| Xpra on an existing display | `xpra start :N --use-display=yes` attaches to the already-running Xorg (no own `Xvfb-for-Xpra-N` process, HTTP 200), so a privileged display lifecycle can hand a GPU display to the unprivileged session |
+| Xpra NVENC | still unavailable: xpra-codecs-nvidia 6.5.5 targets NVENC SDK 13.1 while driver 595.99.02 exposes 13.0 (`invalid struct version`); codec stack removed and must not be reinstalled |
+| Stream encoding | unchanged: software webp/x264 through Xpra; GPU display does not change server-side encoding |
+
+### Remaining work before production can use it (not implemented yet)
+
+The experiment proves the rendering path, but production enablement needs a
+privileged lifecycle that is deliberately **not** enabled:
+1. `rast-native.service` must start/stop one headless Xorg per session (root,
+   trusted `/usr/bin/Xorg` only, generated config, identity-owned xauth cookie,
+   display allocation/validation, cleanup on stop) — never a user-supplied
+   wrapper or argument.
+2. `xpra start` then uses `--use-display=yes` instead of `--xvfb=Xvfb`; the web
+   server must fall back to Xvfb automatically if the display fails.
+3. Security review: X11 clients are unprivileged, but the Xorg server itself
+   runs as root; a narrowly defined helper protocol (no arbitrary commands, no
+   user config paths) and per-display auth isolation are required. This is the
+   main reason it is not enabled by default.
+4. End-to-end validation with two users, Chrome `chrome://gpu` inside the
+   session, GTK/Qt apps, and a rollback path.
+
+Production keeps `linux_display_backend = "software"` and
+`gpuAccelerationVerified = false` until that lifecycle is implemented and
+verified.
