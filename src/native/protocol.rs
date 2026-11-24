@@ -1495,8 +1495,12 @@ const ARGV0_PREFIXES: &[&str] = &[
     // root-owned snap tree must be allowed for canonicalisation to succeed.
     "/snap",
     // Snap wrapper scripts are symlinks through /usr/bin/snap to the root-owned
-    // snapd binary, so allow its canonical location as well.
+    // snapd binary, so allow its canonical location as well. (Snap applications
+    // themselves cannot run for RAST identities: snapd refuses non-system users.)
     "/usr/lib/snapd",
+    // /usr/bin/libreoffice is a wrapper that resolves into the root-owned
+    // LibreOffice program tree.
+    "/usr/lib/libreoffice",
 ];
 
 /// Validate `argv[0]`: absolute, inside an allow-listed prefix, and after

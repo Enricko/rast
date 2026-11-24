@@ -402,7 +402,19 @@ environment mitigation: observed 60–70 s starts under sustained I/O are host
 contention, not the product's normal startup (normal: pre-warmed session ready
 ~2 s; click→window ~3 s).
 
-### GPU-backed displays
+#### Snap-packaged applications are not supported for RAST identities
+
+Installing a package with snap is not enough to run it through RAST: snapd
+refuses to launch snaps for the mapped identity users (service accounts without
+normal login sessions) — the app unit exits with "The user rast-u… cannot run
+snap applications on this system". This is a snapd policy limitation, not an
+argv validation problem (the allow-list was extended for snap wrappers, and the
+wrapper then fails inside snapd). Use the application's `.deb`, official tarball
+or an AppImage, import it through App Center's "Import existing application",
+and it launches like any other native app. Snap entries are still discovered for
+inventory/admin visibility, but launch fails honestly.
+
+## GPU-backed displays
 
 With `linux_display_backend = "auto"` (production default as of runtime 2.1),
 the native helper starts a privileged per-session NVIDIA Xorg display and
