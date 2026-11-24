@@ -8,7 +8,9 @@ import {
   linuxAppById,
   linuxApps,
   linuxOverview,
+  loadDiscoveredApps as fetchDiscoveredApps,
   loadLinuxApps as fetchLinuxApps,
+  onDiscoveredApps,
   onLinuxApps,
 } from "../apps/linuxapp/catalog";
 import { onPackageApps, packageAppId, refreshPackageApps } from "../apps/package-apps";
@@ -1604,6 +1606,13 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       } catch {
         /* an older server, or Docker is off: no Linux apps */
       }
+      // Discovered applications (installed outside App Center) in the same
+      // reload: they become desktop apps for the accounts that may launch them.
+      try {
+        await fetchDiscoveredApps(deps.api);
+      } catch {
+        /* older server: no discovery */
+      }
     };
     const scheduleLinuxApps = (): void => {
       if (linuxTimer !== undefined) window.clearTimeout(linuxTimer);
@@ -1622,7 +1631,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         renderTaskbar();
       }),
     );
+    disposers.push(
+      onDiscoveredApps(() => {
+        if (disposed) return;
+        enforceEffectiveAccess();
+        desktopIcons.refresh();
+        renderTaskbar();
+      }),
+    );
     disposers.push(realtime.on("linuxapps.changed", scheduleLinuxApps));
+    disposers.push(realtime.on("linuxapps.discovered", scheduleLinuxApps));
     disposers.push(realtime.onResync(scheduleLinuxApps));
     disposers.push(() => {
       if (linuxTimer !== undefined) window.clearTimeout(linuxTimer);

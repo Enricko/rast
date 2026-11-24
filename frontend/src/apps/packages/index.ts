@@ -214,8 +214,14 @@ class PackageCenterApp {
     this.applyAccess();
     if (this.denied) return;
     this.lc.add(onLinuxApps(() => this.render()));
+    this.lc.add(
+      this.realtime.on("linuxapps.discovered", () => {
+        void this.linux.reloadDiscovered().then(() => this.render());
+      }),
+    );
     this.render();
     void this.linux.reload();
+    void this.linux.reloadDiscovered();
     await this.reload();
   }
 
@@ -580,6 +586,10 @@ class PackageCenterApp {
       this.linuxSection = h("section", { class: "pkg-group", ariaLabel: "Linux apps" }, h("h3", { class: "pkg-group-title" }, "Linux apps"), this.linuxGrid);
       content.appendChild(this.linuxSection);
     }
+    // Applications installed outside the App Center (owner/approved entries;
+    // administrators also see pending, hidden and unavailable ones).
+    const discovered = this.linux.discoveredSection();
+    if (discovered) content.appendChild(discovered);
     this.grid = h("div", { class: "pkg-grid" });
     this.runtimeSection = h(
       "section",

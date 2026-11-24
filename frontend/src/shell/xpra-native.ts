@@ -30,13 +30,14 @@ import { copyText, errorMessage, modal } from "../core/ui";
 import type { WindowHandle, WindowInfo, WindowManager, WindowRect } from "../core/wm";
 import {
   LINUX_PREFIX,
+  discoveredApps,
   isNativeApp,
   linuxAppById,
-  linuxApps,
   linuxNativeSession,
   linuxOverview,
   matchWindowApp,
   nativeWindowAppId,
+  nativeWindowApps,
   setLinuxNativeSession,
   type LinuxApp,
   type NativeSession,
@@ -1291,8 +1292,11 @@ export class NativeLinuxHost {
     // often have no useful WM_CLASS, and every transient must keep the parent
     // app's identity for icons, grouping and access checks).
     if (parent) return parent.slug;
-    const nativeApps = linuxApps().filter(isNativeApp);
-    const matched = matchWindowApp(nativeApps, window.classInstance);
+    // Managed native apps plus the discovered apps this account can launch:
+    // unknown windows still get a usable generic identity, but a StartupWMClass
+    // / WM_CLASS match gives them the right name and icon.
+    const nativeApps = nativeWindowApps();
+    const matched = matchWindowApp(nativeApps, window.classInstance, discoveredApps());
     if (matched) return matched.id;
     // Reuse the app of another window with the same X11 class (e.g. a second
     // Chrome window).
@@ -2206,7 +2210,7 @@ export class NativeLinuxHost {
     for (const frame of this.frames.values()) {
       if (frame.appId !== appId) continue;
       if (frame.slug === "unknown") return true;
-      return linuxApps().some((app) => app.id === frame.slug);
+      return linuxAppById(frame.slug) !== undefined;
     }
     return true;
   }

@@ -10,6 +10,7 @@ import { getRealtime } from "../../core/realtime";
 import { errorMessage } from "../../core/ui";
 import { AppLifecycle } from "../../components/lifecycle";
 import {
+  discoveredOpenableLinuxApps,
   isNativeApp,
   isOpenable,
   LINUX_PREFIX,
@@ -44,6 +45,34 @@ export function linuxAppDefinitions(): AppDefinition[] {
           icon: "box",
           description: app.description || "Linux app",
           // The server lists only the apps this account may see.
+          adminOnly: false,
+          singleton: true,
+          defaultSize: { w: 1100, h: 720 },
+          minSize: { w: 480, h: 360 },
+          mount: (ctx) => new LinuxWindow(ctx, appId).start(),
+        },
+      };
+      definitions.set(id, entry);
+    }
+    result.push(entry.def);
+  }
+  // Discovered applications (installed outside App Center) that this account
+  // may launch get the same desktop identity; their windows are adopted by the
+  // shared native session and matched back through StartupWMClass/WM_CLASS.
+  for (const app of discoveredOpenableLinuxApps()) {
+    const id = `${LINUX_PREFIX}${app.id}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let entry = definitions.get(id);
+    if (!entry || entry.name !== app.name) {
+      const appId = app.id;
+      entry = {
+        name: app.name,
+        def: {
+          id,
+          name: app.name,
+          icon: "box",
+          description: app.description || "Discovered Linux application",
           adminOnly: false,
           singleton: true,
           defaultSize: { w: 1100, h: 720 },

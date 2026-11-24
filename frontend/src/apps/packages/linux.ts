@@ -21,7 +21,7 @@ import { watchJob, type JobOutcome } from "../../components/jobs";
 import { banner, emptyBlock, progressBar, type ProgressHandle } from "../../components/states";
 import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
-import { NEWER_BUILD, isNativeApp, isOpenable, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
+import { NEWER_BUILD, discoveredApps, isNativeApp, isOpenable, LINUX_PREFIX, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadDiscoveredApps, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, type DiscoveredApp, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
 import {
   APPIMAGE_REJECTED_MESSAGE,
   INSTALL_STAGES,
@@ -138,6 +138,28 @@ const FORMAT_LABEL: Record<string, string> = {
   tarball: "Portable archive",
 };
 
+const DISCOVERED_STATUS: Record<string, string> = {
+  discovered: "Not ready",
+  pending_approval: "Waiting for approval",
+  ready: "Ready",
+  unavailable: "No longer installed",
+  failed: "Failed",
+};
+
+const DISCOVERED_SCOPE: Record<string, string> = {
+  user: "Your account",
+  system: "System-wide",
+  "managed-profile": "Inside an app profile",
+};
+
+const DISCOVERED_SOURCE: Record<string, string> = {
+  xdg: "Desktop entry",
+  appimage: "AppImage",
+  portable: "Portable program",
+  manual: "Imported by an administrator",
+  "external-installer": "Installed by another app",
+};
+
 const SOURCE_LABEL: Record<string, string> = {
   apt: "Its official package repository",
   github: "GitHub releases",
@@ -215,6 +237,107 @@ export class LinuxApps {
     return loadLinuxApps(this.host.ctx.api)
       .then(() => this.reattachJobs())
       .catch(() => undefined);
+  }
+
+  /** Reload the discovered (externally installed) application inventory. */
+  reloadDiscovered(): Promise<void> {
+    if (!this.offered) return Promise.resolve();
+    return loadDiscoveredApps(this.host.ctx.api).catch(() => undefined);
+  }
+
+  /** Is the discovered-application section relevant for this account? */
+  discoveredSection(): HTMLElement | null {
+    if (!this.offered) return null;
+    const apps = discoveredApps();
+    // Ordinary accounts see the section only when they actually have entries
+    // they may launch; administrators always see it (it is where they approve
+    // and rescan).
+    if (!this.enabled && apps.length === 0) return null;
+    const rows = apps
+      .filter((app) => this.enabled || app.canLaunch)
+      .map((app) => this.discoveredRow(app));
+    return h(
+      "section",
+      { class: "pkg-group", ariaLabel: "Discovered applications" },
+      h(
+        "div",
+        { class: "pkg-group-head" },
+        h("h3", { class: "pkg-group-title" }, "Discovered applications"),
+        button("Rescan applications", "secondary", () => void this.rescanDiscovered()),
+      ),
+      h(
+        "p",
+        { class: "small muted pkg-discovered-note" },
+        "Applications installed outside App Center (their own .desktop entries, AppImages, portable programs, or an external installer inside an app profile). Administrators approve system-wide entries; owners can launch theirs.",
+      ),
+      rows.length ? h("div", { class: "pkg-discovered" }, ...rows) : emptyBlock("No applications discovered yet", "Use Rescan applications to look again."),
+    );
+  }
+
+  private discoveredRow(app: DiscoveredApp): HTMLElement {
+    const status = DISCOVERED_STATUS[app.status] ?? app.status;
+    const scope = DISCOVERED_SCOPE[app.scope] ?? app.scope;
+    const source = DISCOVERED_SOURCE[app.source] ?? app.source;
+    const actions: HTMLElement[] = [];
+    if (app.canLaunch) {
+      actions.push(button("Launch", "primary", () => this.host.ctx.openApp(`${LINUX_PREFIX}${app.id}`)));
+    }
+    if (this.enabled && !this.host.readOnly()) {
+      if (app.scope === "system") {
+        actions.push(
+          button(app.approved ? "Unapprove" : "Approve", "secondary", () => void this.patchDiscovered(app, { approved: !app.approved })),
+        );
+      }
+      actions.push(button(app.hidden ? "Show" : "Hide", "secondary", () => void this.patchDiscovered(app, { hidden: !app.hidden })));
+      actions.push(button("Forget", "secondary", () => void this.forgetDiscovered(app)));
+    }
+    return h(
+      "div",
+      { class: "pkg-info-item pkg-discovered-row" },
+      h(
+        "div",
+        { class: "pkg-discovered-body" },
+        h("div", { class: "pkg-discovered-name" }, app.name, h("span", { class: "pkg-discovered-status" }, status)),
+        h("div", { class: "small muted" }, `${source} · ${scope}${app.version ? ` · v${app.version}` : ""}${app.ownerUserId == null ? "" : ` · owner #${app.ownerUserId}`}`),
+        h("div", { class: "small muted mono pkg-discovered-exec" }, app.exec.join(" ")),
+      ),
+      actions.length ? h("div", { class: "pkg-hero-actions" }, ...actions) : null,
+    );
+  }
+
+  private async rescanDiscovered(): Promise<void> {
+    const { ctx } = this.host;
+    try {
+      const result = await ctx.api.post<{ system?: number; user?: number; userError?: string }>("/api/linux-apps/discovered/scan", {});
+      await this.reloadDiscovered();
+      const found = (result.system ?? 0) + (result.user ?? 0);
+      if (result.userError) {
+        ctx.toast.warning(`Scanned system applications, but this account's own directories could not be scanned: ${result.userError}`);
+      } else {
+        ctx.toast.info(`Scan finished: ${found} ${found === 1 ? "application" : "applications"} in the inventory.`);
+      }
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+    }
+  }
+
+  private async patchDiscovered(app: DiscoveredApp, patch: { approved?: boolean; hidden?: boolean }): Promise<void> {
+    try {
+      await this.host.ctx.api.patch(`/api/linux-apps/discovered/${encodeURIComponent(app.id)}`, patch);
+      await this.reloadDiscovered();
+    } catch (error) {
+      this.host.ctx.toast.error(errorMessage(error));
+    }
+  }
+
+  private async forgetDiscovered(app: DiscoveredApp): Promise<void> {
+    try {
+      await this.host.ctx.api.del(`/api/linux-apps/discovered/${encodeURIComponent(app.id)}`);
+      await this.reloadDiscovered();
+      this.host.ctx.toast.info(`${app.name} was removed from the discovered list (its files were not touched).`);
+    } catch (error) {
+      this.host.ctx.toast.error(errorMessage(error));
+    }
   }
 
   /**

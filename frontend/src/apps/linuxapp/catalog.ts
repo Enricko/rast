@@ -190,6 +190,46 @@ export interface LinuxOverview {
   linuxAppsEnabled?: boolean;
 }
 
+/** One application installed outside the App Center ("discovered"). */
+export interface DiscoveredApp {
+  id: string;
+  name: string;
+  genericName: string | null;
+  comment: string | null;
+  /** Parsed desktop-entry argv (never a shell string). */
+  exec: string[];
+  tryExec: string | null;
+  icon: string | null;
+  categories: string[];
+  terminal: boolean;
+  startupWmClass: string | null;
+  desktopPath: string;
+  desktopId: string | null;
+  /** NULL = system-wide entry. */
+  ownerUserId: number | null;
+  scope: "user" | "system" | "managed-profile";
+  source: "xdg" | "appimage" | "portable" | "manual" | "external-installer" | string;
+  installDir: string | null;
+  version: string | null;
+  status: "discovered" | "pending_approval" | "ready" | "unavailable" | "failed";
+  approved: boolean;
+  hidden: boolean;
+  lastSeenMs: number;
+  lastLaunchedMs: number | null;
+  createdAt: number;
+  updatedAt: number;
+  canLaunch: boolean;
+}
+
+export interface DiscoveredOverview {
+  apps: DiscoveredApp[];
+  enabled: boolean;
+  policy: "approval" | "auto" | "hidden" | string;
+  scanIntervalSeconds: number;
+  systemRoots: string[];
+  extraRoots: string[];
+}
+
 /** The server reports a newer AppImage build without a version number this way. */
 export const NEWER_BUILD = "newer build";
 
@@ -316,7 +356,11 @@ export function linuxAppsInstallAvailable(state: LinuxOverview | null): boolean 
  * class-instance metadata (e.g. ["google-chrome", "Google-chrome"]). Only a
  * heuristic: several apps can share a toolkit class. Returns the best match.
  */
-export function matchWindowApp(apps: readonly LinuxApp[], classInstance: readonly string[]): LinuxApp | null {
+export function matchWindowApp(
+  apps: readonly LinuxApp[],
+  classInstance: readonly string[],
+  discovered: readonly DiscoveredApp[] = [],
+): LinuxApp | null {
   const classes = classInstance.map((value) => value.toLowerCase()).filter(Boolean);
   if (classes.length === 0) return null;
   let best: LinuxApp | null = null;
@@ -355,6 +399,34 @@ export function matchWindowApp(apps: readonly LinuxApp[], classInstance: readonl
       }
     }
   }
+  // Discovered applications match through their StartupWMClass first (the
+  // desktop entry's declaration), then the usual name/exec heuristics.
+  for (const app of discovered) {
+    const candidates: Array<{ value: string; score: number }> = [];
+    if (app.startupWmClass) candidates.push({ value: app.startupWmClass.toLowerCase(), score: 100 });
+    if (app.desktopId) {
+      const base = app.desktopId.toLowerCase().replace(/\.desktop$/, "");
+      candidates.push({ value: base, score: 90 });
+      candidates.push({ value: base.split(".").pop() ?? base, score: 70 });
+    }
+    const command = app.exec[0];
+    if (command) {
+      const base = command.split("/").pop() ?? command;
+      candidates.push({ value: base.toLowerCase(), score: 60 });
+    }
+    candidates.push({ value: app.name.toLowerCase().replace(/\s+/g, ""), score: 80 });
+    for (const candidate of candidates) {
+      for (const klass of classes) {
+        let score = 0;
+        if (klass === candidate.value) score = candidate.score;
+        else if (klass.startsWith(candidate.value) || candidate.value.startsWith(klass)) score = Math.round(candidate.score * 0.6);
+        if (score > bestScore) {
+          bestScore = score;
+          best = discoveredAsLinuxApp(app);
+        }
+      }
+    }
+  }
   return best;
 }
 
@@ -364,7 +436,7 @@ export function nativeWindowAppId(appId: string, wid: string | number): string {
 }
 
 export function linuxAppById(id: string): LinuxApp | undefined {
-  return current.find((app) => app.id === id);
+  return current.find((app) => app.id === id) ?? discoveredSynthetic.get(id);
 }
 
 export function setLinuxOverview(next: LinuxOverview): void {
@@ -409,4 +481,120 @@ export function loadLinuxApps(api: ApiClient): Promise<void> {
     }
   })();
   return loading;
+}
+
+// ---------------------------------------------------------------------------
+// Discovered applications (installed outside the App Center)
+// ---------------------------------------------------------------------------
+
+let discoveredCurrent: DiscoveredApp[] = [];
+let discoveredState: DiscoveredOverview | null = null;
+let discoveredSynthetic = new Map<string, LinuxApp>();
+const discoveredListeners = new Set<() => void>();
+
+/** Entries the server reports as visible to this account. */
+export function discoveredApps(): DiscoveredApp[] {
+  return discoveredCurrent;
+}
+
+/** The last discovery overview (policy, scan interval, feature state). */
+export function discoveredOverview(): DiscoveredOverview | null {
+  return discoveredState;
+}
+
+export function discoveredAppById(id: string): DiscoveredApp | undefined {
+  return discoveredCurrent.find((app) => app.id === id);
+}
+
+/**
+ * A discovered entry as the synthetic [`LinuxApp`] the shared window/launch
+ * machinery already understands (native backend + discovered id). It is never
+ * part of [`linuxApps()`]: App Center lists discovered entries separately.
+ */
+export function discoveredAsLinuxApp(app: DiscoveredApp): LinuxApp {
+  return {
+    id: app.id,
+    desktopId: app.desktopId ?? `discovered-${app.id}`,
+    name: app.name,
+    format: "appimage",
+    fileName: app.desktopPath,
+    version: app.version,
+    package: null,
+    description: app.comment,
+    command: app.exec,
+    launchGuess: false,
+    iconUrl: null,
+    status: "ready",
+    error: null,
+    jobId: null,
+    update: { source: null, latestVersion: null, available: false, checkedAt: null, error: null },
+    memoryMb: 0,
+    cpus: 0,
+    sizeBytes: null,
+    visibility: app.scope === "system" ? "users" : "admins",
+    running: 0,
+    createdAt: app.createdAt,
+    updatedAt: app.updatedAt,
+    backend: "native",
+  };
+}
+
+/** Discovered entries the current account may open now, as LinuxApps. */
+export function discoveredOpenableLinuxApps(): LinuxApp[] {
+  return discoveredCurrent.filter((app) => app.canLaunch).map(discoveredAsLinuxApp);
+}
+
+/**
+ * Every app the native session may adopt windows for: managed native apps plus
+ * the discovered apps this account can launch.
+ */
+export function nativeWindowApps(): LinuxApp[] {
+  return [...linuxApps().filter(isNativeApp), ...discoveredOpenableLinuxApps()];
+}
+
+/** Look up a managed or discovered app id (windows adopt discovered ids too). */
+export function anyLinuxAppById(id: string): LinuxApp | undefined {
+  return linuxAppById(id) ?? discoveredSynthetic.get(id);
+}
+
+export function setDiscoveredOverview(next: DiscoveredOverview): void {
+  discoveredState = next;
+  discoveredCurrent = Array.isArray(next.apps) ? next.apps : [];
+  discoveredSynthetic = new Map(
+    discoveredCurrent.map((app) => [app.id, discoveredAsLinuxApp(app)] as const),
+  );
+  for (const listener of [...discoveredListeners]) {
+    try {
+      listener();
+    } catch (error) {
+      console.warn("discovered applications listener failed", error);
+    }
+  }
+}
+
+export function onDiscoveredApps(listener: () => void): () => void {
+  discoveredListeners.add(listener);
+  return () => discoveredListeners.delete(listener);
+}
+
+let discoveredLoading: Promise<void> | null = null;
+let discoveredAgain = false;
+
+/** Fetch the discovered inventory the server allows this account to see. */
+export function loadDiscoveredApps(api: ApiClient): Promise<void> {
+  if (discoveredLoading) {
+    discoveredAgain = true;
+    return discoveredLoading;
+  }
+  discoveredLoading = (async () => {
+    try {
+      do {
+        discoveredAgain = false;
+        setDiscoveredOverview(await api.get<DiscoveredOverview>("/api/linux-apps/discovered"));
+      } while (discoveredAgain);
+    } finally {
+      discoveredLoading = null;
+    }
+  })();
+  return discoveredLoading;
 }
