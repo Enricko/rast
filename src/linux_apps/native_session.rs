@@ -789,7 +789,9 @@ impl NativeSessions {
             .clone()
     }
 
-    fn session_of_user(&self, user_id: i64) -> Option<Arc<NativeSession>> {
+    /// The person's current session, including one that just ended (callers
+    /// that need a live stream check [`NativeSession::upstream_port`]).
+    pub(crate) fn session_of_user(&self, user_id: i64) -> Option<Arc<NativeSession>> {
         self.inner().by_user.get(&user_id).cloned()
     }
 
@@ -1136,13 +1138,12 @@ impl NativeSessions {
             }
             if Instant::now() >= next_unit_check {
                 next_unit_check = Instant::now() + Duration::from_secs(2);
-                if let Ok(info) = self
-                    .helper
-                    .call("unit_status", json!({"unit": unit}))
-                    .await
-                {
+                if let Ok(info) = self.helper.call("unit_status", json!({"unit": unit})).await {
                     let active = info.get("active").and_then(Value::as_bool).unwrap_or(true);
-                    let state = info.get("state").and_then(Value::as_str).unwrap_or_default();
+                    let state = info
+                        .get("state")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     if !active || state == "failed" {
                         return Err(
                             "The graphical session unit stopped during startup; retrying \
@@ -2835,6 +2836,11 @@ impl NativeSession {
         self.lock().viewers
     }
 
+    /// Pretend the loopback Xpra web server is (or is no longer) listening.
+    pub(crate) fn set_upstream_port_for_test(&self, port: Option<u16>) {
+        self.lock().port = port;
+    }
+
     pub(crate) fn last_input_for_test(&self) -> Instant {
         self.lock().last_input
     }
@@ -3300,7 +3306,11 @@ mod tests {
             .expect("the retry starts a healthy session");
         assert_eq!(run["status"], "running");
         assert_eq!(session["status"], "ready");
-        assert_eq!(helper.call_count("session_start"), 2, "one failed + one successful start");
+        assert_eq!(
+            helper.call_count("session_start"),
+            2,
+            "one failed + one successful start"
+        );
         // Must not wait the full 30 s readiness timeout for the dead unit.
         assert!(
             started.elapsed() < Duration::from_secs(10),

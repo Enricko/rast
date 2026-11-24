@@ -24,6 +24,7 @@ pub mod discovery;
 pub mod gpu;
 pub mod native_apps;
 pub mod native_archive;
+pub mod native_broker;
 pub mod native_proxy;
 pub mod native_session;
 pub mod proxy;
@@ -46,6 +47,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use self::discovery::{DiscoveryHelper, ScanRoot, ScanThrottle, Scope};
 use self::native_apps::{NativeApps, StagedFile};
+use self::native_broker::NativeBroker;
 use self::native_session::{LaunchRequest as NativeLaunchRequest, NativeSessions};
 
 use crate::{
@@ -451,6 +453,15 @@ impl AppRow {
 }
 
 /// Linux apps: records, builds, updates and running copies.
+/// A freshly issued native stream token plus the session snapshot the
+/// `POST /api/linux-apps/session/stream-token` response carries.
+pub(crate) struct NativeStreamToken {
+    pub(crate) token: String,
+    pub(crate) expires_at_ms: i64,
+    pub(crate) ttl_seconds: u64,
+    pub(crate) session: Value,
+}
+
 pub struct LinuxApps {
     config: Arc<Config>,
     db: SqlitePool,
@@ -474,6 +485,8 @@ pub struct LinuxApps {
     /// Per-person pre-warm throttle: an automatic background session start is
     /// attempted at most once per [`PREWARM_COOLDOWN`].
     prewarm_slots: Mutex<HashMap<i64, std::time::Instant>>,
+    /// Short-lived single-use tokens for the native (non-browser) stream relay.
+    broker: Arc<NativeBroker>,
 }
 
 impl LinuxApps {
@@ -506,6 +519,7 @@ impl LinuxApps {
             native_enabled,
             linux_apps_enabled,
             prewarm_slots: Mutex::new(HashMap::new()),
+            broker: Arc::new(NativeBroker::new()),
         })
     }
 
@@ -621,6 +635,11 @@ impl LinuxApps {
     /// The manager of the person's shared graphical session.
     pub fn native_sessions(&self) -> &Arc<NativeSessions> {
         &self.native
+    }
+
+    /// The broker of short-lived native stream tokens (native relay route).
+    pub(crate) fn native_broker(&self) -> &Arc<NativeBroker> {
+        &self.broker
     }
 
     // -----------------------------------------------------------------------
@@ -1230,6 +1249,61 @@ impl LinuxApps {
             return Ok(None);
         }
         self.native.session_json(user).await
+    }
+
+    /// Issue a single-use stream token for the caller's live native session.
+    ///
+    /// The response is the protocol §4.1 payload; the URL is built by the API
+    /// handler because it depends on the request headers/configured
+    /// `public_url`. The token is bound to this account, the RAST login session
+    /// and the exact native session; only its SHA-256 hash is retained.
+    pub(crate) async fn native_stream_token(
+        &self,
+        user: &AuthUser,
+    ) -> AppResult<NativeStreamToken> {
+        // 409 (not 503): the documented "native runtime disabled" answer.
+        if !self.native_enabled || !self.linux_apps_enabled {
+            return Err(AppError::conflict(
+                "Native Linux applications are not enabled on this server; RAST Desktop cannot \
+                 stream them.",
+            ));
+        }
+        self.broker
+            .admit_issue(user.id)
+            .map_err(|retry_after_secs| AppError::TooManyRequests {
+                retry_after_secs,
+                message: "too many stream-token requests; wait a moment and retry",
+            })?;
+        // 404: the caller has no live session (launch/prewarm first).
+        let session = self
+            .native
+            .session_of_user(user.id)
+            .filter(|session| session.upstream_port().is_some())
+            .ok_or(AppError::NotFound(
+                "No graphical session is running; launch or pre-warm an application first.",
+            ))?;
+        let issued = self.broker.issue(user.id, &user.session_id, session.key());
+        audit::record_with_events(
+            &self.db,
+            &self.events,
+            AuditLog::new(self::native_broker::AUDIT_ISSUED)
+                .actor(user)
+                .object("native_session", "native")
+                .success()
+                .detail(format!("ttl={}s", issued.ttl_seconds)),
+        )
+        .await;
+        Ok(NativeStreamToken {
+            token: issued.token,
+            expires_at_ms: issued.expires_at_ms,
+            ttl_seconds: issued.ttl_seconds,
+            session: session.json(),
+        })
+    }
+
+    /// Revoke every outstanding native stream token of an account.
+    pub(crate) fn revoke_native_stream_tokens(&self, user_id: i64) -> usize {
+        self.broker.revoke_all(user_id)
     }
 
     /// Start the person's background pre-warm on the first desktop load (or a
