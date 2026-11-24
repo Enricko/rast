@@ -116,6 +116,73 @@ per-user profiles are protected by the Linux identity, not by an OS keyring;
 only the person's own RAST home is ACL-exposed (read-only) and shared folders
 are not mapped into app profiles.
 
+## Discovered applications
+
+RAST lists applications **installed outside the App Center** as a separate
+inventory: `.desktop` entries in XDG directories, AppImages and portable
+programs in `~/Applications` / `~/.local/bin`, and applications an external
+installer (for example an app launcher that itself runs inside a managed RAST
+profile) dropped into its own profile — the real "WordCraft installed through
+ArtCraft Launcher" case. Discovery never installs, updates or uninstalls
+anything; it records what exists and lets people launch it in their shared
+session.
+
+* **Where RAST looks.** System directories (`/usr/share/applications`,
+  `/usr/local/share/applications`, `/opt`, plus operator roots from
+  `linux_discovery_roots`), the person's `$XDG_DATA_HOME/applications`,
+  `~/.local/share/applications`, `~/Applications` and `~/.local/bin`, and
+  managed application profiles (`<data_dir>/linux-apps/profiles/<app>/<user>`)
+  where external installers put their applications.
+* **Identity-scoped scanning.** Identity homes are 0700 and owned by the app
+  identity, so the web server cannot read them. The privileged helper runs the
+  hidden `desktop-scan-agent` subcommand **as that identity** through a bounded
+  transient systemd unit (`--pipe --wait`, same cgroup limits as an app) and
+  returns the parsed entries: no root reads of user homes, no shell.
+* **Safe parsing.** A `.desktop` file must be a small regular file (symlinks
+  are refused) of type `Application` with a `Name` and a resolvable `Exec` and
+  `TryExec`. `Exec` is parsed into an argv array: quoting is honoured, desktop
+  field codes (`%f`, `%U`, `%i`, …) are stripped and `%%` becomes a literal
+  `%`. Argv is always executed directly — never through a shell. `Hidden=true`
+  and `NoDisplay=true` entries are not listed.
+* **Scopes and approval.** An entry found in the person's own directories or in
+  their managed app profiles belongs to that person and is launchable right
+  away. An entry found system-wide is recorded for administrators only and is
+  shown to ordinary accounts after an administrator approves it
+  (`linux_discovery_system_apps = "approval"`, the default; `"auto"` approves
+  everything, `"hidden"` records it without ever showing it). Administrators
+  can also hide an entry, rename it, forget it (registry only) or import an
+  existing executable manually.
+* **Launching and windows.** A discovered application starts in the person's
+  shared Xpra session exactly like a managed native app (one run record per
+  app id, idempotent launch, cgroup limits). Its X11 windows are adopted by the
+  same shim; RAST matches them to the entry through `StartupWMClass`, the XDG
+  desktop id and the `Exec` program name (`WM_CLASS`) so the window gets the
+  right name and desktop identity. Unknown windows still get a generic
+  identity instead of being dropped.
+* **Rescans.** The inventory is rescanned at startup and every
+  `linux_discovery_interval_seconds` (default 300, 0 disables the timer);
+  administrators can press **Rescan applications** in App Center. A rescan
+  updates entries in place (stable ids) and marks vanished files
+  `unavailable` — it never deletes history and never touches installed files.
+* **App Center.** The Linux section shows a **Discovered applications** list
+  with each entry's source (`desktop entry`, `AppImage`, `portable program`,
+  `installed by another app`, `imported by an administrator`), scope
+  (`system-wide`, `your account`, `inside an app profile`), status and owner,
+  with **Launch** for entries the account may start and
+  approve/unapprove, hide/show and forget for administrators.
+* **Configuration.**
+  `linux_discovery_enabled = true|false` (default `true`),
+  `linux_discovery_roots = ["/extra/applications"]` (operator roots, treated as
+  system-wide), `linux_discovery_system_apps = "approval"` (default) and
+  `linux_discovery_interval_seconds = 300`. Discovery needs the native backend
+  (`native_enabled`, the default when Xpra is installed); the legacy Docker
+  backend is unaffected.
+
+Limitations: discovered icons are not served yet (a generic icon is shown); the
+inventory is per file path, so an app reinstalled at a different path appears as
+a new entry; `Terminal=true` entries are started as-is and need their own
+terminal emulator window.
+
 ## Requirements
 
 | Component | Requirement |
@@ -464,6 +531,9 @@ before upgrading). See [INSTALL.md](INSTALL.md#native-linux-apps-xpra).
   RAST.
 * Source archives are rejected by design: install a prebuilt `.deb`/AppImage or
   a prepared portable archive.
+* Discovered applications are listed with a generic icon (their own icons are
+  not served yet), and an application reinstalled at a different path appears
+  as a new entry — see [Discovered applications](#discovered-applications).
 * One RAST instance per host may use the native backend (unit names are keyed
   by RAST user id).
 * `.deb` uninstall fidelity depends on the host package manager: RAST removes

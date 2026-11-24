@@ -379,6 +379,21 @@ policy's `applications` (Docker) rule.
 | DELETE | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | legacy per-window streaming: stop that window's stream |
 | POST | `/api/linux-apps/sessions/{sid}/windows/{window}/close` | legacy per-window streaming: close that window inside the app, as its own close button would |
 
+Discovered applications (installed outside App Center, migration 15). Discovery
+never installs, updates or uninstalls anything; it records what exists and lets
+people launch it in their shared session. System-wide entries require
+administrator approval (`linux_discovery_system_apps`, default `approval`); the
+owner's own entries are launchable immediately.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/linux-apps/discovered` | any signed-in user: `{apps:[DiscoveredApp], enabled, policy:"approval"\|"auto"\|"hidden", scanIntervalSeconds, systemRoots:[dir], extraRoots:[dir]}`. Entries are the caller's own (scope `user`/`managed-profile`, owner only) plus approved system-wide entries; administrators see every entry including pending, hidden and unavailable ones. `canLaunch` is computed server-side (visibility + `status:"ready"` + a non-empty argv) and must be checked before showing Launch |
+| POST | `/api/linux-apps/discovered/scan` | any signed-in user: `{}` scans the caller's inventory; administrators may send `{"userId":<id>}` to scan another account. Discovery never installs or changes files: system directories are scanned by the server, identity-owned directories (0700 homes, managed app profiles) are scanned by the privileged helper **as that identity**; rescan reconciles by stable id (vanished entries become `unavailable`; nothing is deleted). Rate-limited per account (10 s). Returns `{system, user, policy, userError?}`. Emits `linuxapps.discovered` |
+| POST | `/api/linux-apps/discovered/import` | administrator: `{path, name?, ownerUserId?}` registers an existing executable as a manual discovered entry (no installer runs, no files are changed). Omitted `ownerUserId` = system-wide entry (approved immediately). Returns `DiscoveredApp` |
+| PATCH | `/api/linux-apps/discovered/{id}` | administrator: `{approved?, hidden?, name?}` — approve/unapprove a system entry, hide/show an entry from ordinary accounts, or rename it. Returns `DiscoveredApp`; emits `linuxapps.discovered` |
+| DELETE | `/api/linux-apps/discovered/{id}` | administrator: forget the registry entry. Installed files are never touched. Emits `linuxapps.discovered` |
+| POST | `/api/linux-apps/discovered/{id}/launch` | any signed-in user: launch a discovered application into the caller's shared native session (same lazy session start, cgroup limits and window adoption as managed native apps; argv only, no shell) → `{run, session, app}`. 404 when the entry is not visible to the caller, 409 while pending approval/unavailable. Idempotent: an already running entry returns the existing run. The generic `POST /api/linux-apps/{id}/launch` resolves discovered ids too |
+
 `LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball",
 fileName, version, package, description, command:[argv], launchGuess, iconUrl,
 status:"installing"|"ready"|"updating"|"failed", error, jobId,
@@ -627,7 +642,8 @@ never appear in the event URL.
 Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
 `job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
 `audit.created`, `user.changed`, `settings.changed`, `appearance.changed`,
-`package.changed`, `package.catalog`.
+`package.changed`, `package.catalog`, `linuxapps.changed`, `linuxapps.session`,
+`linuxapps.discovered`.
 
 ## Conventions for implementers
 

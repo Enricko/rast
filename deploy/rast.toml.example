@@ -215,6 +215,23 @@ linux_app_tasks = 1024
 # env: RAST_LINUX_ADMISSION_RESERVE_MB
 linux_admission_reserve_mb = 1024
 
+# ---- Applications installed outside the App Center ----------------------
+# Scan for desktop applications RAST did not install (XDG .desktop entries,
+# AppImages, portable programs and applications an external installer put in a
+# managed app profile) and list them in App Center as a separate inventory.
+# linux_discovery_enabled = true
+# Extra roots to scan (treated as system-wide entries). The standard
+# /usr/share/applications, /usr/local/share/applications, /opt and per-identity
+# XDG/Applications directories are always scanned.
+# linux_discovery_roots = ["/srv/applications"]
+# Policy for system-wide discoveries: "approval" (default; administrators
+# approve before ordinary accounts may launch them), "auto" (usable at once) or
+# "hidden" (recorded, never shown to ordinary accounts).
+# linux_discovery_system_apps = "approval"
+# Seconds between background rescans (default 300; 0 disables the timer, the
+# App Center "Rescan applications" button always works).
+# linux_discovery_interval_seconds = 300
+
 # ---- Native session performance profile -----------------------------------
 # Adaptive profile for every person's shared Xpra session. "balanced" keeps
 # Xpra's own adaptive defaults (quality/speed chosen from load). "responsive"

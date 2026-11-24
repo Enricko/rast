@@ -26,6 +26,25 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **Discovered applications (installed outside App Center).** RAST now finds
+  desktop applications that were not installed through App Center — `.desktop`
+  entries in XDG directories, AppImages, portable programs, and applications an
+  external installer put inside a managed app profile (the real WordCraft /
+  ArtCraft Launcher case). They appear in a new App Center "Discovered
+  applications" list and as desktop apps, can be launched in the person's
+  shared Xpra session with the same window adoption/limits as managed native
+  apps, and are matched to their windows by `StartupWMClass`/`WM_CLASS`. A
+  bounded identity-scoped helper operation (`desktop_scan`, run as the person's
+  identity) reads 0700 homes the web server cannot; `.desktop` `Exec` lines are
+  parsed into argv arrays and never go through a shell. System-wide entries
+  require administrator approval by default (`linux_discovery_system_apps`),
+  and admins can approve/hide/rename/forget or manually import an executable.
+  New settings: `linux_discovery_enabled` (default on),
+  `linux_discovery_roots`, `linux_discovery_system_apps` (default `approval`),
+  `linux_discovery_interval_seconds` (default 300). New API under
+  `/api/linux-apps/discovered` and the `linuxapps.discovered` realtime event;
+  schema migration 15 adds the `discovered_apps` inventory and lets
+  `linux_runs` reference discovered app ids.
 - **Configurable session pre-warming** (`linux_prewarm`, default off):
   after a person with native apps signs in the desktop starts their shared Xpra
   session in the background (`POST /api/linux-apps/session/prewarm`), so the
