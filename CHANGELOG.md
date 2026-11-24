@@ -9,6 +9,20 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Session startup under host disk pressure.** Xpra startup is file-I/O bound;
+  when other workloads saturate the disk (`/proc/pressure/io`), a 30 s
+  readiness deadline can expire while the session is still initialising,
+  causing a needless retry/rollback. The session manager now uses a bounded
+  75 s readiness window when `some avg10` is >= 25 %, and the deployment
+  Terminal smoke scales its browser waits under the same condition. Normal
+  sessions keep the 30 s deadline.
+- **Snap-packaged applications** can be imported/launched through the generic
+  discovery path (`/snap/bin/*` wrappers canonicalise through `/usr/lib/snapd`).
+
+
+
 ### Added
 
 - **Verified GPU-backed native sessions.** `linux_display_backend` accepts

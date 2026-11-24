@@ -39,8 +39,8 @@ below combines them; automation variance is not claimed as product failure.
 | Chromium (snap) | **snap browser** | **PASS** (run running) | window not captured in 6 s snapshot | snap command execution now allowed after allowing `/usr/lib/snapd`; window capture follow-up |
 | Blender 5.3 (snap) | **graphics/3D** | **PASS** (run running) | window not captured in 6 s snapshot (slow first start) | snap command execution allowed; long first-start window capture follow-up |
 | Google Chrome | browser | **PASS** (earlier matrices) | PASS — adopted window, typing/navigation, GPU hardware acceleration | full behaviour covered by the clipboard/input/benchmark harnesses |
-| Firefox | browser | **NOT TESTED** | — | not installed on this host; honest gap |
-| LibreOffice Writer | productivity | **NOT TESTED** | — | install attempt aborted (large download on slow mirror); honest gap |
+| Firefox (snap 160) | browser | **PASS** (process running, GPU session) | window **not observed within 45 s** under sustained host I/O pressure | installed during round 3; imported/launched through the snap allow-list path; first-window capture needs a quieter host / longer settle |
+| LibreOffice Writer | productivity | **NOT TESTED** | — | install failed twice: Ubuntu mirror returned HTTP 403 for `libgpgmepp7`; honest gap (retry on a different mirror) |
 | VS Code / Code OSS | development | **NOT TESTED** | — | not installed |
 | GIMP / Inkscape | graphics | **NOT TESTED** | — | not installed |
 | VLC | multimedia | **NOT TESTED** | — | not installed (mpv used instead) |
@@ -73,3 +73,18 @@ simultaneously-running window is adopted in one session is an open follow-up
 - Firefox/LibreOffice/VS Code/GIMP/VLC and Electron remain untested here;
 - WordCraft's window was proven via RAST's generic pipeline for a test account,
   not in the real u1 account (u1 credentials/policy unavailable).
+
+## Host I/O pressure observation (environment limitation, round 3)
+
+While this matrix was running, the host's `/proc/pressure/io` reported
+`some avg10` 35–70 % and `avg300` ≈ 48–61 % from other server workloads
+(containers, web stack). Under that pressure Xpra startup (dominated by Python
+file I/O) took >30 s and session starts failed their readiness deadline even
+though they were making progress; Firefox's first window was still missing
+after 45 s. The product now adapts: session readiness uses a bounded 75 s
+timeout when I/O pressure is ≥25 % (`some avg10`), and the deploy smoke scales
+its browser timeouts under the same measurement, so deployments remain
+verifiable. Normal-load measurements from earlier rounds (pre-warmed session
+ready ~2 s, click→window ~3 s) are the representative product numbers; the
+60–70 s starts observed here are host-contention artifacts and are not claimed
+as product latency.

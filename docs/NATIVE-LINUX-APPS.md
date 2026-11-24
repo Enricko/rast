@@ -388,6 +388,20 @@ viewer the first launch additionally connects the transport before starting the
 app (normally well under a second; the gate gives up after 15 s), so the
 click-to-window advantage is kept and the keyboard-focus regression is gone.
 
+### Session startup under host I/O pressure
+
+Xpra session startup is dominated by file I/O (Python imports, profile
+scanning). On a host whose disk is saturated by other workloads, a normal
+30 s readiness deadline can be missed even while startup is progressing. The
+session manager reads `/proc/pressure/io` and, when `some avg10` is at least
+25 %, allows a bounded 75 s readiness window instead of killing and retrying
+the session; without pressure the normal deadline is unchanged. The deploy
+Terminal smoke also scales its browser timeouts under the same pressure
+measurement so deployment verification stays meaningful. This is an
+environment mitigation: observed 60–70 s starts under sustained I/O are host
+contention, not the product's normal startup (normal: pre-warmed session ready
+~2 s; click→window ~3 s).
+
 ### GPU-backed displays
 
 With `linux_display_backend = "auto"` (production default as of runtime 2.1),
