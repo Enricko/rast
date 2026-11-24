@@ -20,13 +20,13 @@
 // for apps whose server-side `backend` is "native", and falls back to the
 // legacy path when the server does not support native apps.
 
-import { h } from "../core/dom";
+import { h, isElementNode } from "../core/dom";
 import type { ApiClient } from "../core/api";
 import type { AppDefinition } from "../core/app";
 import { getRealtime, type RealtimeStore } from "../core/realtime";
 import type { EventStream } from "../core/sse";
 import type { ToastCenter } from "../core/toast";
-import { errorMessage } from "../core/ui";
+import { copyText, errorMessage, modal } from "../core/ui";
 import type { WindowHandle, WindowInfo, WindowManager, WindowRect } from "../core/wm";
 import {
   LINUX_PREFIX,
@@ -75,19 +75,52 @@ interface NativeShimState {
   disconnectReason: string | null;
   size: [number, number];
   clipboardEnabled: boolean;
+  /** `both`, `to-server`, `to-client` or empty when the client is disconnected. */
+  clipboardDirection?: string;
+  clipboardPending?: number;
+  clipboardLastEventAt?: number;
+  keyboardSwap?: boolean;
   captureKeyboard: boolean;
   windows: NativeShimWindow[];
 }
 
-interface KeyboardInit {
+export interface KeyboardInit {
   key?: string;
   code?: string;
   keyCode?: number;
+  /** DOM_KEY_LOCATION_*: distinguishes left/right modifiers, numpad, ... */
+  location?: number;
   ctrlKey?: boolean;
   shiftKey?: boolean;
   altKey?: boolean;
   metaKey?: boolean;
   repeat?: boolean;
+}
+
+/** Payload of the shim's `clipboard` event (remote copy landed in the client). */
+export interface ShimClipboardPayload {
+  text?: string;
+  datatype?: string;
+  selection?: string;
+}
+
+/**
+ * Payload of the shim's `clipboard-request` event: the remote application wants
+ * the current browser clipboard (a paste inside the app). The parent answers
+ * with `respondClipboardRequest(key, text)`; `null` hands the request back to
+ * the Xpra client's own fallback path.
+ */
+export interface ShimClipboardRequest {
+  key?: string;
+  requestId?: string;
+  selection?: string;
+}
+
+/** Payload of the shim's `clipboard-format` event (non-text clipboard data). */
+export interface ShimClipboardFormat {
+  datatype?: string;
+  selection?: string;
+  supported?: boolean;
 }
 
 export interface NativeShimApi {
@@ -109,10 +142,532 @@ export interface NativeShimApi {
   sendClipboardText(text: string): boolean;
   clipboardText(): string;
   requestClipboard(): boolean;
+  /** Answer a deferred `clipboard-request`; `null` declines (client fallback). */
+  respondClipboardRequest?(key: string, text: string | null): boolean;
+  /** Release every mouse button held by the remote window (focus loss). */
+  releaseInput?(): boolean;
   reconnect(): boolean;
   disconnect(): boolean;
-  on(event: string, callback: (payload?: never) => void): () => void;
-  off(event: string, callback: (payload?: never) => void): void;
+  on(event: string, callback: (payload?: any) => void): () => void;
+  off(event: string, callback: (payload?: any) => void): void;
+}
+
+/* --------------------------------------------------------- keyboard model */
+//
+// The RAST desktop document owns the keyboard; the Xpra HTML5 client's own key
+// handling runs in the hidden transport iframe. Every key event therefore
+// reaches the parent first, which decides what the remote window receives:
+//
+//   `shell`     RAST keeps the key (no native window focused, shell control
+//               focused, a modal is open, or an IME composition is running)
+//   `reserved`  the browser or the operating system owns the combination; it is
+//               never forwarded and never cancelled
+//   `forward`   forwarded to the focused native window through the shim
+//
+// macOS: Command is the shortcut modifier while Linux applications expect
+// Control. The pinned Xpra HTML5 client already maps this correctly through
+// its `swap_keys` mode (it translates Meta to Control for key *and* mouse
+// modifiers and delays a Ctrl/Cmd+V key packet behind the browser paste event
+// so the clipboard token is pushed first). RAST therefore forwards the real
+// Command event and only takes policy decisions here: rewriting modifiers in
+// this file would be swapped a second time by the client. The shim pins
+// `swap_keys` from the detected platform so this contract does not depend on a
+// viewer URL parameter.
+
+export type NativeKeyMode = "shell" | "reserved" | "forward";
+
+/** Clipboard gestures the browser fires around a forwarded copy/cut/paste. */
+export type NativeKeyGesture = "copy" | "cut" | "paste";
+
+export interface NativeKeyContext {
+  /** Client OS is macOS: Command is the shortcut modifier. */
+  mac: boolean;
+  /** A native window currently owns the remote focus. */
+  nativeFocused: boolean;
+  /** The event target is a RAST shell control or an editable field. */
+  shellTarget: boolean;
+  /** A RAST modal dialog is open (the shell keeps the keyboard). */
+  modalOpen: boolean;
+  /** The event belongs to an IME composition (Xpra HTML5 v21 cannot forward it). */
+  composing: boolean;
+  /** The transport viewer is connected (never forward into a dead session). */
+  connected: boolean;
+}
+
+export interface NativeKeyDecision {
+  mode: NativeKeyMode;
+  init: KeyboardInit;
+  /** True when the browser default action must be cancelled. */
+  preventDefault: boolean;
+  gesture: NativeKeyGesture | null;
+}
+
+/** How long the browser has to deliver the paste event of a paste gesture. */
+export const PASTE_EVENT_GRACE_MS = 250;
+/** How long a copied text may be reused to answer a remote paste request. */
+export const CLIPBOARD_CACHE_TTL_MS = 120_000;
+
+/**
+ * macOS Command combinations RAST forwards to the native application. The
+ * pinned client turns Command into Control, so these become the usual Linux
+ * editing shortcuts (select-all, undo/redo, save). Copy/cut/paste are handled
+ * before this set because they also drive the browser clipboard gesture.
+ */
+export const MAC_COMMAND_FORWARD_KEYS: ReadonlySet<string> = new Set(["a", "z", "y", "s"]) as ReadonlySet<string>;
+
+/**
+ * macOS Command combinations reserved by the browser or the operating system.
+ * They are never forwarded and never cancelled: the browser keeps tab/window
+ * management, navigation and the volume of its own UI, like it does for any
+ * web page (a page cannot reliably override them anyway).
+ */
+export const MAC_COMMAND_RESERVED: ReadonlySet<string> = new Set([
+  "w", "t", "n", "l", "r", "p", "m", "h", "f", "o", "q", ",", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+  "[", "]", "`", "\\", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Tab", "Escape",
+]) as ReadonlySet<string>;
+
+/** Command+Shift combinations owned by the browser (inspect/fullscreen/...). */
+export const MAC_COMMAND_RESERVED_SHIFTED: ReadonlySet<string> = new Set([
+  "w", "t", "n", "r", "q", "c", "3", "4", "5",
+]) as ReadonlySet<string>;
+
+/** Windows/Linux browser-reserved Control combinations (tab/window/navigation). */
+export const OTHER_BROWSER_RESERVED: ReadonlySet<string> = new Set([
+  "w", "t", "n", "l", "r", "p", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+]) as ReadonlySet<string>;
+
+/** Windows/Linux browser-reserved Control+Shift combinations. */
+export const OTHER_BROWSER_RESERVED_SHIFTED: ReadonlySet<string> = new Set(["w", "t", "n", "r", "p"]) as ReadonlySet<string>;
+
+/** Function keys that stay with the browser (reload, fullscreen, devtools). */
+export const RESERVED_FUNCTION_KEYS: ReadonlySet<string> = new Set(["F5", "F11", "F12"]) as ReadonlySet<string>;
+
+/** Developer-tools letter shortcuts (Control+Shift on Windows/Linux). */
+const DEVTOOLS_KEYS: ReadonlySet<string> = new Set(["i", "j", "c", "k"]) as ReadonlySet<string>;
+
+const MODIFIER_KEY_NAMES: ReadonlySet<string> = new Set([
+  "Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock", "OS", "Super", "Hyper",
+]) as ReadonlySet<string>;
+
+/**
+ * Selector for RAST-owned keyboard contexts. Clicking any of these keeps the
+ * keyboard in the desktop shell: typing in a form, operating the taskbar/start
+ * menu/dialog buttons, or working inside a modal.
+ */
+const SHELL_KEYBOARD_SELECTOR =
+  "input, textarea, select, [contenteditable='true'], [contenteditable=''], " +
+  ".taskbar, .start-menu, .context-menu, .panel, .tray, .modal, .auth";
+
+/** Element of the RAST-owned window body for an adopted native surface. */
+export function nativeSurfaceFor(target: EventTarget | null): Element | null {
+  if (!isElementNode(target)) return null;
+  try {
+    return target.closest(".linux-native-window");
+  } catch {
+    return null;
+  }
+}
+
+/** True when the event target belongs to a RAST shell control / editable. */
+export function isShellKeyboardTarget(target: EventTarget | null): boolean {
+  if (!isElementNode(target)) return false;
+  try {
+    if (target.closest(SHELL_KEYBOARD_SELECTOR)) return true;
+  } catch {
+    /* detached or cross-realm node: fall through to the cheap checks */
+  }
+  if ((target as HTMLElement).isContentEditable === true) return true;
+  const tag = target.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
+
+/** Detect macOS without relying on a deprecated-only field. */
+export function detectMacPlatform(
+  nav: { userAgentData?: { platform?: string }; platform?: string; userAgent?: string } | null | undefined = globalThis.navigator,
+): boolean {
+  if (!nav) return false;
+  const platform = nav.userAgentData?.platform || nav.platform || "";
+  if (/mac/i.test(platform)) return true;
+  return /Macintosh|Mac OS X/i.test(nav.userAgent ?? "");
+}
+
+function normalizedKeyName(key: string | undefined): string {
+  if (!key) return "";
+  return key.length === 1 ? key.toLowerCase() : key;
+}
+
+function isModifierKey(event: KeyboardInit): boolean {
+  const key = event.key ?? "";
+  if (MODIFIER_KEY_NAMES.has(key)) return true;
+  const code = event.code ?? "";
+  return (
+    code.startsWith("Shift") ||
+    code.startsWith("Control") ||
+    code.startsWith("Alt") ||
+    code.startsWith("Meta") ||
+    code === "CapsLock"
+  );
+}
+
+/**
+ * Decide what happens to one keydown/keyup. Pure so the complete policy is unit
+ * tested without a browser: see `frontend/tests/input-clipboard.test.ts`.
+ */
+export function decideNativeKey(
+  event: KeyboardInit & { isComposing?: boolean },
+  context: NativeKeyContext,
+): NativeKeyDecision {
+  const init: KeyboardInit = {
+    key: event.key,
+    code: event.code,
+    keyCode: event.keyCode,
+    location: event.location,
+    ctrlKey: event.ctrlKey,
+    shiftKey: event.shiftKey,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+    repeat: event.repeat,
+  };
+  const shell: NativeKeyDecision = { mode: "shell", init, preventDefault: false, gesture: null };
+  const reserved: NativeKeyDecision = { mode: "reserved", init, preventDefault: false, gesture: null };
+  const forward = (preventDefault: boolean, gesture: NativeKeyGesture | null = null): NativeKeyDecision => ({
+    mode: "forward",
+    init,
+    preventDefault,
+    gesture,
+  });
+
+  if (!context.connected) return shell;
+  if (!context.nativeFocused || context.shellTarget || context.modalOpen || context.composing) return shell;
+  if (event.isComposing === true) return shell;
+  const key = normalizedKeyName(event.key);
+  if (RESERVED_FUNCTION_KEYS.has(event.key ?? "")) return reserved;
+
+  // A modifier press on its own is never a command: forward it so remote
+  // chords work (the client swaps Meta/Control on macOS by itself).
+  if (isModifierKey(event)) return forward(false);
+
+  if (context.mac) {
+    // Command+Option / Command+Control belong to the OS or the browser
+    // (devtools, fullscreen, tab switching); never forward them.
+    if (event.metaKey && (event.ctrlKey || event.altKey)) return reserved;
+    if (event.metaKey) {
+      if (event.shiftKey) {
+        if (key === "z") return forward(true); // redo
+        if (key === "v") return forward(false, "paste"); // paste special
+        return reserved;
+      }
+      if (key === "v") return forward(false, "paste");
+      if (key === "c") return forward(true, "copy");
+      if (key === "x") return forward(true, "cut");
+      if (MAC_COMMAND_FORWARD_KEYS.has(key)) return forward(true);
+      return reserved;
+    }
+    // Control on macOS is not the Command modifier; forward it (the client
+    // swaps it to Meta for the Linux application, which is its documented
+    // `swap_keys` behaviour). Option/Alt is forwarded as Alt.
+    return forward(true);
+  }
+
+  // Windows/Linux: Control is the primary shortcut modifier; Meta (Windows /
+  // Super) belongs to the OS.
+  if (event.metaKey) return reserved;
+  if (event.ctrlKey) {
+    if (event.shiftKey && DEVTOOLS_KEYS.has(key)) return reserved;
+    if (!event.shiftKey && OTHER_BROWSER_RESERVED.has(key)) return reserved;
+    if (event.shiftKey && OTHER_BROWSER_RESERVED_SHIFTED.has(key)) return reserved;
+    if (!event.shiftKey && key === "c") return forward(true, "copy");
+    if (!event.shiftKey && key === "x") return forward(true, "cut");
+    if (key === "v") return forward(false, "paste");
+    return forward(true);
+  }
+  if (event.shiftKey && (event.key === "Insert" || key === "Insert")) return forward(false, "paste");
+  return forward(true);
+}
+
+/* --------------------------------------------------------- clipboard model */
+//
+// Xpra's clipboard is a best-effort token protocol: the server pushes text
+// tokens, the client writes them to the browser clipboard, and the client
+// answers the server's clipboard requests with browser clipboard text. The
+// pinned client does that itself *inside its own document*, which is hidden
+// and unfocused here — browsers reject clipboard API calls from an unfocused
+// document, which is why copies used to fail silently. RAST therefore runs
+// the clipboard in the focused desktop document:
+//
+//   remote copy  -> shim `clipboard` event -> manager writes navigator.clipboard
+//   browser copy -> captured text (copy event / paste event / quiet read)
+//   remote paste -> shim `clipboard-request` -> manager answers with that text
+//
+// Every refusal is surfaced to the person (toast with an action, or an explicit
+// copy/paste fallback dialog). Nothing is ignored silently. Text/plain only:
+// the negotiated Xpra protocol in this deployment is text-first, so HTML and
+// images trigger an honest notice instead of a partial/failed transfer.
+
+export interface NativeClipboardEnv {
+  /** Write text to the browser clipboard; resolves false when refused. */
+  writeText(text: string): Promise<boolean>;
+  /** Read the browser clipboard only when no permission prompt can appear. */
+  readTextQuietly(): Promise<string | null>;
+  notify(
+    kind: "info" | "success" | "warning" | "error",
+    message: string,
+    action?: { label: string; run: () => void },
+  ): void;
+  /** Explicit fallback showing text the person can select and copy by hand. */
+  copyFallback(text: string, reason: string): void;
+  /** Explicit fallback where the person pastes text to send to the application. */
+  pasteFallback(reason: string, suggestedText: string | null): void;
+}
+
+interface ClipboardShim {
+  sendClipboardText(text: string): boolean;
+  requestClipboard(): boolean;
+  clipboardText(): string;
+  respondClipboardRequest?(key: string, text: string | null): boolean;
+}
+
+/**
+ * Two-way text clipboard between the focused desktop document and the shared
+ * native session. All browser APIs are injected (`NativeClipboardEnv`) so the
+ * complete policy is unit tested without a DOM.
+ */
+export class NativeClipboardManager {
+  readonly env: NativeClipboardEnv;
+  private shim: ClipboardShim | null = null;
+  private connected = false;
+  /** Last browser clipboard text seen by a copy/paste event (best effort). */
+  private browserText: string | null = null;
+  private browserTextAt = 0;
+  private lastWritten = "";
+  private lastRemote = "";
+  private pendingWrite: string | null = null;
+  private writing = false;
+  private failureText: string | null = null;
+  private failureAt = 0;
+  private readNoticeShown = false;
+  private sessionNoticeShown = false;
+  private readonly unsupportedFormats = new Set<string>();
+
+  constructor(env: NativeClipboardEnv) {
+    this.env = env;
+  }
+
+  attach(shim: ClipboardShim): void {
+    this.shim = shim;
+  }
+
+  detach(): void {
+    this.shim = null;
+    this.pendingWrite = null;
+    this.failureText = null;
+    this.connected = false;
+  }
+
+  setConnected(connected: boolean): void {
+    if (this.connected === connected) return;
+    this.connected = connected;
+    if (!connected) {
+      this.pendingWrite = null;
+      this.failureText = null;
+      return;
+    }
+    void this.reconnect();
+  }
+
+  /** Last text the remote desktop sent us (debugging/status). */
+  remoteText(): string {
+    return this.lastRemote;
+  }
+
+  /** Text copied inside RAST, reusable for a remote paste request. */
+  cachedBrowserText(): string | null {
+    if (this.browserText === null) return null;
+    if (Date.now() - this.browserTextAt > CLIPBOARD_CACHE_TTL_MS) return null;
+    return this.browserText;
+  }
+
+  /**
+   * The remote application copied text (Xpra clipboard token). Writes it to the
+   * browser clipboard, coalescing bursts and never clobbering a newer token.
+   */
+  remoteClipboard(payload: ShimClipboardPayload): void {
+    const text = typeof payload.text === "string" ? payload.text : "";
+    if (!text) return;
+    this.lastRemote = text;
+    this.queueWrite(text);
+  }
+
+  /** The application copied something that is not plain text. Tell the person. */
+  unsupportedFormat(payload: ShimClipboardFormat): void {
+    const datatype = (payload.datatype || "unknown").toLowerCase();
+    const key = datatype.split(";")[0] ?? datatype;
+    if (this.unsupportedFormats.has(key)) return;
+    const firstNotice = this.unsupportedFormats.size === 0;
+    this.unsupportedFormats.add(key);
+    if (!firstNotice) return;
+    this.env.notify(
+      "info",
+      "The native application copied non-text data (images/HTML). RAST transfers plain text only, so it was not placed on your clipboard.",
+    );
+  }
+
+  /** Text the person copied inside the RAST desktop (copy/cut event). */
+  browserCopied(text: string): void {
+    if (!text) return;
+    this.browserText = text;
+    this.browserTextAt = Date.now();
+  }
+
+  /** Paste event text: the reliable browser -> remote path. */
+  pasteEventText(text: string): boolean {
+    if (!text) return false;
+    this.browserCopied(text);
+    return this.pushToRemote(text);
+  }
+
+  /**
+   * A paste gesture (Cmd/Ctrl+V) was forwarded but the browser never delivered
+   * the paste event. Try a quiet clipboard read, otherwise show the explicit
+   * fallback dialog. Called by the host after `PASTE_EVENT_GRACE_MS`.
+   */
+  async pasteGestureMissed(): Promise<void> {
+    const text = await this.env.readTextQuietly();
+    if (text) {
+      this.browserCopied(text);
+      if (this.pushToRemote(text)) return;
+    }
+    this.env.pasteFallback(
+      "The browser did not deliver the paste event, so RAST could not read your clipboard for this paste.",
+      this.cachedBrowserText(),
+    );
+  }
+
+  /**
+   * The remote application asked for the clipboard (a paste inside the app).
+   * Answer from the freshest source available, or hand the request back to the
+   * Xpra client's fallback path so the application never hangs.
+   */
+  clipboardRequest(payload: ShimClipboardRequest): void {
+    const shim = this.shim;
+    const key = typeof payload.key === "string" ? payload.key : "";
+    if (!shim?.respondClipboardRequest || !key) return;
+    const cached = this.cachedBrowserText();
+    if (cached !== null) {
+      shim.respondClipboardRequest(key, cached);
+      return;
+    }
+    void (async () => {
+      const text = await this.env.readTextQuietly();
+      if (text) {
+        this.browserCopied(text);
+        shim.respondClipboardRequest?.(key, text);
+        return;
+      }
+      // Decline: the shim runs the Xpra client's own fallback immediately.
+      shim.respondClipboardRequest?.(key, null);
+      if (!this.readNoticeShown) {
+        this.readNoticeShown = true;
+        this.env.notify(
+          "warning",
+          "RAST could not read your browser clipboard for the application's paste. Copy the text inside RAST, or use the paste fallback.",
+          { label: "Paste manually…", run: () => this.env.pasteFallback("Clipboard read permission was refused.", null) },
+        );
+      }
+    })();
+  }
+
+  /** The session (re)connected: re-establish clipboard ownership both ways. */
+  async reconnect(): Promise<void> {
+    if (!this.connected) return;
+    this.lastWritten = "";
+    this.failureText = null;
+    this.pendingWrite = null;
+    try {
+      this.shim?.requestClipboard();
+    } catch {
+      /* the client may still be starting; the next event retries */
+    }
+    const text = await this.env.readTextQuietly();
+    if (text) {
+      this.browserCopied(text);
+      this.pushToRemote(text);
+    }
+  }
+
+  /** The browser window regained focus: retry a write the browser refused. */
+  onWindowFocus(): void {
+    if (this.failureText === null) return;
+    const text = this.failureText;
+    this.failureText = null;
+    this.queueWrite(text);
+  }
+
+  /** Push text to the remote selection; surfaces a disabled/closed session. */
+  pushToRemote(text: string): boolean {
+    if (!text) return false;
+    const shim = this.shim;
+    if (!shim) return false;
+    const ok = shim.sendClipboardText(text);
+    if (ok) return true;
+    if (!this.sessionNoticeShown) {
+      this.sessionNoticeShown = true;
+      this.env.notify(
+        "error",
+        "The native session did not accept clipboard data. Clipboard sharing may be disabled by the server or the session is reconnecting.",
+      );
+    }
+    return false;
+  }
+
+  /** Queue a browser clipboard write, coalescing bursts of remote tokens. */
+  private queueWrite(text: string): void {
+    if (!this.connected) return;
+    if (text === this.lastWritten) return;
+    this.pendingWrite = text;
+    this.pumpWrite();
+  }
+
+  private pumpWrite(): void {
+    if (this.writing) return;
+    const text = this.pendingWrite;
+    if (text === null) return;
+    this.pendingWrite = null;
+    this.writing = true;
+    void this.env.writeText(text).then((ok) => {
+      this.writing = false;
+      if (ok) {
+        this.lastWritten = text;
+        const recovered = this.failureText !== null && this.failureAt > 0;
+        this.failureText = null;
+        if (recovered) this.env.notify("info", "Copied the application's text to your browser clipboard.");
+      } else if (this.pendingWrite === null) {
+        // A newer token is queued: let it win instead of reporting a stale failure.
+        this.failureText = text;
+        this.failureAt = Date.now();
+        this.surfaceCopyFailure(text);
+      }
+      this.pumpWrite();
+    });
+  }
+
+  private surfaceCopyFailure(text: string): void {
+    this.env.notify(
+      "warning",
+      "The native application copied text, but the browser blocked access to your clipboard.",
+      { label: "Copy now", run: () => void this.retryCopy(text) },
+    );
+  }
+
+  private async retryCopy(text: string): Promise<void> {
+    if (await this.env.writeText(text)) {
+      this.lastWritten = text;
+      this.failureText = null;
+      this.env.notify("success", "Copied the application's text to your clipboard.");
+      return;
+    }
+    this.env.copyFallback(text, "The browser still refuses programmatic clipboard access.");
+  }
 }
 
 /* -------------------------------------------------------------------- deps */
@@ -236,16 +791,64 @@ export class NativeLinuxHost {
   private lastRemoteClipboard = "";
   private focusedWid: string | null = null;
   private lastRemoteFocus: string | null = null;
+  /** Client OS uses Command as the shortcut modifier (macOS). */
+  private readonly mac = detectMacPlatform();
+  private readonly clipboard: NativeClipboardManager;
+  /** Last connection state reported by the shim (never forward into a dead link). */
+  private shimConnected = false;
+  /** Keys currently held down in the remote session, for focus-loss releases. */
+  private readonly pressedKeys = new Map<string, KeyboardInit>();
+  private composing = false;
+  /** Paste gesture bookkeeping: the browser has PASTE_EVENT_GRACE_MS to fire. */
+  private pasteGestureSeq = 0;
+  private pasteGestureSeen = true;
+  private pasteFallbackTimer = 0;
+  private keyForwardNoticeShown = false;
   private readonly onPasteHandler: (event: ClipboardEvent) => void;
+  private readonly onCopyHandler: (event: ClipboardEvent) => void;
+  private readonly onCutHandler: (event: ClipboardEvent) => void;
   private readonly onKeyDownHandler: (event: KeyboardEvent) => void;
   private readonly onKeyUpHandler: (event: KeyboardEvent) => void;
+  private readonly onWindowBlurHandler: () => void;
+  private readonly onWindowFocusHandler: () => void;
+  private readonly onVisibilityHandler: () => void;
+  private readonly onCompositionStartHandler: () => void;
+  private readonly onCompositionEndHandler: () => void;
 
   constructor(deps: NativeLinuxDeps) {
     this.deps = deps;
     this.realtime = getRealtime(deps.events);
+    this.clipboard = new NativeClipboardManager({
+      writeText: (text) => this.writeBrowserClipboard(text),
+      readTextQuietly: () => this.readBrowserClipboardQuietly(),
+      notify: (kind, message, action) => {
+        this.deps.toast.show(message, {
+          kind,
+          ...(action ? { action: { label: action.label, onClick: action.run } } : {}),
+        });
+      },
+      copyFallback: (text, reason) => this.showCopyFallback(text, reason),
+      pasteFallback: (reason, suggested) => this.showPasteFallback(reason, suggested),
+    });
     this.onPasteHandler = (event) => this.forwardPaste(event);
+    this.onCopyHandler = (event) => this.rememberCopiedText(event);
+    this.onCutHandler = (event) => this.rememberCopiedText(event);
     this.onKeyDownHandler = (event) => this.forwardKey(event, true);
     this.onKeyUpHandler = (event) => this.forwardKey(event, false);
+    this.onWindowBlurHandler = () => this.flushNativeInput("window-blur");
+    this.onWindowFocusHandler = () => {
+      this.clipboard.onWindowFocus();
+      this.ensureNativeKeyboardFocus();
+    };
+    this.onVisibilityHandler = () => {
+      if (document.visibilityState === "hidden") this.flushNativeInput("document-hidden");
+    };
+    this.onCompositionStartHandler = () => {
+      this.composing = true;
+    };
+    this.onCompositionEndHandler = () => {
+      this.composing = false;
+    };
   }
 
   /* ------------------------------------------------------------- lifecycle */
@@ -284,14 +887,31 @@ export class NativeLinuxHost {
     this.unsubscribers.push(
       this.deps.wm.subscribe((windows) => this.onRastWindowsChanged(windows)),
     );
+    // The RAST document owns the keyboard and the clipboard: the transport
+    // iframe is hidden and must never receive focus (the shim releases the
+    // Xpra page's clipboard autofocus for the same reason).
     document.addEventListener("paste", this.onPasteHandler, true);
-    this.unsubscribers.push(() => document.removeEventListener("paste", this.onPasteHandler, true));
-    // The RAST document owns the keyboard: forward keys to the focused remote
-    // window (the Xpra client's own document handlers only see its iframe).
+    document.addEventListener("copy", this.onCopyHandler, true);
+    document.addEventListener("cut", this.onCutHandler, true);
     document.addEventListener("keydown", this.onKeyDownHandler, true);
     document.addEventListener("keyup", this.onKeyUpHandler, true);
-    this.unsubscribers.push(() => document.removeEventListener("keydown", this.onKeyDownHandler, true));
-    this.unsubscribers.push(() => document.removeEventListener("keyup", this.onKeyUpHandler, true));
+    document.addEventListener("compositionstart", this.onCompositionStartHandler, true);
+    document.addEventListener("compositionend", this.onCompositionEndHandler, true);
+    window.addEventListener("blur", this.onWindowBlurHandler);
+    window.addEventListener("focus", this.onWindowFocusHandler);
+    document.addEventListener("visibilitychange", this.onVisibilityHandler);
+    this.unsubscribers.push(() => {
+      document.removeEventListener("paste", this.onPasteHandler, true);
+      document.removeEventListener("copy", this.onCopyHandler, true);
+      document.removeEventListener("cut", this.onCutHandler, true);
+      document.removeEventListener("keydown", this.onKeyDownHandler, true);
+      document.removeEventListener("keyup", this.onKeyUpHandler, true);
+      document.removeEventListener("compositionstart", this.onCompositionStartHandler, true);
+      document.removeEventListener("compositionend", this.onCompositionEndHandler, true);
+      window.removeEventListener("blur", this.onWindowBlurHandler);
+      window.removeEventListener("focus", this.onWindowFocusHandler);
+      document.removeEventListener("visibilitychange", this.onVisibilityHandler);
+    });
     this.pollTimer = window.setInterval(() => {
       if (this.disposed || this.nativeUnavailable) return;
       void this.refreshSession();
@@ -309,6 +929,10 @@ export class NativeLinuxHost {
     window.clearTimeout(this.launchRecoveryTimer);
     window.clearTimeout(this.reconnectTimer);
     window.clearTimeout(this.attachTimer);
+    window.clearTimeout(this.pasteFallbackTimer);
+    this.pasteFallbackTimer = 0;
+    this.pressedKeys.clear();
+    this.clipboard.detach();
     for (const unsubscribe of this.unsubscribers.splice(0)) {
       try {
         unsubscribe();
@@ -383,6 +1007,7 @@ export class NativeLinuxHost {
       this.removeIframe();
       this.shim = null;
       this.lastSnapshot = null;
+      this.resetInputState("session-ended");
       if (session?.status === "ended" && (wasAlive || previous?.status === "ready")) this.announceEnded(session);
       return;
     }
@@ -397,6 +1022,7 @@ export class NativeLinuxHost {
       if (this.iframe) {
         this.removeIframe();
         this.shim = null;
+        this.resetInputState("viewer-replaced");
       }
     }
     if (session.url && !this.iframe) this.createIframe(session.url);
@@ -453,6 +1079,10 @@ export class NativeLinuxHost {
     const iframe = document.createElement("iframe");
     iframe.className = "linux-native-session-frame";
     iframe.title = "Native desktop session";
+    // The transport frame is hidden and must never be reachable with Tab: all
+    // keyboard input is routed through the desktop document (see forwardKey).
+    iframe.tabIndex = -1;
+    iframe.setAttribute("aria-hidden", "true");
     // The Xpra client must stay same-origin and unsandboxed: the RAST desktop
     // adopts the remote windows' DOM nodes and forwards input.
     iframe.setAttribute("allow", "autoplay; clipboard-read; clipboard-write");
@@ -507,6 +1137,7 @@ export class NativeLinuxHost {
     this.quiet = true;
     this.closeAllWindows(true);
     this.quiet = false;
+    this.clipboard.attach(shim);
     shim.on("state", (state?: NativeShimState) => {
       if (state) this.applySnapshot(state);
     });
@@ -516,17 +1147,34 @@ export class NativeLinuxHost {
     shim.on("connected", (state?: NativeShimState) => {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = 0;
+      this.shimConnected = true;
+      this.clipboard.setConnected(true);
       if (state) this.applySnapshot(state);
+      this.ensureNativeKeyboardFocus();
     });
-    shim.on("disconnected", () => this.scheduleReconnect());
+    shim.on("disconnected", (state?: NativeShimState) => {
+      this.shimConnected = false;
+      this.clipboard.setConnected(false);
+      this.flushNativeInput("viewer-disconnected");
+      if (state) this.applySnapshot(state);
+      this.scheduleReconnect();
+    });
     shim.on("error", () => {
       /* surfaced through the session state */
     });
-    shim.on("clipboard", (payload?: { text?: string }) => {
-      const text = typeof payload?.text === "string" ? payload.text : "";
+    shim.on("focus-request", () => this.ensureNativeKeyboardFocus());
+    shim.on("clipboard", (payload?: ShimClipboardPayload) => {
+      if (!payload) return;
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (!text) return;
       this.lastRemoteClipboard = text;
-      if (!text || !navigator.clipboard?.writeText) return;
-      navigator.clipboard.writeText(text).catch(() => undefined);
+      this.clipboard.remoteClipboard(payload);
+    });
+    shim.on("clipboard-format", (payload?: ShimClipboardFormat) => {
+      if (payload) this.clipboard.unsupportedFormat(payload);
+    });
+    shim.on("clipboard-request", (payload?: ShimClipboardRequest) => {
+      if (payload) this.clipboard.clipboardRequest(payload);
     });
     const snapshot = shim.snapshot();
     if (snapshot) this.applySnapshot(snapshot);
@@ -554,6 +1202,7 @@ export class NativeLinuxHost {
     this.quiet = false;
     this.lastSnapshot = null;
     this.shim = null;
+    this.resetInputState("viewer-reload");
     window.clearInterval(this.snapshotTimer);
     try {
       this.iframe.contentWindow?.location.reload();
@@ -575,6 +1224,7 @@ export class NativeLinuxHost {
     this.quiet = false;
     this.lastSnapshot = null;
     this.shim = null;
+    this.resetInputState("viewer-reconnect");
     try {
       this.iframe?.contentWindow?.location.reload();
     } catch {
@@ -591,6 +1241,11 @@ export class NativeLinuxHost {
   private applySnapshot(snapshot: NativeShimState): void {
     if (this.disposed || !snapshot?.ready) return;
     this.lastSnapshot = snapshot;
+    if (snapshot.connected !== this.shimConnected) {
+      this.shimConnected = snapshot.connected === true;
+      this.clipboard.setConnected(this.shimConnected);
+      if (!this.shimConnected) this.flushNativeInput("viewer-disconnected");
+    }
     if (snapshot.separate === false) {
       this.onNonSeamlessSnapshot(snapshot);
       return;
@@ -803,10 +1458,32 @@ export class NativeLinuxHost {
     ctx.contentEl.tabIndex = -1;
     const focusContent = (): void => {
       if (frame.closing) return;
+      if (document.activeElement === ctx.contentEl) return;
       ctx.contentEl.focus({ preventScroll: true });
+      // The browser may have kept focus in the hidden transport iframe (the
+      // Xpra page's clipboard autofocus does exactly that): take it back.
+      window.setTimeout(() => this.ensureNativeKeyboardFocus(), 0);
     };
     ctx.contentEl.addEventListener("pointerdown", focusContent, true);
     ctx.onDispose(() => ctx.contentEl.removeEventListener("pointerdown", focusContent, true));
+    // The remote application draws and handles its own context menu, popup
+    // menus and drags. The browser's page-level defaults (context menu,
+    // middle-click autoscroll, native image/canvas dragging) would appear on
+    // top of the application's own UI, so they are suppressed inside the
+    // adopted surface only.
+    const suppressDefaults = (event: Event): void => {
+      event.preventDefault();
+    };
+    const suppressed = ["contextmenu", "auxclick", "dragstart"];
+    for (const type of suppressed) ctx.contentEl.addEventListener(type, suppressDefaults, true);
+    const suppressMiddleDown = (event: MouseEvent): void => {
+      if (event.button === 1) event.preventDefault();
+    };
+    ctx.contentEl.addEventListener("mousedown", suppressMiddleDown, true);
+    ctx.onDispose(() => {
+      for (const type of suppressed) ctx.contentEl.removeEventListener(type, suppressDefaults, true);
+      ctx.contentEl.removeEventListener("mousedown", suppressMiddleDown, true);
+    });
     ctx.onResize(() => this.scheduleRemoteResize(frame, ctx.contentEl));
     ctx.onDispose(() => this.onFrameDisposed(frame));
     const shim = this.shim;
@@ -845,7 +1522,12 @@ export class NativeLinuxHost {
         shim?.requestRefresh(frame.wid);
       }, retryMs);
     }
-    if (!frame.popup) shim?.focusWindow(frame.wid);
+    if (!frame.popup) {
+      shim?.focusWindow(frame.wid);
+      // A new window takes the keyboard: make sure the desktop document (not
+      // the hidden transport iframe) holds DOM focus.
+      focusContent();
+    }
   }
 
   private scheduleRemoteResize(frame: FrameState, contentEl: HTMLElement, delay = RESIZE_DEBOUNCE_MS): void {
@@ -904,6 +1586,7 @@ export class NativeLinuxHost {
     const target = frame.popup ? this.frames.get(frame.dialogParent ?? "") : frame;
     if (!target?.handle) return;
     if (!target.handle.isMinimized()) target.handle.focus();
+    this.focusNativeContent(target);
   }
 
   private onRastWindowsChanged(windows: WindowInfo[]): void {
@@ -922,8 +1605,12 @@ export class NativeLinuxHost {
           shim.focusWindow(frame.wid);
         }
       }
-      if (info.focused) this.focusedWid = frame.wid;
-      else if (this.focusedWid === frame.wid) this.focusedWid = null;
+      if (info.focused) {
+        this.focusedWid = frame.wid;
+        this.focusNativeContent(frame);
+      } else if (this.focusedWid === frame.wid) {
+        this.focusedWid = null;
+      }
       frame.last.minimized = info.minimized;
       frame.last.maximized = info.maximized;
       frame.last.focused = info.focused;
@@ -1176,70 +1863,329 @@ export class NativeLinuxHost {
     );
   }
 
-  /* -------------------------------------------------------------- clipboard */
+  /* --------------------------------------------------- keyboard & clipboard */
 
-  private forwardPaste(event: ClipboardEvent): void {
-    const target = event.target;
-    if (!(target instanceof Node)) return;
-    const container = target instanceof Element ? target.closest(".linux-native-window") : null;
-    if (!container) return;
-    const shim = this.shim;
-    if (!shim) return;
-    const text = event.clipboardData?.getData("text/plain") ?? "";
-    if (!text) return;
-    event.preventDefault();
-    event.stopPropagation();
-    shim.sendClipboardText(text);
+  private isModalOpen(): boolean {
+    return document.querySelector(".modal-backdrop") !== null;
   }
 
-  /* ----------------------------------------------------------------- keyboard */
-
+  /**
+   * The single keyboard path: every keydown/keyup in the desktop document is
+   * classified once (see `decideNativeKey`) and either kept by the shell, left
+   * to the browser, or forwarded exactly once to the focused native window.
+   */
   private forwardKey(event: KeyboardEvent, pressed: boolean): void {
     if (this.disposed) return;
     const shim = this.shim;
     if (!shim) return;
-    const wid = this.focusedWid;
-    if (!wid) return;
-    if (document.querySelector(".modal-backdrop")) return;
-    // Keyboard stays with the RAST shell whenever the user is operating shell
-    // controls (taskbar, start menu, dialogs, buttons): those must remain
-    // usable with Space/Enter/arrow keys even while a native window is focused.
-    const target = event.target;
-    if (target instanceof Element) {
-      if (
-        target.closest(
-          "input, textarea, select, [contenteditable='true'], [contenteditable=''], " +
-            ".taskbar, .start-menu, .context-menu, .panel, .tray, .modal, .auth",
-        )
-      ) {
+    const code = event.code || event.key || "";
+    const decision = decideNativeKey(
+      {
+        key: event.key,
+        code: event.code,
+        keyCode: event.keyCode || event.which || 0,
+        location: event.location,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        repeat: event.repeat,
+        isComposing: event.isComposing === true || event.keyCode === 229,
+      },
+      {
+        mac: this.mac,
+        nativeFocused: this.focusedWid !== null,
+        shellTarget: isShellKeyboardTarget(event.target),
+        modalOpen: this.isModalOpen(),
+        composing: this.composing,
+        connected: this.shimConnected,
+      },
+    );
+
+    // Releasing a key earlier forwarded must always reach the remote window,
+    // even if focus moved to the shell meanwhile: a stuck modifier in the
+    // remote session is worse than one extra keyup.
+    if (!pressed) {
+      const tracked = code ? this.pressedKeys.get(code) : undefined;
+      if (tracked) {
+        this.pressedKeys.delete(code);
+        shim.sendKey(false, { ...tracked, repeat: false });
         return;
       }
-      // Controls inside the focused native window (min/max/close) still keep
-      // the app's keyboard: a person who clicked the title bar expects typing
-      // to reach the application, not to be swallowed by the shell.
-    } else if (target instanceof HTMLElement) {
-      if (target.isContentEditable) return;
-      const tag = target.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (decision.mode === "forward") shim.sendKey(false, decision.init);
+      return;
     }
-    // Keep browser/reload/devtools shortcuts working.
-    if (event.key === "F5" || event.key === "F11" || event.key === "F12") return;
-    if (event.ctrlKey && event.shiftKey && ["I", "J", "C", "K"].includes(event.key)) return;
-    if (event.metaKey) return;
-    const forwarded = shim.sendKey(pressed, {
-      key: event.key,
-      code: event.code,
-      keyCode: event.keyCode || event.which || 0,
-      ctrlKey: event.ctrlKey,
-      shiftKey: event.shiftKey,
-      altKey: event.altKey,
-      metaKey: event.metaKey,
-      repeat: event.repeat,
-    });
-    if (forwarded) {
+
+    if (decision.mode !== "forward") return;
+    if (!shim.sendKey(true, decision.init)) {
+      if (!this.keyForwardNoticeShown) {
+        this.keyForwardNoticeShown = true;
+        this.deps.toast.error(
+          "Keyboard input could not be sent to the native session. Reload the page or restart the application.",
+        );
+      }
+      return;
+    }
+    if (code) this.pressedKeys.set(code, decision.init);
+    if (decision.preventDefault) {
       event.preventDefault();
       event.stopPropagation();
+    } else if (decision.gesture === "paste") {
+      // Keep the browser's paste default action (it delivers the paste event
+      // with the clipboard data) but never let RAST shell shortcuts treat the
+      // gesture as their own.
+      event.stopPropagation();
     }
+    if (decision.gesture === "paste") this.armPasteGesture();
+  }
+
+  /** Arm the "paste event never arrived" fallback after a paste gesture. */
+  private armPasteGesture(): void {
+    this.pasteGestureSeq += 1;
+    const seq = this.pasteGestureSeq;
+    this.pasteGestureSeen = false;
+    window.clearTimeout(this.pasteFallbackTimer);
+    this.pasteFallbackTimer = window.setTimeout(() => {
+      this.pasteFallbackTimer = 0;
+      if (seq !== this.pasteGestureSeq || this.pasteGestureSeen) return;
+      this.pasteGestureSeen = true;
+      void this.clipboard.pasteGestureMissed();
+    }, PASTE_EVENT_GRACE_MS);
+  }
+
+  /**
+   * Browser paste into a native window. The paste event is a trusted user
+   * gesture, so `clipboardData` is available without a permission prompt: this
+   * is the primary browser -> application path. It also answers a Cmd/Ctrl+V
+   * gesture whose paste event was consumed by a browser UI element.
+   */
+  private forwardPaste(event: ClipboardEvent): void {
+    if (this.disposed) return;
+    const shim = this.shim;
+    if (!shim || !this.shimConnected) return;
+    if (this.focusedWid === null) return;
+    if (this.isModalOpen()) return;
+    const onSurface = nativeSurfaceFor(event.target) !== null;
+    const pendingGesture = !this.pasteGestureSeen;
+    if (!onSurface && !pendingGesture) return;
+    this.pasteGestureSeen = true;
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    event.preventDefault();
+    event.stopPropagation();
+    if (text) this.clipboard.pasteEventText(text);
+  }
+
+  /** Remember text copied inside RAST for remote paste requests (best effort). */
+  private rememberCopiedText(event: ClipboardEvent): void {
+    if (this.disposed) return;
+    // A copy performed by the application itself is handled by the shim.
+    if (nativeSurfaceFor(event.target) !== null) return;
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (text) this.clipboard.browserCopied(text);
+  }
+
+  /** Release everything RAST forwarded (focus loss / disconnect / reload). */
+  private flushNativeInput(_reason: string): void {
+    const shim = this.shim;
+    for (const init of this.pressedKeys.values()) {
+      try {
+        shim?.sendKey(false, init);
+      } catch {
+        /* the session may already be gone */
+      }
+    }
+    this.pressedKeys.clear();
+    try {
+      shim?.releaseInput?.();
+    } catch {
+      /* ignore */
+    }
+    window.clearTimeout(this.pasteFallbackTimer);
+    this.pasteFallbackTimer = 0;
+    this.pasteGestureSeen = true;
+    this.composing = false;
+  }
+
+  /** Full input reset when the viewer/session is replaced or ended. */
+  private resetInputState(reason: string): void {
+    this.flushNativeInput(reason);
+    this.clipboard.detach();
+    this.shimConnected = false;
+    this.focusedWid = null;
+    this.lastRemoteClipboard = "";
+  }
+
+  /** Focus the RAST window body that hosts an adopted surface. */
+  private focusNativeContent(frame: FrameState | null | undefined): void {
+    const content = frame?.handle?.contentEl;
+    if (!content || frame?.closing) return;
+    if (document.activeElement === content) return;
+    try {
+      content.focus({ preventScroll: true });
+    } catch {
+      /* the window may be closing */
+    }
+  }
+
+  /**
+   * The hidden transport iframe must never keep keyboard focus: give it back to
+   * the focused native window body so the desktop document sees every key.
+   */
+  private ensureNativeKeyboardFocus(): void {
+    if (this.disposed) return;
+    if (this.isModalOpen()) return;
+    if (this.iframe && document.activeElement === this.iframe) {
+      this.focusNativeContent(this.focusedWid ? this.frames.get(this.focusedWid) : null);
+      return;
+    }
+    if (this.focusedWid) this.focusNativeContent(this.frames.get(this.focusedWid));
+  }
+
+  /* ---------------------------------------------------- browser clipboard api */
+
+  private async writeBrowserClipboard(text: string): Promise<boolean> {
+    try {
+      const clipboard = navigator.clipboard;
+      if (!clipboard || typeof clipboard.writeText !== "function") return false;
+      await clipboard.writeText(text);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Read the browser clipboard only when the permission is already granted:
+   * a clipboard read must never pop a permission prompt from an event the
+   * person did not directly trigger.
+   */
+  private async readBrowserClipboardQuietly(): Promise<string | null> {
+    try {
+      const clipboard = navigator.clipboard;
+      if (!clipboard || typeof clipboard.readText !== "function") return null;
+      const permissions = navigator.permissions;
+      if (!permissions || typeof permissions.query !== "function") return null;
+      let state = "prompt";
+      try {
+        const status = await permissions.query({ name: "clipboard-read" as PermissionName });
+        state = status.state;
+      } catch {
+        return null;
+      }
+      if (state !== "granted") return null;
+      const text = await clipboard.readText();
+      return typeof text === "string" ? text : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Retry writing from a real user gesture, with the legacy copy fallback. */
+  private async retryClipboardWrite(text: string): Promise<boolean> {
+    if (await this.writeBrowserClipboard(text)) return true;
+    return copyText(text);
+  }
+
+  /* ------------------------------------------------------- explicit fallbacks */
+
+  private showCopyFallback(text: string, reason: string): void {
+    const area = h("textarea", { class: "textarea" });
+    area.value = text;
+    area.readOnly = true;
+    area.rows = 6;
+    area.style.cssText = "width: 100%; min-height: 140px; margin-top: 10px; white-space: pre-wrap;";
+    area.addEventListener("focus", () => area.select());
+    modal({
+      title: "Copy from the native application",
+      wide: true,
+      body: h(
+        "div",
+        {},
+        h("p", {}, "The browser refused to let RAST write to your clipboard."),
+        h("p", {}, reason),
+        h("p", {}, "Select the text below and press Cmd+C (macOS) or Ctrl+C to copy it manually."),
+        area,
+      ),
+      actions: [
+        {
+          label: "Try copy again",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            if (await this.retryClipboardWrite(text)) {
+              this.deps.toast.success("Copied to your browser clipboard.");
+              close();
+              this.ensureNativeKeyboardFocus();
+              return;
+            }
+            this.deps.toast.warning("The browser still refuses clipboard access. Select the text and copy it manually.");
+            area.focus();
+            area.select();
+          },
+        },
+        { label: "Close", variant: "ghost", onClick: (close) => close() },
+      ],
+    });
+    window.setTimeout(() => {
+      area.focus();
+      area.select();
+    }, 0);
+  }
+
+  private showPasteFallback(reason: string, suggestedText: string | null): void {
+    const area = h("textarea", { class: "textarea" });
+    area.value = suggestedText ?? "";
+    area.rows = 6;
+    area.placeholder = "Paste the text here (Cmd+V / Ctrl+V), then send it to the application.";
+    area.style.cssText = "width: 100%; min-height: 140px; margin-top: 10px;";
+    modal({
+      title: "Paste into the native application",
+      wide: true,
+      body: h(
+        "div",
+        {},
+        h("p", {}, "RAST could not read your clipboard directly for the application's paste."),
+        h("p", {}, reason),
+        h("p", {}, "Paste the text below, then send it to the focused application."),
+        area,
+      ),
+      actions: [
+        {
+          label: "Send to application",
+          variant: "primary",
+          keepOpen: true,
+          onClick: () => {
+            const text = area.value;
+            if (!text) {
+              this.deps.toast.warning("Paste some text first.");
+              area.focus();
+              return;
+            }
+            if (!this.clipboard.pushToRemote(text)) {
+              this.deps.toast.error("The native session did not accept the pasted text.");
+              return;
+            }
+            this.sendPasteShortcut();
+            this.deps.toast.success("Sent to the native application.");
+          },
+        },
+        { label: "Close", variant: "ghost", onClick: (close) => close() },
+      ],
+    });
+    window.setTimeout(() => {
+      area.focus();
+      if (area.value) area.select();
+    }, 0);
+  }
+
+  /** Send a Ctrl+V (Command+V on macOS) to the focused remote window. */
+  private sendPasteShortcut(): void {
+    const shim = this.shim;
+    if (!shim || !this.shimConnected || this.focusedWid === null) return;
+    const modifier = this.mac ? { metaKey: true } : { ctrlKey: true };
+    const init: KeyboardInit = { key: "v", code: "KeyV", keyCode: 86, ...modifier };
+    shim.sendKey(true, init);
+    window.setTimeout(() => shim.sendKey(false, init), 30);
   }
 
   /** Last clipboard text the remote desktop sent us (debugging/status). */

@@ -13,6 +13,9 @@ test("a starting session never loads the viewer before Xpra is ready", () => {
   const loaded: string[] = [];
   const host: any = {
     disposed: false, session: null, iframe: null, shim: null,
+    shimConnected: false,
+    clipboard: { attach() {}, detach() {}, setConnected() {} },
+    resetInputState() {},
     createIframe(url: string) { loaded.push(url); this.iframe = {}; },
     attachShim() { throw new Error("should not attach to a failed starting page"); },
     removeIframe() { this.iframe = null; },
@@ -34,6 +37,9 @@ test("a replacement session uses its new viewer URL", () => {
   const loaded: string[] = [];
   const host: any = {
     disposed: false, session: old, iframe: {}, shim: {},
+    shimConnected: false,
+    clipboard: { attach() {}, detach() {}, setConnected() {} },
+    resetInputState() {},
     createIframe(url: string) { loaded.push(url); this.iframe = {}; },
     removeIframe() { this.iframe = null; },
   };
@@ -50,6 +56,9 @@ test("a non-seamless session never renders the remote desktop in a RAST window",
     disposed: false,
     frames: new Map(),
     starting: new Map(),
+    shimConnected: false,
+    clipboard: { attach() {}, detach() {}, setConnected() {} },
+    resetInputState() {},
     session: { url: "/linux-apps/session/0123456789abcdef0123456789abcdef/" },
     nonSeamlessNotice: "",
     deps: {

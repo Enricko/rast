@@ -29,7 +29,7 @@
 (function () {
   "use strict";
 
-  var VERSION = "1.2.0";
+  var VERSION = "1.3.0";
   var ROOT = window;
 
   /* ------------------------------------------------------------------ state */
@@ -42,10 +42,26 @@
   var listeners = Object.create(null);
   var lastConnected = null;
   var lastWindowsSignature = "";
-  var lastClipboard = "";
   var notifyTimer = 0;
   var pollTimer = 0;
   var patchedClient = null;
+  var platformCache = null;
+
+  /* Clipboard bookkeeping shared by the token/request patches below. */
+  var clipboardState = {
+    lastText: "",
+    lastDatatype: "",
+    lastEventAt: 0,
+    direction: "both",
+    requestCount: 0,
+    responseCount: 0,
+  };
+  var pendingClipboardRequests = Object.create(null);
+  var clipboardRequestSeq = 0;
+  /* The desktop answers a clipboard request synchronously from its cached
+   * clipboard in the normal case; this timeout only exists so an application
+   * paste never hangs when the desktop cannot read the clipboard at all. */
+  var CLIPBOARD_REQUEST_TIMEOUT_MS = 750;
 
   function log() {
     try {
@@ -200,6 +216,12 @@
       window.cancelAnimationFrame = parent.cancelAnimationFrame.bind(parent);
     }
     patchClient(client);
+    // The desktop may capture the client after the first hello already ran:
+    // pin the keyboard/clipboard contract and release the viewer's clipboard
+    // autofocus as soon as we own the instance.
+    applyKeyboardPolicy(client);
+    neutralizeClipboardAutofocus();
+    requestDesktopKeyboardFocus();
     state.ready = true;
     log("captured XpraClient, version", VERSION);
     emit("ready", snapshot());
@@ -386,6 +408,10 @@
       desktopWidth: desktopWidth,
       desktopHeight: desktopHeight,
       clipboardEnabled: !!(client && client.clipboard_enabled),
+      clipboardDirection: client ? String(client.clipboard_direction || "") : "",
+      clipboardPending: clipboardState.requestCount - clipboardState.responseCount,
+      clipboardLastEventAt: clipboardState.lastEventAt,
+      keyboardSwap: !!(client && client.swap_keys),
       captureKeyboard: !!(client && client.capture_keyboard),
       audio: {
         enabled: !!(client && client.audio_enabled),
@@ -455,6 +481,328 @@
       };
     } catch (e) {
       /* ignore */
+    }
+  }
+
+  /* --------------------------------------------------- platform + focus */
+
+  /** navigator of the top-level RAST document (same-origin), or ours. */
+  function desktopNavigator() {
+    try {
+      var parent = parentWindow();
+      if (parent && parent.navigator) return parent.navigator;
+    } catch (e) {
+      /* cross-origin: use our own */
+    }
+    try {
+      return window.navigator;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * The desktop client's platform. RAST and the viewer share an origin, so the
+   * parent navigator is the authoritative one (and is not Chrome-specific).
+   */
+  function isMacPlatform() {
+    if (platformCache !== null) return platformCache;
+    var result = false;
+    try {
+      var nav = desktopNavigator();
+      if (nav) {
+        var platform = (nav.userAgentData && nav.userAgentData.platform) || nav.platform || "";
+        result =
+          /mac/i.test(platform) ||
+          /Macintosh|Mac OS X/i.test(nav.userAgent || "");
+      }
+    } catch (e) {
+      result = false;
+    }
+    platformCache = result;
+    return result;
+  }
+
+  /**
+   * The RAST desktop is the only keyboard owner. The hidden viewer must not
+   * keep DOM focus: the Xpra page focuses its #pasteboard element and re-focuses
+   * it on blur, which pulls every keystroke into the off-screen iframe and
+   * bypasses the desktop's key routing (and leaves the browser clipboard APIs
+   * running in an unfocused document, where they are rejected). Replacing the
+   * node drops the viewer's jQuery blur handler; the desktop then focuses the
+   * adopted window body after connecting.
+   */
+  function neutralizeClipboardAutofocus() {
+    var changed = false;
+    try {
+      var pasteboard = document.getElementById("pasteboard");
+      if (pasteboard && pasteboard.parentNode) {
+        var clone = pasteboard.cloneNode(true);
+        try {
+          clone.removeAttribute("autofocus");
+        } catch (e) {
+          /* ignore */
+        }
+        try {
+          clone.setAttribute("data-rast-neutralized", "1");
+        } catch (e) {
+          /* ignore */
+        }
+        pasteboard.parentNode.replaceChild(clone, pasteboard);
+        changed = true;
+      }
+      var active = document.activeElement;
+      if (active && active !== document.body && typeof active.blur === "function") {
+        try {
+          active.blur();
+        } catch (e) {
+          /* ignore */
+        }
+        changed = true;
+      }
+    } catch (error) {
+      warn("could not release the viewer's clipboard focus", error);
+    }
+    return changed;
+  }
+
+  /** Ask the desktop to put keyboard focus back on the adopted window body. */
+  function requestDesktopKeyboardFocus() {
+    try {
+      emit("focus-request", {});
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * Pin the keyboard/clipboard contract of the pinned Xpra HTML5 client:
+   *  - macOS clients get xpra-html5's Meta<->Control swap, so the desktop can
+   *    forward the real Command events and Linux applications receive their
+   *    usual Control shortcuts (and Control+click behaves like Ctrl+click);
+   *  - every other platform keeps its native Control mapping;
+   *  - key capture is enforced because only the RAST desktop sends keys here.
+   */
+  function applyKeyboardPolicy(client) {
+    if (!client) return;
+    try {
+      client.swap_keys = isMacPlatform();
+    } catch (e) {
+      warn("could not set the keyboard swap mode", e);
+    }
+    try {
+      client.capture_keyboard = true;
+    } catch (e) {
+      warn("could not enable keyboard capture", e);
+    }
+    try {
+      clipboardState.direction = String(client.clipboard_direction || "both");
+    } catch (e) {
+      /* ignore */
+    }
+  }
+
+  /* --------------------------------------------------- clipboard patches */
+
+  function replaceClientMethod(client, name, wrapped, original) {
+    try {
+      client[name] = wrapped;
+    } catch (e) {
+      warn("could not patch", name, e);
+      return false;
+    }
+    try {
+      var table = client.packet_handlers;
+      if (table && original) {
+        for (var key in table) {
+          if (table[key] === original) table[key] = wrapped;
+        }
+      }
+    } catch (e) {
+      /* ignore */
+    }
+    return true;
+  }
+
+  /**
+   * Remote -> browser copy. The pinned client plays the token itself (writing
+   * navigator.clipboard from its hidden, unfocused document, which browsers
+   * reject), so the desktop must receive the token and write the clipboard from
+   * its focused document instead. Only text targets are forwarded; image/HTML
+   * data is reported as unsupported instead of pretending it was copied.
+   */
+  function patchClipboardTokens(client) {
+    var original = client._process_clipboard_token;
+    if (typeof original !== "function" || original.__rastClipboardToken) return;
+    var wrapped = function (packet) {
+      var result;
+      try {
+        result = original.apply(this, arguments);
+      } finally {
+        try {
+          var datatype = packet && packet.length > 4 ? String(packet[4] == null ? "" : packet[4]) : "";
+          var selection = packet && packet.length > 1 ? String(packet[1] == null ? "CLIPBOARD" : packet[1]) : "CLIPBOARD";
+          var lower = datatype.toLowerCase();
+          var isText = lower === "" || lower.indexOf("text") >= 0 || lower.indexOf("string") >= 0;
+          if (isText) {
+            var text = client.clipboard_buffer == null ? "" : String(client.clipboard_buffer);
+            if (text && text !== clipboardState.lastText) {
+              clipboardState.lastText = text;
+              clipboardState.lastDatatype = datatype || "text/plain";
+              clipboardState.lastEventAt = Date.now();
+              emit("clipboard", {
+                text: text,
+                datatype: clipboardState.lastDatatype,
+                selection: selection,
+              });
+            }
+          } else {
+            emit("clipboard-format", { datatype: datatype || "unknown", selection: selection, supported: false });
+          }
+        } catch (error) {
+          warn("clipboard token handling failed", error);
+        }
+      }
+      return result;
+    };
+    wrapped.__rastClipboardToken = true;
+    replaceClientMethod(client, "_process_clipboard_token", wrapped, original);
+  }
+
+  /**
+   * Browser -> application paste. The X11 application asks the Xpra server for
+   * the clipboard; the server asks this client, and the pinned client would read
+   * navigator.clipboard from its unfocused document (refused). Defer the request
+   * to the focused desktop document and fall back to the client's own path if
+   * the desktop cannot answer in time, so an application paste never hangs.
+   */
+  function patchClipboardRequests(client) {
+    var original = client._process_clipboard_request;
+    if (typeof original !== "function" || original.__rastClipboardRequest) return;
+    var wrapped = function (packet) {
+      var requestId = packet && packet.length > 1 ? packet[1] : 0;
+      var selection = packet && packet.length > 2 ? String(packet[2] == null ? "CLIPBOARD" : packet[2]) : "CLIPBOARD";
+      clipboardRequestSeq += 1;
+      var key = selection + ":" + String(requestId) + ":" + clipboardRequestSeq;
+      var entry = {
+        key: key,
+        requestId: requestId,
+        selection: selection,
+        timer: 0,
+        done: false,
+        createdAt: Date.now(),
+      };
+      entry.finish = function (text, provide) {
+        if (entry.done) return false;
+        entry.done = true;
+        if (entry.timer) {
+          try {
+            window.clearTimeout(entry.timer);
+          } catch (e) {
+            /* ignore */
+          }
+          entry.timer = 0;
+        }
+        delete pendingClipboardRequests[key];
+        try {
+          if (provide) {
+            client.send_clipboard_string(requestId, selection, text == null ? "" : String(text));
+          } else {
+            original.call(client, packet);
+          }
+          clipboardState.responseCount += 1;
+          return true;
+        } catch (error) {
+          warn("clipboard request answer failed", error);
+          return false;
+        }
+      };
+      pendingClipboardRequests[key] = entry;
+      clipboardState.requestCount += 1;
+      entry.timer = window.setTimeout(function () {
+        entry.timer = 0;
+        if (entry.done) return;
+        entry.finish(null, false);
+      }, CLIPBOARD_REQUEST_TIMEOUT_MS);
+      emit("clipboard-request", {
+        key: key,
+        requestId: String(requestId),
+        selection: selection,
+      });
+      return true;
+    };
+    wrapped.__rastClipboardRequest = true;
+    replaceClientMethod(client, "_process_clipboard_request", wrapped, original);
+  }
+
+  function clearClipboardRequests() {
+    for (var key in pendingClipboardRequests) {
+      if (!Object.prototype.hasOwnProperty.call(pendingClipboardRequests, key)) continue;
+      var entry = pendingClipboardRequests[key];
+      if (!entry) continue;
+      entry.done = true;
+      if (entry.timer) {
+        try {
+          window.clearTimeout(entry.timer);
+        } catch (e) {
+          /* ignore */
+        }
+        entry.timer = 0;
+      }
+      delete pendingClipboardRequests[key];
+    }
+  }
+
+  /** Called after the connection is replaced: no stale requests/buffers. */
+  function onConnectionLost() {
+    clearClipboardRequests();
+    clipboardState.lastText = "";
+    clipboardState.lastDatatype = "";
+  }
+
+  /** Called after every hello: pin the contract and the desktop focus. */
+  function onSessionConnected() {
+    applyKeyboardPolicy(state.client);
+    var released = neutralizeClipboardAutofocus();
+    requestDesktopKeyboardFocus();
+    if (released) log("released the viewer clipboard autofocus");
+  }
+
+  /* ------------------------------------------------ wheel normalization */
+
+  /**
+   * Shift+wheel: browsers disagree (some report only a vertical delta). Linux
+   * applications expect a horizontal scroll while Shift is held, so convert an
+   * untranslated vertical delta into the horizontal component. Real horizontal
+   * trackpad/wheel deltas are left untouched.
+   */
+  function patchWheelNormalization() {
+    try {
+      var utils = window.Utilities;
+      if (!utils || typeof utils.normalizeWheel !== "function" || utils.normalizeWheel.__rastWheel) return;
+      var original = utils.normalizeWheel;
+      var wrapped = function (event) {
+        var normalized = original.call(utils, event);
+        try {
+          if (event && event.shiftKey && normalized && normalized.pixelY && !normalized.pixelX) {
+            var pixelX = normalized.pixelY;
+            return {
+              spinX: pixelX < 1 ? -1 : 1,
+              spinY: 0,
+              pixelX: pixelX,
+              pixelY: 0,
+              deltaMode: normalized.deltaMode || 0,
+            };
+          }
+        } catch (e) {
+          /* keep the original result */
+        }
+        return normalized;
+      };
+      wrapped.__rastWheel = true;
+      utils.normalizeWheel = wrapped;
+    } catch (error) {
+      warn("could not normalize shift-wheel scrolling", error);
     }
   }
 
@@ -585,19 +933,19 @@
       "_process_window_resized",
       "_process_setting_change",
     ];
-    for (var i = 0; i < handlers.length; i++) patchHandler(client, handlers[i]);
-    patchHandler(client, "_process_clipboard_token", function () {
-      try {
-        var text = client.clipboard_buffer == null ? "" : String(client.clipboard_buffer);
-        if (text !== lastClipboard) {
-          lastClipboard = text;
-          emit("clipboard", { text: text });
-        }
-      } catch (e) {
-        /* ignore */
-      }
-    });
+    var afterHandlers = {
+      _process_hello: onSessionConnected,
+      _process_close: onConnectionLost,
+      _process_disconnect: onConnectionLost,
+    };
+    for (var i = 0; i < handlers.length; i++) {
+      var handlerName = handlers[i];
+      patchHandler(client, handlerName, afterHandlers[handlerName] || null);
+    }
+    patchClipboardTokens(client);
+    patchClipboardRequests(client);
     patchGetMouse(client);
+    patchWheelNormalization();
     sanitizeWindowPackets(client);
     /* Some builds assign handlers directly on the instance; make sure the
      * packet table references our wrappers even if it was built earlier. */
@@ -680,29 +1028,49 @@
     if (!win.canvas || win.__rastInputRecovery) return;
     var canvas = win.canvas;
     var parent = canvas.ownerDocument.defaultView;
-    var down = function (event) {
-      // Mouse capture changes compatibility mouse-event delivery in some
-      // browsers; only capture touch/pen, where it is required for dragging.
-      if (event.pointerType !== "mouse") {
+    var markDown = function (event) {
+      win.__rastPointerDown = true;
+      if (event && event.pointerType && event.pointerType !== "mouse") {
+        // Mouse capture changes compatibility mouse-event delivery in some
+        // browsers; only capture touch/pen, where it is required for dragging.
         try { canvas.setPointerCapture(event.pointerId); } catch (e) { /* unsupported */ }
       }
       unlockAudio();
     };
     var release = function () {
+      if (!win.__rastPointerDown) return;
+      win.__rastPointerDown = false;
       var client = state.client;
-      // No adopted pointer event was recorded yet: Xpra's release_buttons
-      // would call getMouse(undefined) and throw inside the viewer. There is
-      // no remote button to release in that case.
-      if (!win.__rastLastPointerEvent) return;
-      if (client && typeof client.release_buttons === "function") client.release_buttons(win.__rastLastPointerEvent, win);
+      var lastEvent = win.__rastLastPointerEvent;
+      win.__rastLastPointerEvent = null;
+      // Without a recorded adopted pointer event Xpra's release_buttons would
+      // call getMouse(undefined) and throw inside the viewer; the button state
+      // is then cleared directly below instead.
+      if (!lastEvent) {
+        try {
+          if (client && client.buttons_pressed && typeof client.buttons_pressed.clear === "function") {
+            client.buttons_pressed.clear();
+          }
+        } catch (e) {
+          /* ignore */
+        }
+        return;
+      }
+      if (client && typeof client.release_buttons === "function") client.release_buttons(lastEvent, win);
     };
-    canvas.addEventListener("pointerdown", down);
+    canvas.addEventListener("pointerdown", markDown);
+    canvas.addEventListener("mousedown", markDown);
     canvas.addEventListener("pointercancel", release);
-    // The iframe cannot see a button release over the parent document (tab
-    // tear-out, drag out of the window): release on the visible page instead.
+    // The transport iframe cannot see a button release over the RAST document
+    // (drag out of the adopted window, a title-bar press, focus loss): release
+    // on the visible desktop page instead so the remote drag never sticks.
+    var releaseAll = function () {
+      release();
+    };
     if (parent) {
-      parent.addEventListener("pointerup", release);
-      parent.addEventListener("blur", release);
+      parent.addEventListener("pointerup", releaseAll);
+      parent.addEventListener("pointercancel", releaseAll);
+      parent.addEventListener("blur", releaseAll);
     }
     var destroy = win.destroy;
     win.destroy = function () {
@@ -711,14 +1079,42 @@
       return destroy.apply(this, arguments);
     };
     win.__rastInputRecovery = function () {
-      canvas.removeEventListener("pointerdown", down);
+      canvas.removeEventListener("pointerdown", markDown);
+      canvas.removeEventListener("mousedown", markDown);
       canvas.removeEventListener("pointercancel", release);
       if (parent) {
-        parent.removeEventListener("pointerup", release);
-        parent.removeEventListener("blur", release);
+        parent.removeEventListener("pointerup", releaseAll);
+        parent.removeEventListener("pointercancel", releaseAll);
+        parent.removeEventListener("blur", releaseAll);
       }
       win.destroy = destroy;
     };
+  }
+
+  /** Release every mouse button held by an adopted remote window. */
+  function releaseInput() {
+    var client = state.client;
+    if (!client) return false;
+    try {
+      var map = client.id_to_window || {};
+      for (var wid in map) {
+        if (!Object.prototype.hasOwnProperty.call(map, wid)) continue;
+        var win = map[wid];
+        if (!win || !win.__rastContentEl) continue;
+        win.__rastPointerDown = false;
+        var lastEvent = win.__rastLastPointerEvent;
+        win.__rastLastPointerEvent = null;
+        if (!lastEvent) continue;
+        if (typeof client.release_buttons === "function") client.release_buttons(lastEvent, win);
+      }
+      if (client.buttons_pressed && typeof client.buttons_pressed.clear === "function") {
+        client.buttons_pressed.clear();
+      }
+      return true;
+    } catch (error) {
+      warn("could not release the remote mouse buttons", error);
+      return false;
+    }
   }
 
   /* ------------------------------------------------------- polling fallback */
@@ -1155,7 +1551,9 @@
   function sendClipboardText(text) {
     var client = state.client;
     if (!client || !client.connected) return false;
+    if (client.clipboard_enabled === false) return false;
     var value = text == null ? "" : String(text);
+    if (!value) return false;
     try {
       var bytes = value;
       try {
@@ -1166,7 +1564,17 @@
         /* send the string as-is */
       }
       client.clipboard_buffer = value;
+      try {
+        client.clipboard_datatype = "text/plain";
+      } catch (e) {
+        /* ignore */
+      }
       client.send_clipboard_token(bytes);
+      // Remember what the desktop pushed: a token echoed back by the server for
+      // identical content must not overwrite the browser clipboard again.
+      clipboardState.lastText = value;
+      clipboardState.lastDatatype = "text/plain";
+      clipboardState.lastEventAt = Date.now();
       return true;
     } catch (error) {
       warn("clipboard send failed", error);
@@ -1181,13 +1589,25 @@
 
   function requestClipboard() {
     var client = state.client;
-    if (!client) return false;
+    if (!client || !client.connected) return false;
     try {
       if (typeof client._poll_clipboard === "function") client._poll_clipboard();
       return true;
     } catch (e) {
       return false;
     }
+  }
+
+  /**
+   * Answer a deferred clipboard request (`clipboard-request` event). `text`
+   * null declines and lets the Xpra client run its own fallback path.
+   */
+  function respondClipboardRequest(key, text) {
+    if (key == null) return false;
+    var entry = pendingClipboardRequests[String(key)];
+    if (!entry) return false;
+    if (text === null || typeof text === "undefined") return entry.finish(null, false);
+    return entry.finish(String(text), true);
   }
 
   /* -------------------------------------------------------------- playback */
@@ -1286,6 +1706,8 @@
     sendClipboardText: sendClipboardText,
     clipboardText: clipboardText,
     requestClipboard: requestClipboard,
+    respondClipboardRequest: respondClipboardRequest,
+    releaseInput: releaseInput,
     reconnect: reconnect,
     disconnect: disconnect,
     setScale: setScale,
