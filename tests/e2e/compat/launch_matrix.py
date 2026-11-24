@@ -99,27 +99,41 @@ def main():
             print(f"FAIL {name}: {rec['error']}")
             return rec
         rec["launchMs"] = int((time.time() - t0) * 1000)
-        # wait for the run to report running and the window to appear
         appId = (resp.get("run") or {}).get("appId") or entry["id"]
         deadline = time.time() + 90
-        before = None
+        run = None
         while time.time() < deadline:
             _, ov = alice.curl("/api/linux-apps")
             session = (ov or {}).get("session") or {}
-            runs = (session.get("apps") or [])
+            runs = session.get("apps") or []
             run = next((r for r in runs if r.get("appId") == appId), None)
             if run and run.get("status") == "running":
-                if before is None:
-                    before = host_snapshot(session.get("display"))
-                windows = host_snapshot(session.get("display"))
-                new = [w for w in windows if w not in before]
-                if new:
-                    rec["windows"] = new
-                    break
+                break
+            if run and run.get("status") in ("failed", "exited"):
+                break
             time.sleep(1)
-        rec["status"] = (session.get("apps") or [{}])[0].get("status")
+        rec["status"] = (run or {}).get("status")
+        # Collect the full X window list once and attribute windows to this app
+        # by WM class / name token: timing-diffs between launches mis-attribute
+        # windows that are mapped late by a previous application.
+        time.sleep(2.5)
+        _, ov = alice.curl("/api/linux-apps")
+        session = (ov or {}).get("session") or {}
+        display = session.get("display")
+        windows = host_snapshot(display) if display else []
+        tokens = []
+        for token in (entry.get("startupWmClass"), entry.get("name"), name):
+            if token:
+                tokens.append(str(token).lower())
+        if entry.get("exec"):
+            tokens.append(str(entry["exec"][0]).rsplit("/", 1)[-1].lower())
+        matched = [w for w in windows if any(tok and tok in w.lower() for tok in tokens)]
+        # Avoid the tiny 1x1/selection-owner helper windows when a real window
+        # of the same application exists.
+        substantial = [w for w in matched if "1x1+" not in w and "3x3+" not in w and "10x10+" not in w]
+        rec["windows"] = substantial or matched
         results.append(rec)
-        print(f"{'PASS' if rec['windows'] else 'PARTIAL'} {name} windows={len(rec['windows'])} {rec['windows'][:2]}")
+        print(f"{'PASS' if rec['windows'] else 'PARTIAL'} {name} status={rec['status']} windows={len(rec['windows'])} {rec['windows'][:2]}")
         return rec
 
     def find(name):
@@ -129,7 +143,7 @@ def main():
         ("XTerm", "system desktop entry"),
         ("UXTerm", "system desktop entry"),
         ("Alacritty", "Rust/OpenGL native app"),
-        ("Obconf", "GTK2 settings dialog"),
+        ("Openbox Configuration Manager", "GTK2 settings dialog"),
         ("Blender", "snap, graphics/3D (slow start)"),
         ("Chromium Web Browser", "snap browser"),
         ("ArtCraft Launcher", "third-party launcher (system entry)"),
@@ -144,13 +158,35 @@ def main():
         launch(name, entry, note)
 
     # WordCraft (real AppImage installed as an external application in this test account)
-    wc = next((a for a in apps.values() if "wordcraft" in a["name"].lower()), None)
+    wc = next((a for a in apps.values() if "wordcraft" in a["name"].lower() and "test" in a["name"].lower()), None) \
+         or next((a for a in apps.values() if "wordcraft" in a["name"].lower()), None)
     if wc:
         if not wc.get("approved"):
             admin.curl(f"/api/linux-apps/discovered/{wc['id']}", "PATCH", {"approved": True})
         launch("WordCraft (real AppImage)", wc, "real WordCraft AppImage installed as an external app for this test account")
     else:
         results.append({"app": "WordCraft", "status": "not-in-inventory", "windows": []})
+
+    def import_and_launch(name, path, args, icon, note):
+        code, imp = admin.curl("/api/linux-apps/discovered/import", "POST",
+                               {"name": name, "path": path, "args": args, "icon": icon})
+        if code != 200:
+            results.append({"app": name, "status": "import-failed", "error": str(imp)[:200]})
+            print(f"FAIL import {name}: {str(imp)[:160]}")
+            return
+        entry = imp if imp.get("id") else (imp.get("app") or imp)
+        if isinstance(entry, dict) and entry.get("id"):
+            launch(name, entry, note)
+
+    # Snap-packaged apps are not under /usr/share/applications; import them manually.
+    for name, path, icon in [
+        ("Blender (snap)", "/snap/bin/blender", "blender"),
+        ("Chromium (snap)", "/snap/bin/chromium", "chromium-browser"),
+    ]:
+        if os.path.exists(path):
+            import_and_launch(name, path, [], icon, "snap-packaged application, manually imported")
+        else:
+            results.append({"app": name, "status": "not-installed", "windows": []})
 
     # imported fixtures (mpv video, GTK zenity, Qt qterminal, LibreOffice writer if present)
     imports = [

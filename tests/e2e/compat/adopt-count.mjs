@@ -23,7 +23,11 @@ try {
   const session = await page.evaluate(() => fetch('/api/linux-apps').then(r=>r.json()).then(d=>d.session ?? null));
   result.sessionBackend = session?.displayBackend;
   // Wait for the adopted native windows to appear (bounded).
+  // Wait for adoption to settle: Xpra sends existing windows progressively, so
+  // stopping at the first adopted window undercounts a multi-app session.
   let titles = [];
+  let stable = 0;
+  let lastCount = 0;
   for (let i = 0; i < 60; i++) {
     titles = await page.evaluate(() =>
       Array.from(document.querySelectorAll(".linux-native-window")).map((el) => {
@@ -32,7 +36,10 @@ try {
         return title;
       }),
     );
-    if (titles.length > 0 && await page.evaluate(() => !document.querySelector(".win-body .starting, .window .starting"))) break;
+    if (titles.length === lastCount && titles.length > 0) stable += 1;
+    else stable = 0;
+    lastCount = titles.length;
+    if (stable >= 5) break;
     await page.waitForTimeout(500);
   }
   result.adoptedWindows = titles.length;

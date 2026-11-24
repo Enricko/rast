@@ -1490,7 +1490,10 @@ const ARGV0_PREFIXES: &[&str] = &[
     "/usr/local/bin",
     "/usr/games",
     "/opt",
-    "/snap/bin",
+    // Snap-packaged applications: `/snap/bin` holds root-owned symlinks whose
+    // canonical target lives under `/snap/<name>/<revision>/...`, so the whole
+    // root-owned snap tree must be allowed for canonicalisation to succeed.
+    "/snap",
 ];
 
 /// Validate `argv[0]`: absolute, inside an allow-listed prefix, and after
@@ -2421,6 +2424,7 @@ mod tests {
             "/usr/local/bin/tool",
             "/opt/google/chrome/google-chrome",
             "/snap/bin/code",
+            "/snap/blender/7998/bin/blender",
         ] {
             assert!(validate_argv0(&ctx, ok).is_ok(), "{ok}");
         }
