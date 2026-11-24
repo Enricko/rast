@@ -847,23 +847,30 @@ the revert. Full record: `tests/e2e/results/final-input-verification-951c15a.md`
 Full reports: `tests/e2e/results/perf-runtime2-runtime21-final-2026-11-24-2026-11-24.{json,md,evidence.txt}`.
 
 Environment caveat: this run happened while the shared host was under sustained
-external disk-I/O pressure (`/proc/pressure/io` some avg10 ~30-45 % during the
-round) and the benchmark's new session fell back to the software Xvfb backend
+external disk-I/O pressure (`/proc/pressure/io` some avg10 ≈ 30–45 %) and the
+benchmark's new session fell back to the software Xvfb backend
 (`Display: Xvfb software (:101)`) instead of the GPU display. The numbers below
-are therefore an **environment-degraded reference**, not the normal-load
-product result; they are published with the environment facts and must not be
-compared as a fair regression without re-running under comparable conditions.
+are an **environment-degraded reference**, not the normal-load product result;
+they are published with the environment facts and must not be treated as a fair
+regression without re-running under comparable conditions.
 
 | Metric | p50 / p95 | Samples | Notes |
 | --- | --- | --- | --- |
-| Input latency keydown→changed pixel | 229 / 456 | n=20 |
-| Negotiated encoder | webp → h264 | — | xpra info before/mid/after; batch 16/500/250 ms |
-| Host load at start/end | 1.18 / 2.53 | — | 12 vCPU, I/O pressure elevated |
-| Idle CPU / memory | 25.2 % / 153.3 MiB | — | session+app cgroups |
+| Cold launch — click → adopted window | 5174 / 5215 ms | 2 | session stopped first; Xvfb fallback |
+| Cold launch — placeholder window | 264 / 290 ms | 2 | shell responsiveness |
+| Cold launch — adopted → first painted | 50 / 236 ms | 2 | additional paint wait |
+| Warm launch — click → adopted window | 846 / 2638 ms | 4 | p95 outlier under load; warm median 846 ms |
+| Input latency keydown → changed pixel | 229 / 456 ms | 20 | screenshot polling ≈59 ms granularity; upper bound |
+| Typing burst 40 chars — dispatch | 29 / 29 ms | 3 | first→last key |
+| Typing burst — drain / total | 321 / 434 ms, 350 / 461 ms | 3 | last key→stable frame, first→stable frame (upper bounds) |
+| Idle CPU | 25.2 % of one core | 1 | session+app cgroups, 30 s quiet |
+| Idle memory (current / peak) | 153.3 / 194.5 MiB | 1 | cgroup memory.current / memory.peak |
+| Negotiated encoder | webp (before) → h264 (mid/after) | — | xpra info; batch 16/500/250 ms, lz4 |
+| Host load at start/end | 1.18 / 2.53 | — | 12 vCPU i7-9750H, I/O pressure elevated |
 
-The before/after comparison for the 2.0 work (§7.3) remains the authoritative
-product comparison (input p50 217→182 ms, p95 398→280 ms, typing total
-825→337 ms, dispatch 129→26 ms, cold session start 12.09 s → pre-warmed path
-~3 s). This final run mainly confirms the deployed build is healthy and records
-the host-contention caveat; a clean re-run is scheduled on a quiet host for the
+The authoritative before/after comparison for the 2.0 input/runtime work (§7.3)
+remains: input p50 217→182 ms, p95 398→280 ms, typing total 825→337 ms,
+dispatch 129→26 ms, cold session start 12.09 s → pre-warmed/lazy path ~3 s.
+This final run confirms the deployed build is healthy and records the
+host-contention caveat; a clean re-run on a quiet host is scheduled for the
 final acceptance report.
