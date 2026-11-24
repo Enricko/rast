@@ -37,7 +37,8 @@ All list endpoints accept `page` and `perPage` (bounded server-side).
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/healthz` | liveness for proxies (`ok`) |
-| GET | `/api/bootstrap` | `{product, description, version, setupRequired, setupTokenRequired, registrationEnabled, maxUploadBytes, sessionTtlHours, serverTime}` |
+| GET | `/api/bootstrap` | `{product, description, version, setupRequired, setupTokenRequired, registrationEnabled, maxUploadBytes, sessionTtlHours, serverTime, desktop:{protocol, streamTokens, minClientVersion}}` — additive `desktop` capability for RAST Desktop; `streamTokens:true` means the native stream broker is available |
+| GET | `/linux-apps/native/{token}/{optional-rest}` | native stream relay (WebSocket `Upgrade` only, not under `/api`). The single-use stream token in the path — issued by `POST /api/linux-apps/session/stream-token` — is the only credential; no cookie and no browser `Origin` are required or accepted. Frames are relayed transparently to the caller's loopback Xpra WebSocket (`/rest?query` preserved). Invalid/expired/consumed token → bodyless `401`; protocol errors (e.g. unmasked client frames) close the connection. See [NATIVE-BROKER.md](NATIVE-BROKER.md) |
 | GET | `/api/setup/status` | `{setupRequired, tokenRequired, version}` |
 | POST | `/api/setup` | `{token?, username, password, displayName?}` — creates the first admin, one-shot, disabled once an admin exists |
 | POST | `/api/auth/login` | `{username, password}` → `{user, csrfToken, expiresAt}` |
@@ -354,6 +355,8 @@ policy's `applications` (Docker) rule.
 | Method | Path | Notes |
 | --- | --- | --- |
 | POST | `/api/linux-apps/session/prewarm` | any signed-in user: starts the caller's shared graphical session in the background without launching an application, so the first launch is warm. Returns `{prewarmed:true, session:NativeSession}` or `{prewarmed:false, reason}` when `linux_prewarm` is disabled. No-op when a session already exists | — |
+| POST | `/api/linux-apps/session/stream-token` | any signed-in user (**RAST Desktop**): issue a short-lived, single-use stream token for the caller's live native session → `{protocol:1, token, url:"wss://…/linux-apps/native/<token>/", expiresAt, ttlSeconds:120, transport:"xpra-websocket", session:NativeSession, xpra:{sharing:true,protocol:1}}`. The token is 32 random bytes (base64url), kept server-side only as SHA-256, bound to the caller + login session + native session, consumed by the first successful WebSocket upgrade, at most 8 outstanding per user, 30 issuances/minute. `404` when no native session is running, `409` when native Linux apps are disabled, `429` rate limited. Never present in logs/audit. See [NATIVE-BROKER.md](NATIVE-BROKER.md) |
+| DELETE | `/api/linux-apps/session/stream-tokens` | any signed-in user: revoke every outstanding native stream token of the caller → `{revoked:<n>}` (best-effort on logout/detach) |
 | GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled, runtime:{profile, quality, minQuality, speed, minSpeed, videoScaling, avSync, encoding, display:{xvfb, xvfbPath, customConfigured, customUsable, active, customCommand, nvidiaXorgDriver, xorg, gpuDisplayConfigured}, gpu:{vendor, model, driverVersion, nvidiaDeviceNodes, nvidiaUvm, nvidiaSmi, nvencLibrary, nvdecLibrary, xpraNvidiaCodecs, mesaEgl, renderNodes}, gpuAccelerationVerified, notes}}` — the `limits` object is flat (no nested per-backend object); `runtime` is read-only capability/policy detection (no probing side effects) and `gpuAccelerationVerified` stays false unless a real application test was performed |
 | POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
 | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
@@ -468,6 +471,20 @@ Closing a RAST window sends the app's normal close request (the app's own
 unsaved-changes dialog appears as a dialog window); terminating an application
 is the separate `session/runs/{run}/close` action. Window titles from the
 application are escaped before the Xpra HTML5 client renders them.
+
+RAST Desktop (the native macOS client) does not use the cookie-authorized HTML5
+proxy: it calls `POST /api/linux-apps/session/stream-token`, receives a 120 s
+single-use `wss://…/linux-apps/native/<token>/` URL and attaches the official
+native Xpra client there. The relay route strips the token prefix, forwards the
+client's remainder/query verbatim to the loopback Xpra WebSocket and consumes
+the token atomically on the first successful upgrade; it is mounted outside
+cookie auth and outside the browser same-origin `Origin` check because the
+native client can present neither, and the token (bound to the account, login
+session and native session) is its only credential. Native Xpra must run with
+`XPRA_WEBSOCKET_MASK=1` (RFC 6455 masking). Audit events:
+`linux_apps.stream_token.issued`, `linux_apps.stream_token.denied`,
+`linux_apps.stream.attached` (no tokens, URLs or session keys). Full security
+model and examples: [NATIVE-BROKER.md](NATIVE-BROKER.md).
 
 ## Native Terminal (app id `terminal`)
 
