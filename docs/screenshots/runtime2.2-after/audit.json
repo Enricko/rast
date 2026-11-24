@@ -1,0 +1,144 @@
+{
+  "screens": [
+    "01-desktop-1440x900",
+    "02-applications-menu",
+    "03-app-center-default",
+    "04-app-center-discovered-tiles",
+    "05-two-native-windows",
+    "06-desktop-with-two-windows",
+    "10-desktop-1280x720",
+    "10-desktop-1920x1080",
+    "11-menu-1280x720"
+  ],
+  "consoleErrors": [
+    "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security ",
+    "Loading the script 'https://static.cloudflareinsights.com/beacon.min.js/vce701823e78c4301a35b7e07294d87301792088814092' violates the following Content Security ",
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "Failed to load resource: the server responded with a status of 404 ()",
+    "Failed to load resource: the server responded with a status of 404 ()"
+  ],
+  "diagnostics": {
+    "desktop": {
+      "icons": [
+        "Applications",
+        "File Station",
+        "Terminal",
+        "Docker",
+        "Resource Monitor",
+        "Backup Center",
+        "App Center",
+        "Control Panel",
+        "Activity Logs",
+        "ArtCraft Launcher",
+        "Google Chrome",
+        "Browser",
+        "Calculator"
+      ],
+      "overflow": {
+        "sw": 1440,
+        "cw": 1440
+      }
+    },
+    "menu": {
+      "items": [
+        "ApplicationsEvery app you can open",
+        "File StationBrowse, upload, download and",
+        "TerminalCommand line access to this RAST",
+        "DockerDeploy and manage Docker container",
+        "Resource MonitorLive CPU, memory, disk a",
+        "Backup CenterBack up and restore RAST co",
+        "App CenterInstall and manage apps and ve",
+        "Control PanelProfile, users, shared fold",
+        "Activity LogsAudit trail of sign-ins, fi",
+        "ArtCraft LauncherInstall, update and lau",
+        "Google ChromeAccess the Internet",
+        "WordCraftWriting and document design",
+        "AlacrittyA fast, cross-platform, OpenGL ",
+        "FirefoxDiscovered Linux application",
+        "GNU Image Manipulation ProgramCreate ima",
+        "LibreOffice WriterCreate and edit text a",
+        "mpv Media PlayerPlay movies and songs",
+        "Openbox Configuration ManagerTweak setti",
+        "QTerminalTerminal emulator",
+        "UXTermxterm wrapper for Unicode environm",
+        "VLC media playerRead, capture, broadcast",
+        "VS CodeDiscovered Linux application",
+        "XTermstandard terminal emulator for the ",
+        "BrowserA built-in web viewer: opens publ",
+        "CalculatorA tiny dependency-free integer"
+      ]
+    },
+    "appCenter": {
+      "title": "App Center",
+      "textSample": "App CenterInstall from GitHubSettingsInstall Linux AppLive×InstalledAll PackagesUpdates1Catalog verifiedChecked just nowInstalledAppsApplicationsBuilt-in appOpenFile StationBuilt-in appOpenDockerOptional appOpenResource MonitorBuilt-in appOpenBackup CenterOptional appOpenApp CenterBuilt-in appInstalledActivity LogsBuilt-in appOpenControl PanelBuilt-in appOpenTerminalBuilt-in appOpenBrowserPackage app · 1.0.7OpenCalculatorPackage app · 1.0.3OpenLinux appsArtCraft LauncherVersion 0.19.2-1NativeOpenInstalling…Google ChromeVersion 157.0.8103.78-1NativeOpenInstalling…Discovered applicationsImport existing applicationRescan applicationsInstalled outside App Center. System-wide entries need administrator approval.WordCraftInstalled by another appOpenAlacrittyDesktop entryOpenFirefoxImported by an administratorOpenGNU Image Manipulation ProgramDesktop entryOpenHtopWaiting for approvalApproveLibreOffice WriterDesktop entryOpenmpv Media PlayerDesktop entryOpenOpenbox Configuration ManagerDesktop entryOpenQTerminalDesktop entryOpenTeXInfoWaiting for approvalApproveUXTermDesktop entryOpenVimWaiting for approvalApproveVLC media playerDesktop entryOpenVS CodeImported by an administratorOpenXTermDesktop entryOpenXpraDesktop entryApproveRuntimesComposer2.9.5 → 2.11.2UpdateEclipse Temurin JDK25.0.5.1 · SystemInstalledGo1.27.4InstalledNode.js22.23.5InstalledPHP CLI8.5.12InstalledPython3.14.10InstalledRust1.100.0InstalledWorking…"
+    },
+    "discoveredTiles": [
+      "Applications",
+      "File Station",
+      "Docker",
+      "Resource Monitor",
+      "Backup Center",
+      "App Center",
+      "Activity Logs",
+      "Control Panel",
+      "Terminal",
+      "Browser",
+      "Calculator",
+      "WordCraft",
+      "Alacritty",
+      "Firefox",
+      "GNU Image Manipulation Program",
+      "Htop",
+      "LibreOffice Writer",
+      "mpv Media Player",
+      "Openbox Configuration Manager",
+      "QTerminal",
+      "TeXInfo",
+      "UXTerm",
+      "Vim",
+      "VLC media player",
+      "VS Code",
+      "XTerm",
+      "Xpra"
+    ],
+    "windows": [
+      {
+        "title": "New Tab - Google Chrome",
+        "x": 8,
+        "y": 88,
+        "w": 1424,
+        "h": 638
+      },
+      {
+        "title": "Starting ArtCraft Launcher…",
+        "x": 128,
+        "y": 128,
+        "w": 420,
+        "h": 220
+      }
+    ],
+    "taskbar": [
+      "File Station",
+      "Resource Monitor",
+      "Control Panel",
+      "New Tab - Google Chrome"
+    ],
+    "menuSmall": {
+      "x": 12,
+      "y": 12,
+      "w": 392,
+      "h": 642,
+      "sw": 390,
+      "cw": 390,
+      "sh": 1387,
+      "ch": 640
+    },
+    "overflowSmall": {
+      "sw": 1280,
+      "cw": 1280
+    }
+  }
+}

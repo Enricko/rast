@@ -102,3 +102,29 @@ choices.
    approve the canonical system entries (GIMP, LibreOffice Writer, VLC, mpv,
    QTerminal) and delete their now-duplicate manual imports. Registry-only:
    no files are uninstalled.
+
+## Phase 0 repair verification (build 4d25249..8e878e0, after screenshots in `docs/screenshots/runtime2.2-after/`)
+
+| Regression | Fix | After-state evidence |
+| --- | --- | --- |
+| R1 desktop flood (28 icons) | `isDiscoveredDesktopId()` + default-layout filter (`desktop-icons.ts`) | 13 desktop icons: built-ins, package apps and the two managed Linux apps only; Applications menu and App Center retain every launchable discovered app (`01-desktop-1440x900.png`, menu 23 items) |
+| R2 duplicates (menu + desktop) | `discoveredIsShadowed` / `reconciledDiscoveredApps` in the catalog; production registry cleanup (fixture imports deleted, canonical xdg entries approved, duplicates hidden) | menu contains each app exactly once (ArtCraft ×1, Google Chrome ×1, WordCraft ×1); `menu_no_duplicates` assertion passes |
+| R3 App Center technical clutter | discovered entries render with the shared `pkg-tile` pattern; raw path/owner/scope moved into a details dialog; one primary action + overflow menu | tiles read “WordCraft — Installed by another app — Open”, “Alacritty — Desktop entry — Open”, “Htop — Waiting for approval — Approve” (`04-app-center-discovered-tiles.png`) |
+| R4 covered windows | cascade 26 → 40 px (`wm.ts`) | two native windows open offset (Chrome 8,88 / ArtCraft 128,128); taskbar click minimizes and restores with the active indicator following focus (`05/06/08-*.png`) |
+| R5 production test fixtures | registry-only cleanup via the discovered API (7 deletes, 5 approvals, 2 renames, 5 hides) + fixture files removed from the test account home | inventory now lists one record per executable; the live `rast-xpra-u1` session was untouched |
+
+Additional fix found during verification: an adopted Chrome window attached to the
+leftover discovered google-chrome entry (taskbar id `linux:d-f19b…`) instead of
+the managed app. Window identity matching now considers every non-wrapper
+command token, strips the `linux:` desktop-id prefix and uses the same
+reconciliation as the launcher, so the taskbar shows `linux:google-chrome`.
+
+Not regressed (verified): no document overflow at 1440×900 and 1280×720, the
+start menu scrolls within its panel, the taskbar running-window lifecycle
+(appears → click minimizes → click restores → active indicator) works, the
+Terminal smoke passes on both deploys, and existing native sessions were
+preserved across both deployments.
+
+Remaining P1 (next rounds): Firefox keyboard focus in WM-less GPU sessions
+(planned: invisible focus-helper started per session), real-account WordCraft
+acceptance path, LibreOffice/VS Code/GIMP/VLC interaction matrices.
