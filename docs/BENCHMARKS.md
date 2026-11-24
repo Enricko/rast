@@ -755,7 +755,12 @@ classification addendum: `…/classification-note.md`.
 
 No product bugs were found by the clipboard probes. One real product bug WAS
 found and fixed during the deploy window: the hidden Xpra transport could steal
-keyboard focus after a prewarmed session connected (fixed in `93585ba2`); that
+keyboard focus after a prewarmed session connected. The first fix (`93585ba2`,
+blurring the hidden viewer) was **reverted in `951c15a`** because it also stopped
+the shim's synthetic keys from reaching the remote client; the final deployed
+build keeps the previous input path and disables pre-warm (see §9.1), and a
+production re-check on `951c15a` confirmed key forwarding again
+(`Ctrl+K` → `about:blank - Google Chrome`). That
 matches the class of focus-ownership edge that the automated post-prewarm
 latency runs hit (keys forwarded while the fixture received none), which is why
 the profiler now aborts via its focus handshake instead of reporting a title
@@ -786,7 +791,16 @@ Both items were measured by the Lead on a quiet production window with the
 dedicated test accounts; they are recorded here because they change the
 performance and security envelope of the native runtime.
 
-### 9.1 Session prewarm
+### 9.1 Session prewarm (implemented, measured, **disabled in the deployed build**)
+
+> Status correction: the deployed runtime 2.1 build (`951c15ac13e4`, binary
+> sha256 `ab5e511f…`) runs with `linux_prewarm = false`. Reliable pre-warming
+> makes the hidden Xpra transport connect right after sign-in, and the client's
+> clipboard autofocus then steals keyboard focus from local RAST apps (Terminal
+> typing ignored until a click). The measured win below is real, but the feature
+> stays opt-in/off until the viewer connection is deferred to the first native
+> window launch; that follow-up is on the roadmap.
+
 
 The server now starts the user's shared native session in the background right
 after the desktop loads the app list (`/api/linux-apps/session/prewarm`), i.e.

@@ -446,7 +446,13 @@ document lost keyboard ownership, so a user's keystrokes could stop reaching
 the native application. This is exactly the failure class the clipboard/input
 matrix is built to catch (focus probe: `document.activeElement` must be
 `.win-body.linux-native-window`, never the hidden viewer iframe). It was found
-and fixed during the deploy window (build `93585ba2`), and the Terminal smoke
+and first patched during the deploy window (build `93585ba2`). That patch
+(blurring the hidden viewer document) was **reverted in `951c15a`**: the shim
+forwards synthetic key events into the viewer, and blurring its document made
+them stop reaching the Xpra client (the automated focus handshake correctly
+caught this). The final deployed build keeps the original input path with
+pre-warm disabled; a production re-check on `951c15a` confirmed forwarding
+again (`Ctrl+K` navigated the remote Chrome window), and the Terminal smoke
 test passes again on the final build. The latency profiler was additionally
 given a focus handshake that aborts a measurement when a forwarded key does not
 provably reach the controlled remote page, instead of reporting a wrong number.

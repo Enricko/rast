@@ -335,6 +335,13 @@ session per person, never shared between accounts, subject to the normal
 memory admission check, and reclaimed by the existing idle cleanup. The trade
 off is a small idle memory cost per signed-in native-app user (~150–250 MiB).
 
+> **Status:** implemented and measured, but **disabled in the deployed runtime
+> 2.1 build** (`linux_prewarm = false`). With reliable pre-warming the hidden
+> Xpra transport connects immediately after sign-in and its clipboard autofocus
+> can steal keyboard focus from local apps (Terminal typing ignored until a
+> click). The feature stays opt-in/off until the viewer connection is deferred
+> to the first native window launch.
+
 Measured on production (2026-11-24, quiet window, `tests/e2e/prewarm/measure.mjs`):
 the background session became ready 9.2 s after the desktop loaded (scheduled by
 the server from the first `GET /api/linux-apps`, not in the click path), and the
