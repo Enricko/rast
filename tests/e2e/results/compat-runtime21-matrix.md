@@ -51,8 +51,15 @@ below combines them; automation variance is not claimed as product failure.
 Apps produced real X11 top-level windows on the GPU display (XTerm, UXTerm,
 Alacritty, obconf, ArtCraft, WordCraft, mpv, zenity, qterminal), and the RAST
 desktop adopted native window surfaces for them. The multi-app adoption probe
-counted 2 adopted windows at its snapshot while many apps ran; per-app adoption
-is proven earlier (Chrome, xterm external-install, WordCraft). Whether every
+counted only 2 adopted windows at its snapshot while many apps ran. A dedicated
+follow-up (two apps launched through the API before the browser connected,
+`tests/e2e/compat/adopt-two-apps.mjs`) proved **simultaneous adoption works**:
+both "New Tab - Google Chrome" and "ArtCraft Launcher" were adopted as
+independent RAST windows in the same GPU session. The low count in the large
+matrix is therefore explained by transient/1x1 helper windows and snapshot
+timing, not by a two-window limit; whether every simultaneously-running
+application window is adopted in a very large session remains to be re-checked
+with a longer settle time. Whether every
 simultaneously-running window is adopted in one session is an open follow-up
 (adoption result is reported as partial, not as a pass).
 
