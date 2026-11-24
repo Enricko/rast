@@ -40,13 +40,13 @@ use crate::native::{
         validate_mode, validate_package_name, validate_packages, validate_port, validate_run_id,
         validate_runtime_dir, validate_session_args, validate_sha256, validate_symlink_target,
         validate_unit, validate_xpra_bin, AppStartOp, AppStopOp, DebDownloadOp, DebInstallOp,
-        DebPreviewOp, DebRemoveOp, DesktopScanOp, IdentityEnsureOp, IdentityRemoveOp, NativeError,
-        NativeOp, NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp,
-        PackagePolicyOp, PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp,
-        PathSymlinkOp, ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp,
-        ProfileSummaryOp, ResourceLimits, SessionStartOp, SessionStopOp, TerminalStartOp,
-        TerminalStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
-        PROTOCOL_VERSION,
+        DebPreviewOp, DebRemoveOp, DesktopScanOp, DisplayStartOp, DisplayStopOp, IdentityEnsureOp,
+        IdentityRemoveOp, NativeError, NativeOp, NativeRequest, NativeResponse, PackageFilesOp,
+        PackageInstalledListOp, PackagePolicyOp, PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp,
+        PathRemoveOp, PathSymlinkOp, ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp,
+        ProfileRemoveOp, ProfileSummaryOp, ResourceLimits, SessionStartOp, SessionStopOp,
+        TerminalStartOp, TerminalStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES,
+        MAX_RESPONSE_BYTES, PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
 };
@@ -409,6 +409,8 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::IdentityRemove(op) => identity_remove(options, op).await,
         NativeOp::SessionStart(op) => session_start(options, op).await,
         NativeOp::SessionStop(op) => session_stop(options, op).await,
+        NativeOp::DisplayStart(op) => display_start(options, op).await,
+        NativeOp::DisplayStop(op) => display_stop(options, op).await,
         NativeOp::UnitStatus(op) => unit_status(options, op).await,
         NativeOp::UnitsList => units_list(options).await,
         NativeOp::RuntimesDetect(op) => runtimes_detect(op).await,
@@ -1218,6 +1220,462 @@ async fn session_start(options: &NativeOptions, op: SessionStartOp) -> Result<Va
         return Err(error);
     }
     Ok(json!({"unit": unit, "active": true}))
+}
+
+// ---------------------------------------------------------------------------
+// Privileged GPU display (per-session NVIDIA Xorg)
+// ---------------------------------------------------------------------------
+
+/// Transient unit prefix for the privileged display server. The unit runs as
+/// root but its X clients are unprivileged identities and authenticated with a
+/// per-display xauth cookie.
+const DISPLAY_UNIT_PREFIX: &str = "rast-display-u";
+/// How long a display server may take to create its UNIX socket.
+const DISPLAY_READY_TIMEOUT: Duration = Duration::from_secs(12);
+/// Per-display server limits (Xorg with the NVIDIA driver is small).
+const DISPLAY_MEMORY_MB: u32 = 1024;
+const DISPLAY_TASKS: u32 = 512;
+
+fn display_unit(user_id: i64) -> Result<String, NativeError> {
+    if !(1..=1_000_000).contains(&user_id) {
+        return Err(NativeError::invalid("invalid user id for a display"));
+    }
+    Ok(format!("{DISPLAY_UNIT_PREFIX}{user_id}"))
+}
+
+/// Parse a sysfs PCI address (`0000:01:00.0`) into an Xorg `BusID`.
+fn pci_bus_id(address: &str) -> Option<String> {
+    let (_domain, rest) = address.split_once(':')?;
+    let (bus, rest) = rest.split_once(':')?;
+    let (slot, function) = rest.split_once('.')?;
+    let bus = u32::from_str_radix(bus, 16).ok()?;
+    let slot = u32::from_str_radix(slot, 16).ok()?;
+    let function = u32::from_str_radix(function, 16).ok()?;
+    Some(format!("PCI:{bus}:{slot}:{function}"))
+}
+
+/// Find the first NVIDIA VGA/3D PCI device and return its Xorg BusID.
+fn nvidia_bus_id() -> Result<String, NativeError> {
+    let dir = std::fs::read_dir("/sys/bus/pci/devices").map_err(|error| {
+        NativeError::command_failed(format!("cannot read the PCI device list: {error}"))
+    })?;
+    for entry in dir.filter_map(Result::ok) {
+        let vendor = std::fs::read_to_string(entry.path().join("vendor")).unwrap_or_default();
+        if vendor.trim() != "0x10de" {
+            continue;
+        }
+        let class = std::fs::read_to_string(entry.path().join("class")).unwrap_or_default();
+        // 0x03xxxx = display controller (VGA/3D/other).
+        if !class.trim().starts_with("0x03") {
+            continue;
+        }
+        if let Some(bus_id) = pci_bus_id(&entry.file_name().to_string_lossy()) {
+            return Ok(bus_id);
+        }
+    }
+    Err(NativeError::unavailable(
+        "no NVIDIA display controller was found for the GPU display backend",
+    ))
+}
+
+/// Administrator-controlled Xorg configuration. Never contains user input.
+fn xorg_config(bus_id: &str) -> String {
+    format!(
+        r#"# Generated by RAST for a per-session GPU-backed display.
+Section "ServerFlags"
+    Option "AutoAddDevices" "false"
+    Option "AutoEnableDevices" "false"
+    Option "AllowEmptyInitialConfiguration" "true"
+EndSection
+Section "Device"
+    Identifier "rast-gpu0"
+    Driver "nvidia"
+    BusID "{bus_id}"
+    Option "AllowEmptyInitialConfiguration" "true"
+    Option "UseDisplayDevice" "none"
+    Option "NoLogo" "true"
+EndSection
+Section "Monitor"
+    Identifier "rast-monitor0"
+    HorizSync 1-10000
+    VertRefresh 1-10000
+EndSection
+Section "Screen"
+    Identifier "rast-screen0"
+    Device "rast-gpu0"
+    Monitor "rast-monitor0"
+    DefaultDepth 24
+    SubSection "Display"
+        Depth 24
+        Virtual 1920 1080
+        Modes "1920x1080"
+    EndSubSection
+EndSection
+Section "ServerLayout"
+    Identifier "rast-layout0"
+    Screen 0 "rast-screen0" 0 0
+EndSection
+"#
+    )
+}
+
+/// Validate a binary the helper will execute as root. In production the helper
+/// runs as root, so the target must be root-owned and not group/world writable.
+fn validate_trusted_binary(path: &Path, label: &str) -> Result<(), NativeError> {
+    use std::os::unix::fs::MetadataExt;
+    if !path.is_absolute() {
+        return Err(NativeError::invalid(format!(
+            "{label} must be an absolute path"
+        )));
+    }
+    let meta = std::fs::metadata(path).map_err(|error| {
+        NativeError::unavailable(format!("{label} {} is not usable: {error}", path.display()))
+    })?;
+    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
+        return Err(NativeError::unavailable(format!(
+            "{label} {} is not an executable file",
+            path.display()
+        )));
+    }
+    if is_root() && (meta.uid() != 0 || meta.mode() & 0o022 != 0) {
+        return Err(NativeError::forbidden(format!(
+            "{label} {} must be owned by root and not writable by other users",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Root-only directory that holds generated Xorg configurations and cookies.
+fn display_artifacts_dir(options: &NativeOptions) -> Result<PathBuf, NativeError> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = options.run_dir.join(".xorg");
+    std::fs::create_dir_all(&dir).map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot create the display configuration directory {}: {error}",
+            dir.display()
+        ))
+    })?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        NativeError::command_failed(format!(
+            "cannot secure the display configuration directory {}: {error}",
+            dir.display()
+        ))
+    })?;
+    Ok(dir)
+}
+
+fn display_paths(
+    options: &NativeOptions,
+    identity: &Identity,
+    display: u32,
+) -> Result<(PathBuf, PathBuf, PathBuf), NativeError> {
+    let dir = display_artifacts_dir(options)?;
+    Ok((
+        dir.join(format!("xorg-u{}-{display}.conf", identity.uid)),
+        dir.join(format!("xauth-u{}-{display}", identity.uid)),
+        dir.join(format!("xorg-u{}-{display}.log", identity.uid)),
+    ))
+}
+
+fn chown_identity(path: &Path, identity: &Identity) -> Result<(), NativeError> {
+    std::os::unix::fs::chown(path, Some(identity.uid), Some(identity.gid)).map_err(|error| {
+        NativeError::command_failed(format!("cannot chown {}: {error}", path.display()))
+    })
+}
+
+fn write_private_file(path: &Path, contents: &str) -> Result<(), NativeError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            NativeError::command_failed(format!("cannot write {}: {error}", path.display()))
+        })?;
+    file.write_all(contents.as_bytes()).map_err(|error| {
+        NativeError::command_failed(format!("cannot write {}: {error}", path.display()))
+    })
+}
+
+async fn xauth_add(
+    options: &NativeOptions,
+    file: &Path,
+    display: u32,
+    cookie: &str,
+) -> Result<(), NativeError> {
+    let args = vec![
+        OsString::from("-f"),
+        file.as_os_str().to_owned(),
+        OsString::from("add"),
+        OsString::from(format!(":{display}")),
+        OsString::from("."),
+        OsString::from(cookie),
+    ];
+    let output = run_command(
+        &options.xauth_bin,
+        args,
+        &[],
+        QUICK_CMD_TIMEOUT,
+        MAX_APT_OUTPUT,
+        MAX_APT_OUTPUT,
+    )
+    .await?;
+    if output.success {
+        Ok(())
+    } else {
+        Err(NativeError::command_failed(format!(
+            "cannot write the display credential for :{display}: {}",
+            summarize_command(&output)
+        )))
+    }
+}
+
+async fn xauth_remove(options: &NativeOptions, file: &Path, display: u32) {
+    let args = vec![
+        OsString::from("-f"),
+        file.as_os_str().to_owned(),
+        OsString::from("remove"),
+        OsString::from(format!(":{display}")),
+    ];
+    let _ = run_command(
+        &options.xauth_bin,
+        args,
+        &[],
+        QUICK_CMD_TIMEOUT,
+        MAX_APT_OUTPUT,
+        MAX_APT_OUTPUT,
+    )
+    .await;
+}
+
+fn remove_display_files(options: &NativeOptions, identity: &Identity, display: u32) {
+    let Ok((config, auth, log)) = display_paths(options, identity, display) else {
+        return;
+    };
+    for path in [config, auth, log] {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+async fn stop_display_unit(options: &NativeOptions, unit: &str) {
+    let _ = stop_unit(options, unit).await;
+    reset_failed(options, unit).await;
+}
+
+/// Verify that the person's identity really gets an NVIDIA OpenGL renderer on
+/// the new display, using a trusted `glxinfo` run in an identity-scoped
+/// transient unit with only DISPLAY/XAUTHORITY set.
+async fn probe_display_renderer(
+    options: &NativeOptions,
+    identity: &Identity,
+    display: u32,
+) -> Result<String, NativeError> {
+    validate_trusted_binary(&options.glxinfo_bin, "glxinfo")?;
+    let xauthority = identity.home.join(".Xauthority");
+    let args: Vec<OsString> = vec![
+        OsString::from(format!("--uid={}", identity.uid)),
+        OsString::from(format!("--gid={}", identity.gid)),
+        OsString::from("--pipe"),
+        OsString::from("--wait"),
+        OsString::from("--collect"),
+        OsString::from("--quiet"),
+        OsString::from(format!("--setenv=DISPLAY=:{display}")),
+        OsString::from(format!("--setenv=XAUTHORITY={}", xauthority.display())),
+        options.glxinfo_bin.as_os_str().to_owned(),
+        OsString::from("-B"),
+    ];
+    let output = run_command(
+        &options.systemd_run_bin,
+        args,
+        &[],
+        SYSTEMD_RUN_TIMEOUT,
+        MAX_APT_OUTPUT,
+        MAX_APT_OUTPUT,
+    )
+    .await?;
+    if !output.success {
+        return Err(NativeError::unavailable(format!(
+            "the GPU display answered but its OpenGL probe failed: {}",
+            summarize_command(&output)
+        )));
+    }
+    let stdout = output.stdout.as_str();
+    let renderer = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("OpenGL renderer string:"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .ok_or_else(|| {
+            NativeError::unavailable(
+                "the GPU display did not report an OpenGL renderer; refusing to claim acceleration",
+            )
+        })?
+        .to_string();
+    if !renderer.to_ascii_lowercase().contains("nvidia") {
+        return Err(NativeError::unavailable(format!(
+            "the GPU display reported the software renderer '{renderer}'; refusing to claim acceleration"
+        )));
+    }
+    Ok(renderer)
+}
+
+/// Start the privileged per-session NVIDIA Xorg for `op.display` and verify the
+/// renderer as the target identity. Idempotent when the unit is already active.
+async fn display_start(options: &NativeOptions, op: DisplayStartOp) -> Result<Value, NativeError> {
+    validate_display(op.display)?;
+    let unit = display_unit(op.user_id)?;
+    let identity = require_identity(options, op.user_id).await?;
+    identity::ensure_home(options, &identity).await?;
+    validate_trusted_binary(&options.xorg_bin, "Xorg")?;
+    validate_trusted_binary(&options.xauth_bin, "xauth")?;
+    validate_trusted_binary(&options.glxinfo_bin, "glxinfo")?;
+
+    let current = unit_state(options, &unit).await?;
+    if current.active {
+        // A recovered session may ask again; do not start a second server.
+        let renderer = probe_display_renderer(options, &identity, op.display)
+            .await
+            .unwrap_or_default();
+        return Ok(json!({
+            "unit": unit,
+            "display": op.display,
+            "active": true,
+            "verified": !renderer.is_empty(),
+            "renderer": renderer,
+        }));
+    }
+    for suffix in ["-lock", ""] {
+        let marker = if suffix == "-lock" {
+            PathBuf::from(format!("/tmp/.X{display}-lock", display = op.display))
+        } else {
+            PathBuf::from(format!("/tmp/.X11-unix/X{display}", display = op.display))
+        };
+        if marker.exists() {
+            return Err(NativeError::invalid(format!(
+                "display :{} is already in use ({} exists)",
+                op.display,
+                marker.display()
+            )));
+        }
+    }
+    let bus_id = nvidia_bus_id()?;
+    let (config, root_auth, log) = display_paths(options, &identity, op.display)?;
+    let user_auth = identity.home.join(".Xauthority");
+    write_private_file(&config, &xorg_config(&bus_id))?;
+
+    let mut cookie = vec![0u8; 16];
+    {
+        use rand::RngCore;
+        rand::rng().fill_bytes(&mut cookie);
+    }
+    let cookie = hex::encode(cookie);
+    xauth_add(options, &root_auth, op.display, &cookie).await?;
+    xauth_add(options, &user_auth, op.display, &cookie).await?;
+    chown_identity(&user_auth, &identity)?;
+    chown_identity(&root_auth, &identity)?;
+
+    let argv: Vec<OsString> = vec![
+        options.xorg_bin.as_os_str().to_owned(),
+        OsString::from(format!(":{display}", display = op.display)),
+        OsString::from("-config"),
+        config.as_os_str().to_owned(),
+        OsString::from("-noreset"),
+        OsString::from("-nolisten"),
+        OsString::from("tcp"),
+        OsString::from("-auth"),
+        root_auth.as_os_str().to_owned(),
+        OsString::from("-logfile"),
+        log.as_os_str().to_owned(),
+        OsString::from("-dpi"),
+        OsString::from("96"),
+    ];
+    let mut args: Vec<OsString> = vec![
+        OsString::from(format!("--unit={unit}")),
+        OsString::from(format!("--slice={}", LINUX_SLICE)),
+        OsString::from("--collect"),
+        OsString::from("--quiet"),
+        OsString::from("--property=Type=exec"),
+        OsString::from(format!("--property=MemoryMax={DISPLAY_MEMORY_MB}M")),
+        OsString::from(format!("--property=TasksMax={DISPLAY_TASKS}")),
+        OsString::from("--property=KillMode=control-group"),
+        OsString::from("--property=Restart=no"),
+        OsString::from("--property=WorkingDirectory=/"),
+        OsString::from("--"),
+    ];
+    args.extend(argv);
+    if let Err(error) = run_systemd_unit(options, &unit, args).await {
+        stop_display_unit(options, &unit).await;
+        remove_display_files(options, &identity, op.display);
+        return Err(error);
+    }
+    // Wait for the display socket and give the verification probe a bounded
+    // window; an unverified display is stopped instead of being used.
+    let socket = Path::new(&format!("/tmp/.X11-unix/X{}", op.display)).to_path_buf();
+    let deadline = std::time::Instant::now() + DISPLAY_READY_TIMEOUT;
+    loop {
+        if socket.exists() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            stop_display_unit(options, &unit).await;
+            remove_display_files(options, &identity, op.display);
+            return Err(NativeError::unavailable(format!(
+                "the GPU display :{} did not become ready in time",
+                op.display
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    match probe_display_renderer(options, &identity, op.display).await {
+        Ok(renderer) => {
+            tracing::info!(
+                user_id = op.user_id,
+                display = op.display,
+                renderer,
+                "started a verified GPU-backed display"
+            );
+            Ok(json!({
+                "unit": unit,
+                "display": op.display,
+                "active": true,
+                "verified": true,
+                "renderer": renderer,
+            }))
+        }
+        Err(error) => {
+            stop_display_unit(options, &unit).await;
+            remove_display_files(options, &identity, op.display);
+            Err(error)
+        }
+    }
+}
+
+/// Stop the privileged display (if any) and remove its credentials/config.
+async fn display_stop(options: &NativeOptions, op: DisplayStopOp) -> Result<Value, NativeError> {
+    if let Some(display) = op.display {
+        validate_display(display)?;
+    }
+    let unit = display_unit(op.user_id)?;
+    // A missing identity has nothing to clean up (and no way to own a display).
+    let identity = match require_identity(options, op.user_id).await {
+        Ok(identity) => identity,
+        Err(error) if error.code == "identity_missing" => {
+            return Ok(json!({"unit": unit, "stopped": false, "reason": "identity_missing"}));
+        }
+        Err(error) => return Err(error),
+    };
+    stop_display_unit(options, &unit).await;
+    if let Some(display) = op.display {
+        let _ = xauth_remove(options, &identity.home.join(".Xauthority"), display).await;
+        let _ = chown_identity(&identity.home.join(".Xauthority"), &identity);
+        remove_display_files(options, &identity, display);
+        let _ = std::fs::remove_file(format!("/tmp/.X{display}-lock"));
+    }
+    Ok(json!({"unit": unit, "stopped": true}))
 }
 
 async fn session_stop(options: &NativeOptions, op: SessionStopOp) -> Result<Value, NativeError> {
@@ -6049,5 +6507,76 @@ exit 0
         assert!(root_joined.contains("WorkingDirectory=/root"));
         assert!(root_joined.contains("--setenv=PATH=/usr/bin"));
         assert!(!root_joined.contains("RestrictSUIDSGID=yes"));
+    }
+}
+
+#[cfg(test)]
+mod display_backend_tests {
+    use super::*;
+
+    #[test]
+    fn pci_addresses_are_rendered_as_xorg_bus_ids() {
+        assert_eq!(pci_bus_id("0000:01:00.0").as_deref(), Some("PCI:1:0:0"));
+        assert_eq!(pci_bus_id("0000:0a:1f.3").as_deref(), Some("PCI:10:31:3"));
+        assert_eq!(pci_bus_id("not-a-pci-address"), None);
+    }
+
+    #[test]
+    fn the_generated_xorg_config_pins_the_gpu_and_disables_remote_tcp() {
+        let config = xorg_config("PCI:1:0:0");
+        assert!(config.contains(r#"BusID "PCI:1:0:0""#));
+        assert!(config.contains(r#"Driver "nvidia""#));
+        assert!(config.contains(r#"Option "AllowEmptyInitialConfiguration" "true""#));
+        assert!(config.contains(r#"Option "UseDisplayDevice" "none""#));
+        assert!(config.contains(r#"Virtual 1920 1080"#));
+        // The listen options live in the Xorg command line (-nolisten tcp);
+        // the generated file must never enable a network listener.
+        assert!(!config.contains("TCP"));
+        assert!(!config.contains("Listen"));
+    }
+
+    #[test]
+    fn display_units_are_stable_and_identity_scoped() {
+        assert_eq!(display_unit(7).unwrap(), "rast-display-u7");
+        assert_eq!(display_unit(200_001).unwrap(), "rast-display-u200001");
+        assert!(display_unit(0).is_err());
+        assert!(display_unit(-1).is_err());
+    }
+
+    #[test]
+    fn trusted_binaries_must_be_absolute_and_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain = temp.path().join("not-executable");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(validate_trusted_binary(&plain, "xorg").is_err());
+        assert!(validate_trusted_binary(std::path::Path::new("relative/Xorg"), "xorg").is_err());
+        let ok = temp.path().join("executable");
+        std::fs::write(&ok, b"#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&ok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(validate_trusted_binary(&ok, "xorg").is_ok());
+    }
+
+    #[test]
+    fn display_start_rejects_an_out_of_range_display() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = NativeOptions::for_test(
+            temp.path().join("helper.sock"),
+            temp.path().join("data"),
+            temp.path().join("run"),
+        );
+        let error = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(display_start(
+                &options,
+                DisplayStartOp {
+                    user_id: 7,
+                    display: 99,
+                },
+            ))
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_request");
     }
 }

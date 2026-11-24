@@ -406,3 +406,31 @@ privileged lifecycle that is deliberately **not** enabled:
 Production keeps `linux_display_backend = "software"` and
 `gpuAccelerationVerified = false` until that lifecycle is implemented and
 verified.
+
+## 2026-11-24 (runtime 2.1) — privileged display lifecycle implemented
+
+The privileged per-session GPU display is now implemented in the native
+helper (`display_start` / `display_stop`):
+
+- Only the trusted `/usr/bin/Xorg` (root-owned, not writable by others) and
+  `/usr/bin/xauth` are executed; there is no user-supplied command or wrapper.
+- The display is a transient `rast-display-u<id>` unit in `rast-linux.slice`,
+  generated configuration is written root-only under `/run/rast-linux/.xorg/`,
+  Xorg listens only on the UNIX socket (`-nolisten tcp`) and authenticates with
+  a random per-display MIT-MAGIC-COOKIE written to the identity's
+  `~/.Xauthority` (identity-owned) and to a root-only Xorg auth file.
+- The helper waits for the display socket and then runs a real `glxinfo -B`
+  **as the person's identity**; the session is only reported as GPU-backed
+  (`displayBackend="gpu"`, `gpuAccelerationVerified=true`, `renderer` filled)
+  when that probe reports an NVIDIA renderer. Otherwise the display is stopped
+  and, with `linux_display_backend="auto"`, the session falls back to Xvfb; with
+  the explicit `gpu` backend the session fails with a clear error instead of
+  pretending acceleration.
+- Xpra attaches with `--use-display=yes`; session stop (including recovery
+  paths) stops the display unit and removes the credential/config files.
+- The backend choice is written into the session row (migration 16) so a RAST
+  restart that adopts a live session reports and cleans up the real backend.
+
+Operator selection: `linux_display_backend = "auto" | "software" | "gpu"`.
+`auto` prefers GPU when the filesystem probe says it is plausible and falls
+back at session start if the real probe fails; `software` never tries GPU.

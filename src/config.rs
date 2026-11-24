@@ -280,6 +280,10 @@ pub enum LinuxDisplayBackend {
     /// Require `linux_xvfb_command`; fall back to Xvfb at session start if it
     /// is missing or not executable (never crash the session).
     Custom,
+    /// Start a privileged per-session NVIDIA Xorg display inside the native
+    /// helper and attach Xpra to it (`--use-display=yes`). If the display
+    /// cannot be started or fails its OpenGL probe, session start fails.
+    Gpu,
 }
 
 impl LinuxDisplayBackend {
@@ -288,6 +292,7 @@ impl LinuxDisplayBackend {
             Self::Auto => "auto",
             Self::Software => "software",
             Self::Custom => "custom",
+            Self::Gpu => "gpu",
         }
     }
 
@@ -296,6 +301,7 @@ impl LinuxDisplayBackend {
             "auto" => Some(Self::Auto),
             "software" | "xvfb" => Some(Self::Software),
             "custom" | "xorg" | "nvidia-xorg" => Some(Self::Custom),
+            "gpu" | "nvidia-gpu" | "gpu-xorg" => Some(Self::Gpu),
             _ => None,
         }
     }
@@ -931,7 +937,7 @@ impl Config {
         ) {
             Some(value) => LinuxDisplayBackend::parse(&value).ok_or_else(|| {
                 ConfigError::Invalid(format!(
-                    "linux_display_backend must be one of auto, software, custom (got '{value}')"
+                    "linux_display_backend must be one of auto, software, gpu, custom (got '{value}')"
                 ))
             })?,
             None => LinuxDisplayBackend::Auto,
@@ -1669,6 +1675,20 @@ mod native_runtime_config_tests {
         assert_eq!(
             LinuxDisplayBackend::parse("nvidia-xorg"),
             Some(LinuxDisplayBackend::Custom)
+        );
+        assert_eq!(
+            LinuxDisplayBackend::parse("GPU"),
+            Some(LinuxDisplayBackend::Gpu)
+        );
+        assert_eq!(
+            Config::from_parts(
+                None,
+                FileConfig::from_toml_str("linux_display_backend = \"gpu\"").unwrap(),
+                no_env
+            )
+            .unwrap()
+            .linux_display_backend,
+            LinuxDisplayBackend::Gpu
         );
         assert_eq!(
             LinuxProfile::parse(" Quality "),

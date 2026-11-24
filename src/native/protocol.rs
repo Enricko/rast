@@ -245,6 +245,8 @@ pub enum NativeOp {
     IdentityRemove(IdentityRemoveOp),
     SessionStart(SessionStartOp),
     SessionStop(SessionStopOp),
+    DisplayStart(DisplayStartOp),
+    DisplayStop(DisplayStopOp),
     UnitStatus(UnitStatusOp),
     UnitsList,
     /// Start (or find) the root file agent behind File Station's root file
@@ -287,6 +289,8 @@ impl NativeOp {
             Self::IdentityRemove(_) => "identity_remove",
             Self::SessionStart(_) => "session_start",
             Self::SessionStop(_) => "session_stop",
+            Self::DisplayStart(_) => "display_start",
+            Self::DisplayStop(_) => "display_stop",
             Self::UnitStatus(_) => "unit_status",
             Self::UnitsList => "units_list",
             Self::RootfsStart => "rootfs_start",
@@ -328,6 +332,7 @@ impl NativeOp {
             Self::AptUpdate => APT_UPDATE_TIMEOUT,
             Self::IdentityEnsure(_) | Self::IdentityRemove(_) => IDENTITY_OP_TIMEOUT,
             Self::TerminalStart(_) => IDENTITY_OP_TIMEOUT,
+            Self::DisplayStart(_) | Self::DisplayStop(_) => IDENTITY_OP_TIMEOUT,
             _ => QUICK_OP_TIMEOUT,
         }
     }
@@ -406,6 +411,8 @@ impl NativeRequest {
             NativeOp::IdentityRemove(op) => merge!(op),
             NativeOp::SessionStart(op) => merge!(op),
             NativeOp::SessionStop(op) => merge!(op),
+            NativeOp::DisplayStart(op) => merge!(op),
+            NativeOp::DisplayStop(op) => merge!(op),
             NativeOp::UnitStatus(op) => merge!(op),
             NativeOp::RuntimesDetect(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
@@ -614,6 +621,25 @@ pub struct SessionStartOp {
 pub struct SessionStopOp {
     #[serde(rename = "userId")]
     pub user_id: i64,
+}
+
+/// Start (or reuse) the privileged per-session NVIDIA Xorg display.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayStartOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    pub display: u32,
+}
+
+/// Stop the privileged display and remove its per-display credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayStopOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

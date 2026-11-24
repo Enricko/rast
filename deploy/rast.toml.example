@@ -263,6 +263,10 @@ linux_profile = "balanced"
 # Xvfb, "custom" expects the command below (still falls back to Xvfb at start
 # if it is missing, so a bad command never bricks sessions).
 # env: RAST_LINUX_DISPLAY_BACKEND
+# auto | software | gpu | custom (default: auto). "auto" prefers a verified
+# NVIDIA GPU display when the helper can start one, and falls back to Xvfb when
+# the real OpenGL probe fails. "gpu" is strict: the session fails instead of
+# silently using software rendering. "custom" uses linux_xvfb_command.
 # linux_display_backend = "auto"
 # Optional wrapper script that starts an alternative headless X server (a
 # GPU-backed Xorg configuration, validated as described in

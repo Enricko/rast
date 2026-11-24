@@ -150,6 +150,13 @@ pub struct DisplayCapability {
     pub nvidia_xorg_driver: bool,
     /// Whether a plain Xorg binary exists (alternative display backend work).
     pub xorg: bool,
+    /// `glxinfo` exists so the helper can actually probe the GPU display.
+    pub glxinfo: bool,
+    /// A privileged per-session GPU display can plausibly be started (NVIDIA
+    /// GPU + Xorg + NVIDIA Xorg driver + glxinfo). Still only a file-system
+    /// probe: the helper verifies the real OpenGL renderer before a session
+    /// reports `gpuAccelerationVerified`.
+    pub gpu_display_available: bool,
     /// GPU-backed display is *configured*; it is not a verified acceleration
     /// claim (see `gpu_acceleration_verified`).
     pub gpu_display_configured: bool,
@@ -209,7 +216,7 @@ pub fn custom_command(config: &Config) -> Option<&Path> {
 /// falls back to software rendering so a session still starts.
 pub fn display_backend_arg(config: &Config) -> String {
     match config.linux_display_backend {
-        LinuxDisplayBackend::Software => "--xvfb=Xvfb".to_string(),
+        LinuxDisplayBackend::Software | LinuxDisplayBackend::Gpu => "--xvfb=Xvfb".to_string(),
         LinuxDisplayBackend::Auto | LinuxDisplayBackend::Custom => match custom_command(config) {
             Some(path) => format!("--xvfb={}", path.display()),
             None => "--xvfb=Xvfb".to_string(),
@@ -217,28 +224,76 @@ pub fn display_backend_arg(config: &Config) -> String {
     }
 }
 
+/// Can the native helper start a privileged NVIDIA Xorg display on this host?
+/// Read-only: real verification happens in the helper before a session is
+/// reported as accelerated, and failures fall back to Xvfb under `auto`.
+pub fn gpu_display_available(_config: &Config) -> bool {
+    // Deliberately does not call `detect_display`: that function derives the
+    // active backend from this probe, so calling back would recurse.
+    let gpu = detect_gpu();
+    gpu.vendor == "nvidia"
+        && gpu.nvidia_device_nodes
+        && Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists()
+        && find_in_path("Xorg").is_some()
+        && find_in_path("glxinfo").is_some()
+}
+
 /// Backend that sessions actually use with the current configuration.
 pub fn resolved_display_backend(config: &Config) -> &'static str {
-    if config.linux_display_backend == LinuxDisplayBackend::Software {
-        return "xvfb";
-    }
-    if custom_command(config).is_some() {
-        "custom"
-    } else {
-        "xvfb"
+    match config.linux_display_backend {
+        LinuxDisplayBackend::Software => "xvfb",
+        LinuxDisplayBackend::Gpu => "gpu",
+        LinuxDisplayBackend::Custom => {
+            if custom_command(config).is_some() {
+                "custom"
+            } else {
+                "xvfb"
+            }
+        }
+        // `auto` prefers an available accelerated display and falls back to
+        // Xvfb at session start if the helper's real probe fails.
+        LinuxDisplayBackend::Auto => {
+            if custom_command(config).is_some() {
+                "custom"
+            } else if gpu_display_available(config) {
+                "gpu"
+            } else {
+                "xvfb"
+            }
+        }
     }
 }
 
-fn detect_display(config: &Config) -> DisplayCapability {
+fn detect_display(config: &Config, gpu_display_available: bool) -> DisplayCapability {
     let xvfb_path = find_in_path("Xvfb");
     let custom_command_path = config.linux_xvfb_command.clone();
     let custom_usable = config
         .linux_xvfb_command
         .as_deref()
         .is_some_and(is_executable);
-    let active = resolved_display_backend(config);
+    let active = match config.linux_display_backend {
+        LinuxDisplayBackend::Software => "xvfb",
+        LinuxDisplayBackend::Gpu => "gpu",
+        LinuxDisplayBackend::Custom => {
+            if custom_command(config).is_some() {
+                "custom"
+            } else {
+                "xvfb"
+            }
+        }
+        LinuxDisplayBackend::Auto => {
+            if custom_command(config).is_some() {
+                "custom"
+            } else if gpu_display_available {
+                "gpu"
+            } else {
+                "xvfb"
+            }
+        }
+    };
     let nvidia_xorg_driver = Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
     let xorg = find_in_path("Xorg").is_some();
+    let glxinfo = find_in_path("glxinfo").is_some();
     let gpu_display_configured = active == "custom"
         && (nvidia_xorg_driver
             || custom_command_path.as_ref().is_some_and(|path| {
@@ -254,6 +309,8 @@ fn detect_display(config: &Config) -> DisplayCapability {
         custom_command: custom_command_path.map(|path| path.display().to_string()),
         nvidia_xorg_driver,
         xorg,
+        glxinfo,
+        gpu_display_available,
         gpu_display_configured,
     }
 }
@@ -297,7 +354,8 @@ pub fn report(config: &Config) -> RuntimeReport {
 }
 
 fn build_report(config: &Config) -> RuntimeReport {
-    let display = detect_display(config);
+    let gpu_display_available = gpu_display_available(config);
+    let display = detect_display(config, gpu_display_available);
     let gpu = detect_gpu();
     let mut notes = Vec::new();
 
@@ -313,6 +371,22 @@ fn build_report(config: &Config) -> RuntimeReport {
              through Xpra requires a codec module built for the driver's NVENC SDK - check \
              docs/GPU-ACCELERATION.md before installing xpra-codecs-nvidia (on driver 595.99.02 \
              with Xpra 6.5.5 the packaged module is incompatible)."
+                .to_string(),
+        );
+    }
+    if display.active == "gpu" {
+        notes.push(
+            "GPU display backend selected: the helper starts a privileged per-session NVIDIA \
+             Xorg, verifies the OpenGL renderer as the person's identity and falls back to \
+             Xvfb only when the backend is 'auto'. Application rendering acceleration is \
+             reported per session via gpuAccelerationVerified."
+                .to_string(),
+        );
+    } else if config.linux_display_backend == LinuxDisplayBackend::Gpu {
+        notes.push(
+            "linux_display_backend = gpu but the host is missing an NVIDIA GPU, the NVIDIA Xorg \
+             driver, Xorg or glxinfo; sessions will fail to start instead of silently using \
+             software rendering. Use 'auto' for fallback."
                 .to_string(),
         );
     }

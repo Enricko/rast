@@ -73,6 +73,10 @@ pub const NOLOGIN_CANDIDATES: &[&str] = &["/usr/sbin/nologin", "/sbin/nologin", 
 
 /// systemd slice that holds every transient native unit.
 pub const LINUX_SLICE: &str = "rast-linux.slice";
+/// Trusted binaries for the privileged GPU display backend (never user input).
+pub const XORG_BIN: &str = "/usr/bin/Xorg";
+pub const XAUTH_BIN: &str = "/usr/bin/xauth";
+pub const GLXINFO_BIN: &str = "/usr/bin/glxinfo";
 
 /// Idle timeout of one helper connection (clients normally send one request).
 pub const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -101,6 +105,12 @@ pub struct NativeOptions {
     /// (or inside the identity home).
     pub storage_dir: PathBuf,
     pub xpra_bin: PathBuf,
+    /// Trusted headless Xorg used by the privileged GPU display backend.
+    pub xorg_bin: PathBuf,
+    /// Trusted `xauth` used to provision per-display cookies.
+    pub xauth_bin: PathBuf,
+    /// Trusted `glxinfo` used to verify the real OpenGL renderer.
+    pub glxinfo_bin: PathBuf,
     pub uid_base: u32,
     pub session_limits: ResourceLimits,
     pub app_limits: ResourceLimits,
@@ -158,6 +168,9 @@ impl NativeOptions {
             homes_dir: cfg.homes_dir(),
             storage_dir: cfg.storage_dir.clone(),
             xpra_bin: cfg.linux_xpra_bin.clone(),
+            xorg_bin: PathBuf::from(XORG_BIN),
+            xauth_bin: PathBuf::from(XAUTH_BIN),
+            glxinfo_bin: PathBuf::from(GLXINFO_BIN),
             uid_base: cfg.linux_uid_base,
             session_limits: ResourceLimits::from_config(
                 cfg.linux_session_memory_mb,
@@ -213,6 +226,9 @@ impl NativeOptions {
             homes_dir,
             storage_dir: PathBuf::from("/srv/rast"),
             xpra_bin: PathBuf::from("/usr/bin/xpra"),
+            xorg_bin: PathBuf::from("/usr/bin/Xorg"),
+            xauth_bin: PathBuf::from("/usr/bin/xauth"),
+            glxinfo_bin: PathBuf::from("/usr/bin/glxinfo"),
             uid_base: 200_000,
             session_limits: ResourceLimits::from_config(4096, 4, 2048),
             app_limits: ResourceLimits::from_config(2048, 2, 1024),

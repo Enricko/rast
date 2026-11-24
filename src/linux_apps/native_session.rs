@@ -249,7 +249,8 @@ impl NativeSession {
             // Runtime policy diagnostics for the App Center performance panel.
             "profile": state.profile.clone(),
             "displayBackend": state.display_backend.clone(),
-            "gpuAccelerationVerified": false,
+            "gpuAccelerationVerified": state.gpu_verified,
+            "renderer": state.renderer.clone(),
             "display": state.display,
             "apps": state.apps.iter().map(NativeRun::json).collect::<Vec<Value>>(),
         })
@@ -306,8 +307,13 @@ struct SessionState {
     unit: String,
     /// Operator-selected performance profile at session start (`balanced`, ...).
     profile: String,
-    /// Display backend the session actually uses (`xvfb` or `custom`).
+    /// Display backend the session actually uses (`xvfb`, `custom` or `gpu`).
     display_backend: String,
+    /// The helper verified an NVIDIA OpenGL renderer as this identity on the
+    /// GPU-backed display. Always false for software Xvfb sessions.
+    gpu_verified: bool,
+    /// OpenGL renderer reported by the verification probe, if accelerated.
+    renderer: Option<String>,
     viewers: usize,
     /// Last input/activity from any viewer (idle bookkeeping).
     last_input: Instant,
@@ -914,6 +920,8 @@ impl NativeSessions {
                     unit: unit.clone(),
                     profile: self.config.linux_profile.as_str().to_string(),
                     display_backend: gpu::resolved_display_backend(&self.config).to_string(),
+                    gpu_verified: false,
+                    renderer: None,
                     viewers: 0,
                     last_input: Instant::now(),
                     empty_since: None,
@@ -937,7 +945,94 @@ impl NativeSessions {
                 "starting a native graphical session"
             );
 
-            let args = xpra_args(display_number, port, &runtime, &self.config);
+            // GPU-backed display (privileged helper) or software Xvfb.
+            // `auto` falls back to Xvfb when the helper cannot start *and verify*
+            // a real NVIDIA display; an explicit `gpu` backend fails instead of
+            // silently pretending acceleration.
+            let requested_backend = gpu::resolved_display_backend(&self.config).to_string();
+            let mut gpu_verified = false;
+            let mut renderer: Option<String> = None;
+            if requested_backend == "gpu" {
+                match self
+                    .helper
+                    .call(
+                        "display_start",
+                        json!({"userId": user.id, "display": display_number}),
+                    )
+                    .await
+                {
+                    Ok(data) => {
+                        gpu_verified = data
+                            .get("verified")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        renderer = data
+                            .get("renderer")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        if !gpu_verified {
+                            let message = "the GPU display did not pass its OpenGL verification";
+                            if self.config.linux_display_backend
+                                == crate::config::LinuxDisplayBackend::Gpu
+                            {
+                                self.end_session(&session, "error", Some(message.to_string()))
+                                    .await;
+                                return Err(AppError::unavailable(format!(
+                                    "Could not start an accelerated display: {message}"
+                                )));
+                            }
+                            tracing::warn!(
+                                user_id = user.id,
+                                display = display_number,
+                                "GPU display verification failed; falling back to Xvfb"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!("Could not start the GPU-backed display: {error}");
+                        if self.config.linux_display_backend
+                            == crate::config::LinuxDisplayBackend::Gpu
+                        {
+                            self.end_session(&session, "error", Some(message.clone()))
+                                .await;
+                            return Err(AppError::unavailable(message));
+                        }
+                        tracing::warn!(
+                            user_id = user.id,
+                            display = display_number,
+                            error = %error,
+                            "GPU display unavailable; falling back to Xvfb"
+                        );
+                    }
+                }
+            }
+            let use_gpu = gpu_verified;
+            if !use_gpu && requested_backend == "gpu" {
+                let mut state = session.lock();
+                state.display_backend = "xvfb".to_string();
+            } else {
+                let mut state = session.lock();
+                state.display_backend = requested_backend.clone();
+                state.gpu_verified = gpu_verified;
+                state.renderer = renderer.clone();
+            }
+            tracing::info!(
+                user_id = user.id,
+                display = display_number,
+                backend = if use_gpu {
+                    "gpu"
+                } else {
+                    requested_backend.as_str()
+                },
+                renderer = renderer.as_deref().unwrap_or(""),
+                "native session display backend resolved"
+            );
+            let mut args = xpra_args(display_number, port, &runtime, &self.config);
+            if use_gpu {
+                // The privileged display already exists; Xpra must attach to it
+                // instead of starting its own Xvfb.
+                args.push("--use-display=yes".to_string());
+            }
             let params = json!({
                 "userId": user.id,
                 "display": display_number,
@@ -1217,7 +1312,7 @@ impl NativeSessions {
     }
 
     async fn store_session_start(&self, session: &NativeSession) -> AppResult<()> {
-        let (status, display, port, unit, started_at) = {
+        let (status, display, port, unit, started_at, backend, gpu_verified, renderer) = {
             let state = session.lock();
             (
                 state.status.as_str(),
@@ -1225,17 +1320,23 @@ impl NativeSessions {
                 state.port.unwrap_or_default(),
                 state.unit.clone(),
                 state.started_at,
+                state.display_backend.clone(),
+                state.gpu_verified,
+                state.renderer.clone(),
             )
         };
         sqlx::query(
             "INSERT INTO linux_sessions
-                 (user_id, key, display, port, unit, status, started_at, last_input, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (user_id, key, display, port, unit, status, started_at, last_input, updated_at,
+                  display_backend, gpu_verified, renderer)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(user_id) DO UPDATE SET
                  key = excluded.key, display = excluded.display, port = excluded.port,
                  unit = excluded.unit, status = excluded.status,
                  started_at = excluded.started_at, last_input = excluded.last_input,
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at,
+                 display_backend = excluded.display_backend,
+                 gpu_verified = excluded.gpu_verified, renderer = excluded.renderer",
         )
         .bind(session.user_id())
         .bind(session.key())
@@ -1246,6 +1347,9 @@ impl NativeSessions {
         .bind(started_at)
         .bind(started_at)
         .bind(db::now_ms())
+        .bind(backend)
+        .bind(gpu_verified as i64)
+        .bind(renderer)
         .execute(&self.db)
         .await?;
         Ok(())
@@ -1727,6 +1831,16 @@ impl NativeSessions {
             .helper
             .call("session_stop", json!({"userId": user_id}))
             .await;
+        // Stop the privileged display even for software sessions: the helper
+        // treats a missing unit as a no-op, and adopted sessions may have been
+        // GPU-backed before a restart.
+        let _ = self
+            .helper
+            .call(
+                "display_stop",
+                json!({"userId": user_id, "display": session.lock().display}),
+            )
+            .await;
         tracing::info!(user_id, reason, "native graphical session ended");
         self.publish_session(session);
     }
@@ -1749,7 +1863,9 @@ impl NativeSessions {
             }
         };
         let rows: Vec<SessionRow> = sqlx::query_as(
-            "SELECT user_id, key, display, port, unit, started_at FROM linux_sessions",
+            "SELECT user_id, key, display, port, unit, started_at,
+                    display_backend, gpu_verified, renderer
+             FROM linux_sessions",
         )
         .fetch_all(&self.db)
         .await
@@ -1861,7 +1977,9 @@ impl NativeSessions {
                     port: Some(port),
                     unit,
                     profile: self.config.linux_profile.as_str().to_string(),
-                    display_backend: gpu::resolved_display_backend(&self.config).to_string(),
+                    display_backend: row.display_backend.clone(),
+                    gpu_verified: row.gpu_verified != 0,
+                    renderer: row.renderer.clone(),
                     viewers: 0,
                     last_input: Instant::now(),
                     // Adopted sessions start their idle timer immediately:
@@ -2145,6 +2263,9 @@ struct SessionRow {
     port: i64,
     unit: String,
     started_at: i64,
+    display_backend: String,
+    gpu_verified: i64,
+    renderer: Option<String>,
 }
 
 /// `linux_runs` row used by recovery.
@@ -2603,6 +2724,8 @@ impl NativeSession {
                 unit: session_unit(user_id),
                 profile: "balanced".into(),
                 display_backend: "xvfb".into(),
+                gpu_verified: false,
+                renderer: None,
                 viewers: 0,
                 last_input: Instant::now(),
                 empty_since: None,
@@ -2803,6 +2926,23 @@ mod tests {
                     self.set_unit(&unit, false);
                     Ok(json!({"stopped": true}))
                 }
+                "display_start" => {
+                    let user_id = params["userId"].as_i64().unwrap_or(0);
+                    let display = params["display"].as_u64().unwrap_or(0);
+                    self.set_unit(&format!("rast-display-u{user_id}"), true);
+                    Ok(json!({
+                        "unit": format!("rast-display-u{user_id}"),
+                        "display": display,
+                        "active": true,
+                        "verified": true,
+                        "renderer": "NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2",
+                    }))
+                }
+                "display_stop" => {
+                    let user_id = params["userId"].as_i64().unwrap_or(0);
+                    self.set_unit(&format!("rast-display-u{user_id}"), false);
+                    Ok(json!({"stopped": true}))
+                }
                 "app_start" => {
                     if *self.stale_xauthority.lock().unwrap() {
                         return Err(HelperError {
@@ -2896,7 +3036,16 @@ mod tests {
     }
 
     fn test_config() -> Arc<Config> {
-        Arc::new(Config::from_parts(None, crate::config::FileConfig::default(), |_| None).unwrap())
+        // Software backend keeps session tests deterministic on GPU hosts.
+        let file = crate::config::FileConfig::from_toml_str("linux_display_backend = \"software\"")
+            .unwrap();
+        Arc::new(Config::from_parts(None, file, |_| None).unwrap())
+    }
+
+    fn gpu_test_config() -> Arc<Config> {
+        let file =
+            crate::config::FileConfig::from_toml_str("linux_display_backend = \"gpu\"").unwrap();
+        Arc::new(Config::from_parts(None, file, |_| None).unwrap())
     }
 
     fn test_user(id: i64) -> AuthUser {
@@ -2917,8 +3066,18 @@ mod tests {
         Arc<NativeSessions>,
         Arc<Config>,
     ) {
+        manager_with(test_config()).await
+    }
+
+    async fn manager_with(
+        config: Arc<Config>,
+    ) -> (
+        tempfile::TempDir,
+        Arc<FakeHelper>,
+        Arc<NativeSessions>,
+        Arc<Config>,
+    ) {
         let (dir, db) = test_db().await;
-        let config = test_config();
         let helper = Arc::new(FakeHelper::default());
         let sessions =
             NativeSessions::with_helper(config.clone(), db, helper.clone(), EventBus::new());
@@ -3008,6 +3167,53 @@ mod tests {
         assert_eq!(parse_mem_available(Some(text)), Some(8_000_000u64 * 1024));
         assert_eq!(parse_mem_available(Some("nothing")), None);
         assert_eq!(parse_mem_available(None), None);
+    }
+
+    #[tokio::test]
+    async fn a_gpu_session_attaches_xpra_to_a_verified_nvidia_display() {
+        let (_dir, helper, sessions, _cfg) = manager_with(gpu_test_config()).await;
+        let user = test_user(1);
+        let (run, session) = sessions
+            .launch(&user, launch_request("google-chrome"))
+            .await
+            .expect("a GPU session starts");
+        assert_eq!(run["status"], "running");
+        assert_eq!(session["displayBackend"], "gpu");
+        assert_eq!(session["gpuAccelerationVerified"], true);
+        assert!(
+            session["renderer"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("NVIDIA"),
+            "{session}"
+        );
+        let calls = helper.calls();
+        let display_at = calls
+            .iter()
+            .position(|(op, _)| op == "display_start")
+            .expect("display_start call");
+        let session_at = calls
+            .iter()
+            .position(|(op, _)| op == "session_start")
+            .expect("session_start call");
+        assert!(display_at < session_at, "{calls:?}");
+        let args = calls[session_at]
+            .1
+            .get("args")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            args.iter()
+                .any(|arg| arg.as_str() == Some("--use-display=yes")),
+            "xpra must attach to the existing display: {args:?}"
+        );
+        sessions
+            .close_session(&user)
+            .await
+            .expect("close the session");
+        assert_eq!(helper.call_count("display_stop"), 1);
+        assert!(!helper.unit_active("rast-display-u1"));
     }
 
     #[tokio::test]
@@ -3357,6 +3563,8 @@ mod tests {
                 unit: session_unit(1),
                 profile: "balanced".into(),
                 display_backend: "xvfb".into(),
+                gpu_verified: false,
+                renderer: None,
                 viewers: 0,
                 last_input: Instant::now(),
                 empty_since: None,
