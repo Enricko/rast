@@ -2358,8 +2358,9 @@ fn profile_arguments(config: &Config) -> Vec<String> {
 /// Live cgroup v2 usage of one person's session unit (read-only). Missing
 /// values are `null`, never an error: telemetry must not break a page.
 fn session_cgroup_metrics(user_id: i64) -> Value {
-    let base =
-        PathBuf::from("/sys/fs/cgroup/rast.slice/rast-linux.slice").join(session_unit(user_id));
+    // systemd exposes the transient unit's cgroup as `<unit>.service`.
+    let base = PathBuf::from("/sys/fs/cgroup/rast.slice/rast-linux.slice")
+        .join(format!("{}.service", session_unit(user_id)));
     let read = |name: &str| std::fs::read_to_string(base.join(name)).ok();
     let memory_bytes = read("memory.current").and_then(|value| value.trim().parse::<u64>().ok());
     let tasks = read("pids.current").and_then(|value| value.trim().parse::<u64>().ok());

@@ -1117,9 +1117,10 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
     if runtime.gpu.vendor == "nvidia" && !runtime.gpu.xpra_nvidia_codecs {
         warn(
             &mut report,
-            "an NVIDIA GPU is present but Xpra's NVIDIA codec module is not installed: sessions \
-             use software encoding (x264/webp). Install the xpra-codecs-nvidia package that \
-             matches the installed Xpra version (see docs/GPU-ACCELERATION.md)"
+            "NVIDIA GPU present; sessions encode with software codecs \
+             (x264/webp/jpeg). NVENC through Xpra only works when the packaged module \
+             matches the driver's NVENC SDK - see docs/GPU-ACCELERATION.md before \
+             installing xpra-codecs-nvidia"
                 .to_string(),
         );
     }
