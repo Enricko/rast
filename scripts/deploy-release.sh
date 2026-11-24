@@ -192,10 +192,24 @@ if [ "$SMOKE_TERMINAL" = 1 ]; then
         warn "node not found; skipping Terminal smoke"
     else
         say "running Terminal smoke as $SMOKE_USER"
-        if (cd "$ROOT/tests/e2e" && node terminal/smoke.mjs --user="$SMOKE_USER"); then
+        # A just-restarted backend can be slow to serve the first session/terminal
+        # handshake; retry once after a short pause before treating it as a real
+        # regression (the rollback path is still exercised on repeated failure).
+        SMOKE_OK=0
+        for attempt in 1 2; do
+            if (cd "$ROOT/tests/e2e" && node terminal/smoke.mjs --user="$SMOKE_USER"); then
+                SMOKE_OK=1
+                break
+            fi
+            if [ "$attempt" = 1 ]; then
+                warn "Terminal smoke failed (attempt 1); retrying in 15 s"
+                sleep 15
+            fi
+        done
+        if [ "$SMOKE_OK" = 1 ]; then
             say "Terminal smoke: PASS"
         else
-            rollback "Terminal smoke failed after deploy"
+            rollback "Terminal smoke failed after deploy (2 attempts)"
         fi
     fi
 fi
