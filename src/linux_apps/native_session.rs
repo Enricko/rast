@@ -1060,7 +1060,10 @@ impl NativeSessions {
                     return Err(AppError::unavailable(message));
                 }
             }
-            match wait_ready(port, READY_TIMEOUT).await {
+            match self
+                .wait_ready_or_session_failed(port, &unit, READY_TIMEOUT)
+                .await
+            {
                 Ok(()) => {
                     {
                         let mut state = session.lock();
@@ -1100,6 +1103,50 @@ impl NativeSessions {
         Err(AppError::unavailable(format!(
             "The graphical session did not start: {last_error}"
         )))
+    }
+
+    /// Wait until the Xpra web server answers, but give up early when the
+    /// session's transient unit exits during startup. Without this, a rapid
+    /// close→reopen can leave the old display/Xpra teardown racing the new
+    /// start and waste the whole readiness timeout before retrying.
+    async fn wait_ready_or_session_failed(
+        &self,
+        port: u16,
+        unit: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        let mut next_unit_check = Instant::now() + Duration::from_secs(2);
+        loop {
+            if probe_http(port).await {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "The graphical session did not answer in time. Check the native helper log."
+                        .to_string(),
+                );
+            }
+            if Instant::now() >= next_unit_check {
+                next_unit_check = Instant::now() + Duration::from_secs(2);
+                if let Ok(info) = self
+                    .helper
+                    .call("unit_status", json!({"unit": unit}))
+                    .await
+                {
+                    let active = info.get("active").and_then(Value::as_bool).unwrap_or(true);
+                    let state = info.get("state").and_then(Value::as_str).unwrap_or_default();
+                    if !active || state == "failed" {
+                        return Err(
+                            "The graphical session unit stopped during startup; retrying \
+                             on another display."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     /// Can a live session be reused for this launch?
@@ -2784,6 +2831,9 @@ mod tests {
         app_starts: StdMutex<usize>,
         orphan_stops: StdMutex<Vec<String>>,
         fail_session_start: StdMutex<Option<String>>,
+        /// Make the next session_start report success but leave the unit
+        /// inactive (simulates Xpra exiting immediately during startup).
+        kill_session_unit_once: StdMutex<bool>,
         broken_profile: StdMutex<bool>,
         stale_xauthority: StdMutex<bool>,
         upstreams: StdMutex<Vec<tokio::task::JoinHandle<()>>>,
@@ -2930,6 +2980,18 @@ mod tests {
                     let port = u16::try_from(params["port"].as_u64().unwrap_or(0)).unwrap_or(0);
                     *self.port.lock().unwrap() = Some(port);
                     let unit = session_unit(params["userId"].as_i64().unwrap_or(0));
+                    let kill_once = {
+                        let mut flag = self.kill_session_unit_once.lock().unwrap();
+                        let value = *flag;
+                        *flag = false;
+                        value
+                    };
+                    if kill_once {
+                        // The unit "starts" and immediately exits: give the fake
+                        // server a moment, then leave the unit inactive and the
+                        // port unbound so the readiness wait must notice.
+                        return Ok(json!({"unit": unit, "active": true}));
+                    }
                     self.upstream(port).await?;
                     self.set_unit(&unit, true);
                     Ok(json!({"unit": unit, "active": true}))
@@ -3181,6 +3243,27 @@ mod tests {
         assert_eq!(parse_mem_available(Some(text)), Some(8_000_000u64 * 1024));
         assert_eq!(parse_mem_available(Some("nothing")), None);
         assert_eq!(parse_mem_available(None), None);
+    }
+
+    #[tokio::test]
+    async fn a_session_unit_that_exits_during_startup_is_retried_immediately() {
+        let (_dir, helper, sessions, _cfg) = manager().await;
+        *helper.kill_session_unit_once.lock().unwrap() = true;
+        let user = test_user(1);
+        let started = Instant::now();
+        let (run, session) = sessions
+            .launch(&user, launch_request("code"))
+            .await
+            .expect("the retry starts a healthy session");
+        assert_eq!(run["status"], "running");
+        assert_eq!(session["status"], "ready");
+        assert_eq!(helper.call_count("session_start"), 2, "one failed + one successful start");
+        // Must not wait the full 30 s readiness timeout for the dead unit.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "early failure detection took {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

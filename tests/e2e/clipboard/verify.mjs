@@ -209,7 +209,23 @@ function makeDriver(page, layoutByWindow) {
     async clickField(windowId) {
       const layout = getLayout(windowId);
       if (!layout) throw new Error(`no calibrated layout for ${windowId}`);
-      return clickRemotePage(page, layout, {});
+      const result = await clickRemotePage(page, layout, {});
+      // The controlled page's field covers the whole content area below its
+      // 62 px origin strip. Clicking the adopted window centre is a robust
+      // fallback when the calibrated pixel origin is slightly off (window
+      // shape/scale differs across GPU and Xvfb sessions); without it the
+      // click can land on the page body and selection/typing then go to the
+      // document instead of the textarea.
+      const box = await page.evaluate((id) => {
+        const element = document.querySelector(`.window[data-window-id="${id}"]`);
+        const rect = element?.getBoundingClientRect();
+        return rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+      }, windowId);
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2).catch(() => undefined);
+        await sleep(150);
+      }
+      return result;
     },
     /** Clear the remote field (forwarded Ctrl+A then Backspace). */
     async clearField(windowId, keys) {
