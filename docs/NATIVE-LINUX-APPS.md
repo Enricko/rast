@@ -146,7 +146,7 @@ effect as soon as the old session is idle-clean or the person closes it):
 
 | Profile | Behaviour | Typical use |
 | --- | --- | --- |
-| `responsive` | pinned low quality floor, maximum encoding speed, video scaling off, audio/video sync off | typing, coding, general interaction |
+| `responsive` | pinned low quality floor, maximum encoding speed, video scaling off, audio/video sync off, Xpra damage batching capped (max 120 ms / start 16 ms) | typing, coding, general interaction |
 | `balanced` (default) | Xpra's own adaptive quality/speed (the historical behaviour) | ordinary apps |
 | `media` | higher quality, fast encoding, video downscaling on, A/V sync on | video playback, continuous motion |
 | `quality` | near-lossless text/image quality, slower encoding | document editing, design |

@@ -42,7 +42,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
     auth::AuthUser,
-    config::Config,
+    config::{Config, LinuxProfile},
     db,
     error::{AppError, AppResult},
     events::EventBus,
@@ -932,7 +932,7 @@ impl NativeSessions {
                 "xpraBin": self.config.linux_xpra_bin.display().to_string(),
                 "runtimeDir": runtime.display().to_string(),
                 "args": args,
-                "env": session_env(&identity, &runtime),
+                "env": session_env(&identity, &runtime, self.config.linux_profile),
                 "memoryMaxMb": self.config.linux_session_memory_mb,
                 "cpuQuotaPercent": self.config.linux_session_cpus.saturating_mul(100),
                 "tasksMax": self.config.linux_session_tasks,
@@ -2379,7 +2379,46 @@ fn session_cgroup_metrics(user_id: i64) -> Value {
 /// Environment of the Xpra server process. The helper forces the identity
 /// `HOME`/`XAUTHORITY`; explicitness here documents the contract and makes the
 /// session reproducible when the helper fills only missing keys.
-fn session_env(identity: &Identity, runtime: &Path) -> BTreeMap<String, String> {
+/// Profile-driven Xpra batching limits (server-side `XPRA_BATCH_*` knobs).
+///
+/// Xpra batches damage events to save bandwidth; the measured HTML5 batch
+/// delay on a WAN/Cloudflare path sat around 150-200 ms, which is the dominant
+/// part of input-to-display latency. `balanced` deliberately adds nothing (the
+/// historical behaviour); the latency-sensitive profile caps the worst case.
+fn profile_env(profile: LinuxProfile) -> Vec<(&'static str, String)> {
+    let pairs: &[(&str, u32)] = match profile {
+        LinuxProfile::Balanced => return Vec::new(),
+        LinuxProfile::Responsive => &[
+            ("XPRA_BATCH_MAX_DELAY", 120),
+            ("XPRA_BATCH_MIN_DELAY", 8),
+            ("XPRA_BATCH_START_DELAY", 16),
+            ("XPRA_BATCH_EXPIRE_DELAY", 100),
+            ("XPRA_BATCH_TIMEOUT_DELAY", 1000),
+        ],
+        LinuxProfile::Media => &[
+            ("XPRA_BATCH_MAX_DELAY", 250),
+            ("XPRA_BATCH_START_DELAY", 40),
+            ("XPRA_BATCH_EXPIRE_DELAY", 200),
+            ("XPRA_BATCH_TIMEOUT_DELAY", 3000),
+        ],
+        LinuxProfile::Quality => &[
+            ("XPRA_BATCH_MAX_DELAY", 300),
+            ("XPRA_BATCH_START_DELAY", 40),
+            ("XPRA_BATCH_EXPIRE_DELAY", 250),
+            ("XPRA_BATCH_TIMEOUT_DELAY", 5000),
+        ],
+    };
+    pairs
+        .iter()
+        .map(|(key, value)| (*key, value.to_string()))
+        .collect()
+}
+
+fn session_env(
+    identity: &Identity,
+    runtime: &Path,
+    profile: LinuxProfile,
+) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("HOME".into(), identity.home.display().to_string());
     env.insert(
@@ -2397,6 +2436,9 @@ fn session_env(identity: &Identity, runtime: &Path) -> BTreeMap<String, String> 
     // independently launched app units use, even inside a container. Only one
     // seamless session exists per identity; the enclosing runtime is 0700.
     env.insert("XPRA_PRIVATE_PULSEAUDIO".into(), "0".into());
+    for (key, value) in profile_env(profile) {
+        env.insert(key.to_string(), value);
+    }
     env
 }
 
@@ -2997,11 +3039,13 @@ mod tests {
             home: PathBuf::from("/var/lib/rast/linux-users/1"),
         };
         let runtime = runtime_dir(identity.uid);
-        let env = session_env(&identity, &runtime);
+        let env = session_env(&identity, &runtime, LinuxProfile::Balanced);
         for (key, value) in crate::native::audio::environment(&runtime) {
             assert_eq!(env.get(&key), Some(&value));
         }
         assert_eq!(env["XPRA_PRIVATE_PULSEAUDIO"], "0");
+        // Balanced keeps Xpra's historical batching defaults.
+        assert!(!env.keys().any(|key| key.starts_with("XPRA_BATCH_")));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3709,5 +3753,28 @@ mod tests {
             balanced.is_empty(),
             "balanced must keep Xpra defaults: {balanced:?}"
         );
+    }
+
+    #[test]
+    fn latency_profile_caps_xpra_batching_and_balanced_changes_nothing() {
+        assert!(profile_env(LinuxProfile::Balanced).is_empty());
+        let responsive: std::collections::BTreeMap<_, _> =
+            profile_env(LinuxProfile::Responsive).into_iter().collect();
+        assert_eq!(
+            responsive.get("XPRA_BATCH_MAX_DELAY"),
+            Some(&"120".to_string())
+        );
+        assert_eq!(
+            responsive.get("XPRA_BATCH_MIN_DELAY"),
+            Some(&"8".to_string())
+        );
+        assert_eq!(
+            responsive.get("XPRA_BATCH_START_DELAY"),
+            Some(&"16".to_string())
+        );
+        // Media/quality keep a larger worst case but still bound it.
+        let media: std::collections::BTreeMap<_, _> =
+            profile_env(LinuxProfile::Media).into_iter().collect();
+        assert_eq!(media.get("XPRA_BATCH_MAX_DELAY"), Some(&"250".to_string()));
     }
 }
