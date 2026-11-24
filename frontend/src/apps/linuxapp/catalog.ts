@@ -374,14 +374,14 @@ export function matchWindowApp(
     if (app.package) candidates.add(app.package.toLowerCase());
     if (app.desktopId) {
       candidates.add(app.desktopId.toLowerCase());
-      const base = app.desktopId.toLowerCase().replace(/\.desktop$/, "");
+      const base = desktopIdBase(app.desktopId);
       candidates.add(base);
-      candidates.add(base.split(".").pop() ?? base);
     }
-    const command = app.command[0];
-    if (command) {
-      const base = command.split("/").pop() ?? command;
-      candidates.add(base.toLowerCase());
+    for (const token of app.command) {
+      const base = (token.split("/").pop() ?? token).toLowerCase();
+      // dbus-run-session and friends describe the launcher, not the app.
+      if (!base || LAUNCHER_WRAPPER_BASES.has(base)) continue;
+      candidates.add(base);
     }
     candidates.add(app.name.toLowerCase().replace(/\s+/g, ""));
     for (const mode of ["prefix", "prefix-two"] as const) {
@@ -520,17 +520,25 @@ export function discoveredAppById(id: string): DiscoveredApp | undefined {
  * same application (a managed app and its leftover system desktop entry, or a
  * manual import of what a `.desktop` file already declares).
  */
+const LAUNCHER_WRAPPER_BASES = new Set(["sh", "env", "bash", "dbus-run-session", "nohup", "xvfb-run"]);
+
+function desktopIdBase(desktopId: string): string {
+  const stripped = desktopId.toLowerCase().replace(/\.desktop$/, "");
+  const withoutLauncher = stripped.startsWith("linux:") ? stripped.slice("linux:".length) : stripped;
+  return withoutLauncher.split(".").pop() ?? "";
+}
+
 function discoveredIdentityKeys(app: { desktopId?: string | null; exec: readonly string[] }): string[] {
   const keys: string[] = [];
   if (app.desktopId) {
-    const base = app.desktopId.toLowerCase().replace(/\.desktop$/, "").split(".").pop() ?? "";
+    const base = desktopIdBase(app.desktopId);
     if (base) keys.push(`desktop:${base}`);
   }
   const seenExec = new Set<string>();
   for (const token of app.exec) {
     const base = (token.split("/").pop() ?? "").toLowerCase();
-    // System wrapper scripts never identify an application.
-    if (!base || base === "sh" || base === "env" || base === "dbus-run-session") continue;
+    // Launcher wrappers never identify the application they start.
+    if (!base || LAUNCHER_WRAPPER_BASES.has(base)) continue;
     if (seenExec.has(base)) continue;
     seenExec.add(base);
     keys.push(`exec:${base}`);

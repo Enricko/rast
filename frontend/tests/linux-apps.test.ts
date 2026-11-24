@@ -212,6 +212,19 @@ test("managed apps still win when both match, and unknown classes stay unmatched
   assert.equal(matchWindowApp([], ["totally-unknown-class"], [discoveredApp({})]), null);
 });
 
+test("a managed app matches a window through any command token and a linux: desktop id", () => {
+  const managed = managedLinuxApp({
+    id: "google-chrome",
+    name: "Google Chrome",
+    desktopId: "linux:google-chrome",
+    command: ["/usr/bin/dbus-run-session", "--", "/usr/bin/google-chrome-stable"],
+  });
+  const matched = matchWindowApp([managed], ["google-chrome", "Google-chrome"], []);
+  assert.equal(matched?.id, "google-chrome");
+  const byBinary = matchWindowApp([managed], ["google-chrome-stable"], []);
+  assert.equal(byBinary?.id, "google-chrome");
+});
+
 test("a discovered entry maps to a native LinuxApp with its parsed argv", () => {
   const app = discoveredAsLinuxApp(discoveredApp({}));
   assert.equal(app.id, "d-0123456789abcdef");

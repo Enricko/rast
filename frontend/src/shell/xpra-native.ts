@@ -30,7 +30,7 @@ import { copyText, errorMessage, modal } from "../core/ui";
 import type { WindowHandle, WindowInfo, WindowManager, WindowRect } from "../core/wm";
 import {
   LINUX_PREFIX,
-  discoveredApps,
+  reconciledDiscoveredApps,
   isNativeApp,
   linuxAppById,
   linuxNativeSession,
@@ -1359,7 +1359,10 @@ export class NativeLinuxHost {
     // unknown windows still get a usable generic identity, but a StartupWMClass
     // / WM_CLASS match gives them the right name and icon.
     const nativeApps = nativeWindowApps();
-    const matched = matchWindowApp(nativeApps, window.classInstance, discoveredApps());
+    // Window identity follows the same reconciliation as the launcher: an
+    // entry a managed app already provides (or one hidden as a duplicate)
+    // must not steal the window's identity, icon or grouping.
+    const matched = matchWindowApp(nativeApps, window.classInstance, reconciledDiscoveredApps());
     if (matched) return matched.id;
     // Reuse the app of another window with the same X11 class (e.g. a second
     // Chrome window).
