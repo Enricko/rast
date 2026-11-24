@@ -20,6 +20,7 @@
 //! * copies do not survive a restart of RAST (their addresses and passwords
 //!   live only in memory), so leftovers are stopped at start-up.
 
+pub mod gpu;
 pub mod native_apps;
 pub mod native_archive;
 pub mod native_proxy;

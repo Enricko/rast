@@ -80,6 +80,16 @@ applied by `src/config.rs`.
 | `linux_app_cpus` | integer | `2` | 1–256; default CPU limit of one native application | `RAST_LINUX_APP_CPUS` |
 | `linux_app_tasks` | integer | `1024` | 16–131072; default process limit of one native application | `RAST_LINUX_APP_TASKS` |
 | `linux_admission_reserve_mb` | integer | `1024` | 0–1048576; free memory kept in reserve when a new application is admitted | `RAST_LINUX_ADMISSION_RESERVE_MB` |
+| `linux_profile` | string | `balanced` | Adaptive performance profile of the shared session: `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the historical behaviour), `media` (smooth video), `quality` (sharp text/images). Explicit settings below override it. See [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md#performance-profiles-and-display-backend) | `RAST_LINUX_PROFILE` |
+| `linux_quality` | integer | unset | 1–100; fixed image quality. Overrides the profile; unset = profile/automatic | `RAST_LINUX_QUALITY` |
+| `linux_min_quality` | integer | unset | 1–100; minimum automatic quality | `RAST_LINUX_MIN_QUALITY` |
+| `linux_speed` | integer | unset | 1–100; fixed encoding speed | `RAST_LINUX_SPEED` |
+| `linux_min_speed` | integer | unset | 1–100; minimum automatic encoding speed | `RAST_LINUX_MIN_SPEED` |
+| `linux_video_scaling` | integer | unset | 0–100; automatic video downscaling | `RAST_LINUX_VIDEO_SCALING` |
+| `linux_av_sync` | boolean | unset | Audio/video synchronisation (unset = profile, normally on) | `RAST_LINUX_AV_SYNC` |
+| `linux_encoding` | string | unset | Preferred encoding: `h264`, `vp8`, `vp9`, `webp`, `jpeg` or `rgb`; unset = Xpra automatic. Forcing a codec the browser cannot decode breaks rendering, so prefer the profiles | `RAST_LINUX_ENCODING` |
+| `linux_display_backend` | string | `auto` | `auto` (custom X server when usable, else Xvfb), `software` (always Xvfb) or `custom` (expects `linux_xvfb_command`, falls back to Xvfb if unusable) | `RAST_LINUX_DISPLAY_BACKEND` |
+| `linux_xvfb_command` | path | unset | Absolute path of a wrapper script starting an alternative headless X server for GPU-backed rendering; passed as `xpra --xvfb=<path>`. Validate it as described in [GPU-ACCELERATION.md](GPU-ACCELERATION.md) | `RAST_LINUX_XVFB_COMMAND` |
 | `default_quota_bytes` | integer | `21474836480` (20 GiB) | `0` = unlimited; applies to newly created accounts | `RAST_DEFAULT_QUOTA_BYTES` |
 | `secure_cookies` | boolean | auto | Auto = `true` when `public_url` starts with `https://` | `RAST_SECURE_COOKIES` |
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
@@ -133,6 +143,12 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_LINUX_SESSION_MEMORY_MB` / `RAST_LINUX_SESSION_CPUS` / `RAST_LINUX_SESSION_TASKS` | `linux_session_*` | Session cgroup limits |
 | `RAST_LINUX_APP_MEMORY_MB` / `RAST_LINUX_APP_CPUS` / `RAST_LINUX_APP_TASKS` | `linux_app_*` | Default application cgroup limits |
 | `RAST_LINUX_ADMISSION_RESERVE_MB` | `linux_admission_reserve_mb` | Free-memory reserve for admission |
+| `RAST_LINUX_PROFILE` | `linux_profile` | `responsive`/`balanced`/`media`/`quality` |
+| `RAST_LINUX_QUALITY` / `_MIN_QUALITY` / `_SPEED` / `_MIN_SPEED` / `_VIDEO_SCALING` | `linux_quality` / … | Integer overrides |
+| `RAST_LINUX_AV_SYNC` | `linux_av_sync` | `true`/`false` |
+| `RAST_LINUX_ENCODING` | `linux_encoding` | Codec override |
+| `RAST_LINUX_DISPLAY_BACKEND` | `linux_display_backend` | `auto`/`software`/`custom` |
+| `RAST_LINUX_XVFB_COMMAND` | `linux_xvfb_command` | Absolute wrapper-script path |
 | `RAST_DEFAULT_QUOTA_BYTES` | `default_quota_bytes` | New accounts only |
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |

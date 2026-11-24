@@ -215,6 +215,44 @@ linux_app_tasks = 1024
 # env: RAST_LINUX_ADMISSION_RESERVE_MB
 linux_admission_reserve_mb = 1024
 
+# ---- Native session performance profile -----------------------------------
+# Adaptive profile for every person's shared Xpra session. "balanced" keeps
+# Xpra's own adaptive defaults (quality/speed chosen from load). "responsive"
+# pins the lowest latency for typing and general interaction, "media" favours
+# smooth video, "quality" favours sharp text and images. Explicit quality/
+# speed/scaling settings below override the profile.
+# env: RAST_LINUX_PROFILE
+linux_profile = "balanced"
+# Optional fixed settings (1-100; video_scaling 0-100). Unset = profile value.
+# env: RAST_LINUX_QUALITY
+# linux_quality = 60
+# env: RAST_LINUX_MIN_QUALITY
+# linux_min_quality = 20
+# env: RAST_LINUX_SPEED
+# linux_speed = 60
+# env: RAST_LINUX_MIN_SPEED
+# linux_min_speed = 30
+# env: RAST_LINUX_VIDEO_SCALING
+# linux_video_scaling = 50
+# env: RAST_LINUX_AV_SYNC
+# linux_av_sync = true
+# Preferred encoding; unset = Xpra automatic. One of: h264, vp8, vp9, webp,
+# jpeg, rgb (browser clients cannot decode every codec).
+# env: RAST_LINUX_ENCODING
+# linux_encoding = "h264"
+
+# Headless X server for native sessions: "auto" uses linux_xvfb_command when it
+# is executable and falls back to the bundled Xvfb, "software" always uses
+# Xvfb, "custom" expects the command below (still falls back to Xvfb at start
+# if it is missing, so a bad command never bricks sessions).
+# env: RAST_LINUX_DISPLAY_BACKEND
+# linux_display_backend = "auto"
+# Optional wrapper script that starts an alternative headless X server (a
+# GPU-backed Xorg configuration, validated as described in
+# docs/GPU-ACCELERATION.md). It replaces `Xvfb` in `xpra start --xvfb=...`.
+# env: RAST_LINUX_XVFB_COMMAND
+# linux_xvfb_command = "/usr/local/sbin/rast-xorg-gpu"
+
 # ---------------------------------------------------------------------------
 # App Center
 # ---------------------------------------------------------------------------

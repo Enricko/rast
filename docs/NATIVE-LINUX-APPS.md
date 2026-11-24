@@ -138,6 +138,43 @@ names are keyed by RAST user id (`rast-xpra-u<id>`, `rast-app-u<uid>-…`), so a
 second instance on the same host would fight over the same sessions. Test or
 secondary instances must set `native_enabled = false` (or use another host).
 
+## Performance profiles and display backend
+
+The shared per-user Xpra session has one **adaptive performance profile**. It
+is applied when a session starts, so a change affects new sessions (and takes
+effect as soon as the old session is idle-clean or the person closes it):
+
+| Profile | Behaviour | Typical use |
+| --- | --- | --- |
+| `responsive` | pinned low quality floor, maximum encoding speed, video scaling off, audio/video sync off | typing, coding, general interaction |
+| `balanced` (default) | Xpra's own adaptive quality/speed (the historical behaviour) | ordinary apps |
+| `media` | higher quality, fast encoding, video downscaling on, A/V sync on | video playback, continuous motion |
+| `quality` | near-lossless text/image quality, slower encoding | document editing, design |
+
+Explicit `linux_quality` / `linux_min_quality` / `linux_speed` /
+`linux_min_speed` / `linux_video_scaling` / `linux_av_sync` settings override
+the profile's values, and `linux_encoding` can pin a codec. Profiles never
+change the window model: every remote top-level window is still its own RAST
+window.
+
+The **display backend** is chosen independently. `linux_display_backend=auto`
+uses the bundled **Xvfb** (software OpenGL/llvmpipe) unless the operator has
+configured a validated `linux_xvfb_command` wrapper that starts a GPU-backed X
+server; `software` always uses Xvfb; `custom` expects the wrapper but still
+falls back to Xvfb at session start if it is missing or not executable, so a
+bad command cannot brick a session. GPU rendering inside applications, GPU
+encoding on the server and GPU decoding in the browser are separate layers —
+RAST detects what is installed (App Center's app details panel and
+`rast doctor` show the profile, display backend, GPU model/driver and whether
+NVENC/NVDEC codecs are available) but never claims acceleration that a real
+application test has not verified. See
+[GPU-ACCELERATION.md](GPU-ACCELERATION.md) for the validated options on this
+host and [BENCHMARKS.md](BENCHMARKS.md) for measured results.
+
+`rast doctor` reports the detected runtime. The App Center app details panel
+shows the same fields for the signed-in person, and
+`GET /api/linux-apps` includes a read-only `runtime` object for tooling.
+
 ## Security model
 
 The security boundary is **between users**, not between the applications of one

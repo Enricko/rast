@@ -976,6 +976,14 @@ pub struct DoctorReport {
 /// Build the `rast doctor` lines for the native helper. Never reports a
 /// *failure*: the native backend is optional, and a broken helper must not make
 /// the whole installation look unhealthy.
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
 pub async fn doctor_report(cfg: &Config) -> DoctorReport {
     let mut report = DoctorReport::default();
     report.lines.push("[INFO] native Linux apps".to_string());
@@ -1059,6 +1067,64 @@ pub async fn doctor_report(cfg: &Config) -> DoctorReport {
                     .to_string(),
             );
         }
+    }
+
+    // Session profile, display backend and GPU capability detection. This is
+    // read-only: nothing is started and no package/config is changed.
+    let runtime = crate::linux_apps::gpu::report(cfg);
+    report
+        .lines
+        .push(format!("        session profile: {}", runtime.profile));
+    report.lines.push(format!(
+        "        display backend: {} ({})",
+        runtime.display.active,
+        match (
+            &runtime.display.custom_command,
+            runtime.display.custom_usable
+        ) {
+            (Some(command), true) => command.as_str(),
+            (Some(_), false) => "configured command is not executable; using Xvfb",
+            (None, _) => "Xvfb (software rendering)",
+        }
+    ));
+    match (
+        runtime.gpu.model.as_deref(),
+        runtime.gpu.driver_version.as_deref(),
+    ) {
+        (Some(model), Some(version)) => report
+            .lines
+            .push(format!("        GPU: {model} (NVIDIA driver {version})")),
+        (Some(model), None) => report
+            .lines
+            .push(format!("        GPU: {model} (driver version unknown)")),
+        _ if runtime.gpu.vendor == "nvidia" => report.lines.push(
+            "        GPU: NVIDIA device nodes present, driver metadata unreadable".to_string(),
+        ),
+        _ if !runtime.gpu.render_nodes.is_empty() => report.lines.push(format!(
+            "        GPU: {} DRM render node(s), no NVIDIA driver",
+            runtime.gpu.render_nodes.len()
+        )),
+        _ => report
+            .lines
+            .push("        GPU: none detected (software rendering)".to_string()),
+    }
+    report.lines.push(format!(
+        "        GPU codecs: xpra-nvidia-module={} nvenc-lib={} nvdec-lib={}",
+        yes_no(runtime.gpu.xpra_nvidia_codecs),
+        yes_no(runtime.gpu.nvenc_library),
+        yes_no(runtime.gpu.nvdec_library)
+    ));
+    if runtime.gpu.vendor == "nvidia" && !runtime.gpu.xpra_nvidia_codecs {
+        warn(
+            &mut report,
+            "an NVIDIA GPU is present but Xpra's NVIDIA codec module is not installed: sessions \
+             use software encoding (x264/webp). Install the xpra-codecs-nvidia package that \
+             matches the installed Xpra version (see docs/GPU-ACCELERATION.md)"
+                .to_string(),
+        );
+    }
+    for note in &runtime.notes {
+        report.lines.push(format!("        note: {note}"));
     }
 
     let helper_state = std::process::Command::new("systemctl")

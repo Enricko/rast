@@ -121,6 +121,10 @@ async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<V
         "dockerEnabled": state.config.docker_enabled && crate::linux_apps::SUPPORTED,
         "nativeEnabled": state.linux_apps.native_available(),
         "linuxAppsEnabled": state.linux_apps.linux_apps_enabled(),
+        // Runtime profile, display backend and GPU capability detection for
+        // the App Center performance panel. Detection is read-only and cached
+        // per process; it never claims acceleration that was not verified.
+        "runtime": crate::linux_apps::gpu::report(&state.config),
     })))
 }
 

@@ -46,7 +46,7 @@ use crate::{
     db,
     error::{AppError, AppResult},
     events::EventBus,
-    linux_apps::SESSION_EVENT,
+    linux_apps::{gpu, SESSION_EVENT},
 };
 
 /// Every proxied Xpra page and asset lives under this prefix; the secret
@@ -246,6 +246,10 @@ impl NativeSession {
             // Native apps draw their own top-level X11 windows; the browser
             // adopts each one in its own RAST window.
             "separateWindows": true,
+            // Runtime policy diagnostics for the App Center performance panel.
+            "profile": state.profile.clone(),
+            "displayBackend": state.display_backend.clone(),
+            "gpuAccelerationVerified": false,
             "display": state.display,
             "apps": state.apps.iter().map(NativeRun::json).collect::<Vec<Value>>(),
         })
@@ -300,6 +304,10 @@ struct SessionState {
     port: Option<u16>,
     /// systemd transient unit of the Xpra session.
     unit: String,
+    /// Operator-selected performance profile at session start (`balanced`, ...).
+    profile: String,
+    /// Display backend the session actually uses (`xvfb` or `custom`).
+    display_backend: String,
     viewers: usize,
     /// Last input/activity from any viewer (idle bookkeeping).
     last_input: Instant,
@@ -539,7 +547,19 @@ impl NativeSessions {
     /// The person's session as JSON, when one exists (starting, ready or just
     /// ended).
     pub async fn session_json(&self, user: &AuthUser) -> AppResult<Option<Value>> {
-        Ok(self.session_of_user(user.id).map(|session| session.json()))
+        Ok(self.session_of_user(user.id).map(|session| {
+            let mut value = session.json();
+            if let Some(object) = value.as_object_mut() {
+                // Diagnostics for the App Center performance panel: the
+                // operator-selected runtime policy, the display backend in use
+                // and live cgroup usage of this person's session. The GPU
+                // report is cached per process and never claims verified
+                // acceleration. Negotiated encoder details stay server-side in
+                // the Xpra log/info (see docs/BENCHMARKS.md).
+                object.insert("metrics".into(), session_cgroup_metrics(user.id));
+            }
+            value
+        }))
     }
 
     /// Close one of the person's applications (its own close button normally
@@ -879,6 +899,8 @@ impl NativeSessions {
                     display: display_number,
                     port: Some(port),
                     unit: unit.clone(),
+                    profile: self.config.linux_profile.as_str().to_string(),
+                    display_backend: gpu::resolved_display_backend(&self.config).to_string(),
                     viewers: 0,
                     last_input: Instant::now(),
                     empty_since: None,
@@ -897,10 +919,12 @@ impl NativeSessions {
                 user_id = user.id,
                 display = display_number,
                 port,
+                profile = self.config.linux_profile.as_str(),
+                display_backend = gpu::resolved_display_backend(&self.config),
                 "starting a native graphical session"
             );
 
-            let args = xpra_args(display_number, port, &runtime);
+            let args = xpra_args(display_number, port, &runtime, &self.config);
             let params = json!({
                 "userId": user.id,
                 "display": display_number,
@@ -1823,6 +1847,8 @@ impl NativeSessions {
                     display: display_number,
                     port: Some(port),
                     unit,
+                    profile: self.config.linux_profile.as_str().to_string(),
+                    display_backend: gpu::resolved_display_backend(&self.config).to_string(),
                     viewers: 0,
                     last_input: Instant::now(),
                     // Adopted sessions start their idle timer immediately:
@@ -2220,8 +2246,10 @@ fn runtime_dir(uid: u32) -> PathBuf {
 ///   microphone forwarding remains disabled, as do printing, webcam and mDNS.
 /// * a foreground, playback-only PulseAudio child captures only the person's
 ///   virtual speaker; no default.pa or host/global sound device is loaded.
-fn xpra_args(display: u32, port: u16, runtime: &Path) -> Vec<String> {
-    vec![
+/// Arguments for `xpra start`: the verified base command, the selected
+/// headless display backend and the adaptive performance profile.
+fn xpra_args(display: u32, port: u16, runtime: &Path, config: &Config) -> Vec<String> {
+    let mut args = vec![
         "start".to_string(),
         format!(":{display}"),
         "--daemon=no".to_string(),
@@ -2234,7 +2262,7 @@ fn xpra_args(display: u32, port: u16, runtime: &Path) -> Vec<String> {
         "--clipboard=yes".to_string(),
         format!("--socket-dir={}", runtime.join("sockets").display()),
         format!("--log-file={}", runtime.join("xpra.log").display()),
-        "--xvfb=Xvfb".to_string(),
+        gpu::display_backend_arg(config),
         "--dpi=96".to_string(),
         "--audio=yes".to_string(),
         "--speaker=on".to_string(),
@@ -2248,7 +2276,104 @@ fn xpra_args(display: u32, port: u16, runtime: &Path) -> Vec<String> {
             crate::native::audio::pulseaudio_command()
         ),
         "--dbus=no".to_string(),
-    ]
+    ];
+    args.extend(profile_arguments(config));
+    args
+}
+
+/// Profile defaults: `balanced` keeps Xpra's adaptive defaults (the historical
+/// behaviour); the other profiles pin quality/speed/video-scaling for their use
+/// case. Explicit `linux_*` options always win over the profile.
+fn profile_arguments(config: &Config) -> Vec<String> {
+    use crate::config::LinuxProfile;
+
+    #[derive(Default)]
+    struct Limits {
+        quality: Option<u8>,
+        min_quality: Option<u8>,
+        speed: Option<u8>,
+        min_speed: Option<u8>,
+        video_scaling: Option<u8>,
+        av_sync: Option<bool>,
+    }
+    let profile = match config.linux_profile {
+        LinuxProfile::Balanced => Limits::default(),
+        LinuxProfile::Responsive => Limits {
+            quality: Some(30),
+            min_quality: Some(10),
+            speed: Some(90),
+            min_speed: Some(70),
+            video_scaling: Some(0),
+            av_sync: Some(false),
+        },
+        LinuxProfile::Media => Limits {
+            quality: Some(70),
+            min_quality: Some(40),
+            speed: Some(85),
+            min_speed: Some(60),
+            video_scaling: Some(70),
+            av_sync: Some(true),
+        },
+        LinuxProfile::Quality => Limits {
+            quality: Some(95),
+            min_quality: Some(70),
+            speed: Some(25),
+            min_speed: Some(15),
+            video_scaling: Some(0),
+            av_sync: Some(true),
+        },
+    };
+    let quality = config.linux_quality.or(profile.quality);
+    let min_quality = config.linux_min_quality.or(profile.min_quality);
+    let speed = config.linux_speed.or(profile.speed);
+    let min_speed = config.linux_min_speed.or(profile.min_speed);
+    let video_scaling = config.linux_video_scaling.or(profile.video_scaling);
+    let av_sync = config.linux_av_sync.or(profile.av_sync);
+
+    let mut args = Vec::new();
+    if let Some(value) = quality {
+        args.push(format!("--quality={value}"));
+    }
+    if let Some(value) = min_quality {
+        args.push(format!("--min-quality={value}"));
+    }
+    if let Some(value) = speed {
+        args.push(format!("--speed={value}"));
+    }
+    if let Some(value) = min_speed {
+        args.push(format!("--min-speed={value}"));
+    }
+    if let Some(value) = video_scaling {
+        args.push(format!("--video-scaling={value}"));
+    }
+    if av_sync == Some(false) {
+        args.push("--av-sync=no".to_string());
+    }
+    if let Some(encoding) = config.linux_encoding.as_deref() {
+        args.push(format!("--encoding={encoding}"));
+    }
+    args
+}
+
+/// Live cgroup v2 usage of one person's session unit (read-only). Missing
+/// values are `null`, never an error: telemetry must not break a page.
+fn session_cgroup_metrics(user_id: i64) -> Value {
+    let base =
+        PathBuf::from("/sys/fs/cgroup/rast.slice/rast-linux.slice").join(session_unit(user_id));
+    let read = |name: &str| std::fs::read_to_string(base.join(name)).ok();
+    let memory_bytes = read("memory.current").and_then(|value| value.trim().parse::<u64>().ok());
+    let tasks = read("pids.current").and_then(|value| value.trim().parse::<u64>().ok());
+    let cpu_useconds = read("cpu.stat").and_then(|value| {
+        value.lines().find_map(|line| {
+            line.strip_prefix("usage_usec ")
+                .and_then(|number| number.trim().parse::<u64>().ok())
+        })
+    });
+    json!({
+        "memoryBytes": memory_bytes,
+        "tasks": tasks,
+        "cpuUsec": cpu_useconds,
+    })
 }
 
 /// Environment of the Xpra server process. The helper forces the identity
@@ -2410,6 +2535,8 @@ impl NativeSession {
                 display: 100,
                 port: None,
                 unit: session_unit(user_id),
+                profile: "balanced".into(),
+                display_backend: "xvfb".into(),
                 viewers: 0,
                 last_input: Instant::now(),
                 empty_since: None,
@@ -2783,6 +2910,14 @@ mod tests {
             "/linux-apps/session/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
         );
         assert_eq!(json["separateWindows"], true);
+        // Runtime diagnostics: the profile/backend come from configuration and
+        // are always strings; live cgroup metrics are present but may be null
+        // in environments without the session unit.
+        assert_eq!(json["profile"], "balanced");
+        assert_eq!(json["displayBackend"], "xvfb");
+        assert_eq!(json["gpuAccelerationVerified"], false);
+        // Live cgroup metrics are added by the manager-level `session_json`
+        // (which has the per-user unit); the raw session JSON has no unit path.
         assert!(json.get("key").is_none());
         assert_eq!(json["apps"], json!([]));
         assert_eq!(json["display"], 100);
@@ -2811,7 +2946,13 @@ mod tests {
 
     #[test]
     fn xpra_command_is_the_verified_one() {
-        let args = xpra_args(150, 14611, &PathBuf::from("/run/rast-linux/200901"));
+        let config = test_config();
+        let args = xpra_args(
+            150,
+            14611,
+            &PathBuf::from("/run/rast-linux/200901"),
+            &config,
+        );
         assert_eq!(args[0], "start");
         assert_eq!(args[1], ":150");
         assert!(args.contains(&"--bind-tcp=127.0.0.1:14611".to_string()));
@@ -2827,6 +2968,12 @@ mod tests {
         assert!(args.contains(&"--microphone=disabled".to_string()));
         assert!(args.contains(&"--audio-source=pulse:device=Xpra-Speaker.monitor".to_string()));
         assert!(args.contains(&"--pulseaudio=yes".to_string()));
+        // Balanced (the default) keeps Xpra's own adaptive defaults: no
+        // quality/speed flags are added, so upgrading does not change the
+        // stream policy unless the operator opts into a profile.
+        assert!(!args.iter().any(|arg| arg.starts_with("--quality=")));
+        assert!(!args.iter().any(|arg| arg.starts_with("--speed=")));
+        assert!(!args.iter().any(|arg| arg == "--av-sync=no"));
         // List-valued CLI options append to distro config in Xpra 6.5.5.
         // The helper replaces this via its fixed final config layer instead.
         assert!(!args
@@ -3126,6 +3273,8 @@ mod tests {
                 display: 900,
                 port: Some(1),
                 unit: session_unit(1),
+                profile: "balanced".into(),
+                display_backend: "xvfb".into(),
                 viewers: 0,
                 last_input: Instant::now(),
                 empty_since: None,
@@ -3497,5 +3646,68 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("stopped unexpectedly"));
+    }
+
+    fn config_with_runtime(file: crate::config::FileConfig) -> Config {
+        Config::from_parts(None, file, |_| None).unwrap()
+    }
+
+    fn args_for(file: crate::config::FileConfig) -> Vec<String> {
+        let config = config_with_runtime(file);
+        profile_arguments(&config)
+    }
+
+    #[test]
+    fn responsive_profile_pins_low_latency_limits() {
+        let args = args_for(crate::config::FileConfig {
+            linux_profile: Some("responsive".into()),
+            ..Default::default()
+        });
+        for expected in [
+            "--quality=30",
+            "--min-quality=10",
+            "--speed=90",
+            "--min-speed=70",
+            "--video-scaling=0",
+            "--av-sync=no",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == expected),
+                "missing {expected} in {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_profile_prioritises_fidelity() {
+        let args = args_for(crate::config::FileConfig {
+            linux_profile: Some("quality".into()),
+            ..Default::default()
+        });
+        assert!(args.iter().any(|arg| arg == "--quality=95"));
+        assert!(args.iter().any(|arg| arg == "--min-quality=70"));
+        assert!(args.iter().any(|arg| arg == "--speed=25"));
+        assert!(!args.iter().any(|arg| arg == "--av-sync=no"));
+    }
+
+    #[test]
+    fn explicit_overrides_win_over_the_profile_and_balanced_adds_nothing() {
+        let args = args_for(crate::config::FileConfig {
+            linux_profile: Some("responsive".into()),
+            linux_quality: Some(55),
+            linux_speed: Some(40),
+            linux_encoding: Some("webp".into()),
+            ..Default::default()
+        });
+        assert!(args.iter().any(|arg| arg == "--quality=55"));
+        assert!(!args.iter().any(|arg| arg == "--quality=30"));
+        assert!(args.iter().any(|arg| arg == "--speed=40"));
+        assert!(args.iter().any(|arg| arg == "--encoding=webp"));
+
+        let balanced = args_for(crate::config::FileConfig::default());
+        assert!(
+            balanced.is_empty(),
+            "balanced must keep Xpra defaults: {balanced:?}"
+        );
     }
 }

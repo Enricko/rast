@@ -144,6 +144,30 @@ pub struct FileConfig {
     pub linux_app_cpus: Option<u32>,
     /// Default process (task) limit of one native application.
     pub linux_app_tasks: Option<u32>,
+    /// Adaptive performance profile for the shared graphical session:
+    /// `responsive`, `balanced` (default), `media` or `quality`.
+    pub linux_profile: Option<String>,
+    /// Fixed image quality (1-100). Overrides the profile; unset = profile.
+    pub linux_quality: Option<u32>,
+    /// Minimum automatic quality (1-100). Overrides the profile.
+    pub linux_min_quality: Option<u32>,
+    /// Fixed encoding speed (1-100). Overrides the profile.
+    pub linux_speed: Option<u32>,
+    /// Minimum automatic encoding speed (1-100). Overrides the profile.
+    pub linux_min_speed: Option<u32>,
+    /// Automatic video downscaling (0-100). Overrides the profile.
+    pub linux_video_scaling: Option<u32>,
+    /// Audio/video synchronisation (default: profile, normally on).
+    pub linux_av_sync: Option<bool>,
+    /// Preferred image/video encoding (`auto`, `h264`, `vp8`, `vp9`, `webp`,
+    /// `jpeg`, `rgb`). Unset = Xpra's automatic selection.
+    pub linux_encoding: Option<String>,
+    /// Display backend: `auto` (default), `software` (Xvfb) or `custom`
+    /// (the `linux_xvfb_command` script, falling back to Xvfb).
+    pub linux_display_backend: Option<String>,
+    /// Absolute path of a wrapper script that starts an alternative headless X
+    /// server (for example a GPU-backed Xorg). Xpra runs it in place of Xvfb.
+    pub linux_xvfb_command: Option<PathBuf>,
     /// Free memory kept in reserve when admitting a new native application.
     pub linux_admission_reserve_mb: Option<u32>,
 
@@ -172,6 +196,87 @@ pub struct FileConfig {
     pub terminal_admin_account: Option<String>,
     /// Extra directories at the end of an administrator root shell's PATH.
     pub terminal_path_extra: Option<Vec<String>>,
+}
+
+/// Adaptive performance profile of the shared Xpra session.
+///
+/// `Balanced` keeps Xpra's own adaptive defaults (the historical behaviour).
+/// The other profiles pin quality/speed/video-scaling for their use case; any
+/// explicit `linux_quality`/`linux_speed`/... setting overrides the profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxProfile {
+    /// Lowest latency for typing and general interaction.
+    Responsive,
+    /// Adaptive defaults (Xpra decides quality/speed from load).
+    Balanced,
+    /// Smoother video / continuous motion.
+    Media,
+    /// Sharpest text and images for editing and design work.
+    Quality,
+}
+
+impl LinuxProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Responsive => "responsive",
+            Self::Balanced => "balanced",
+            Self::Media => "media",
+            Self::Quality => "quality",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "responsive" => Some(Self::Responsive),
+            "balanced" => Some(Self::Balanced),
+            "media" => Some(Self::Media),
+            "quality" => Some(Self::Quality),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LinuxProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// How the headless X server for native sessions is chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinuxDisplayBackend {
+    /// Use `linux_xvfb_command` when it is configured and usable, else Xvfb.
+    Auto,
+    /// Always use the bundled Xvfb (software rendering).
+    Software,
+    /// Require `linux_xvfb_command`; fall back to Xvfb at session start if it
+    /// is missing or not executable (never crash the session).
+    Custom,
+}
+
+impl LinuxDisplayBackend {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Software => "software",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "software" | "xvfb" => Some(Self::Software),
+            "custom" | "xorg" | "nvidia-xorg" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for LinuxDisplayBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Fully resolved configuration.
@@ -216,6 +321,20 @@ pub struct Config {
     pub linux_app_memory_mb: u32,
     pub linux_app_cpus: u32,
     pub linux_app_tasks: u32,
+    /// Adaptive performance profile for native graphical sessions.
+    pub linux_profile: LinuxProfile,
+    /// Fixed quality override (None = profile).
+    pub linux_quality: Option<u8>,
+    pub linux_min_quality: Option<u8>,
+    pub linux_speed: Option<u8>,
+    pub linux_min_speed: Option<u8>,
+    pub linux_video_scaling: Option<u8>,
+    pub linux_av_sync: Option<bool>,
+    /// Preferred encoding override (None = automatic).
+    pub linux_encoding: Option<String>,
+    pub linux_display_backend: LinuxDisplayBackend,
+    /// Custom headless X server command (see [`LinuxDisplayBackend::Custom`]).
+    pub linux_xvfb_command: Option<PathBuf>,
     pub linux_admission_reserve_mb: u32,
     /// Native Terminal settings (PTY shells under the per-user identity).
     pub terminal: TerminalConfig,
@@ -599,6 +718,119 @@ impl Config {
             ));
         }
 
+        // ---- Native session runtime profile and display backend ----------
+        let linux_profile = match get_str(
+            file.linux_profile.map(|v| v.to_string()),
+            "RAST_LINUX_PROFILE",
+        ) {
+            Some(value) => LinuxProfile::parse(&value).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "linux_profile must be one of responsive, balanced, media, quality (got '{value}')"
+                ))
+            })?,
+            None => LinuxProfile::Balanced,
+        };
+        fn optional_percent(
+            env: &impl Fn(&str) -> Option<String>,
+            key: &str,
+            file: Option<u32>,
+            name: &str,
+            allow_zero: bool,
+        ) -> Result<Option<u8>, ConfigError> {
+            let Some(value) = parse_env_num(env, key, file)? else {
+                return Ok(None);
+            };
+            let min = if allow_zero { 0 } else { 1 };
+            if !(min..=100).contains(&value) {
+                return Err(ConfigError::Invalid(format!(
+                    "{name} must be between {min} and 100"
+                )));
+            }
+            Ok(Some(value as u8))
+        }
+        let linux_quality = optional_percent(
+            &env,
+            "RAST_LINUX_QUALITY",
+            file.linux_quality,
+            "linux_quality",
+            false,
+        )?;
+        let linux_min_quality = optional_percent(
+            &env,
+            "RAST_LINUX_MIN_QUALITY",
+            file.linux_min_quality,
+            "linux_min_quality",
+            false,
+        )?;
+        let linux_speed = optional_percent(
+            &env,
+            "RAST_LINUX_SPEED",
+            file.linux_speed,
+            "linux_speed",
+            false,
+        )?;
+        let linux_min_speed = optional_percent(
+            &env,
+            "RAST_LINUX_MIN_SPEED",
+            file.linux_min_speed,
+            "linux_min_speed",
+            false,
+        )?;
+        let linux_video_scaling = optional_percent(
+            &env,
+            "RAST_LINUX_VIDEO_SCALING",
+            file.linux_video_scaling,
+            "linux_video_scaling",
+            true,
+        )?;
+        let linux_av_sync = parse_env_bool(&env, "RAST_LINUX_AV_SYNC", file.linux_av_sync)?;
+        let linux_encoding = get_str(file.linux_encoding, "RAST_LINUX_ENCODING")
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty() && value != "auto");
+        if let Some(encoding) = &linux_encoding {
+            const ALLOWED: &[&str] = &["h264", "vp8", "vp9", "webp", "jpeg", "png", "rgb", "avif"];
+            if !ALLOWED.contains(&encoding.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "linux_encoding must be one of {} (got '{encoding}')",
+                    ALLOWED.join(", ")
+                )));
+            }
+        }
+        let linux_display_backend = match get_str(
+            file.linux_display_backend.map(|v| v.to_string()),
+            "RAST_LINUX_DISPLAY_BACKEND",
+        ) {
+            Some(value) => LinuxDisplayBackend::parse(&value).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "linux_display_backend must be one of auto, software, custom (got '{value}')"
+                ))
+            })?,
+            None => LinuxDisplayBackend::Auto,
+        };
+        let linux_xvfb_command = get_str(
+            file.linux_xvfb_command.map(|p| p.display().to_string()),
+            "RAST_LINUX_XVFB_COMMAND",
+        )
+        .map(PathBuf::from)
+        .map(|path| {
+            let text = path.display().to_string();
+            if !path.is_absolute()
+                || text.len() > 512
+                || text.chars().any(|c| c.is_control() || c == '\0')
+            {
+                return Err(ConfigError::Invalid(
+                    "linux_xvfb_command must be an absolute path without control characters".into(),
+                ));
+            }
+            Ok(path)
+        })
+        .transpose()?;
+        if !(0..=1_048_576).contains(&linux_admission_reserve_mb) {
+            return Err(ConfigError::Invalid(
+                "linux_admission_reserve_mb must be between 0 and 1048576".into(),
+            ));
+        }
+
         let terminal_path_extra: Vec<String> = get_str(
             file.terminal_path_extra.map(|v| v.join(":")),
             "RAST_TERMINAL_PATH_EXTRA",
@@ -715,6 +947,16 @@ impl Config {
             linux_app_cpus,
             linux_app_tasks,
             linux_admission_reserve_mb,
+            linux_profile,
+            linux_quality,
+            linux_min_quality,
+            linux_speed,
+            linux_min_speed,
+            linux_video_scaling,
+            linux_av_sync,
+            linux_encoding,
+            linux_display_backend,
+            linux_xvfb_command,
             terminal,
             loaded_from,
         })
@@ -1170,5 +1412,114 @@ mod tests {
         );
         assert_eq!(parsed.packages_check_interval_minutes, Some(360));
         assert!(!text.contains("packages_github_token"));
+    }
+}
+
+#[cfg(test)]
+mod native_runtime_config_tests {
+    use super::*;
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn native_runtime_defaults_keep_the_historical_behaviour() {
+        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
+        assert_eq!(cfg.linux_profile, LinuxProfile::Balanced);
+        assert_eq!(cfg.linux_display_backend, LinuxDisplayBackend::Auto);
+        assert_eq!(cfg.linux_quality, None);
+        assert_eq!(cfg.linux_speed, None);
+        assert_eq!(cfg.linux_encoding, None);
+        assert_eq!(cfg.linux_av_sync, None);
+        assert_eq!(cfg.linux_xvfb_command, None);
+    }
+
+    #[test]
+    fn native_runtime_profile_and_overrides_parse() {
+        let file = FileConfig::from_toml_str(
+            r#"
+            linux_profile = "responsive"
+            linux_quality = 42
+            linux_min_quality = 20
+            linux_speed = 80
+            linux_min_speed = 60
+            linux_video_scaling = 0
+            linux_av_sync = false
+            linux_encoding = "WEBP"
+            linux_display_backend = "software"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::from_parts(None, file, no_env).unwrap();
+        assert_eq!(cfg.linux_profile, LinuxProfile::Responsive);
+        assert_eq!(cfg.linux_quality, Some(42));
+        assert_eq!(cfg.linux_min_quality, Some(20));
+        assert_eq!(cfg.linux_speed, Some(80));
+        assert_eq!(cfg.linux_min_speed, Some(60));
+        assert_eq!(cfg.linux_video_scaling, Some(0));
+        assert_eq!(cfg.linux_av_sync, Some(false));
+        assert_eq!(cfg.linux_encoding.as_deref(), Some("webp"));
+        assert_eq!(cfg.linux_display_backend, LinuxDisplayBackend::Software);
+    }
+
+    #[test]
+    fn invalid_native_runtime_values_are_rejected() {
+        for bad in [
+            "linux_profile = \"turbo\"",
+            "linux_quality = 0",
+            "linux_quality = 101",
+            "linux_min_quality = 101",
+            "linux_speed = 0",
+            "linux_min_speed = 101",
+            "linux_video_scaling = 101",
+            "linux_encoding = \"h265\"",
+            "linux_display_backend = \"vulkan\"",
+            "linux_xvfb_command = \"relative/script.sh\"",
+        ] {
+            let file = FileConfig::from_toml_str(bad).expect("toml parses");
+            assert!(
+                Config::from_parts(None, file, no_env).is_err(),
+                "expected an error for {bad}"
+            );
+        }
+        // 0 is valid for video scaling (disable automatic downscaling).
+        let cfg = Config::from_parts(
+            None,
+            FileConfig::from_toml_str("linux_video_scaling = 0").unwrap(),
+            no_env,
+        )
+        .unwrap();
+        assert_eq!(cfg.linux_video_scaling, Some(0));
+    }
+
+    #[test]
+    fn native_runtime_env_overrides_file() {
+        let file = FileConfig::from_toml_str("linux_profile = \"quality\"").unwrap();
+        let env = |k: &str| match k {
+            "RAST_LINUX_PROFILE" => Some("media".to_string()),
+            "RAST_LINUX_QUALITY" => Some("55".to_string()),
+            _ => None,
+        };
+        let cfg = Config::from_parts(None, file, env).unwrap();
+        assert_eq!(cfg.linux_profile, LinuxProfile::Media);
+        assert_eq!(cfg.linux_quality, Some(55));
+    }
+
+    #[test]
+    fn display_backend_aliases_parse() {
+        assert_eq!(
+            LinuxDisplayBackend::parse("XVFB"),
+            Some(LinuxDisplayBackend::Software)
+        );
+        assert_eq!(
+            LinuxDisplayBackend::parse("nvidia-xorg"),
+            Some(LinuxDisplayBackend::Custom)
+        );
+        assert_eq!(
+            LinuxProfile::parse(" Quality "),
+            Some(LinuxProfile::Quality)
+        );
+        assert_eq!(LinuxProfile::as_str(LinuxProfile::Balanced), "balanced");
     }
 }

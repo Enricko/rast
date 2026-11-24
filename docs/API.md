@@ -353,7 +353,7 @@ policy's `applications` (Docker) rule.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled}` — the `limits` object is flat (no nested per-backend object) |
+| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled, runtime:{profile, quality, minQuality, speed, minSpeed, videoScaling, avSync, encoding, display:{xvfb, xvfbPath, customConfigured, customUsable, active, customCommand, nvidiaXorgDriver, xorg, gpuDisplayConfigured}, gpu:{vendor, model, driverVersion, nvidiaDeviceNodes, nvidiaUvm, nvidiaSmi, nvencLibrary, nvdecLibrary, xpraNvidiaCodecs, mesaEgl, renderNodes}, gpuAccelerationVerified, notes}}` — the `limits` object is flat (no nested per-backend object); `runtime` is read-only capability/policy detection (no probing side effects) and `gpuAccelerationVerified` stays false unless a real application test was performed |
 | POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
 | POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
 | GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |
@@ -420,7 +420,11 @@ logs and it stops working when the copy ends. Legacy responses on
 `NativeSession`: `{id:"native", status:"starting"|"ready"|"ended",
 url:"/linux-apps/session/<key>/", appId:null, appName:"Desktop session",
 reason:"closed"|"idle"|"error"|"removed"|null, error, startedAt, viewers,
-separateWindows:true, display, apps:[Run]}`. `Run`: `{id, appId, appName,
+separateWindows:true, profile, displayBackend, gpuAccelerationVerified, metrics:
+{memoryBytes, tasks, cpuUsec}|null, display, apps:[Run]}`. `profile` is the
+operator-selected performance profile at session start; `displayBackend` is
+`xvfb` or `custom`; `metrics` is the live cgroup memory/process/CPU usage of the
+session unit (null when it cannot be read). `Run`: `{id, appId, appName,
 status:"launching"|"running"|"exited"|"failed", unit, error, startedAt}`. The
 native session URL is served **same-origin** by RAST and every request (HTML,
 assets, WebSocket) is authorized against the signed-in RAST user that owns the

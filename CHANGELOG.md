@@ -9,6 +9,24 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- **Adaptive native session performance profiles.** `linux_profile` selects
+  `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the
+  previous behaviour), `media` (smooth video) or `quality` (sharp text/images);
+  `linux_quality`, `linux_min_quality`, `linux_speed`, `linux_min_speed`,
+  `linux_video_scaling`, `linux_av_sync` and `linux_encoding` override the
+  profile. Applies to every native application without per-app code.
+- **GPU/display capability detection, without unverified acceleration
+  claims.** `GET /api/linux-apps` and `rast doctor` now report the effective
+  profile, display backend, NVIDIA driver/devices, NVENC/NVDEC codec
+  availability, DRM render nodes and actionable notes. A validated
+  `linux_xvfb_command` wrapper can replace Xvfb for GPU-backed rendering, with
+  a safe fallback to software rendering at session start.
+- **Native session diagnostics in App Center.** App details show the runtime
+  policy and GPU capability; the session API now carries the live cgroup
+  memory/task/CPU usage of the person's session unit.
+
 ### Fixed
 
 - **Native Linux apps always open as individual RAST windows.** The desktop no

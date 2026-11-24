@@ -116,6 +116,63 @@ export interface NativeSession {
   reason: null | "closed" | "idle" | "error" | "removed";
   error: null | string;
   apps: NativeSessionApp[];
+  /** Operator-selected performance profile at session start. */
+  profile?: string | null;
+  /** Display backend the session uses (`xvfb` software or `custom` GPU). */
+  displayBackend?: string | null;
+  /** True only when a real application was verified to render on the GPU. */
+  gpuAccelerationVerified?: boolean;
+  /** Live cgroup usage of this person's session unit (missing = unknown). */
+  metrics?: {
+    memoryBytes?: number | null;
+    tasks?: number | null;
+    cpuUsec?: number | null;
+  } | null;
+}
+
+/** Display-backend capability detection (read-only, from the server). */
+export interface NativeDisplayReport {
+  xvfb: boolean;
+  xvfbPath: string | null;
+  customConfigured: boolean;
+  customUsable: boolean;
+  /** `xvfb` or `custom`. */
+  active: string;
+  customCommand: string | null;
+  nvidiaXorgDriver: boolean;
+  xorg: boolean;
+  gpuDisplayConfigured: boolean;
+}
+
+/** GPU capability detection (read-only; never an acceleration claim). */
+export interface NativeGpuReport {
+  vendor: string;
+  model: string | null;
+  driverVersion: string | null;
+  nvidiaDeviceNodes: boolean;
+  nvidiaUvm: boolean;
+  nvidiaSmi: boolean;
+  nvencLibrary: boolean;
+  nvdecLibrary: boolean;
+  xpraNvidiaCodecs: boolean;
+  mesaEgl: boolean;
+  renderNodes: string[];
+}
+
+/** Effective native runtime policy and host capabilities. */
+export interface NativeRuntimeReport {
+  profile: string;
+  quality: number | null;
+  minQuality: number | null;
+  speed: number | null;
+  minSpeed: number | null;
+  videoScaling: number | null;
+  avSync: boolean | null;
+  encoding: string | null;
+  display: NativeDisplayReport;
+  gpu: NativeGpuReport;
+  gpuAccelerationVerified: boolean;
+  notes: string[];
 }
 
 export interface LinuxOverview {
@@ -123,6 +180,8 @@ export interface LinuxOverview {
   sessions: LinuxSession[];
   limits: { minFreeMemoryBytes: number; idleMinutes: number; maxCpus: number };
   dockerEnabled: boolean;
+  /** Effective runtime profile, display backend and GPU detection. */
+  runtime?: NativeRuntimeReport | null;
   /** The user's shared native session, when the server supports native apps. */
   session?: NativeSession | null;
   /** False when this server has no native (host install) support. */
@@ -133,6 +192,52 @@ export interface LinuxOverview {
 
 /** The server reports a newer AppImage build without a version number this way. */
 export const NEWER_BUILD = "newer build";
+
+/**
+ * Human-readable runtime rows for the App Center details panel. Pure so the
+ * formatting (and the "never claim unverified acceleration" rule) is unit
+ * tested without a DOM.
+ */
+export function nativeRuntimeSummary(
+  report: NativeRuntimeReport | null | undefined,
+): Array<{ label: string; value: string }> {
+  if (!report) return [];
+  const rows: Array<{ label: string; value: string }> = [];
+  rows.push({ label: "Runtime profile", value: report.profile });
+  const display = report.display;
+  rows.push({
+    label: "Display backend",
+    value:
+      display.active === "custom"
+        ? `custom GPU X server (${display.customCommand ?? "configured"})`
+        : "Xvfb (software rendering)",
+  });
+  const gpu = report.gpu;
+  if (gpu.model) {
+    rows.push({
+      label: "GPU",
+      value: gpu.driverVersion ? `${gpu.model} (driver ${gpu.driverVersion})` : gpu.model,
+    });
+  }
+  rows.push({
+    label: "Stream encoding",
+    value: report.encoding
+      ? `forced ${report.encoding}`
+      : gpu.xpraNvidiaCodecs && display.gpuDisplayConfigured
+        ? "NVENC-capable (hardware video encoding)"
+        : "software (x264 / webp / jpeg)",
+  });
+  rows.push({
+    label: "GPU acceleration",
+    value: report.gpuAccelerationVerified
+      ? "verified by a real application test"
+      : "not verified (software fallback is in use unless tested)",
+  });
+  for (const note of report.notes.slice(0, 2)) {
+    rows.push({ label: "Runtime note", value: note });
+  }
+  return rows;
+}
 
 /** File names App Center can install (same list as the server). */
 export const LINUX_FILE_PATTERN = /\.(deb|appimage|tar\.gz|tgz|tar\.xz|txz|tar\.bz2|tbz2|tar)$/i;

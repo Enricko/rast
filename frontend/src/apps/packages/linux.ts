@@ -21,7 +21,7 @@ import { watchJob, type JobOutcome } from "../../components/jobs";
 import { banner, emptyBlock, progressBar, type ProgressHandle } from "../../components/states";
 import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
-import { NEWER_BUILD, isNativeApp, isOpenable, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadLinuxApps, nativeAppsEnabled, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
+import { NEWER_BUILD, isNativeApp, isOpenable, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
 import {
   APPIMAGE_REJECTED_MESSAGE,
   INSTALL_STAGES,
@@ -515,6 +515,10 @@ export class LinuxApps {
     if (app.sizeBytes) items.push(["Size", formatBytes(app.sizeBytes)]);
     items.push(["Added", formatDate(app.createdAt)]);
     items.push(["Files", "Your RAST home folder"]);
+    // Effective runtime policy + host GPU capability (read-only diagnostics).
+    for (const row of nativeRuntimeSummary(linuxOverview()?.runtime)) {
+      items.push([row.label, row.value]);
+    }
     return h(
       "section",
       { class: "pkg-section" },
