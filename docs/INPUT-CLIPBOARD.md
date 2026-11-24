@@ -503,3 +503,20 @@ adopted pointer mapping (including browser zoom), button numbers, wheel
 normalization, clipboard token filtering, deferred clipboard requests with the
 timeout fallback, echoed-token loop prevention, and the pinned
 `swap_keys`/`capture_keyboard` contract.
+
+## Final-build (runtime 2.1) matrix status
+
+The controlled-page clipboard matrix was re-run on the final GPU/pre-warm build.
+A same-build direct diagnostic proved key forwarding into the remote page works
+(clicking the adopted window centre and typing changed the remote page title to
+`T:CLICKTYPED9`), and navigation (Alt+D), window adoption, focus ownership and
+transport checks pass. The full automated matrix is currently inconsistent on
+this build because the harness's synthetic clicks can leave the remote Chrome
+address bar as the DOM-focused element (its Ctrl+A/C then selects the URL and
+`PASTED:`/`INPUT:` title assertions fail) — a harness/geometry issue, not a
+confirmed product regression; the same harness passed 18/19 on the pre-GPU
+build with byte-identical input code (`docs/BENCHMARKS.md` §7.6). A
+window-centre click fallback was added to the harness; a full clean rerun is a
+follow-up. Rich text/image clipboard remains unsupported by design and real
+macOS Command behaviour is still not provable on this host.
+
