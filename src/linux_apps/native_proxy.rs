@@ -97,9 +97,9 @@ const MAX_HTML: usize = 4 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HEAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Frame cap for the relayed WebSocket (Xpra sends whole window updates).
-const MAX_WS_MESSAGE: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_WS_MESSAGE: usize = 64 * 1024 * 1024;
 /// How often a live display stream revalidates its RAST login session.
-const REVALIDATE_EVERY: Duration = Duration::from_secs(5);
+pub(crate) const REVALIDATE_EVERY: Duration = Duration::from_secs(5);
 
 /// Handler for `/linux-apps/session/<key>/…`: the Xpra HTML5 page, its assets
 /// and its WebSocket, served through RAST with per-user authorization.
@@ -265,7 +265,7 @@ fn shim_response(head_only: bool) -> Response {
     response
 }
 
-fn is_websocket(headers: &HeaderMap) -> bool {
+pub(crate) fn is_websocket(headers: &HeaderMap) -> bool {
     headers
         .get(header::UPGRADE)
         .and_then(|value| value.to_str().ok())
@@ -665,39 +665,178 @@ fn relay_halves(
     impl std::future::Future<Output = ()>,
     impl std::future::Future<Output = ()>,
 ) {
+    relay_halves_traced(client, upstream, session, false)
+}
+
+/// The shared frame relay, optionally with gated diagnostics.
+///
+/// `relay_halves` (the browser HTML5 path) calls this with `debug = false`, so
+/// its behaviour is unchanged. The native stream broker calls it with
+/// `debug = true` when `RAST_NATIVE_RELAY_DEBUG` is set, which traces frame
+/// counts/sizes and close reasons (never frame contents, cookies, URLs or the
+/// stream token) so a real native-client attach can be diagnosed in
+/// production.
+pub(crate) fn relay_halves_traced(
+    client: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<TcpStream>,
+    session: Arc<NativeSession>,
+    debug: bool,
+) -> (
+    impl std::future::Future<Output = ()>,
+    impl std::future::Future<Output = ()>,
+) {
     session.viewer_joined();
     let (mut client_tx, mut client_rx) = client.split();
     let (mut app_tx, mut app_rx) = upstream.split();
     let watcher = session.clone();
     let to_app = async move {
-        while let Some(Ok(message)) = client_rx.next().await {
-            watcher.input();
-            let message = match message {
-                ClientMessage::Text(text) => UpstreamMessage::text(text.as_str().to_owned()),
-                ClientMessage::Binary(bytes) => UpstreamMessage::Binary(bytes),
-                ClientMessage::Ping(bytes) => UpstreamMessage::Ping(bytes),
-                ClientMessage::Pong(bytes) => UpstreamMessage::Pong(bytes),
-                ClientMessage::Close(_) => break,
+        let mut frames: u64 = 0;
+        let mut bytes: u64 = 0;
+        let mut close_code = None;
+        loop {
+            let message = match client_rx.next().await {
+                None => break,
+                Some(Ok(message)) => message,
+                Some(Err(error)) => {
+                    if debug {
+                        tracing::info!(
+                            direction = "client->xpra",
+                            %error,
+                            frames,
+                            bytes,
+                            "native relay: client stream error"
+                        );
+                    }
+                    break;
+                }
             };
+            watcher.input();
+            let (message, size) = match message {
+                ClientMessage::Text(text) => {
+                    (UpstreamMessage::text(text.as_str().to_owned()), text.len())
+                }
+                ClientMessage::Binary(bytes) => {
+                    let size = bytes.len();
+                    (UpstreamMessage::Binary(bytes), size)
+                }
+                ClientMessage::Ping(bytes) => {
+                    let size = bytes.len();
+                    (UpstreamMessage::Ping(bytes), size)
+                }
+                ClientMessage::Pong(bytes) => {
+                    let size = bytes.len();
+                    (UpstreamMessage::Pong(bytes), size)
+                }
+                ClientMessage::Close(frame) => {
+                    close_code = frame.as_ref().map(|frame| frame.code);
+                    break;
+                }
+            };
+            frames += 1;
+            bytes += size as u64;
+            if debug && frames == 1 {
+                tracing::info!(
+                    direction = "client->xpra",
+                    bytes = size,
+                    "native relay: first client frame"
+                );
+            }
             if app_tx.send(message).await.is_err() {
+                if debug {
+                    tracing::info!(
+                        direction = "client->xpra",
+                        frames,
+                        bytes,
+                        "native relay: xpra stream closed while forwarding"
+                    );
+                }
                 break;
             }
+        }
+        if debug {
+            tracing::info!(
+                direction = "client->xpra",
+                frames,
+                bytes,
+                close_code = ?close_code,
+                "native relay: direction finished"
+            );
         }
         let _ = app_tx.close().await;
     };
     let to_client = async move {
-        while let Some(Ok(message)) = app_rx.next().await {
-            let message = match message {
-                UpstreamMessage::Text(text) => ClientMessage::Text(text.as_str().to_owned().into()),
-                UpstreamMessage::Binary(bytes) => ClientMessage::Binary(bytes),
-                UpstreamMessage::Ping(bytes) => ClientMessage::Ping(bytes),
-                UpstreamMessage::Pong(bytes) => ClientMessage::Pong(bytes),
-                UpstreamMessage::Close(_) => break,
+        let mut frames: u64 = 0;
+        let mut bytes: u64 = 0;
+        let mut close_code = None;
+        loop {
+            let message = match app_rx.next().await {
+                None => break,
+                Some(Ok(message)) => message,
+                Some(Err(error)) => {
+                    if debug {
+                        tracing::info!(
+                            direction = "xpra->client",
+                            %error,
+                            frames,
+                            bytes,
+                            "native relay: xpra stream error"
+                        );
+                    }
+                    break;
+                }
+            };
+            let (message, size) = match message {
+                UpstreamMessage::Text(text) => {
+                    let size = text.len();
+                    (ClientMessage::Text(text.as_str().to_owned().into()), size)
+                }
+                UpstreamMessage::Binary(bytes) => {
+                    let size = bytes.len();
+                    (ClientMessage::Binary(bytes), size)
+                }
+                UpstreamMessage::Ping(bytes) => {
+                    let size = bytes.len();
+                    (ClientMessage::Ping(bytes), size)
+                }
+                UpstreamMessage::Pong(bytes) => {
+                    let size = bytes.len();
+                    (ClientMessage::Pong(bytes), size)
+                }
+                UpstreamMessage::Close(frame) => {
+                    close_code = frame.as_ref().map(|frame| frame.code);
+                    break;
+                }
                 UpstreamMessage::Frame(_) => continue,
             };
+            frames += 1;
+            bytes += size as u64;
+            if debug && frames == 1 {
+                tracing::info!(
+                    direction = "xpra->client",
+                    bytes = size,
+                    "native relay: first xpra frame"
+                );
+            }
             if client_tx.send(message).await.is_err() {
+                if debug {
+                    tracing::info!(
+                        direction = "xpra->client",
+                        frames,
+                        bytes,
+                        "native relay: client stream closed while forwarding"
+                    );
+                }
                 break;
             }
+        }
+        if debug {
+            tracing::info!(
+                direction = "xpra->client",
+                frames,
+                bytes,
+                close_code = ?close_code,
+                "native relay: direction finished"
+            );
         }
         let _ = client_tx.close().await;
     };
@@ -706,8 +845,12 @@ fn relay_halves(
 
 /// Run both relay directions until one ends or `revoked` resolves, then
 /// release the viewer slot.
-async fn relay_until<A, B, R>(to_app: A, to_client: B, session: Arc<NativeSession>, revoked: R)
-where
+pub(crate) async fn relay_until<A, B, R>(
+    to_app: A,
+    to_client: B,
+    session: Arc<NativeSession>,
+    revoked: R,
+) where
     A: std::future::Future<Output = ()>,
     B: std::future::Future<Output = ()>,
     R: std::future::Future<Output = ()>,
@@ -724,7 +867,11 @@ where
 /// The RAST login session backing a live display stream is still valid.
 type SessionAuthRow = (i64, i64, Option<i64>, bool);
 
-async fn auth_still_valid(db: &sqlx::SqlitePool, user_id: i64, auth_session_id: &str) -> bool {
+pub(crate) async fn auth_still_valid(
+    db: &sqlx::SqlitePool,
+    user_id: i64,
+    auth_session_id: &str,
+) -> bool {
     let row: Result<Option<SessionAuthRow>, sqlx::Error> = sqlx::query_as(
         "SELECT s.user_id, s.expires_at, s.revoked_at, u.active
          FROM sessions s JOIN users u ON u.id = s.user_id

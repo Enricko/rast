@@ -9,6 +9,31 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- **RAST Desktop native stream broker (Phase 3).** Additive server support for
+  the native macOS client (`docs/PROTOCOL.md` §2/§4 in the RAST Desktop
+  repository): `POST /api/linux-apps/session/stream-token` issues a 120 s,
+  single-use `wss://…/linux-apps/native/<token>/` URL (32 random bytes; only
+  SHA-256 kept in memory; bound to the account, the RAST login session and the
+  exact native session; max 8 outstanding per user with oldest-eviction; 30
+  issuances/minute; `404` without a live session, `409` when native Linux apps
+  are disabled), and `DELETE /api/linux-apps/session/stream-tokens` revokes all
+  outstanding tokens (`{revoked}`). The new public WebSocket route
+  `GET /linux-apps/native/<token>/<rest>?<query>` is mounted outside cookie auth
+  and outside the browser same-origin `Origin` check because the native Xpra
+  client is not a browser: the token is its sole credential, consumed atomically
+  on the first successful upgrade, and the relay is transparent to the loopback
+  Xpra WebSocket (64 MiB frame cap, same relay semantics as the HTML5 stream,
+  sub-protocols negotiated end to end, 5 s revalidation of the issuing login
+  session). No token, URL, session key or cookie is ever logged or audited;
+  denied attaches get a bodyless `401`. `GET /api/bootstrap` now advertises
+  `desktop: {protocol: 1, streamTokens: true, minClientVersion: "0.1.0"}`.
+  Native Xpra must run with `XPRA_WEBSOCKET_MASK=1` (RFC 6455 masking; the
+  relay is strict and closes unmasked client frames). The browser HTML5 path is
+  unchanged, no new public port is opened, and Xpra stays on loopback. New
+  documentation: [docs/NATIVE-BROKER.md](docs/NATIVE-BROKER.md).
+
 ### Fixed
 
 - **LibreOffice launches.** `/usr/bin/libreoffice` resolves into the root-owned

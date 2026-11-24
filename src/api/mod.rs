@@ -84,6 +84,28 @@ fn public_routes() -> Router<AppState> {
             "/linux-apps/session/",
             axum::routing::any(crate::linux_apps::native_proxy::handle),
         )
+        // Native (non-browser) Xpra stream attached by RAST Desktop.
+        //
+        // SECURITY DECISION: this route is deliberately mounted OUTSIDE cookie
+        // authentication and OUTSIDE the browser same-origin `Origin` check.
+        // The official native Xpra client is not a browser: it cannot present
+        // the `rast_session` cookie and sends no `Origin` header, so the HTML5
+        // proxy's authorization model cannot apply. The single-use, 120 s
+        // stream token in the path IS the credential for this one route; it is
+        // only issued to an authenticated account (cookie + CSRF) by
+        // `POST /api/linux-apps/session/stream-token`, is bound to that account
+        // and live native session, and is consumed by the first successful
+        // upgrade. TLS is mandatory in production (the issued URL is `wss://`)
+        // and Xpra remains bound to loopback. See
+        // `linux_apps::native_broker` and `docs/NATIVE-BROKER.md`.
+        .route(
+            "/linux-apps/native/{*rest}",
+            axum::routing::any(crate::linux_apps::native_broker::handle),
+        )
+        .route(
+            "/linux-apps/native/",
+            axum::routing::any(crate::linux_apps::native_broker::handle),
+        )
         .route(
             "/linux-apps/{*rest}",
             axum::routing::any(crate::linux_apps::proxy::handle),

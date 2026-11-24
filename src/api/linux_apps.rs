@@ -32,6 +32,8 @@
 //! | GET | `/api/linux-apps/session` | any signed-in user: their shared graphical session |
 //! | POST | `/api/linux-apps/session/close` | any signed-in user: stop the whole shared session |
 //! | POST | `/api/linux-apps/session/runs/{run}` | any signed-in user: terminate one app run |
+//! | POST | `/api/linux-apps/session/stream-token` | any signed-in user: issue a short-lived single-use token + `wss://` URL for the native (non-browser) stream relay |
+//! | DELETE | `/api/linux-apps/session/stream-tokens` | any signed-in user: revoke all outstanding native stream tokens |
 //! | POST | `/api/linux-apps/{id}/migrate` | administrator: migrate a Docker-backed app to native |
 //! | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return it to the Docker backend |
 //! | POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: remove retained legacy data |
@@ -49,9 +51,9 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderValue},
+    http::{header, HeaderMap, HeaderValue},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -94,6 +96,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/linux-apps/session", get(native_session))
         .route("/api/linux-apps/session/close", post(close_native_session))
         .route("/api/linux-apps/session/prewarm", post(prewarm_session))
+        // Native (RAST Desktop) stream broker: one short-lived, single-use
+        // token per WebSocket attach. Cookie auth + CSRF apply here; the token
+        // itself authorizes the WSS route (see `native_broker::handle`).
+        .route("/api/linux-apps/session/stream-token", post(stream_token))
+        .route(
+            "/api/linux-apps/session/stream-tokens",
+            delete(revoke_stream_tokens),
+        )
         .route("/api/linux-apps/session/runs/{run}", post(close_native_run))
         // Canonical form used by the App Center "End application" action and
         // documented in docs/API.md; the shorter path stays for compatibility.
@@ -474,6 +484,56 @@ async fn close_native_session(
 /// Pre-warm the caller's shared graphical session (opt-in, no app started).
 async fn prewarm_session(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     Ok(Json(state.linux_apps.native_prewarm(&user).await?))
+}
+
+/// Issue a short-lived, single-use stream token for the caller's live native
+/// session (`POST /api/linux-apps/session/stream-token`).
+///
+/// This is the RAST Desktop native stream broker: the returned `url` is a
+/// `wss://…/linux-apps/native/<token>/` URL and the token is the only
+/// credential of that native WebSocket route. Cookie auth + CSRF are enforced
+/// by the standard middleware, like every other mutating API route. The URL is
+/// derived from the configured `public_url` (or the request's forwarded
+/// scheme/host), never hard-coded.
+async fn stream_token(
+    State(state): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let issued = state.linux_apps.native_stream_token(&user).await?;
+    let url = crate::linux_apps::native_broker::stream_url(
+        &headers,
+        state.config.public_url.as_deref(),
+        state.config.secure_cookies,
+        &issued.token,
+    )
+    .ok_or_else(|| {
+        crate::error::AppError::internal(
+            "cannot determine the public server URL for the native stream; set public_url in \
+             the RAST configuration",
+        )
+    })?;
+    Ok(Json(json!({
+        "protocol": crate::linux_apps::native_broker::DESKTOP_PROTOCOL,
+        "token": issued.token,
+        "url": url,
+        "expiresAt": issued.expires_at_ms,
+        "ttlSeconds": issued.ttl_seconds,
+        "transport": "xpra-websocket",
+        "session": issued.session,
+        "xpra": {"sharing": true, "protocol": 1},
+    })))
+}
+
+/// Revoke every outstanding native stream token of the caller
+/// (`DELETE /api/linux-apps/session/stream-tokens`).
+async fn revoke_stream_tokens(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Value>> {
+    Ok(Json(json!({
+        "revoked": state.linux_apps.revoke_native_stream_tokens(user.id),
+    })))
 }
 
 async fn close_native_run(
