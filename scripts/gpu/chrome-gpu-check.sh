@@ -112,21 +112,35 @@ if [ "$node_rc" != 0 ]; then
     exit 1
 fi
 
-# chrome://gpu renders its sections inside shadow DOM; the text is whitespace-free.
+# chrome://gpu renders its sections inside shadow DOM, so the text has to be
+# read recursively (done in the node helper). Fault the fields out with sed:
+# join everything on one line, then take the value between two known fields.
 text="$(tr -d '\n' <"$profile/gpu.txt")"
+compact="$(printf '%s' "$text" | tr -d ' \t')"
 show() { printf '  %s\n' "$1"; }
+field() { # field <name> <next-field-name> <compacted-text>
+    printf '%s' "$3" | sed -n "s/.*${1}:\(.*\)${2}.*/\1/p" | head -1
+}
 echo
 echo "chrome://gpu highlights:"
-for key in "GL_RENDERER" "GL_VENDOR" "GL_VERSION" "GPU0"; do
-    value="$(printf '%s' "$text" | grep -oE "${key}[^A-Za-z]{0,3}:[^G]{0,180}" | head -1)"
-    [ -n "$value" ] && show "$value"
-done
+renderer="$(field GL_RENDERER GL_VERSION "$compact")"
+vendor="$(field GL_VENDOR GL_RENDERER "$compact")"
+gpu0="$(field GPU0 GPU1 "$compact")"
+[ -n "$renderer" ] && show "GL_RENDERER: $renderer"
+[ -n "$vendor" ] && show "GL_VENDOR:   $vendor"
+[ -n "$gpu0" ] && show "GPU0:        $gpu0"
 for feature in "Canvas" "Compositing" "Rasterization" "WebGL" "WebGPU" "Video Decode" "Video Encode" "Vulkan"; do
-    value="$(printf '%s' "$text" | grep -oE "\*   ${feature}:[^*]{0,60}" | head -1)"
-    [ -n "$value" ] && show "*${value#\*}"
+    value="$(printf '%s' "$text" | grep -oE "${feature}:[[:space:]]*(Hardware accelerated|Software only[^A-Z]*|Disabled)" | head -1)"
+    [ -n "$value" ] && show "* $value"
 done
 
-renderer="$(printf '%s' "$text" | grep -oE 'GL_RENDERER[^:]{0,3}:[^G]{0,200}' | head -1)"
+if [ -z "$renderer" ]; then
+    echo
+    echo "RESULT: chrome://gpu did not report a GL_RENDERER (Chrome may have failed on this display)"
+    echo "--- chrome log tail ---"
+    tail -15 "$log" 2>/dev/null
+    exit 1
+fi
 echo
 case "$renderer" in
     *NVIDIA*|*Intel*) show "RESULT: hardware GPU renderer reported by Chrome"; exit 0 ;;

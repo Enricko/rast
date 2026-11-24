@@ -3,11 +3,20 @@
 Status: measured on `lufria-server` (GTX 1660 Ti Mobile, driver 595.99.02) on
 2026-11-24. Every number below was produced on this host; nothing is estimated.
 
+> **Validated today: headless NVIDIA Xorg + Chrome hardware acceleration as root.**
+> **NOT enabled in RAST production:** Xorg requires root, while per-user sessions
+> run unprivileged (`rast-u<id>`); wiring that path needs the privileged helper.
+> **The default display backend remains software Xvfb + x264.** The NVIDIA
+> codec stack (`xpra-codecs-nvidia`, PyCUDA, `libnvidia-{encode,decode,fbc1}-595`,
+> `libnvjpeg-13-1`) was **removed** from this host because Xpra 6.5.5 cannot use
+> NVENC with driver 595.99.02 (NVENC SDK 13.1 vs driver API 13.0); do not
+> reinstall it with this driver.
+
 ## TL;DR verdict
 
 | Capability | State on this host | Evidence |
 |---|---|---|
-| NVIDIA GPU present and usable (CUDA 13.2, compute 7.5) | **yes** | `nvidia-smi`, `python3 -c "import pycuda.driver"` |
+| NVIDIA GPU present and usable (CUDA 13.2, compute 7.5) | **yes** | `nvidia-smi`, `nvidia-smi --query-gpu=...` |
 | NVENC silicon works | **yes** | `ffmpeg -c:v h264_nvenc` 1080p60, NVENC util 27 % |
 | NVENC usable **through Xpra 6.5.5** | **NO — build/API mismatch** | `xpra encoding` self-test fails: `invalid struct version` |
 | Headless NVIDIA **Xorg** display (`glxinfo` = NVIDIA, not llvmpipe) | **YES, verified** | `glxinfo -B` renderer `NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2` |
