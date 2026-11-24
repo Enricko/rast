@@ -335,12 +335,22 @@ session per person, never shared between accounts, subject to the normal
 memory admission check, and reclaimed by the existing idle cleanup. The trade
 off is a small idle memory cost per signed-in native-app user (~150–250 MiB).
 
-> **Status:** implemented and measured, but **disabled in the deployed runtime
-> 2.1 build** (`linux_prewarm = false`). With reliable pre-warming the hidden
-> Xpra transport connects immediately after sign-in and its clipboard autofocus
-> can steal keyboard focus from local apps (Terminal typing ignored until a
-> click). The feature stays opt-in/off until the viewer connection is deferred
-> to the first native window launch.
+> **Status:** safe to enable (`linux_prewarm`, recommended where first-launch
+> latency matters; it stays opt-in because of the idle memory cost). The hidden
+> Xpra transport is connected lazily: while a session exists solely because of
+> a pre-warm (no application run yet), the desktop does **not** create the
+> transport iframe, so the Xpra client's clipboard autofocus cannot take
+> keyboard focus from local RAST apps after sign-in. The first native
+> application launch clears the deferral, creates the iframe, waits up to 15 s
+> for the shim to report the transport connected and then calls the launch API;
+> every launch entry point (start menu, desktop icons, taskbar, App Center
+> *Open*) goes through that same gate. If the viewer cannot connect in time the
+> launch still goes ahead with a clear warning, and the viewer recovers on its
+> own. A pre-warmed session the person never uses is reclaimed by the normal
+> idle cleanup and closed silently (no "session ended" toast for a background
+> session nobody opened). The earlier viewer-focus workaround (blurring the
+> hidden viewer, reverted in `951c15a`) is not used: it stopped the shim's
+> synthetic keys reaching the Xpra client.
 
 Measured on production (2026-11-24, quiet window, `tests/e2e/prewarm/measure.mjs`):
 the background session became ready 9.2 s after the desktop loaded (scheduled by
@@ -348,7 +358,10 @@ the server from the first `GET /api/linux-apps`, not in the click path), and the
 first application launch took 3.1 s from click to an adopted RAST window — the
 cold path paid ~12 s in the click path for the session alone. The 10-minute
 per-person throttle and the explicit session close mean a person who closes
-their session is not immediately restarted by the next poll.
+their session is not immediately restarted by the next poll. With the deferred
+viewer the first launch additionally connects the transport before starting the
+app (normally well under a second; the gate gives up after 15 s), so the
+click-to-window advantage is kept and the keyboard-focus regression is gone.
 
 ## Windows and the desktop
 

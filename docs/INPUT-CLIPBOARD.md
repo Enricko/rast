@@ -450,12 +450,32 @@ and first patched during the deploy window (build `93585ba2`). That patch
 (blurring the hidden viewer document) was **reverted in `951c15a`**: the shim
 forwards synthetic key events into the viewer, and blurring its document made
 them stop reaching the Xpra client (the automated focus handshake correctly
-caught this). The final deployed build keeps the original input path with
-pre-warm disabled; a production re-check on `951c15a` confirmed forwarding
-again (`Ctrl+K` navigated the remote Chrome window), and the Terminal smoke
-test passes again on the final build. The latency profiler was additionally
-given a focus handshake that aborts a measurement when a forwarded key does not
-provably reach the controlled remote page, instead of reporting a wrong number.
+caught this).
+
+The product fix is instead to never have a hidden transport iframe while a
+session is only pre-warmed: the desktop defers the viewer connection until the
+first native app launch (`NativeLinuxHost.viewerDeferred` /
+`prepareForLaunch()`), then connects the transport (bounded 15 s wait for the
+shim), and only then calls the launch API. Consequently:
+
+* after sign-in with pre-warming enabled there is no hidden iframe at all, so
+  `document.activeElement` stays in the desktop document and local RAST apps
+  (Terminal, Editors, File Station) keep keyboard ownership — the original
+  "Terminal opens but ignores typing until a click" symptom cannot occur;
+* during a native launch the iframe connects before the app starts, and
+  `ensureNativeKeyboardFocus()` keeps routing keys to the focused adopted
+  window afterwards; synthetic keyboard forwarding is untouched (the reverted
+  blurring patch stays reverted);
+* if the transport cannot connect inside the bounded wait, the launch still
+  proceeds and the person sees a clear warning instead of a silent failure.
+
+Focus probe to re-run on the deployed build with pre-warm enabled: sign in,
+open Terminal without clicking a native app, type — `document.activeElement`
+must never be the hidden `.linux-native-session-frame` document; then launch a
+native app and verify the adopted window is the active element
+(`.win-body.linux-native-window`). The latency profiler keeps its focus
+handshake that aborts a measurement when a forwarded key does not provably
+reach the controlled remote page, instead of reporting a wrong number.
 
 ### Matrix classification addendum
 

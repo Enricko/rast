@@ -11,6 +11,20 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- **Native session pre-warming no longer steals keyboard focus, so it is safe
+  to enable.** With a reliably pre-warmed session the hidden Xpra transport
+  iframe used to connect right after sign-in, and its clipboard autofocus could
+  take keyboard ownership from local RAST apps (Terminal opened but ignored
+  typing until a click). The desktop now keeps the transport iframe
+  **disconnected while a session exists only because of a pre-warm** (no app
+  run yet): the viewer is created on the first native application launch, which
+  waits bounded (15 s) for the shim to report the transport connected and only
+  then calls the launch API. Every launch entry point uses that gate (start
+  menu, desktop icons, taskbar, App Center *Open*). If the viewer cannot
+  connect in time the launch still proceeds and a clear warning is shown. The
+  earlier viewer-blurring patch (`93585ba`) remains reverted: it stopped the
+  shim's synthetic key events reaching the Xpra client. The pre-warm benefit
+  (~9 s background session start, ~3 s first click-to-window) is kept.
 - **Terminal failed after a binary upgrade with "Failed to find executable
   /usr/local/bin/rast (deleted)".** The privileged helper passed
   `std::env::current_exe()` — which the kernel reports with a `" (deleted)"`
@@ -49,9 +63,11 @@ this file by `scripts/changelog-section.sh`.
   after a person with native apps signs in the desktop starts their shared Xpra
   session in the background (`POST /api/linux-apps/session/prewarm`), so the
   first application launch is warm (measured cold session start is ~12 s;
-  warm launch ~0.8 s). One session per person, admission-checked and reclaimed
-  by the normal idle cleanup; the trade-off is ~150–250 MiB idle memory per
-  signed-in native-app user.
+  warm launch ~0.8 s). The hidden viewer transport is deferred until the first
+  native launch (see Fixed), so enabling pre-warming does not affect keyboard
+  focus. One session per person, admission-checked and reclaimed by the normal
+  idle cleanup; the trade-off is ~150–250 MiB idle memory per signed-in
+  native-app user.
 - **Adaptive native session performance profiles.** `linux_profile` selects
   `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the
   previous behaviour), `media` (smooth video) or `quality` (sharp text/images);
