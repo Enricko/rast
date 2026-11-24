@@ -1,0 +1,10 @@
+{
+  "note": "Authoritative keyboard-forwarding proof on deployed build 951c15ac13e4: Alt+D address-bar typing navigated remote Chrome; Ctrl+K navigation also passed in an independent run. In-page content typing by the standalone probe is harness-inconclusive (synthetic click focus on a cold session); see final-input-verification-951c15a.md.",
+  "release": "RAST 0.18.3 (951c15ac13e4)",
+  "checks": {
+    "address_bar_typing_navigation": true,
+    "shortcut_navigation_ctrl_k": true,
+    "focus_in_desktop": true
+  },
+  "harness_inconclusive": ["in_page_synthetic_click_typing_on_cold_session"]
+}

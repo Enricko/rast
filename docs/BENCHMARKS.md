@@ -830,3 +830,14 @@ Runner: `tests/e2e/multiuser/verify.mjs` (production, quiet window):
 These are guardrails for the per-user shared Xpra session model, and they were
 re-verified after the prewarm change (the prewarmed session is still scoped to
 its own identity).
+
+## 10. Final input verification on the deployed runtime 2.1 build
+
+Deployed source `951c15ac13e4` (binary sha256 `ab5e511f…`, prewarm disabled):
+keyboard forwarding is verified again after the revert — `Ctrl+K` navigation
+(`about:blank`) and `Alt+D` address-bar typing both reach the remote Chrome
+window, focus stays on `.win-body linux-native-window` and the transport shim
+reports v1.3.0/connected. The standalone in-page typing probe is
+harness-inconclusive on a cold session (synthetic click focus), and the earlier
+18/19 clipboard matrix applies because the input code is byte-identical after
+the revert. Full record: `tests/e2e/results/final-input-verification-951c15a.md`.
