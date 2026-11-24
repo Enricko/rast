@@ -588,9 +588,7 @@ fn scan_desktop_file(scope: Scope, path: &Path, path_env: &str) -> Option<ScanEn
     let entry = parse_desktop_entry(&text)?;
     // TryExec must resolve or the application cannot be started.
     if let Some(try_exec) = &entry.try_exec {
-        if resolve_program(try_exec, path_env).is_none() {
-            return None;
-        }
+        resolve_program(try_exec, path_env)?;
     }
     let program = entry.exec.first()?;
     let program = resolve_program(program, path_env)?;
