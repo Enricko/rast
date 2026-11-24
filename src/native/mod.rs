@@ -77,6 +77,7 @@ pub const LINUX_SLICE: &str = "rast-linux.slice";
 pub const XORG_BIN: &str = "/usr/bin/Xorg";
 pub const XAUTH_BIN: &str = "/usr/bin/xauth";
 pub const GLXINFO_BIN: &str = "/usr/bin/glxinfo";
+pub const XRANDR_BIN: &str = "/usr/bin/xrandr";
 
 /// Idle timeout of one helper connection (clients normally send one request).
 pub const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -111,6 +112,8 @@ pub struct NativeOptions {
     pub xauth_bin: PathBuf,
     /// Trusted `glxinfo` used to verify the real OpenGL renderer.
     pub glxinfo_bin: PathBuf,
+    /// Trusted `xrandr` used to verify the display exposes a usable output.
+    pub xrandr_bin: PathBuf,
     pub uid_base: u32,
     pub session_limits: ResourceLimits,
     pub app_limits: ResourceLimits,
@@ -171,6 +174,7 @@ impl NativeOptions {
             xorg_bin: PathBuf::from(XORG_BIN),
             xauth_bin: PathBuf::from(XAUTH_BIN),
             glxinfo_bin: PathBuf::from(GLXINFO_BIN),
+            xrandr_bin: PathBuf::from(XRANDR_BIN),
             uid_base: cfg.linux_uid_base,
             session_limits: ResourceLimits::from_config(
                 cfg.linux_session_memory_mb,
@@ -229,6 +233,7 @@ impl NativeOptions {
             xorg_bin: PathBuf::from("/usr/bin/Xorg"),
             xauth_bin: PathBuf::from("/usr/bin/xauth"),
             glxinfo_bin: PathBuf::from("/usr/bin/glxinfo"),
+            xrandr_bin: PathBuf::from("/usr/bin/xrandr"),
             uid_base: 200_000,
             session_limits: ResourceLimits::from_config(4096, 4, 2048),
             app_limits: ResourceLimits::from_config(2048, 2, 1024),
