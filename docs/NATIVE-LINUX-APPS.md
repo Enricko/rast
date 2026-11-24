@@ -296,6 +296,20 @@ Consequences:
   pinned Xpra HTML5 client renders them. Titles are untrusted text (a web page
   title, a file name or a credential prompt can contain HTML).
 
+## Keyboard and clipboard ownership
+
+The RAST desktop document owns keyboard focus and the clipboard; the hidden
+Xpra viewer is a transport only and never takes focus. Keys are forwarded to
+the focused native window exactly once, macOS Command shortcuts are translated
+for the common editing set (Cmd+A/C/X/V/Shift+V/Z/Shift+Z/Y/S) while
+browser-reserved combinations stay with the browser, and clipboard text is
+synchronised in both directions with explicit user-visible fallbacks (toast +
+"Copy now"/"Paste into the native application" dialogs) when a browser refuses
+automatic clipboard access. Text/plain is supported; HTML and image clipboard
+formats and IME composition are not supported by the pinned Xpra HTML5 client
+and are documented honestly. The full behavior matrix, reserved chords and
+diagnostics are in [INPUT-CLIPBOARD.md](INPUT-CLIPBOARD.md).
+
 ## Clipboard
 
 Clipboard integration is **best-effort** in both directions:
@@ -308,9 +322,12 @@ Clipboard integration is **best-effort** in both directions:
   makes clipboard data available (usually only for a paste event and only with
   clipboard permission).
 
-RAST does not prompt for or override clipboard permissions. If copying fails in
-one direction, use a file (for example through File Station and the RAST home)
-instead of the clipboard.
+RAST does not prompt for or override browser clipboard permissions on its own:
+a refused automatic write/read is surfaced with a user-gesture retry ("Copy
+now") and an explicit paste dialog, and a copy of a non-text format shows one
+honest "plain text only" notice instead of pretending success. If copying still
+fails in one direction, use a file (for example through File Station and the
+RAST home) instead of the clipboard.
 
 ## Keyboard shortcuts
 

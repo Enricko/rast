@@ -40,6 +40,20 @@ this file by `scripts/changelog-section.sh`.
   longer falls back to the legacy Docker viewer: the list is loaded and the
   launch retried, or the app is reported as not installed.
 
+### Fixed
+
+- **Keyboard focus and clipboard for native apps are now owned by the RAST
+  desktop instead of the hidden Xpra viewer.** Keys reach the focused native
+  window exactly once (repeat preserved, keyups delivered after focus moves,
+  all pressed keys/buttons released on blur/disconnect), macOS Command
+  shortcuts are translated for the common editing/shortcut set when a native
+  window is focused, and text clipboard works both ways with visible fallbacks
+  when the browser refuses clipboard access instead of silently failing. Text
+  only: HTML/image clipboard formats and IME composition are documented as
+  unsupported by the pinned Xpra HTML5 client.
+- **Session cgroup metrics** in the native session API were always null because
+  the cgroup path was missing the `.service` suffix.
+
 ### Changed
 
 - **The legacy in-window Linux-app viewer is limited to Docker-backed apps.**
