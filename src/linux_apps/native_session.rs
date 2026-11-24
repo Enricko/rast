@@ -29,7 +29,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc, Mutex, MutexGuard,
     },
     time::{Duration, Instant},
@@ -399,6 +399,11 @@ pub struct NativeSessions {
     user_locks: Mutex<HashMap<i64, Arc<AsyncMutex<()>>>>,
     /// Serialises display and TCP port allocation across users.
     allocation: AsyncMutex<()>,
+    /// Rotates through display numbers instead of reusing the lowest free one.
+    /// A display that was just stopped can still be tearing down inside Xpra
+    /// (readiness timeouts observed when a session was reopened immediately);
+    /// starting on the next number avoids that race.
+    next_display: AtomicU32,
     /// Users whose background home ACL grant is still running (see
     /// [`NativeSessions::spawn_home_grant`]). At most one per user.
     home_grants: Mutex<HashSet<i64>>,
@@ -469,6 +474,7 @@ impl NativeSessions {
             inner: Mutex::new(Inner::default()),
             user_locks: Mutex::new(HashMap::new()),
             allocation: AsyncMutex::new(()),
+            next_display: AtomicU32::new(DISPLAY_MIN),
             home_grants: Mutex::new(HashSet::new()),
             started: AtomicBool::new(false),
             strict_identity_health,
@@ -1298,7 +1304,15 @@ impl NativeSessions {
                 .map(|session| session.lock().display)
                 .collect()
         };
-        for display in DISPLAY_MIN..=DISPLAY_MAX {
+        // Rotate through the display range: reusing a display that a previous
+        // session stopped moments ago can race Xpra/X11 teardown and hit the
+        // readiness timeout (observed when reopening right after closing).
+        let first = self
+            .next_display
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let span = DISPLAY_MAX - DISPLAY_MIN + 1;
+        for offset in 0..span {
+            let display = DISPLAY_MIN + (first.wrapping_sub(DISPLAY_MIN) + offset) % span;
             if in_use.contains(&display) || display_in_use(display) {
                 continue;
             }
