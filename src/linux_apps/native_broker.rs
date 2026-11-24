@@ -1531,4 +1531,92 @@ mod tests {
         }
         serving.abort();
     }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a real Xpra server: `xpra start :N --daemon=no --bind-ws=127.0.0.1:PORT ...` then set RAST_TEST_REAL_XPRA_WS=127.0.0.1:PORT"]
+    async fn a_real_xpra_protocol_client_connects_through_the_native_bridge() {
+        // End-to-end against the real thing (not a mock): a real Xpra client
+        // (`xpra info`, a full xpra-protocol WebSocket client) attaches through
+        // the native broker bridge to a real `xpra --bind-ws` server. This is
+        // the highest-fidelity relay test available without a display; it is
+        // ignored by default because it needs an external xpra server.
+        //
+        // Manual reproduction:
+        //   xpra start :199 --daemon=no --bind-ws=127.0.0.1:18999 \
+        //     --start-new-commands=no --notifications=no --mdns=no --pulseaudio=no &
+        //   RAST_TEST_REAL_XPRA_WS=127.0.0.1:18999 \
+        //     cargo test --locked --lib a_real_xpra_protocol_client -- --ignored
+        let upstream = std::env::var("RAST_TEST_REAL_XPRA_WS").expect(
+            "set RAST_TEST_REAL_XPRA_WS=127.0.0.1:<port of a real `xpra --bind-ws` server>",
+        );
+        let (host, port) = upstream.rsplit_once(':').expect("host:port");
+        assert_eq!(
+            host, "127.0.0.1",
+            "the test only targets a loopback xpra server"
+        );
+        let upstream_port: u16 = port.parse().expect("a numeric xpra ws port");
+
+        let broker = Arc::new(NativeBroker::new());
+        let session = NativeSession::for_test("a".repeat(32), 1);
+        session.set_upstream_port_for_test(Some(upstream_port));
+        let issued = broker.issue(1, "auth-session", session.key());
+        let (address, serving) =
+            spawn_native_bridge(upstream_port, broker.clone(), session.clone()).await;
+        let url = format!("ws://{address}{STREAM_PATH_PREFIX}{}/", issued.token);
+
+        let mut child = tokio::process::Command::new("xpra")
+            .args(["info", &url])
+            .env("XPRA_WEBSOCKET_MASK", "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("the xpra binary must be installed");
+        let mut saw_viewer = false;
+        for _ in 0..200 {
+            if session.viewers_for_test() == 1 {
+                saw_viewer = true;
+            }
+            if child.try_wait().expect("xpra info state").is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+            .await
+            .expect("xpra info did not finish through the relay")
+            .expect("xpra info output");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "the real Xpra client failed through the relay: status={:?}\nstderr={stderr}\nstdout={stdout}",
+            output.status
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "the real Xpra client received no server data through the relay"
+        );
+        assert!(
+            saw_viewer,
+            "the relay must count the real Xpra client as a viewer"
+        );
+        // Single use, end to end: the token was consumed by that attach.
+        assert!(matches!(broker.peek(&issued.token), TokenLookup::Unknown));
+
+        // A second attach with the same URL must fail (consumed token).
+        let second = tokio::process::Command::new("xpra")
+            .args(["info", &url])
+            .env("XPRA_WEBSOCKET_MASK", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .status()
+            .await
+            .expect("second xpra info run");
+        assert!(
+            !second.success(),
+            "a consumed stream token must not authorize a second attach"
+        );
+        serving.abort();
+    }
 }
