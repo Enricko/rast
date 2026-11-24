@@ -16,6 +16,7 @@ import { h } from "../core/dom";
 import { appIconSvg } from "../core/icons";
 import type { ToastCenter } from "../core/toast";
 import { contextMenu, type ContextMenuEntry } from "../core/ui";
+import { isDiscoveredDesktopId } from "../apps/linuxapp/catalog";
 import {
   displayLayout,
   neighbour,
@@ -255,8 +256,12 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
       }
     } else {
       // Tidy automatic arrangement for the initial layout, stored in memory
-      // as fine-grid pixels until the account customizes it.
-      icons = displayLayout(null, apps.map((app) => app.id), grid, order).map((icon) =>
+      // as fine-grid pixels until the account customizes it. Externally
+      // discovered applications do not appear here on their own: they belong
+      // in the Applications menu and App Center until the account drags one
+      // onto the desktop (an explicit shortcut, saved with the layout).
+      const initial = apps.filter((app) => !isDiscoveredDesktopId(app.id));
+      icons = displayLayout(null, initial.map((app) => app.id), grid, order).map((icon) =>
         toV2(icon, iconRect(icon)),
       );
     }

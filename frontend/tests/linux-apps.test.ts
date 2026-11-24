@@ -3,6 +3,11 @@ import test from "node:test";
 
 import {
   discoveredAsLinuxApp,
+  discoveredIsShadowed,
+  isDiscoveredDesktopId,
+  reconciledDiscoveredApps,
+  setDiscoveredOverview,
+  setLinuxOverview,
   linuxAppsInstallAvailable,
   linuxAppsOffered,
   matchWindowApp,
@@ -21,6 +26,36 @@ function overview(patch: Partial<LinuxOverview>): LinuxOverview {
     dockerEnabled: false,
     ...patch,
   } as LinuxOverview;
+}
+
+/** A managed Linux app for inventory/reconciliation tests. */
+function managedLinuxApp(patch: Partial<LinuxApp>): LinuxApp {
+  return {
+    id: "app",
+    name: "App",
+    desktopId: "app",
+    format: "deb",
+    fileName: "app.deb",
+    version: "1",
+    package: null,
+    description: null,
+    command: ["/usr/bin/app"],
+    launchGuess: false,
+    iconUrl: null,
+    status: "ready",
+    error: null,
+    jobId: null,
+    update: { source: null, latestVersion: null, available: false, checkedAt: null, error: null },
+    memoryMb: 0,
+    cpus: 0,
+    sizeBytes: null,
+    visibility: "users",
+    running: 0,
+    createdAt: 1,
+    updatedAt: 1,
+    backend: "native",
+    ...patch,
+  } as LinuxApp;
 }
 
 // The operator can quarantine the whole Linux apps feature with
@@ -82,6 +117,76 @@ function discoveredApp(patch: Partial<DiscoveredApp>): DiscoveredApp {
     ...patch,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Discovery reconciliation (Runtime 2.2: no duplicate applications)
+// ---------------------------------------------------------------------------
+
+function resetInventories(): void {
+  setLinuxOverview({ ...overview({}), apps: [] });
+  setDiscoveredOverview({ apps: [], enabled: true });
+}
+
+test("a discovered entry shadowed by a managed app is not a launcher duplicate", () => {
+  resetInventories();
+  setLinuxOverview({
+    ...overview({}),
+    apps: [
+      managedLinuxApp({ id: "google-chrome", name: "Google Chrome", desktopId: "google-chrome", command: ["/usr/bin/dbus-run-session", "--", "/usr/bin/google-chrome-stable"] }),
+    ],
+  });
+  const chromeEntry = discoveredApp({
+    id: "d-chrome-desktop",
+    name: "Google Chrome",
+    exec: ["/usr/bin/google-chrome-stable"],
+    desktopId: "google-chrome.desktop",
+    scope: "system",
+    source: "xdg",
+    status: "pending_approval",
+    canLaunch: false,
+  });
+  assert.equal(discoveredIsShadowed(chromeEntry), true);
+  assert.deepEqual(reconciledDiscoveredApps(), []);
+  setLinuxOverview({ ...overview({}), apps: [] });
+  setDiscoveredOverview({ apps: [], enabled: true });
+});
+
+test("one visible entry per executable: a manual import does not double a desktop entry", () => {
+  resetInventories();
+  const xdg = discoveredApp({
+    id: "d-vlc-xdg",
+    name: "VLC media player",
+    exec: ["/usr/bin/vlc"],
+    desktopId: "vlc.desktop",
+    scope: "system",
+    source: "xdg",
+    status: "pending_approval",
+    canLaunch: false,
+  });
+  const manual = discoveredApp({
+    id: "d-vlc-import",
+    name: "VLC media player",
+    exec: ["/usr/bin/vlc"],
+    scope: "system",
+    source: "manual",
+    status: "ready",
+    approved: true,
+    canLaunch: true,
+  });
+  setDiscoveredOverview({ apps: [xdg, manual], enabled: true });
+  const seen = reconciledDiscoveredApps();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.id, "d-vlc-xdg");
+  setDiscoveredOverview({ apps: [], enabled: true });
+});
+
+test("isDiscoveredDesktopId recognises only discovered launcher identities", () => {
+  setDiscoveredOverview({ apps: [discoveredApp({})], enabled: true });
+  assert.equal(isDiscoveredDesktopId("linux:d-0123456789abcdef"), true);
+  assert.equal(isDiscoveredDesktopId("linux:google-chrome"), false);
+  assert.equal(isDiscoveredDesktopId("terminal"), false);
+  setDiscoveredOverview({ apps: [], enabled: true });
+});
 
 test("a discovered window matches through its StartupWMClass", () => {
   const wordcraft = discoveredApp({});

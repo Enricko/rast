@@ -21,7 +21,7 @@ import { watchJob, type JobOutcome } from "../../components/jobs";
 import { banner, emptyBlock, progressBar, type ProgressHandle } from "../../components/states";
 import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
-import { NEWER_BUILD, discoveredApps, isNativeApp, isOpenable, LINUX_PREFIX, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadDiscoveredApps, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, validateDiscoveredImport, type DiscoveredApp, type DiscoveredImportProblems, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
+import { NEWER_BUILD, isNativeApp, isOpenable, LINUX_PREFIX, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadDiscoveredApps, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, reconciledDiscoveredApps, validateDiscoveredImport, type DiscoveredApp, type DiscoveredImportProblems, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
 import {
   APPIMAGE_REJECTED_MESSAGE,
   INSTALL_STAGES,
@@ -248,14 +248,17 @@ export class LinuxApps {
   /** Is the discovered-application section relevant for this account? */
   discoveredSection(): HTMLElement | null {
     if (!this.offered) return null;
-    const apps = discoveredApps();
+    // One row per application: entries a managed app already provides are
+    // hidden (the managed app is canonical), and so are literals duplicated
+    // by exec (an import next to the equivalent desktop entry).
+    const apps = reconciledDiscoveredApps();
     // Ordinary accounts see the section only when they actually have entries
     // they may launch; administrators always see it (it is where they approve
     // and rescan).
     if (!this.enabled && apps.length === 0) return null;
     const rows = apps
       .filter((app) => this.enabled || app.canLaunch)
-      .map((app) => this.discoveredRow(app));
+      .map((app) => this.discoveredTile(app));
     return h(
       "section",
       { class: "pkg-group", ariaLabel: "Discovered applications" },
@@ -275,50 +278,111 @@ export class LinuxApps {
       h(
         "p",
         { class: "small muted pkg-discovered-note" },
-        "Applications installed outside App Center (their own .desktop entries, AppImages, portable programs, or an external installer inside an app profile). Administrators approve system-wide entries; owners can launch theirs.",
+        "Installed outside App Center. System-wide entries need administrator approval.",
       ),
       rows.length ? h("div", { class: "pkg-discovered" }, ...rows) : emptyBlock("No applications discovered yet", "Use Rescan applications to look again."),
     );
   }
 
-  private discoveredRow(app: DiscoveredApp): HTMLElement {
-    const status = DISCOVERED_STATUS[app.status] ?? app.status;
-    const scope = DISCOVERED_SCOPE[app.scope] ?? app.scope;
+  /** One line of tile context: what the entry is, never a raw path. */
+  private discoveredContext(app: DiscoveredApp): string {
+    if (app.status === "pending_approval") return "Waiting for approval";
     const source = DISCOVERED_SOURCE[app.source] ?? app.source;
-    const actions: HTMLElement[] = [];
+    return app.version ? `${source} · v${app.version}` : source;
+  }
+
+  /** Technical identity (registry id, paths, owner) on request only. */
+  private discoveredDetails(app: DiscoveredApp): void {
+    const row = (label: string, value: string | null | undefined): HTMLElement | null =>
+      value ? h("div", { class: "pkg-discovered-detail-row" },
+        h("div", { class: "small muted" }, label),
+        h("div", { class: "pkg-discovered-detail-value mono" }, value)) : null;
+    modal({
+      title: `${app.name} — details`,
+      body: h("div", { class: "col" },
+        row("Entry", `${DISCOVERED_STATUS[app.status] ?? app.status} · ${DISCOVERED_SCOPE[app.scope] ?? app.scope}`),
+        row("Inventory ID", app.id),
+        row("Executes", app.exec.join(" ")),
+        app.workingDir ? row("Working directory", app.workingDir) : null,
+        row("Found in", app.desktopPath),
+        app.desktopId ? row("Desktop entry", app.desktopId) : null,
+        row("Installed in", app.installDir),
+        app.ownerUserId != null ? row("Owner account", `#${app.ownerUserId}`) : null,
+        h("p", { class: "small muted" },
+          "This entry registers software installed outside App Center. \u201cRemove from list\u201d deletes only the inventory record; nothing is uninstalled."),
+      ),
+      actions: [{ label: "Close", variant: "primary", onClick: (close) => close() }],
+    });
+  }
+
+  /** The App Center tile for one discovered application (pkg-tile pattern). */
+  private discoveredTile(app: DiscoveredApp): HTMLElement {
+    const adminActions = this.enabled && !this.host.readOnly();
+
+    const foot = h("div", { class: "pkg-tile-foot" });
     if (app.canLaunch) {
-      actions.push(button("Launch", "primary", () => this.host.ctx.openApp(`${LINUX_PREFIX}${app.id}`)));
+      foot.appendChild(button("Open", "primary", () => this.host.ctx.openApp(`${LINUX_PREFIX}${app.id}`)));
+    } else if (adminActions && app.scope === "system") {
+      foot.appendChild(button("Approve", "primary", () => void this.patchDiscovered(app, { approved: true })));
     }
-    if (this.enabled && !this.host.readOnly()) {
+
+    const menu: ContextMenuEntry[] = [];
+    if (adminActions) {
       if (app.scope === "system") {
-        actions.push(
-          button(app.approved ? "Unapprove" : "Approve", "secondary", () => void this.patchDiscovered(app, { approved: !app.approved })),
-        );
+        menu.push({
+          label: app.approved ? "Unapprove" : "Approve",
+          icon: "check",
+          onClick: () => void this.patchDiscovered(app, { approved: !app.approved }),
+        });
       }
-      actions.push(button(app.hidden ? "Show" : "Hide", "secondary", () => void this.patchDiscovered(app, { hidden: !app.hidden })));
-      actions.push(button("Forget", "secondary", () => void this.forgetDiscovered(app)));
+      menu.push({
+        label: app.hidden ? "Show" : "Hide",
+        icon: "eye",
+        onClick: () => void this.patchDiscovered(app, { hidden: !app.hidden }),
+      });
+      menu.push({
+        label: "Remove from list",
+        icon: "close",
+        danger: true,
+        onClick: () => void this.forgetDiscovered(app),
+      });
     }
-    return h(
-      "div",
-      { class: "pkg-info-item pkg-discovered-row" },
+    menu.push({
+      label: "Details",
+      icon: "info",
+      onClick: () => this.discoveredDetails(app),
+    });
+
+    const more = h("button", {
+      class: "btn btn-sm btn-secondary btn-icon",
+      type: "button",
+      title: "More actions",
+      ariaLabel: `${app.name} actions`,
+    }, iconSvg("more", 15));
+    more.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const rect = more.getBoundingClientRect();
+      contextMenu(rect.left, rect.bottom + 4, menu, { ariaLabel: `${app.name} actions` });
+    });
+    foot.appendChild(more);
+
+    const tile = h(
+      "article",
+      { class: "pkg-tile is-app", dataset: { appId: `${LINUX_PREFIX}${app.id}` } },
+      h("div", { class: "pkg-icon pkg-icon-tile is-app", ariaHidden: true }, appIconSvg(`${LINUX_PREFIX}${app.id}`, app.iconUrl ?? "box", 34)),
       h(
         "div",
-        { class: "row pkg-discovered-main" },
-        h(
-          "span",
-          { class: "pkg-discovered-icon", ariaHidden: true },
-          appIconSvg(`${LINUX_PREFIX}${app.id}`, "box", 24),
-        ),
-        h(
-          "div",
-          { class: "pkg-discovered-body" },
-          h("div", { class: "pkg-discovered-name" }, app.name, h("span", { class: "pkg-discovered-status" }, status)),
-          h("div", { class: "small muted" }, `${source} · ${scope}${app.version ? ` · v${app.version}` : ""}${app.ownerUserId == null ? "" : ` · owner #${app.ownerUserId}`}`),
-          h("div", { class: "small muted mono pkg-discovered-exec" }, app.exec.join(" ")),
-        ),
+        { class: "pkg-tile-body" },
+        h("div", { class: "pkg-tile-name", title: app.name }, app.name),
+        h("div", { class: "pkg-tile-sub" }, this.discoveredContext(app)),
+        foot,
       ),
-      actions.length ? h("div", { class: "pkg-hero-actions" }, ...actions) : null,
     );
+    tile.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button, a")) return;
+      this.discoveredDetails(app);
+    });
+    return tile;
   }
 
   /**

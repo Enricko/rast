@@ -622,7 +622,10 @@ export class WindowManager {
     const bounds = this.bounds();
     const w = Math.min(size.w, Math.max(MIN_SIZE.w, bounds.w - 16));
     const h = Math.min(size.h, Math.max(MIN_SIZE.h, bounds.h - 16));
-    const offset = (this.cascade % 7) * 26;
+    // The step must exceed the title-bar height (~34 px): a smaller offset
+    // lets a raised window cover the title bar of the one beneath it, making
+    // that window unreachable by mouse (all of it is hidden behind it).
+    const offset = (this.cascade % 7) * 40;
     this.cascade += 1;
     const x = Math.min(Math.max(8 + offset, 8), Math.max(8, bounds.w - w - 8));
     const y = Math.min(Math.max(8 + offset, 8), Math.max(8, bounds.h - h - 8));

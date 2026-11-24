@@ -6144,3 +6144,24 @@ body:has(.is-dragging, .is-resizing) .linux-frame {
     max-width: 70%;
   }
 }
+
+/* Discovered applications: details dialog rows (inventory-only metadata). */
+.pkg-discovered-detail-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pkg-discovered-detail-row + .pkg-discovered-detail-row {
+  margin-top: 10px;
+}
+
+.pkg-discovered-detail-row + p {
+  margin-top: 14px;
+}
+
+.pkg-discovered-detail-value {
+  font-size: 13px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}

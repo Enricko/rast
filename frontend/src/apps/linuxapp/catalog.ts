@@ -510,6 +510,87 @@ export function discoveredAppById(id: string): DiscoveredApp | undefined {
   return discoveredCurrent.find((app) => app.id === id);
 }
 
+// ---------------------------------------------------------------------------
+// Discovery ↔ launcher reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * Identity keys of one application: the base of its desktop id and the
+ * basenames of its executable tokens. Two entries sharing any key describe the
+ * same application (a managed app and its leftover system desktop entry, or a
+ * manual import of what a `.desktop` file already declares).
+ */
+function discoveredIdentityKeys(app: { desktopId?: string | null; exec: readonly string[] }): string[] {
+  const keys: string[] = [];
+  if (app.desktopId) {
+    const base = app.desktopId.toLowerCase().replace(/\.desktop$/, "").split(".").pop() ?? "";
+    if (base) keys.push(`desktop:${base}`);
+  }
+  const seenExec = new Set<string>();
+  for (const token of app.exec) {
+    const base = (token.split("/").pop() ?? "").toLowerCase();
+    // System wrapper scripts never identify an application.
+    if (!base || base === "sh" || base === "env" || base === "dbus-run-session") continue;
+    if (seenExec.has(base)) continue;
+    seenExec.add(base);
+    keys.push(`exec:${base}`);
+  }
+  return keys;
+}
+
+function managedIdentityKeys(): Set<string> {
+  const keys = new Set<string>();
+  // `current` holds the managed apps only; discovered entries live in
+  // `discoveredSynthetic` and never appear there.
+  for (const app of current) {
+    for (const key of discoveredIdentityKeys({ desktopId: app.desktopId, exec: app.command })) keys.add(key);
+  }
+  return keys;
+}
+
+/**
+ * A discovered entry that a managed application already provides. It must not
+ * duplicate the managed app in the Applications menu, on the desktop or in
+ * App Center's launcher surface (the managed app stays canonical).
+ */
+export function discoveredIsShadowed(app: { desktopId?: string | null; exec: readonly string[] }): boolean {
+  const managed = managedIdentityKeys();
+  if (managed.size === 0 || current.length === 0) return false;
+  return discoveredIdentityKeys(app).some((key) => managed.has(key));
+}
+
+/**
+ * One canonical discovered entry per executable, ordered for the launcher.
+ * Managed-shadowed entries are removed; everything else is grouped by the
+ * argv[0] basename so a manual import next to the equivalent system desktop
+ * entry shows a single row (highest-ranked entry first: pending approval over
+ * ready, approved, then xdg source, then name).
+ */
+export function reconciledDiscoveredApps(): DiscoveredApp[] {
+  const managed = managedIdentityKeys();
+  const byExec = new Map<string, DiscoveredApp[]>();
+  for (const app of discoveredCurrent) {
+    if (managed.size > 0 && current.length > 0) {
+      if (discoveredIdentityKeys(app).some((key) => managed.has(key))) continue;
+    }
+    const base = (app.exec[0]?.split("/").pop() ?? `id:${app.id}`).toLowerCase();
+    const group = byExec.get(base);
+    if (group) group.push(app);
+    else byExec.set(base, [app]);
+  }
+  const rank = (app: DiscoveredApp): number =>
+    (app.status === "pending_approval" ? 4 : 0) + (app.approved ? 2 : 0) + (app.source === "xdg" ? 1 : 0);
+  const representative = (group: DiscoveredApp[]): DiscoveredApp =>
+    group.reduce((best, app) =>
+      rank(app) > rank(best) || (rank(app) === rank(best) && app.name.localeCompare(best.name) < 0) ? app : best);
+  return [...byExec.values()].map(representative);
+}
+
+/** Is `appId` (`linux:<discovered id>`) one of the externally discovered apps? */
+export function isDiscoveredDesktopId(appId: string): boolean {
+  return appId.startsWith(LINUX_PREFIX) && discoveredSynthetic.has(appId.slice(LINUX_PREFIX.length));
+}
+
 /**
  * A discovered entry as the synthetic [`LinuxApp`] the shared window/launch
  * machinery already understands (native backend + discovered id). It is never
@@ -545,7 +626,12 @@ export function discoveredAsLinuxApp(app: DiscoveredApp): LinuxApp {
 
 /** Discovered entries the current account may open now, as LinuxApps. */
 export function discoveredOpenableLinuxApps(): LinuxApp[] {
-  return discoveredCurrent.filter((app) => app.canLaunch).map(discoveredAsLinuxApp);
+  // Reconciled first: entries a managed app already provides (for example a
+  // leftover system desktop entry for a managed browser) never produce a
+  // second launcher item.
+  return reconciledDiscoveredApps()
+    .filter((app) => app.canLaunch)
+    .map(discoveredAsLinuxApp);
 }
 
 /**
