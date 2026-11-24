@@ -82,6 +82,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/linux-apps/preview", post(preview))
         .route("/api/linux-apps/session", get(native_session))
         .route("/api/linux-apps/session/close", post(close_native_session))
+        .route("/api/linux-apps/session/prewarm", post(prewarm_session))
         .route("/api/linux-apps/session/runs/{run}", post(close_native_run))
         // Canonical form used by the App Center "End application" action and
         // documented in docs/API.md; the shorter path stays for compatibility.
@@ -431,6 +432,11 @@ async fn close_native_session(
     user: AuthUser,
 ) -> AppResult<Json<Value>> {
     Ok(Json(state.linux_apps.native_close_session(&user).await?))
+}
+
+/// Pre-warm the caller's shared graphical session (opt-in, no app started).
+async fn prewarm_session(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.native_prewarm(&user).await?))
 }
 
 async fn close_native_run(

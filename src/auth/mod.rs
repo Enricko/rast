@@ -352,6 +352,7 @@ mod tests {
             linux_encoding: None,
             linux_display_backend: crate::config::LinuxDisplayBackend::Auto,
             linux_xvfb_command: None,
+            linux_prewarm: false,
             terminal: crate::config::TerminalConfig::default(),
             loaded_from: None,
         }

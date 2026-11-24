@@ -544,6 +544,19 @@ impl NativeSessions {
         Ok((run, session_json))
     }
 
+    /// Start the person's graphical session in the background without launching
+    /// an application, so the first real launch is warm instead of paying the
+    /// ~12 s cold Xpra start. Disabled unless `linux_prewarm` is enabled; the
+    /// existing admission checks (available memory) still apply, and this never
+    /// starts an application process.
+    pub async fn prewarm(self: &Arc<Self>, user: &AuthUser) -> AppResult<Option<Value>> {
+        if !self.config.linux_prewarm {
+            return Ok(None);
+        }
+        let session = self.ensure_session(user).await?;
+        Ok(Some(session.json()))
+    }
+
     /// The person's session as JSON, when one exists (starting, ready or just
     /// ended).
     pub async fn session_json(&self, user: &AuthUser) -> AppResult<Option<Value>> {
@@ -2985,6 +2998,20 @@ mod tests {
         assert_eq!(parse_mem_available(Some(text)), Some(8_000_000u64 * 1024));
         assert_eq!(parse_mem_available(Some("nothing")), None);
         assert_eq!(parse_mem_available(None), None);
+    }
+
+    #[tokio::test]
+    async fn prewarm_is_a_noop_unless_enabled_and_never_starts_an_app() {
+        let (_dir, helper, sessions, _cfg) = manager().await;
+        let user = test_user(7);
+        // Default configuration: linux_prewarm is off.
+        assert!(sessions.prewarm(&user).await.unwrap().is_none());
+        assert_eq!(
+            *helper.session_starts.lock().unwrap(),
+            0,
+            "prewarm must not start a session when disabled"
+        );
+        assert_eq!(helper.calls.lock().unwrap().len(), 0);
     }
 
     #[test]

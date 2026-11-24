@@ -44,6 +44,9 @@ pub const DEFAULT_LINUX_APP_MEMORY_MB: u32 = 2048;
 pub const DEFAULT_LINUX_APP_CPUS: u32 = 2;
 pub const DEFAULT_LINUX_APP_TASKS: u32 = 1024;
 pub const DEFAULT_LINUX_ADMISSION_RESERVE_MB: u32 = 1024;
+/// Pre-warming is off by default: it trades a little idle memory for a much
+/// faster first application launch and must be an operator decision.
+pub const DEFAULT_LINUX_PREWARM: bool = false;
 
 /// Default CPU limit of one user's graphical session: a quarter of the
 /// server's CPUs, at least two and at most eight.
@@ -168,6 +171,10 @@ pub struct FileConfig {
     /// Absolute path of a wrapper script that starts an alternative headless X
     /// server (for example a GPU-backed Xorg). Xpra runs it in place of Xvfb.
     pub linux_xvfb_command: Option<PathBuf>,
+    /// Start each eligible person's graphical session in the background after
+    /// they sign in, so the first application launch does not pay the cold
+    /// Xpra session start (default: off; resource-aware opt-in).
+    pub linux_prewarm: Option<bool>,
     /// Free memory kept in reserve when admitting a new native application.
     pub linux_admission_reserve_mb: Option<u32>,
 
@@ -335,6 +342,8 @@ pub struct Config {
     pub linux_display_backend: LinuxDisplayBackend,
     /// Custom headless X server command (see [`LinuxDisplayBackend::Custom`]).
     pub linux_xvfb_command: Option<PathBuf>,
+    /// Pre-warm the graphical session in the background after sign-in.
+    pub linux_prewarm: bool,
     pub linux_admission_reserve_mb: u32,
     /// Native Terminal settings (PTY shells under the per-user identity).
     pub terminal: TerminalConfig,
@@ -807,6 +816,8 @@ impl Config {
             })?,
             None => LinuxDisplayBackend::Auto,
         };
+        let linux_prewarm = parse_env_bool(&env, "RAST_LINUX_PREWARM", file.linux_prewarm)?
+            .unwrap_or(DEFAULT_LINUX_PREWARM);
         let linux_xvfb_command = get_str(
             file.linux_xvfb_command.map(|p| p.display().to_string()),
             "RAST_LINUX_XVFB_COMMAND",
@@ -957,6 +968,7 @@ impl Config {
             linux_encoding,
             linux_display_backend,
             linux_xvfb_command,
+            linux_prewarm,
             terminal,
             loaded_from,
         })
@@ -1433,6 +1445,24 @@ mod native_runtime_config_tests {
         assert_eq!(cfg.linux_encoding, None);
         assert_eq!(cfg.linux_av_sync, None);
         assert_eq!(cfg.linux_xvfb_command, None);
+    }
+
+    #[test]
+    fn prewarm_is_off_by_default_and_parsed_from_file_and_env() {
+        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
+        assert!(!cfg.linux_prewarm);
+        let file = FileConfig::from_toml_str("linux_prewarm = true").unwrap();
+        assert!(
+            Config::from_parts(None, file, no_env)
+                .unwrap()
+                .linux_prewarm
+        );
+        let env = |key: &str| (key == "RAST_LINUX_PREWARM").then(|| "true".to_string());
+        assert!(
+            Config::from_parts(None, FileConfig::default(), env)
+                .unwrap()
+                .linux_prewarm
+        );
     }
 
     #[test]

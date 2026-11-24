@@ -90,6 +90,7 @@ applied by `src/config.rs`.
 | `linux_encoding` | string | unset | Preferred encoding: `h264`, `vp8`, `vp9`, `webp`, `jpeg` or `rgb`; unset = Xpra automatic. Forcing a codec the browser cannot decode breaks rendering, so prefer the profiles | `RAST_LINUX_ENCODING` |
 | `linux_display_backend` | string | `auto` | `auto` (custom X server when usable, else Xvfb), `software` (always Xvfb) or `custom` (expects `linux_xvfb_command`, falls back to Xvfb if unusable) | `RAST_LINUX_DISPLAY_BACKEND` |
 | `linux_xvfb_command` | path | unset | Absolute path of a wrapper script starting an alternative headless X server for GPU-backed rendering; passed as `xpra --xvfb=<path>`. Validate it as described in [GPU-ACCELERATION.md](GPU-ACCELERATION.md) | `RAST_LINUX_XVFB_COMMAND` |
+| `linux_prewarm` | boolean | `false` | Start an eligible person's shared graphical session in the background after sign-in, so the first application launch is warm instead of paying the ~12 s cold Xpra start. Uses ~150–250 MiB idle per signed-in user until the normal idle cleanup; admission and memory checks still apply. `GET/POST /api/linux-apps/session/prewarm` exposes the state | `RAST_LINUX_PREWARM` |
 | `default_quota_bytes` | integer | `21474836480` (20 GiB) | `0` = unlimited; applies to newly created accounts | `RAST_DEFAULT_QUOTA_BYTES` |
 | `secure_cookies` | boolean | auto | Auto = `true` when `public_url` starts with `https://` | `RAST_SECURE_COOKIES` |
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
@@ -149,6 +150,7 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_LINUX_ENCODING` | `linux_encoding` | Codec override |
 | `RAST_LINUX_DISPLAY_BACKEND` | `linux_display_backend` | `auto`/`software`/`custom` |
 | `RAST_LINUX_XVFB_COMMAND` | `linux_xvfb_command` | Absolute wrapper-script path |
+| `RAST_LINUX_PREWARM` | `linux_prewarm` | `true`/`false` |
 | `RAST_DEFAULT_QUOTA_BYTES` | `default_quota_bytes` | New accounts only |
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |

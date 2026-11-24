@@ -252,6 +252,12 @@ linux_profile = "balanced"
 # docs/GPU-ACCELERATION.md). It replaces `Xvfb` in `xpra start --xvfb=...`.
 # env: RAST_LINUX_XVFB_COMMAND
 # linux_xvfb_command = "/usr/local/sbin/rast-xorg-gpu"
+# Pre-warm each eligible person's graphical session after sign-in so the first
+# application launch does not pay the ~12 s cold Xpra start. Off by default:
+# it keeps one idle session per signed-in native-app user (roughly 150-250 MiB)
+# until the normal idle cleanup reclaims it.
+# env: RAST_LINUX_PREWARM
+# linux_prewarm = true
 
 # ---------------------------------------------------------------------------
 # App Center

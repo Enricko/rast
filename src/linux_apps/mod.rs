@@ -805,6 +805,17 @@ impl LinuxApps {
         self.native.session_json(user).await
     }
 
+    /// Pre-warm the person's shared native session (no application started).
+    /// No-op unless the operator enabled `linux_prewarm`.
+    pub async fn native_prewarm(&self, user: &AuthUser) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
+        self.ensure_native()?;
+        match self.native.prewarm(user).await? {
+            Some(session) => Ok(json!({"prewarmed": true, "session": session})),
+            None => Ok(json!({"prewarmed": false, "reason": "linux_prewarm is disabled"})),
+        }
+    }
+
     /// Launch an app into the person's shared native session (lazily started).
     pub async fn native_launch(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
         self.ensure_native()?;

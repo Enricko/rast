@@ -257,6 +257,17 @@ Consequences:
   Uninstalling with *Also delete its settings* removes only those profiles,
   never files in RAST homes.
 
+### Pre-warmed sessions
+
+The operator can enable `linux_prewarm = true` (default off). After a person
+with native apps signs in, the desktop asks the server to start their shared
+Xpra session in the background
+(`POST /api/linux-apps/session/prewarm`), so the first application launch pays
+only the application start instead of the ~12 s cold session start. It is one
+session per person, never shared between accounts, subject to the normal
+memory admission check, and reclaimed by the existing idle cleanup. The trade
+off is a small idle memory cost per signed-in native-app user (~150–250 MiB).
+
 ## Windows and the desktop
 
 * Every normal remote top-level window becomes **one RAST window** with its own

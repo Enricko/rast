@@ -6,6 +6,8 @@ import {
   LINUX_PREFIX,
   isNativeApp,
   linuxAppById,
+  linuxApps,
+  linuxOverview,
   loadLinuxApps as fetchLinuxApps,
   onLinuxApps,
 } from "../apps/linuxapp/catalog";
@@ -1572,6 +1574,23 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   );
   updateTray();
 
+  // Pre-warm the person's shared native session once per desktop load when the
+  // operator enabled it (linux_prewarm): the first application launch then only
+  // pays the application start instead of the ~12 s cold Xpra session start.
+  let prewarmRequested = false;
+  const prewarmNativeSession = async (): Promise<void> => {
+    if (prewarmRequested || disposed) return;
+    const overview = linuxOverview();
+    if (!overview?.nativeEnabled || overview.session) return;
+    if (!linuxApps().some(isNativeApp)) return;
+    prewarmRequested = true;
+    try {
+      await deps.api.post("/api/linux-apps/session/prewarm");
+    } catch {
+      /* older server or pre-warming disabled: ordinary lazy start still works */
+    }
+  };
+
   // ----------------------------------------------------------- Linux apps
   // Linux apps shared with this account join the app list once loaded (the
   // server sends only the ones it may see). Windows are not restored after
@@ -1581,6 +1600,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     const loadLinuxApps = async (): Promise<void> => {
       try {
         await fetchLinuxApps(deps.api);
+        void prewarmNativeSession();
       } catch {
         /* an older server, or Docker is off: no Linux apps */
       }

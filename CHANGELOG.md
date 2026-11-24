@@ -26,6 +26,13 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- **Configurable session pre-warming** (`linux_prewarm`, default off):
+  after a person with native apps signs in the desktop starts their shared Xpra
+  session in the background (`POST /api/linux-apps/session/prewarm`), so the
+  first application launch is warm (measured cold session start is ~12 s;
+  warm launch ~0.8 s). One session per person, admission-checked and reclaimed
+  by the normal idle cleanup; the trade-off is ~150–250 MiB idle memory per
+  signed-in native-app user.
 - **Adaptive native session performance profiles.** `linux_profile` selects
   `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the
   previous behaviour), `media` (smooth video) or `quality` (sharp text/images);
