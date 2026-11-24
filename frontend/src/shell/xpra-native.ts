@@ -1088,23 +1088,7 @@ export class NativeLinuxHost {
     // adopts the remote windows' DOM nodes and forwards input.
     iframe.setAttribute("allow", "autoplay; clipboard-read; clipboard-write");
     iframe.addEventListener("load", () => {
-      try {
-        const doc = iframe.contentDocument;
-        // The transport never owns keyboard focus: desktop input is forwarded
-        // by the parent document (see forwardKey), so any focus the Xpra page
-        // takes for its clipboard pasteboard is immediately returned.
-        doc?.addEventListener(
-          "focusin",
-          () => {
-            this.releaseViewerFocus();
-          },
-          true,
-        );
-      } catch {
-        /* not same-origin yet */
-      }
       this.attachShim(0);
-      window.setTimeout(() => this.releaseViewerFocus(), 0);
     });
     const viewerUrl = new URL(url, window.location.href);
     viewerUrl.searchParams.set("sound", "true");
@@ -1179,13 +1163,7 @@ export class NativeLinuxHost {
     shim.on("error", () => {
       /* surfaced through the session state */
     });
-    shim.on("focus-request", () => {
-      this.releaseViewerFocus();
-      this.ensureNativeKeyboardFocus();
-    });
-    shim.on("ready", () => {
-      window.setTimeout(() => this.releaseViewerFocus(), 0);
-    });
+    shim.on("focus-request", () => this.ensureNativeKeyboardFocus());
     shim.on("clipboard", (payload?: ShimClipboardPayload) => {
       if (!payload) return;
       const text = typeof payload.text === "string" ? payload.text : "";
@@ -2061,41 +2039,10 @@ export class NativeLinuxHost {
     if (this.disposed) return;
     if (this.isModalOpen()) return;
     if (this.iframe && document.activeElement === this.iframe) {
-      this.releaseViewerFocus();
       this.focusNativeContent(this.focusedWid ? this.frames.get(this.focusedWid) : null);
       return;
     }
     if (this.focusedWid) this.focusNativeContent(this.frames.get(this.focusedWid));
-  }
-
-  /**
-   * The hidden Xpra transport may focus its clipboard pasteboard while the
-   * session connects (the pre-warmed session makes this happen right after
-   * sign-in). Every keystroke would then land in the off-screen iframe instead
-   * of the focused RAST window (for example the Terminal), so the frame is
-   * blurred again and the desktop keeps keyboard ownership.
-   */
-  private releaseViewerFocus(): void {
-    const iframe = this.iframe;
-    if (!iframe) return;
-    try {
-      const doc = iframe.contentDocument;
-      if (doc) {
-        const active = doc.activeElement as HTMLElement | null;
-        if (active && active !== doc.body && typeof active.blur === "function") active.blur();
-        doc.getElementById("pasteboard")?.blur();
-      }
-    } catch {
-      /* cross-origin or not ready: nothing to release */
-    }
-    try {
-      iframe.blur();
-    } catch {
-      /* ignore */
-    }
-    if (document.activeElement === iframe) {
-      (document.activeElement as HTMLElement).blur();
-    }
   }
 
   /* ---------------------------------------------------- browser clipboard api */
