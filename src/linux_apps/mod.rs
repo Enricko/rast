@@ -673,21 +673,22 @@ impl LinuxApps {
             "user": 0,
             "policy": self.discovery_policy(),
         });
-        if target_user_id != actor.id || actor.is_admin() {
-            match self.scan_discovered_user(target_user_id).await {
-                Ok(count) => {
-                    summary["user"] = json!(count);
-                }
-                Err(error) => {
-                    // A scan for another account or an identity that cannot be
-                    // scanned yet must not discard the system result.
-                    tracing::warn!(
-                        user_id = target_user_id,
-                        error = %error,
-                        "identity desktop scan failed"
-                    );
-                    summary["userError"] = json!(error.to_string());
-                }
+        // Always scan the target identity, including when a person scans their
+        // own account (the common case: the App Center "Rescan applications"
+        // button). The helper runs the scan as that identity.
+        match self.scan_discovered_user(target_user_id).await {
+            Ok(count) => {
+                summary["user"] = json!(count);
+            }
+            Err(error) => {
+                // A scan for another account or an identity that cannot be
+                // scanned yet must not discard the system result.
+                tracing::warn!(
+                    user_id = target_user_id,
+                    error = %error,
+                    "identity desktop scan failed"
+                );
+                summary["userError"] = json!(error.to_string());
             }
         }
         Ok(summary)
