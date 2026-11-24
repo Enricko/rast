@@ -242,12 +242,22 @@ pub fn display_backend_arg(config: &Config) -> String {
 pub fn gpu_display_available(_config: &Config) -> bool {
     // Deliberately does not call `detect_display`: that function derives the
     // active backend from this probe, so calling back would recurse.
-    let gpu = detect_gpu();
-    gpu.vendor == "nvidia"
-        && gpu.nvidia_device_nodes
+    //
+    // Device nodes are not required here: the web server runs with systemd
+    // hardening that can hide /dev/nvidia0, while the privileged helper (which
+    // starts and verifies the display) is outside that sandbox. The helper's
+    // real glxinfo/xrandr probe is the actual gate for `gpuAccelerationVerified`.
+    nvidia_driver_loaded()
         && nvidia_xorg_driver_present()
         && find_in_path("Xorg").is_some()
         && find_in_path("glxinfo").is_some()
+        && find_in_path("xrandr").is_some()
+}
+
+/// Is the NVIDIA kernel driver loaded (readable even when device nodes are
+/// hidden by service sandboxing)?
+fn nvidia_driver_loaded() -> bool {
+    Path::new("/proc/driver/nvidia/version").is_file() || Path::new("/sys/module/nvidia").is_dir()
 }
 
 /// Backend that sessions actually use with the current configuration.
@@ -373,7 +383,9 @@ fn build_report(config: &Config) -> RuntimeReport {
 
     if gpu.vendor == "nvidia" && !gpu.nvidia_device_nodes {
         notes.push(
-            "An NVIDIA driver is loaded but /dev/nvidia0 is missing; applications cannot use the GPU."
+            "The NVIDIA kernel driver is loaded but its device nodes are not visible to the RAST \
+             web service (systemd device hardening). GPU display sessions are still started and \
+             verified by the privileged helper, which is outside that sandbox."
                 .to_string(),
         );
     }
