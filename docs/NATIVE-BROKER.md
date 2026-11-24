@@ -242,3 +242,21 @@ The token, URL, session key and cookie are never part of an audit row.
 * unmasked client frames are closed strictly (the Xpra `XPRA_WEBSOCKET_MASK=1`
   requirement);
 * native client frames count as session activity (idle rules).
+
+There is also an `#[ignore]`d end-to-end test against the **real** Xpra
+protocol (`xpra info` as a full WebSocket client) that is run on demand on a
+host with xpra installed:
+
+```bash
+# A throwaway Xpra server on loopback (never exposed):
+xpra start :199 --daemon=no --bind-ws=127.0.0.1:18999 \
+  --start-new-commands=no --notifications=no --mdns=no --pulseaudio=no &
+# The real client attaches through the new broker route:
+RAST_TEST_REAL_XPRA_WS=127.0.0.1:18999 \
+  cargo test --locked --lib a_real_xpra_protocol_client -- --ignored
+```
+
+It asserts the real client receives Xpra server data through the relay, the
+relay counts the viewer, the token is consumed by that attach and a second
+attach with the same URL is refused. Verified against Xpra 6.5.5 on
+2026-11-24 (Linux, loopback).
