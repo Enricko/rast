@@ -402,7 +402,18 @@ environment mitigation: observed 60–70 s starts under sustained I/O are host
 contention, not the product's normal startup (normal: pre-warmed session ready
 ~2 s; click→window ~3 s).
 
-#### Snap-packaged applications are not supported for RAST identities
+#### Browser keyboard focus in the GPU session
+
+Chrome/Chromium-family windows receive keyboard input in the GPU-backed Xpra
+session, but **Firefox (tarball) does not** without a window manager: the
+headless Xorg display has no WM to assign X input focus, and even host-level
+`xdotool` key events aimed at the Firefox window do not reach its page or
+address bar (window creation and RAST adoption work). This is documented as a
+partial compatibility result; the follow-up is a minimal internal window
+manager/focus helper for the GPU display (RAST's own window manager remains the
+only visible window manager in the browser UI).
+
+### Snap-packaged applications are not supported for RAST identities
 
 Installing a package with snap is not enough to run it through RAST: snapd
 refuses to launch snaps for the mapped identity users (service accounts without
