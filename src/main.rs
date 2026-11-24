@@ -144,6 +144,16 @@ enum Command {
         #[arg(long = "expected-build")]
         expected_build: Option<String>,
     },
+    /// Internal: per-identity desktop application scanner (used by the helper)
+    #[command(hide = true)]
+    DesktopScanAgent {
+        /// `"<scope>:<absolute path>"` roots to scan.
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// Build id of the helper that started this agent; refuses to run on mismatch.
+        #[arg(long = "expected-build")]
+        expected_build: Option<String>,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -553,6 +563,14 @@ async fn run(
                 .map_err(|error| -> Box<dyn std::error::Error> {
                     format!("root file agent failed: {error}").into()
                 }),
+                Command::DesktopScanAgent {
+                    roots,
+                    expected_build,
+                } => rast::linux_apps::discovery::run_scan_agent(&roots, expected_build.as_deref())
+                    .map(|_| ExitCode::SUCCESS)
+                    .map_err(|error| -> Box<dyn std::error::Error> {
+                        format!("desktop scan agent failed: {error}").into()
+                    }),
                 Command::Serve { .. }
                 | Command::Version
                 | Command::Package { .. }

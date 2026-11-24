@@ -103,6 +103,19 @@ impl NativeClient {
         self.call_json("ping", Value::Object(Map::new())).await
     }
 
+    /// Scan for installed desktop applications as `user_id`'s identity.
+    ///
+    /// `roots` are extra system directories (`"system:<absolute path>"`); the
+    /// helper derives the identity's XDG directories and managed application
+    /// profiles itself. The response is `{entries, skipped, roots, scanned}`.
+    pub async fn desktop_scan(&self, user_id: i64, roots: &[String]) -> Result<Value, NativeError> {
+        self.call_json(
+            "desktop_scan",
+            serde_json::json!({"userId": user_id, "roots": roots}),
+        )
+        .await
+    }
+
     /// Send one typed request and return its `data` object.
     pub async fn call(&self, req: NativeRequest) -> Result<Value, NativeError> {
         let line = req.to_line()?;

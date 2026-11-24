@@ -47,6 +47,18 @@ pub const DEFAULT_LINUX_ADMISSION_RESERVE_MB: u32 = 1024;
 /// Pre-warming is off by default: it trades a little idle memory for a much
 /// faster first application launch and must be an operator decision.
 pub const DEFAULT_LINUX_PREWARM: bool = false;
+/// How often the background scan looks for applications installed outside the
+/// App Center (seconds; 0 disables the periodic scan, an administrator can
+/// always rescan from App Center).
+pub const DEFAULT_LINUX_DISCOVERY_INTERVAL_SECONDS: u64 = 300;
+/// System directories every discovery scan inspects (`.desktop` entries and
+/// AppImages). `linux_discovery_roots` adds operator-chosen roots on top of
+/// these and the per-identity XDG directories.
+pub const DEFAULT_LINUX_DISCOVERY_SYSTEM_ROOTS: [&str; 3] = [
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/opt",
+];
 
 /// Default CPU limit of one user's graphical session: a quarter of the
 /// server's CPUs, at least two and at most eight.
@@ -177,6 +189,15 @@ pub struct FileConfig {
     pub linux_prewarm: Option<bool>,
     /// Free memory kept in reserve when admitting a new native application.
     pub linux_admission_reserve_mb: Option<u32>,
+    /// Scan for applications installed outside the App Center (default: on).
+    pub linux_discovery_enabled: Option<bool>,
+    /// Extra roots the scan walks, in addition to the standard XDG directories,
+    /// `~/Applications`, `~/.local/bin` and the managed application profiles.
+    pub linux_discovery_roots: Option<Vec<String>>,
+    /// System-wide entries policy: `approval` (default), `auto` or `hidden`.
+    pub linux_discovery_system_apps: Option<String>,
+    /// Seconds between background rescans (default 300; 0 disables the timer).
+    pub linux_discovery_interval_seconds: Option<u64>,
 
     // ---- Native Terminal (PTY) ------------------------------------------
     /// Enable the server-wide Terminal application (admins must still grant
@@ -286,6 +307,46 @@ impl std::fmt::Display for LinuxDisplayBackend {
     }
 }
 
+/// Policy for applications discovered system-wide (installed by the OS or an
+/// administrator outside the App Center). They are never silently usable by
+/// ordinary accounts by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscoverySystemApps {
+    /// Administrators must approve each system entry before people can launch
+    /// it (default).
+    Approval,
+    /// System entries are visible and usable immediately.
+    Auto,
+    /// System entries are recorded for administrators but hidden from
+    /// ordinary accounts and never approved automatically.
+    Hidden,
+}
+
+impl DiscoverySystemApps {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::Auto => "auto",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "approval" | "approve" | "pending" => Some(Self::Approval),
+            "auto" | "allow" | "allowed" | "open" => Some(Self::Auto),
+            "hidden" | "hide" | "off" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for DiscoverySystemApps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Fully resolved configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -345,6 +406,12 @@ pub struct Config {
     /// Pre-warm the graphical session in the background after sign-in.
     pub linux_prewarm: bool,
     pub linux_admission_reserve_mb: u32,
+    /// Discovery of applications installed outside the App Center.
+    pub linux_discovery_enabled: bool,
+    /// Extra scan roots chosen by the operator.
+    pub linux_discovery_roots: Vec<PathBuf>,
+    pub linux_discovery_system_apps: DiscoverySystemApps,
+    pub linux_discovery_interval_seconds: u64,
     /// Native Terminal settings (PTY shells under the per-user identity).
     pub terminal: TerminalConfig,
     /// Config file that was actually loaded, if any.
@@ -727,6 +794,59 @@ impl Config {
             ));
         }
 
+        // ---- Discovered (externally installed) applications --------------
+        let linux_discovery_enabled = parse_env_bool(
+            &env,
+            "RAST_LINUX_DISCOVERY_ENABLED",
+            file.linux_discovery_enabled,
+        )?
+        .unwrap_or(true);
+        let linux_discovery_roots_raw: Vec<String> = match get_str(
+            file.linux_discovery_roots.map(|v| v.join(",")),
+            "RAST_LINUX_DISCOVERY_ROOTS",
+        ) {
+            Some(raw) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => Vec::new(),
+        };
+        let mut linux_discovery_roots = Vec::new();
+        for raw in linux_discovery_roots_raw {
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                return Err(ConfigError::Invalid(format!(
+                    "linux_discovery_roots entries must be absolute paths, got {raw:?}"
+                )));
+            }
+            linux_discovery_roots.push(path);
+        }
+        if linux_discovery_roots.len() > 32 {
+            return Err(ConfigError::Invalid(
+                "linux_discovery_roots accepts at most 32 roots".into(),
+            ));
+        }
+        let linux_discovery_system_apps = match get_str(
+            file.linux_discovery_system_apps,
+            "RAST_LINUX_DISCOVERY_SYSTEM_APPS",
+        ) {
+            Some(value) => DiscoverySystemApps::parse(&value).ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "linux_discovery_system_apps must be one of approval, auto, hidden (got '{value}')"
+                ))
+            })?,
+            None => DiscoverySystemApps::Approval,
+        };
+        let linux_discovery_interval_seconds = parse_env_num(
+            &env,
+            "RAST_LINUX_DISCOVERY_INTERVAL_SECONDS",
+            file.linux_discovery_interval_seconds,
+        )?
+        .unwrap_or(DEFAULT_LINUX_DISCOVERY_INTERVAL_SECONDS)
+        .clamp(0, 7 * 24 * 60 * 60);
+
         // ---- Native session runtime profile and display backend ----------
         let linux_profile = match get_str(
             file.linux_profile.map(|v| v.to_string()),
@@ -958,6 +1078,10 @@ impl Config {
             linux_app_cpus,
             linux_app_tasks,
             linux_admission_reserve_mb,
+            linux_discovery_enabled,
+            linux_discovery_roots,
+            linux_discovery_system_apps,
+            linux_discovery_interval_seconds,
             linux_profile,
             linux_quality,
             linux_min_quality,

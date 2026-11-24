@@ -88,6 +88,9 @@ pub const MAX_DEB_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 /// Maximum length of an error message returned to the caller.
 pub const MAX_ERROR_MESSAGE: usize = 2000;
+/// Maximum number of extra roots a `desktop_scan` request may add to the
+/// identity's standard application directories.
+pub const MAX_DESKTOP_SCAN_ROOTS: usize = 32;
 
 /// Client-side deadline for cheap operations (ping, unit queries, sessions,
 /// app start/stop, path operations, package policy).
@@ -251,6 +254,8 @@ pub enum NativeOp {
     RuntimesDetect(RuntimesDetectOp),
     AppStart(AppStartOp),
     AppStop(AppStopOp),
+    /// Scan for installed desktop applications as the person's identity.
+    DesktopScan(DesktopScanOp),
     TerminalStart(TerminalStartOp),
     TerminalStop(TerminalStopOp),
     DebPreview(DebPreviewOp),
@@ -288,6 +293,7 @@ impl NativeOp {
             Self::RuntimesDetect(_) => "runtimes_detect",
             Self::AppStart(_) => "app_start",
             Self::AppStop(_) => "app_stop",
+            Self::DesktopScan(_) => "desktop_scan",
             Self::TerminalStart(_) => "terminal_start",
             Self::TerminalStop(_) => "terminal_stop",
             Self::DebPreview(_) => "deb_preview",
@@ -341,6 +347,7 @@ impl NativeOp {
                 | Self::PathSymlink(_)
                 | Self::PackageInstalledList(_)
                 | Self::PackageFiles(_)
+                | Self::DesktopScan(_)
         )
     }
 
@@ -403,6 +410,7 @@ impl NativeRequest {
             NativeOp::RuntimesDetect(op) => merge!(op),
             NativeOp::AppStart(op) => merge!(op),
             NativeOp::AppStop(op) => merge!(op),
+            NativeOp::DesktopScan(op) => merge!(op),
             NativeOp::TerminalStart(op) => merge!(op),
             NativeOp::TerminalStop(op) => merge!(op),
             NativeOp::DebPreview(op) => merge!(op),
@@ -521,6 +529,7 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "runtimes_detect" => NativeOp::RuntimesDetect(op_from(rest, "runtimes_detect")?),
         "app_start" => NativeOp::AppStart(op_from(rest, "app_start")?),
         "app_stop" => NativeOp::AppStop(op_from(rest, "app_stop")?),
+        "desktop_scan" => NativeOp::DesktopScan(op_from(rest, "desktop_scan")?),
         "terminal_start" => NativeOp::TerminalStart(op_from(rest, "terminal_start")?),
         "terminal_stop" => NativeOp::TerminalStop(op_from(rest, "terminal_stop")?),
         "deb_preview" => NativeOp::DebPreview(op_from(rest, "deb_preview")?),
@@ -638,6 +647,21 @@ pub struct AppStartOp {
 #[serde(deny_unknown_fields)]
 pub struct AppStopOp {
     pub unit: String,
+}
+
+/// Scan for installed desktop applications **as the person's identity**.
+///
+/// The web server cannot read identity-owned directories (they are 0700), so
+/// it asks the helper for a scan. `roots` adds operator-configured system
+/// directories (as `"system:<absolute path>"`); the helper derives the
+/// identity's own XDG directories and managed application profiles itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopScanOp {
+    #[serde(rename = "userId")]
+    pub user_id: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roots: Vec<String>,
 }
 
 /// Open a native PTY terminal as the mapped identity.

@@ -2562,7 +2562,17 @@ fn random_hex(bytes: usize) -> String {
 }
 
 async fn app_name(db: &SqlitePool, app_id: &str) -> String {
-    sqlx::query_scalar::<_, String>("SELECT name FROM linux_apps WHERE id = ?")
+    if let Ok(Some(name)) =
+        sqlx::query_scalar::<_, String>("SELECT name FROM linux_apps WHERE id = ?")
+            .bind(app_id)
+            .fetch_optional(db)
+            .await
+    {
+        return name;
+    }
+    // Discovered applications have runs in the same table but no `linux_apps`
+    // row (they are an inventory, not a managed install).
+    sqlx::query_scalar::<_, String>("SELECT name FROM discovered_apps WHERE id = ?")
         .bind(app_id)
         .fetch_optional(db)
         .await

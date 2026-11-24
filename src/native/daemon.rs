@@ -40,12 +40,12 @@ use crate::native::{
         validate_mode, validate_package_name, validate_packages, validate_port, validate_run_id,
         validate_runtime_dir, validate_session_args, validate_sha256, validate_symlink_target,
         validate_unit, validate_xpra_bin, AppStartOp, AppStopOp, DebDownloadOp, DebInstallOp,
-        DebPreviewOp, DebRemoveOp, IdentityEnsureOp, IdentityRemoveOp, NativeError, NativeOp,
-        NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp, PackagePolicyOp,
-        PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp, PathSymlinkOp,
-        ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp, ProfileSummaryOp,
-        ResourceLimits, SessionStartOp, SessionStopOp, TerminalStartOp, TerminalStopOp,
-        UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
+        DebPreviewOp, DebRemoveOp, DesktopScanOp, IdentityEnsureOp, IdentityRemoveOp, NativeError,
+        NativeOp, NativeRequest, NativeResponse, PackageFilesOp, PackageInstalledListOp,
+        PackagePolicyOp, PathAclOp, PathChmodOp, PathChownOp, PathMkdirOp, PathRemoveOp,
+        PathSymlinkOp, ProfileCleanLocksOp, ProfileInstallOp, ProfilePrepareOp, ProfileRemoveOp,
+        ProfileSummaryOp, ResourceLimits, SessionStartOp, SessionStopOp, TerminalStartOp,
+        TerminalStopOp, UnitStatusOp, MAX_OUTPUT_BYTES, MAX_REQUEST_LINE_BYTES, MAX_RESPONSE_BYTES,
         PROTOCOL_VERSION,
     },
     run_command, run_command_in, summarize_command, CommandOutput, NativeOptions, LINUX_SLICE,
@@ -341,6 +341,7 @@ fn log_context(op: &NativeOp) -> (Option<i64>, Option<String>) {
         NativeOp::AppStop(AppStopOp { unit }) | NativeOp::UnitStatus(UnitStatusOp { unit }) => {
             (None, Some(unit.clone()))
         }
+        NativeOp::DesktopScan(DesktopScanOp { user_id, .. }) => (Some(*user_id), None),
         _ => (None, None),
     }
 }
@@ -414,6 +415,7 @@ async fn dispatch(op: NativeOp, options: &NativeOptions) -> Result<Value, Native
         NativeOp::RootfsStart => rootfs_start(options).await,
         NativeOp::AppStart(op) => app_start(options, op).await,
         NativeOp::AppStop(op) => app_stop(options, op).await,
+        NativeOp::DesktopScan(op) => desktop_scan(options, op).await,
         NativeOp::TerminalStart(op) => terminal_start(options, op).await,
         NativeOp::TerminalStop(op) => terminal_stop(options, op).await,
         NativeOp::DebPreview(op) => deb_preview(options, op).await,
@@ -1355,6 +1357,217 @@ async fn app_stop(options: &NativeOptions, op: AppStopOp) -> Result<Value, Nativ
     validate_app_unit(&op.unit)?;
     stop_unit(options, &op.unit).await?;
     Ok(json!({"stopped": true}))
+}
+
+// ---------------------------------------------------------------------------
+// Discovered desktop applications
+// ---------------------------------------------------------------------------
+
+/// System directories a desktop scan inspects in addition to the identity's
+/// own XDG directories and managed application profiles. Order matters only for
+/// determinism.
+const DESKTOP_SCAN_SYSTEM_ROOTS: &[&str] = &[
+    "/usr/share/applications",
+    "/usr/local/share/applications",
+    "/opt",
+    "/var/lib/flatpak/exports/share/applications",
+    "/snap",
+];
+/// Extra roots a request may add (all must be inside the system roots above).
+const MAX_DESKTOP_SCAN_EXTRA_ROOTS: usize = 32;
+/// Managed application profiles one scan may inspect.
+const MAX_DESKTOP_SCAN_PROFILES: usize = 64;
+/// Hard cap on the returned entry list (the whole response must stay < 1 MiB).
+const MAX_DESKTOP_SCAN_ENTRIES: usize = crate::linux_apps::discovery::MAX_SCAN_ENTRIES;
+
+/// Monotonic sequence for transient scan units (`rast-scan-u<uid>-<n>`).
+static DESKTOP_SCAN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Scan for installed desktop applications **as the person's identity**.
+///
+/// The web server (running as `rast`) cannot read identity-owned profile
+/// trees, so it asks the helper for a scan. The helper validates every root,
+/// runs the RAST binary's hidden `desktop-scan-agent` subcommand as the mapped
+/// uid/gid through a bounded transient systemd unit (`--pipe --wait`), and
+/// returns the parsed entries. No shell is involved and the scan runs with the
+/// same resource limits as an application.
+async fn desktop_scan(options: &NativeOptions, op: DesktopScanOp) -> Result<Value, NativeError> {
+    let ctx = options.validation_context();
+    let ids = identity_ids(&ctx, op.user_id)?;
+    if op.roots.len() > MAX_DESKTOP_SCAN_EXTRA_ROOTS {
+        return Err(NativeError::invalid(format!(
+            "a desktop scan accepts at most {MAX_DESKTOP_SCAN_EXTRA_ROOTS} extra roots"
+        )));
+    }
+    // Validate caller-supplied roots before touching the file system. They must
+    // be absolute, clean paths inside one of the known system application
+    // directories; identity-owned roots are derived by the helper itself.
+    let mut roots: Vec<String> = Vec::new();
+    for raw in &op.roots {
+        let parsed =
+            crate::linux_apps::discovery::parse_scan_root(raw).map_err(NativeError::invalid)?;
+        let literal = parsed.path.to_string_lossy().into_owned();
+        if parsed.scope != crate::linux_apps::discovery::Scope::System
+            || !DESKTOP_SCAN_SYSTEM_ROOTS
+                .iter()
+                .any(|allowed| literal == *allowed || literal.starts_with(&format!("{allowed}/")))
+        {
+            return Err(NativeError::forbidden(format!(
+                "desktop scan root {raw:?} is not an allowed system application directory"
+            )));
+        }
+        roots.push(format!("system:{literal}"));
+    }
+    // A person without an identity cannot have installed anything yet.
+    let identity = match require_identity(options, op.user_id).await {
+        Ok(identity) => identity,
+        Err(error) if error.code == "identity_missing" => {
+            return Ok(json!({
+                "entries": [],
+                "skipped": 0,
+                "roots": [],
+                "scanned": false,
+                "reason": "identity_missing",
+            }));
+        }
+        Err(error) => return Err(error),
+    };
+    for root in DESKTOP_SCAN_SYSTEM_ROOTS {
+        roots.push(format!("system:{root}"));
+    }
+    let home = identity.home.as_path();
+    for (label, subdir) in [
+        ("user", ".local/share/applications"),
+        ("user", "Applications"),
+        ("user", ".local/bin"),
+    ] {
+        let path = home.join(subdir);
+        if path.is_dir() {
+            roots.push(format!("{label}:{}", path.display()));
+        }
+    }
+    // External installers put applications inside managed profiles; enumerate
+    // them as root (the profiles root is 0711, only the per-user subtrees are
+    // readable by the identity alone) and scan each subtree as the identity.
+    if let Ok(read) = std::fs::read_dir(options.profiles_dir()) {
+        let mut profiles = 0usize;
+        for entry in read.flatten() {
+            if profiles >= MAX_DESKTOP_SCAN_PROFILES {
+                break;
+            }
+            let Some(app_id) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            if validate_app_id(&app_id).is_err() {
+                continue;
+            }
+            let profile = entry.path().join(op.user_id.to_string());
+            if !profile.is_dir() {
+                continue;
+            }
+            profiles += 1;
+            for subdir in [
+                "data/applications",
+                "home/Applications",
+                "home/.local/share/applications",
+                ".local/share/applications",
+            ] {
+                let path = profile.join(subdir);
+                if path.is_dir() {
+                    roots.push(format!("managed-profile:{}", path.display()));
+                }
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    if roots.len() > 160 {
+        roots.truncate(160);
+    }
+    if roots.is_empty() {
+        return Ok(json!({"entries": [], "skipped": 0, "roots": [], "scanned": false}));
+    }
+    let executable = crate::executable::agent_executable().map_err(NativeError::unavailable)?;
+    let unit = format!(
+        "rast-scan-u{}-{}",
+        ids.uid,
+        DESKTOP_SCAN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let limits = ctx.app_limits;
+    let mut args: Vec<OsString> = vec![
+        OsString::from(format!("--unit={unit}")),
+        OsString::from(format!("--slice={LINUX_SLICE}")),
+        OsString::from(format!("--uid={}", ids.uid)),
+        OsString::from(format!("--gid={}", ids.gid)),
+        OsString::from("--pipe"),
+        OsString::from("--wait"),
+        OsString::from("--collect"),
+        OsString::from("--quiet"),
+        OsString::from("--property=Type=exec"),
+        OsString::from("--property=NoNewPrivileges=yes"),
+        OsString::from(format!("--property=MemoryMax={}M", limits.memory_max_mb)),
+        OsString::from(format!("--property=CPUQuota={}%", limits.cpu_quota_percent)),
+        OsString::from(format!("--property=TasksMax={}", limits.tasks_max)),
+        OsString::from(format!(
+            "--setenv=PATH={}",
+            crate::linux_apps::discovery::DEFAULT_SCAN_PATH
+        )),
+        OsString::from("--"),
+        OsString::from(executable.display().to_string()),
+        OsString::from("desktop-scan-agent"),
+        OsString::from(format!(
+            "--expected-build={}",
+            crate::executable::build_id()
+        )),
+    ];
+    for root in &roots {
+        args.push(OsString::from("--root"));
+        args.push(OsString::from(root));
+    }
+    // Keep the captured JSON well below the 1 MiB response limit.
+    let output = run_command(
+        &options.systemd_run_bin,
+        args,
+        &[],
+        QUICK_CMD_TIMEOUT,
+        MAX_RESPONSE_BYTES.saturating_sub(64 * 1024),
+        MAX_OUTPUT_BYTES,
+    )
+    .await?;
+    if !output.success {
+        return Err(NativeError::command_failed(format!(
+            "the identity desktop scan failed: {}",
+            summarize_command(&output)
+        )));
+    }
+    let scan: crate::linux_apps::discovery::AgentScan = serde_json::from_str(output.stdout.trim())
+        .map_err(|error| {
+            NativeError::protocol(format!(
+                "the identity desktop scan returned invalid data (is this helper's binary the \
+                 same build as RAST?): {error}"
+            ))
+        })?;
+    if scan.entries.len() > MAX_DESKTOP_SCAN_ENTRIES {
+        return Err(NativeError::protocol(
+            "the identity desktop scan returned too many entries",
+        ));
+    }
+    for entry in &scan.entries {
+        if entry.exec.is_empty()
+            || !entry.exec[0].starts_with('/')
+            || crate::linux_apps::discovery::Scope::parse(&entry.scope).is_none()
+        {
+            return Err(NativeError::protocol(
+                "the identity desktop scan returned an invalid entry",
+            ));
+        }
+    }
+    Ok(json!({
+        "entries": scan.entries,
+        "skipped": scan.skipped,
+        "roots": roots.len(),
+        "scanned": true,
+    }))
 }
 
 // ---------------------------------------------------------------------------

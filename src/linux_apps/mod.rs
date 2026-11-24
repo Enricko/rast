@@ -20,6 +20,7 @@
 //! * copies do not survive a restart of RAST (their addresses and passwords
 //!   live only in memory), so leftovers are stopped at start-up.
 
+pub mod discovery;
 pub mod gpu;
 pub mod native_apps;
 pub mod native_archive;
@@ -43,6 +44,7 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use self::discovery::{DiscoveryHelper, ScanRoot, ScanThrottle, Scope};
 use self::native_apps::{NativeApps, StagedFile};
 use self::native_session::{LaunchRequest as NativeLaunchRequest, NativeSessions};
 
@@ -457,6 +459,10 @@ pub struct LinuxApps {
     native: Arc<NativeSessions>,
     /// Native backend: install/update/uninstall/migration of host apps.
     native_apps: Arc<NativeApps>,
+    /// Privileged scan for applications installed outside the App Center.
+    discovered_helper: Arc<dyn DiscoveryHelper>,
+    /// Per-user rescan throttle (a scan starts an identity process).
+    discovered_throttle: ScanThrottle,
     /// Whether native execution is enabled (the default on Linux).
     native_enabled: bool,
     /// Whether the Linux apps feature is offered at all (`linux_apps_enabled`).
@@ -475,6 +481,10 @@ impl LinuxApps {
     ) -> Arc<Self> {
         let native_enabled = config.native_enabled && SUPPORTED;
         let linux_apps_enabled = config.linux_apps_enabled;
+        let discovered_helper: Arc<dyn DiscoveryHelper> =
+            Arc::new(self::discovery::ClientDiscoveryHelper(
+                crate::native::client::NativeClient::from_config(&config),
+            ));
         Arc::new(Self {
             config,
             db,
@@ -484,6 +494,8 @@ impl LinuxApps {
             sessions: Mutex::new(HashMap::new()),
             native,
             native_apps,
+            discovered_helper,
+            discovered_throttle: ScanThrottle::new(Duration::from_secs(10)),
             native_enabled,
             linux_apps_enabled,
         })
@@ -507,6 +519,23 @@ impl LinuxApps {
         .await;
         if self.native_enabled {
             self.native.start().await;
+        }
+        // Discovery of applications installed outside the App Center runs on
+        // its own timer, independent of the Docker backend.
+        if self.discovery_enabled() && self.config.linux_discovery_interval_seconds > 0 {
+            let discovered = self.clone();
+            tokio::spawn(async move {
+                // Let the server settle (sessions recover first).
+                tokio::time::sleep(Duration::from_secs(90)).await;
+                loop {
+                    discovered.scan_discovered_all().await;
+                    let seconds = discovered.config.linux_discovery_interval_seconds;
+                    if seconds == 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(seconds)).await;
+                }
+            });
         }
         if !self.config.docker_enabled {
             return;
@@ -584,6 +613,266 @@ impl LinuxApps {
     /// The manager of the person's shared graphical session.
     pub fn native_sessions(&self) -> &Arc<NativeSessions> {
         &self.native
+    }
+
+    // -----------------------------------------------------------------------
+    // Discovered applications (installed outside the App Center)
+    // -----------------------------------------------------------------------
+
+    /// Is discovery of externally installed applications offered?
+    pub fn discovery_enabled(&self) -> bool {
+        self.native_enabled && self.linux_apps_enabled && self.config.linux_discovery_enabled
+    }
+
+    /// The effective system-entry policy (`approval`, `auto` or `hidden`).
+    pub fn discovery_policy(&self) -> &'static str {
+        self.config.linux_discovery_system_apps.as_str()
+    }
+
+    /// Entries the person may see (administrators see everything).
+    pub async fn discovered_list(&self, user: &AuthUser) -> AppResult<Vec<Value>> {
+        let rows = discovery::list(&self.db, user.id, user.is_admin()).await?;
+        Ok(rows
+            .iter()
+            .map(|row| row.json(user.id, user.is_admin()))
+            .collect())
+    }
+
+    /// Scan now: system directories server-side, identity-owned directories
+    /// through the privileged helper (which runs the scan as the identity).
+    /// `target_user_id` may differ from the caller only for administrators.
+    pub async fn discovered_scan(&self, actor: &AuthUser, target_user_id: i64) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
+        self.ensure_native()?;
+        if !self.config.linux_discovery_enabled {
+            return Err(AppError::unavailable(
+                "Application discovery is disabled on this server (linux_discovery_enabled = false).",
+            ));
+        }
+        if !actor.is_admin() && target_user_id != actor.id {
+            return Err(AppError::Forbidden(
+                "only administrators can scan another account's applications",
+            ));
+        }
+        if let Err(wait) = self.discovered_throttle.admit(target_user_id) {
+            return Err(AppError::TooManyRequests {
+                retry_after_secs: wait,
+                message: "a scan was just started; wait a moment before rescanning",
+            });
+        }
+        let mut summary = json!({
+            "system": self.scan_discovered_system().await?,
+            "user": 0,
+            "policy": self.discovery_policy(),
+        });
+        if target_user_id != actor.id || actor.is_admin() {
+            match self.scan_discovered_user(target_user_id).await {
+                Ok(count) => {
+                    summary["user"] = json!(count);
+                }
+                Err(error) => {
+                    // A scan for another account or an identity that cannot be
+                    // scanned yet must not discard the system result.
+                    tracing::warn!(
+                        user_id = target_user_id,
+                        error = %error,
+                        "identity desktop scan failed"
+                    );
+                    summary["userError"] = json!(error.to_string());
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Launch a discovered application in the person's shared session.
+    pub async fn discovered_launch(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
+        self.ensure_native()?;
+        let row = discovery::get(&self.db, id).await?;
+        if !row.visible_to(user.id, user.is_admin()) {
+            return Err(AppError::NotFound("Discovered application not found"));
+        }
+        if !row.launchable_for(user.id, user.is_admin()) {
+            return Err(AppError::conflict(match row.status.as_str() {
+                "pending_approval" => {
+                    "This application needs an administrator's approval before it can be launched."
+                }
+                "unavailable" => "This application is no longer installed.",
+                _ => "This application cannot be launched yet.",
+            }));
+        }
+        let command = row.exec();
+        if command.is_empty() {
+            return Err(AppError::unavailable(
+                "This application has no launch command (its desktop entry is incomplete).",
+            ));
+        }
+        // The run is registered under the discovered id (`d-…`, which is a
+        // valid native app id); windows are adopted generically by the session
+        // shim and matched back through StartupWMClass/WM_CLASS.
+        let request = NativeLaunchRequest {
+            app_id: row.id.clone(),
+            app_name: row.name.clone(),
+            command,
+            env: Vec::new(),
+            cwd: None,
+            memory_mb: self.config.linux_app_memory_mb,
+            cpus: self.config.linux_app_cpus,
+            tasks: self.config.linux_app_tasks,
+            chromium: false,
+        };
+        let (run, session) = self.native.launch(user, request).await?;
+        discovery::mark_launched(&self.db, &row.id).await;
+        discovery::publish_changed(&self.events, row.owner_user_id);
+        Ok(json!({
+            "run": run,
+            "session": session,
+            "app": row.json(user.id, user.is_admin()),
+        }))
+    }
+
+    /// Administrator: approve/hide/rename one discovered entry.
+    pub async fn discovered_patch(
+        &self,
+        id: &str,
+        approved: Option<bool>,
+        hidden: Option<bool>,
+        name: Option<&str>,
+    ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
+        let row = discovery::patch(&self.db, id, approved, hidden, name).await?;
+        discovery::publish_changed(&self.events, row.owner_user_id);
+        Ok(row.json(row.owner_user_id.unwrap_or(0), true))
+    }
+
+    /// Administrator: forget one registry entry (never touches installed files).
+    pub async fn discovered_delete(&self, id: &str) -> AppResult<()> {
+        self.ensure_linux_apps_enabled()?;
+        let row = discovery::get(&self.db, id).await?;
+        discovery::delete(&self.db, id).await?;
+        discovery::publish_changed(&self.events, row.owner_user_id);
+        Ok(())
+    }
+
+    /// Administrator: register an existing executable without running an
+    /// installer (the "Import existing application" action).
+    pub async fn discovered_import(
+        &self,
+        path: &str,
+        name: &str,
+        owner_user_id: Option<i64>,
+    ) -> AppResult<Value> {
+        self.ensure_linux_apps_enabled()?;
+        let row = discovery::import(&self.db, path, name, owner_user_id).await?;
+        discovery::publish_changed(&self.events, row.owner_user_id);
+        Ok(row.json(owner_user_id.unwrap_or(0), true))
+    }
+
+    /// Scan the standard system application directories (the server can read
+    /// them) and reconcile the system inventory.
+    async fn scan_discovered_system(&self) -> AppResult<usize> {
+        if !self.config.linux_discovery_enabled {
+            return Ok(0);
+        }
+        let path_env =
+            std::env::var("PATH").unwrap_or_else(|_| discovery::DEFAULT_SCAN_PATH.to_string());
+        let mut roots: Vec<ScanRoot> = crate::config::DEFAULT_LINUX_DISCOVERY_SYSTEM_ROOTS
+            .iter()
+            .map(|path| ScanRoot {
+                scope: Scope::System,
+                path: PathBuf::from(path),
+            })
+            .collect();
+        for root in &self.config.linux_discovery_roots {
+            roots.push(ScanRoot {
+                scope: Scope::System,
+                path: root.clone(),
+            });
+        }
+        roots.sort_by(|a, b| a.path.cmp(&b.path));
+        roots.dedup_by(|a, b| a.path == b.path);
+        let scan = discovery::scan_roots(&roots, &path_env);
+        let written = discovery::reconcile(
+            &self.db,
+            Scope::System,
+            None,
+            self.config.linux_discovery_system_apps,
+            &scan.entries,
+        )
+        .await?;
+        discovery::publish_changed(&self.events, None);
+        Ok(written)
+    }
+
+    /// Ask the helper to scan identity-owned directories as that identity.
+    async fn scan_discovered_user(&self, user_id: i64) -> AppResult<usize> {
+        let data = self
+            .discovered_helper
+            .desktop_scan(user_id, &[])
+            .await
+            .map_err(AppError::from)?;
+        if data.get("scanned").and_then(Value::as_bool) == Some(false) {
+            return Ok(0);
+        }
+        let entries: Vec<discovery::ScanEntry> = data
+            .get("entries")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|error| {
+                AppError::internal(format!(
+                    "the desktop scan returned invalid entries: {error}"
+                ))
+            })?
+            .unwrap_or_default();
+        let user_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.scope == "user")
+            .cloned()
+            .collect();
+        let profile_entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| entry.scope == "managed-profile")
+            .cloned()
+            .collect();
+        let mut written = discovery::reconcile(
+            &self.db,
+            Scope::User,
+            Some(user_id),
+            self.config.linux_discovery_system_apps,
+            &user_entries,
+        )
+        .await?;
+        written += discovery::reconcile(
+            &self.db,
+            Scope::ManagedProfile,
+            Some(user_id),
+            self.config.linux_discovery_system_apps,
+            &profile_entries,
+        )
+        .await?;
+        discovery::publish_changed(&self.events, Some(user_id));
+        Ok(written)
+    }
+
+    /// Periodic scan: system directories plus every identity that was used.
+    async fn scan_discovered_all(&self) {
+        if let Err(error) = self.scan_discovered_system().await {
+            tracing::warn!(error = %error, "system application discovery failed");
+        }
+        let users: Vec<i64> = sqlx::query_scalar("SELECT user_id FROM linux_identities")
+            .fetch_all(&self.db)
+            .await
+            .unwrap_or_default();
+        for user_id in users {
+            if let Err(error) = self.scan_discovered_user(user_id).await {
+                tracing::debug!(
+                    user_id,
+                    error = %error,
+                    "identity application discovery failed"
+                );
+            }
+        }
     }
 
     /// Inspect an uploaded or downloaded package without changing anything.
@@ -817,9 +1106,18 @@ impl LinuxApps {
     }
 
     /// Launch an app into the person's shared native session (lazily started).
+    ///
+    /// The id may belong to a managed App Center app or to a discovered
+    /// application (the unified launch route the desktop uses for both).
     pub async fn native_launch(&self, user: &AuthUser, id: &str) -> AppResult<Value> {
         self.ensure_native()?;
-        let row = self.row(id).await?;
+        let row = match self.row(id).await {
+            Ok(row) => row,
+            Err(AppError::NotFound(_)) => {
+                return self.discovered_launch(user, id).await;
+            }
+            Err(error) => return Err(error),
+        };
         if !row.visible_to(user) {
             return Err(AppError::NotFound("Linux app not found"));
         }

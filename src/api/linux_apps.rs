@@ -91,6 +91,18 @@ pub fn routes() -> Router<AppState> {
             post(close_native_run),
         )
         .route("/api/linux-apps/{id}/launch", post(launch))
+        // Applications installed outside the App Center (discovered inventory).
+        .route("/api/linux-apps/discovered", get(discovered_list))
+        .route("/api/linux-apps/discovered/scan", post(discovered_scan))
+        .route("/api/linux-apps/discovered/import", post(discovered_import))
+        .route(
+            "/api/linux-apps/discovered/{id}",
+            axum::routing::patch(discovered_patch).delete(discovered_delete),
+        )
+        .route(
+            "/api/linux-apps/discovered/{id}/launch",
+            post(discovered_launch),
+        )
         .route("/api/linux-apps/{id}/migrate", post(migrate))
         .route(
             "/api/linux-apps/{id}/migration/rollback",
@@ -496,6 +508,117 @@ async fn cleanup_migration(
         state
             .linux_apps
             .native_cleanup(&admin.0, &id, remove_backup)
+            .await?,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Discovered applications (installed outside the App Center)
+// ---------------------------------------------------------------------------
+
+async fn discovered_list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    Ok(Json(json!({
+        "apps": state.linux_apps.discovered_list(&user).await?,
+        "enabled": state.linux_apps.discovery_enabled(),
+        "policy": state.linux_apps.discovery_policy(),
+        "scanIntervalSeconds": state.config.linux_discovery_interval_seconds,
+        "systemRoots": crate::config::DEFAULT_LINUX_DISCOVERY_SYSTEM_ROOTS,
+        "extraRoots": state.config.linux_discovery_roots
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect::<Vec<String>>(),
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoveredScanRequest {
+    /// Administrator only: scan another account's identity-owned directories.
+    user_id: Option<i64>,
+}
+
+async fn discovered_scan(
+    State(state): State<AppState>,
+    user: AuthUser,
+    body: Option<Json<DiscoveredScanRequest>>,
+) -> AppResult<Json<Value>> {
+    let target = body.and_then(|Json(body)| body.user_id).unwrap_or(user.id);
+    if !user.is_admin() && target != user.id {
+        return Err(crate::error::AppError::Forbidden(
+            "only administrators can scan another account's applications",
+        ));
+    }
+    Ok(Json(state.linux_apps.discovered_scan(&user, target).await?))
+}
+
+async fn discovered_launch(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(state.linux_apps.discovered_launch(&user, &id).await?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoveredPatchRequest {
+    approved: Option<bool>,
+    hidden: Option<bool>,
+    name: Option<String>,
+}
+
+async fn discovered_patch(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+    Json(body): Json<DiscoveredPatchRequest>,
+) -> AppResult<Json<Value>> {
+    if body.approved.is_none() && body.hidden.is_none() && body.name.is_none() {
+        return Err(crate::error::AppError::bad_request(
+            "send approved, hidden or name",
+        ));
+    }
+    Ok(Json(
+        state
+            .linux_apps
+            .discovered_patch(&id, body.approved, body.hidden, body.name.as_deref())
+            .await?,
+    ))
+}
+
+async fn discovered_delete(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    state.linux_apps.discovered_delete(&id).await?;
+    Ok(Json(json!({"removed": true})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoveredImportRequest {
+    /// Absolute path of an existing executable.
+    path: String,
+    /// Display name (default: the file's stem).
+    name: Option<String>,
+    /// Owner account; omitted registers a system-wide entry.
+    owner_user_id: Option<i64>,
+}
+
+async fn discovered_import(
+    State(state): State<AppState>,
+    _admin: AdminUser,
+    Json(body): Json<DiscoveredImportRequest>,
+) -> AppResult<Json<Value>> {
+    Ok(Json(
+        state
+            .linux_apps
+            .discovered_import(
+                &body.path,
+                body.name.as_deref().unwrap_or_default(),
+                body.owner_user_id,
+            )
             .await?,
     ))
 }
