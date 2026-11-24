@@ -118,6 +118,38 @@ blocker (see `native-blockers-2026-11-12.md`) is fixed.
   `linux_idle_minutes` (2 min in the E2E config) and stops the whole shared
   session when nothing is left running.
 
+
+## Native-runtime benchmark and compatibility matrix (2026-11-24)
+
+`tests/e2e/perf/bench.mjs` and `tests/e2e/compat/matrix.mjs` are the scripts used
+for the native-runtime BEFORE/AFTER work; `docs/BENCHMARKS.md` is the reference
+document (method, environment, baseline tables, AFTER comparison).
+
+* `perf-runtime2-<label>-<date>.json` / `.md` — full benchmark run: launch
+  latency (cold/warm, p50/p95), input→display latency samples (p50/p95),
+  typing-burst dispatch/drain/total, scroll/animation/video frame rates
+  (CDP screencast + server-encoded `xpra info` counters), per-phase cgroup CPU
+  and memory, WebSocket bandwidth, idle overhead, negotiated Xpra
+  encoding/batch/latency evidence, environment and raw samples.
+* `perf-runtime2-<label>-<date>-evidence.txt` — `systemctl show` / `ExecStart`
+  of the benchmark user's session unit, `xpra info` selected fields (before,
+  mid-interaction while typing, after), and the session journal lines that show
+  the encoding selection.
+* `compat-runtime2-<label>-<date>.json` / `.md` — application compatibility
+  matrix: detected system `.desktop` apps, RAST App Center Linux apps, RAST
+  built-in apps, and per-app live checks (launch, window mapping, typing,
+  scrolling, clipboard, second window, close) with Pass/Partial/Fail/Not
+  tested/Not applicable. Apps that are installed but not managed by the App
+  Center are marked "not tested — cannot be launched through RAST"; apps that
+  are not installed are marked "not installed → not tested"; these are kept
+  strictly separate from real failures.
+
+The benchmark logs in through the real login form and drives the real desktop
+shell, and uses only the benchmark user's own session through the RAST API. The
+disposable dev instance (`scripts/e2e/dev-instance.sh up native`) must not be
+started while any other RAST instance has active native sessions — its recovery
+sweep is host-wide and would stop the live units (see `docs/BENCHMARKS.md`).
+
 ## Reproduce
 
 ```bash
