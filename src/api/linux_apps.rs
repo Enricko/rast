@@ -115,10 +115,22 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn list(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
+    let apps = state.linux_apps.list(&user).await?;
+    let session = state.linux_apps.native_session_json(&user).await?;
+    // First desktop load after sign-in: start the shared graphical session in
+    // the background (opt-in, throttled) so the first application launch is
+    // warm. The frontend requests it too, but that call can race the bootstrap
+    // CSRF token; doing it here is deterministic and still non-blocking.
+    if session.is_none() {
+        let has_native_app = apps
+            .iter()
+            .any(|app| app.get("backend").and_then(Value::as_str) == Some("native"));
+        state.linux_apps.maybe_prewarm_native(&user, has_native_app);
+    }
     Ok(Json(json!({
-        "apps": state.linux_apps.list(&user).await?,
+        "apps": apps,
         "sessions": state.linux_apps.my_sessions(&user),
-        "session": state.linux_apps.native_session_json(&user).await?,
+        "session": session,
         "limits": {
             "minFreeMemoryBytes": crate::linux_apps::MIN_FREE_MEMORY_BYTES,
             "idleMinutes": state.config.linux_idle_minutes,
@@ -443,6 +455,7 @@ async fn close_native_session(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> AppResult<Json<Value>> {
+    state.linux_apps.suppress_prewarm_native(user.id);
     Ok(Json(state.linux_apps.native_close_session(&user).await?))
 }
 

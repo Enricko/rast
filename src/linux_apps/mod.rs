@@ -84,6 +84,10 @@ const EXIT_CHECK_DELAYS: [Duration; 4] = [
     Duration::from_secs(3),
 ];
 const SWEEP_EVERY: Duration = Duration::from_secs(10);
+/// Cooldown between automatic background pre-warm attempts for one person.
+/// It also applies after they explicitly close their session, so the next
+/// desktop poll cannot immediately start a new one.
+const PREWARM_COOLDOWN: Duration = Duration::from_secs(600);
 /// Every this many sweeps the running containers are compared with Docker.
 const RECONCILE_EVERY: u32 = 3;
 /// Update sources are asked at most this often (an administrator can ask
@@ -467,6 +471,9 @@ pub struct LinuxApps {
     native_enabled: bool,
     /// Whether the Linux apps feature is offered at all (`linux_apps_enabled`).
     linux_apps_enabled: bool,
+    /// Per-person pre-warm throttle: an automatic background session start is
+    /// attempted at most once per [`PREWARM_COOLDOWN`].
+    prewarm_slots: Mutex<HashMap<i64, std::time::Instant>>,
 }
 
 impl LinuxApps {
@@ -498,6 +505,7 @@ impl LinuxApps {
             discovered_throttle: ScanThrottle::new(Duration::from_secs(10)),
             native_enabled,
             linux_apps_enabled,
+            prewarm_slots: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1092,6 +1100,49 @@ impl LinuxApps {
             return Ok(None);
         }
         self.native.session_json(user).await
+    }
+
+    /// Start the person's background pre-warm on the first desktop load (or a
+    /// later poll) when enabled, when they have at least one native app and no
+    /// session exists. Non-blocking and throttled per person.
+    pub fn maybe_prewarm_native(&self, user: &AuthUser, has_native_app: bool) {
+        if !self.config.linux_prewarm
+            || !self.native_enabled
+            || !self.linux_apps_enabled
+            || !has_native_app
+        {
+            return;
+        }
+        let mut slots = match self.prewarm_slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let now = std::time::Instant::now();
+        if slots
+            .get(&user.id)
+            .is_some_and(|last| now.duration_since(*last) < PREWARM_COOLDOWN)
+        {
+            return;
+        }
+        slots.insert(user.id, now);
+        drop(slots);
+        let native = Arc::clone(&self.native);
+        let user = user.clone();
+        tokio::spawn(async move {
+            if let Err(error) = native.prewarm(&user).await {
+                tracing::debug!(user_id = user.id, %error, "background native session pre-warm failed");
+            }
+        });
+    }
+
+    /// Suppress automatic pre-warm for a person (after an explicit close, so
+    /// the next desktop poll does not start a new session).
+    pub fn suppress_prewarm_native(&self, user_id: i64) {
+        let mut slots = match self.prewarm_slots.lock() {
+            Ok(slots) => slots,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        slots.insert(user_id, std::time::Instant::now());
     }
 
     /// Pre-warm the person's shared native session (no application started).

@@ -1579,17 +1579,20 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // Pre-warm the person's shared native session once per desktop load when the
   // operator enabled it (linux_prewarm): the first application launch then only
   // pays the application start instead of the ~12 s cold Xpra session start.
-  let prewarmRequested = false;
+  let prewarmAttempts = 0;
   const prewarmNativeSession = async (): Promise<void> => {
-    if (prewarmRequested || disposed) return;
+    if (disposed || prewarmAttempts > 3) return;
     const overview = linuxOverview();
     if (!overview?.nativeEnabled || overview.session) return;
     if (!linuxApps().some(isNativeApp)) return;
-    prewarmRequested = true;
+    prewarmAttempts += 1;
     try {
       await deps.api.post("/api/linux-apps/session/prewarm");
     } catch {
-      /* older server or pre-warming disabled: ordinary lazy start still works */
+      /* A server that predates pre-warming, or a request that raced the
+         bootstrap CSRF token: the server also pre-warms on the app-list load,
+         so a quiet retry is enough and a failure is never user-visible. */
+      window.setTimeout(() => void prewarmNativeSession(), 2500);
     }
   };
 
