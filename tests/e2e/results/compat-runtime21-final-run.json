@@ -1,0 +1,153 @@
+{
+  "generatedAt": "2026-11-24T10:01:39.896796+00:00",
+  "user": "t-alice",
+  "display": 103,
+  "backend": "gpu",
+  "gpuVerified": true,
+  "renderer": "NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2",
+  "browserAdoption": {
+    "sessionBackend": "gpu",
+    "adoptedWindows": 2,
+    "titles": [
+      "Shell No. 1",
+      "RAST GTK Test"
+    ]
+  },
+  "results": [
+    {
+      "app": "XTerm",
+      "id": "d-748552fc3fbc21eb",
+      "http": 200,
+      "note": "system desktop entry",
+      "windows": [
+        "0x60000c \"xterm\": (\"xterm\" \"XTerm\")  484x316+0+0  +0+0"
+      ],
+      "launchMs": 6433,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "UXTerm",
+      "id": "d-e00c6ede44704eb8",
+      "http": 200,
+      "note": "system desktop entry",
+      "windows": [
+        "0x40000c \"uxterm\": (\"xterm\" \"UXTerm\")  484x316+0+0  +0+0"
+      ],
+      "launchMs": 125,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "Alacritty",
+      "id": "d-57db706c2aeccdf1",
+      "http": 200,
+      "note": "Rust/OpenGL native app",
+      "windows": [],
+      "launchMs": 103,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "Openbox Configuration Manager",
+      "id": "d-f38ddb0ad15b6ef7",
+      "http": 200,
+      "note": "GTK2 settings dialog",
+      "windows": [
+        "0x800001 \"obconf\": (\"obconf\" \"Obconf\")  10x10+10+10  +10+10"
+      ],
+      "launchMs": 1717,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "Blender",
+      "status": "not-in-inventory",
+      "windows": [],
+      "note": "snap, graphics/3D (slow start)"
+    },
+    {
+      "app": "Chromium Web Browser",
+      "status": "not-in-inventory",
+      "windows": [],
+      "note": "snap browser"
+    },
+    {
+      "app": "ArtCraft Launcher",
+      "id": "d-4f31d8b5b6c2bb43",
+      "http": 200,
+      "note": "third-party launcher (system entry)",
+      "windows": [
+        "0xa00002 \"ArtCraft Launcher\": (\"\" \"ai.storyteller.artcraft-launcher\")  1120x760+0+0  +0+0"
+      ],
+      "launchMs": 49,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "WordCraft (real AppImage)",
+      "id": "d-efa84d3a86ce33f7",
+      "http": 200,
+      "note": "real WordCraft AppImage installed as an external app for this test account",
+      "windows": [],
+      "launchMs": 1081,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "Blender (snap)",
+      "id": "d-1a78d2151a56ae61",
+      "http": 503,
+      "note": "snap-packaged application, manually imported",
+      "windows": [],
+      "launchMs": null,
+      "error": "launch HTTP 503: {'error': {'code': 'unavailable', 'message': 'Could not start Blender (snap): argv[0] \"/snap/bin/blender\" resolves outside the allowed binary locations'}}"
+    },
+    {
+      "app": "Chromium (snap)",
+      "id": "d-3ae0bed45849f95c",
+      "http": 503,
+      "note": "snap-packaged application, manually imported",
+      "windows": [],
+      "launchMs": null,
+      "error": "launch HTTP 503: {'error': {'code': 'unavailable', 'message': 'Could not start Chromium (snap): argv[0] \"/snap/bin/chromium\" resolves outside the allowed binary locations'}}"
+    },
+    {
+      "app": "MPV video",
+      "id": "d-4fc0eb5881b8131e",
+      "http": 200,
+      "note": "imported external application",
+      "windows": [],
+      "launchMs": 51,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "GTK Zenity",
+      "id": "d-a6efd6e089d40e1f",
+      "http": 200,
+      "note": "imported external application",
+      "windows": [],
+      "launchMs": 165,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "Qt QTerminal",
+      "id": "d-5e31082e859ece16",
+      "http": 200,
+      "note": "imported external application",
+      "windows": [
+        "0xc00007 \"Shell No. 1\": (\"qterminal\" \"qterminal\")  600x420+0+0  +0+0"
+      ],
+      "launchMs": 141,
+      "error": null,
+      "status": "running"
+    },
+    {
+      "app": "LibreOffice Writer",
+      "status": "not-installed",
+      "windows": []
+    }
+  ]
+}

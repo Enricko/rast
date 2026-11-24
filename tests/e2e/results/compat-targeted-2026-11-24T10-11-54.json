@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-11-24T10:11:54.154359+00:00",
+  "results": [
+    {
+      "app": "Blender (snap)",
+      "status": "running",
+      "display": 103,
+      "windows": [],
+      "allWindowCount": 1
+    },
+    {
+      "app": "Chromium (snap)",
+      "status": "running",
+      "display": 102,
+      "windows": [],
+      "allWindowCount": 1
+    },
+    {
+      "app": "WordCraft (real AppImage)",
+      "status": "running",
+      "display": 103,
+      "windows": [],
+      "allWindowCount": 1
+    }
+  ]
+}
