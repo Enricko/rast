@@ -90,7 +90,8 @@ this file by `scripts/changelog-section.sh`.
   `/api/linux-apps/discovered` and the `linuxapps.discovered` realtime event;
   schema migration 15 adds the `discovered_apps` inventory and lets
   `linux_runs` reference discovered app ids.
-- **Configurable session pre-warming** (`linux_prewarm`, default off):
+- **Configurable session pre-warming** (`linux_prewarm`, default off, enabled
+  in production):
   after a person with native apps signs in the desktop starts their shared Xpra
   session in the background (`POST /api/linux-apps/session/prewarm`), so the
   first application launch is warm (measured cold session start is ~12 s;
@@ -2302,3 +2303,11 @@ server required.
   [SECURITY.md](SECURITY.md#known-dependency-advisory-010).
 - Frontend build requires Node.js >= 22 and npm (build-time only); the
   installed server needs neither.
+
+### Changed
+
+- **Session pre-warming is enabled in production** and safe again: the hidden
+  Xpra transport connects lazily on the first native launch, so a pre-warmed
+  session has no iframe that could steal keyboard focus. Measured: session ready
+  ~2.0 s after desktop load; Terminal typing works without clicking while a
+  pre-warmed GPU session exists (`tests/e2e/results/prewarm-reenabled-413ad2c.md`).
