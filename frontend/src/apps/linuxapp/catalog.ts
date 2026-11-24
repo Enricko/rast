@@ -200,6 +200,8 @@ export interface DiscoveredApp {
   exec: string[];
   tryExec: string | null;
   icon: string | null;
+  /** Same-origin URL of the entry's stored icon; null = use the generic icon. */
+  iconUrl: string | null;
   categories: string[];
   terminal: boolean;
   startupWmClass: string | null;
@@ -211,6 +213,8 @@ export interface DiscoveredApp {
   source: "xdg" | "appimage" | "portable" | "manual" | "external-installer" | string;
   installDir: string | null;
   version: string | null;
+  /** Optional working directory the entry was launched with. */
+  workingDir: string | null;
   status: "discovered" | "pending_approval" | "ready" | "unavailable" | "failed";
   approved: boolean;
   hidden: boolean;
@@ -523,7 +527,7 @@ export function discoveredAsLinuxApp(app: DiscoveredApp): LinuxApp {
     description: app.comment,
     command: app.exec,
     launchGuess: false,
-    iconUrl: null,
+    iconUrl: app.iconUrl,
     status: "ready",
     error: null,
     jobId: null,
@@ -563,6 +567,11 @@ export function setDiscoveredOverview(next: DiscoveredOverview): void {
   discoveredSynthetic = new Map(
     discoveredCurrent.map((app) => [app.id, discoveredAsLinuxApp(app)] as const),
   );
+  // The desktop identity of a discovered app is `linux:<id>`, like a managed
+  // app; without an icon URL the existing generic icon is used.
+  for (const app of discoveredCurrent) {
+    setAppImageIcon(`${LINUX_PREFIX}${app.id}`, app.iconUrl ?? null);
+  }
   for (const listener of [...discoveredListeners]) {
     try {
       listener();
@@ -597,4 +606,148 @@ export function loadDiscoveredApps(api: ApiClient): Promise<void> {
     }
   })();
   return discoveredLoading;
+}
+
+// ---------------------------------------------------------------------------
+// "Import existing application" draft (pure validation, unit tested)
+// ---------------------------------------------------------------------------
+
+/** The raw values of the App Center import dialog. */
+export interface DiscoveredImportDraft {
+  name: string;
+  path: string;
+  args: string;
+  workingDir: string;
+  icon: string;
+}
+
+/** A validated import request (`POST /api/linux-apps/discovered/import`). */
+export interface DiscoveredImportBody {
+  name: string;
+  path: string;
+  args: string[];
+  workingDir?: string;
+  icon?: string;
+}
+
+/** Per-field messages the dialog shows inline; empty = valid. */
+export interface DiscoveredImportProblems {
+  name?: string;
+  path?: string;
+  args?: string;
+  workingDir?: string;
+  icon?: string;
+}
+
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+const ICON_THEME_NAME = /^[A-Za-z0-9][A-Za-z0-9@+._-]*$/;
+
+function hasPathTraversal(value: string): boolean {
+  return value.split("/").some((part) => part === "." || part === "..");
+}
+
+/**
+ * Split the optional arguments field into an argv array. Quotes group spaces,
+ * a backslash escapes the next character and empty tokens are dropped. RAST
+ * always starts applications with an explicit argv, never through a shell.
+ */
+export function splitDiscoveredImportArgs(value: string): { args: string[]; error: string | null } {
+  const args: string[] = [];
+  let current = "";
+  let started = false;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (const char of value) {
+    if (char === "\0") return { args: [], error: "Arguments cannot contain NUL characters." };
+    if (escaped) {
+      current += char;
+      started = true;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      started = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    current += char;
+    started = true;
+  }
+  if (escaped) current += "\\";
+  if (quote) return { args: [], error: "Close the quoted argument (unbalanced quotes)." };
+  if (started) args.push(current);
+  if (args.length > 64) return { args: [], error: "At most 64 arguments are supported." };
+  if (args.some((arg) => arg.length > 4096)) {
+    return { args: [], error: "Each argument must be at most 4096 characters." };
+  }
+  return { args, error: null };
+}
+
+/**
+ * Validate the import dialog client-side (the server validates again). Returns
+ * the request body only when every field is acceptable, so an invalid dialog
+ * never sends a request.
+ */
+export function validateDiscoveredImport(draft: DiscoveredImportDraft): {
+  problems: DiscoveredImportProblems;
+  body: DiscoveredImportBody | null;
+} {
+  const problems: DiscoveredImportProblems = {};
+  const name = draft.name.trim();
+  if (!name) problems.name = "Enter a name for the application.";
+  else if (name.length > 256) problems.name = "The name must be at most 256 characters.";
+  else if (CONTROL_CHARS.test(name)) problems.name = "The name contains unsupported characters.";
+
+  const path = draft.path.trim();
+  if (!path) problems.path = "Enter the executable's absolute path.";
+  else if (!path.startsWith("/")) problems.path = "The executable path must be absolute (start with /).";
+  else if (path.length > 4096) problems.path = "The executable path is too long.";
+  else if (CONTROL_CHARS.test(path)) problems.path = "The executable path contains unsupported characters.";
+
+  const parsed = splitDiscoveredImportArgs(draft.args);
+  if (parsed.error) problems.args = parsed.error;
+
+  const workingDir = draft.workingDir.trim();
+  if (workingDir) {
+    if (!workingDir.startsWith("/")) problems.workingDir = "The working directory must be absolute (start with /).";
+    else if (hasPathTraversal(workingDir)) problems.workingDir = "The working directory must not contain . or .. segments.";
+    else if (workingDir.length > 4096) problems.workingDir = "The working directory is too long.";
+    else if (CONTROL_CHARS.test(workingDir)) problems.workingDir = "The working directory contains unsupported characters.";
+  }
+
+  const icon = draft.icon.trim();
+  if (icon) {
+    if (icon.length > 1024) problems.icon = "The icon must be at most 1024 characters.";
+    else if (CONTROL_CHARS.test(icon) || icon.includes("\\")) problems.icon = "The icon contains unsupported characters.";
+    else if (icon.startsWith("/")) {
+      if (hasPathTraversal(icon)) problems.icon = "The icon path must not contain . or .. segments.";
+      else if (!/\.(png|svg)$/i.test(icon)) problems.icon = "An icon file path must end in .png or .svg.";
+    } else if (icon.includes("/") || !ICON_THEME_NAME.test(icon) || icon.includes("..")) {
+      problems.icon = "Use an icon-theme name (for example utilities-terminal) or an absolute .png/.svg path.";
+    }
+  }
+
+  if (Object.keys(problems).length > 0) return { problems, body: null };
+  const body: DiscoveredImportBody = { name, path, args: parsed.args };
+  if (workingDir) body.workingDir = workingDir;
+  if (icon) body.icon = icon;
+  return { problems, body };
 }

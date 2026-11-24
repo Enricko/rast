@@ -6,6 +6,8 @@ import {
   linuxAppsInstallAvailable,
   linuxAppsOffered,
   matchWindowApp,
+  splitDiscoveredImportArgs,
+  validateDiscoveredImport,
   type DiscoveredApp,
   type LinuxApp,
   type LinuxOverview,
@@ -57,6 +59,7 @@ function discoveredApp(patch: Partial<DiscoveredApp>): DiscoveredApp {
     exec: ["/var/lib/rast/linux-apps/profiles/artcraft-launcher/1/home/Applications/wordcraft-0.18.1-linux-x86_64.AppImage"],
     tryExec: null,
     icon: "ai.storyteller.wordcraft",
+    iconUrl: "/api/linux-apps/discovered/d-0123456789abcdef/icon",
     categories: ["Office", "WordProcessor"],
     terminal: false,
     startupWmClass: "ai.storyteller.wordcraft",
@@ -67,6 +70,7 @@ function discoveredApp(patch: Partial<DiscoveredApp>): DiscoveredApp {
     source: "external-installer",
     installDir: "/var/lib/rast/linux-apps/profiles/artcraft-launcher/1/home/Applications",
     version: "0.18.1",
+    workingDir: null,
     status: "ready",
     approved: true,
     hidden: false,
@@ -110,4 +114,102 @@ test("a discovered entry maps to a native LinuxApp with its parsed argv", () => 
   assert.deepEqual(app.command, discoveredApp({}).exec);
   assert.equal(app.desktopId, "ai.storyteller.wordcraft.desktop");
   assert.equal(app.status, "ready");
+  // The icon URL is passed through; the generic App Center icon is the fallback.
+  assert.equal(app.iconUrl, "/api/linux-apps/discovered/d-0123456789abcdef/icon");
+  assert.equal(discoveredAsLinuxApp(discoveredApp({ iconUrl: null })).iconUrl, null);
+});
+
+// ---------------------------------------------------------------------------
+// "Import existing application" form (pure client-side validation)
+// ---------------------------------------------------------------------------
+
+test("import arguments are split like an argv array", () => {
+  assert.deepEqual(splitDiscoveredImportArgs("").args, []);
+  assert.deepEqual(splitDiscoveredImportArgs("  ").args, []);
+  assert.deepEqual(splitDiscoveredImportArgs("--flag value").args, ["--flag", "value"]);
+  assert.deepEqual(splitDiscoveredImportArgs('--title "Hello world" plain').args, [
+    "--title",
+    "Hello world",
+    "plain",
+  ]);
+  assert.deepEqual(splitDiscoveredImportArgs("--title 'single quoted'").args, [
+    "--title",
+    "single quoted",
+  ]);
+  assert.deepEqual(splitDiscoveredImportArgs("a \"b c\" d").args, ["a", "b c", "d"]);
+  assert.deepEqual(splitDiscoveredImportArgs("").error, null);
+  assert.notEqual(splitDiscoveredImportArgs('--title "unterminated').error, null);
+  assert.notEqual(splitDiscoveredImportArgs("a\0b").error, null);
+});
+
+test("an import draft becomes a request only when every value is valid", () => {
+  const valid = validateDiscoveredImport({
+    name: "WordCraft",
+    path: "/opt/wordcraft/wordcraft",
+    args: "--flag",
+    workingDir: "/opt/wordcraft",
+    icon: "ai.storyteller.wordcraft",
+  });
+  assert.deepEqual(valid.problems, {});
+  assert.deepEqual(valid.body, {
+    name: "WordCraft",
+    path: "/opt/wordcraft/wordcraft",
+    args: ["--flag"],
+    workingDir: "/opt/wordcraft",
+    icon: "ai.storyteller.wordcraft",
+  });
+
+  // Optional fields stay absent when empty.
+  const minimal = validateDiscoveredImport({
+    name: "Tool",
+    path: "/usr/bin/tool",
+    args: "",
+    workingDir: "",
+    icon: "",
+  });
+  assert.deepEqual(minimal.body, { name: "Tool", path: "/usr/bin/tool", args: [] });
+
+  // A relative executable is refused client-side (the server refuses it too).
+  const relative = validateDiscoveredImport({
+    name: "Tool",
+    path: "bin/tool",
+    args: "",
+    workingDir: "",
+    icon: "",
+  });
+  assert.equal(relative.body, null);
+  assert.ok(relative.problems.path);
+
+  // Path traversal in the working directory / icon is refused.
+  const traversal = validateDiscoveredImport({
+    name: "Tool",
+    path: "/usr/bin/tool",
+    args: "",
+    workingDir: "/tmp/../etc",
+    icon: "../outside.png",
+  });
+  assert.equal(traversal.body, null);
+  assert.ok(traversal.problems.workingDir);
+  assert.ok(traversal.problems.icon);
+
+  // An icon file path must be PNG or SVG; a theme name is fine.
+  assert.equal(
+    validateDiscoveredImport({
+      name: "Tool",
+      path: "/usr/bin/tool",
+      args: "",
+      workingDir: "",
+      icon: "/usr/share/pixmaps/tool.png",
+    }).body?.icon,
+    "/usr/share/pixmaps/tool.png",
+  );
+  const gif = validateDiscoveredImport({
+    name: "Tool",
+    path: "/usr/bin/tool",
+    args: "",
+    workingDir: "",
+    icon: "/usr/share/pixmaps/tool.gif",
+  });
+  assert.equal(gif.body, null);
+  assert.ok(gif.problems.icon);
 });

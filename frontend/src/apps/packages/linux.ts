@@ -13,7 +13,7 @@
 import type { AppContext } from "../../core/app";
 import { clear, h } from "../../core/dom";
 import { formatBytes, formatDate, relativeTime } from "../../core/format";
-import { iconSvg } from "../../core/icons";
+import { appIconSvg, iconSvg } from "../../core/icons";
 import type { RealtimeStore } from "../../core/realtime";
 import { contextMenu, errorMessage, modal, type ContextMenuEntry } from "../../core/ui";
 import type { AppLifecycle } from "../../components/lifecycle";
@@ -21,7 +21,7 @@ import { watchJob, type JobOutcome } from "../../components/jobs";
 import { banner, emptyBlock, progressBar, type ProgressHandle } from "../../components/states";
 import { pickDestination } from "../files/picker";
 import { UploadManager } from "../files/upload";
-import { NEWER_BUILD, discoveredApps, isNativeApp, isOpenable, LINUX_PREFIX, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadDiscoveredApps, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, type DiscoveredApp, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
+import { NEWER_BUILD, discoveredApps, isNativeApp, isOpenable, LINUX_PREFIX, linuxAppById, linuxApps, linuxAppsInstallAvailable, linuxAppsOffered, linuxNativeSession, linuxOverview, loadDiscoveredApps, loadLinuxApps, nativeAppsEnabled, nativeRuntimeSummary, validateDiscoveredImport, type DiscoveredApp, type DiscoveredImportProblems, type LinuxApp, type NativeAppInfo } from "../linuxapp/catalog";
 import {
   APPIMAGE_REJECTED_MESSAGE,
   INSTALL_STAGES,
@@ -261,9 +261,16 @@ export class LinuxApps {
       { class: "pkg-group", ariaLabel: "Discovered applications" },
       h(
         "div",
-        { class: "pkg-group-head" },
+        { class: "pkg-group-head row" },
         h("h3", { class: "pkg-group-title" }, "Discovered applications"),
-        button("Rescan applications", "secondary", () => void this.rescanDiscovered()),
+        h(
+          "div",
+          { class: "row" },
+          this.enabled && !this.host.readOnly()
+            ? button("Import existing application", "secondary", () => this.openImportDiscovered())
+            : null,
+          button("Rescan applications", "secondary", () => void this.rescanDiscovered()),
+        ),
       ),
       h(
         "p",
@@ -296,13 +303,149 @@ export class LinuxApps {
       { class: "pkg-info-item pkg-discovered-row" },
       h(
         "div",
-        { class: "pkg-discovered-body" },
-        h("div", { class: "pkg-discovered-name" }, app.name, h("span", { class: "pkg-discovered-status" }, status)),
-        h("div", { class: "small muted" }, `${source} · ${scope}${app.version ? ` · v${app.version}` : ""}${app.ownerUserId == null ? "" : ` · owner #${app.ownerUserId}`}`),
-        h("div", { class: "small muted mono pkg-discovered-exec" }, app.exec.join(" ")),
+        { class: "row pkg-discovered-main" },
+        h(
+          "span",
+          { class: "pkg-discovered-icon", ariaHidden: true },
+          appIconSvg(`${LINUX_PREFIX}${app.id}`, "box", 24),
+        ),
+        h(
+          "div",
+          { class: "pkg-discovered-body" },
+          h("div", { class: "pkg-discovered-name" }, app.name, h("span", { class: "pkg-discovered-status" }, status)),
+          h("div", { class: "small muted" }, `${source} · ${scope}${app.version ? ` · v${app.version}` : ""}${app.ownerUserId == null ? "" : ` · owner #${app.ownerUserId}`}`),
+          h("div", { class: "small muted mono pkg-discovered-exec" }, app.exec.join(" ")),
+        ),
       ),
       actions.length ? h("div", { class: "pkg-hero-actions" }, ...actions) : null,
     );
+  }
+
+  /**
+   * Administrator: register an application that is already installed on the
+   * server (no installer runs). The server validates the argv/working
+   * directory/icon and shows up in the list right away.
+   */
+  private openImportDiscovered(): void {
+    const { ctx } = this.host;
+    const textField = (
+      label: string,
+      input: HTMLInputElement,
+      hint?: string,
+    ): { el: HTMLElement; input: HTMLInputElement; error: HTMLElement } => {
+      const error = h("div", { class: "field-error", hidden: true });
+      const el = h(
+        "label",
+        { class: "field" },
+        h("span", { class: "field-label" }, label),
+        input,
+        hint ? h("span", { class: "field-hint" }, hint) : null,
+        error,
+      );
+      return { el, input, error };
+    };
+    const name = textField(
+      "Application name",
+      h("input", { class: "input", type: "text", placeholder: "For example WordCraft" }),
+    );
+    const path = textField(
+      "Executable path",
+      h("input", {
+        class: "input mono",
+        type: "text",
+        placeholder: "/opt/app/app or /usr/bin/app",
+        dataset: { autofocus: "true" },
+      }),
+      "An existing executable on this server. RAST starts it with this exact argv — no shell is involved.",
+    );
+    const args = textField(
+      "Arguments (optional)",
+      h("input", { class: "input mono", type: "text", placeholder: '--flag "value with spaces"' }),
+      "Extra arguments passed after the program; quotes keep spaces together.",
+    );
+    const workingDir = textField(
+      "Working directory (optional)",
+      h("input", { class: "input mono", type: "text", placeholder: "/home/you/Applications" }),
+      "Only applied when it is inside the managed application trees; otherwise the app profile home is used.",
+    );
+    const icon = textField(
+      "Icon (optional)",
+      h("input", { class: "input", type: "text", placeholder: "icon-theme name or /path/icon.png" }),
+      "A PNG or SVG the server can read; otherwise the generic icon is used.",
+    );
+    const error = h("div", { class: "form-error", role: "alert" });
+    const body = h(
+      "div",
+      { class: "col" },
+      h(
+        "p",
+        { class: "muted small" },
+        "Register an application that is already installed on the server. It appears in Discovered applications and can be launched in your shared session; nothing is installed, updated or uninstalled.",
+      ),
+      name.el,
+      path.el,
+      args.el,
+      workingDir.el,
+      icon.el,
+      error,
+    );
+    const fields = [
+      ["name", name],
+      ["path", path],
+      ["args", args],
+      ["workingDir", workingDir],
+      ["icon", icon],
+    ] as const;
+    modal({
+      title: "Import existing application",
+      body,
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => {} },
+        {
+          label: "Import",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            for (const [, field] of fields) {
+              field.error.hidden = true;
+              field.input.classList.remove("has-error");
+              field.input.removeAttribute("aria-invalid");
+            }
+            error.textContent = "";
+            const check = validateDiscoveredImport({
+              name: name.input.value,
+              path: path.input.value,
+              args: args.input.value,
+              workingDir: workingDir.input.value,
+              icon: icon.input.value,
+            });
+            let invalid = false;
+            for (const [key, field] of fields) {
+              const message: string | undefined = check.problems[key as keyof DiscoveredImportProblems];
+              if (!message) continue;
+              invalid = true;
+              field.error.textContent = message;
+              field.error.hidden = false;
+              field.input.classList.add("has-error");
+              field.input.setAttribute("aria-invalid", "true");
+            }
+            if (invalid || !check.body) {
+              error.textContent = "Check the highlighted fields.";
+              throw new Error("the import form is incomplete");
+            }
+            try {
+              await ctx.api.post<DiscoveredApp>("/api/linux-apps/discovered/import", check.body);
+              close();
+              ctx.toast.success(`${check.body.name} was added to Discovered applications`);
+              await this.reloadDiscovered();
+            } catch (err) {
+              error.textContent = errorMessage(err);
+              throw err;
+            }
+          },
+        },
+      ],
+    });
   }
 
   private async rescanDiscovered(): Promise<void> {
