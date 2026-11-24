@@ -697,6 +697,12 @@ const START_TIMEOUT_MS = 240_000;
 const SNAPSHOT_POLL_MS = 1_000;
 /** Reload the embedded viewer if a launched app's window has not appeared. */
 const LAUNCH_VIEWER_RECOVERY_MS = 8_000;
+/** Bounded wait for the hidden transport to connect before a native launch.
+ * The transport is deliberately uncreated while a session is only pre-warmed
+ * (see `viewerDeferred`), so the first launch waits for it up to this long. */
+const VIEWER_CONNECT_TIMEOUT_MS = 15_000;
+/** How often the launch gate re-checks the shim's connected state. */
+const VIEWER_CONNECT_POLL_MS = 100;
 const RESIZE_DEBOUNCE_MS = 90;
 const ATTACH_DELAYS = [40, 120, 300, 700, 1500, 3000, 6000];
 const FORCE_FORGET_MS = 12_000;
@@ -786,6 +792,25 @@ export class NativeLinuxHost {
   private launchRecoveryTimer = 0;
   private lastLaunchSlug: string | null = null;
   private lastLaunchAt = 0;
+  /**
+   * True while the shared session exists only because the server pre-warmed it:
+   * no application has started in it yet. The hidden transport iframe is
+   * deliberately not created in that state — connecting it loads the Xpra
+   * client, whose clipboard autofocus can take keyboard focus from local RAST
+   * apps (Terminal typing ignored until the person clicks). The first native
+   * launch connects it first (`prepareForLaunch`).
+   */
+  private viewerDeferred = false;
+  /** A native launch from this desktop asked for the transport: from then on a
+   * session is never deferred again, even while it briefly reports no app
+   * runs (the launch response can arrive before the run is listed). */
+  private viewerRequested = false;
+  /** Native launch API calls currently in flight (never defer around them). */
+  private launchesInFlight = 0;
+  /** One bounded wait for the hidden transport connection at a time. */
+  private connecting: Promise<boolean> | null = null;
+  private connectWaitTimer = 0;
+  private connectWaitDone: ((connected: boolean) => void) | null = null;
   private disposed = false;
   private quiet = false;
   private nativeUnavailable = false;
@@ -931,6 +956,7 @@ export class NativeLinuxHost {
     window.clearTimeout(this.reconnectTimer);
     window.clearTimeout(this.attachTimer);
     window.clearTimeout(this.pasteFallbackTimer);
+    this.finishConnectionWait(false);
     this.pasteFallbackTimer = 0;
     this.pressedKeys.clear();
     this.clipboard.detach();
@@ -1002,20 +1028,40 @@ export class NativeLinuxHost {
     }
 
     if (!session || session.status === "ended") {
+      const wasDeferred = this.viewerDeferred;
       const wasAlive = this.frames.size > 0 || this.starting.size > 0;
+      this.finishConnectionWait(false);
       this.closeAllWindows(false);
       this.nonSeamlessNotice = "";
       this.removeIframe();
       this.shim = null;
       this.lastSnapshot = null;
       this.resetInputState("session-ended");
-      if (session?.status === "ended" && (wasAlive || previous?.status === "ready")) this.announceEnded(session);
+      // A later session is a new one: a pre-warmed replacement must be
+      // deferred again instead of inheriting this generation's launch state.
+      this.viewerRequested = false;
+      this.viewerDeferred = false;
+      // A session that only existed because the server pre-warmed it is dropped
+      // silently: the person never opened an app in it, so there is no workflow
+      // to interrupt with a "session ended" message (an explicit user close
+      // still gets its confirmation).
+      const used = wasAlive || previous?.status === "ready";
+      const prewarmOnly = wasDeferred && !wasAlive;
+      if (session?.status === "ended" && used && !(prewarmOnly && session.reason !== "closed")) {
+        this.announceEnded(session);
+      }
       return;
     }
+    // A session that only exists because the server pre-warmed it (no app run
+    // yet) keeps the hidden transport iframe disconnected: connecting it loads
+    // the Xpra client, whose clipboard autofocus can take keyboard focus from
+    // local RAST apps. The first native launch connects it (prepareForLaunch).
+    const deferred = this.deferViewerFor(session);
     // Starting sessions already have a proxy URL, but Xpra is not listening
     // yet. Loading now would leave an HTML 502 page in the iframe indefinitely.
     if (session.status !== "ready") {
       if (this.iframe && !this.shim) this.removeIframe();
+      this.viewerDeferred = deferred && !this.iframe;
       return;
     }
     if (previous?.url !== session.url) {
@@ -1026,8 +1072,25 @@ export class NativeLinuxHost {
         this.resetInputState("viewer-replaced");
       }
     }
+    if (deferred && !this.iframe) {
+      this.viewerDeferred = true;
+      return;
+    }
+    this.viewerDeferred = false;
     if (session.url && !this.iframe) this.createIframe(session.url);
     else if (this.iframe && !this.shim) this.attachShim(0);
+  }
+
+  /**
+   * The session is only pre-warmed while no application has started in it and
+   * no launch from this desktop has asked for the transport yet. Such a
+   * session must not create the hidden viewer (see `viewerDeferred`).
+   */
+  private deferViewerFor(session: NativeSession): boolean {
+    if (this.viewerRequested || this.launchesInFlight > 0) return false;
+    // Older servers may not report the app runs at all: connect in that case
+    // rather than deferring a session that may be in use.
+    return Array.isArray(session.apps) && session.apps.length === 0;
   }
 
   private announceEnded(session: NativeSession): void {
@@ -1709,6 +1772,93 @@ export class NativeLinuxHost {
 
   /* --------------------------------------------------------------- launching */
 
+  /**
+   * The launch gate: make sure the hidden transport is connected before the
+   * launch API is called. A session that only exists because the server
+   * pre-warmed it has no viewer connected yet (see `viewerDeferred`); the first
+   * native launch connects it here, then performs the launch, so the launched
+   * app's windows are adopted as soon as they appear. Every native launch entry
+   * point funnels through `open()` → `launch()` → this method.
+   *
+   * Resolves false only when a ready session exists but its viewer could not
+   * connect within the bounded timeout. The launch still goes ahead in that
+   * case (the session and app are untouched, and the viewer may recover).
+   */
+  async prepareForLaunch(): Promise<boolean> {
+    if (this.disposed) return false;
+    // From here on this desktop expects the transport, so a session is never
+    // deferred again even if it briefly reports no app runs.
+    this.viewerRequested = true;
+    this.viewerDeferred = false;
+    const connected = await this.ensureConnected();
+    if (!connected && !this.disposed) {
+      this.deps.toast.warning(
+        "The native desktop viewer could not connect. The app will still start; its window may take a little longer to appear.",
+      );
+    }
+    return connected;
+  }
+
+  /**
+   * Make sure the hidden transport iframe is connected, creating it when a
+   * ready session exists. Resolves true when there is nothing to connect to
+   * yet: a cold or still-starting session connects from the launch response
+   * once Xpra is ready.
+   */
+  async ensureConnected(): Promise<boolean> {
+    if (this.disposed) return false;
+    if (this.shimConnected) return true;
+    // The app-list snapshot may be fresher than the last poll: a pre-warmed
+    // session can be ready before its realtime event is processed here.
+    const session = this.session ?? linuxNativeSession();
+    if (!session || session.status !== "ready" || !session.url) return true;
+    if (!this.iframe) {
+      this.createIframe(session.url);
+    } else if (!this.shim) {
+      this.attachShim(0);
+    }
+    if (!this.connecting) {
+      this.connecting = this.waitForShimConnection(VIEWER_CONNECT_TIMEOUT_MS).finally(() => {
+        this.connecting = null;
+      });
+    }
+    return this.connecting;
+  }
+
+  /** Bounded wait for the shim to report the Xpra transport connected. */
+  private waitForShimConnection(timeoutMs: number): Promise<boolean> {
+    if (this.shimConnected) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      this.connectWaitDone = resolve;
+      const startedAt = Date.now();
+      const tick = (): void => {
+        if (this.disposed) {
+          this.finishConnectionWait(false);
+          return;
+        }
+        if (this.shimConnected) {
+          this.finishConnectionWait(true);
+          return;
+        }
+        if (Date.now() - startedAt >= timeoutMs) {
+          this.finishConnectionWait(false);
+          return;
+        }
+        this.connectWaitTimer = window.setTimeout(tick, VIEWER_CONNECT_POLL_MS);
+      };
+      tick();
+    });
+  }
+
+  /** Settle a pending connection wait exactly once (also used by dispose). */
+  private finishConnectionWait(connected: boolean): void {
+    window.clearTimeout(this.connectWaitTimer);
+    this.connectWaitTimer = 0;
+    const done = this.connectWaitDone;
+    this.connectWaitDone = null;
+    if (done) done(connected);
+  }
+
   /** The app's desktop icon or taskbar entry was used. */
   open(slug: string): void {
     if (this.disposed) return;
@@ -1735,6 +1885,13 @@ export class NativeLinuxHost {
 
   private async launch(app: LinuxApp): Promise<void> {
     const starting = this.showStarting(app);
+    // Only a pre-warmed session has a wait here: it was left without a
+    // connected transport on purpose, so this launch connects it first.
+    if (this.viewerDeferred) starting.detailEl.textContent = "Connecting to your desktop session…";
+    await this.prepareForLaunch();
+    if (this.disposed) return;
+    starting.detailEl.textContent = "Preparing your desktop session…";
+    this.launchesInFlight += 1;
     try {
       const res = await this.deps.api.post<{
         run: { id: string; appId: string; appName: string; status: string };
@@ -1769,6 +1926,8 @@ export class NativeLinuxHost {
         return;
       }
       this.deps.toast.error(errorMessage(error));
+    } finally {
+      this.launchesInFlight = Math.max(0, this.launchesInFlight - 1);
     }
   }
 

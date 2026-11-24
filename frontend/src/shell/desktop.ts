@@ -1579,6 +1579,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // Pre-warm the person's shared native session once per desktop load when the
   // operator enabled it (linux_prewarm): the first application launch then only
   // pays the application start instead of the ~12 s cold Xpra session start.
+  // The native host deliberately keeps the hidden transport disconnected while
+  // the session only exists because of pre-warming, and connects it on the
+  // first native launch (NativeLinuxHost.prepareForLaunch): the Xpra client's
+  // clipboard autofocus must never take keyboard focus before an app is opened.
   let prewarmAttempts = 0;
   const prewarmNativeSession = async (): Promise<void> => {
     if (disposed || prewarmAttempts > 3) return;
