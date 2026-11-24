@@ -335,6 +335,14 @@ session per person, never shared between accounts, subject to the normal
 memory admission check, and reclaimed by the existing idle cleanup. The trade
 off is a small idle memory cost per signed-in native-app user (~150–250 MiB).
 
+Measured on production (2026-11-24, quiet window, `tests/e2e/prewarm/measure.mjs`):
+the background session became ready 9.2 s after the desktop loaded (scheduled by
+the server from the first `GET /api/linux-apps`, not in the click path), and the
+first application launch took 3.1 s from click to an adopted RAST window — the
+cold path paid ~12 s in the click path for the session alone. The 10-minute
+per-person throttle and the explicit session close mean a person who closes
+their session is not immediately restarted by the next poll.
+
 ## Windows and the desktop
 
 * Every normal remote top-level window becomes **one RAST window** with its own
