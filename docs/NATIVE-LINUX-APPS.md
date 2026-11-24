@@ -363,6 +363,19 @@ viewer the first launch additionally connects the transport before starting the
 app (normally well under a second; the gate gives up after 15 s), so the
 click-to-window advantage is kept and the keyboard-focus regression is gone.
 
+### GPU-backed displays
+
+With `linux_display_backend = "auto"` (production default as of runtime 2.1),
+the native helper starts a privileged per-session NVIDIA Xorg display and
+verifies the NVIDIA renderer and a connected output as the person's identity
+before the session reports `displayBackend="gpu"` and
+`gpuAccelerationVerified=true`; Xpra then attaches with `--use-display=yes`.
+A failed verification falls back to Xvfb under `auto` (the strict `gpu` backend
+fails instead). GPU rendering in applications is separate from stream encoding:
+NVENC through Xpra is still unavailable, so the stream itself remains
+CPU-encoded. See [GPU-ACCELERATION.md](GPU-ACCELERATION.md) and the rollout
+evidence in `tests/e2e/results/gpu-display-rollout-4cc60dc.md`.
+
 ## Windows and the desktop
 
 * Every normal remote top-level window becomes **one RAST window** with its own

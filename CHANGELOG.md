@@ -9,6 +9,22 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- **Verified GPU-backed native sessions.** `linux_display_backend` accepts
+  `auto | software | gpu | custom`; `auto` starts a privileged per-session
+  NVIDIA Xorg display, verifies the NVIDIA OpenGL renderer and a connected
+  RandR output as the person's identity, attaches Xpra with
+  `--use-display=yes`, and falls back to Xvfb if the real probe fails. Sessions
+  report `displayBackend`, `gpuAccelerationVerified` and `renderer`; the
+  backend is persisted for restart adoption and cleaned up on session end.
+  Chrome reports Canvas/Compositing/Rasterization/WebGL/WebGPU/Video-Decode
+  hardware accelerated on such sessions. Honest limits: Xorg runs as root,
+  GPU VRAM is shared, browser video decoding stays software, and stream
+  encoding remains software (NVENC unavailable). Evidence:
+  `tests/e2e/results/gpu-display-rollout-4cc60dc.md`.
+
+
 ### Fixed
 
 - **Native session pre-warming no longer steals keyboard focus, so it is safe

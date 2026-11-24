@@ -434,3 +434,18 @@ helper (`display_start` / `display_stop`):
 Operator selection: `linux_display_backend = "auto" | "software" | "gpu"`.
 `auto` prefers GPU when the filesystem probe says it is plausible and falls
 back at session start if the real probe fails; `software` never tries GPU.
+
+## 2026-11-24 (runtime 2.1) — production enabled (`auto`)
+
+Production runs `linux_display_backend = "auto"` in build
+`4cc60dc0105e`; new graphical sessions start the privileged NVIDIA Xorg
+display, verify the NVIDIA renderer + a connected RandR output as the person's
+identity, and report `displayBackend="gpu"` /
+`gpuAccelerationVerified=true` / `renderer`. `chrome://gpu` in a session on that
+display reports Canvas, Compositing, Rasterization, WebGL, WebGPU and Video
+Decode hardware accelerated (Video Encode software only). Two test users ran
+verified GPU sessions concurrently with separate display units and
+per-identity auth cookies. Honest limits: Xorg still runs as root (residual
+X11 attack surface), GPU VRAM is shared (no cgroup isolation), decoding inside
+the browser remains software, and NVENC stream encoding is still unavailable
+(SDK mismatch). Full evidence: `tests/e2e/results/gpu-display-rollout-4cc60dc.md`.
