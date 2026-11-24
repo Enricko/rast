@@ -27,6 +27,9 @@ const marker = `RAST_TERMINAL_OK_${Date.now().toString(36)}`;
 const executable =
   process.env.RAST_E2E_CHROMIUM ||
   "/home/lufria/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
+// Screenshots must be written next to this file whatever the working directory.
+const shotPath = (name) =>
+  new URL(`./${name}`, import.meta.url).pathname;
 const browser = await chromium.launch({
   headless: true,
   executablePath: executable,
@@ -62,22 +65,36 @@ try {
   if (await terminal.count()) {
     await terminal.click();
     await page.waitForTimeout(1500);
+    // The Terminal app owns a real xterm.js textarea; make sure keyboard input
+    // reaches it (the desktop must not leave focus in the hidden Xpra frame).
+    const focused = await page.evaluate(() =>
+      document.activeElement?.classList?.contains("xterm-helper-textarea") ?? false,
+    );
+    if (!focused) {
+      await page.locator(".xterm-helper-textarea").first().click({ force: true }).catch(() => {});
+      const active = await page.evaluate(() => document.activeElement?.className ?? "");
+      if (!String(active).includes("xterm-helper-textarea")) {
+        console.error(`Terminal input is not focused (active=${active})`);
+      }
+    }
     await page.keyboard.type(`echo ${marker}`);
     await page.keyboard.press("Enter");
     await page.waitForTimeout(2500);
     const text = await page.locator("body").innerText();
     ok = text.includes(marker);
     if (!ok) {
-      const shot = `tests/e2e/terminal/smoke-failure-${Date.now()}.png`;
-      await page.screenshot({ path: shot, fullPage: false });
+      const shot = shotPath(`smoke-failure-${Date.now()}.png`);
+      await page.screenshot({ path: shot, fullPage: false }).catch(() => {});
+      const text = await page.locator("body").innerText().catch(() => "");
       console.error(`Terminal output did not contain ${marker}; screenshot: ${shot}`);
+      console.error(`page text (last 800 chars): ${text.slice(-800)}`);
     }
   } else {
     console.error("no .xterm element found after opening Terminal");
   }
 } catch (error) {
-  console.error(`terminal smoke failed: ${error}`);
-  await page.screenshot({ path: `tests/e2e/terminal/smoke-failure-${Date.now()}.png` }).catch(() => {});
+  console.error(`terminal smoke failed: ${error?.stack ?? error}`);
+  await page.screenshot({ path: shotPath(`smoke-failure-${Date.now()}.png`) }).catch(() => {});
 } finally {
   await context.close();
   await browser.close();
