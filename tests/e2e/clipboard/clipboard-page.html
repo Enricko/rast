@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>READY</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b0d12; color: #eef1f7; overflow: hidden;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  /* Pure-black 8 px strip: the harness uses the first all-black screenshot row
+     to locate the remote page origin inside the adopted RAST window. */
+  #topstrip { position: fixed; top: 0; left: 0; right: 0; height: 8px; background: #000; z-index: 60; }
+  #bar {
+    position: fixed; top: 8px; left: 0; right: 0; height: 54px;
+    display: flex; align-items: stretch; gap: 8px; padding: 6px 8px;
+    box-sizing: border-box; background: #151a23; border-bottom: 2px solid #333c4d; z-index: 50;
+  }
+  #bar button {
+    height: 42px; padding: 0; border: 0; border-radius: 6px; color: #fff;
+    font: 700 16px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.02em; cursor: pointer;
+  }
+  #new-window { width: 150px; background: #2a4f8f; }
+  #clear { width: 90px; background: #6b3030; }
+  #state {
+    flex: 1; align-self: center; min-width: 0; overflow: hidden;
+    font: 600 15px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: #9fe6b0; white-space: nowrap; text-overflow: ellipsis;
+  }
+  #role {
+    align-self: center; padding: 0 10px; font: 700 22px/1 ui-monospace, monospace;
+    color: #ffd479;
+  }
+  #field {
+    position: fixed; top: 62px; left: 0; right: 0; bottom: 0;
+    width: 100%; height: calc(100% - 62px); box-sizing: border-box;
+    margin: 0; padding: 14px; border: 0; outline: none; resize: none;
+    background: #0b0d12; color: #eef1f7;
+    font: 22px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    caret-color: #ffd479;
+  }
+</style>
+</head>
+<body>
+<div id="topstrip"></div>
+<div id="bar">
+  <button id="new-window" type="button">NEW WINDOW</button>
+  <button id="clear" type="button">CLEAR</button>
+  <span id="state">READY</span>
+  <span id="role"></span>
+</div>
+<textarea id="field" spellcheck="false" autocomplete="off" autocapitalize="off"
+          autocorrect="off" wrap="soft" aria-label="RAST clipboard test field"></textarea>
+<script>
+/*
+ * RAST controlled clipboard/input test page.
+ *
+ * The remote application is a canvas inside the RAST desktop (no DOM access),
+ * so this page reports its state through `document.title`, which the RAST
+ * window manager mirrors into the adopted window's `.win-title`. The Playwright
+ * harness polls that title as the assertion channel.
+ *
+ * Title grammar (the harness matches these prefixes exactly):
+ *   READY:<role>            page loaded (before the window focus event)
+ *   FOCUS:<role> / BLUR:<role>  remote window focus change
+ *   PASTED:<text>           a paste event or an input event of type *Paste*
+ *   INPUT:<text>            typed / deleted text
+ *   COPIED:<sha8>|<len>     text copied out of the field (sync SHA-256, 8 hex)
+ *   CUT:<sha8>|<remaining>  text cut out of the field
+ *   SEL:<len>               non-empty selection (debounced; used for Ctrl+A)
+ *   UNDO:<text> / REDO:<text>  text after an undo/redo input event
+ *   WINDOW-OPENED:B / POPUP-BLOCKED  second-window request result
+ *   CLEARED                 field cleared by the CLEAR button
+ *
+ * Control text is flattened to one line and capped so WM_NAME stays small.
+ * Input that arrives by the Xpra keyboard path produces INPUT:/PASTED:; the
+ * harness therefore proves both "keys reached the application" and "the
+ * application clipboard content is correct", not just one of them.
+ */
+(function () {
+  "use strict";
+
+  /* ---------------------------------------------------------- sync sha256 */
+  var K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+  ];
+
+  function rotr(value, count) {
+    return (value >>> count) | (value << (32 - count));
+  }
+
+  function sha256Hex(text) {
+    var bytes = new TextEncoder().encode(String(text == null ? "" : text));
+    var length = bytes.length;
+    var blocks = Math.ceil((length + 9) / 64);
+    var buffer = new ArrayBuffer(blocks * 64);
+    var view = new DataView(buffer);
+    var raw = new Uint8Array(buffer);
+    raw.set(bytes, 0);
+    raw[length] = 0x80;
+    var bits = length * 8;
+    view.setUint32(blocks * 64 - 8, Math.floor(bits / 0x100000000), false);
+    view.setUint32(blocks * 64 - 4, bits >>> 0, false);
+    var H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+    var w = new Uint32Array(64);
+    var i;
+    var b;
+    for (b = 0; b < blocks; b += 1) {
+      for (i = 0; i < 16; i += 1) w[i] = view.getUint32(b * 64 + i * 4, false);
+      for (i = 16; i < 64; i += 1) {
+        var x = w[i - 15];
+        var y = w[i - 2];
+        var s0 = (rotr(x, 7) ^ rotr(x, 18) ^ (x >>> 3)) >>> 0;
+        var s1 = (rotr(y, 17) ^ rotr(y, 19) ^ (y >>> 10)) >>> 0;
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+      }
+      var a = H[0], bb = H[1], c = H[2], d = H[3], e = H[4], f = H[5], g = H[6], h = H[7];
+      for (i = 0; i < 64; i += 1) {
+        var S1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+        var ch = ((e & f) ^ (~e & g)) >>> 0;
+        var t1 = (h + S1 + ch + K[i] + w[i]) >>> 0;
+        var S0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+        var maj = ((a & bb) ^ (a & c) ^ (bb & c)) >>> 0;
+        var t2 = (S0 + maj) >>> 0;
+        h = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = bb; bb = a; a = (t1 + t2) >>> 0;
+      }
+      H[0] = (H[0] + a) >>> 0; H[1] = (H[1] + bb) >>> 0; H[2] = (H[2] + c) >>> 0; H[3] = (H[3] + d) >>> 0;
+      H[4] = (H[4] + e) >>> 0; H[5] = (H[5] + f) >>> 0; H[6] = (H[6] + g) >>> 0; H[7] = (H[7] + h) >>> 0;
+    }
+    var hex = "";
+    for (i = 0; i < 8; i += 1) hex += H[i].toString(16).padStart(8, "0");
+    return hex;
+  }
+
+  /* ---------------------------------------------------------------- state */
+  var params = new URLSearchParams(location.search);
+  var role = params.get("role") || "A";
+  var field = document.getElementById("field");
+  var stateEl = document.getElementById("state");
+  document.getElementById("role").textContent = role;
+
+  var suppressSelUntil = 0;
+  var selTimer = 0;
+  var pendingCut = null;
+
+  function printable(text) {
+    var value = String(text == null ? "" : text);
+    value = value.replace(/\r\n/g, "\n").replace(/[\n\r\t]/g, "\u21b5");
+    if (value.length > 120) value = value.slice(0, 117) + "...";
+    return value;
+  }
+
+  function currentValue() {
+    return field.value || "";
+  }
+
+  function selectionLength() {
+    try {
+      return Math.max(0, (field.selectionEnd || 0) - (field.selectionStart || 0));
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  function setTitle(title) {
+    document.title = title;
+    stateEl.textContent = title.length > 130 ? title.slice(0, 130) + "\u2026" : (title || "(empty)");
+    window.__clipTitle = title;
+  }
+
+  function scheduleSelectionTitle() {
+    if (suppressSelUntil > performance.now()) return;
+    if (selTimer) clearTimeout(selTimer);
+    selTimer = setTimeout(function () {
+      selTimer = 0;
+      if (suppressSelUntil > performance.now()) return;
+      var length = selectionLength();
+      if (length > 0) setTitle("SEL:" + length);
+    }, 200);
+  }
+
+  /* --------------------------------------------------------------- events */
+  field.addEventListener("paste", function (event) {
+    suppressSelUntil = performance.now() + 1000;
+    var text = "";
+    try {
+      text = event.clipboardData ? event.clipboardData.getData("text/plain") : "";
+    } catch (error) {
+      text = "";
+    }
+    // clipboardData is the authoritative pasted payload; fall back to the
+    // field value when the browser exposed no clipboard data.
+    setTitle("PASTED:" + printable(text || currentValue()));
+  }, true);
+
+  field.addEventListener("copy", function (event) {
+    suppressSelUntil = performance.now() + 1000;
+    var text = "";
+    try {
+      text = currentValue().slice(field.selectionStart || 0, field.selectionEnd || 0);
+    } catch (error) {
+      text = "";
+    }
+    if (!text) text = currentValue();
+    setTitle("COPIED:" + sha256Hex(text).slice(0, 8) + "|" + text.length);
+    return undefined;
+  }, true);
+
+  field.addEventListener("cut", function (event) {
+    suppressSelUntil = performance.now() + 1000;
+    var text = "";
+    try {
+      text = event.clipboardData ? event.clipboardData.getData("text/plain") : "";
+    } catch (error) {
+      text = "";
+    }
+    if (!text) {
+      try {
+        text = currentValue().slice(field.selectionStart || 0, field.selectionEnd || 0);
+      } catch (error) {
+        text = "";
+      }
+    }
+    pendingCut = { sha: sha256Hex(text).slice(0, 8), at: performance.now() };
+    setTitle("CUT:" + pendingCut.sha + "|" + text.length);
+  }, true);
+
+  field.addEventListener("input", function (event) {
+    var inputType = event.inputType || "";
+    if (pendingCut && performance.now() - pendingCut.at < 2000) {
+      var cut = pendingCut;
+      pendingCut = null;
+      setTitle("CUT:" + cut.sha + "|" + currentValue().length);
+      return;
+    }
+    if (inputType.indexOf("Paste") >= 0) {
+      setTitle("PASTED:" + printable(currentValue()));
+    } else if (inputType === "historyUndo") {
+      setTitle("UNDO:" + printable(currentValue()));
+    } else if (inputType === "historyRedo") {
+      setTitle("REDO:" + printable(currentValue()));
+    } else {
+      setTitle("INPUT:" + printable(currentValue()));
+    }
+  });
+
+  document.addEventListener("selectionchange", function () {
+    if (document.activeElement !== field) return;
+    scheduleSelectionTitle();
+  });
+
+  window.addEventListener("focus", function () { setTitle("FOCUS:" + role); });
+  window.addEventListener("blur", function () { setTitle("BLUR:" + role); });
+
+  /* ------------------------------------------------------ second window */
+  function openSecondWindow(kind) {
+    var win = null;
+    try {
+      win = window.open(
+        "./clipboard-page.html?role=B&from=" + encodeURIComponent(kind),
+        "rast-clip-b",
+        "width=860,height=600,menubar=no,toolbar=no,location=no,status=no,scrollbars=no,resizable=yes"
+      );
+    } catch (error) {
+      win = null;
+    }
+    setTitle(win ? "WINDOW-OPENED:B" : "POPUP-BLOCKED");
+  }
+
+  document.getElementById("new-window").addEventListener("click", function () {
+    openSecondWindow("button");
+  });
+  document.getElementById("clear").addEventListener("click", function () {
+    field.value = "";
+    setTitle("CLEARED");
+    field.focus();
+  });
+
+  // Non-reserved RAST chord (Ctrl+Shift+E is forwarded by the shell, Chrome has
+  // no default action for it): opens the second window from a trusted gesture.
+  window.addEventListener("keydown", function (event) {
+    if (event.ctrlKey && !event.altKey && event.shiftKey && (event.code === "KeyE" || event.key === "E" || event.key === "e")) {
+      event.preventDefault();
+      event.stopPropagation();
+      openSecondWindow("key");
+    }
+  }, true);
+
+  /* ---------------------------------------------------------------- boot */
+  window.__clipPage = {
+    role: role,
+    version: 1,
+    sha8: function (text) { return sha256Hex(text).slice(0, 8); },
+  };
+  field.focus();
+  setTitle("READY:" + role);
+})();
+</script>
+</body>
+</html>

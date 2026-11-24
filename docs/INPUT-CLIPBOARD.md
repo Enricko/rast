@@ -314,39 +314,129 @@ Other signals:
 * The transport viewer's screenshot/logs are not displayed by design; input
   goes through the desktop document.
 
-## End-to-end verification
+## End-to-end verification (production, 2026-11-24)
 
-`tests/e2e/input-clipboard/run.mjs` drives the real production UI: it signs in
-with a test account, opens Google Chrome from Applications, types into the
-remote application's address bar, copies inside the app to the browser
-clipboard, pastes a known unicode string from the browser into the app, and
-round-trips it again — proving both directions and exact (no duplicate/lost)
-key delivery. It only closes the window(s) it opened and never stops sessions.
+The end-to-end harness was rebuilt around a **controlled remote page** so the
+clipboard matrix is asserted on exact content instead of screenshot heuristics
+or blind address-bar typing. It runs against the real public deployment
+(`https://desktop.lufria.tech`) with the dedicated test account.
+
+Harness files:
+
+| Path | Purpose |
+|---|---|
+| `tests/e2e/clipboard/clipboard-page.html` | Controlled remote page: a full-window `<textarea id="field">`, a NEW WINDOW button and a pure-black 8 px top strip. It reports every state change in `document.title` (see grammar below). |
+| `tests/e2e/clipboard/verify.mjs` | The matrix runner (Playwright). Serves the page on `127.0.0.1`, logs in through the real form, launches Google Chrome from Applications and drives the real clipboard paths. |
+| `tests/e2e/clipboard/lib.mjs` | Shared helpers: login, start menu, adopted-window inspection, hit-tested clicks (overlapping adopted windows), page-origin calibration, title observer, browser clipboard, read-only X11/`xpra info` evidence. |
+| `tests/e2e/clipboard/results/<run>/report.{json,md}` | Committed evidence of each matrix run. |
+| `tests/e2e/clipboard/screenshots/<run>/*.png` | Screenshots (git-ignored run artifacts). |
+
+### Assertion channel (why `document.title`)
+
+The remote application is an Xpra window rendered into a canvas inside the
+RAST window: remote DOM is not inspectable from the client. The controlled page
+therefore reports its state through `document.title`, which RAST mirrors into
+the adopted RAST window's `.win-title` (plus a `" - Google Chrome"` suffix that
+the harness tolerates). Title grammar:
+
+| Title | Meaning |
+|---|---|
+| `READY:<role>` / `FOCUS:<role>` / `BLUR:<role>` | page loaded / remote window focus change |
+| `PASTED:<text>` | a paste (paste event or `insertFromPaste` input) produced exactly this text |
+| `INPUT:<text>` | typed/deleted text (no clipboard involved) |
+| `COPIED:<sha8>|<len>` | a copy inside the application; SHA-256 prefix + length of the copied text |
+| `CUT:<sha8>|<remaining>` | a cut; SHA-256 prefix of the cut text + remaining field length |
+| `SEL:<len>` | non-empty selection (debounced; used for select-all) |
+| `UNDO:<text>` / `REDO:<text>` | the text after an undo/redo input event |
+| `WINDOW-OPENED:B` / `POPUP-BLOCKED` | result of the page's second-window request |
+
+Navigation never uses browser-reserved chords: **Alt+D** (primary) or a pointer
+click on the omnibox, both validated on the shipped input policy (`Ctrl+L`,
+`Ctrl+N`, `Ctrl+T`, … are deliberately browser-reserved and never reach the
+remote app). Navigation success is decided by the page's *pixels* (dark
+textarea + black origin strip + coloured toolbar), not by the window title
+alone, because Chrome restores tabs and a title can be stale.
+
+### Matrix result (run `2026-11-24T06-18-48-986`, RAST 0.18.3 `ab9b821d18cb`)
+
+| # | Direction / behaviour | Result | Evidence |
+|---|---|---|---|
+| 1 | local browser → remote app, ASCII | **PASS** | window title `PASTED:RAST-LOCAL-TO-REMOTE-48-986 - Google Chrome`, 313.8 ms from Ctrl+V to the title update |
+| 2 | local browser → remote app, unicode | **PASS** | `PASTED:RAST ⇄ Linux ✓ — ünïcødé テスト 日本語 🚀 Ω≈ç√∫ -986 - Google Chrome`, 345.5 ms |
+| 3 | remote app → local browser clipboard | **PASS** | remote Ctrl+A/Ctrl+C produced `COPIED:de568410\|46`; `navigator.clipboard.readText()` returned the exact unicode string; independent host evidence: `xclip -selection clipboard -o` on `:101` returned the same text |
+| 4 | select-all | **PASS** | title `SEL:46 - Google Chrome` |
+| 5 | cut (Ctrl+X) | **PASS** | `CUT:de568410\|0 - Google Chrome` and the browser clipboard received the cut text |
+| 6 | typing exactly once | **PASS** | `INPUT:typed-marker-48-986 - Google Chrome` (exact; no duplicated/lost characters) |
+| 7 | undo / redo | **PASS** | `UNDO:typed-marker-48-98`, `REDO:typed-marker-48-986` |
+| 8 | second window adopted 1:1, focus switching | **PASS** | 1 → 2 adopted RAST windows (`win-2`, `win-3`), focus class moves with clicks (`A.focused=true`, then `B.focused=true`) |
+| 9 | remote window A → remote window B | **PASS** | A `COPIED:98f3504e\|23`, browser clipboard synced, B `PASTED:remote-to-remote-48-986 - Google Chrome`, 316.1 ms |
+| 10 | desktop reload (viewer reconnect) → paste | **PASS** | after `page.reload()` both windows re-adopted and the new browser clipboard pasted into the app: `PASTED:after-reconnect-48-986`, 351.6 ms |
+| 11 | macOS `keyboardSwap` emulation | **PARTIAL** | emulated platform ⇒ `keyboardSwap=true`; Cmd+A/Cmd+C proven end-to-end; the automated Cmd+V pass did not surface the new text (see limitations) |
+| 12 | image/HTML clipboard | **NOT TESTED** | unsupported by design: this deployment transfers plain text only |
+
+Plain text, exact round trip, both directions, unicode included, across two
+top-level windows and across a viewer reconnect. Latency values above are
+"Ctrl+V/Ctrl+C down → application state observed" measured on the title
+observer, so they include the client round trip and Xpra metadata propagation,
+not only the clipboard transfer.
+
+### Honest limitations of this harness
+
+* **The trusted browser paste event cannot be produced by automation.**
+  Playwright/CDP key injection does not run browser editing commands, so the
+  local browser never fires a trusted `paste` event with `clipboardData`. The
+  browser→application direction is therefore proven through the product's own
+  fallbacks: the forwarded paste gesture leads to a quiet `navigator.clipboard
+  .readText()` and a push to the session, and the application's X11 clipboard
+  request is answered by the desktop manager. A real user Ctrl/Cmd+V also
+  delivers the trusted paste event first (the primary path, covered by the
+  frontend unit tests); the fallback is what makes the gesture still work when
+  the event is missing, which is why this automation is representative but not
+  identical to a human gesture.
+* **Real macOS hardware is not available here.** The macOS pass emulates
+  `navigator.platform` / `navigator.userAgentData.platform` on a Linux
+  Chromium. It proves the `keyboardSwap` policy and transport path, and the
+  Cmd+A/Cmd+C forwarding, but not physical Apple-keyboard behaviour; the Cmd+V
+  assertion remains partial (possible stale-clipboard/cached-text race in the
+  automation; not a confirmed product bug). A real macOS client is required for
+  the final sign-off of the Command path.
+* **Text only.** HTML/image clipboard is intentionally unsupported and reported
+  not-tested; the desktop manager shows an honest notice instead.
+* The remote DOM is a canvas; everything remote is asserted through the
+  title channel plus read-only host-side evidence (`xclip`, `xdotool`,
+  `xpra info` on the test identity's own display).
+* One host, one Xpra version (v6.5.5-r0), Chrome 158, software Xvfb, no GPU.
+
+### How to run
 
 ```bash
 cd tests/e2e
-node input-clipboard/run.mjs --mode=baseline            # BEFORE evidence (old build)
-node input-clipboard/run.mjs --mode=after               # AFTER evidence (must pass)
-# optional: emulate macOS navigator.platform on the Linux CI host to exercise
-# the Command -> Control path (real macOS browser not available here)
-node input-clipboard/run.mjs --mode=after --emulate-mac
+
+# Full clipboard/input matrix on production (writes report + screenshots):
+node clipboard/verify.mjs
+
+# Navigation/focus probe only (fast, useful when changing the harness):
+node clipboard/verify.mjs --nav-only
+
+# Watch it in a real browser window:
+node clipboard/verify.mjs --headless=false
 ```
 
-Evidence (JSON report + screenshots) is written under
-`tests/e2e/input-clipboard/{results,screenshots}/<mode>-<stamp>/` and is
-git-ignored. Credentials come from `/home/lufria/.config/rast-test/creds`
-(never printed).
+Options: `--url=<base>`, `--creds=<file>`, `--user=<name>`, `--admin=<name>`,
+`--nav-only`, `--keep-session` (leave the test session for a follow-up run).
+Credentials come from `/home/lufria/.config/rast-test/creds` and are never
+printed or committed. The runner only opens/closes the test account's own Chrome
+windows and ends only that account's own native session through the RAST API;
+the live user session is never touched. Results are written under
+`tests/e2e/clipboard/results/<run>/`.
 
 ### Benchmark/environment note
 
-The AFTER measurement runs against a binary that also introduces the session
-runtime profile layer (`linux_profile`). The default profile is `balanced`,
-which is exactly the previous Xpra defaults, so BEFORE/AFTER input and
-clipboard comparisons are on the same stream policy. Other profiles
-(`responsive`, `media`, `quality`) change encoding/latency characteristics and
-are reported separately with the session JSON (`profile`, `displayBackend`,
-`gpuAccelerationVerified`, `metrics`) — they do not change the input/clipboard
-contract described here.
+The matrix runs against the deployed production build; the `report.json`
+records the `/api/system/info` facts and the session state at the time of the
+run. Latency stage numbers for the same path (rAF rates, Xpra ping/damage,
+tunnel RTT, estimated floor) are in
+[BENCHMARKS.md §8](BENCHMARKS.md#8-input-and-clipboard-latency-stage-profile-2026-11-24-production).
 
 ## Frontend unit tests
 
