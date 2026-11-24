@@ -1,7 +1,10 @@
 # Session pre-warm re-enabled — deferred-viewer + Terminal focus validation
 
+Final deployed build: `RAST 0.18.3 (f1d96a0625fe)`, binary sha256
+`292b07b60834ee456f382dc1c641e97ad92ceb971224a03d464e0286f2b62481`.
 Builds: pre-warm deferred-viewer frontend (`3d3f8f9`, docs `6a86cc3`), GPU
-display backend (`4cc60dc`), discovery polish (`41c1027`/`ce77cb9`/`413ad2c`).
+display backend (`4cc60dc` + fixes `81264f8`/`4cc60dc`/`f1d96a0`), discovery
+polish (`41c1027`/`ce77cb9`/`413ad2c`).
 Production config at validation time: `linux_prewarm = true`,
 `linux_display_backend = "auto"` (GPU verified sessions).
 
@@ -36,3 +39,16 @@ synthetic key path is untouched.
 server-side pre-warm (app-list trigger, 10-minute per-person throttle, explicit
 close suppression) is unchanged. Rollback: set it back to `false` and restart
 `rast.service` (the deferred-viewer frontend is inert without pre-warm).
+
+## Known limitation: impatient close→reopen
+
+`tests/e2e/prewarm/measure.mjs` deliberately closes the session, waits 3 s and
+reloads. In that artificial rapid-reopen sequence the first Xpra start can stay
+running without answering its HTTP port and only the automatic retry succeeds,
+so the measured "prewarm ready" was 33.8 s (launch→window 7.1 s after the retry)
+on build `f1d96a0` — the display-number rotation added in that build did not
+eliminate this specific Xpra teardown race. A normal pre-warm (sign-in, no
+immediate close) was measured at **1.99 s**, and the desktop never waits for it.
+Next step: detect a failed/silent session unit early (poll `unit_status` during
+readiness instead of waiting the full 30 s timeout) and/or wait for Xpra
+teardown before allowing a restart on the same identity.

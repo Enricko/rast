@@ -1,7 +1,8 @@
 # GPU-backed native sessions — production rollout evidence
 
-Deployed build: `RAST 0.18.3 (4cc60dc0105e)` — binary sha256
-`528b5d3476d8bf1603def0926c3c99b01a33e4c3efb9bd169bd2bd1759ab3fe0`.
+Rollout build: `RAST 0.18.3 (4cc60dc0105e)` (first GPU-verified build). Final
+runtime 2.1 build also verified: `RAST 0.18.3 (f1d96a0625fe)`, binary sha256
+`292b07b60834ee456f382dc1c641e97ad92ceb971224a03d464e0286f2b62481`.
 Production config: `linux_profile="balanced"`, `linux_display_backend="auto"`.
 Rollout date: 2026-11-24.
 
@@ -70,3 +71,17 @@ Set `linux_display_backend = "software"` (or `custom`) in
 Existing GPU sessions are only restarted when they end naturally (or after an
 explicit `POST /api/linux-apps/session/close`). Full binary rollback follows
 `docs/OPERATIONS.md` / the atomic deploy script.
+
+## Final runtime 2.1 verification (build f1d96a0)
+
+Same GPU path re-verified after the final deploy: production config
+`linux_display_backend="auto"`, `linux_prewarm=true`; doctor reports
+`display backend: gpu`; a pre-warmed GPU session reported
+`displayBackend="gpu"`, `gpuAccelerationVerified=true`,
+`renderer="NVIDIA GeForce GTX 1660 Ti/PCIe/SSE2"`, and the browser adopted its
+window with `Ctrl+K` navigation working on the GPU-backed session. Discovered
+application icons are also live (WordCraft icon served as a validated
+3,350-byte PNG; 9/11 discovered rows have icons, the rest correctly fall back).
+Multi-user isolation re-verified 6/6 on this build (cross-user session 403,
+anonymous 401, per-identity session units, no raw display ports, display
+firewall present).
