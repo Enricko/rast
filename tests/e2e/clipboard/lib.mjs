@@ -760,16 +760,50 @@ export async function focusWindowContent(page, windowId, layout = null) {
   // The window is covered in its content area: raise it through its RAST
   // titlebar (the window manager owns that DOM) and click the content again.
   const titleHit = await findClickablePoint(page, resolved, { mode: "titlebar" });
-  if (!titleHit) throw new Error(`window ${windowId} is fully covered by another window`);
-  await page.mouse.click(titleHit.x, titleHit.y);
-  await sleep(350);
-  const second = await findClickablePoint(page, resolved, { mode: "content" });
-  if (second) {
-    await page.mouse.click(second.x, second.y);
-    await sleep(300);
-    return second;
+  if (titleHit) {
+    await page.mouse.click(titleHit.x, titleHit.y);
+    await sleep(350);
+    const second = await findClickablePoint(page, resolved, { mode: "content" });
+    if (second) {
+      await page.mouse.click(second.x, second.y);
+      await sleep(300);
+      return second;
+    }
+    return titleHit;
   }
-  return titleHit;
+  // Fully covered by another RAST window: a user raises such a window from the
+  // taskbar, and the WM raises on a pointerdown on the window element. Dispatch
+  // that pointerdown directly on the DOM node (hit-testing would reach the
+  // covering window) so the focused/covered window is brought to the front,
+  // then click its content.
+  const raised = await page.evaluate((id) => {
+    const element = document.querySelector(`.window[data-window-id="${id}"]`);
+    if (!element) return false;
+    try {
+      element.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          pointerId: 1,
+          pointerType: "mouse",
+          button: 0,
+        }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, windowId).catch(() => false);
+  if (raised) {
+    await sleep(400);
+    const afterRaise = await findClickablePoint(page, resolved, { mode: "content" });
+    if (afterRaise) {
+      await page.mouse.click(afterRaise.x, afterRaise.y);
+      await sleep(300);
+      return afterRaise;
+    }
+  }
+  throw new Error(`window ${windowId} is fully covered by another window`);
 }
 
 export function focusProbe(page) {
