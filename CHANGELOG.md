@@ -11,6 +11,19 @@ this file by `scripts/changelog-section.sh`.
 
 ### Fixed
 
+- **LibreOffice launches.** `/usr/bin/libreoffice` resolves into the root-owned
+  `/usr/lib/libreoffice` tree, which was outside the argv[0] canonical
+  allow-list; the tree is now allowed, and LibreOffice Writer imports/launches
+  as a normal discovered application.
+- **Snap packages are honestly unsupported for identity users.** Snapd refuses
+  to run snaps for RAST's mapped service identities; install `.deb`, official
+  tarballs or AppImages instead. Documented in the operator guide so a
+  discovered Snap entry is not mistaken for a runnable app.
+
+
+
+### Fixed
+
 - **Session startup under host disk pressure.** Xpra startup is file-I/O bound;
   when other workloads saturate the disk (`/proc/pressure/io`), a 30 s
   readiness deadline can expire while the session is still initialising,

@@ -1,0 +1,24 @@
+{
+  "importHttp": 200,
+  "entry": {
+    "id": "d-17f1f761ae3b2802",
+    "name": "LibreOffice Writer",
+    "status": "ready",
+    "canLaunch": true
+  },
+  "launchHttp": 200,
+  "launchError": null,
+  "run": {
+    "status": "running",
+    "error": null
+  },
+  "session": {
+    "display": 102,
+    "backend": "gpu",
+    "gpuVerified": true
+  },
+  "windows": [
+    "0x600001 \"LibreOffice\": ()  644x199+0+0  +0+0"
+  ],
+  "launchMs": 5297
+}

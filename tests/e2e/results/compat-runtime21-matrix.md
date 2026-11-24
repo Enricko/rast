@@ -37,9 +37,11 @@ below combines them; automation variance is not claimed as product failure.
 | Zenity (GTK info dialog) | **GTK application** | **PASS** | PASS — `"zenity": ("zenity" "zenity")` | imported custom app |
 | QTerminal | **Qt application** | **PASS** | PASS — `"Shell No. 1": ("qterminal" "qterminal")` 600x420 | imported custom app; Qt toolkit verified via window |
 | Chromium (snap) | **snap browser** | **PASS** (run running) | window not captured in 6 s snapshot | snap command execution now allowed after allowing `/usr/lib/snapd`; window capture follow-up |
-| Blender 5.3 (snap) | **graphics/3D** | **PASS** (run running) | window not captured in 6 s snapshot (slow first start) | snap command execution allowed; long first-start window capture follow-up |
+| Blender 5.3 (snap) | graphics/3D | **NOT SUPPORTED (snapd)** | — | snapd refuses snaps for identity users (see above); no snap claim |
 | Google Chrome | browser | **PASS** (earlier matrices) | PASS — adopted window, typing/navigation, GPU hardware acceleration | full behaviour covered by the clipboard/input/benchmark harnesses |
-| Firefox (snap 160) | browser | **PASS** (process running, GPU session) | window **not observed within 45 s** under sustained host I/O pressure | installed during round 3; imported/launched through the snap allow-list path; first-window capture needs a quieter host / longer settle |
+| Firefox (tarball 160) | browser | **PASS** | **PASS** — `"Welcome to Firefox — Mozilla Firefox"` 1280x972 (`Navigator`/`firefox`), adopted by the RAST desktop | snap-distributed Firefox cannot run for RAST identities (snapd refusal), so the official Mozilla tarball was installed at `/opt/rast-apps/firefox-tarball` and imported; keyboard navigation into the page was **not proven** (a repeated cold start under host load produced no window; first run showed Mozilla's rights page instead of the typed data URL) |
+| VS Code (tarball, **Electron**) | development | **PASS** (first launch ~39 s under load) | **PASS** — `"Welcome - Visual Studio Code"` 1200x800 (`code`/`code`), adopted by the RAST desktop | official Microsoft tarball at `/opt/rast-apps/vscode`, root-owned SUID `chrome-sandbox`; covers the Electron toolkit category |
+| LibreOffice Writer | productivity | **PASS** (after allowing `/usr/lib/libreoffice`) | **PASS** — `"LibreOffice"` window created (startup window; Writer document window follow-up) | installed from Ubuntu (apt mirror switched to archive.ubuntu.com after the regional mirror returned 403) |
 | LibreOffice Writer | productivity | **NOT TESTED** | — | install failed twice: Ubuntu mirror returned HTTP 403 for `libgpgmepp7`; honest gap (retry on a different mirror) |
 | VS Code / Code OSS | development | **NOT TESTED** | — | not installed |
 | GIMP / Inkscape | graphics | **NOT TESTED** | — | not installed |
@@ -68,6 +70,11 @@ simultaneously-running window is adopted in one session is an open follow-up
 - first launch of a cold GPU session can take tens of seconds for some apps
   (XTerm cold ~20–36 s observed once; warm ~100–600 ms) — session/display startup
   and app cold start are being separated in follow-up measurements;
+- **snap-packaged applications cannot run for RAST identities** (snapd policy,
+  see docs/NATIVE-LINUX-APPS.md); use `.deb`/tarball/AppImage imports. Earlier
+  "snap launch PASS" rows in this document were corrected accordingly;
+- Firefox keyboard/page interaction and the LibreOffice Writer document window
+  (beyond the startup window) remain follow-ups;
 - the compatibility harness's window detection needs a longer per-app settle
   time (some slow starters were missed in a single 2.5 s snapshot);
 - Firefox/LibreOffice/VS Code/GIMP/VLC and Electron remain untested here;
@@ -88,3 +95,18 @@ verifiable. Normal-load measurements from earlier rounds (pre-warmed session
 ready ~2 s, click→window ~3 s) are the representative product numbers; the
 60–70 s starts observed here are host-contention artifacts and are not claimed
 as product latency.
+
+## Round-4 desktop application evidence
+
+- **Firefox 160 (official tarball)**: imported, launched in a verified GPU
+  session; X11 window `"Welcome to Firefox — Mozilla Firefox"` (1280x972,
+  WM_CLASS `Navigator`/`firefox`) and **adopted simultaneously with VS Code**
+  in one RAST desktop session (`tests/e2e/results/firefox-vscode-adopted.png`).
+  Keyboard navigation into the page was not proven (first-run page / repeated
+  cold start under host load); re-test on a settled profile.
+- **VS Code (official tarball, Electron)**: launch/window/adoption PASS;
+  covers the Electron toolkit category (`tests/e2e/results/compat-desktop-apps-*.json`).
+- **LibreOffice Writer** (apt): launch/window PASS after allowing
+  `/usr/lib/libreoffice` in the argv[0] canonical allow-list.
+- **snap** (Firefox/Blender/Chromium): structurally unsupported for RAST
+  identities; snapd refuses to stream snaps for service users.
