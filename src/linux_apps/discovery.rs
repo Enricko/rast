@@ -18,6 +18,10 @@
 //!   and `TryExec`, and its program resolves to an executable file;
 //! * a rescan updates rows in place (stable ids) and marks vanished entries
 //!   `unavailable` — it never deletes inventory data;
+//! * icons are resolved while the scan (or a manual import) runs, only from
+//!   known XDG/icon-theme/application-profile roots, canonicalised and checked
+//!   to be a regular PNG/SVG within the size limit, and stored so the
+//!   authenticated icon endpoint never touches the file system itself;
 //! * files the web server cannot read (identity homes are 0700 and owned by
 //!   the app identity) are scanned by the privileged helper, which executes the
 //!   scan **as the identity**;
@@ -27,21 +31,24 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Instant,
 };
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
+use walkdir::WalkDir;
 
 use crate::{
     config::DiscoverySystemApps,
     db,
     error::{AppError, AppResult},
     events::EventBus,
+    linux_apps::native_archive::{png_dimensions, read_icon},
 };
 
 /// Event: the discovered-application inventory changed. Every client reloads
@@ -60,6 +67,30 @@ pub const MAX_EXEC_ARGS: usize = 64;
 /// Default `PATH` used when the scan agent runs without one.
 pub const DEFAULT_SCAN_PATH: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin";
+/// Largest icon a scan or a manual import may capture and store. Bigger files
+/// are practically never application icons (screenshots, wallpapers) and would
+/// bloat the helper response and the database.
+pub const MAX_CAPTURED_ICON_BYTES: u64 = 96 * 1024;
+/// Largest total base64 icon payload one scan may carry back. The privileged
+/// helper response is capped at 1 MiB, so the icon payload stays far below it.
+pub const MAX_SCAN_ICON_PAYLOAD_BYTES: usize = 256 * 1024;
+/// Longest `Icon=` value accepted from a desktop entry or an import request.
+pub const MAX_ICON_VALUE_CHARS: usize = 1024;
+/// System icon roots searched for `Icon=` theme names and absolute icon paths.
+pub const SYSTEM_ICON_ROOTS: &[&str] = &[
+    "/usr/share/icons",
+    "/usr/local/share/icons",
+    "/usr/share/pixmaps",
+    "/usr/local/share/pixmaps",
+    "/var/lib/flatpak/exports/share/icons",
+    "/var/lib/snapd/desktop/icons",
+];
+/// Icon sizes tried first under a theme's `<size>x<size>/apps` layout.
+const ICON_SIZES: &[u32] = &[512, 256, 128, 96, 64, 48, 32, 24, 16];
+/// Largest number of theme files one icon index walks.
+const MAX_ICON_INDEX_FILES: usize = 20_000;
+/// Deepest theme layout one icon index walks (theme/size/app).
+const MAX_ICON_INDEX_DEPTH: usize = 6;
 
 /// What kind of entry a scanned path belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +141,8 @@ pub struct DesktopEntry {
     pub exec_raw: String,
     pub try_exec: Option<String>,
     pub icon: Option<String>,
+    /// `Path=` working directory declared by the desktop entry.
+    pub working_dir: Option<String>,
     pub categories: Vec<String>,
     pub terminal: bool,
     pub startup_wm_class: Option<String>,
@@ -170,6 +203,7 @@ pub fn parse_desktop_entry(text: &str) -> Option<DesktopEntry> {
             }
             "TryExec" => entry.try_exec = non_empty(value),
             "Icon" => entry.icon = non_empty(value),
+            "Path" => entry.working_dir = non_empty(value),
             "Categories" => entry.categories = list_value(value, 32),
             "MimeType" => entry.mime_type = list_value(value, 64),
             "Actions" => entry.actions = list_value(value, 32),
@@ -354,6 +388,13 @@ pub struct ScanEntry {
     pub exec: Vec<String>,
     pub try_exec: Option<String>,
     pub icon: Option<String>,
+    /// `Path=` working directory, used when the app is launched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
+    /// Base64 PNG/SVG icon bytes captured by the scan (validated and stored by
+    /// the server; never serialised when absent so system scans stay small).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_data: Option<String>,
     pub categories: Vec<String>,
     pub terminal: bool,
     pub startup_wm_class: Option<String>,
@@ -498,6 +539,8 @@ pub fn scan_roots(roots: &[ScanRoot], path_env: &str) -> AgentScan {
                         exec: vec![path.display().to_string()],
                         try_exec: None,
                         icon: None,
+                        working_dir: None,
+                        icon_data: None,
                         categories: Vec::new(),
                         terminal: false,
                         startup_wm_class: None,
@@ -542,6 +585,8 @@ pub fn scan_roots(roots: &[ScanRoot], path_env: &str) -> AgentScan {
             exec: vec![program],
             try_exec: None,
             icon: None,
+            working_dir: None,
+            icon_data: None,
             categories: Vec::new(),
             terminal: false,
             startup_wm_class: None,
@@ -549,6 +594,7 @@ pub fn scan_roots(roots: &[ScanRoot], path_env: &str) -> AgentScan {
             install_dir: path.parent().map(|parent| parent.display().to_string()),
         });
     }
+    capture_scan_icons(&mut scan.entries, roots);
     scan
 }
 
@@ -612,12 +658,439 @@ fn scan_desktop_file(scope: Scope, path: &Path, path_env: &str) -> Option<ScanEn
         exec,
         try_exec: entry.try_exec.clone(),
         icon: entry.icon.clone(),
+        working_dir: entry.working_dir.clone(),
+        icon_data: None,
         categories: entry.categories.clone(),
         terminal: entry.terminal,
         startup_wm_class: entry.startup_wm_class.clone(),
         version: entry.version.clone(),
         install_dir: path.parent().map(|parent| parent.display().to_string()),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Icons (bounded resolution, captured during a scan or a manual import)
+// ---------------------------------------------------------------------------
+
+/// A validated PNG or SVG icon, ready to be stored in `discovered_apps`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredIcon {
+    pub kind: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+/// Recognise the only two image formats the icon endpoint serves.
+pub fn sniff_icon_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("png");
+    }
+    let head = &bytes[..bytes.len().min(2048)];
+    String::from_utf8_lossy(head).contains("<svg").then_some("svg")
+}
+
+/// Decode and validate the base64 icon payload a scan carried back. The helper
+/// and the agent are trusted, but the payload is re-validated here so a buggy
+/// helper can never store an oversized or non-image value.
+pub fn decode_captured_icon(raw: &str) -> Option<DiscoveredIcon> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .ok()?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CAPTURED_ICON_BYTES {
+        return None;
+    }
+    let kind = sniff_icon_bytes(&bytes)?;
+    Some(DiscoveredIcon { kind, bytes })
+}
+
+/// Validate an `Icon=` value supplied by an administrator when importing an
+/// existing application. Only an icon-theme name or an absolute `.png`/`.svg`
+/// path is accepted; the path is not required to exist (the identity may own
+/// it) but is resolved and validated before anything is stored.
+pub fn validate_icon_value(value: &str) -> AppResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().count() > MAX_ICON_VALUE_CHARS {
+        return Err(AppError::bad_request(
+            "icon must be 1-1024 characters (an icon-theme name or an absolute .png/.svg path)",
+        ));
+    }
+    if value.chars().any(char::is_control) || value.contains('\\') {
+        return Err(AppError::bad_request("icon contains invalid characters"));
+    }
+    if value.starts_with('/') {
+        let path = Path::new(value);
+        if path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+        {
+            return Err(AppError::bad_request(
+                "icon path must not contain . or .. components",
+            ));
+        }
+        let is_image = path
+            .extension()
+            .map(|ext| {
+                let ext = ext.to_string_lossy();
+                ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("svg")
+            })
+            .unwrap_or(false);
+        if !is_image {
+            return Err(AppError::bad_request(
+                "an icon file path must end in .png or .svg",
+            ));
+        }
+    } else if value.contains('/') || !valid_icon_name(value) {
+        return Err(AppError::bad_request(
+            "icon must be an icon-theme name or an absolute .png/.svg path",
+        ));
+    }
+    Ok(value.to_string())
+}
+
+/// Theme names are plain names: no separators, no traversal.
+fn valid_icon_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 255 || name.contains("..") {
+        return false;
+    }
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@'))
+}
+
+fn push_dir(list: &mut Vec<PathBuf>, path: PathBuf) {
+    if path.is_dir() && !list.contains(&path) {
+        list.push(path);
+    }
+}
+
+/// The identity's own icon directories.
+fn push_home_icon_roots(home: &Path, list: &mut Vec<PathBuf>) {
+    for suffix in [
+        ".local/share/icons",
+        ".icons",
+        ".local/share/pixmaps",
+        ".local/share/flatpak/exports/share/icons",
+    ] {
+        push_dir(list, home.join(suffix));
+    }
+}
+
+/// Search and allowed roots for the icons of one scan. They are derived from the
+/// scanned roots themselves: an XDG `applications` directory yields the sibling
+/// `icons` directory, `~/Applications` / `~/.local/bin` yield the home icon
+/// trees, and a managed application profile yields its `data/icons` theme tree
+/// — no app-specific code.
+pub fn scan_icon_roots(roots: &[ScanRoot]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut search: Vec<PathBuf> = SYSTEM_ICON_ROOTS.iter().map(PathBuf::from).collect();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute());
+    if let Some(home) = &home {
+        push_home_icon_roots(home, &mut search);
+    }
+    for root in roots {
+        for ancestor in root.path.ancestors().take(5) {
+            for suffix in [
+                "icons",
+                "share/icons",
+                ".local/share/icons",
+                ".local/share/pixmaps",
+                ".icons",
+                "home/.local/share/icons",
+                "home/.icons",
+            ] {
+                push_dir(&mut search, ancestor.join(suffix));
+            }
+        }
+    }
+    let mut allowed = search.clone();
+    if let Some(home) = &home {
+        allowed.push(home.clone());
+    }
+    for root in roots {
+        // An absolute `Icon=` may point inside the scanned application tree.
+        allowed.push(root.path.clone());
+    }
+    (search, allowed)
+}
+
+/// Search and allowed roots for one application's icon: a manual import, or a
+/// stored inventory row served by the icon endpoint. `app_path` is the
+/// executable for an import or the stored `desktop_path` otherwise; `home` is
+/// the owner identity's home when known.
+pub fn app_icon_roots(
+    app_path: &Path,
+    install_dir: Option<&Path>,
+    home: Option<&Path>,
+    profiles_dir: &Path,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut search: Vec<PathBuf> = SYSTEM_ICON_ROOTS.iter().map(PathBuf::from).collect();
+    if let Some(home) = home {
+        push_home_icon_roots(home, &mut search);
+    }
+    if let Some(profile) = managed_profile_root(app_path, profiles_dir) {
+        for suffix in [
+            "data/icons",
+            "home/.local/share/icons",
+            "home/.icons",
+            ".local/share/icons",
+        ] {
+            push_dir(&mut search, profile.join(suffix));
+        }
+    }
+    let mut allowed = search.clone();
+    if let Some(home) = home {
+        allowed.push(home.to_path_buf());
+    }
+    if let Some(parent) = app_path.parent() {
+        allowed.push(parent.to_path_buf());
+    }
+    if let Some(dir) = install_dir {
+        allowed.push(dir.to_path_buf());
+    }
+    if let Some(profile) = managed_profile_root(app_path, profiles_dir) {
+        allowed.push(profile);
+    }
+    (search, allowed)
+}
+
+/// `<data_dir>/linux-apps/profiles/<app>/<user>` for an absolute path inside a
+/// managed application profile; `None` for anything else.
+fn managed_profile_root(path: &Path, profiles_dir: &Path) -> Option<PathBuf> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir))
+    {
+        return None;
+    }
+    let relative = path.strip_prefix(profiles_dir).ok()?;
+    let mut parts = relative.components();
+    let app = parts.next()?;
+    let user = parts.next()?;
+    if !matches!(app, Component::Normal(_)) || !matches!(user, Component::Normal(_)) {
+        return None;
+    }
+    Some(profiles_dir.join(app.as_os_str()).join(user.as_os_str()))
+}
+
+/// Icon preference for a theme-name search: a medium PNG, then an SVG, then a
+/// large PNG, then small sizes.
+fn icon_candidate_score(path: &Path) -> u64 {
+    let svg = path
+        .extension()
+        .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("svg"));
+    if svg {
+        return 400;
+    }
+    match png_dimensions(path) {
+        Some((width, height)) => {
+            let side = width.min(height) as u64;
+            if side > 512 {
+                150
+            } else if side >= 96 {
+                600 + side
+            } else if side >= 32 {
+                300 + side
+            } else {
+                side
+            }
+        }
+        None => 0,
+    }
+}
+
+/// Bounded resolver for a batch of desktop-entry `Icon=` values. Resolution is
+/// only allowed inside `allowed` roots (canonicalised once) so neither `..`
+/// nor a symlink can escape the identity's data or the system icon trees.
+pub struct IconResolver {
+    search: Vec<PathBuf>,
+    allowed: Vec<PathBuf>,
+    index: Option<BTreeMap<String, PathBuf>>,
+}
+
+impl IconResolver {
+    pub fn new(search: Vec<PathBuf>, allowed: Vec<PathBuf>) -> Self {
+        let mut search: Vec<PathBuf> = search
+            .into_iter()
+            .filter(|path| path.is_dir())
+            .collect();
+        search.sort();
+        search.dedup();
+        let mut allowed: Vec<PathBuf> = allowed
+            .into_iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .collect();
+        allowed.sort();
+        allowed.dedup();
+        Self {
+            search,
+            allowed,
+            index: None,
+        }
+    }
+
+    /// Resolve one `Icon=` value to validated PNG/SVG bytes.
+    pub fn resolve(&mut self, value: &str) -> Option<DiscoveredIcon> {
+        let value = value.trim();
+        if value.is_empty()
+            || value.chars().count() > MAX_ICON_VALUE_CHARS
+            || value.chars().any(char::is_control)
+        {
+            return None;
+        }
+        if value.starts_with('/') {
+            return self.read_validated(Path::new(value));
+        }
+        if value.contains('/') || value.contains('\\') || !valid_icon_name(value) {
+            return None;
+        }
+        if let Some(path) = self.direct_lookup(value) {
+            if let Some(icon) = self.read_validated(&path) {
+                return Some(icon);
+            }
+        }
+        self.ensure_index();
+        let path = self.index.as_ref()?.get(value)?.clone();
+        self.read_validated(&path)
+    }
+
+    /// Fast path: the conventional FreeDesktop layouts, without walking a
+    /// theme (`hicolor/128x128/apps/name.png`, `scalable/apps/name.svg`,
+    /// `pixmaps/name.png`, …).
+    fn direct_lookup(&self, name: &str) -> Option<PathBuf> {
+        for root in &self.search {
+            for size in ICON_SIZES {
+                let base = root.join(format!("{size}x{size}"));
+                for dir in [base.join("apps"), base] {
+                    for ext in ["png", "svg"] {
+                        let candidate = dir.join(format!("{name}.{ext}"));
+                        if candidate.is_file() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+            for dir in [root.join("scalable").join("apps"), root.join("scalable")] {
+                for ext in ["svg", "png"] {
+                    let candidate = dir.join(format!("{name}.{ext}"));
+                    if candidate.is_file() {
+                        return Some(candidate);
+                    }
+                }
+            }
+            for ext in ["png", "svg"] {
+                let candidate = root.join(format!("{name}.{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    }
+
+    /// Last-resort fallback for arbitrary theme layouts: one bounded walk of the
+    /// search roots, keeping the best file per icon name.
+    fn ensure_index(&mut self) {
+        if self.index.is_some() {
+            return;
+        }
+        let mut index: BTreeMap<String, PathBuf> = BTreeMap::new();
+        let mut scores: BTreeMap<String, u64> = BTreeMap::new();
+        let mut scanned = 0usize;
+        'roots: for root in &self.search {
+            for entry in WalkDir::new(root)
+                .follow_links(false)
+                .max_depth(MAX_ICON_INDEX_DEPTH)
+            {
+                let Ok(entry) = entry else { continue };
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                scanned += 1;
+                if scanned > MAX_ICON_INDEX_FILES {
+                    break 'roots;
+                }
+                let path = entry.path();
+                let is_image = path.extension().is_some_and(|ext| {
+                    let ext = ext.to_string_lossy();
+                    ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("svg")
+                });
+                if !is_image {
+                    continue;
+                }
+                let Some(stem) = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                if stem.is_empty() || stem.len() > 255 {
+                    continue;
+                }
+                let score = icon_candidate_score(path);
+                if scores.get(&stem).copied().unwrap_or(0) < score {
+                    scores.insert(stem.clone(), score);
+                    index.insert(stem, path.to_path_buf());
+                }
+            }
+        }
+        self.index = Some(index);
+    }
+
+    fn read_validated(&self, path: &Path) -> Option<DiscoveredIcon> {
+        let canonical = std::fs::canonicalize(path).ok()?;
+        if !self.allowed.iter().any(|root| canonical.starts_with(root)) {
+            return None;
+        }
+        let icon = read_icon(&canonical)?;
+        if icon.bytes.len() as u64 > MAX_CAPTURED_ICON_BYTES {
+            return None;
+        }
+        Some(DiscoveredIcon {
+            kind: icon.kind,
+            bytes: icon.bytes,
+        })
+    }
+}
+
+/// Resolve and attach the icons of a scanned batch. The identity scan (the
+/// agent) does not duplicate system-entry icons: the server's own system scan
+/// captures those, which keeps the helper response small.
+fn capture_scan_icons(entries: &mut [ScanEntry], roots: &[ScanRoot]) {
+    let agent_scan = roots.iter().any(|root| root.scope != Scope::System);
+    let candidates = entries
+        .iter()
+        .filter(|entry| {
+            entry.icon.is_some()
+                && (!agent_scan || entry.scope != Scope::System.as_str())
+        })
+        .count();
+    if candidates == 0 {
+        return;
+    }
+    let (search, allowed) = scan_icon_roots(roots);
+    let mut resolver = IconResolver::new(search, allowed);
+    let mut budget = MAX_SCAN_ICON_PAYLOAD_BYTES;
+    for entry in entries.iter_mut() {
+        if agent_scan && entry.scope == Scope::System.as_str() {
+            continue;
+        }
+        let Some(value) = entry.icon.as_deref() else {
+            continue;
+        };
+        let Some(icon) = resolver.resolve(value) else {
+            continue;
+        };
+        let encoded = icon.bytes.len().div_ceil(3) * 4;
+        if encoded > budget {
+            continue;
+        }
+        budget -= encoded;
+        entry.icon_data = Some(base64::engine::general_purpose::STANDARD.encode(&icon.bytes));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -656,10 +1129,18 @@ impl DiscoveryHelper for ClientDiscoveryHelper {
 }
 
 // ---------------------------------------------------------------------------
-// Registry (migration 15)
+// Registry (migrations 15 and 17)
 // ---------------------------------------------------------------------------
 
-/// One `discovered_apps` row.
+/// Columns of one `discovered_apps` row. `icon_data` is deliberately excluded:
+/// it is a potentially large BLOB served by the icon endpoint and never needed
+/// by list/get queries.
+pub const ROW_COLUMNS: &str = "id, name, generic_name, comment, exec_json, try_exec, icon, \
+ categories, terminal, startup_wm_class, desktop_path, desktop_id, owner_user_id, scope, \
+ source, install_dir, version, working_dir, status, approved, hidden, last_seen_ms, \
+ last_launched_ms, created_at, updated_at";
+
+/// One `discovered_apps` row (without its icon bytes).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DiscoveredRow {
     pub id: String,
@@ -679,6 +1160,7 @@ pub struct DiscoveredRow {
     pub source: String,
     pub install_dir: Option<String>,
     pub version: Option<String>,
+    pub working_dir: Option<String>,
     pub status: String,
     pub approved: i64,
     pub hidden: i64,
@@ -717,7 +1199,9 @@ impl DiscoveredRow {
         self.visible_to(user_id, is_admin) && self.status == "ready" && !self.exec().is_empty()
     }
 
-    pub fn json(&self, user_id: i64, is_admin: bool) -> Value {
+    /// `has_icon` is whether validated PNG/SVG bytes are stored for this row;
+    /// the icon URL is only advertised when the endpoint can serve it.
+    pub fn json(&self, user_id: i64, is_admin: bool, has_icon: bool) -> Value {
         json!({
             "id": self.id,
             "name": self.name,
@@ -726,6 +1210,9 @@ impl DiscoveredRow {
             "exec": self.exec(),
             "tryExec": self.try_exec,
             "icon": self.icon,
+            "iconUrl": has_icon.then(|| {
+                format!("/api/linux-apps/discovered/{}/icon", self.id)
+            }),
             "categories": self.categories(),
             "terminal": self.terminal == 1,
             "startupWmClass": self.startup_wm_class,
@@ -736,6 +1223,7 @@ impl DiscoveredRow {
             "source": self.source,
             "installDir": self.install_dir,
             "version": self.version,
+            "workingDir": self.working_dir,
             "status": self.status,
             "approved": self.approved == 1,
             "hidden": self.hidden == 1,
@@ -812,20 +1300,28 @@ pub async fn reconcile(
         let exec_json = serde_json::to_string(&entry.exec).unwrap_or_else(|_| "[]".to_string());
         let categories =
             serde_json::to_string(&entry.categories).unwrap_or_else(|_| "[]".to_string());
+        // Re-validate the (trusted) captured icon before storing it.
+        let icon = entry
+            .icon_data
+            .as_deref()
+            .and_then(decode_captured_icon);
+        let (icon_type, icon_data) = match &icon {
+            Some(icon) => (Some(icon.kind), Some(icon.bytes.clone())),
+            None => (None, None),
+        };
         sqlx::query(
             "INSERT INTO discovered_apps (
                  id, name, generic_name, comment, exec_json, try_exec, icon, categories,
                  terminal, startup_wm_class, desktop_path, desktop_id, owner_user_id, scope,
-                 source, install_dir, version, status, approved, hidden, last_seen_ms,
-                 created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 source, install_dir, version, working_dir, icon_type, icon_data, status,
+                 approved, hidden, last_seen_ms, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                  name = excluded.name,
                  generic_name = excluded.generic_name,
                  comment = excluded.comment,
                  exec_json = excluded.exec_json,
                  try_exec = excluded.try_exec,
-                 icon = excluded.icon,
                  categories = excluded.categories,
                  terminal = excluded.terminal,
                  startup_wm_class = excluded.startup_wm_class,
@@ -833,6 +1329,20 @@ pub async fn reconcile(
                  source = excluded.source,
                  install_dir = excluded.install_dir,
                  version = excluded.version,
+                 working_dir = excluded.working_dir,
+                 -- Keep the last known icon when a rescan cannot resolve it;
+                 -- drop it when the entry no longer declares an icon.
+                 icon = excluded.icon,
+                 icon_type = CASE
+                     WHEN excluded.icon IS NULL THEN NULL
+                     WHEN excluded.icon IS NOT discovered_apps.icon THEN excluded.icon_type
+                     ELSE COALESCE(excluded.icon_type, discovered_apps.icon_type)
+                 END,
+                 icon_data = CASE
+                     WHEN excluded.icon IS NULL THEN NULL
+                     WHEN excluded.icon IS NOT discovered_apps.icon THEN excluded.icon_data
+                     ELSE COALESCE(excluded.icon_data, discovered_apps.icon_data)
+                 END,
                  last_seen_ms = excluded.last_seen_ms,
                  updated_at = excluded.updated_at,
                  -- Preserve an administrator's approval/hide decision.
@@ -861,6 +1371,9 @@ pub async fn reconcile(
         .bind(&entry.source)
         .bind(&entry.install_dir)
         .bind(&entry.version)
+        .bind(&entry.working_dir)
+        .bind(icon_type)
+        .bind(icon_data)
         .bind(status)
         .bind(approved)
         .bind(hidden)
@@ -918,19 +1431,19 @@ pub async fn list(
     is_admin: bool,
 ) -> AppResult<Vec<DiscoveredRow>> {
     let rows: Vec<DiscoveredRow> = if is_admin {
-        sqlx::query_as(
-            "SELECT * FROM discovered_apps
-             ORDER BY hidden ASC, scope ASC, name COLLATE NOCASE ASC, id ASC",
-        )
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {ROW_COLUMNS} FROM discovered_apps
+             ORDER BY hidden ASC, scope ASC, name COLLATE NOCASE ASC, id ASC"
+        )))
         .fetch_all(pool)
         .await?
     } else {
-        sqlx::query_as(
-            "SELECT * FROM discovered_apps
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT {ROW_COLUMNS} FROM discovered_apps
              WHERE (owner_user_id = ?1 AND hidden = 0)
                 OR (scope = 'system' AND approved = 1 AND hidden = 0)
-             ORDER BY scope ASC, name COLLATE NOCASE ASC, id ASC",
-        )
+             ORDER BY scope ASC, name COLLATE NOCASE ASC, id ASC"
+        )))
         .bind(user_id)
         .fetch_all(pool)
         .await?
@@ -940,11 +1453,13 @@ pub async fn list(
 
 /// One row by id.
 pub async fn get(pool: &SqlitePool, id: &str) -> AppResult<DiscoveredRow> {
-    sqlx::query_as("SELECT * FROM discovered_apps WHERE id = ?")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or(AppError::NotFound("Discovered application not found"))
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {ROW_COLUMNS} FROM discovered_apps WHERE id = ?"
+    )))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::NotFound("Discovered application not found"))
 }
 
 /// Administrator action: approve/hide/rename. `None` leaves a field unchanged.
@@ -1005,16 +1520,94 @@ pub async fn delete(pool: &SqlitePool, id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Administrator action: register an existing executable by hand (no
-/// installer runs). The file is not modified; only the inventory row is added.
+/// One "Import existing application" request.
+#[derive(Debug, Clone, Default)]
+pub struct ManualImport {
+    /// Absolute path of an existing executable.
+    pub path: String,
+    /// Display name; empty/omitted uses the file name.
+    pub name: Option<String>,
+    /// Extra argv passed after the program (never a shell string).
+    pub args: Vec<String>,
+    /// Optional absolute working directory (the `.desktop` `Path=` equivalent).
+    pub working_dir: Option<String>,
+    /// Optional icon-theme name or absolute `.png`/`.svg` path.
+    pub icon: Option<String>,
+    /// Owner account; omitted registers a system-wide entry.
+    pub owner_user_id: Option<i64>,
+}
+
+/// Validate the extra argv of an import. Nothing is ever passed through a
+/// shell, so only values that cannot be represented in an argv array (NUL) and
+/// absurd lengths are rejected.
+pub fn validate_import_args(args: &[String]) -> AppResult<()> {
+    if args.len() > MAX_EXEC_ARGS {
+        return Err(AppError::bad_request(format!(
+            "at most {MAX_EXEC_ARGS} arguments are accepted"
+        )));
+    }
+    for arg in args {
+        if arg.len() > 4096 || arg.contains('\0') {
+            return Err(AppError::bad_request(
+                "each argument must be at most 4096 bytes without NUL characters",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the optional working directory of an imported application.
+pub fn validate_working_dir(value: &str) -> AppResult<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 4096 || value.contains('\0') {
+        return Err(AppError::bad_request(
+            "working directory must be an absolute directory path",
+        ));
+    }
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(AppError::bad_request(
+            "working directory must be an absolute, clean directory path",
+        ));
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(AppError::bad_request(
+                "working directory must be a directory",
+            ))
+        }
+        Ok(_) => {}
+        // An identity-owned directory may be unreadable for the server; the
+        // launch itself runs as the identity and reports a real error then.
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {}
+        Err(error) => {
+            return Err(AppError::bad_request(format!(
+                "cannot read working directory {value}: {error}"
+            )))
+        }
+    }
+    Ok(value.to_string())
+}
+
+/// Administrator action: register an existing executable by hand (no installer
+/// runs). The file is not modified; only the inventory row is added. `icon`
+/// is the icon resolved by the caller from the request's icon value, if any.
 pub async fn import(
     pool: &SqlitePool,
-    path: &str,
-    name: &str,
-    owner_user_id: Option<i64>,
+    request: &ManualImport,
+    icon: Option<DiscoveredIcon>,
 ) -> AppResult<DiscoveredRow> {
-    let path = path.trim();
-    if path.is_empty() || !Path::new(path).is_absolute() || path.contains('\0') {
+    let path = request.path.trim();
+    if path.is_empty()
+        || !Path::new(path).is_absolute()
+        || path.contains('\0')
+        || path.chars().any(char::is_control)
+        || path.len() > 4096
+    {
         return Err(AppError::bad_request("path must be an absolute file path"));
     }
     let metadata = match std::fs::metadata(path) {
@@ -1036,7 +1629,29 @@ pub async fn import(
             ));
         }
     }
-    let name = name.trim();
+    validate_import_args(&request.args)?;
+    let working_dir = match request
+        .working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(validate_working_dir(value)?),
+        None => None,
+    };
+    let icon_value = match request
+        .icon
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(validate_icon_value(value)?),
+        None => None,
+    };
+    let name = request.name.as_deref().unwrap_or("").trim();
+    if name.chars().any(char::is_control) {
+        return Err(AppError::bad_request("name contains invalid characters"));
+    }
     let name = if name.is_empty() {
         Path::new(path)
             .file_stem()
@@ -1045,9 +1660,10 @@ pub async fn import(
     } else {
         name.to_string()
     };
-    if name.len() > 256 {
+    if name.chars().count() > 256 {
         return Err(AppError::bad_request("name must be 1-256 characters"));
     }
+    let owner_user_id = request.owner_user_id;
     let scope = if owner_user_id.is_some() {
         Scope::User
     } else {
@@ -1055,21 +1671,44 @@ pub async fn import(
     };
     let id = stable_id(scope, owner_user_id, path);
     let now = db::now_ms();
-    let exec = serde_json::to_string(&vec![path.to_string()]).unwrap_or_else(|_| "[]".to_string());
+    let mut exec = Vec::with_capacity(request.args.len() + 1);
+    exec.push(path.to_string());
+    exec.extend(request.args.iter().cloned());
+    let exec_json = serde_json::to_string(&exec).unwrap_or_else(|_| "[]".to_string());
+    let (icon_type, icon_data) = match &icon {
+        Some(icon) => (Some(icon.kind), Some(icon.bytes.clone())),
+        None => (None, None),
+    };
     sqlx::query(
         "INSERT INTO discovered_apps (
-             id, name, exec_json, desktop_path, owner_user_id, scope, source, status,
-             approved, hidden, install_dir, last_seen_ms, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'manual', 'ready', 1, 0, ?, ?, ?, ?)
+             id, name, exec_json, try_exec, icon, icon_type, icon_data, desktop_path,
+             owner_user_id, scope, source, status, approved, hidden, install_dir,
+             working_dir, last_seen_ms, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'manual', 'ready', 1, 0, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-             name = excluded.name, exec_json = excluded.exec_json, scope = excluded.scope,
-             owner_user_id = excluded.owner_user_id, status = 'ready', approved = 1,
-             hidden = 0, last_seen_ms = excluded.last_seen_ms,
+             name = excluded.name,
+             exec_json = excluded.exec_json,
+             icon = excluded.icon,
+             icon_type = excluded.icon_type,
+             icon_data = excluded.icon_data,
+             desktop_path = excluded.desktop_path,
+             scope = excluded.scope,
+             owner_user_id = excluded.owner_user_id,
+             source = 'manual',
+             status = 'ready',
+             approved = 1,
+             hidden = 0,
+             install_dir = excluded.install_dir,
+             working_dir = excluded.working_dir,
+             last_seen_ms = excluded.last_seen_ms,
              updated_at = excluded.updated_at",
     )
     .bind(&id)
     .bind(&name)
-    .bind(&exec)
+    .bind(&exec_json)
+    .bind(&icon_value)
+    .bind(icon_type)
+    .bind(icon_data)
     .bind(path)
     .bind(owner_user_id)
     .bind(scope.as_str())
@@ -1078,12 +1717,46 @@ pub async fn import(
             .parent()
             .map(|parent| parent.display().to_string()),
     )
+    .bind(&working_dir)
     .bind(now)
     .bind(now)
     .bind(now)
     .execute(pool)
     .await?;
     get(pool, &id).await
+}
+
+/// The stored icon (validated PNG/SVG) of one discovered entry, if any.
+pub async fn icon(pool: &SqlitePool, id: &str) -> AppResult<Option<(String, Vec<u8>)>> {
+    let row: Option<(Option<String>, Option<Vec<u8>>)> =
+        sqlx::query_as("SELECT icon_type, icon_data FROM discovered_apps WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(match row {
+        Some((Some(kind), Some(bytes))) => validated_icon_payload(&kind, bytes),
+        _ => None,
+    })
+}
+
+/// Ids of the entries that have a stored icon (used for the list JSON).
+pub async fn stored_icon_ids(pool: &SqlitePool) -> AppResult<BTreeSet<String>> {
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM discovered_apps WHERE icon_type IS NOT NULL AND icon_data IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().map(|(id,)| id).collect())
+}
+
+fn validated_icon_payload(kind: &str, bytes: Vec<u8>) -> Option<(String, Vec<u8>)> {
+    if kind != "png" && kind != "svg" {
+        return None;
+    }
+    if bytes.is_empty() || bytes.len() as u64 > MAX_CAPTURED_ICON_BYTES {
+        return None;
+    }
+    (sniff_icon_bytes(&bytes)? == kind).then_some((kind.to_string(), bytes))
 }
 
 /// Record that an entry was just launched.
@@ -1333,6 +2006,8 @@ mod tests {
             exec: vec!["/bin/true".into()],
             try_exec: None,
             icon: None,
+            working_dir: None,
+            icon_data: None,
             categories: vec![],
             terminal: false,
             startup_wm_class: Some("app".into()),
@@ -1489,9 +2164,17 @@ mod tests {
         let binary = dir.path().join("tool");
         std::fs::copy("/bin/true", &binary).unwrap();
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let row = import(&pool, &binary.display().to_string(), "My Tool", None)
-            .await
-            .unwrap();
+        let row = import(
+            &pool,
+            &ManualImport {
+                path: binary.display().to_string(),
+                name: Some("My Tool".into()),
+                ..ManualImport::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(row.name, "My Tool");
         assert_eq!(row.source, "manual");
         assert_eq!(row.status, "ready");

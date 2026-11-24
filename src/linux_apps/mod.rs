@@ -30,7 +30,7 @@ pub mod proxy;
 mod updates;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
@@ -640,9 +640,41 @@ impl LinuxApps {
     /// Entries the person may see (administrators see everything).
     pub async fn discovered_list(&self, user: &AuthUser) -> AppResult<Vec<Value>> {
         let rows = discovery::list(&self.db, user.id, user.is_admin()).await?;
+        let stored = discovery::stored_icon_ids(&self.db).await?;
+        let mut with_icon: BTreeSet<String> = BTreeSet::new();
+        let mut homes: HashMap<i64, Option<PathBuf>> = HashMap::new();
+        for owner in rows.iter().filter_map(|row| row.owner_user_id) {
+            if !homes.contains_key(&owner) {
+                homes.insert(owner, self.identity_home(owner).await);
+            }
+        }
+        // Rows that predate icon capture (or a manual import whose icon could
+        // not be stored) still advertise their icon when the server can resolve
+        // it right now; a rescan stores the bytes permanently.
+        let mut resolvers: HashMap<Option<i64>, discovery::IconResolver> = HashMap::new();
+        for row in &rows {
+            if stored.contains(&row.id) {
+                with_icon.insert(row.id.clone());
+                continue;
+            }
+            let Some(value) = row.icon.as_deref() else {
+                continue;
+            };
+            let resolver = resolvers.entry(row.owner_user_id).or_insert_with(|| {
+                let home = row
+                    .owner_user_id
+                    .and_then(|owner| homes.get(&owner).cloned())
+                    .flatten();
+                let (search, allowed) = self.discovered_icon_roots(row, home.as_deref());
+                discovery::IconResolver::new(search, allowed)
+            });
+            if resolver.resolve(value).is_some() {
+                with_icon.insert(row.id.clone());
+            }
+        }
         Ok(rows
             .iter()
-            .map(|row| row.json(user.id, user.is_admin()))
+            .map(|row| row.json(user.id, user.is_admin(), with_icon.contains(&row.id)))
             .collect())
     }
 
@@ -724,7 +756,9 @@ impl LinuxApps {
             app_name: row.name.clone(),
             command,
             env: Vec::new(),
-            cwd: None,
+            // The session applies it only when it is inside the managed
+            // application trees (native_session::managed_cwd).
+            cwd: row.working_dir.as_deref().map(PathBuf::from),
             memory_mb: self.config.linux_app_memory_mb,
             cpus: self.config.linux_app_cpus,
             tasks: self.config.linux_app_tasks,
@@ -733,10 +767,11 @@ impl LinuxApps {
         let (run, session) = self.native.launch(user, request).await?;
         discovery::mark_launched(&self.db, &row.id).await;
         discovery::publish_changed(&self.events, row.owner_user_id);
+        let has_icon = self.discovered_has_icon(&row.id).await;
         Ok(json!({
             "run": run,
             "session": session,
-            "app": row.json(user.id, user.is_admin()),
+            "app": row.json(user.id, user.is_admin(), has_icon),
         }))
     }
 
@@ -751,7 +786,8 @@ impl LinuxApps {
         self.ensure_linux_apps_enabled()?;
         let row = discovery::patch(&self.db, id, approved, hidden, name).await?;
         discovery::publish_changed(&self.events, row.owner_user_id);
-        Ok(row.json(row.owner_user_id.unwrap_or(0), true))
+        let has_icon = self.discovered_has_icon(&row.id).await;
+        Ok(row.json(row.owner_user_id.unwrap_or(0), true, has_icon))
     }
 
     /// Administrator: forget one registry entry (never touches installed files).
@@ -767,14 +803,109 @@ impl LinuxApps {
     /// installer (the "Import existing application" action).
     pub async fn discovered_import(
         &self,
-        path: &str,
-        name: &str,
-        owner_user_id: Option<i64>,
+        request: &discovery::ManualImport,
     ) -> AppResult<Value> {
         self.ensure_linux_apps_enabled()?;
-        let row = discovery::import(&self.db, path, name, owner_user_id).await?;
+        // Resolve the icon the administrator named before the row is stored:
+        // only the server-readable icon roots are used here (a rescan or the
+        // icon endpoint can still resolve an identity-owned path later).
+        let icon = match request.icon.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => {
+                let home = match request.owner_user_id {
+                    Some(owner) => self.identity_home(owner).await,
+                    None => None,
+                };
+                let (search, allowed) = discovery::app_icon_roots(
+                    Path::new(request.path.trim()),
+                    None,
+                    home.as_deref(),
+                    &self.config.linux_apps_dir().join("profiles"),
+                );
+                let mut resolver = discovery::IconResolver::new(search, allowed);
+                // Validate the value even when it cannot be resolved.
+                let value = discovery::validate_icon_value(value)?;
+                resolver.resolve(&value)
+            }
+            None => None,
+        };
+        let row = discovery::import(&self.db, request, icon).await?;
         discovery::publish_changed(&self.events, row.owner_user_id);
-        Ok(row.json(owner_user_id.unwrap_or(0), true))
+        let has_icon = self.discovered_has_icon(&row.id).await;
+        Ok(row.json(request.owner_user_id.unwrap_or(0), true, has_icon))
+    }
+
+    /// The stored (or, as a fallback, freshly resolved) icon of one discovered
+    /// entry. Only entries visible to the caller are served.
+    pub async fn discovered_icon(
+        &self,
+        user: &AuthUser,
+        id: &str,
+    ) -> AppResult<(String, Vec<u8>)> {
+        self.ensure_linux_apps_enabled()?;
+        let row = discovery::get(&self.db, id).await?;
+        if !row.visible_to(user.id, user.is_admin()) {
+            return Err(AppError::NotFound("Discovered application not found"));
+        }
+        if let Some((kind, bytes)) = discovery::icon(&self.db, id).await? {
+            return Ok((kind, bytes));
+        }
+        if let Some(icon) = self.resolve_discovered_icon(&row).await {
+            return Ok((icon.kind.to_string(), icon.bytes));
+        }
+        Err(AppError::NotFound("this application has no icon"))
+    }
+
+    /// Is an icon stored for one discovered entry?
+    async fn discovered_has_icon(&self, id: &str) -> bool {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM discovered_apps
+             WHERE id = ? AND icon_type IS NOT NULL AND icon_data IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_one(&self.db)
+        .await
+        .map(|count| count > 0)
+        .unwrap_or(false)
+    }
+
+    /// The owner identity's home directory, when it exists.
+    async fn identity_home(&self, user_id: i64) -> Option<PathBuf> {
+        sqlx::query_scalar::<_, String>("SELECT home FROM linux_identities WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_optional(&self.db)
+            .await
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
+    }
+
+    /// Search and allowed roots for one inventory row's icon.
+    fn discovered_icon_roots(
+        &self,
+        row: &discovery::DiscoveredRow,
+        home: Option<&Path>,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        discovery::app_icon_roots(
+            Path::new(&row.desktop_path),
+            row.install_dir.as_deref().map(Path::new),
+            home,
+            &self.config.linux_apps_dir().join("profiles"),
+        )
+    }
+
+    /// Resolve a row's icon from the file system (bounded, allowed roots only).
+    async fn resolve_discovered_icon(
+        &self,
+        row: &discovery::DiscoveredRow,
+    ) -> Option<discovery::DiscoveredIcon> {
+        let value = row.icon.as_deref()?;
+        let home = match row.owner_user_id {
+            Some(owner) => self.identity_home(owner).await,
+            None => None,
+        };
+        let (search, allowed) = self.discovered_icon_roots(row, home.as_deref());
+        let mut resolver = discovery::IconResolver::new(search, allowed);
+        resolver.resolve(value)
     }
 
     /// Scan the standard system application directories (the server can read

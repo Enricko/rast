@@ -35,6 +35,17 @@
 //! | POST | `/api/linux-apps/{id}/migrate` | administrator: migrate a Docker-backed app to native |
 //! | POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return it to the Docker backend |
 //! | POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: remove retained legacy data |
+//!
+//! Discovered applications (installed outside App Center):
+//!
+//! | Method | Path | Who |
+//! |---|---|---|
+//! | GET | `/api/linux-apps/discovered` | any signed-in user: the discovered inventory |
+//! | POST | `/api/linux-apps/discovered/scan` | any signed-in user: rescan now |
+//! | POST | `/api/linux-apps/discovered/import` | administrator: register an existing executable |
+//! | GET | `/api/linux-apps/discovered/{id}/icon` | any signed-in user: the entry's icon |
+//! | PATCH/DELETE | `/api/linux-apps/discovered/{id}` | administrator: approve/hide/rename/forget |
+//! | POST | `/api/linux-apps/discovered/{id}/launch` | any signed-in user: launch it |
 
 use axum::{
     extract::{Path, Query, State},
@@ -102,6 +113,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/linux-apps/discovered/{id}/launch",
             post(discovered_launch),
+        )
+        .route(
+            "/api/linux-apps/discovered/{id}/icon",
+            get(discovered_icon),
         )
         .route("/api/linux-apps/{id}/migrate", post(migrate))
         .route(
@@ -615,6 +630,15 @@ struct DiscoveredImportRequest {
     path: String,
     /// Display name (default: the file's stem).
     name: Option<String>,
+    /// Extra argv passed after the program (never a shell string).
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    /// Optional absolute working directory.
+    #[serde(default)]
+    working_dir: Option<String>,
+    /// Optional icon-theme name or absolute `.png`/`.svg` path.
+    #[serde(default)]
+    icon: Option<String>,
     /// Owner account; omitted registers a system-wide entry.
     owner_user_id: Option<i64>,
 }
@@ -624,14 +648,43 @@ async fn discovered_import(
     _admin: AdminUser,
     Json(body): Json<DiscoveredImportRequest>,
 ) -> AppResult<Json<Value>> {
-    Ok(Json(
-        state
-            .linux_apps
-            .discovered_import(
-                &body.path,
-                body.name.as_deref().unwrap_or_default(),
-                body.owner_user_id,
-            )
-            .await?,
-    ))
+    let request = crate::linux_apps::discovery::ManualImport {
+        path: body.path,
+        name: body.name,
+        args: body.args.unwrap_or_default(),
+        working_dir: body.working_dir,
+        icon: body.icon,
+        owner_user_id: body.owner_user_id,
+    };
+    Ok(Json(state.linux_apps.discovered_import(&request).await?))
+}
+
+/// The entry's own icon (PNG or SVG). The bytes are validated and stored by a
+/// scan or an import, so this never reads the file system: no traversal and no
+/// symlink escape is possible through the URL.
+async fn discovered_icon(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Response> {
+    let (kind, bytes) = state.linux_apps.discovered_icon(&user, &id).await?;
+    let content_type = if kind == "svg" {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    };
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    // The URL is stable; a rescan may replace the bytes, so the icon may be
+    // cached for an hour rather than forever (managed app icons use ?v=).
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=3600"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+    );
+    Ok(response)
 }
