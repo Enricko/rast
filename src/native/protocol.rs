@@ -530,6 +530,8 @@ pub fn parse_request_line(line: &[u8]) -> Result<NativeRequest, RequestParseErro
         "identity_remove" => NativeOp::IdentityRemove(op_from(rest, "identity_remove")?),
         "session_start" => NativeOp::SessionStart(op_from(rest, "session_start")?),
         "session_stop" => NativeOp::SessionStop(op_from(rest, "session_stop")?),
+        "display_start" => NativeOp::DisplayStart(op_from(rest, "display_start")?),
+        "display_stop" => NativeOp::DisplayStop(op_from(rest, "display_stop")?),
         "unit_status" => NativeOp::UnitStatus(op_from(rest, "unit_status")?),
         "units_list" => no_fields(rest, "units_list").map(|_| NativeOp::UnitsList)?,
         "rootfs_start" => no_fields(rest, "rootfs_start").map(|_| NativeOp::RootfsStart)?,

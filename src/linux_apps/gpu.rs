@@ -50,6 +50,18 @@ fn read_text(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// The NVIDIA Xorg driver module path used by Ubuntu/Debian multiarch packages.
+fn nvidia_xorg_driver_present() -> bool {
+    const MODULE_PATHS: &[&str] = &[
+        "/usr/lib/xorg/modules/drivers/nvidia_drv.so",
+        "/usr/lib/x86_64-linux-gnu/nvidia/xorg/nvidia_drv.so",
+        "/usr/lib/aarch64-linux-gnu/nvidia/xorg/nvidia_drv.so",
+        "/usr/lib/nvidia/xorg/nvidia_drv.so",
+        "/usr/lib64/nvidia/xorg/nvidia_drv.so",
+    ];
+    MODULE_PATHS.iter().any(|path| Path::new(path).exists())
+}
+
 fn library_present(prefix: &str) -> bool {
     const LIB_DIRS: &[&str] = &[
         "/usr/lib/x86_64-linux-gnu",
@@ -233,7 +245,7 @@ pub fn gpu_display_available(_config: &Config) -> bool {
     let gpu = detect_gpu();
     gpu.vendor == "nvidia"
         && gpu.nvidia_device_nodes
-        && Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists()
+        && nvidia_xorg_driver_present()
         && find_in_path("Xorg").is_some()
         && find_in_path("glxinfo").is_some()
 }
@@ -291,7 +303,7 @@ fn detect_display(config: &Config, gpu_display_available: bool) -> DisplayCapabi
             }
         }
     };
-    let nvidia_xorg_driver = Path::new("/usr/lib/xorg/modules/drivers/nvidia_drv.so").exists();
+    let nvidia_xorg_driver = nvidia_xorg_driver_present();
     let xorg = find_in_path("Xorg").is_some();
     let glxinfo = find_in_path("glxinfo").is_some();
     let gpu_display_configured = active == "custom"
@@ -470,7 +482,20 @@ mod tests {
     fn default_backend_is_the_bundled_xvfb() {
         let cfg = config(None, None);
         assert_eq!(display_backend_arg(&cfg), "--xvfb=Xvfb");
-        assert_eq!(resolved_display_backend(&cfg), "xvfb");
+        // `auto` prefers a verified GPU display when the host can provide one
+        // (this test must stay deterministic on GPU and non-GPU hosts alike).
+        let expected = if gpu_display_available(&cfg) {
+            "gpu"
+        } else {
+            "xvfb"
+        };
+        assert_eq!(resolved_display_backend(&cfg), expected);
+    }
+
+    #[test]
+    fn the_strict_gpu_backend_is_reported_as_gpu() {
+        let cfg = config(Some("gpu"), None);
+        assert_eq!(resolved_display_backend(&cfg), "gpu");
     }
 
     #[test]
