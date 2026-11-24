@@ -874,3 +874,32 @@ dispatch 129→26 ms, cold session start 12.09 s → pre-warmed/lazy path ~3 s.
 This final run confirms the deployed build is healthy and records the
 host-contention caveat; a clean re-run on a quiet host is scheduled for the
 final acceptance report.
+
+## 12. Final acceptance run (2026-11-24, build 8a08a9a3)
+
+Full reports: `tests/e2e/results/perf-runtime2-runtime21-acceptance-2026-11-24-2026-11-24.{json,md,evidence.txt}`.
+Environment: the host was still under elevated disk-I/O pressure during this run
+and the new benchmark session again used the software **Xvfb** backend
+(`Display: Xvfb software (:101)`, load 3.23→4.70). Numbers are an
+environment-degraded reference, published with the evidence.
+
+| Metric | p50 / p95 | Samples | Notes |
+| --- | --- | --- | --- |
+| Cold launch — click → adopted window | 4523 / 4911 ms | 2 | session stopped first |
+| Cold launch — placeholder window | 267 / 287 ms | 2 | shell responsiveness |
+| Warm launch — click → adopted window | 869 / 945 ms | 4 | shared session kept |
+| Warm launch — adopted → first painted | 495 / 521 ms | 4 | |
+| Input latency keydown → changed pixel | 183 / 313 ms | 20 | polling ≈56 ms; upper bound |
+| Typing burst — dispatch / drain / total | 26 / 349 / 374 ms | 3 | p95 drain 525 / total 551 |
+| Idle CPU | 31.1 % of one core | 1 | under load; earlier quiet 10.3 % |
+| Idle memory (current) | ~139.6 MiB | 1 | cgroup memory.current |
+| Encoder | h264 (quality 70, speed 67) | — | xpra info; batch avg 3–13 ms, lz4 |
+| Server-encoded fps (animation) | 60.3 | 1 | 60 Hz canvas phase |
+| Server-encoded fps (video) | 32.6 | 1 | local VP8 video phase |
+
+The authoritative product comparison remains §7.3 (input 217→182 ms p50,
+398→280 p95, typing total 825→337 ms, dispatch 129→26 ms, cold session start
+12.09 s → pre-warmed path ~3 s). This acceptance run confirms the deployed
+build is healthy under adverse host conditions and current performance is
+consistent with the earlier normal-load measurements for input latency
+(183/313 ms under load).
