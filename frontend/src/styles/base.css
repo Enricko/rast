@@ -330,9 +330,9 @@ pre {
    each icon in a cell of this size (and snaps drags to it). */
 .desktop-icons {
   --icon-cell-w: 104px;
-  --icon-cell-h: 112px;
+  --icon-cell-h: 108px;
   position: absolute;
-  inset: 16px 16px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 16px;
+  inset: 16px 12px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 12px;
   z-index: 2;
   pointer-events: none;
 }
@@ -418,10 +418,7 @@ pre {
   background: var(--surface);
   backdrop-filter: blur(26px) saturate(1.2);
   box-shadow: var(--shadow-window);
-  /* Visible so the resize grab strips can sit *outside* the window (a hidden
-     overflow clipped them: the bottom-right handle was unreachable under the
-     next window). Window content clips itself in `.win-body`. */
-  overflow: visible;
+  overflow: hidden;
   opacity: 0;
   transform: translateY(8px) scale(0.985);
   transition: opacity 0.16s ease, transform 0.16s ease;
@@ -458,7 +455,6 @@ pre {
 
 .win-titlebar {
   height: var(--titlebar-h);
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -520,7 +516,6 @@ pre {
   container: win / inline-size;
   flex: 1;
   overflow: auto;
-  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   position: relative;
   display: flex;
   flex-direction: column;
@@ -539,16 +534,12 @@ pre {
   cursor: ns-resize;
 }
 
-/* The grab strips sit *outside* the window so the content keeps every pixel:
-   an adopted Xpra canvas paints to its full edge, and an overlay strip would
-   swallow clicks on controls near the border (Chrome's profile/menu buttons). */
-
 .win-resize-n {
-  top: -6px;
+  top: -3px;
 }
 
 .win-resize-s {
-  bottom: -6px;
+  bottom: -3px;
 }
 
 .win-resize-e,
@@ -560,11 +551,11 @@ pre {
 }
 
 .win-resize-e {
-  right: -6px;
+  right: -3px;
 }
 
 .win-resize-w {
-  left: -6px;
+  left: -3px;
 }
 
 .win-resize-ne,
@@ -576,26 +567,26 @@ pre {
 }
 
 .win-resize-ne {
-  top: -8px;
-  right: -8px;
+  top: -4px;
+  right: -4px;
   cursor: nesw-resize;
 }
 
 .win-resize-nw {
-  top: -8px;
-  left: -8px;
+  top: -4px;
+  left: -4px;
   cursor: nwse-resize;
 }
 
 .win-resize-se {
-  bottom: -8px;
-  right: -8px;
+  bottom: -4px;
+  right: -4px;
   cursor: nwse-resize;
 }
 
 .win-resize-sw {
-  bottom: -8px;
-  left: -8px;
+  bottom: -4px;
+  left: -4px;
   cursor: nesw-resize;
 }
 
@@ -1623,8 +1614,8 @@ pre.code {
   /* Phones: four columns across, filled row by row. */
   .desktop-icons {
     --icon-columns: 4;
-    --icon-cell-h: 104px;
-    inset: 16px 16px calc(var(--taskbar-total, var(--taskbar-h)) + 16px) 16px;
+    --icon-cell-h: 100px;
+    inset: 12px 8px calc(var(--taskbar-total, var(--taskbar-h)) + 12px) 8px;
   }
 
   .desktop-icon {
@@ -4107,76 +4098,4 @@ kbd {
   .impact-list {
     max-height: 220px;
   }
-}
-
-/* Fine-grid shortcut drag: snapped placement preview. */
-.desktop-icon-drop {
-  position: absolute;
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  pointer-events: none;
-  z-index: 4;
-}
-
-.desktop-icon-drop.is-blocked {
-  border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-}
-
-/* Desktop marquee multi-selection. */
-.desktop-marquee {
-  position: absolute;
-  z-index: 4;
-  border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-radius: 4px;
-  pointer-events: none;
-}
-
-html.is-selecting,
-html.is-selecting * {
-  user-select: none !important;
-  cursor: crosshair;
-}
-
-.desktop-icon.is-multi-selected {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  border-color: var(--accent);
-}
-
-.desktop-widget.is-multi-selected {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Desktop group-drag preview and File Station marquee/bulk-drop feedback. */
-.desktop-group-preview {
-  position: absolute;
-  z-index: 4;
-  border: 2px dashed var(--accent);
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-  pointer-events: none;
-}
-
-.desktop-group-preview.is-blocked {
-  border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 10%, transparent);
-}
-
-.fs-marquee {
-  position: absolute;
-  z-index: 30;
-  border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-  border-radius: 4px;
-  pointer-events: none;
-}
-
-.fs-card.is-drop-target,
-.fs-table tr.is-drop-target {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }

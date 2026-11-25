@@ -10,11 +10,8 @@
 //! * [`shell`] — the defaults on every login shell's PATH (`/etc/profile.d`).
 //! * [`service`] — the orchestration used by the HTTP API.
 
-pub mod accounts;
 pub mod archive;
-pub mod authoring;
 pub mod catalog;
-pub mod catalog_cli;
 pub mod github;
 pub mod host;
 pub mod install;

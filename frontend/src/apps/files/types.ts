@@ -3,19 +3,6 @@
 import { ApiError } from "../../core/api";
 import type { FileEntry, FileListing } from "../../core/types";
 
-/** Logical path of the server's own file system (super administrators only). */
-export const SYSTEM_ROOT = "/@root";
-
-/** Whether a logical path is on the root file system: no quota, no recycle bin, everything as root. */
-export function isSystemPath(path: string): boolean {
-  return path === SYSTEM_ROOT || path.startsWith(`${SYSTEM_ROOT}/`);
-}
-
-/** The real server path behind a root file system logical path (`/@root/etc` → `/etc`). */
-export function systemPathLabel(path: string): string {
-  return path.slice(SYSTEM_ROOT.length) || "/";
-}
-
 /** Friendly copy shown when a folder/share/file becomes inaccessible mid-session. */
 export const ACCESS_CHANGED_MESSAGE =
   "Your access to this folder was changed. You may no longer have permission to view it.";

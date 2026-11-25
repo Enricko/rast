@@ -4,7 +4,6 @@
 // installed live in App Center ("Get more apps").
 
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition } from "../../core/app";
-import { onPackageApps } from "../package-apps";
 import { h } from "../../core/dom";
 import { appIconSvg, iconSvg } from "../../core/icons";
 import { contextMenu, type ContextMenuEntry } from "../../core/ui";
@@ -166,10 +165,8 @@ function mountLauncher(ctx: AppContext): void {
     }
   });
 
-  // Installs, uninstalls and access changes show up right away; Package
-  // Center app packages join the same list when their registry loads.
+  // Installs, uninstalls and access changes show up right away.
   ctx.onDispose(ctx.store.subscribe(() => render()));
-  ctx.onDispose(onPackageApps(() => render(true)));
   render(true);
   window.setTimeout(() => search.focus(), 0);
 }

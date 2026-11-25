@@ -262,7 +262,7 @@ pub async fn login(
         state.config.secure_cookies,
     );
     let body = LoginResponse {
-        user: users::dto(&state.db, record).await?,
+        user: UserDto::from(record),
         csrf_token,
         expires_at: new_session.expires_at,
     };
@@ -333,14 +333,10 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
     let mut apps = BTreeMap::new();
     for app_id in APP_IDS {
         let grant = access::app_access(&state.db, &user, app_id).await?;
-        // The Terminal is unavailable when the server administrator disabled
-        // it (or on non-Linux hosts): the launcher must not offer a dead app.
-        let available = *app_id != "terminal"
-            || (state.config.terminal.enabled && crate::terminal::manager::supported());
         apps.insert(
             (*app_id).to_string(),
             AppPermissionDto {
-                allowed: grant.allowed && available,
+                allowed: grant.allowed,
                 read_only: grant.read_only,
                 label: app_label(app_id).to_string(),
                 installed: grant.fallback != "not-installed",
@@ -362,15 +358,13 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
         },
         permissions: PermissionsDto { apps, groups },
         server_time: db::now_ms(),
-        user: users::dto(&state.db, record).await?,
+        user: UserDto::from(record),
     }))
 }
 
 /// POST /api/auth/logout
 pub async fn logout(State(state): State<AppState>, user: AuthUser) -> AppResult<Response> {
     session::revoke(&state.db, &user.session_id).await?;
-    // Signed-out accounts must not keep a live shell around.
-    state.terminal.close_user(user.id).await;
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -508,7 +502,6 @@ pub async fn revoke_all_sessions(
     user: AuthUser,
 ) -> AppResult<Json<serde_json::Value>> {
     let n = session::revoke_all_for_user(&state.db, user.id, Some(&user.session_id)).await?;
-    state.terminal.close_user(user.id).await;
     audit::record_with_events(
         &state.db,
         &state.events,
@@ -615,8 +608,6 @@ pub async fn setup(
         Some(0),
     )
     .await?;
-    // The first administrator owns the server.
-    users::set_super_admin(&state.db, user.id, true).await?;
     // Invalidate the token: one-shot.
     let _ = db::set_setting(&state.db, "setup_token_hash", "").await;
     let _ = db::set_setting(&state.db, "setup_token_expires", "0").await;
@@ -634,7 +625,7 @@ pub async fn setup(
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
-            "user": users::dto(&state.db, user).await?,
+            "user": UserDto::from(user),
             "message": "administrator created; sign in to continue"
         })),
     )

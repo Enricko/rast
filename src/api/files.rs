@@ -38,7 +38,7 @@ use crate::{
 /// Sandboxing CSP for inline previews. `sandbox` without `allow-scripts` means
 /// even an SVG/HTML payload that somehow got a markup content type cannot run
 /// script in the application origin or read the session cookie.
-pub(crate) const PREVIEW_CSP: &str = "sandbox; default-src 'none'; img-src 'self' data: blob:; \
+const PREVIEW_CSP: &str = "sandbox; default-src 'none'; img-src 'self' data: blob:; \
 style-src 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'none'; \
 frame-ancestors 'self'";
 
@@ -195,7 +195,7 @@ fn required_path(query: &PathQuery) -> AppResult<String> {
         .ok_or_else(|| AppError::bad_request("path is required"))
 }
 
-pub(crate) async fn audit_file(
+async fn audit_file(
     state: &AppState,
     user: &AuthUser,
     ip: &ClientIp,
@@ -295,16 +295,6 @@ pub async fn list_files(
 /// GET /api/files/roots
 pub async fn list_roots(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
     let mut roots = vec![json!({"name": "Home", "path": "/", "kind": "home"})];
-    // The server's own file system, for super administrators only.
-    let system = (state.rootfs.enabled() && crate::users::is_super_admin(&state.db, user.id).await)
-        .then(|| {
-            json!({
-                "name": "Root file system",
-                "path": crate::rootfs::PREFIX,
-                "kind": "system",
-                "perms": "write",
-            })
-        });
     // The evaluator decides both visibility (group rules, legacy membership,
     // ownership) and the advertised permission level.
     for (share, level) in shares::list_for_user_with_levels(&state.db, &user).await? {
@@ -315,7 +305,6 @@ pub async fn list_roots(State(state): State<AppState>, user: AuthUser) -> AppRes
             "perms": level.as_str(),
         }));
     }
-    roots.extend(system);
     Ok(Json(Value::Array(roots)))
 }
 
@@ -605,7 +594,7 @@ pub async fn cancel_chunked_upload(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Disposition {
+enum Disposition {
     Attachment,
     Inline,
 }
@@ -702,32 +691,12 @@ async fn serve_file(
     disposition: Disposition,
     csp: Option<&'static str>,
 ) -> AppResult<Response> {
-    serve_path(
-        &resolved.physical,
-        resolved.name(),
-        request_headers,
-        content_type,
-        disposition,
-        csp,
-    )
-    .await
-}
-
-/// Stream the regular file at `physical` (never through a symbolic link)
-/// under the download name `file_name`, with optional `Range` support.
-pub(crate) async fn serve_path(
-    physical: &std::path::Path,
-    file_name: &str,
-    request_headers: &HeaderMap,
-    content_type: &str,
-    disposition: Disposition,
-    csp: Option<&'static str>,
-) -> AppResult<Response> {
-    let meta = tokio::fs::symlink_metadata(physical).await?;
+    let meta = tokio::fs::symlink_metadata(&resolved.physical).await?;
     if !meta.is_file() {
         return Err(AppError::bad_request("path is not a regular file"));
     }
     let len = meta.len();
+    let file_name = resolved.name();
     let (status, start, length, content_range) = match parse_range(
         request_headers
             .get(header::RANGE)
@@ -756,7 +725,7 @@ pub(crate) async fn serve_path(
 
     // Reopen-safe: O_NOFOLLOW (Linux) + inode comparison against the earlier
     // lstat, so a symlink swapped in after resolution cannot leak data.
-    let mut file = crate::storage::safe_path::open_read_no_follow_async(physical).await?;
+    let mut file = crate::storage::safe_path::open_read_no_follow_async(&resolved.physical).await?;
     let opened_meta = file.metadata().await?;
     safe_path::verify_same_inode(&opened_meta, &meta)?;
     if start > 0 {

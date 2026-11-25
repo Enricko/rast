@@ -15,7 +15,6 @@ import { renderLogin, renderSetup } from "./auth";
 import { applyDocumentBrand, setDocumentTitle, setFavicon } from "./brand";
 import { startDesktop } from "./desktop";
 import { forcePasswordChange } from "./dialogs";
-import { getAppearanceService } from "../core/appearance";
 import type { DesktopController, SessionSnapshot, ShellDeps } from "./shared";
 
 export async function boot(root: HTMLElement): Promise<void> {
@@ -51,60 +50,14 @@ export async function boot(root: HTMLElement): Promise<void> {
   let desktop: DesktopController | null = null;
   let pendingRestore: SessionSnapshot | null = null;
   let handlingLostSession = false;
-  const WORKSPACE_KEY = "rast.workspace.v1";
 
-  interface SavedWorkspace {
-    userId: number;
-    snapshot: SessionSnapshot;
-  }
-
-  function readWorkspace(): SavedWorkspace | null {
-    try {
-      const raw = window.sessionStorage.getItem(WORKSPACE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as SavedWorkspace;
-      if (typeof parsed?.userId !== "number" || !Array.isArray(parsed?.snapshot?.apps)) return null;
-      return parsed;
-    } catch {
-      return null;
-    }
-  }
-
-  function writeWorkspace(userId: number): void {
-    if (!desktop) return;
-    try {
-      window.sessionStorage.setItem(
-        WORKSPACE_KEY,
-        JSON.stringify({ userId, snapshot: desktop.snapshot() }),
-      );
-    } catch {
-      /* private mode / quota: restoring is best effort */
-    }
-  }
-
-  const onAuthenticated = async (me: MeResponse): Promise<void> => {
+  const onAuthenticated = (me: MeResponse): void => {
     handlingLostSession = false;
     desktop?.dispose();
-    // Load the account's appearance before the desktop paints, so a refresh
-    // never shows the previous wallpaper from the local paint cache.
-    try {
-      await getAppearanceService(deps.api).load(me.user.id);
-    } catch {
-      /* the desktop retries and falls back to the cached look */
-    }
-    const saved = readWorkspace();
-    const restore =
-      pendingRestore ??
-      (saved && saved.userId === me.user.id ? saved.snapshot : null);
     desktop = startDesktop(deps, me, {
-      restore,
+      restore: pendingRestore,
       onSignedOut: (notice) => {
         pendingRestore = null;
-        try {
-          window.sessionStorage.removeItem(WORKSPACE_KEY);
-        } catch {
-          /* ignore */
-        }
         showLogin(notice);
       },
       onSessionRevoked: (reason) => {
@@ -119,13 +72,6 @@ export async function boot(root: HTMLElement): Promise<void> {
       },
     });
     pendingRestore = null;
-    const userId = me.user.id;
-    const persist = (): void => writeWorkspace(userId);
-    window.addEventListener("pagehide", persist);
-    window.addEventListener("beforeunload", persist);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") persist();
-    });
   };
 
   const showLogin = (notice?: string): void => {

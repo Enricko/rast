@@ -31,11 +31,6 @@ pub struct AppState {
     pub storage: Arc<crate::storage::Storage>,
     pub docker: Arc<crate::docker::DockerManager>,
     pub packages: Arc<crate::packages::PackageManager>,
-    pub linux_apps: Arc<crate::linux_apps::LinuxApps>,
-    /// Native PTY terminals (independent from the Docker terminal).
-    pub terminal: Arc<crate::terminal::manager::TerminalManager>,
-    /// File Station's root file system (super administrators).
-    pub rootfs: Arc<crate::rootfs::RootFs>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -70,59 +65,8 @@ impl AppState {
             events.clone(),
             jobs.clone(),
         );
-        packages.set_native(crate::native::client::NativeClient::from_config(&config));
         // Restores the catalog check state and starts the periodic checker.
         packages.start().await;
-        // Native backend: the unprivileged web server drives the privileged
-        // helper over a Unix socket; sessions are started lazily per person.
-        let native_client = crate::native::client::NativeClient::from_config(&config);
-        let native_sessions = crate::linux_apps::native_session::NativeSessions::new(
-            config.clone(),
-            db.clone(),
-            native_client.clone(),
-            events.clone(),
-        );
-        // Native installation/updates/migration; the Docker backend is wired
-        // in as the legacy source for migration when it is enabled.
-        let native_apps = if config.docker_enabled {
-            crate::linux_apps::native_apps::NativeApps::with_legacy(
-                config.clone(),
-                db.clone(),
-                native_client,
-                events.clone(),
-                crate::linux_apps::native_apps::docker_legacy(docker.clone()),
-            )
-        } else {
-            crate::linux_apps::native_apps::NativeApps::new(
-                config.clone(),
-                db.clone(),
-                native_client,
-                events.clone(),
-            )
-        };
-        let linux_apps = crate::linux_apps::LinuxApps::new(
-            config.clone(),
-            db.clone(),
-            docker.clone(),
-            events.clone(),
-            jobs.clone(),
-            native_sessions,
-            native_apps,
-        );
-        // Stops copies left from before a restart, then sweeps and checks.
-        linux_apps.start().await;
-        // Native PTY terminals: not tied to the graphical/native-apps feature,
-        // they only reuse the identity mapping and the helper socket.
-        let terminal = crate::terminal::manager::TerminalManager::new(
-            config.clone(),
-            db.clone(),
-            crate::native::client::NativeClient::from_config(&config),
-        );
-        terminal.spawn_sweeper();
-        let rootfs = Arc::new(crate::rootfs::RootFs::new(
-            config.files_root_enabled,
-            crate::native::client::NativeClient::from_config(&config),
-        ));
         // Background maintenance: retention + session cleanup + monitor sampling.
         spawn_maintenance(
             db.clone(),
@@ -149,9 +93,6 @@ impl AppState {
             storage,
             docker,
             packages,
-            linux_apps,
-            terminal,
-            rootfs,
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

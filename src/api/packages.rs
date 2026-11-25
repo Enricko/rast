@@ -9,8 +9,6 @@
 
 use axum::{
     extract::{Path, Query, State},
-    http::header,
-    response::IntoResponse,
     routing::{delete, get, post, put},
     Json, Router,
 };
@@ -69,8 +67,6 @@ pub fn routes() -> Router<AppState> {
         .route("/api/packages/apps/{id}/install", post(install_app))
         .route("/api/packages/apps/{id}", delete(uninstall_app))
         .route("/api/packages/{id}", get(package).delete(uninstall))
-        .route("/api/packages/{id}/run", post(run_package_app))
-        .route("/api/packages/{id}/app/{*path}", get(package_app_asset))
         .route("/api/packages/{id}/install", post(install))
         .route("/api/packages/{id}/update", post(update))
         .route("/api/packages/{id}/default", put(set_default))
@@ -405,52 +401,6 @@ pub async fn delete_consumer(
 ) -> AppResult<Json<Value>> {
     state.packages.delete_consumer(&user, id).await?;
     Ok(Json(json!({ "ok": true })))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RunAppRequest {
-    #[serde(default)]
-    pub args: Vec<String>,
-}
-
-/// GET /api/packages/{id}/app/{*path} — static file of an installed web app.
-pub async fn package_app_asset(
-    State(state): State<AppState>,
-    PackageManager(user): PackageManager,
-    Path((id, path)): Path<(String, String)>,
-) -> AppResult<axum::response::Response> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
-    let (bytes, content_type) = state.packages.app_asset(&id, &path).await?;
-    Ok((
-        [
-            (header::CONTENT_TYPE, content_type),
-            (header::CACHE_CONTROL, "no-store".to_string()),
-            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
-            (header::X_FRAME_OPTIONS, "SAMEORIGIN".to_string()),
-            (
-                header::CONTENT_SECURITY_POLICY,
-                "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src https:; frame-ancestors 'self'".to_string(),
-            ),
-        ],
-        bytes,
-    )
-        .into_response())
-}
-
-/// POST /api/packages/{id}/run — run an installed app-type package's command
-/// and return its output (App Center → Apps → Open).
-pub async fn run_package_app(
-    State(state): State<AppState>,
-    PackageManager(user): PackageManager,
-    Path(id): Path<String>,
-    Json(body): Json<RunAppRequest>,
-) -> AppResult<Json<Value>> {
-    access::app_surface(&state.db, &state, &user, "packages").await?;
-    let output = state.packages.run_package_app(&id, body.args).await?;
-    Ok(Json(
-        serde_json::to_value(output).map_err(|e| AppError::internal(e.to_string()))?,
-    ))
 }
 
 #[derive(Debug, Deserialize)]

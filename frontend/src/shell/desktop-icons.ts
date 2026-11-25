@@ -16,28 +16,27 @@ import { h } from "../core/dom";
 import { appIconSvg } from "../core/icons";
 import type { ToastCenter } from "../core/toast";
 import { contextMenu, type ContextMenuEntry } from "../core/ui";
-import { isDiscoveredDesktopId } from "../apps/linuxapp/catalog";
 import {
   displayLayout,
+  layoutForSave,
+  moveIcon,
   neighbour,
+  placeIcon,
   readingOrder,
   removeIcon,
   type Cell,
   type FillOrder,
   type Grid,
 } from "./icon-layout";
-import { GRID, nearestFreeRect, rectsIntersect, snap, type Bounds, type Rect } from "./snap-grid";
 
 const DRAG_THRESHOLD = 5;
 const TOUCH_DRAG_THRESHOLD = 8;
 const LONG_PRESS_MS = 550;
 /** Clicks right after a drag are the end of that drag, not a new click. */
 const CLICK_GUARD_MS = 350;
-const DEFAULT_CELL = { w: 104, h: 112 };
-/** Fixed shortcut box, including its label and interaction area (CSS px). */
-const ICON_W = 104;
-const ICON_H = 112;
+const DEFAULT_CELL = { w: 104, h: 108 };
 /** Space between neighbouring icons (their hover backgrounds never touch). */
+const CELL_GAP = 4;
 const NOT_DROPPABLE = ".window, .taskbar, .menu-panel, .context-menu, .modal-backdrop, .desktop-widget, .toast";
 
 export interface DesktopIconsOptions {
@@ -54,19 +53,9 @@ export interface DesktopIconsOptions {
   menuItems(app: AppDefinition): ContextMenuEntry[];
   /** An icon was dropped on the taskbar. */
   dropOnTaskbar(appId: string): void;
-  /** Rectangles (same layer coordinates) occupied by desktop widgets. */
-  blockedRects?: () => Array<{ x: number; y: number; w: number; h: number }>;
 }
 
 export interface DesktopIcons {
-  /** Current on-screen shortcut rectangles keyed by app id (desktop coords). */
-  rects(): Map<string, Rect>;
-  /** Outline the given shortcuts as part of a multi-selection. */
-  setSelected(ids: ReadonlySet<string>): void;
-  /** Preferred shortcuts with their current fine-grid positions. */
-  snapshot(): DesktopIcon[];
-  /** Move shortcuts by updating their pixel positions (no save). */
-  applyPixels(positions: Map<string, { x: number; y: number }>): void;
   /** Show the current apps and saved layout (cheap when nothing changed). */
   refresh(): void;
   has(appId: string): boolean;
@@ -87,7 +76,6 @@ interface Press {
 export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   const { layer, desktop, appearance, toast } = options;
   const marker = h("div", { class: "desktop-icon-drop", ariaHidden: true, hidden: true });
-  const gridOverlay = h("div", { class: "desktop-grid-overlay", ariaHidden: true, hidden: true });
   const buttons = new Map<string, HTMLButtonElement>();
   const disposers: Array<() => void> = [];
   let shown: DesktopIcon[] = [];
@@ -101,8 +89,6 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   let arranging = false;
   let clickGuardUntil = 0;
   let disposed = false;
-  let displayRects = new Map<string, Rect>();
-  let migrating = false;
 
   /** The layout being saved, else the saved one; null = default layout. */
   const savedLayout = (): DesktopIcon[] | null =>
@@ -136,79 +122,26 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     cell = { w: cellW, h: cellH };
   }
 
-  const layerBounds = (): Bounds => ({ x: 0, y: 0, w: layer.clientWidth, h: layer.clientHeight });
-
-  function iconRect(icon: DesktopIcon): Rect {
-    if (icon.gridVersion === 2 && typeof icon.pxX === "number" && typeof icon.pxY === "number") {
-      return { x: snap(icon.pxX), y: snap(icon.pxY), w: ICON_W, h: ICON_H };
-    }
-    return { x: icon.col * cell.w, y: icon.row * cell.h, w: ICON_W, h: ICON_H };
+  function position(el: HTMLElement, at: Cell): void {
+    el.style.left = `${Math.round(at.col * cell.w + CELL_GAP / 2)}px`;
+    el.style.top = `${Math.round(at.row * cell.h + CELL_GAP / 2)}px`;
+    el.style.width = `${Math.round(cell.w - CELL_GAP)}px`;
+    el.style.height = `${Math.round(cell.h - CELL_GAP)}px`;
   }
 
-  function clampIconRect(rect: Rect, area: Bounds): Rect {
+  function cellAt(clientX: number, clientY: number): Cell {
+    const rect = layer.getBoundingClientRect();
+    const col = Math.floor((clientX - rect.left) / cell.w);
+    const row = Math.floor((clientY - rect.top) / cell.h);
     return {
-      x: Math.max(area.x, Math.min(area.x + area.w - ICON_W, snap(rect.x))),
-      y: Math.max(area.y, Math.min(area.y + area.h - ICON_H, snap(rect.y))),
-      w: ICON_W,
-      h: ICON_H,
+      col: Math.max(0, Math.min(grid.cols - 1, col)),
+      row: Math.max(0, Math.min(grid.rows - 1, row)),
     };
   }
 
-  function widgetRects(): Rect[] {
-    return options.blockedRects?.() ?? [];
-  }
-
-  function cellFor(rect: Rect): { col: number; row: number } {
-    return {
-      col: Math.max(0, Math.min(MAX_DESKTOP_CELL, Math.round(rect.x / Math.max(1, cell.w)))),
-      row: Math.max(0, Math.min(MAX_DESKTOP_CELL, Math.round(rect.y / Math.max(1, cell.h)))),
-    };
-  }
-
-  function toV2(icon: DesktopIcon, rect: Rect): DesktopIcon {
-    return { ...icon, ...cellFor(rect), gridVersion: 2, pxX: snap(rect.x), pxY: snap(rect.y) };
-  }
-
-  /** Resolve preferred fine-grid rects against widgets and each other. */
-  function resolveRects(icons: DesktopIcon[]): Map<string, Rect> {
-    const area = layerBounds();
-    const obstacles: Rect[] = [...widgetRects()];
-    const mapped = new Map<string, Rect>();
-    for (const icon of icons) {
-      let rect = clampIconRect(iconRect(icon), area);
-      if (obstacles.some((other) => rectsIntersect(other, rect))) {
-        rect = nearestFreeRect(rect, { w: ICON_W, h: ICON_H }, area, obstacles) ?? rect;
-      }
-      obstacles.push(rect);
-      mapped.set(icon.id, rect);
-    }
-    return mapped;
-  }
-
-
-
-
-
-  function showMarkerRect(rect: Rect, valid = true): void {
-    marker.style.left = `${Math.round(rect.x)}px`;
-    marker.style.top = `${Math.round(rect.y)}px`;
-    marker.style.width = `${ICON_W - 4}px`;
-    marker.style.height = `${ICON_H - 4}px`;
-    marker.classList.toggle("is-blocked", !valid);
+  function showMarker(at: Cell): void {
+    position(marker, at);
     marker.hidden = false;
-  }
-
-  function showGrid(): void {
-    const area = layerBounds();
-    gridOverlay.style.left = `${area.x}px`;
-    gridOverlay.style.top = `${area.y}px`;
-    gridOverlay.style.width = `${area.w}px`;
-    gridOverlay.style.height = `${area.h}px`;
-    gridOverlay.hidden = false;
-  }
-
-  function hideGrid(): void {
-    gridOverlay.hidden = true;
   }
 
   function hideMarker(): void {
@@ -239,66 +172,32 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     if (disposed || arranging) return;
     measure();
     const apps = options.visibleApps();
-    const visible = new Set(apps.map((app) => app.id));
-    const saved = savedLayout();
-    let icons: DesktopIcon[];
-    if (saved && saved.some((icon) => icon.gridVersion === 2)) {
-      icons = saved.filter((icon) => visible.has(icon.id));
-    } else if (saved) {
-      // One-time migration of legacy row/column shortcuts to fine pixels,
-      // preserving the visual position (cells were fixed CSS pixels).
-      icons = saved.map((icon) => toV2(icon, iconRect(icon)));
-      if (!migrating) {
-        migrating = true;
-        void appearance.saveDesktopIcons(icons).finally(() => {
-          migrating = false;
-        });
-      }
-    } else {
-      // Tidy automatic arrangement for the initial layout, stored in memory
-      // as fine-grid pixels until the account customizes it. Externally
-      // discovered applications do not appear here on their own: they belong
-      // in the Applications menu and App Center until the account drags one
-      // onto the desktop (an explicit shortcut, saved with the layout).
-      const initial = apps.filter((app) => !isDiscoveredDesktopId(app.id));
-      icons = displayLayout(null, initial.map((app) => app.id), grid, order).map((icon) =>
-        toV2(icon, iconRect(icon)),
-      );
-    }
-    shown = icons;
-    const rects = resolveRects(shown);
-    displayRects = rects;
-    const nextSignature = JSON.stringify(
-      shown.map((icon) => [icon.id, rects.get(icon.id)]),
+    shown = displayLayout(
+      savedLayout(),
+      apps.map((app) => app.id),
+      grid,
+      order,
+      shown,
     );
-    if (!force && nextSignature === signature) {
-      updateSelection();
-      return;
-    }
+    const nextSignature = JSON.stringify([shown, grid, cell]);
+    if (!force && nextSignature === signature) return;
     signature = nextSignature;
     const active = document.activeElement;
     const focusedId = active instanceof HTMLElement && layer.contains(active) ? (active.dataset.app ?? null) : null;
-    layer.replaceChildren(marker, gridOverlay);
+    layer.replaceChildren(marker);
     buttons.clear();
-    const ordered = shown.filter((icon) => apps.some((app) => app.id === icon.id));
+    const ordered = readingOrder(shown, order);
     if (!selectedId || !ordered.some((icon) => icon.id === selectedId)) selectedId = ordered[0]?.id ?? null;
     for (const icon of ordered) {
       const app = apps.find((candidate) => candidate.id === icon.id);
       if (!app) continue;
       const button = iconButton(app);
-      place(button, rects.get(icon.id) ?? iconRect(icon));
+      position(button, icon);
       buttons.set(app.id, button);
       layer.appendChild(button);
     }
     updateSelection();
     if (focusedId) buttons.get(focusedId)?.focus();
-  }
-
-  function place(el: HTMLElement, rect: Rect): void {
-    el.style.left = `${Math.round(rect.x)}px`;
-    el.style.top = `${Math.round(rect.y)}px`;
-    el.style.width = `${ICON_W - 4}px`;
-    el.style.height = `${ICON_H - 4}px`;
   }
 
   function iconButton(app: AppDefinition): HTMLButtonElement {
@@ -342,19 +241,15 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   }
 
   // ---------------------------------------------------------- arranging
-  /** Persist the complete fine-grid layout, keeping hidden apps' shortcuts. */
-  function apply(next: DesktopIcon[]): boolean {
+  /** Show `next` now and save it; false (and nothing changes) when the saved desktop is unknown. */
+  function apply(next: DesktopIcon[], before: DesktopIcon[]): boolean {
     if (!appearance.isKnown) {
       toast.error("Your saved desktop could not be loaded yet, so icons cannot be arranged. Try again in a moment.");
       render(true);
       return false;
     }
-    const visible = new Set(options.visibleApps().map((app) => app.id));
-    const previous = savedLayout() ?? [];
-    const hidden = previous.filter(
-      (icon) => !visible.has(icon.id) && !next.some((known) => known.id === icon.id),
-    );
-    const layout = [...next, ...hidden].map((icon) => toV2(icon, iconRect(icon)));
+    const visible = options.visibleApps().map((app) => app.id);
+    const layout = layoutForSave(next, savedLayout(), visible, before);
     shown = next;
     void appearance.saveDesktopIcons(layout).then((ok) => {
       if (ok || disposed) return;
@@ -365,58 +260,25 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     return true;
   }
 
-  function occupiedShortcutRects(except?: string): Rect[] {
-    const out: Rect[] = [];
-    for (const icon of shown) {
-      if (icon.id === except) continue;
-      const rect = displayRects.get(icon.id);
-      if (rect) out.push(rect);
+  function moveTo(id: string, target: Cell): void {
+    const next = moveIcon(shown, id, target);
+    if (next === shown) {
+      render(true);
+      return;
     }
-    return out;
-  }
-
-  /** Nearest valid fine-grid rect for a shortcut at the desired position. */
-  function freeRectFor(desired: Rect, except?: string): Rect | null {
-    const area = layerBounds();
-    const candidate = {
-      x: Math.max(area.x, Math.min(area.x + area.w - ICON_W, snap(desired.x))),
-      y: Math.max(area.y, Math.min(area.y + area.h - ICON_H, snap(desired.y))),
-      w: ICON_W,
-      h: ICON_H,
-    };
-    const obstacles = [...widgetRects(), ...occupiedShortcutRects(except)];
-    if (!obstacles.some((other) => rectsIntersect(other, candidate))) return candidate;
-    return nearestFreeRect(candidate, { w: ICON_W, h: ICON_H }, area, obstacles);
-  }
-
-  function moveToRect(id: string, rect: Rect): void {
-    const next = shown.map((icon) => (icon.id === id ? toV2(icon, rect) : icon));
-    apply(next);
-  }
-
-  function addAt(id: string, point?: { x: number; y: number }, cellHint?: Cell | null): boolean {
-    if (!appById(id)) return false;
-    render();
-    const area = layerBounds();
-    let desired: Rect;
-    if (point) {
-      desired = { x: point.x - ICON_W / 2, y: point.y - ICON_H / 2, w: ICON_W, h: ICON_H };
-    } else if (cellHint) {
-      desired = { x: cellHint.col * cell.w, y: cellHint.row * cell.h, w: ICON_W, h: ICON_H };
-    } else {
-      desired = { x: area.x, y: area.y, w: ICON_W, h: ICON_H };
-    }
-    const free = freeRectFor(desired);
-    if (!free) {
-      toast.warning("The desktop is full. Remove an icon to make room.");
-      return false;
-    }
-    const next = [...shown, toV2({ id, col: 0, row: 0 }, free)];
-    return apply(next);
+    apply(next, shown);
   }
 
   function add(id: string, at: Cell | null = null): boolean {
-    return addAt(id, undefined, at);
+    if (!appById(id)) return false;
+    render();
+    const next = placeIcon(shown, id, at, grid, order);
+    if (!next) {
+      toast.warning("The desktop is full. Remove an icon to make room.");
+      return false;
+    }
+    if (next === shown) return true;
+    return apply(next, shown);
   }
 
   /** Remove an icon; `focusNext` (keyboard) moves focus to the icon that followed it. */
@@ -424,7 +286,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     const icon = shown.find((candidate) => candidate.id === id);
     if (!icon) return;
     const following = neighbour(shown, icon, order === "rows" ? "right" : "down") ?? neighbour(shown, icon, "up");
-    if (!apply(removeIcon(shown, id))) return;
+    if (!apply(removeIcon(shown, id), shown)) return;
     if (focusNext && following) select(following.id);
     const name = appById(id)?.name ?? "The app";
     toast.info(`${name} was removed from the desktop`, {
@@ -455,12 +317,11 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     const startX = event.clientX;
     const startY = event.clientY;
     const layerRect = layer.getBoundingClientRect();
-    const startRect = displayRects.get(app.id) ?? iconRect(icon);
-    // Pointer grab offset inside the shortcut, so it never jumps on drag start.
-    const grabX = startX - layerRect.left - startRect.x;
-    const grabY = startY - layerRect.top - startRect.y;
+    // Where in its cell the icon was grabbed, so it does not jump to the pointer.
+    const grabX = startX - layerRect.left - icon.col * cell.w;
+    const grabY = startY - layerRect.top - icon.row * cell.h;
     let dragging = false;
-    let targetRect: Rect | null = startRect;
+    let target: Cell = { col: icon.col, row: icon.row };
     let longPress: number | undefined;
     try {
       button.setPointerCapture(event.pointerId);
@@ -479,7 +340,6 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
         arranging = true;
         layer.classList.add("is-arranging");
         button.classList.add("is-dragging");
-        showGrid();
         select(app.id, false);
       }
       button.style.transform = `translate(${Math.round(dx)}px, ${Math.round(dy)}px)`;
@@ -490,15 +350,9 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
         hideMarker();
         return;
       }
-      const desired: Rect = {
-        x: moveEvent.clientX - layerRect.left - grabX,
-        y: moveEvent.clientY - layerRect.top - grabY,
-        w: ICON_W,
-        h: ICON_H,
-      };
-      const free = freeRectFor(desired, app.id);
-      targetRect = free;
-      showMarkerRect(free ?? desired, free !== null);
+      // The cell under the dragged icon's centre.
+      target = cellAt(moveEvent.clientX - grabX + cell.w / 2, moveEvent.clientY - grabY + cell.h / 2);
+      showMarker(target);
     };
     const onUp = (upEvent: PointerEvent): void => {
       if (upEvent.pointerId === event.pointerId) current.end(true, upEvent);
@@ -536,7 +390,6 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
         button.classList.remove("is-dragging");
         button.style.transform = "";
         hideMarker();
-        hideGrid();
         if (!commit || !endEvent) {
           render(true);
           return;
@@ -546,11 +399,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
           options.dropOnTaskbar(app.id);
           return;
         }
-        if (targetRect) {
-          moveToRect(app.id, targetRect);
-        } else {
-          render(true);
-        }
+        moveTo(app.id, target);
       },
     };
     press = current;
@@ -602,16 +451,9 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
       event.preventDefault();
       const [name, dc, dr] = direction;
       if (event.altKey) {
-        const current = displayRects.get(app.id) ?? iconRect(icon);
-        const step = event.shiftKey ? GRID * 8 : GRID;
-        const desired = {
-          x: current.x + dc * step,
-          y: current.y + dr * step,
-          w: ICON_W,
-          h: ICON_H,
-        };
-        const free = freeRectFor(desired, app.id);
-        if (free) moveToRect(app.id, free);
+        const target = { col: icon.col + dc, row: icon.row + dr };
+        if (target.col < 0 || target.row < 0 || target.col >= grid.cols || target.row >= grid.rows) return;
+        moveTo(app.id, target);
         return;
       }
       const next = neighbour(shown, icon, name);
@@ -638,28 +480,14 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     }
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-    const layerRect = layer.getBoundingClientRect();
-    const desired: Rect = {
-      x: event.clientX - layerRect.left - ICON_W / 2,
-      y: event.clientY - layerRect.top - ICON_H / 2,
-      w: ICON_W,
-      h: ICON_H,
-    };
-    const free = freeRectFor(desired);
-    showMarkerRect(free ?? desired, free !== null);
+    showMarker(cellAt(event.clientX, event.clientY));
   };
   const onDrop = (event: DragEvent): void => {
     if (!carriesApp(event) || !droppable(event)) return;
     event.preventDefault();
     hideMarker();
     const id = event.dataTransfer?.getData(APP_DRAG_TYPE) ?? "";
-    if (id) {
-      const layerRect = layer.getBoundingClientRect();
-      addAt(id, {
-        x: event.clientX - layerRect.left,
-        y: event.clientY - layerRect.top,
-      });
-    }
+    if (id) add(id, cellAt(event.clientX, event.clientY));
   };
   const onDragLeave = (event: DragEvent): void => {
     const next = event.relatedTarget;
@@ -699,20 +527,6 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   render(true);
 
   return {
-    rects: () => new Map(displayRects),
-    setSelected: (ids) => {
-      for (const [id, button] of buttons) button.classList.toggle("is-multi-selected", ids.has(id));
-    },
-    snapshot: () => shown.map((icon) => toV2(icon, displayRects.get(icon.id) ?? iconRect(icon))),
-    applyPixels: (positions) => {
-      shown = shown.map((icon) => {
-        const position = positions.get(icon.id);
-        return position
-          ? toV2(icon, { x: position.x, y: position.y, w: ICON_W, h: ICON_H })
-          : icon;
-      });
-      render(true);
-    },
     refresh: () => render(),
     has: (appId) => shown.some((icon) => icon.id === appId),
     add: (appId, at) => add(appId, at ?? null),

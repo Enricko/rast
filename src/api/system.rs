@@ -52,10 +52,6 @@ pub struct Bootstrap {
     pub max_upload_bytes: u64,
     pub session_ttl_hours: i64,
     pub server_time: i64,
-    /// Additive RAST Desktop capability (protocol §2). Older clients ignore
-    /// it; newer clients require `streamTokens: true` before offering native
-    /// streaming.
-    pub desktop: crate::linux_apps::native_broker::DesktopCapability,
 }
 
 /// GET /api/bootstrap — unauthenticated metadata needed by the login screen.
@@ -82,7 +78,6 @@ pub async fn bootstrap(State(state): State<AppState>, headers: HeaderMap) -> Jso
         max_upload_bytes: state.config.max_upload_bytes,
         session_ttl_hours: state.config.session_ttl_hours,
         server_time: db::now_ms(),
-        desktop: crate::linux_apps::native_broker::desktop_capability(),
     })
 }
 

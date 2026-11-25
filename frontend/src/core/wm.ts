@@ -24,12 +24,6 @@ export interface WindowInfo {
   maximized: boolean;
   tiled: "left" | "right" | null;
   focused: boolean;
-  /** Current geometry inside the desktop layer. */
-  rect: WindowRect;
-  /** The window this transient dialog belongs to (if any). */
-  ownerId: string | null;
-  /** False for transient dialogs: they get no taskbar entry. */
-  taskbar: boolean;
 }
 
 export interface WindowHandle {
@@ -45,10 +39,6 @@ export interface WindowHandle {
   isMinimized(): boolean;
   isMaximized(): boolean;
   isClosed(): boolean;
-  /** Current geometry inside the desktop layer (a copy). */
-  getRect(): WindowRect;
-  /** Move the window to a desktop position (used to keep dialogs with their owner). */
-  moveTo(x: number, y: number): void;
   onResize(callback: () => void): () => void;
 }
 
@@ -57,7 +47,7 @@ interface WindowRecord {
   appId: string;
   appIcon: string;
   el: HTMLElement;
-  titlebar: HTMLElement | null;
+  titlebar: HTMLElement;
   titleEl: HTMLElement;
   iconEl: HTMLElement;
   contentEl: HTMLElement;
@@ -65,8 +55,6 @@ interface WindowRecord {
   maximized: boolean;
   tiled: "left" | "right" | null;
   prevRect: WindowRect | null;
-  ownerId: string | null;
-  taskbar: boolean;
   resizeCallbacks: Set<() => void>;
   closeCallbacks: Set<() => void>;
   cleanup: Array<() => void>;
@@ -95,7 +83,6 @@ export class WindowManager {
   private readonly mobileHandler: () => void;
   private readonly resizeHandler: () => void;
   private resizeFrame: number | undefined;
-  private readonly changeListeners = new Set<(windows: WindowInfo[]) => void>();
   private cascade = 0;
   private snapPreview: HTMLElement | null = null;
   private snapZone: "left" | "right" | "top" | null = null;
@@ -129,8 +116,6 @@ export class WindowManager {
       icon: string;
       defaultSize?: { w: number; h: number };
       minSize?: { w: number; h: number };
-      /** The app draws its own window controls; hide the desktop title bar. */
-      frameless?: boolean;
     },
     params: unknown,
     mount: (ctx: {
@@ -139,19 +124,7 @@ export class WindowManager {
       onResize: (cb: () => void) => () => void;
       onDispose: (cb: () => void) => () => void;
     }) => void | Promise<void>,
-    options: {
-      singleton?: boolean;
-      /** Restore a previous position/size (clamped to the current viewport). */
-      rect?: WindowRect;
-      maximized?: boolean;
-      minimized?: boolean;
-      /** Transient dialog: attach to this window, always above it, no taskbar entry. */
-      ownerId?: string;
-      /** Override the taskbar visibility (transient dialogs default to false). */
-      taskbar?: boolean;
-      /** Initial geometry (e.g. a dialog placed next to its owner). */
-      initialRect?: WindowRect;
-    } = {},
+    options: { singleton?: boolean } = {},
   ): WindowHandle {
     if (options.singleton) {
       const existing = this.findByApp(app.id);
@@ -172,30 +145,22 @@ export class WindowManager {
     const iconEl = h("span", { class: "win-icon", dataset: { app: app.id } });
     iconEl.appendChild(appIconSvg(app.id, app.icon, 16));
     const titleEl = h("span", { class: "win-title" }, app.name);
-    // Frameless windows let the app draw its own title bar and controls; the
-    // taskbar still minimizes, maximizes and closes them, and the edges
-    // resize. Phones keep the title bar: there is nothing else to grab the
-    // window with there.
-    const frameless = app.frameless === true && !this.isMobile;
-    const titlebar = frameless
-      ? null
-      : h(
-          "header",
-          { class: "win-titlebar" },
-          iconEl,
-          titleEl,
-          h(
-            "div",
-            { class: "win-controls" },
-            this.controlButton("minimize", "Minimize", () => this.minimize(id)),
-            this.controlButton("maximize", "Maximize", () => this.toggleMaximize(id)),
-            this.controlButton("close", "Close", () => this.close(id)),
-          ),
-        );
+    const titlebar = h(
+      "header",
+      { class: "win-titlebar" },
+      iconEl,
+      titleEl,
+      h(
+        "div",
+        { class: "win-controls" },
+        this.controlButton("minimize", "Minimize", () => this.minimize(id)),
+        this.controlButton("maximize", "Maximize", () => this.toggleMaximize(id)),
+        this.controlButton("close", "Close", () => this.close(id)),
+      ),
+    );
 
     const contentEl = h("div", { class: "win-body" });
-    if (titlebar) el.appendChild(titlebar);
-    if (frameless) el.classList.add("is-frameless");
+    el.appendChild(titlebar);
     el.appendChild(contentEl);
     for (const dir of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
       el.appendChild(h("div", { class: `win-resize win-resize-${dir}`, dataset: { dir } }));
@@ -214,45 +179,21 @@ export class WindowManager {
       maximized: false,
       tiled: null,
       prevRect: null,
-      ownerId: options.ownerId ?? null,
-      taskbar: options.taskbar ?? !(options.ownerId != null),
       resizeCallbacks: new Set(),
       closeCallbacks: new Set(),
       cleanup: [],
     };
     this.records.set(id, record);
     this.host.appendChild(el);
-    if (options.initialRect) {
-      // Transient surfaces carry their own geometry (already computed from
-      // the owner's content area); clamp it to the current viewport.
-      const bounds = this.bounds();
-      const rect = options.initialRect;
-      const w = Math.min(rect.w, Math.max(MIN_SIZE.w, bounds.w - 16));
-      const h = Math.min(rect.h, Math.max(MIN_SIZE.h, bounds.h - 16));
-      const x = Math.min(Math.max(8, rect.x), Math.max(8, bounds.w - w - 8));
-      const y = Math.min(Math.max(8, rect.y), Math.max(8, bounds.h - h - 8));
-      this.setRect(record, { x, y, w, h });
-    } else if (options.rect) {
-      const bounds = this.bounds();
-      const rect = options.rect;
-      const w = Math.min(rect.w, Math.max(MIN_SIZE.w, bounds.w - 16));
-      const h = Math.min(rect.h, Math.max(MIN_SIZE.h, bounds.h - 16));
-      const x = Math.min(Math.max(8, rect.x), Math.max(8, bounds.w - w - 8));
-      const y = Math.min(Math.max(8, rect.y), Math.max(8, bounds.h - h - 8));
-      this.setRect(record, { x, y, w, h });
-    } else {
-      this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
-    }
+    this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
 
     // Drag and resize.
-    if (titlebar) {
-      record.cleanup.push(this.attachDrag(record));
-      titlebar.addEventListener("dblclick", (event) => {
-        if ((event.target as HTMLElement).closest(".win-control")) return;
-        this.toggleMaximize(id);
-      });
-    }
+    record.cleanup.push(this.attachDrag(record));
     record.cleanup.push(this.attachResize(record, app));
+    titlebar.addEventListener("dblclick", (event) => {
+      if ((event.target as HTMLElement).closest(".win-control")) return;
+      this.toggleMaximize(id);
+    });
     el.addEventListener("pointerdown", () => this.focus(id), { capture: true });
 
     const notifyResize = () => {
@@ -280,8 +221,6 @@ export class WindowManager {
 
     this.focus(id);
     this.emitChange();
-    if (options.maximized) this.toggleMaximize(id);
-    if (options.minimized) this.minimize(id);
     requestAnimationFrame(() => el.classList.remove("entering"));
 
     // Mount the application asynchronously; errors are shown inside the window.
@@ -380,13 +319,6 @@ export class WindowManager {
       isClosed() {
         return !manager.records.has(record.id);
       },
-      getRect() {
-        return manager.rectOf(record);
-      },
-      moveTo(x: number, y: number) {
-        const rect = manager.rectOf(record);
-        manager.setRect(record, { x, y, w: rect.w, h: rect.h });
-      },
       onResize(cb: () => void) {
         record.resizeCallbacks.add(cb);
         return () => record.resizeCallbacks.delete(cb);
@@ -401,12 +333,6 @@ export class WindowManager {
     return undefined;
   }
 
-  /** Current geometry of an open window (or null when it is gone). */
-  rectOfId(id: string): WindowRect | null {
-    const record = this.records.get(id);
-    return record ? this.rectOf(record) : null;
-  }
-
   findWindow(appId: string): WindowHandle | null {
     const record = this.findByApp(appId);
     return record ? this.handle(record) : null;
@@ -419,7 +345,7 @@ export class WindowManager {
 
   focus(id: string): void {
     const record = this.records.get(id);
-    if (!record || this.focusedId === id) return;
+    if (!record) return;
     this.focusedId = id;
     this.zCounter += 1;
     record.el.style.zIndex = String(this.zCounter);
@@ -503,10 +429,6 @@ export class WindowManager {
   close(id: string): void {
     const record = this.records.get(id);
     if (!record) return;
-    // Transient dialogs belong to their owner: closing the owner closes them.
-    for (const other of Array.from(this.records.values())) {
-      if (other.ownerId === id) this.close(other.id);
-    }
     for (const cb of record.closeCallbacks) {
       try {
         cb();
@@ -555,9 +477,6 @@ export class WindowManager {
       maximized: record.maximized,
       tiled: record.tiled,
       focused: this.focusedId === record.id,
-      rect: this.rectOf(record),
-      ownerId: record.ownerId,
-      taskbar: record.taskbar,
     }));
   }
 
@@ -622,10 +541,7 @@ export class WindowManager {
     const bounds = this.bounds();
     const w = Math.min(size.w, Math.max(MIN_SIZE.w, bounds.w - 16));
     const h = Math.min(size.h, Math.max(MIN_SIZE.h, bounds.h - 16));
-    // The step must exceed the title-bar height (~34 px): a smaller offset
-    // lets a raised window cover the title bar of the one beneath it, making
-    // that window unreachable by mouse (all of it is hidden behind it).
-    const offset = (this.cascade % 7) * 40;
+    const offset = (this.cascade % 7) * 26;
     this.cascade += 1;
     const x = Math.min(Math.max(8 + offset, 8), Math.max(8, bounds.w - w - 8));
     const y = Math.min(Math.max(8 + offset, 8), Math.max(8, bounds.h - h - 8));
@@ -727,8 +643,6 @@ export class WindowManager {
   // ---------------------------------------------------------------- pointer
 
   private attachDrag(record: WindowRecord): () => void {
-    const titlebar = record.titlebar;
-    if (!titlebar) return () => {};
     let dragging = false;
     let moved = false;
     let startX = 0;
@@ -749,7 +663,7 @@ export class WindowManager {
       originY = rect.y;
       record.tiled = null;
       record.el.classList.remove("is-tiled");
-      titlebar.setPointerCapture(event.pointerId);
+      record.titlebar.setPointerCapture(event.pointerId);
       record.el.classList.add("is-dragging");
       event.preventDefault();
         };
@@ -774,8 +688,8 @@ export class WindowManager {
       if (!dragging) return;
       dragging = false;
       record.el.classList.remove("is-dragging");
-      if (titlebar.hasPointerCapture(event.pointerId)) {
-        titlebar.releasePointerCapture(event.pointerId);
+      if (record.titlebar.hasPointerCapture(event.pointerId)) {
+        record.titlebar.releasePointerCapture(event.pointerId);
       }
       if (moved) this.applySnap(record);
       this.hideSnapPreview();
@@ -791,16 +705,16 @@ export class WindowManager {
       }
     };
 
-    titlebar.addEventListener("pointerdown", onPointerDown);
-    titlebar.addEventListener("pointermove", onPointerMove);
-    titlebar.addEventListener("pointerup", onPointerUp);
-    titlebar.addEventListener("pointercancel", onPointerUp);
+    record.titlebar.addEventListener("pointerdown", onPointerDown);
+    record.titlebar.addEventListener("pointermove", onPointerMove);
+    record.titlebar.addEventListener("pointerup", onPointerUp);
+    record.titlebar.addEventListener("pointercancel", onPointerUp);
     document.addEventListener("keydown", onKeyDown);
     return () => {
-      titlebar.removeEventListener("pointerdown", onPointerDown);
-      titlebar.removeEventListener("pointermove", onPointerMove);
-      titlebar.removeEventListener("pointerup", onPointerUp);
-      titlebar.removeEventListener("pointercancel", onPointerUp);
+      record.titlebar.removeEventListener("pointerdown", onPointerDown);
+      record.titlebar.removeEventListener("pointermove", onPointerMove);
+      record.titlebar.removeEventListener("pointerup", onPointerUp);
+      record.titlebar.removeEventListener("pointercancel", onPointerUp);
       document.removeEventListener("keydown", onKeyDown);
     };
   }
@@ -868,24 +782,7 @@ export class WindowManager {
     };
   }
 
-  /**
-   * Subscribe to window list changes (open/close/focus/minimize/maximize/move).
-   * Used by the native Linux session to mirror RAST state to the X server.
-   */
-  subscribe(callback: (windows: WindowInfo[]) => void): () => void {
-    this.changeListeners.add(callback);
-    return () => this.changeListeners.delete(callback);
-  }
-
   private emitChange(): void {
-    const windows = this.list();
-    this.options.onChange?.(windows);
-    for (const listener of [...this.changeListeners]) {
-      try {
-        listener(windows);
-      } catch (error) {
-        console.error("window change listener failed", error);
-      }
-    }
+    this.options.onChange?.(this.list());
   }
 }

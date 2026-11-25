@@ -1,4 +1,4 @@
-/*! @license xterm.js (@xterm/xterm, @xterm/addon-fit, @xterm/addon-search) — MIT License.
+/*! @license xterm.js (@xterm/xterm, @xterm/addon-fit) — MIT License.
  * Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
  * Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
  * Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
@@ -24,4 +24,3 @@ import "@xterm/xterm/css/xterm.css";
 
 export { Terminal } from "@xterm/xterm";
 export { FitAddon } from "@xterm/addon-fit";
-export { SearchAddon } from "@xterm/addon-search";

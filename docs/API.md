@@ -37,8 +37,7 @@ All list endpoints accept `page` and `perPage` (bounded server-side).
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/healthz` | liveness for proxies (`ok`) |
-| GET | `/api/bootstrap` | `{product, description, version, setupRequired, setupTokenRequired, registrationEnabled, maxUploadBytes, sessionTtlHours, serverTime, desktop:{protocol, streamTokens, minClientVersion}}` — additive `desktop` capability for RAST Desktop; `streamTokens:true` means the native stream broker is available |
-| GET | `/linux-apps/native/{token}/{optional-rest}` | native stream relay (WebSocket `Upgrade` only, not under `/api`). The single-use stream token in the path — issued by `POST /api/linux-apps/session/stream-token` — is the only credential; no cookie and no browser `Origin` are required or accepted. Frames are relayed transparently to the caller's loopback Xpra WebSocket (`/rest?query` preserved). Invalid/expired/consumed token → bodyless `401`; protocol errors (e.g. unmasked client frames) close the connection. See [NATIVE-BROKER.md](NATIVE-BROKER.md) |
+| GET | `/api/bootstrap` | `{product, description, version, setupRequired, setupTokenRequired, registrationEnabled, maxUploadBytes, sessionTtlHours, serverTime}` |
 | GET | `/api/setup/status` | `{setupRequired, tokenRequired, version}` |
 | POST | `/api/setup` | `{token?, username, password, displayName?}` — creates the first admin, one-shot, disabled once an admin exists |
 | POST | `/api/auth/login` | `{username, password}` → `{user, csrfToken, expiresAt}` |
@@ -74,13 +73,6 @@ before using RAST`.
 | GET | `/api/users?page&perPage&q` | list |
 | POST | `/api/users` | `{username, password, role, displayName?, quotaBytes?, active?, mustChangePassword?, groupIds?, folderRules?, appRules?}` (see below) |
 | PATCH | `/api/users/{id}` | `{displayName?, role?, active?, quotaBytes?, mustChangePassword?}` |
-
-`role` in a request is `superadmin`, `admin` or `user`. In responses `role`
-stays `admin|user` and `superAdmin: true` marks a super administrator. Only a
-super administrator may create administrators, change any role, or edit,
-disable, reset the password of or revoke the sessions of another
-administrator (`403` otherwise); nobody changes their own role, and the last
-active super administrator cannot be demoted or disabled (`400`).
 | DELETE | `/api/users/{id}` | deactivate (data preserved) |
 | POST | `/api/users/{id}/password` | `{password, mustChangePassword?}` |
 | GET | `/api/users/{id}/sessions` | active sessions |
@@ -88,12 +80,6 @@ active super administrator cannot be demoted or disabled (`400`).
 
 Rules enforced server-side: cannot demote/deactivate the last active admin,
 cannot deactivate yourself.
-
-A username has 1–32 characters (letters, digits, dot, dash, underscore),
-starts with a letter or digit and is stored in lower case. Names of the form
-`rast-u<digits>` (any letter case) are reserved for the Linux accounts of
-native apps and answer `400` on `POST /api/users` and `POST /api/setup`;
-existing accounts keep working.
 
 `POST /api/users` can set up the whole account in one request. `active`
 defaults to `true` and `mustChangePassword` to `false`. `groupIds`,
@@ -112,19 +98,10 @@ Paths are **logical** paths: `/` is the user's home root. Shared folders are
 mounted read-only or read-write under `/shared/<name>` (per ACL). Use
 `/api/files/roots` to discover them.
 
-For super administrators, paths under `/@root` are the server's own file
-system (`/@root/etc/hosts` is `/etc/hosts`), served as root with the same
-endpoints and shapes: listing, stat, mkdir, upload (single and chunked),
-download, preview, text, rename, search, and copy/move/delete as jobs. There
-is no quota (`quota` in a listing is the disk behind the folder) and no
-recycle bin (delete is permanent). One request cannot mix `/@root` paths
-with storage paths (`400`). Anyone else gets `403`. `@root` is a reserved
-name in Home and shared folders.
-
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/files?path=/&page=1&perPage=100&sort=name&order=asc&q=` | listing: `{path, breadcrumbs:[{name,path}], items:[entry], page, perPage, total, quota:{quotaBytes,usedBytes,freeBytes}}` |
-| GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]`; super administrators also get `{name:"Root file system", path:"/@root", kind:"system"}` |
+| GET | `/api/files/roots` | `[{name:"Home", path:"/", kind:"home"}, {name:"team", path:"/shared/team", kind:"share", perms:"read|write|admin"}]` |
 | GET | `/api/files/stat?path=` | single entry |
 | POST | `/api/files/mkdir` | `{path}` (parent + name) |
 | POST | `/api/files/upload?dir=/&name=file.bin&overwrite=false` | **raw stream** body; `Content-Length` required; returns entry |
@@ -322,208 +299,6 @@ place`), after which it finishes.
 versions the catalog announces while its workflow verifies them (not
 installable). Manifest format: [`rast-package.schema.json`](rast-package.schema.json).
 
-## Linux apps (app id `applications`; managing them is administrator-only)
-
-Desktop Linux apps installed from a File Station file (`.deb`, AppImage or a
-portable `.tar.gz`/`.tar.xz`/`.tar.bz2`/`.tar` archive) or an `https://` link.
-Since v0.13 they run **natively** on the server by default: each RAST user gets
-one unprivileged Linux identity and one lazily started Xpra seamless graphical
-session that every application and window of that user shares. Installed files
-live under `<data_dir>/linux-apps` for portable/AppImage apps, or are installed
-with the host package manager for `.deb` apps (through the privileged
-`rast-native.service` helper, which also starts the session and application
-systemd units). Per-user application profiles live in
-`<data_dir>/linux-apps/profiles/<app>/<user>` and the person's RAST home is
-exposed read-only to their app identity through a recursive `rx` ACL (shared
-folders are not mapped). The helper restricts the loopback Xpra display ports
-to the `rast` service account with an owned nftables rule, and a live display
-WebSocket revalidates the RAST login session every 5 s. Behaviour and
-limitations: [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md). Legacy apps keep
-`backend:"docker"` and their existing Docker behaviour until an administrator
-migrates them; setting `native_enabled = false` keeps the Docker backend for
-new installs. Every change is audited (`linuxapp.install`, `linuxapp.update`,
-`linuxapp.limits`, `linuxapp.visibility`, `linuxapp.uninstall`,
-`linuxapp.migrate`, `linuxapp.rollback`, `linuxapp.cleanup`).
-
-Installed apps are shared with every signed-in user by default; an
-administrator can restrict one to administrators. Everyone who may see an app
-can launch their own copy, list it and read its icon. Managing apps
-(installing, updating, removing, limits, visibility, migration) is
-administrator-only. The shared app surface is not governed by the group
-policy's `applications` (Docker) rule.
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| POST | `/api/linux-apps/session/prewarm` | any signed-in user: starts the caller's shared graphical session in the background without launching an application, so the first launch is warm. Returns `{prewarmed:true, session:NativeSession}` or `{prewarmed:false, reason}` when `linux_prewarm` is disabled. No-op when a session already exists | — |
-| POST | `/api/linux-apps/session/stream-token` | any signed-in user (**RAST Desktop**): issue a short-lived, single-use stream token for the caller's live native session → `{protocol:1, token, url:"wss://…/linux-apps/native/<token>/", expiresAt, ttlSeconds:120, transport:"xpra-websocket", session:NativeSession, xpra:{sharing:true,protocol:1}}`. The token is 32 random bytes (base64url), kept server-side only as SHA-256, bound to the caller + login session + native session, consumed by the first successful WebSocket upgrade, at most 8 outstanding per user, 30 issuances/minute. `404` when no native session is running, `409` when native Linux apps are disabled, `429` rate limited. Never present in logs/audit. See [NATIVE-BROKER.md](NATIVE-BROKER.md) |
-| DELETE | `/api/linux-apps/session/stream-tokens` | any signed-in user: revoke every outstanding native stream token of the caller → `{revoked:<n>}` (best-effort on logout/detach) |
-| GET | `/api/linux-apps` | any signed-in user: `{apps:[LinuxApp they may see], sessions:[legacy Session] (the caller's), session:NativeSession\|null, limits:{minFreeMemoryBytes, idleMinutes, maxCpus, admissionReserveMb, sessionMemoryMb, sessionCpus, sessionTasks, appMemoryMb, appCpus, appTasks}, dockerEnabled, nativeEnabled, runtime:{profile, quality, minQuality, speed, minSpeed, videoScaling, avSync, encoding, display:{xvfb, xvfbPath, customConfigured, customUsable, active, customCommand, nvidiaXorgDriver, xorg, gpuDisplayConfigured}, gpu:{vendor, model, driverVersion, nvidiaDeviceNodes, nvidiaUvm, nvidiaSmi, nvencLibrary, nvdecLibrary, xpraNvidiaCodecs, mesaEgl, renderNodes}, gpuAccelerationVerified, notes}}` — the `limits` object is flat (no nested per-backend object); `runtime` is read-only capability/policy detection (no probing side effects) and `gpuAccelerationVerified` stays false unless a real application test was performed |
-| POST | `/api/linux-apps/preview` | administrator: `{path}` (File Station path) or `{url}` (an `https://` link) → `{preview:Preview}`. Inspects a file **without changing the system**: `.deb` metadata, dependency transaction (packages to install/upgrade/remove, download size), host compatibility, chosen launcher (or `candidates` when ambiguous), AppImage update information, portable archive contents. Source archives are rejected with an actionable `error`. Chromium-family apps include the `--password-store=basic` keyring warning in `warnings` |
-| POST | `/api/linux-apps/install` | administrator: `{path}` (File Station path the caller can read, up to 8 GB) or `{url}` (an `https://` link on port 443 that ends in the file's name; the server downloads it, following redirects; hosts that resolve to a private, loopback or link-local address are refused with 400) or `{path|url, launcher:{argv,desktopEntry}}` for an ambiguous portable archive → legacy Docker backend `{app, jobId}`; native backend `{jobId, installing:true}` (the app row is created during the job; watch `linuxapps.changed`/job events). Job kind `linuxapps.install`. Run `preview` first and show the plan to the administrator |
-| GET | `/api/linux-apps/{id}` | any signed-in user: `LinuxApp` they may see (404 otherwise) |
-| PATCH | `/api/linux-apps/{id}` | administrator: `{memoryMb?, cpus?}` (512–65536 MB, 1 to the host's CPU count) → `LinuxApp`; native apps apply it to the next application start |
-| DELETE | `/api/linux-apps/{id}?removeData=true` | administrator: stops the app's runs, removes managed files and (for native `.deb` apps) only the packages RAST added and nothing else depends on; with `removeData` also removes every person's profile. Legacy apps remove their images/volumes as before. Files in RAST homes are never touched. 409 while installing or updating |
-| GET | `/api/linux-apps/{id}/icon` | any signed-in user: PNG or SVG (sandboxed CSP); the URL in `iconUrl` changes with every update and is cached |
-| POST | `/api/linux-apps/{id}/check` | administrator: ask the app's official source for a newer version now → the updated `LinuxApp` (`latestVersion`, `checkedAt`, `checkError`). A native `.deb` check may take up to a couple of minutes because it refreshes the package policy |
-| POST | `/api/linux-apps/{id}/update` | administrator: no body or `{}` (official source), `{path}` or `{url}` (update from a file/link) → `{jobId}`; job kind `linuxapps.update`. Portable updates are staged, validated and switched atomically; the previous version stays available for rollback. Legacy apps keep running copies on the old image. 400 when the app has no update source and no file was given |
-| POST | `/api/linux-apps/{id}/visibility` | administrator: `{visibility:"users"|"admins"}` → `LinuxApp`. `users` (default) shows the app to every signed-in user; `admins` restricts it to administrators |
-| POST | `/api/linux-apps/{id}/open` | any signed-in user: launch into the caller's shared native session (or, for legacy apps, start their own container) → `Session` (legacy) or `NativeSession` (native). 404 when the app is not visible to them |
-| POST | `/api/linux-apps/{id}/launch` | any signed-in user: launch a native app into the caller's shared session; idempotent (an already running app returns the existing run) → `{run:Run, session:NativeSession}`. The first launch starts the session lazily |
-| GET | `/api/linux-apps/session` | any signed-in user: `{session:NativeSession\|null, limits}`; `limits` reports `idleMinutes`, `sessionMemoryMb/Cpus`, `appMemoryMb/Cpus` |
-| POST | `/api/linux-apps/session/close` | any signed-in user: stop the caller's whole native session (all their apps); 404 when none runs. There is no App Center action for this; run-level **End application** is the day-to-day force quit |
-| POST | `/api/linux-apps/session/runs/{run}/close` | any signed-in user: terminate one native application run of their own session (its whole process group); the session and all other apps keep running. Canonical path used by App Center's **End application**; the shorter `POST /api/linux-apps/session/runs/{run}` is accepted as a compatibility alias |
-| POST | `/api/linux-apps/{id}/migrate` | administrator: `{}` or `{path\|url}` (replacement install file when the original is gone) → `{jobId}`; job kind `linuxapps.migrate`. Copies every person's legacy Docker settings into native profiles (the Docker data is retained), keeps the app id and switches the backend after the native install validates |
-| POST | `/api/linux-apps/{id}/migration/rollback` | administrator: return a migrated app to the Docker backend (the retained Docker data is still there) → `LinuxApp` |
-| POST | `/api/linux-apps/{id}/migration/cleanup` | administrator: `{removeBackup:true}` → `LinuxApp`; deliberately removes the retained legacy Docker volumes/profiles backup after native operation was verified |
-| GET | `/api/linux-apps/sessions/{sid}` | legacy apps: one of the caller's own copies → `Session`; 404 once it is gone or for someone else's copy. `sid:"native"` returns the native session |
-| POST | `/api/linux-apps/sessions/{sid}/close` | legacy apps: stop their own copy now → `Session` (`sid:"native"` stops the native session) |
-| GET | `/api/linux-apps/sessions/{sid}/windows` | legacy images with per-window streaming → `{windows:[Window]}`; 503 when the app's image has no window service (use Reinstall) |
-| POST | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | legacy per-window streaming: start (or find) that window's VNC stream → `{url, password}`; a noVNC client connects its WebSocket to `url` (RFB bytes) and authenticates with `password` |
-| DELETE | `/api/linux-apps/sessions/{sid}/windows/{window}/stream` | legacy per-window streaming: stop that window's stream |
-| POST | `/api/linux-apps/sessions/{sid}/windows/{window}/close` | legacy per-window streaming: close that window inside the app, as its own close button would |
-
-Discovered applications (installed outside App Center, migrations 15 and 17).
-Discovery never installs, updates or uninstalls anything; it records what exists
-and lets people launch it in their shared session. System-wide entries require
-administrator approval (`linux_discovery_system_apps`, default `approval`); the
-owner's own entries are launchable immediately. Icons are resolved during the
-scan/import only (bounded roots, regular PNG/SVG, ≤96 KiB) and stored on the
-row; the icon endpoint never reads a path from the URL.
-
-| Method | Path | Notes |
-| --- | --- | --- |
-| GET | `/api/linux-apps/discovered` | any signed-in user: `{apps:[DiscoveredApp], enabled, policy:"approval"\|"auto"\|"hidden", scanIntervalSeconds, systemRoots:[dir], extraRoots:[dir]}`. Entries are the caller's own (scope `user`/`managed-profile`, owner only) plus approved system-wide entries; administrators see every entry including pending, hidden and unavailable ones. `canLaunch` is computed server-side (visibility + `status:"ready"` + a non-empty argv) and must be checked before showing Launch |
-| POST | `/api/linux-apps/discovered/scan` | any signed-in user: `{}` scans the caller's inventory; administrators may send `{"userId":<id>}` to scan another account. Discovery never installs or changes files: system directories are scanned by the server, identity-owned directories (0700 homes, managed app profiles) are scanned by the privileged helper **as that identity**; rescan reconciles by stable id (vanished entries become `unavailable`; nothing is deleted). Rate-limited per account (10 s). Returns `{system, user, policy, userError?}`. Emits `linuxapps.discovered` |
-| POST | `/api/linux-apps/discovered/import` | administrator: `{path, name?, args?, workingDir?, icon?, ownerUserId?}` registers an existing executable as a manual discovered entry (no installer runs, no files are changed). `path` must be an absolute executable; `args` is an argv array (`Exec`-style, never a shell string); `workingDir` must be an absolute clean directory (applied only inside the managed application trees); `icon` is an icon-theme name or an absolute `.png`/`.svg` path resolved against the server-readable icon roots. Omitted `ownerUserId` = system-wide entry (approved immediately). Returns `DiscoveredApp` |
-| GET | `/api/linux-apps/discovered/{id}/icon` | any signed-in user who may see the entry: the entry's icon as `image/png` or `image/svg+xml`, with `Cache-Control: private, max-age=3600`. 404 when the entry is not visible to the caller or has no stored icon (the UI then shows the generic application icon). Only validated bytes stored by a scan/import are served |
-| PATCH | `/api/linux-apps/discovered/{id}` | administrator: `{approved?, hidden?, name?}` — approve/unapprove a system entry, hide/show an entry from ordinary accounts, or rename it. Returns `DiscoveredApp`; emits `linuxapps.discovered` |
-| DELETE | `/api/linux-apps/discovered/{id}` | administrator: forget the registry entry. Installed files are never touched. Emits `linuxapps.discovered` |
-| POST | `/api/linux-apps/discovered/{id}/launch` | any signed-in user: launch a discovered application into the caller's shared native session (same lazy session start, cgroup limits and window adoption as managed native apps; argv only, no shell) → `{run, session, app}`. 404 when the entry is not visible to the caller, 409 while pending approval/unavailable. Idempotent: an already running entry returns the existing run. The generic `POST /api/linux-apps/{id}/launch` resolves discovered ids too |
-
-`DiscoveredApp`: `{id, name, genericName, comment, exec:[argv], tryExec, icon,
-iconUrl, categories, terminal, startupWmClass, desktopPath, desktopId,
-ownerUserId, scope:"user"|"system"|"managed-profile", source, installDir,
-version, workingDir, status, approved, hidden, lastSeenMs, lastLaunchedMs,
-createdAt, updatedAt, canLaunch}`. `icon` is the desktop entry's raw `Icon=`
-value (diagnostics), `iconUrl` is the stable authenticated icon URL or `null`,
-`workingDir` is the desktop entry's `Path=`/imported working directory or
-`null`.
-
-`LinuxApp`: `{id, desktopId:"linux:<id>", name, format:"deb"|"appimage"|"tarball",
-fileName, version, package, description, command:[argv], launchGuess, iconUrl,
-status:"installing"|"ready"|"updating"|"failed", error, jobId,
-update:{source:"apt"|"github"|"zsync"|null, latestVersion, available, checkedAt,
-error}, memoryMb, cpus, sizeBytes, visibility:"users"|"admins", running,
-createdAt, updatedAt, backend:"docker"|"native", native:NativeInfo|null}`.
-`launchGuess` is true when RAST picked the program of an archive itself.
-`latestVersion` is `"newer build"` for an AppImage whose update file changed
-without a version number.
-
-`NativeInfo`: `{installPath, previousPath, launcher:{argv,desktopEntry,name,
-comment,icon,terminal,workingDir,chromium}, architecture, packageVersion,
-preexistingPackage, dependencies:[package], packagesAdded:[package],
-compatibility:{ok, reasons:[]}, installSource:"file"|"url"|"migrated",
-migration:{state:"pending"|"prepared"|"migrated"|"failed"|"rolled_back",
-error, backup, migratedAt, dockerVolume}}`.
-
-`Preview`: `{format, fileName, sizeBytes, sha256, source, app:{name, version,
-package, description, icon:{type,data}|null, launchGuess, launcher|null},
-candidates:[{name,argv,desktopEntry}], compatibility:{ok,reasons:[]},
-deb:{package,version,architecture,description,depends:[],conflicts:[],
-installs:[{name,version,oldVersion?}],removals:[],upgrades:[],downloadBytes,
-transaction:{installs:[],removals:[],upgrades:[],downloadBytes},
-source,candidate,repository,preexisting,installedVersion,sourcesAdded:[]}|null,
-update:{kind,...}|null, warnings:[]}`. The `.deb` transaction lists every
-package the simulated APT transaction would install, upgrade or remove and the
-download size; removals/conflicts are shown highlighted before an administrator
-confirms.
-
-Legacy `Session`: `{id, appId, appName, status:"starting"|"ready"|"ended", url,
-reason:"closed"|"idle"|"exited"|"error"|"removed"|null, error, startedAt,
-viewers, separateWindows}`. `separateWindows` is true when the app's image can
-stream each of its windows on its own. `url` (`/linux-apps/<key>/`) is the
-frame's address; the key is 128 random bits and is the only credential of that
-legacy route, so treat the URL like a password. RAST does not write it to its
-logs and it stops working when the copy ends. Legacy responses on
-`/linux-apps/` carry `Content-Security-Policy: sandbox …; frame-ancestors
-'self'` (the frame has an opaque origin).
-
-`NativeSession`: `{id:"native", status:"starting"|"ready"|"ended",
-url:"/linux-apps/session/<key>/", appId:null, appName:"Desktop session",
-reason:"closed"|"idle"|"error"|"removed"|null, error, startedAt, viewers,
-separateWindows:true, profile, displayBackend, gpuAccelerationVerified, metrics:
-{memoryBytes, tasks, cpuUsec}|null, display, apps:[Run]}`. `profile` is the
-operator-selected performance profile at session start; `displayBackend` is
-`xvfb` or `custom`; `metrics` is the live cgroup memory/process/CPU usage of the
-session unit (null when it cannot be read). `Run`: `{id, appId, appName,
-status:"launching"|"running"|"exited"|"failed", unit, error, startedAt}`. The
-native session URL is served **same-origin** by RAST and every request (HTML,
-assets, WebSocket) is authorized against the signed-in RAST user that owns the
-session; another user's key is refused with 403 and an expired/revoked session
-with 401. A live display WebSocket re-checks the login session, its expiry, its
-revocation and the account state every 5 s and closes the stream when it is no
-longer valid (logout, revocation, expiry, deactivation). The Xpra port itself
-is bound to `127.0.0.1` with Xpra-level authentication disabled and is never
-exposed: an nftables rule installed by the helper rejects connections to the
-display ports from every uid except the `rast` service account, and RAST
-proxies HTTP and WebSocket to it and injects its window-integration shim.
-Closing a RAST window sends the app's normal close request (the app's own
-unsaved-changes dialog appears as a dialog window); terminating an application
-is the separate `session/runs/{run}/close` action. Window titles from the
-application are escaped before the Xpra HTML5 client renders them.
-
-RAST Desktop (the native macOS client) does not use the cookie-authorized HTML5
-proxy: it calls `POST /api/linux-apps/session/stream-token`, receives a 120 s
-single-use `wss://…/linux-apps/native/<token>/` URL and attaches the official
-native Xpra client there. The relay route strips the token prefix, forwards the
-client's remainder/query verbatim to the loopback Xpra WebSocket and consumes
-the token atomically on the first successful upgrade; it is mounted outside
-cookie auth and outside the browser same-origin `Origin` check because the
-native client can present neither, and the token (bound to the account, login
-session and native session) is its only credential. Native Xpra must run with
-`XPRA_WEBSOCKET_MASK=1` (RFC 6455 masking). Audit events:
-`linux_apps.stream_token.issued`, `linux_apps.stream_token.denied`,
-`linux_apps.stream.attached` (no tokens, URLs or session keys). Full security
-model and examples: [NATIVE-BROKER.md](NATIVE-BROKER.md).
-
-## Native Terminal (app id `terminal`)
-
-Interactive PTY shells as the mapped per-user identity. Administrators always
-have access; ordinary accounts need a group grant for the `terminal`
-application. Starting a shell requires the native helper
-(`rast-native.service`), but not Docker, Xpra or a graphical session.
-
-| Method | Path | Notes |
-|---|---|---|
-| GET | `/api/terminal/env` | Runtime panel: available runtimes/versions, selected version, source (`rast`/`system`), executable locations, missing dependencies, this user's defaults |
-| PATCH | `/api/terminal/env` | Save defaults: `{"defaults":{"rust":"1.100.0",…}}`; versions must be installed |
-| GET | `/api/terminal/sessions` | This account's live sessions (`id`, `shell`, `cwd`, `root`, `state`, `startedAt`, `viewers`) |
-| POST | `/api/terminal/sessions/{id}/close` | Close one session you own |
-| GET (WebSocket) | `/api/terminal/ws` | Same-origin upgrade; cookie session; CSRF token in the first message |
-
-A `ready` message includes `"root": true` when the shell is the administrator's
-root shell; `GET /api/terminal/env` includes `"adminRoot": true` when the server
-gives administrators root. Ordinary users always receive their unprivileged
-identity.
-
-WebSocket messages:
-
-* client → server: text `{"type":"start","csrf":"…","cols":120,"rows":32,
-  "folder":{"path":"/shared/team"}?,"runtimes":{"rust":"1.100.0"}?,
-  "session":"<id>"?}`; then binary keyboard bytes; text
-  `{"type":"resize","cols":N,"rows":N}`; text `{"type":"close"}`.
-* server → client: text `{"type":"ready","sessionId":"…","shell":"…",
-  "cwd":"…","root":false,"reconnected":false,"runtimes":{…}}`; binary output; text
-  `{"type":"exit","code":N|null}`; text `{"type":"error","message":"…"}`.
-
-`folder.path` is a File Station logical path (`/`, `/sub`, or
-`/shared/<name>/…`), never a POSIX path: the server resolves it with the
-storage ACLs and the helper grants the identity the matching OS ACL. Sending a
-previous `session` id reattaches to the existing shell within the reconnect
-grace period instead of starting a duplicate. Authentication, the session row
-and the app permission are re-checked every 30 seconds; sign-out, account
-disablement or permission removal eventually closes the shell.
-
 ## Activity logs
 
 | Method | Path | Notes |
@@ -671,8 +446,7 @@ never appear in the event URL.
 Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
 `job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
 `audit.created`, `user.changed`, `settings.changed`, `appearance.changed`,
-`package.changed`, `package.catalog`, `linuxapps.changed`, `linuxapps.session`,
-`linuxapps.discovered`.
+`package.changed`, `package.catalog`.
 
 ## Conventions for implementers
 

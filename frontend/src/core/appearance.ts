@@ -68,30 +68,15 @@ export const WIDGET_IDS: ReadonlyArray<WidgetId> = ["health", "cpu-memory", "sto
  */
 export interface DesktopWidget {
   id: WidgetId;
-  /** Legacy fractional placement (kept for older servers/layouts). */
   x: number;
   y: number;
-  /** Legacy fractional size (kept for older servers/layouts). */
-  w?: number;
-  h?: number;
-  /** Schema version 2: fixed CSS-pixel grid placements (viewport independent). */
-  gridVersion?: 2;
-  pxX?: number;
-  pxY?: number;
-  pxW?: number;
-  pxH?: number;
 }
 
 /** An app placed on the desktop and its grid cell (column, row from the top left). */
 export interface DesktopIcon {
   id: string;
-  /** Legacy coarse cell, kept for older servers/clients (approximate for v2). */
   col: number;
   row: number;
-  /** Version 2: fine-grid position in CSS pixels relative to the icon area. */
-  gridVersion?: 2;
-  pxX?: number;
-  pxY?: number;
 }
 
 /** Grid limit for desktop icons (matches the server). */
@@ -350,47 +335,17 @@ export function normalizeWidgets(input: unknown): DesktopWidget[] {
     const id = (item as { id?: unknown } | null)?.id;
     if (typeof id !== "string" || !WIDGET_IDS.includes(id as WidgetId)) continue;
     if (out.some((widget) => widget.id === id)) continue;
-    const widget: DesktopWidget = {
-      id: id as WidgetId,
-      x: clampFraction((item as DesktopWidget).x),
-      y: clampFraction((item as DesktopWidget).y),
-    };
-    const w = Number((item as DesktopWidget).w);
-    const h = Number((item as DesktopWidget).h);
-    if (Number.isFinite(w) && w > 0) widget.w = Math.round(Math.max(0.05, Math.min(1, w)) * 10_000) / 10_000;
-    if (Number.isFinite(h) && h > 0) widget.h = Math.round(Math.max(0.05, Math.min(1, h)) * 10_000) / 10_000;
-    const gridVersion = Number((item as DesktopWidget).gridVersion);
-    const pxX = Number((item as DesktopWidget).pxX);
-    const pxY = Number((item as DesktopWidget).pxY);
-    const pxW = Number((item as DesktopWidget).pxW);
-    const pxH = Number((item as DesktopWidget).pxH);
-    const px = (value: number, min: number, max: number): number | undefined =>
-      Number.isFinite(value) ? Math.round(Math.max(min, Math.min(max, value))) : undefined;
-    const keptX = px(pxX, 0, 100_000);
-    const keptY = px(pxY, 0, 100_000);
-    const keptW = px(pxW, 32, 10_000);
-    const keptH = px(pxH, 32, 10_000);
-    if (gridVersion === 2 && keptX !== undefined && keptY !== undefined && keptW !== undefined && keptH !== undefined) {
-      widget.gridVersion = 2;
-      widget.pxX = keptX;
-      widget.pxY = keptY;
-      widget.pxW = keptW;
-      widget.pxH = keptH;
-    }
-    out.push(widget);
+    out.push({ id: id as WidgetId, x: clampFraction((item as DesktopWidget).x), y: clampFraction((item as DesktopWidget).y) });
   }
   return out.slice(0, WIDGET_IDS.length);
 }
-
-/** A built-in app id, or an installed Linux app (`linux:<id>`). */
-const SHORTCUT_ID = /^(?:[a-z]+|linux:[a-z0-9][a-z0-9-]{0,47})$/;
 
 /** Unique application ids in order; defaults when the field is missing. */
 export function normalizeTaskbarPins(input: unknown): string[] {
   if (!Array.isArray(input)) return [...DEFAULT_TASKBAR_PINS];
   const out: string[] = [];
   for (const item of input) {
-    if (typeof item !== "string" || !SHORTCUT_ID.test(item) || out.includes(item)) continue;
+    if (typeof item !== "string" || !/^[a-z]+$/.test(item) || out.includes(item)) continue;
     out.push(item);
   }
   return out;
@@ -403,27 +358,10 @@ export function normalizeDesktopIcons(input: unknown): DesktopIcon[] | null {
   for (const item of input) {
     if (!item || typeof item !== "object") continue;
     const { id, col, row } = item as DesktopIcon;
-    if (typeof id !== "string" || !SHORTCUT_ID.test(id)) continue;
+    if (typeof id !== "string" || !/^[a-z]+$/.test(id)) continue;
     if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col > MAX_DESKTOP_CELL || row > MAX_DESKTOP_CELL) continue;
-    const gridVersion = Number((item as DesktopIcon).gridVersion);
-    const pxX = Number((item as DesktopIcon).pxX);
-    const pxY = Number((item as DesktopIcon).pxY);
-    const hasPx =
-      gridVersion === 2 &&
-      Number.isFinite(pxX) &&
-      Number.isFinite(pxY) &&
-      pxX >= 0 &&
-      pxY >= 0 &&
-      pxX <= 100_000 &&
-      pxY <= 100_000;
-    if (out.some((icon) => icon.id === id || (!hasPx && icon.gridVersion !== 2 && icon.col === col && icon.row === row))) continue;
-    const icon: DesktopIcon = { id, col, row };
-    if (hasPx) {
-      icon.gridVersion = 2;
-      icon.pxX = Math.round(pxX);
-      icon.pxY = Math.round(pxY);
-    }
-    out.push(icon);
+    if (out.some((icon) => icon.id === id || (icon.col === col && icon.row === row))) continue;
+    out.push({ id, col, row });
   }
   return out;
 }
@@ -489,26 +427,6 @@ export function applyAppearance(appearance: Appearance, options: { preview?: boo
   }
   if (!options.preview) {
     root.dataset.wallpaperApplied = "true";
-    // The boot splash (index.html + /boot-wallpaper.js) paints this on the
-    // next refresh before the app bundle knows who is signed in.
-    try {
-      if (!url || wallpaper.kind === "color") {
-        window.localStorage.removeItem("rast.wallpaper.splash.v1");
-      } else {
-        window.localStorage.setItem(
-          "rast.wallpaper.splash.v1",
-          JSON.stringify({
-            url,
-            color: wallpaper.color,
-            overlay: wallpaper.overlay,
-            fit: wallpaper.fit,
-            position: positionCss(wallpaper.position),
-          }),
-        );
-      }
-    } catch {
-      /* storage unavailable: the splash keeps its built-in background */
-    }
   }
 }
 
@@ -764,7 +682,7 @@ export class AppearanceService {
       }
     }
     try {
-      const fresh = normalizeAppearance(await this.api.get<Appearance>(`/api/appearance?t=${Date.now()}`));
+      const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
       return this.commit(generation, fresh);
     } catch (error) {
       this.assertCurrent(generation);
@@ -789,7 +707,7 @@ export class AppearanceService {
   async reload(): Promise<Appearance> {
     if (this.userId === null) throw new StaleAppearanceError();
     const generation = this.generation;
-    const fresh = normalizeAppearance(await this.api.get<Appearance>(`/api/appearance?t=${Date.now()}`));
+    const fresh = normalizeAppearance(await this.api.get<Appearance>("/api/appearance"));
     return this.commit(generation, fresh);
   }
 
@@ -925,19 +843,6 @@ export class AppearanceService {
    * {@link saveTheme}: one request at a time, the latest layout wins, and only
    * the final response is announced. Resolves `false` when it failed.
    */
-  /** Save widgets and shortcuts together in one appearance request. */
-  async saveDesktopLayout(widgets: DesktopWidget[], icons: DesktopIcon[] | null): Promise<boolean> {
-    if (this.userId === null) throw new StaleAppearanceError();
-    const generation = this.generation;
-    const payload = {
-      widgets: normalizeWidgets(widgets),
-      desktopIcons: normalizeDesktopIcons(icons),
-    };
-    const updated = normalizeAppearance(await this.api.put<Appearance>("/api/appearance", payload));
-    this.commit(generation, updated);
-    return true;
-  }
-
   saveWidgets(widgets: DesktopWidget[]): Promise<boolean> {
     // An account showing the default set has not saved a list yet: even an
     // unchanged (or empty) list must be stored to make it the account's own.

@@ -7,8 +7,6 @@ export interface User {
   username: string;
   displayName: string;
   role: Role;
-  /** An administrator at the server owner level (root files, host terminal, managing administrators). */
-  superAdmin?: boolean;
   active: boolean;
   quotaBytes: number;
   usedBytes: number;
@@ -251,8 +249,7 @@ export interface FileListing extends Page<FileEntry> {
 export interface FileRoot {
   name: string;
   path: string;
-  /** `system` is the server's own file system (super administrators only). */
-  kind: "home" | "share" | "system";
+  kind: "home" | "share";
   perms?: "read" | "write" | "admin";
 }
 

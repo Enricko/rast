@@ -1,6 +1,6 @@
 [package]
 name = "rast"
-version = "0.18.3"
+version = "0.19.0"
 edition = "2021"
 rust-version = "1.94"
 description = "RAST — Resource Administration & Storage Toolkit"
@@ -29,7 +29,6 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 argon2 = "0.6.0"
 rand = "0.9"
 sha2 = "0.10"
-sha1 = "0.10"
 hmac = "0.12"
 subtle = "2"
 base64 = "0.22"
@@ -51,12 +50,8 @@ percent-encoding = "2"
 rust-embed = { version = "8", features = ["include-exclude"] }
 ipnet = "2"
 walkdir = "2"
-hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
 flate2 = "1"
 tar = "0.4"
-xz2 = "0.1"
-bzip2 = "0.6"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 ring = "0.17"
 async-trait = "0.1"
@@ -64,14 +59,10 @@ socket2 = "0.6"
 libc = "0.2"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 notify = "8.2.2"
-httparse = "1.10"
-tokio-tungstenite = "0.29"
-zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tempfile = "3"
 http-body-util = "0.1"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
 [profile.release]
 opt-level = "z"

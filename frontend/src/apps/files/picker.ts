@@ -1,5 +1,4 @@
-// Folder picker dialog used by File Station copy/move actions. With `files`,
-// it picks one matching file instead (App Center uses it for Linux apps).
+// Folder picker dialog used by File Station copy/move actions.
 
 import type { AppContext } from "../../core/app";
 import { clear, h } from "../../core/dom";
@@ -9,18 +8,12 @@ import { iconSvg } from "../../core/icons";
 import { isAbortError, type AppLifecycle } from "../../components/lifecycle";
 import { isUnavailableError, unavailableReason, unavailableState } from "../../components/states";
 
-import { isSystemPath, SYSTEM_ROOT } from "./types";
-
 export interface FolderPickerOptions {
   title: string;
   confirmLabel: string;
   startPath: string;
   /** Paths being copied/moved: cannot be used as the destination. */
   exclude?: Set<string>;
-  /** Pick a file instead of a folder: the files that may be chosen. */
-  files?: (entry: FileEntry) => boolean;
-  /** Shown when a folder has nothing to choose (file mode). */
-  emptyHint?: string;
 }
 
 /** Resolves with the chosen destination directory, or null when cancelled. */
@@ -32,8 +25,6 @@ export function pickDestination(
   return new Promise((resolve) => {
     let chosen: string | null = null;
     let currentPath = options.startPath;
-    let selectedFile: string | null = null;
-    const fileMode = Boolean(options.files);
     let loading = false;
     let controller = lifecycle.trackController(new AbortController());
     let closed = false;
@@ -54,7 +45,6 @@ export function pickDestination(
 
     const navigate = (path: string): void => {
       currentPath = path;
-      selectedFile = null;
       error.textContent = "";
       void load(path);
     };
@@ -67,17 +57,13 @@ export function pickDestination(
       clear(list);
       clear(crumbs);
       status.textContent = "Loading folders…";
-      // The root file system is its own tree: its top has no parent, and a
-      // copy or move never crosses between it and RAST storage.
-      const system = isSystemPath(path);
-      const top = system ? SYSTEM_ROOT : "/";
-      const parent = path === top ? null : path.slice(0, path.lastIndexOf("/")) || "/";
-      const crumbRoot = h("button", { class: "picker-crumb", type: "button" }, system ? "Root file system" : "Home");
-      crumbRoot.addEventListener("click", () => navigate(top));
+      const parent = path === "/" ? null : path.slice(0, path.lastIndexOf("/")) || "/";
+      const crumbRoot = h("button", { class: "picker-crumb", type: "button" }, "Home");
+      crumbRoot.addEventListener("click", () => navigate("/"));
       crumbs.appendChild(crumbRoot);
-      if (path !== top) {
-        const parts = path.split("/").filter(Boolean).slice(system ? 1 : 0);
-        let accumulated = system ? SYSTEM_ROOT : "";
+      if (path !== "/") {
+        const parts = path.split("/").filter(Boolean);
+        let accumulated = "";
         for (const part of parts) {
           accumulated += `/${part}`;
           const target = accumulated;
@@ -106,21 +92,10 @@ export function pickDestination(
           if (isExcluded(dir.path)) continue;
           list.appendChild(folderRow(dir.name, dir.path, dir.path));
         }
-        let files = 0;
-        if (options.files) {
-          const all = Array.isArray(listing?.items) ? listing.items : [];
-          for (const entry of all) {
-            if (entry.kind === "dir" || !options.files(entry)) continue;
-            list.appendChild(fileRow(entry));
-            files += 1;
-          }
-        }
-        if (fileMode && files === 0) {
-          list.appendChild(h("div", { class: "picker-empty small muted" }, options.emptyHint ?? "No matching files in this folder."));
-        } else if (list.children.length === 0) {
+        if (list.children.length === 0) {
           list.appendChild(h("div", { class: "picker-empty small muted" }, "No sub-folders here. Use this folder as the destination."));
         }
-        status.textContent = fileMode ? "Choose a file." : `Destination: ${path}`;
+        status.textContent = `Destination: ${path}`;
       } catch (err) {
         if (closed || isAbortError(err)) return;
         loading = false;
@@ -131,7 +106,7 @@ export function pickDestination(
             h("div", { class: "error-state" }, h("div", { class: "error-title" }, "Could not list this folder"), h("div", { class: "error-detail" }, errorMessage(err))),
           );
         }
-        status.textContent = fileMode ? "" : `Destination: ${path}`;
+        status.textContent = `Destination: ${path}`;
       } finally {
         lifecycle.releaseController(request);
       }
@@ -150,33 +125,7 @@ export function pickDestination(
       return row;
     };
 
-    let confirmDialog: (() => void) | null = null;
-    const fileRow = (entry: FileEntry): HTMLElement => {
-      const row = h(
-        "button",
-        { class: "picker-row is-file", type: "button", role: "option", ariaSelected: false },
-        iconSvg("file", 18),
-        h("span", { class: "picker-row-label" }, entry.name),
-      );
-      row.addEventListener("click", () => {
-        selectedFile = entry.path;
-        error.textContent = "";
-        for (const other of list.querySelectorAll(".picker-row.is-selected")) {
-          other.classList.remove("is-selected");
-          other.setAttribute("aria-selected", "false");
-        }
-        row.classList.add("is-selected");
-        row.setAttribute("aria-selected", "true");
-        status.textContent = `Selected: ${entry.name}`;
-      });
-      row.addEventListener("dblclick", () => {
-        selectedFile = entry.path;
-        confirmDialog?.();
-      });
-      return row;
-    };
-
-    const closeModal = modal({
+    modal({
       title: options.title,
       body,
       wide: true,
@@ -196,15 +145,6 @@ export function pickDestination(
               error.textContent = "Still loading the folder, please wait.";
               return;
             }
-            if (fileMode) {
-              if (!selectedFile) {
-                error.textContent = "Choose a file first.";
-                return;
-              }
-              chosen = selectedFile;
-              closeDialog();
-              return;
-            }
             if (isExcluded(currentPath)) {
               error.textContent = "The destination cannot be inside the item being copied or moved.";
               return;
@@ -215,11 +155,6 @@ export function pickDestination(
         },
       ],
     });
-    confirmDialog = () => {
-      if (!selectedFile) return;
-      chosen = selectedFile;
-      closeModal();
-    };
     navigate(options.startPath);
   });
 }

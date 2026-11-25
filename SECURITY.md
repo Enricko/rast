@@ -9,8 +9,8 @@ behind TLS and restrict who can reach it.
 
 | Version | Supported |
 | --- | --- |
-| `0.13.x` | ✅ Current release series |
-| `< 0.13` | ❌ Superseded — upgrade to the current release |
+| `0.1.x` | ✅ Current release series |
+| `< 0.1` | ❌ No public releases exist |
 
 Security fixes are released for the current minor series. Upgrade with the
 installer or `rast update`; see [docs/OPERATIONS.md](docs/OPERATIONS.md#updates).
@@ -54,22 +54,18 @@ data, and do not run denial-of-service tests against shared infrastructure.
 * the SQLite database: users, sessions, audit logs, app definitions;
 * `secret.key` (master key for CSRF derivation and encryption of app secrets);
 * Docker applications running on the host (via the worker);
-* native Linux applications and their per-user graphical sessions;
-* the host itself (Docker group membership is effectively root; the native
-  helper runs as root by design).
+* the host itself (Docker group membership is effectively root).
 
 ### Trust boundaries
 
 ```
 untrusted network ──TLS proxy──▶ rast.service (unprivileged)
                                       │ Unix socket (0660, group rast)
-                    ┌─────────────────┴──────────────────┐
-                    ▼                                    ▼
-        rast-worker.service (docker group)      rast-native.service (root)
-                    │ /var/run/docker.sock               │ systemd-run / apt-get / useradd
-                    ▼                                    ▼
-             Docker Engine / host              rast-linux.slice: rast-u<uid>
-                                              session + application processes
+                                      ▼
+                              rast-worker.service (docker group)
+                                      │ /var/run/docker.sock
+                                      ▼
+                                Docker Engine / host
 ```
 
 1. **Network → proxy.** TLS is terminated by nginx/Caddy/Cloudflare. RAST binds
@@ -93,41 +89,6 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
    root-equivalent by design.** A compromise of the worker (or of an app
    definition it deploys) can compromise the host; only administrators can
    manage applications, and compose validation restricts what may be deployed.
-7. **RAST → native helper.** The helper is the only root component of the
-   native backend and is deliberately thin: a Unix socket (0660 root:rast,
-   optional peer-uid allowlist), JSON-lines requests with `deny_unknown_fields`,
-   no shell anywhere, absolute binaries and argument vectors, per-operation
-   field validation (usernames, units, displays, ports, argv[0] prefixes, env
-   keys, limits, managed paths), bounded timeouts/output, serialized APT
-   transactions and an admin-only trigger set. At startup it also installs one
-   owned nftables table/rule restricting the loopback Xpra display ports to the
-   RAST service uid (defence in depth behind the authenticated proxy; requires
-   the `nftables` package). `.deb` installation is explicitly
-   *administrator-approved privileged software installation*; the application
-   processes themselves run under unprivileged identities.
-8. **Native application ↔ other users.** Each RAST user maps to a distinct
-   unprivileged Linux identity; profiles are 0700 per app/user, sessions bind
-   to loopback with Xpra authentication disabled (RAST's authenticated
-   same-origin proxy is the only intended path, and an nftables rule restricts
-   the display ports to the `rast` service uid so other local accounts cannot
-   connect), and users cannot read each other's homes or connect to each
-   other's sockets. Every proxy request is authenticated as the session owner
-   (another user's key → 403); live display WebSockets revalidate the RAST
-   login session every 5 s and close on logout, revocation, expiry or account
-   deactivation. Deactivating an account also stops its native session;
-   revoking only browser sessions keeps its apps running under the retention
-   policy. Applications inside one person's session share that person's trust
-   boundary by design — this is *not* a hostile-application sandbox. The
-   person's RAST home is exposed to *their own* app identity through a
-   read+traverse (`rx`) ACL only; shared folders are not mapped into native app
-   profiles. Chromium-family apps run with `--password-store=basic` because a
-   headless session has no unlocked OS keyring, so their saved site
-   credentials are protected by the 0700 profile and identity permissions, not
-   by keyring encryption. Chromium runs unprivileged with its sandbox enabled
-   (`Seccomp: 2`, `NoNewPrivs: 1` on renderer processes); `--no-sandbox` is
-   never added. Xpra is an external program (GPL-2.0-or-later server, MPL-2.0
-   HTML5 client served from the installed package) and is not linked into or
-   distributed with RAST.
 
 ### Out of scope / limitations
 
@@ -136,25 +97,6 @@ untrusted network ──TLS proxy──▶ rast.service (unprivileged)
 * Malicious Docker images or compose files an administrator deliberately
   deploys — administrators are trusted; the worker limits *how* commands are
   executed, not *what* the chosen containers do.
-* Malicious native application packages or installation scripts an
-  administrator deliberately installs — an admin-approved `.deb` runs its
-  maintainer scripts as root during `apt-get`; the helper bounds *which*
-  operations are possible, not what the chosen package does. Treat App Center
-  → Add app like `sudo apt install`.
-* Applications and windows of one account trust each other: they run as the
-  same Linux identity in the same Xpra session and share that trust boundary.
-  There is no isolation between apps of the same user; per-user separation only
-  isolates accounts from each other.
-* Credentials that a third-party app stores itself are not protected by an OS
-  keyring. Chromium-family apps use `--password-store=basic`; their saved
-  site passwords and cookies are readable by anything that can read the 0700
-  profile (host root, a process of the same identity, or a data-directory
-  backup). Do not store credentials in native apps that you would not keep in
-  that profile.
-* Files that become readable by a native app are outside File Station's access
-  checks: once a file is readable by the person's app identity (for example
-  copied into their RAST home), the application decides what to do with it.
-  Shared folders are not mapped into native app profiles.
 * Availability attacks that exhaust host resources (bounded by systemd limits,
   but there is no per-user request quota beyond file quotas).
 * Supply-chain compromise of crates/npm packages beyond what `Cargo.lock`,
@@ -299,12 +241,6 @@ and upgrade RAST once a build with the patched SQLite is published.
 - [ ] Enable scheduled backups and keep encrypted copies off-server.
 - [ ] Restrict the `docker` group (`rast-worker` only!) — every member is
       root-equivalent.
-- [ ] Keep `rast-native.service` limited to the `rast` peer uid, review
-      `linuxapp.*` audit entries, and remember that installing a `.deb` (App
-      Center → Add app) is privileged software installation: review the
-      dependency transaction in the preview before confirming.
-- [ ] Keep `/run/rast-linux` (0700 per user) and `/var/lib/rast/linux-users`
-      only; never add the `rast` account to a native identity's group.
 - [ ] Review Activity Logs periodically and after any suspicious event.
 - [ ] Set `RAST_MAX_UPLOAD_BYTES` and proxy body limits to values you need;
       missing limits allow disk-filling uploads by authenticated users.

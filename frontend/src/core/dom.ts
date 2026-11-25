@@ -3,20 +3,6 @@
 
 type Child = Node | string | number | null | undefined | false;
 
-/**
- * Realm-independent element test.
- *
- * Nodes created by another document (the Xpra HTML5 viewer iframe) and then
- * adopted into the RAST document keep the creating realm's prototypes, so
- * `target instanceof Element` is false for them even though they are real
- * elements. Event handlers that inspect browser-native targets must use this
- * check instead of `instanceof`; otherwise clicks inside native application
- * windows are misread as desktop-background clicks.
- */
-export function isElementNode(target: EventTarget | null): target is Element {
-  return target !== null && typeof target === "object" && (target as Node).nodeType === 1;
-}
-
 export interface ElementAttrs {
   class?: string;
   id?: string;

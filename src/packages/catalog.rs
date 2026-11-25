@@ -22,7 +22,7 @@ use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    manifest::{self, Manifest, PackageIcon, Publisher},
+    manifest::{self, Manifest, Publisher},
     net::{self, OriginPolicy},
 };
 
@@ -160,10 +160,6 @@ struct RawPackage {
     license: Option<String>,
     #[serde(default)]
     channels: Vec<Channel>,
-    /// Package-level icon (one per package, not per version); absent in
-    /// catalogs written before icons were added.
-    #[serde(default)]
-    icon: Option<PackageIcon>,
     #[serde(default)]
     versions: Vec<serde_json::Value>,
     #[serde(default)]
@@ -204,10 +200,6 @@ pub struct CatalogPackage {
     pub description: String,
     pub homepage: Option<String>,
     pub license: Option<String>,
-    /// Package-level icon embedded as base64; `None` for catalogs written
-    /// before icons were added and for packages without one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icon: Option<PackageIcon>,
     pub channels: Vec<Channel>,
     /// Valid versions, newest first.
     pub versions: Vec<Manifest>,
@@ -294,13 +286,11 @@ pub fn parse(bytes: &[u8]) -> Result<Catalog, String> {
                     return Err("manifest publisher differs from the catalog publisher".into());
                 }
                 for artifact in &m.artifacts {
-                    for archive in artifact.archives() {
-                        let host = net::https_host(archive.url)?;
-                        if !allowed.contains(&host) {
-                            return Err(format!(
-                                "artifact host {host} is not in the catalog's allowed hosts"
-                            ));
-                        }
+                    let host = net::https_host(&artifact.url)?;
+                    if !allowed.contains(&host) {
+                        return Err(format!(
+                            "artifact host {host} is not in the catalog's allowed hosts"
+                        ));
                     }
                 }
                 Ok(m)
@@ -330,7 +320,6 @@ pub fn parse(bytes: &[u8]) -> Result<Catalog, String> {
             description: pkg.description,
             homepage: pkg.homepage,
             license: pkg.license,
-            icon: pkg.icon,
             channels: pkg.channels,
             versions,
             unsupported,
@@ -536,47 +525,5 @@ pub(crate) mod tests {
         assert!(parse_trusted_key("id:AAAA").is_err());
         let signer = TestSigner::new("k");
         assert!(parse_trusted_key(&signer.config_key()).is_ok());
-    }
-
-    #[test]
-    fn package_icons_are_optional_catalog_data() {
-        const TINY_SVG: &str =
-            r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h24v24H0z"/></svg>"#;
-
-        // Catalogs written before icons parse unchanged: the package has no
-        // icon and serializes no `icon` key (the RAST API omits it too).
-        let old = parse(&catalog_json(1, vec![])).unwrap();
-        assert!(old.packages[0].icon.is_none());
-        let value = serde_json::to_value(&old.packages[0]).unwrap();
-        assert!(value.get("icon").is_none());
-
-        // A package-level icon is carried on the package, not per version.
-        let mut document: serde_json::Value =
-            serde_json::from_slice(&catalog_json(1, vec![])).unwrap();
-        document["packages"][0]["icon"] = serde_json::json!({
-            "mediaType": "image/svg+xml",
-            "data": B64.encode(TINY_SVG),
-            "attribution": "Example (CC0)",
-        });
-        let catalog = parse(&serde_json::to_vec(&document).unwrap()).unwrap();
-        let icon = catalog.packages[0].icon.as_ref().unwrap();
-        assert_eq!(icon.media_type, "image/svg+xml");
-        assert_eq!(icon.attribution.as_deref(), Some("Example (CC0)"));
-        assert_eq!(manifest::decode_icon(icon).unwrap(), TINY_SVG.as_bytes());
-        let value = serde_json::to_value(&catalog.packages[0]).unwrap();
-        assert_eq!(value["icon"]["mediaType"], "image/svg+xml");
-        assert_eq!(value["icon"]["attribution"], "Example (CC0)");
-
-        // A malformed icon envelope is a parse error; content problems are
-        // reported by `catalog check`, which reuses manifest::validate_icon.
-        let mut unknown = document.clone();
-        unknown["packages"][0]["icon"]["colour"] = "red".into();
-        assert!(parse(&serde_json::to_vec(&unknown).unwrap()).is_err());
-        let mut bad_media = document;
-        bad_media["packages"][0]["icon"]["mediaType"] = "image/gif".into();
-        let parsed = parse(&serde_json::to_vec(&bad_media).unwrap()).unwrap();
-        let icon = parsed.packages[0].icon.as_ref().unwrap();
-        assert_eq!(icon.media_type, "image/gif");
-        assert!(manifest::validate_icon(icon).is_err());
     }
 }

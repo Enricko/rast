@@ -12,21 +12,17 @@ pub mod appearance;
 pub mod apps;
 pub mod auth;
 pub mod backup;
-pub mod browser;
 pub mod docker;
 pub mod events;
 pub mod files;
 pub mod groups;
 pub mod jobs;
-pub mod linux_apps;
 pub mod logs;
 pub mod monitor;
 pub mod packages;
-pub mod rootfs;
 pub mod settings;
 pub mod system;
 pub mod terminal;
-pub mod terminal_native;
 pub mod users;
 
 /// Build the complete application router (API + embedded frontend).
@@ -38,21 +34,15 @@ pub fn router(state: AppState) -> Router {
         .merge(logs::routes())
         .merge(jobs::routes())
         .merge(system::protected_routes())
-        .merge(files::routes().route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            rootfs::dispatch,
-        )))
+        .merge(files::routes())
         .merge(groups::routes())
         .merge(appearance::routes())
         .merge(apps::routes())
         .merge(docker::routes())
         .merge(terminal::routes())
-        .merge(terminal_native::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
-        .merge(browser::routes())
-        .merge(linux_apps::routes())
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -74,42 +64,6 @@ fn public_routes() -> Router<AppState> {
         .route("/api/setup/status", get(auth::setup_status))
         .route("/api/setup", axum::routing::post(auth::setup))
         .route("/api/auth/login", axum::routing::post(auth::login))
-        // A running Linux app's page; the key in the path is its credential
-        // (see `linux_apps::proxy`).
-        .route(
-            "/linux-apps/session/{*rest}",
-            axum::routing::any(crate::linux_apps::native_proxy::handle),
-        )
-        .route(
-            "/linux-apps/session/",
-            axum::routing::any(crate::linux_apps::native_proxy::handle),
-        )
-        // Native (non-browser) Xpra stream attached by RAST Desktop.
-        //
-        // SECURITY DECISION: this route is deliberately mounted OUTSIDE cookie
-        // authentication and OUTSIDE the browser same-origin `Origin` check.
-        // The official native Xpra client is not a browser: it cannot present
-        // the `rast_session` cookie and sends no `Origin` header, so the HTML5
-        // proxy's authorization model cannot apply. The single-use, 120 s
-        // stream token in the path IS the credential for this one route; it is
-        // only issued to an authenticated account (cookie + CSRF) by
-        // `POST /api/linux-apps/session/stream-token`, is bound to that account
-        // and live native session, and is consumed by the first successful
-        // upgrade. TLS is mandatory in production (the issued URL is `wss://`)
-        // and Xpra remains bound to loopback. See
-        // `linux_apps::native_broker` and `docs/NATIVE-BROKER.md`.
-        .route(
-            "/linux-apps/native/{*rest}",
-            axum::routing::any(crate::linux_apps::native_broker::handle),
-        )
-        .route(
-            "/linux-apps/native/",
-            axum::routing::any(crate::linux_apps::native_broker::handle),
-        )
-        .route(
-            "/linux-apps/{*rest}",
-            axum::routing::any(crate::linux_apps::proxy::handle),
-        )
 }
 
 /// Shared helper: JSON 501 for features not yet available on this host.

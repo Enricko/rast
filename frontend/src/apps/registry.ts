@@ -7,17 +7,13 @@ import { backupApp } from "./backup";
 import { controlPanelApp } from "./controlpanel";
 import { filesApp } from "./files";
 import { launcherApp } from "./launcher";
-import { linuxAppDefinitions } from "./linuxapp";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
 import { packagesApp } from "./packages";
-import { terminalApp } from "./terminal";
-import { packageAppDefinitions } from "./package-apps";
 
 export const APPS: AppDefinition[] = [
   launcherApp,
   filesApp,
-  terminalApp,
   applicationsApp,
   monitorApp,
   backupApp,
@@ -26,22 +22,13 @@ export const APPS: AppDefinition[] = [
   logsApp,
 ];
 
-/** Built-in apps followed by the installed Linux apps (`linux:<id>`, administrators only). */
-export function allApps(): AppDefinition[] {
-  return [...APPS, ...linuxAppDefinitions(), ...packageAppDefinitions()];
-}
-
 export function findApp(id: string): AppDefinition | undefined {
-  return (
-    APPS.find((app) => app.id === id) ??
-    linuxAppDefinitions().find((app) => app.id === id) ??
-    packageAppDefinitions().find((app) => app.id === id)
-  );
+  return APPS.find((app) => app.id === id);
 }
 
 /** Apps visible to the current role (fallback when permissions are absent). */
 export function appsForRole(isAdmin: boolean): AppDefinition[] {
-  return allApps().filter((app) => !app.adminOnly || isAdmin);
+  return APPS.filter((app) => !app.adminOnly || isAdmin);
 }
 
 /**
@@ -64,7 +51,7 @@ export function isAppAllowed(appId: string, permissions: Permissions | null, isA
 
 /** Apps visible to the current account, driven by effective permissions. */
 export function appsForPermissions(permissions: Permissions | null, isAdmin: boolean): AppDefinition[] {
-  return allApps().filter((app) => isAppAllowed(app.id, permissions, isAdmin));
+  return APPS.filter((app) => isAppAllowed(app.id, permissions, isAdmin));
 }
 
 /** True when the app is read-only for this account (e.g. group `allow` grant). */

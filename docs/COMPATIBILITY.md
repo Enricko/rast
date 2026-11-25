@@ -25,16 +25,8 @@ means a release binary is produced there but runtime behaviour is unverified.
 | Alpine, other musl systems | — | **Unsupported** | No musl/static build is published; glibc binaries do not run |
 | Non-systemd init (OpenRC, runit, s6, containers without systemd) | — | **Unsupported** | The binary may run under a custom supervisor, but the installer and units assume systemd; unsupported configurations are not covered by support |
 | WSL2 | x86_64 | Untested | Recent WSL2 has systemd; treat as best effort |
-| macOS 15 (11+ expected) | Apple Silicon (arm64) | **Experimental, CI temporarily disabled** | No release binary; native Xpra integration is Linux-only. Source builds and the local runner are unverified after the native-backend changes; see [macOS](#macos-preview) |
+| macOS 15 (11+ expected) | Apple Silicon (arm64) | **Preview: CI only (native arm64)** | Builds from source; no release binary yet. CI runs clippy and the test suite on `macos-15` and starts the server through `scripts/run-local.sh` (setup token, setup, login). Runs as your user, not as a service; see [macOS](#macos-preview) |
 | macOS 11+ | Intel (x86_64) | Expected, untested | Same code path as Apple Silicon; not built in CI |
-
-Native Linux apps are Linux-only (systemd + Xpra 6.5+ + nftables): the native
-backend is unavailable on macOS, musl/Alpine and non-systemd hosts. The
-native session path is validated on x86_64 (Debian/Ubuntu family with systemd);
-aarch64 is build-supported and the server passes its normal runtime smoke test,
-but native Xpra session/helper behaviour on arm64 is not automated yet — treat
-it as best effort and verify `rast doctor` plus one launch on the host. Details
-in [Native Linux apps](#native-linux-apps) below.
 
 ### macOS (preview)
 
@@ -131,47 +123,6 @@ starts, but hardening is reduced. `Type=simple`, `Restart=on-failure` and
 | Compose | **v2 plugin** (`docker compose`, not legacy `docker-compose`) | Required; v1 is unsupported |
 | Socket | `/var/run/docker.sock`, group `docker` | The worker user is added to `docker` when the group exists |
 | Docker absent | Applications app reports “unavailable” | The rest of RAST is fully functional |
-
-## Native Linux apps
-
-Native Linux apps (App Center, the default since v0.13) run on **Linux hosts
-with systemd only** — macOS and non-systemd hosts have no native backend. The
-feature is validated on x86_64; aarch64 builds and runs the server, but the
-Xpra session/helper path has no automated arm64 validation yet (treat it as
-best effort and run `rast doctor` plus a launch test). A `.deb` app must match
-the host's architecture: the install preview reads the package architecture
-and refuses an incompatible one. Requirements:
-
-| Component | Requirement | Status |
-| --- | --- | --- |
-| systemd | 249+ (transient units, cgroup v2 accounting); recommended 253+ | Required |
-| Xpra | 6.5+ from [xpra.org](https://xpra.org) (distribution packages are too old/unsupported); `xpra`, `xpra-html5`, `xpra-codecs`, `xpra-x11` | Required. Validated against Xpra 6.5.5 with HTML5 client version 21. The installer, `rast doctor` and `rast native-helper --check` detect and report older versions |
-| Xvfb | Distribution package | Required |
-| nftables | `nftables` package (the `nft` command), installed by the native dependency plan | Required for the loopback display-port restriction to the RAST uid. Without it `rast doctor` / `rast native-helper --check` warn and session ports stay reachable by other local accounts behind the authenticated proxy |
-| `rast-native.service` + `rast-linux.slice` | Shipped in `deploy/`, installed by the installer when a supported Xpra is present | Required |
-| ACL support | `acl` package and an ACL-capable local filesystem (ext4/xfs/btrfs) for read-only access to the person's RAST home | Required |
-| Unprivileged Linux identities | `useradd`/`groupadd` (shadow-utils), `setfacl`; `linux_uid_base` (default 200000) must be free of local accounts | Required |
-| Host package manager | `apt-get`/`dpkg` (Debian/Ubuntu families) for `.deb` apps; portable archives and AppImages work without it | Required for `.deb` |
-| Panel proxy | Must forward WebSockets on `/linux-apps/` and disable access logging for it (the URL carries a session key) | Required |
-| Docker | Only for legacy Docker-backed apps and the Applications app; not needed for new native installs | Optional |
-
-Portable archives and AppImage extraction work on any of the supported Linux
-distributions. Native apps share one trust boundary per user (applications of
-the same user), while different users are isolated by distinct Linux
-identities, 0700 profiles and unique displays; apps of one account are not
-isolated from each other, shared folders are not mapped into app profiles, and
-the RAST home is exposed read-only. See
-[NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
-
-Only one RAST instance per host may use the native backend, because the
-systemd transient units are named after the RAST user id
-(`rast-xpra-u<id>`, `rast-app-u<uid>-…`). Test/secondary instances on the same
-host must set `native_enabled = false` (or run on another host).
-
-The macOS preview does not offer Linux apps. Legacy Docker-backed apps keep
-their previous Docker + BuildKit requirement (shared base image pinned to a
-`ghcr.io/linuxserver/baseimage-selkies` digest, pulled once) until they are
-migrated.
 
 ## Browsers
 

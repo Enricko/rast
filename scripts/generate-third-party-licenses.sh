@@ -162,31 +162,6 @@ for name, version, license_id, url in rows:
     lines.append(f"| `{safe_name}` | {version} | {safe_license} | <{url}> |")
 lines.append("")
 
-
-lines.append("")
-lines.append("## External programs invoked at runtime")
-lines.append("")
-lines.append("These programs are **not** linked into or distributed with RAST. They are "
-             "installed by the operator (or by their distribution) and RAST invokes "
-             "them as separate processes; their own license terms and copyright "
-             "notices apply and their source/license files remain in their "
-             "distribution packages.")
-lines.append("")
-lines.append("| Program | Role | Version requirement | License |")
-lines.append("| --- | --- | --- | --- |")
-lines.append("| Xpra server (`xpra`) | Seamless graphical session per RAST user; HTML5 transport, window and audio forwarding. Invoked as an external program by the native helper. | 6.5+ (validated with 6.5.5) | GPL-2.0-or-later |")
-lines.append("| Xpra HTML5 client (`xpra-html5`, served from `/usr/share/xpra/www`) | Browser client loaded inside the authenticated same-origin session page and adapted by RAST's shim. Served by the installed Xpra package, not embedded in the RAST binary. | shipped with the pinned Xpra (HTML5 client v21 with 6.5.5) | MPL-2.0 |")
-lines.append("| Xvfb | Virtual X server started by Xpra for the seamless session | distribution version | GPL-2.0-or-later / MIT-style X11 terms as packaged |")
-lines.append("| nftables (`nft`) | Display-port firewall rule restricting the loopback Xpra port to the RAST service uid | distribution version | GPL-2.0-or-later |")
-lines.append("| PulseAudio + GStreamer plugins | Playback-only audio transport for a native session when enabled | distribution version | LGPL-2.1-or-later / GPL-2.0-or-later as packaged |")
-lines.append("| Applications installed by an administrator | The actual desktop applications started for people | as packaged | determined by each package; RAST does not relicense or redistribute them |")
-lines.append("")
-lines.append("Installing or upgrading Xpra, Xvfb, nftables, PulseAudio/GStreamer or a "
-             "native application does not change RAST's MIT license, and RAST does "
-             "not claim authorship of those programs. Operators who redistribute a "
-             "server image containing them are responsible for including the "
-             "corresponding notices and source offers required by those licenses.")
-lines.append("")
 pathlib.Path(output_path).write_text("\n".join(lines), encoding="utf-8")
 print(f"generate-third-party-licenses: rendered {len(rows)} crates")
 PY

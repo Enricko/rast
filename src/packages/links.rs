@@ -41,21 +41,6 @@ pub fn owner_of(name: &str) -> Option<&'static str> {
         "go" | "gofmt" => Some("go"),
         "python3" | "pip3" => Some("python"),
         n if versioned(n, "python3.") || versioned(n, "pip3.") => Some("python"),
-        "rustc" | "cargo" | "rustfmt" | "cargo-fmt" | "clippy-driver" | "cargo-clippy" => {
-            Some("rust")
-        }
-        "java" | "javac" | "jar" | "jshell" => Some("java"),
-        "bun" => Some("bun"),
-        "deno" => Some("deno"),
-        "dotnet" => Some("dotnet"),
-        "clang" | "clang++" | "ld.lld" | "lldb" => Some("clang"),
-        "flutter" | "dart" => Some("flutter"),
-        "composer" => Some("composer"),
-        "zig" => Some("zig"),
-        "kotlinc" | "kotlin" => Some("kotlin"),
-        "cmake" | "ctest" | "cpack" => Some("cmake"),
-        "gradle" => Some("gradle"),
-        "mvn" => Some("maven"),
         _ => None,
     }
 }

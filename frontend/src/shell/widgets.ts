@@ -27,18 +27,6 @@ import type { RealtimeStore } from "../core/realtime";
 import type { ToastCenter } from "../core/toast";
 import type { ComponentHealth, MonitorDisk, MonitorSnapshot } from "../core/types";
 import { modal, sparkline } from "../core/ui";
-import {
-  GRID,
-  WIDGET_GAP,
-  defaultWidgetGroup,
-  fitRect,
-  nearestFreeRect,
-  rectsIntersect,
-  snap,
-  snapUp,
-  type Bounds,
-  type Rect,
-} from "./snap-grid";
 
 export interface WidgetDefinition {
   id: WidgetId;
@@ -447,10 +435,6 @@ export interface WidgetLayerOptions {
   toast: ToastCenter;
   isMonitorAllowed: () => boolean;
   openMonitor: () => void;
-  /** Desktop app-icon rectangles + the desktop grid cell size. */
-  obstacles?: () => { rects: Array<{ x: number; y: number; w: number; h: number }>; cellW: number; cellH: number };
-  /** Called when widget geometry changes (icons avoid the widgets). */
-  onGeometryChange?: () => void;
 }
 
 export interface WidgetLayer {
@@ -459,19 +443,13 @@ export interface WidgetLayer {
   /** Show the layout being saved, else the account's saved (or default) layout. */
   showSaved(): void;
   openCatalog(): void;
-  /** Current widget rectangles in desktop coordinates (for icon collision). */
-  occupiedRects(): Rect[];
-  /** Current widget rectangles with ids (desktop selection). */
-  rectEntries(): Array<{ id: WidgetId; rect: Rect }>;
-  /** Preferred widget definitions with the current on-screen pixel positions. */
-  snapshot(): DesktopWidget[];
-  /** Move widgets by updating their pixel positions (no save). */
-  applyPixels(positions: Map<WidgetId, { x: number; y: number }>): void;
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
   dispose(): void;
 }
 
+const LAYER_GAP = 12;
+const KEY_STEP = 24;
 
 export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const { layer, appearance, toast } = options;
@@ -481,25 +459,6 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   let dragging: WidgetId | null = null;
   let disposed = false;
   let keySaveTimer: number | undefined;
-  const dropPreview = h("div", {
-    class: "widget-drop-preview",
-    ariaHidden: true,
-    hidden: true,
-  });
-  layer.appendChild(dropPreview);
-  const gridOverlay = h("div", { class: "desktop-grid-overlay", ariaHidden: true, hidden: true });
-  layer.appendChild(gridOverlay);
-  function showGrid(): void {
-    const area = bounds();
-    gridOverlay.style.left = `${area.x}px`;
-    gridOverlay.style.top = `${area.y}px`;
-    gridOverlay.style.width = `${area.w}px`;
-    gridOverlay.style.height = `${area.h}px`;
-    gridOverlay.hidden = false;
-  }
-  function hideGrid(): void {
-    gridOverlay.hidden = true;
-  }
   let catalogRefresh: (() => void) | null = null;
 
   const offFeed = feed.subscribe(() => {
@@ -514,193 +473,37 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   const onWindowResize = (): void => positionAll();
   if (!resizeObserver) window.addEventListener("resize", onWindowResize);
 
-  /** Readable, content-aware preferred sizes (multiples of the 8px grid). */
-  const WIDGET_SIZES: Record<WidgetId, { w: number; h: number; minW: number; minH: number }> = {
-    health: { w: 232, h: 312, minW: 208, minH: 280 },
-    "cpu-memory": { w: 232, h: 256, minW: 208, minH: 224 },
-    storage: { w: 224, h: 232, minW: 200, minH: 208 },
-    network: { w: 224, h: 232, minW: 200, minH: 208 },
-  };
-  const MIN_WIDGET_WIDTH = 200;
-  const MIN_WIDGET_HEIGHT = 200;
-  let migrationQueued = false;
-  let overflowWarned = false;
-
-  const bounds = (): Bounds => ({ x: 0, y: 0, w: layer.clientWidth, h: layer.clientHeight });
-  const iconObstacles = (): Rect[] => options.obstacles?.().rects ?? [];
-  const clampPx = (value: number, min: number, max: number): number =>
-    Math.round(Math.max(min, Math.min(max, value)));
-
-  /** The widget's preferred size in fixed CSS pixels (never viewport-scaled). */
-  function preferredSize(widget: DesktopWidget): { w: number; h: number } {
-    const spec = WIDGET_SIZES[widget.id];
-    if (
-      widget.gridVersion === 2 &&
-      typeof widget.pxW === "number" &&
-      typeof widget.pxH === "number"
-    ) {
-      return {
-        w: clampPx(snapUp(widget.pxW), spec.minW, 4000),
-        h: clampPx(snapUp(widget.pxH), spec.minH, 4000),
-      };
-    }
-    return { w: spec.w, h: spec.h };
-  }
-
-  /** On-screen size: the preference, compacted only when the viewport is too small. */
-  function displaySize(preferred: { w: number; h: number }, area: Bounds): { w: number; h: number } {
+  function freeArea(card: Card): { width: number; height: number } {
     return {
-      w: Math.max(Math.min(GRID, area.w), Math.min(preferred.w, area.w)),
-      h: Math.max(Math.min(GRID, area.h), Math.min(preferred.h, area.h)),
+      width: Math.max(0, layer.clientWidth - card.el.offsetWidth),
+      height: Math.max(0, layer.clientHeight - card.el.offsetHeight),
     };
   }
 
-  /** Preferred top-left in fixed pixels (legacy fractions are only for migration). */
-  function preferredPosition(widget: DesktopWidget, area: Bounds): { x: number; y: number } {
-    if (
-      widget.gridVersion === 2 &&
-      typeof widget.pxX === "number" &&
-      typeof widget.pxY === "number"
-    ) {
-      return { x: snap(widget.pxX), y: snap(widget.pxY) };
-    }
-    const size = preferredSize(widget);
-    const freeW = Math.max(0, area.w - size.w);
-    const freeH = Math.max(0, area.h - size.h);
-    return {
-      x: snap(area.x + Math.max(0, Math.min(1, widget.x)) * freeW),
-      y: snap(area.y + Math.max(0, Math.min(1, widget.y)) * freeH),
-    };
+  function position(card: Card, widget: DesktopWidget): void {
+    const area = freeArea(card);
+    card.el.style.left = `${Math.round(widget.x * area.width)}px`;
+    card.el.style.top = `${Math.round(widget.y * area.height)}px`;
   }
 
-  /** Fractions for older clients; the pixel fields are authoritative. */
-  function legacyFractions(rect: Rect): { x: number; y: number; w: number; h: number } {
-    const area = bounds();
-    const freeW = Math.max(0, area.w - rect.w);
-    const freeH = Math.max(0, area.h - rect.h);
-    const round = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
-    return {
-      x: round(freeW > 0 ? (rect.x - area.x) / freeW : 0),
-      y: round(freeH > 0 ? (rect.y - area.y) / freeH : 0),
-      w: round(area.w > 0 ? rect.w / area.w : 0),
-      h: round(area.h > 0 ? rect.h / area.h : 0),
-    };
-  }
-
-  /** One-time, versioned migration of legacy fractional widgets to pixels. */
-  function migrateLegacyWidgets(): void {
-    if (!appearance.isKnown || layout.every((widget) => widget.gridVersion === 2)) return;
-    const area = bounds();
-    layout = layout.map((widget) => {
-      if (widget.gridVersion === 2) return widget;
-      const size = preferredSize(widget);
-      const position = preferredPosition(widget, area);
-      return {
-        ...widget,
-        gridVersion: 2,
-        pxX: position.x,
-        pxY: position.y,
-        pxW: size.w,
-        pxH: size.h,
-      };
-    });
-    if (migrationQueued) return;
-    migrationQueued = true;
-    window.setTimeout(() => {
-      migrationQueued = false;
-      if (!disposed && appearance.isKnown) void appearance.saveWidgets(layout);
-    }, 400);
-  }
-
-  function applyRect(card: Card, rect: Rect): void {
-    card.el.style.left = `${rect.x}px`;
-    card.el.style.top = `${rect.y}px`;
-    card.el.style.width = `${rect.w}px`;
-    card.el.style.height = `${rect.h}px`;
-  }
-
-  function rectOf(card: Card): Rect {
-    return { x: card.el.offsetLeft, y: card.el.offsetTop, w: card.el.offsetWidth, h: card.el.offsetHeight };
-  }
-
-  function otherWidgetRects(except: WidgetId): Rect[] {
-    const out: Rect[] = [];
-    for (const [id, card] of cards) {
-      if (id === except || !card.el.isConnected) continue;
-      out.push(rectOf(card));
-    }
-    return out;
-  }
-
-  /**
-   * Responsive placement pass. It never changes the saved preferences: the
-   * preferred size/position are fixed pixels, and a smaller viewport only
-   * produces a temporary compact/repositioned rect.
-   */
   function positionAll(): void {
     if (disposed) return;
-    migrateLegacyWidgets();
-    const area = bounds();
-    const icons = iconObstacles();
-    const useDefaultGroup = !appearance.isKnown || !appearance.value.widgetsCustomized;
-    if (useDefaultGroup) {
-      const preferred = layout.map((widget) => preferredSize(widget));
-      const group = defaultWidgetGroup(preferred, area, WIDGET_GAP);
-      layout.forEach((widget, index) => {
-        const card = cards.get(widget.id);
-        if (!card) return;
-        const pref = preferred[index]!;
-        const target = group[index] ?? fitRect(
-          { x: area.x, y: area.y, w: pref.w, h: pref.h },
-          area,
-          Math.min(pref.w, area.w),
-          Math.min(pref.h, area.h),
-        );
-        const compact = target.w < pref.w || target.h < pref.h;
-        card.el.classList.toggle("is-compact", compact);
-        applyRect(card, target);
-      });
-      return;
-    }
-    const placed: Rect[] = [...icons];
-    let overflow = false;
-    layout.forEach((widget) => {
+    for (const widget of layout) {
+      if (widget.id === dragging) continue;
       const card = cards.get(widget.id);
-      if (!card) return;
-      const pref = preferredSize(widget);
-      const size = displaySize(pref, area);
-      const position = preferredPosition(widget, area);
-      let target = fitRect(
-        { x: position.x, y: position.y, w: size.w, h: size.h },
-        area,
-        size.w,
-        size.h,
-      );
-      if (placed.some((other) => rectsIntersect(other, target))) {
-        const free = nearestFreeRect(target, size, area, placed);
-        if (free) {
-          target = free;
-        } else {
-          overflow = true;
-        }
-      }
-      const compact = size.w < pref.w || size.h < pref.h;
-      card.el.classList.toggle("is-compact", compact);
-      card.el.classList.toggle("is-overflow", overflow);
-      applyRect(card, target);
-      placed.push(target);
-    });
-    if (overflow && !overflowWarned) {
-      overflowWarned = true;
-      toast.warning(
-        "There is not enough desktop space for every widget at its saved size. Move or resize them, or use a larger window.",
-      );
+      if (card) position(card, widget);
     }
-    options.onGeometryChange?.();
+  }
+
+  function fractionsFor(card: Card, left: number, top: number): { x: number; y: number } {
+    const area = freeArea(card);
+    const x = area.width > 0 ? left / area.width : 0;
+    const y = area.height > 0 ? top / area.height : 0;
+    const round = (value: number): number => Math.round(Math.max(0, Math.min(1, value)) * 10_000) / 10_000;
+    return { x: round(x), y: round(y) };
   }
 
   function persist(): void {
-    options.onGeometryChange?.();
     void appearance.saveWidgets(layout).then((ok) => {
       if (ok || disposed) return;
       toast.warning("Could not save the widget layout to your account. Showing the saved layout.");
@@ -800,179 +603,54 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       },
       head,
       body,
-      h("div", { class: "widget-resize", ariaHidden: true }),
       foot,
     );
     const card: Card = { id, el, head, pill, body, foot };
     attachDrag(card);
     attachKeys(card);
-    attachResize(card);
     resizeObserver?.observe(el);
     renderCard(card);
     return card;
   }
 
-  function bringToFront(id: WidgetId): void {
-    const index = layout.findIndex((widget) => widget.id === id);
-    if (index < 0 || index === layout.length - 1) return;
-    const [widget] = layout.splice(index, 1);
-    layout.push(widget!);
-    const card = cards.get(id);
-    if (card) layer.appendChild(card.el);
-  }
-
   // ------------------------------------------------------------- dragging
-  function dragObstacles(card: Card): Rect[] {
-    return [...iconObstacles(), ...otherWidgetRects(card.id)];
-  }
-
   function attachDrag(card: Card): void {
-    card.el.addEventListener("pointerdown", (event) => {
+    card.head.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
-      if ((event.target as Element).closest("button, a, input, select, textarea, .widget-resize")) return;
+      if ((event.target as Element).closest("button")) return;
       event.preventDefault();
-      const layerRect = layer.getBoundingClientRect();
-      const startPointerX = event.clientX - layerRect.left;
-      const startPointerY = event.clientY - layerRect.top;
-      const startRect = rectOf(card);
-      const area = bounds();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startLeft = card.el.offsetLeft;
+      const startTop = card.el.offsetTop;
       dragging = card.id;
       bringToFront(card.id);
       card.el.classList.add("is-dragging");
-      card.el.setPointerCapture(event.pointerId);
-      showGrid();
-      let target: Rect = startRect;
-      let blocked = false;
+      card.head.setPointerCapture(event.pointerId);
+      const area = freeArea(card);
+      let left = startLeft;
+      let top = startTop;
       const move = (moveEvent: PointerEvent): void => {
-        const pointerX = moveEvent.clientX - layerRect.left;
-        const pointerY = moveEvent.clientY - layerRect.top;
-        const raw = fitRect(
-          {
-            x: startRect.x + pointerX - startPointerX,
-            y: startRect.y + pointerY - startPointerY,
-            w: startRect.w,
-            h: startRect.h,
-          },
-          area,
-          MIN_WIDGET_WIDTH,
-          MIN_WIDGET_HEIGHT,
-        );
-        target = raw;
-        card.el.style.left = `${raw.x}px`;
-        card.el.style.top = `${raw.y}px`;
-        blocked = dragObstacles(card).some((other) => rectsIntersect(other, raw));
-        dropPreview.hidden = false;
-        dropPreview.style.left = `${raw.x}px`;
-        dropPreview.style.top = `${raw.y}px`;
-        dropPreview.style.width = `${raw.w}px`;
-        dropPreview.style.height = `${raw.h}px`;
-        dropPreview.classList.add("is-visible");
-        dropPreview.classList.toggle("is-blocked", blocked);
+        left = Math.max(0, Math.min(area.width, startLeft + moveEvent.clientX - startX));
+        top = Math.max(0, Math.min(area.height, startTop + moveEvent.clientY - startY));
+        card.el.style.left = `${Math.round(left)}px`;
+        card.el.style.top = `${Math.round(top)}px`;
       };
       const end = (): void => {
-        card.el.removeEventListener("pointermove", move);
-        card.el.removeEventListener("pointerup", end);
-        card.el.removeEventListener("pointercancel", end);
+        card.head.removeEventListener("pointermove", move);
+        card.head.removeEventListener("pointerup", end);
+        card.head.removeEventListener("pointercancel", end);
         card.el.classList.remove("is-dragging");
-        dropPreview.classList.remove("is-visible", "is-blocked");
-        dropPreview.hidden = true;
-        hideGrid();
         dragging = null;
-        const obstacles = dragObstacles(card);
-        const final = blocked
-          ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
-          : target;
-        applyRect(card, final);
-        layout = layout.map((widget) => {
-          if (widget.id !== card.id) return widget;
-          const preferred = preferredSize(widget);
-          return {
-            ...widget,
-            ...legacyFractions({ ...final, w: preferred.w, h: preferred.h }),
-            gridVersion: 2,
-            pxX: snap(final.x),
-            pxY: snap(final.y),
-            pxW: preferred.w,
-            pxH: preferred.h,
-          };
-        });
-        persist();
+        const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
+        const { x, y } = fractionsFor(card, left, top);
+        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
+        position(card, layout.find((widget) => widget.id === card.id)!);
+        if (moved || layout[layout.length - 1]?.id === card.id) persist();
       };
-      card.el.addEventListener("pointermove", move);
-      card.el.addEventListener("pointerup", end);
-      card.el.addEventListener("pointercancel", end);
-    });
-  }
-
-  function attachResize(card: Card): void {
-    const handle = card.el.querySelector<HTMLElement>(".widget-resize");
-    if (!handle) return;
-    handle.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const layerRect = layer.getBoundingClientRect();
-      const startPointerX = event.clientX - layerRect.left;
-      const startPointerY = event.clientY - layerRect.top;
-      const startRect = rectOf(card);
-      const area = bounds();
-      const spec = WIDGET_SIZES[card.id];
-      handle.setPointerCapture(event.pointerId);
-      showGrid();
-      let target = startRect;
-      const move = (moveEvent: PointerEvent): void => {
-        const dx = moveEvent.clientX - layerRect.left - startPointerX;
-        const dy = moveEvent.clientY - layerRect.top - startPointerY;
-        target = fitRect(
-          {
-            x: startRect.x,
-            y: startRect.y,
-            w: Math.max(spec.minW, snapUp(startRect.w + dx)),
-            h: Math.max(spec.minH, snapUp(startRect.h + dy)),
-          },
-          area,
-          spec.minW,
-          spec.minH,
-        );
-        applyRect(card, target);
-        dropPreview.hidden = false;
-        dropPreview.style.left = `${target.x}px`;
-        dropPreview.style.top = `${target.y}px`;
-        dropPreview.style.width = `${target.w}px`;
-        dropPreview.style.height = `${target.h}px`;
-        dropPreview.classList.add("is-visible");
-        dropPreview.classList.toggle("is-blocked", false);
-      };
-      const end = (): void => {
-        handle.removeEventListener("pointermove", move);
-        handle.removeEventListener("pointerup", end);
-        handle.removeEventListener("pointercancel", end);
-        dropPreview.classList.remove("is-visible", "is-blocked");
-        dropPreview.hidden = true;
-        hideGrid();
-        const obstacles = dragObstacles(card);
-        const final = obstacles.some((other) => rectsIntersect(other, target))
-          ? nearestFreeRect(target, { w: target.w, h: target.h }, area, obstacles) ?? target
-          : target;
-        applyRect(card, final);
-        layout = layout.map((widget) =>
-          widget.id === card.id
-            ? {
-                ...widget,
-                ...legacyFractions(final),
-                gridVersion: 2,
-                pxX: snap(final.x),
-                pxY: snap(final.y),
-                pxW: snap(final.w),
-                pxH: snap(final.h),
-              }
-            : widget,
-        );
-        persist();
-      };
-      handle.addEventListener("pointermove", move);
-      handle.addEventListener("pointerup", end);
-      handle.addEventListener("pointercancel", end);
+      card.head.addEventListener("pointermove", move);
+      card.head.addEventListener("pointerup", end);
+      card.head.addEventListener("pointercancel", end);
     });
   }
 
@@ -984,7 +662,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
         remove(card.id);
         return;
       }
-      const step = event.shiftKey ? GRID * 8 : GRID;
+      const step = event.shiftKey ? 4 : KEY_STEP;
       const delta: Record<string, [number, number]> = {
         ArrowLeft: [-step, 0],
         ArrowRight: [step, 0],
@@ -994,38 +672,47 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const move = delta[event.key];
       if (!move) return;
       event.preventDefault();
-      const area = bounds();
-      const current = rectOf(card);
-      const desired = fitRect(
-        { x: current.x + move[0], y: current.y + move[1], w: current.w, h: current.h },
-        area,
-        MIN_WIDGET_WIDTH,
-        MIN_WIDGET_HEIGHT,
-      );
-      const obstacles = dragObstacles(card);
-      const target = obstacles.some((other) => rectsIntersect(other, desired))
-        ? nearestFreeRect(desired, { w: desired.w, h: desired.h }, area, obstacles) ?? desired
-        : desired;
-      applyRect(card, target);
-      layout = layout.map((widget) => {
-        if (widget.id !== card.id) return widget;
-        const preferred = preferredSize(widget);
-        return {
-          ...widget,
-          ...legacyFractions({ ...target, w: preferred.w, h: preferred.h }),
-          gridVersion: 2,
-          pxX: snap(target.x),
-          pxY: snap(target.y),
-          pxW: preferred.w,
-          pxH: preferred.h,
-        };
-      });
+      const area = freeArea(card);
+      const left = Math.max(0, Math.min(area.width, card.el.offsetLeft + move[0]));
+      const top = Math.max(0, Math.min(area.height, card.el.offsetTop + move[1]));
+      const { x, y } = fractionsFor(card, left, top);
+      layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
+      position(card, layout.find((widget) => widget.id === card.id)!);
       window.clearTimeout(keySaveTimer);
       keySaveTimer = window.setTimeout(() => persist(), 500);
     });
   }
 
+  function bringToFront(id: WidgetId): void {
+    const index = layout.findIndex((widget) => widget.id === id);
+    if (index < 0 || index === layout.length - 1) return;
+    const [widget] = layout.splice(index, 1);
+    layout.push(widget!);
+    const card = cards.get(id);
+    if (card) layer.appendChild(card.el);
+  }
+
   // ------------------------------------------------------- add / remove
+  /** First free slot in the right-hand column (icons occupy the left). */
+  function defaultPlacement(card: Card): { x: number; y: number } {
+    const area = freeArea(card);
+    const height = card.el.offsetHeight;
+    const width = card.el.offsetWidth;
+    const right = layer.clientWidth - width;
+    const occupied = layout
+      .map((widget) => cards.get(widget.id))
+      .filter((other): other is Card => Boolean(other) && other !== card)
+      .map((other) => ({ top: other.el.offsetTop, bottom: other.el.offsetTop + other.el.offsetHeight, left: other.el.offsetLeft, right: other.el.offsetLeft + other.el.offsetWidth }));
+    const candidates = [0, ...occupied.map((rect) => rect.bottom + LAYER_GAP)].sort((a, b) => a - b);
+    for (const top of candidates) {
+      if (top + height > layer.clientHeight) break;
+      const overlaps = occupied.some((rect) => top < rect.bottom && top + height > rect.top && right < rect.right && right + width > rect.left);
+      if (!overlaps) return fractionsFor(card, right, top);
+    }
+    // Column full: start a second column to the left.
+    return { x: area.width > 0 ? Math.max(0, (right - width - LAYER_GAP) / area.width) : 0, y: 0 };
+  }
+
   function add(id: WidgetId): void {
     if (!appearance.isKnown) {
       toast.error("Your saved desktop could not be loaded yet, so widgets cannot be changed. Try again in a moment.");
@@ -1038,8 +725,9 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     layer.appendChild(card.el);
     if (!feed.isRunning) feed.start();
     renderCard(card);
-    layout = [...layout, { id, x: 0.7, y: 0 }];
-    positionAll();
+    const placement = defaultPlacement(card);
+    layout = [...layout, { id, ...placement }];
+    position(card, layout[layout.length - 1]!);
     card.el.style.visibility = "";
     persist();
     catalogRefresh?.();
@@ -1070,43 +758,6 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   }
 
   // ---------------------------------------------------------------- sync
-  function occupiedRects(): Rect[] {
-    return [...cards.values()].filter((card) => card.el.isConnected).map(rectOf);
-  }
-
-  function rectEntries(): Array<{ id: WidgetId; rect: Rect }> {
-    return [...cards.entries()]
-      .filter(([, card]) => card.el.isConnected)
-      .map(([id, card]) => ({ id, rect: rectOf(card) }));
-  }
-
-  function snapshot(): DesktopWidget[] {
-    return layout.map((widget) => {
-      const card = cards.get(widget.id);
-      const size = preferredSize(widget);
-      if (!card) return widget;
-      const rect = rectOf(card);
-      return {
-        ...widget,
-        ...legacyFractions({ ...rect, w: size.w, h: size.h }),
-        gridVersion: 2,
-        pxX: snap(rect.x),
-        pxY: snap(rect.y),
-        pxW: size.w,
-        pxH: size.h,
-      };
-    });
-  }
-
-  function applyPixels(positions: Map<WidgetId, { x: number; y: number }>): void {
-    layout = layout.map((widget) => {
-      const position = positions.get(widget.id);
-      if (!position) return widget;
-      return { ...widget, gridVersion: 2, pxX: snap(position.x), pxY: snap(position.y) };
-    });
-    positionAll();
-  }
-
   function sync(widgets: DesktopWidget[]): void {
     if (disposed) return;
     // A drag in progress owns its card; its drop saves the final layout.
@@ -1222,5 +873,5 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     cards.clear();
   }
 
-  return { sync, showSaved, openCatalog, permissionsChanged, occupiedRects, rectEntries, snapshot, applyPixels, dispose };
+  return { sync, showSaved, openCatalog, permissionsChanged, dispose };
 }

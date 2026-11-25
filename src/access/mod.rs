@@ -40,7 +40,6 @@ pub const APP_IDS: &[&str] = &[
     "packages",
     "logs",
     "controlpanel",
-    "terminal",
 ];
 
 /// The "Applications" folder on the desktop: lists every installed app the
@@ -59,16 +58,6 @@ const REMOVED_APPS_SETTING: &str = "apps.removed";
 /// Ids that may be pinned to the taskbar or placed on the desktop.
 pub fn is_desktop_app(app_id: &str) -> bool {
     app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
-}
-
-/// Desktop/taskbar shortcut ids: the built-in apps and installed Linux apps
-/// (`linux:<id>`; unknown ones are hidden by the desktop, not refused, so a
-/// shortcut survives an app being reinstalled).
-pub fn is_shortcut_id(id: &str) -> bool {
-    is_desktop_app(id)
-        || id
-            .strip_prefix("linux:")
-            .is_some_and(|app| crate::docker::linux::validate_app_id(app).is_ok())
 }
 
 /// Removable apps that were uninstalled in App Center.
@@ -130,7 +119,6 @@ pub fn app_label(app_id: &str) -> &'static str {
         "packages" => "App Center",
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
-        "terminal" => "Terminal",
         _ => "Unknown application",
     }
 }
@@ -146,7 +134,6 @@ pub fn app_description(app_id: &str) -> &'static str {
         "packages" => "Install and manage apps and verified runtimes.",
         "logs" => "Audit trail of sign-ins, file operations and administrative actions.",
         "controlpanel" => "Profile, users, shared folders, storage and system settings.",
-        "terminal" => "Interactive Linux shell running as your own unprivileged account.",
         _ => "",
     }
 }
@@ -303,18 +290,7 @@ enum Cached {
     App(AppAccess),
 }
 
-/// Keyed by database, account and decision. The database is part of the key
-/// because account ids are only unique within one: several servers in one
-/// process (the test suite) must not serve each other's decisions.
-type CacheMap = HashMap<(String, i64, String), (u64, Cached)>;
-
-/// Which database a pool belongs to, for the cache key.
-fn database_of(pool: &SqlitePool) -> String {
-    pool.connect_options()
-        .get_filename()
-        .to_string_lossy()
-        .into_owned()
-}
+type CacheMap = HashMap<(i64, String), (u64, Cached)>;
 
 fn cache() -> &'static RwLock<CacheMap> {
     static CACHE: OnceLock<RwLock<CacheMap>> = OnceLock::new();
@@ -334,9 +310,9 @@ fn current_generation() -> u64 {
     GENERATION.load(Ordering::SeqCst)
 }
 
-fn cache_get(database: &str, user_id: i64, key: &str) -> Option<Cached> {
+fn cache_get(user_id: i64, key: &str) -> Option<Cached> {
     let guard = cache().read().ok()?;
-    let (generation, value) = guard.get(&(database.to_string(), user_id, key.to_string()))?;
+    let (generation, value) = guard.get(&(user_id, key.to_string()))?;
     if *generation == current_generation() {
         Some(value.clone())
     } else {
@@ -350,7 +326,7 @@ fn cache_get(database: &str, user_id: i64, key: &str) -> Option<Cached> {
 /// that stale decision - e.g. a just-revoked grant - until the next change.
 /// Stale results are therefore dropped, and one that races past the check
 /// keeps its old generation, which `cache_get` never matches.
-fn cache_put(database: &str, user_id: i64, key: &str, read_at: u64, value: Cached) {
+fn cache_put(user_id: i64, key: &str, read_at: u64, value: Cached) {
     if read_at != current_generation() {
         return;
     }
@@ -359,10 +335,7 @@ fn cache_put(database: &str, user_id: i64, key: &str, read_at: u64, value: Cache
         if map.len() > 4096 {
             map.clear();
         }
-        map.insert(
-            (database.to_string(), user_id, key.to_string()),
-            (read_at, value),
-        );
+        map.insert((user_id, key.to_string()), (read_at, value));
     }
 }
 
@@ -406,17 +379,11 @@ pub async fn folder_access_by_name(
         .ok_or(AppError::NotFound("path not found"))?;
     let share_id: String = row.get("id");
     let key = folder_cache_key(&share_id);
-    if let Some(Cached::Folder(access)) = cache_get(&database_of(pool), user.id, &key) {
+    if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
     let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
-    cache_put(
-        &database_of(pool),
-        user.id,
-        &key,
-        read_at,
-        Cached::Folder(access.clone()),
-    );
+    cache_put(user.id, &key, read_at, Cached::Folder(access.clone()));
     Ok(access)
 }
 
@@ -448,17 +415,11 @@ pub async fn folder_access_by_id(
         .ok_or(AppError::NotFound("path not found"))?;
     let share_id: String = row.get("id");
     let key = folder_cache_key(&share_id);
-    if let Some(Cached::Folder(access)) = cache_get(&database_of(pool), user.id, &key) {
+    if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
     let access = compute_folder(pool, user, share_id, row.get::<String, _>("name")).await?;
-    cache_put(
-        &database_of(pool),
-        user.id,
-        &key,
-        read_at,
-        Cached::Folder(access.clone()),
-    );
+    cache_put(user.id, &key, read_at, Cached::Folder(access.clone()));
     Ok(access)
 }
 
@@ -618,7 +579,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
     }
     let key = app_cache_key(app_id);
     let read_at = current_generation();
-    if let Some(Cached::App(access)) = cache_get(&database_of(pool), user.id, &key) {
+    if let Some(Cached::App(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
 
@@ -716,13 +677,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
         }
     };
 
-    cache_put(
-        &database_of(pool),
-        user.id,
-        &key,
-        read_at,
-        Cached::App(access.clone()),
-    );
+    cache_put(user.id, &key, read_at, Cached::App(access.clone()));
     Ok(access)
 }
 
@@ -1147,15 +1102,15 @@ mod tests {
     fn decision_read_before_a_policy_change_is_never_served_after_it() {
         // A user id no fixture uses; other tests bump the generation
         // concurrently, which only makes the stale case more likely.
-        let (db, user, key) = ("test.db", -4_311, "folder:straddle");
+        let (user, key) = (-4_311, "folder:straddle");
         // An evaluation reads the old policy (a read grant)...
         let read_at = current_generation();
         // ...an administrator revokes it while the evaluation is in flight...
         bump_generation();
         // ...and the evaluation finishes, caching what it read.
-        cache_put(db, user, key, read_at, folder_decision(Some(Perm::Read)));
+        cache_put(user, key, read_at, folder_decision(Some(Perm::Read)));
         assert!(
-            cache_get(db, user, key).is_none(),
+            cache_get(user, key).is_none(),
             "a pre-change decision must not be served as current"
         );
 
@@ -1163,9 +1118,9 @@ mod tests {
         // concurrent test changes the generation in between).
         let served = (0..100).any(|_| {
             let read_at = current_generation();
-            cache_put(db, user, key, read_at, folder_decision(Some(Perm::Write)));
+            cache_put(user, key, read_at, folder_decision(Some(Perm::Write)));
             matches!(
-                cache_get(db, user, key),
+                cache_get(user, key),
                 Some(Cached::Folder(FolderAccess {
                     level: Some(Perm::Write),
                     ..
@@ -1173,8 +1128,6 @@ mod tests {
             )
         });
         assert!(served, "a current decision should be cached");
-        // Another database with the same account id has its own decisions.
-        assert!(cache_get("other.db", user, key).is_none());
     }
 
     #[test]

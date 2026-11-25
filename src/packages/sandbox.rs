@@ -130,14 +130,10 @@ mod linux {
         "/etc/ssl",
         "/etc/ca-certificates",
         "/etc/alternatives",
-        // Interpreter configuration of the distribution's PHP: its extensions
-        // (phar among them) are loaded from here, and Composer needs phar.
-        "/etc/php",
         "/proc/meminfo",
         "/proc/cpuinfo",
         "/proc/stat",
         "/sys/devices/system/cpu",
-        "/sys/devices/system/node",
         "/dev/zero",
         "/dev/full",
         "/dev/random",
@@ -173,23 +169,11 @@ mod linux {
         /// directory the check may write to. With `require_landlock`, a kernel
         /// without Landlock is an error instead of a weaker sandbox.
         pub fn new(root: &Path, home: &Path, require_landlock: bool) -> Result<Self, String> {
-            Self::with_peers(root, home, require_landlock, &[])
-        }
-
-        /// Like [`Confinement::new`], and the check may also read and execute
-        /// from `peers`: the other runtimes installed next to this one, for a
-        /// package that runs on one of them (Composer on PHP).
-        pub fn with_peers(
-            root: &Path,
-            home: &Path,
-            require_landlock: bool,
-            peers: &[std::path::PathBuf],
-        ) -> Result<Self, String> {
             let filter = Arc::new(seccomp_filter()?);
             let abi = landlock_abi();
             let ruleset = match abi {
                 Some(abi) => Some(
-                    landlock_ruleset(abi, root, home, peers)
+                    landlock_ruleset(abi, root, home)
                         .map_err(|e| format!("cannot prepare the Landlock sandbox: {e}"))?,
                 ),
                 None if require_landlock => {
@@ -217,47 +201,6 @@ mod linux {
         }
     }
 
-    /// Allow the check to read its own `/proc/<pid>` directory only.
-    ///
-    /// Procfs magic links resolve per process, so this rule cannot be built in
-    /// the parent: the child opens its own `/proc/self` after `fork` and adds
-    /// the rule to the inherited ruleset. This gives runtimes that need their
-    /// own memory/CPU statistics (.NET CoreCLR reads `/proc/self/maps` and
-    /// `/proc/self/stat`) exactly that, never another process's procfs.
-    ///
-    /// SAFETY: called from `pre_exec`; only async-signal-safe syscalls without
-    /// allocation. A missing procfs is not an error (the rule is simply not
-    /// added, and the runtime behaves as before).
-    unsafe fn allow_own_procfs(ruleset: RawFd) -> io::Result<()> {
-        const AT_FDCWD: libc::c_int = -100;
-        const O_PATH: libc::c_int = 0o10000000;
-        const O_DIRECTORY: libc::c_int = 0o200000;
-        const O_CLOEXEC: libc::c_int = 0o2000000;
-        let dir = libc::syscall(
-            libc::SYS_openat,
-            AT_FDCWD,
-            c"/proc/self".as_ptr(),
-            O_PATH | O_DIRECTORY | O_CLOEXEC,
-            0,
-        ) as libc::c_int;
-        if dir < 0 {
-            return Ok(());
-        }
-        let attr = PathBeneathAttr {
-            allowed_access: FS_READ_FILE | FS_READ_DIR,
-            parent_fd: dir,
-        };
-        let _ = libc::syscall(
-            libc::SYS_landlock_add_rule,
-            ruleset,
-            LANDLOCK_RULE_PATH_BENEATH,
-            &attr as *const PathBeneathAttr,
-            0u32,
-        );
-        libc::close(dir);
-        Ok(())
-    }
-
     fn confine_self(ruleset: Option<RawFd>, filter: &[libc::sock_filter]) -> io::Result<()> {
         let core = libc::rlimit {
             rlim_cur: 0,
@@ -278,7 +221,6 @@ mod linux {
                 return Err(io::Error::last_os_error());
             }
             if let Some(fd) = ruleset {
-                allow_own_procfs(fd)?;
                 if libc::syscall(libc::SYS_landlock_restrict_self, fd, 0u32) != 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -299,12 +241,7 @@ mod linux {
         Ok(())
     }
 
-    fn landlock_ruleset(
-        abi: i32,
-        root: &Path,
-        home: &Path,
-        peers: &[std::path::PathBuf],
-    ) -> io::Result<OwnedFd> {
+    fn landlock_ruleset(abi: i32, root: &Path, home: &Path) -> io::Result<OwnedFd> {
         let mut handled_fs = (1u64 << 13) - 1; // ABI 1: execute .. make_sym
         if abi >= 2 {
             handled_fs |= FS_REFER;
@@ -351,9 +288,6 @@ mod linux {
         let read_exec = FS_EXECUTE | FS_READ_FILE | FS_READ_DIR;
         allow(&ruleset, root, read_exec, handled_fs, true)?;
         allow(&ruleset, home, handled_fs, handled_fs, true)?;
-        for peer in peers {
-            allow(&ruleset, peer, read_exec, handled_fs, false)?;
-        }
         for dir in SYSTEM_DIRS {
             allow(&ruleset, Path::new(dir), read_exec, handled_fs, false)?;
         }
@@ -501,15 +435,6 @@ mod other {
 
     impl Confinement {
         pub fn new(_root: &Path, _home: &Path, _require_landlock: bool) -> Result<Self, String> {
-            Err(UNSUPPORTED.to_string())
-        }
-
-        pub fn with_peers(
-            _root: &Path,
-            _home: &Path,
-            _require_landlock: bool,
-            _peers: &[std::path::PathBuf],
-        ) -> Result<Self, String> {
             Err(UNSUPPORTED.to_string())
         }
 
@@ -666,20 +591,6 @@ mod tests {
         );
         // Output files are cleaned up.
         assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn a_check_can_read_its_own_procfs_but_not_another_process() {
-        let (_tmp, root, home) = dirs();
-        // The confined process itself (not a child of it) may open its own
-        // procfs; runtime checks such as CoreCLR need /proc/self/maps.
-        let own = script(&root, "own", ": < /proc/self/maps");
-        exec(&own, &root, &home, Duration::from_secs(10)).unwrap();
-        // Another process's procfs (here the test process, same uid) is denied
-        // by the Landlock ruleset even for the shell itself.
-        let other = script(&root, "other", ": < /proc/$PPID/maps");
-        let err = exec(&other, &root, &home, Duration::from_secs(10)).unwrap_err();
-        assert!(err.contains("Permission denied"), "{err}");
     }
 
     #[test]

@@ -108,9 +108,6 @@ pub fn validate_new_name(part: &str) -> AppResult<()> {
     if part.starts_with(TEMP_PREFIX) {
         return Err(AppError::bad_request("reserved file name prefix"));
     }
-    if part == crate::rootfs::RESERVED_NAME {
-        return Err(AppError::bad_request("reserved file name"));
-    }
     Ok(())
 }
 

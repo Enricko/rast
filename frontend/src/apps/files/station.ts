@@ -14,12 +14,9 @@ import {
   relativeTime,
 } from "../../core/format";
 import { fileIcon, iconSvg } from "../../core/icons";
-import { confirmDialog, contextMenu, errorMessage, promptDialog } from "../../core/ui";
-import { isLinuxPackageName } from "../linuxapp/catalog";
-import { folderMenuTarget } from "../terminal/model";
+import { confirmDialog, contextMenu, promptDialog } from "../../core/ui";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
-import { boxesIntersect, dedupeDescendants, validMoveTarget } from "../../shell/selection";
 import { watchJob, jobProgressFraction, jobProgressLabel, type JobUpdate } from "../../components/jobs";
 import { Pager } from "../../components/pager";
 import {
@@ -42,8 +39,6 @@ import {
   parentPath,
   previewKind,
   sortEntries,
-  isSystemPath,
-  systemPathLabel,
   validateFileName,
   type JobRef,
   type TrashPage,
@@ -152,8 +147,6 @@ export class FileStation {
   private readonly jobBar: ProgressHandle;
   private searchTimer = 0;
   private dragDepth = 0;
-  private marqueeEl: HTMLElement;
-  private marquee: { startX: number; startY: number; base: Set<string>; active: boolean } | null = null;
   private disposed = false;
   /** Ignore realtime echoes for a short window after our own refetch. */
   private quietUntil = 0;
@@ -281,7 +274,7 @@ export class FileStation {
     this.fileInput = h("input", { type: "file", multiple: true, class: "hidden", tabIndex: -1 });
     this.fileInput.addEventListener("change", () => {
       const files = this.fileInput.files;
-      if (files && files.length > 0) void this.enqueueUploads(files);
+      if (files && files.length > 0) this.uploads.enqueue(files, this.path);
       this.fileInput.value = "";
     });
 
@@ -298,6 +291,7 @@ export class FileStation {
     const sidebar = h(
       "aside",
       { class: "app-sidebar fs-sidebar", ariaLabel: "Locations" },
+      h("div", { class: "fs-sidebar-title" }, "Locations"),
       this.rootsNav,
       h("div", { class: "menu-sep" }),
       this.trashNav,
@@ -361,9 +355,8 @@ export class FileStation {
       maxUploadBytes: () => this.ctx.store.get().maxUploadBytes,
     });
 
-    this.marqueeEl = h("div", { class: "fs-marquee", ariaHidden: true, hidden: true });
     ctx.root.classList.add("fs-app");
-    ctx.root.append(this.toolbar, this.notice.el, this.split, this.dropOverlay, this.uploads.el, this.fileInput, this.marqueeEl);
+    ctx.root.append(this.toolbar, this.notice.el, this.split, this.dropOverlay, this.uploads.el, this.fileInput);
     this.registerInteractions();
     this.subscribeRealtime();
     this.setView(this.view, false);
@@ -410,156 +403,13 @@ export class FileStation {
       this.dragDepth = 0;
       this.dropOverlay.classList.add("hidden");
       const files = event.dataTransfer?.files;
-      if (files && files.length > 0) void this.enqueueUploads(files);
+      if (files && files.length > 0) this.uploads.enqueue(files, this.path);
     });
-    // Clicking blank space clears the selection; marquee selection starts
-    // only from empty pane space (not entries, controls or the table header).
+    // Clicking blank space clears the selection.
     this.panel.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || this.section !== "files") return;
-      const target = event.target as HTMLElement;
-      if (target.closest(".fs-card, tr, input, button, a, .fs-table thead")) return;
-      if (!event.ctrlKey && !event.metaKey && !event.shiftKey && this.selection.size > 0) this.clearSelection();
-      const root = this.ctx.root.getBoundingClientRect();
-      this.marquee = {
-        startX: event.clientX - root.left,
-        startY: event.clientY - root.top,
-        base: new Set(this.selection),
-        active: false,
-      };
-      event.preventDefault();
+      if (event.target instanceof HTMLElement && event.target.closest(".fs-table, .fs-grid")) return;
+      if (this.selection.size > 0) this.clearSelection();
     });
-    const onMarqueeMove = (event: PointerEvent): void => {
-      if (!this.marquee) return;
-      const root = this.ctx.root.getBoundingClientRect();
-      const currentX = event.clientX - root.left;
-      const currentY = event.clientY - root.top;
-      if (!this.marquee.active) {
-        if (Math.hypot(currentX - this.marquee.startX, currentY - this.marquee.startY) < 4) return;
-        this.marquee.active = true;
-        this.marqueeEl.hidden = false;
-      }
-      const box = {
-        x: Math.min(this.marquee.startX, currentX),
-        y: Math.min(this.marquee.startY, currentY),
-        w: Math.abs(currentX - this.marquee.startX),
-        h: Math.abs(currentY - this.marquee.startY),
-      };
-      this.marqueeEl.style.left = `${box.x}px`;
-      this.marqueeEl.style.top = `${box.y}px`;
-      this.marqueeEl.style.width = `${box.w}px`;
-      this.marqueeEl.style.height = `${box.h}px`;
-      const hits: string[] = [];
-      this.panel.querySelectorAll<HTMLElement>("[data-fs-path]").forEach((element) => {
-        const rect = element.getBoundingClientRect();
-        if (boxesIntersect(box, { x: rect.left - root.left, y: rect.top - root.top, w: rect.width, h: rect.height })) {
-          hits.push(element.dataset.fsPath ?? "");
-        }
-      });
-      const shift = event.shiftKey;
-      this.selection = new Set(shift ? this.marquee.base : []);
-      for (const path of hits) if (path) this.selection.add(path);
-      this.anchorPath = [...this.selection][0] ?? null;
-      this.updateSelectionUi();
-      // Auto-scroll the pane near its edges.
-      const pane = targetScrollable(this.panel);
-      if (pane) {
-        const paneRect = pane.getBoundingClientRect();
-        if (event.clientY < paneRect.top + 24) pane.scrollTop -= 24;
-        else if (event.clientY > paneRect.bottom - 24) pane.scrollTop += 24;
-      }
-    };
-    const finishMarquee = (): void => {
-      if (!this.marquee) return;
-      this.marquee = null;
-      this.marqueeEl.hidden = true;
-    };
-    const targetScrollable = (element: HTMLElement): HTMLElement | null => {
-      let node: HTMLElement | null = element;
-      while (node) {
-        if (node.scrollHeight > node.clientHeight + 4) return node;
-        node = node.parentElement;
-      }
-      return null;
-    };
-    window.addEventListener("pointermove", onMarqueeMove);
-    window.addEventListener("pointerup", finishMarquee);
-    window.addEventListener("pointercancel", finishMarquee);
-    this.lc.add(() => {
-      window.removeEventListener("pointermove", onMarqueeMove);
-      window.removeEventListener("pointerup", finishMarquee);
-      window.removeEventListener("pointercancel", finishMarquee);
-    });
-    // Selected-file drag: move the whole selection onto a folder.
-    this.panel.addEventListener("dragstart", (event) => {
-      const element = (event.target as HTMLElement).closest<HTMLElement>("[data-fs-path]");
-      const path = element?.dataset.fsPath;
-      if (!path || this.section !== "files") return;
-      if (!this.selection.has(path)) this.selectSingleFromPath(path);
-      const paths = dedupeDescendants([...this.selection]);
-      if (event.dataTransfer) {
-        event.dataTransfer.effectAllowed = "move";
-        event.dataTransfer.setData("application/x-rast-files", JSON.stringify(paths));
-        event.dataTransfer.setData("text/plain", `${paths.length} item(s)`);
-      }
-    });
-    const dropTarget = (event: DragEvent): HTMLElement | null => {
-      const element = (event.target as HTMLElement)?.closest<HTMLElement>("[data-fs-path]");
-      if (!element || element.dataset.fsKind !== "dir") return null;
-      const dest = element.dataset.fsPath ?? "";
-      if (!dest || dest === this.path) return null;
-      if (this.selection.size > 0 && !validMoveTarget([...this.selection], dest)) return null;
-      return element;
-    };
-    this.panel.addEventListener("dragover", (event) => {
-      if (!event.dataTransfer?.types.includes("application/x-rast-files")) return;
-      const element = dropTarget(event);
-      this.panel.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
-      if (!element) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "move";
-      element.classList.add("is-drop-target");
-    });
-    this.panel.addEventListener("dragleave", (event) => {
-      const element = (event.target as HTMLElement)?.closest<HTMLElement>("[data-fs-path]");
-      element?.classList.remove("is-drop-target");
-    });
-    this.panel.addEventListener("drop", async (event) => {
-      const raw = event.dataTransfer?.getData("application/x-rast-files");
-      if (!raw) return;
-      const element = dropTarget(event);
-      this.panel.querySelectorAll(".is-drop-target").forEach((node) => node.classList.remove("is-drop-target"));
-      if (!element) return;
-      event.preventDefault();
-      event.stopPropagation();
-      let paths: string[] = [];
-      try {
-        paths = dedupeDescendants((JSON.parse(raw) as string[]).filter((path) => typeof path === "string"));
-      } catch {
-        return;
-      }
-      const destDir = element.dataset.fsPath ?? "";
-      if (!destDir || paths.length === 0 || !validMoveTarget(paths, destDir)) return;
-      await this.moveEntriesTo(paths, destDir);
-    });
-  }
-
-  private selectSingleFromPath(path: string): void {
-    const entry = listingItems(this.listing).find((candidate) => candidate.path === path);
-    if (entry) this.selectSingle(entry);
-  }
-
-  private async moveEntriesTo(paths: string[], destDir: string): Promise<void> {
-    try {
-      const response = await this.ctx.api.post<JobRef>("/api/files/move", { paths, destDir });
-      this.clearSelection();
-      if (response?.jobId) await this.runJob("Move", response.jobId);
-      else {
-        this.markSelfChange();
-        await this.loadListing();
-      }
-    } catch (error) {
-      this.ctx.toast.error(`Move failed: ${friendlyFileError(error)}`);
-    }
   }
 
   // -------------------------------------------------------------- realtime
@@ -1073,37 +923,22 @@ export class FileStation {
         (this.path === root.path || this.path.startsWith(root.path === "/" ? "/" : `${root.path}/`));
       if (matches && (!activeRoot || root.path.length > activeRoot.path.length)) activeRoot = root;
     }
-    // Three places: your own storage, the folders shared with you, and (for
-    // super administrators) the server's own file system.
-    const groups: Array<{ title: string; kind: FileRoot["kind"]; empty?: string }> = [
-      { title: "Home", kind: "home" },
-      { title: "Shared folders", kind: "share", empty: "Nothing shared with you yet" },
-      { title: "Server", kind: "system" },
-    ];
-    for (const group of groups) {
-      const roots = this.roots.filter((root) => root.kind === group.kind);
-      if (roots.length === 0 && !group.empty) continue;
-      this.rootsNav.appendChild(h("div", { class: "fs-sidebar-title" }, group.title));
-      if (roots.length === 0) {
-        this.rootsNav.appendChild(h("div", { class: "fs-sidebar-note small" }, group.empty ?? ""));
+    for (const root of this.roots) {
+      const btn = h(
+        "button",
+        {
+          class: `nav-item${activeRoot === root ? " is-active" : ""}`,
+          type: "button",
+          title: root.path,
+        },
+        iconSvg(root.kind === "home" ? "files" : "folder", 16),
+        h("span", { class: "nav-label" }, root.name),
+      );
+      if (root.kind === "share" && root.perms) {
+        btn.appendChild(h("span", { class: `badge ${root.perms === "read" ? "" : "info"} fs-root-badge` }, root.perms === "read" ? "read-only" : root.perms));
       }
-      for (const root of roots) {
-        const btn = h(
-          "button",
-          {
-            class: `nav-item${activeRoot === root ? " is-active" : ""}`,
-            type: "button",
-            title: root.kind === "system" ? "The server's own files, as root" : root.path,
-          },
-          iconSvg(root.kind === "home" ? "home" : root.kind === "system" ? "disk" : "folder", 16),
-          h("span", { class: "nav-label" }, root.kind === "home" ? "My files" : root.name),
-        );
-        if (root.kind === "share" && root.perms) {
-          btn.appendChild(h("span", { class: `badge ${root.perms === "read" ? "" : "info"} fs-root-badge` }, root.perms === "read" ? "read-only" : root.perms));
-        }
-        btn.addEventListener("click", () => void this.navigate(root.path));
-        this.rootsNav.appendChild(btn);
-      }
+      btn.addEventListener("click", () => void this.navigate(root.path));
+      this.rootsNav.appendChild(btn);
     }
     this.trashNav.classList.toggle("is-active", this.section === "trash");
     if (this.rootsError) {
@@ -1121,26 +956,11 @@ export class FileStation {
 
   private renderUsage(): void {
     clear(this.usageHost);
-    // On the root file system the numbers are the disk behind the open
-    // folder, not the account's quota.
-    const system = this.section === "files" && isSystemPath(this.path);
-    const quota = (system ? undefined : this.usage?.quotaBytes) ?? this.listing?.quota?.quotaBytes ?? 0;
-    const used = (system ? undefined : this.usage?.usedBytes) ?? this.listing?.quota?.usedBytes ?? 0;
-    const free = system ? (this.listing?.quota?.freeBytes ?? 0) : Math.max(0, quota - used);
-    const title = h("div", { class: "fs-sidebar-title" }, system ? "Disk" : "Storage");
+    const quota = this.usage?.quotaBytes ?? this.listing?.quota?.quotaBytes ?? 0;
+    const used = this.usage?.usedBytes ?? this.listing?.quota?.usedBytes ?? 0;
+    const free = Math.max(0, quota - used);
+    const title = h("div", { class: "fs-sidebar-title" }, "Storage");
     this.usageHost.appendChild(title);
-    if (system) {
-      const fraction = quota > 0 ? Math.min(1, used / quota) : 0;
-      const bar = h("div", { class: "progress fs-usage-bar" });
-      const fill = h("div", { class: "progress-bar" });
-      fill.style.width = `${(fraction * 100).toFixed(1)}%`;
-      if (fraction > 0.92) fill.classList.add("is-error");
-      bar.appendChild(fill);
-      this.usageHost.appendChild(bar);
-      this.usageHost.appendChild(h("div", { class: "fs-usage-line" }, `${formatBytes(used)} of ${formatBytes(quota)}`));
-      this.usageHost.appendChild(h("div", { class: "fs-usage-line muted" }, `${formatBytes(free)} free`));
-      return;
-    }
     if (this.usageError && !this.usage) {
       this.usageHost.appendChild(
         h(
@@ -1372,11 +1192,7 @@ export class FileStation {
 
     const row = h(
       "tr",
-      {
-        tabIndex: 0,
-        class: this.selection.has(entry.path) ? "is-selected" : "",
-        dataset: { fsPath: entry.path, fsKind: entry.kind },
-      },
+      { tabIndex: 0, class: this.selection.has(entry.path) ? "is-selected" : "" },
       h("td", { class: "fs-check" }, checkbox),
       h("td", { class: "fs-name-cell" }, h("div", { class: "fs-entry" }, icon, name)),
       h(
@@ -1390,7 +1206,6 @@ export class FileStation {
         relativeTime(entry.modifiedAt),
       ),
     );
-    row.draggable = true;
     row.addEventListener("click", (event) => {
       if ((event.target as HTMLElement).closest("input")) return;
       this.selectEntry(entry, event);
@@ -1424,13 +1239,11 @@ export class FileStation {
           role: "listitem",
           tabIndex: 0,
           title: entry.path,
-          dataset: { fsPath: entry.path, fsKind: entry.kind },
         },
         h("div", { class: "fs-card-icon" }, iconSvg(fileIcon(entry), 30)),
         h("div", { class: "fs-card-name" }, entry.name),
         h("div", { class: "fs-card-meta small muted" }, entry.kind === "dir" ? "Folder" : formatBytesShort(entry.size)),
       );
-      card.draggable = true;
       card.addEventListener("click", (event) => this.selectEntry(entry, event));
       card.addEventListener("dblclick", (event) => {
         if ((event.target as HTMLElement).closest("input")) return;
@@ -1760,28 +1573,8 @@ export class FileStation {
       icon: entry.kind === "dir" ? "folder" : "file",
       onClick: () => this.openEntry(entry),
     });
-    // Directories can be handed to the Terminal app with their File Station
-    // logical path; the server re-applies the same folder ACL as the listing
-    // and enforces "directory only" before starting the shell.
-    const terminalFolder = folderMenuTarget({
-      terminalAllowed: this.ctx.desktop.apps().some((app) => app.id === "terminal"),
-      section: this.section,
-      accessBlocked: this.accessBlocked,
-      entryKind: entry.kind,
-      path: entry.path,
-    });
-    if (terminalFolder && !isSystemPath(entry.path)) {
-      items.push({
-        label: "Open in Terminal",
-        icon: "terminal",
-        onClick: () => this.ctx.openApp("terminal", { folder: terminalFolder }),
-      });
-    }
     if (entry.kind === "file") {
       items.push({ label: "Download", icon: "download", onClick: () => void this.downloadFile(entry.path) });
-      if (this.ctx.store.isAdmin() && isLinuxPackageName(entry.name) && !isSystemPath(entry.path)) {
-        items.push({ label: "Install as Linux app", icon: "box", onClick: () => void this.installLinuxApp(entry) });
-      }
       items.push("separator");
     }
     items.push(
@@ -1794,17 +1587,6 @@ export class FileStation {
     this.onItemContextSelect(entry);
     this.updateSelectionUi();
     contextMenu(x, y, items);
-  }
-
-  /** Administrators: install a .deb, AppImage or archive, then show it in App Center. */
-  private async installLinuxApp(entry: FileEntry): Promise<void> {
-    try {
-      const res = await this.ctx.api.post<{ app: { id: string; name: string } }>("/api/linux-apps/install", { path: entry.path });
-      this.ctx.toast.info(`Installing ${res.app.name}. This can take a few minutes.`);
-      this.ctx.openApp("packages", { linux: res.app.id });
-    } catch (error) {
-      this.ctx.toast.error(errorMessage(error));
-    }
   }
 
   private openEntry(entry: FileEntry): void {
@@ -1831,7 +1613,6 @@ export class FileStation {
       }),
     );
     if (!name) return;
-    if (!(await this.confirmSystemWrite(this.path, "Create folder", `Create "${name.trim()}"`))) return;
     try {
       await this.ctx.api.post("/api/files/mkdir", { path: joinPath(this.path, name.trim()) });
       this.ctx.toast.success("Folder created");
@@ -1857,7 +1638,6 @@ export class FileStation {
       }),
     );
     if (!name || name.trim() === entry.name) return;
-    if (!(await this.confirmSystemWrite(entry.path, "Rename", `Rename "${entry.name}" to "${name.trim()}"`))) return;
     try {
       await this.ctx.api.post("/api/files/rename", { path: entry.path, newName: name.trim() });
       this.ctx.toast.success("Renamed");
@@ -1896,8 +1676,6 @@ export class FileStation {
     );
     if (!destDir) return;
     const paths = entries.map((entry) => entry.path);
-    const verb = kind === "copy" ? "Copy" : "Move";
-    if (!(await this.confirmSystemWrite(destDir, verb, `${verb} ${paths.length} item(s) to ${systemPathLabel(destDir)}`))) return;
     try {
       const response = await this.ctx.api.post<JobRef>(kind === "copy" ? "/api/files/copy" : "/api/files/move", {
         paths,
@@ -1919,24 +1697,13 @@ export class FileStation {
   private async deleteSelected(): Promise<void> {
     if (this.selection.size === 0) return;
     const count = this.selection.size;
-    // The root file system has no recycle bin.
-    const permanent = isSystemPath(this.path);
     const confirmed = await this.withEditContext("delete", [...this.selection], () =>
-      confirmDialog(
-        permanent
-          ? {
-              title: "Delete permanently",
-              message: `Permanently delete ${count} item(s) from ${systemPathLabel(this.path)} on the server? This is done as root and cannot be undone.`,
-              confirmLabel: "Delete permanently",
-              danger: true,
-            }
-          : {
-              title: "Move to recycle bin",
-              message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
-              confirmLabel: "Move to recycle bin",
-              danger: true,
-            },
-      ),
+      confirmDialog({
+        title: "Move to recycle bin",
+        message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
+        confirmLabel: "Move to recycle bin",
+        danger: true,
+      }),
     );
     if (!confirmed) return;
     const paths = [...this.selection];
@@ -1953,29 +1720,6 @@ export class FileStation {
     } catch (error) {
       this.ctx.toast.error(`Delete failed: ${friendlyFileError(error)}`);
     }
-  }
-
-  /**
-   * Writes on the root file system are made as root on the server itself:
-   * each one is confirmed. Anywhere else this resolves to true at once.
-   */
-  private async confirmSystemWrite(path: string, title: string, action: string): Promise<boolean> {
-    if (!isSystemPath(path)) return true;
-    return confirmDialog({
-      title,
-      message: `${action} in ${systemPathLabel(path)}? This changes the server's own files, as root.`,
-      confirmLabel: title,
-      danger: true,
-    });
-  }
-
-  /** Queue uploads into the open folder (confirmed first on the root file system). */
-  private async enqueueUploads(files: FileList): Promise<void> {
-    const dir = this.path;
-    // The list is live: copy it before the input is cleared.
-    const picked = Array.from(files);
-    if (!(await this.confirmSystemWrite(dir, "Upload", `Upload ${picked.length} file(s)`))) return;
-    this.uploads.enqueue(picked, dir);
   }
 
   private async runJob(label: string, jobId: string): Promise<void> {

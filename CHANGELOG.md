@@ -11,195 +11,56 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- **RAST Desktop native stream broker (Phase 3).** Additive server support for
-  the native macOS client (`docs/PROTOCOL.md` §2/§4 in the RAST Desktop
-  repository): `POST /api/linux-apps/session/stream-token` issues a 120 s,
-  single-use `wss://…/linux-apps/native/<token>/` URL (32 random bytes; only
-  SHA-256 kept in memory; bound to the account, the RAST login session and the
-  exact native session; max 8 outstanding per user with oldest-eviction; 30
-  issuances/minute; `404` without a live session, `409` when native Linux apps
-  are disabled), and `DELETE /api/linux-apps/session/stream-tokens` revokes all
-  outstanding tokens (`{revoked}`). The new public WebSocket route
-  `GET /linux-apps/native/<token>/<rest>?<query>` is mounted outside cookie auth
-  and outside the browser same-origin `Origin` check because the native Xpra
-  client is not a browser: the token is its sole credential, consumed atomically
-  on the first successful upgrade, and the relay is transparent to the loopback
-  Xpra WebSocket (64 MiB frame cap, same relay semantics as the HTML5 stream,
-  sub-protocols negotiated end to end, 5 s revalidation of the issuing login
-  session). No token, URL, session key or cookie is ever logged or audited;
-  denied attaches get a bodyless `401`. `GET /api/bootstrap` now advertises
-  `desktop: {protocol: 1, streamTokens: true, minClientVersion: "0.1.0"}`.
-  Native Xpra must run with `XPRA_WEBSOCKET_MASK=1` (RFC 6455 masking; the
-  relay is strict and closes unmasked client frames). The browser HTML5 path is
-  unchanged, no new public port is opened, and Xpra stays on loopback. New
-  documentation: [docs/NATIVE-BROKER.md](docs/NATIVE-BROKER.md).
+- Nothing yet.
 
-### Fixed
+### Planned
 
-- **LibreOffice launches.** `/usr/bin/libreoffice` resolves into the root-owned
-  `/usr/lib/libreoffice` tree, which was outside the argv[0] canonical
-  allow-list; the tree is now allowed, and LibreOffice Writer imports/launches
-  as a normal discovered application.
-- **Snap packages are honestly unsupported for identity users.** Snapd refuses
-  to run snaps for RAST's mapped service identities; install `.deb`, official
-  tarballs or AppImages instead. Documented in the operator guide so a
-  discovered Snap entry is not mistaken for a runnable app.
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.19.0] - 2026-11-25
 
+This release rolls RAST back to the 0.9.1 code base. The code is identical to
+v0.9.1 (commit `365f0a0`) apart from the version number and this changelog.
+Everything added from 0.10.0 to 0.18.3 is gone, starting with Linux desktop
+apps (Google Chrome was the first app tested with them).
 
-### Fixed
+### Removed
 
-- **Session startup under host disk pressure.** Xpra startup is file-I/O bound;
-  when other workloads saturate the disk (`/proc/pressure/io`), a 30 s
-  readiness deadline can expire while the session is still initialising,
-  causing a needless retry/rollback. The session manager now uses a bounded
-  75 s readiness window when `some avg10` is >= 25 %, and the deployment
-  Terminal smoke scales its browser waits under the same condition. Normal
-  sessions keep the 30 s deadline.
-- **Snap-packaged applications** can be imported/launched through the generic
-  discovery path (`/snap/bin/*` wrappers canonicalise through `/usr/lib/snapd`).
+- **Linux desktop apps**, in both forms: App Center installs of AppImage,
+  `.deb` and `.tar.gz` apps in Docker with Selkies (0.10.0–0.11.x), and native
+  Linux apps through Xpra (0.13.x and later), including the `rast native-helper`
+  service (`rast-native.service`), `rast-linux.slice`, the per-user Linux
+  accounts (`rast-u<id>`), shared-folder groups and the display firewall.
+- **Every other change from 0.10.0 to 0.18.3**, among them the three roles and
+  the root file system in File Station (0.18.0), Terminal (0.17.x) and the
+  App Center app packages. Their sections below are kept as history.
+- The native runtime work that was on `main` after 0.18.3 and never released
+  (session profiles, GPU displays, discovered applications, the native stream
+  broker) stays in the git history up to commit `ced5e07`.
 
+### Upgrade notes
 
-
-### Added
-
-- **Verified GPU-backed native sessions.** `linux_display_backend` accepts
-  `auto | software | gpu | custom`; `auto` starts a privileged per-session
-  NVIDIA Xorg display, verifies the NVIDIA OpenGL renderer and a connected
-  RandR output as the person's identity, attaches Xpra with
-  `--use-display=yes`, and falls back to Xvfb if the real probe fails. Sessions
-  report `displayBackend`, `gpuAccelerationVerified` and `renderer`; the
-  backend is persisted for restart adoption and cleaned up on session end.
-  Chrome reports Canvas/Compositing/Rasterization/WebGL/WebGPU/Video-Decode
-  hardware accelerated on such sessions. Honest limits: Xorg runs as root,
-  GPU VRAM is shared, browser video decoding stays software, and stream
-  encoding remains software (NVENC unavailable). Evidence:
-  `tests/e2e/results/gpu-display-rollout-4cc60dc.md`.
-
-
-### Fixed
-
-- **Native session pre-warming no longer steals keyboard focus, so it is safe
-  to enable.** With a reliably pre-warmed session the hidden Xpra transport
-  iframe used to connect right after sign-in, and its clipboard autofocus could
-  take keyboard ownership from local RAST apps (Terminal opened but ignored
-  typing until a click). The desktop now keeps the transport iframe
-  **disconnected while a session exists only because of a pre-warm** (no app
-  run yet): the viewer is created on the first native application launch, which
-  waits bounded (15 s) for the shim to report the transport connected and only
-  then calls the launch API. Every launch entry point uses that gate (start
-  menu, desktop icons, taskbar, App Center *Open*). If the viewer cannot
-  connect in time the launch still proceeds and a clear warning is shown. The
-  earlier viewer-blurring patch (`93585ba`) remains reverted: it stopped the
-  shim's synthetic key events reaching the Xpra client. The pre-warm benefit
-  (~9 s background session start, ~3 s first click-to-window) is kept.
-- **Terminal failed after a binary upgrade with "Failed to find executable
-  /usr/local/bin/rast (deleted)".** The privileged helper passed
-  `std::env::current_exe()` — which the kernel reports with a `" (deleted)"`
-  suffix after the on-disk binary has been replaced — to `systemd-run` for the
-  terminal and root-file agents. The helper now captures its resolved
-  executable at start-up, the child refuses to run when its build differs from
-  the helper that spawned it, and `scripts/deploy-release.sh` installs
-  versioned binaries behind a stable symlink, restarts the three services
-  together, preserves running-session units, smoke-tests Terminal and rolls
-  back on failure.
-- **Root file agent** (File Station's root file system) had the same stale
-  executable path and is fixed by the same resolver.
-
-### Added
-
-- **Discovered-application icons and the "Import existing application"
-  dialog.** Applications installed outside App Center now show their own icon:
-  the identity-scoped scan (or a manual import) resolves the desktop entry's
-  `Icon=` theme name or absolute path only inside known icon roots (identity
-  XDG icon directories, system icon themes, a managed profile's `data/icons`),
-  stores validated PNG/SVG bytes (≤96 KiB) on the inventory row (migration 17
-  adds `working_dir`, `icon_type`, `icon_data` to `discovered_apps`), and the
-  authenticated `GET /api/linux-apps/discovered/{id}/icon` serves them with
-  cache headers. The URL contains no path and the endpoint only serves stored
-  bytes, so no path traversal or symlink escape is possible. Administrators can
-  register an already-installed executable from App Center with name, absolute
-  path, optional arguments, working directory and icon; an imported working
-  directory (or a `.desktop` `Path=`) is honoured when it is inside the managed
-  application trees. App Center rows and desktop shortcuts use the icon with
-  the existing generic fallback.
-- **Discovered applications (installed outside App Center).** RAST now finds
-  desktop applications that were not installed through App Center — `.desktop`
-  entries in XDG directories, AppImages, portable programs, and applications an
-  external installer put inside a managed app profile (the real WordCraft /
-  ArtCraft Launcher case). They appear in a new App Center "Discovered
-  applications" list and as desktop apps, can be launched in the person's
-  shared Xpra session with the same window adoption/limits as managed native
-  apps, and are matched to their windows by `StartupWMClass`/`WM_CLASS`. A
-  bounded identity-scoped helper operation (`desktop_scan`, run as the person's
-  identity) reads 0700 homes the web server cannot; `.desktop` `Exec` lines are
-  parsed into argv arrays and never go through a shell. System-wide entries
-  require administrator approval by default (`linux_discovery_system_apps`),
-  and admins can approve/hide/rename/forget or manually import an executable.
-  New settings: `linux_discovery_enabled` (default on),
-  `linux_discovery_roots`, `linux_discovery_system_apps` (default `approval`),
-  `linux_discovery_interval_seconds` (default 300). New API under
-  `/api/linux-apps/discovered` and the `linuxapps.discovered` realtime event;
-  schema migration 15 adds the `discovered_apps` inventory and lets
-  `linux_runs` reference discovered app ids.
-- **Configurable session pre-warming** (`linux_prewarm`, default off, enabled
-  in production):
-  after a person with native apps signs in the desktop starts their shared Xpra
-  session in the background (`POST /api/linux-apps/session/prewarm`), so the
-  first application launch is warm (measured cold session start is ~12 s;
-  warm launch ~0.8 s). The hidden viewer transport is deferred until the first
-  native launch (see Fixed), so enabling pre-warming does not affect keyboard
-  focus. One session per person, admission-checked and reclaimed by the normal
-  idle cleanup; the trade-off is ~150–250 MiB idle memory per signed-in
-  native-app user.
-- **Adaptive native session performance profiles.** `linux_profile` selects
-  `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the
-  previous behaviour), `media` (smooth video) or `quality` (sharp text/images);
-  `linux_quality`, `linux_min_quality`, `linux_speed`, `linux_min_speed`,
-  `linux_video_scaling`, `linux_av_sync` and `linux_encoding` override the
-  profile. Applies to every native application without per-app code.
-- **GPU/display capability detection, without unverified acceleration
-  claims.** `GET /api/linux-apps` and `rast doctor` now report the effective
-  profile, display backend, NVIDIA driver/devices, NVENC/NVDEC codec
-  availability, DRM render nodes and actionable notes. A validated
-  `linux_xvfb_command` wrapper can replace Xvfb for GPU-backed rendering, with
-  a safe fallback to software rendering at session start.
-- **Native session diagnostics in App Center.** App details show the runtime
-  policy and GPU capability; the session API now carries the live cgroup
-  memory/task/CPU usage of the person's session unit.
-
-### Fixed
-
-- **Native Linux apps always open as individual RAST windows.** The desktop no
-  longer has a fallback that renders the whole Xpra remote desktop (its
-  background, Xpra toolbar and remote decorations) inside a RAST window: a
-  session that is not seamless is reported instead of embedded. A native app is
-  also never downgraded to the legacy whole-session viewer when the native
-  backend or helper is unavailable — the launch fails with an actionable
-  message, so the RAST window manager stays the only visible window manager.
-- **Opening a Linux app before the installed-app list finished loading** no
-  longer falls back to the legacy Docker viewer: the list is loaded and the
-  launch retried, or the app is reported as not installed.
-
-### Fixed
-
-- **Keyboard focus and clipboard for native apps are now owned by the RAST
-  desktop instead of the hidden Xpra viewer.** Keys reach the focused native
-  window exactly once (repeat preserved, keyups delivered after focus moves,
-  all pressed keys/buttons released on blur/disconnect), macOS Command
-  shortcuts are translated for the common editing/shortcut set when a native
-  window is focused, and text clipboard works both ways with visible fallbacks
-  when the browser refuses clipboard access instead of silently failing. Text
-  only: HTML/image clipboard formats and IME composition are documented as
-  unsupported by the pinned Xpra HTML5 client.
-- **Session cgroup metrics** in the native session API were always null because
-  the cgroup path was missing the `.service` suffix.
-
-### Changed
-
-- **The legacy in-window Linux-app viewer is limited to Docker-backed apps.**
-  A native app routed to that legacy path re-routes to the shared native
-  session instead of mounting a remote desktop inside a RAST window.
+- **The database schema stays at v9.** A server whose database was migrated
+  by 0.10.0 or later (schema v10 or newer) refuses to start on 0.19.0 with
+  `migration N was previously applied but is missing`. Before updating, stop
+  `rast.service` and restore a backup made before 0.10.0
+  (`sudo -u rast rast restore --from <archive> --yes`). Anything created after
+  that backup is lost, so take a fresh backup first.
+- **`/etc/rast/rast.toml` must only contain 0.9.1 keys.** The configuration
+  rejects unknown keys, so `native_*`, `linux_*` and `terminal_*` settings stop
+  the server from starting. Restore the configuration from the same backup.
+- The update does not remove what Linux apps left on the host:
+  `rast-native.service`, `rast-linux.slice`, `/etc/tmpfiles.d/rast-native.conf`,
+  the `inet rast_native` nftables table, the `rast-u<id>` accounts,
+  `/var/lib/rast/linux-apps`, `/var/lib/rast/linux-users` and the
+  `rast-linux*` Docker images. Remove them by hand.
 
 ## [0.18.3] - 2026-11-16
 

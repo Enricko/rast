@@ -1,88 +1,36 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Enricko/rast/main/docs/rast-package.schema.json",
+  "$id": "https://raw.githubusercontent.com/Enricko/rast-packages/main/schema/rast-package.schema.json",
   "title": "RAST package manifest (rast-package.json), schema version 1",
   "description": "Declarative description of one package version. RAST enforces these rules (and a few that JSON Schema cannot express, such as version ordering) in src/packages/manifest.rs.",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schemaVersion",
-    "kind",
-    "id",
-    "type",
-    "name",
-    "publisher",
-    "version",
-    "revision",
-    "runtime",
-    "artifacts"
-  ],
+  "required": ["schemaVersion", "kind", "id", "type", "name", "publisher", "version", "revision", "runtime", "artifacts"],
   "properties": {
-    "schemaVersion": {
-      "const": 1
-    },
-    "kind": {
-      "const": "rast-package"
-    },
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "rast-package" },
     "id": {
       "description": "Stable package id. Lowercase letters, digits and dashes; must not end with a dash.",
       "type": "string",
       "pattern": "^[a-z0-9][a-z0-9-]{0,39}$",
-      "not": {
-        "enum": [
-          "check",
-          "consumers",
-          "github",
-          "host",
-          "catalog",
-          "bin"
-        ]
-      }
+      "not": { "enum": ["check", "consumers", "github", "host", "catalog", "bin"] }
     },
     "type": {
-      "description": "Package type: runtime installs commands; app installs an App Center application (RAST 0.11.8+); service is reserved for a later version.",
-      "enum": [
-        "runtime",
-        "app"
-      ]
+      "description": "Package type. Schema version 1 installs runtimes; app and service are reserved for later versions.",
+      "enum": ["runtime"]
     },
-    "name": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 64
-    },
-    "description": {
-      "type": "string",
-      "maxLength": 500
-    },
-    "homepage": {
-      "$ref": "#/$defs/httpsUrl"
-    },
-    "license": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 64
-    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "description": { "type": "string", "maxLength": 500 },
+    "homepage": { "$ref": "#/$defs/httpsUrl" },
+    "license": { "type": "string", "minLength": 1, "maxLength": 64 },
     "publisher": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "name"
-      ],
+      "required": ["id", "name"],
       "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
-        },
-        "name": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 64
-        },
-        "url": {
-          "$ref": "#/$defs/httpsUrl"
-        }
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,39}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "url": { "$ref": "#/$defs/httpsUrl" }
       }
     },
     "version": {
@@ -102,56 +50,13 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9.-]{1,16}$"
     },
-    "minRastVersion": {
-      "type": "string",
-      "pattern": "^[0-9]+(\\.[0-9]+){0,3}"
-    },
-    "releaseDate": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 32
-    },
-    "notes": {
-      "type": "string",
-      "maxLength": 1000
-    },
-    "icon": {
-      "description": "Package icon embedded as base64, shown in the RAST Package Center (runtimes) and App Center (apps). A signed catalog also carries the same object once per package as a package-level icon (it identifies the official runtimes); a manifest icon is optional. Validated by RAST: standard base64, decoded image 1 byte to 64 KiB, and SVG data must not contain scripts, foreignObject, event handlers, javascript: URLs or external http(s) hrefs.",
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "mediaType",
-        "data"
-      ],
-      "properties": {
-        "mediaType": {
-          "description": "Image type; image/svg+xml or image/png.",
-          "enum": [
-            "image/svg+xml",
-            "image/png"
-          ]
-        },
-        "data": {
-          "description": "Standard base64 (RFC 4648, with padding, no whitespace, no data: prefix) of the image. The decoded image is 1 byte to 65536 bytes (64 KiB); the base64 text therefore is 4 to 87380 characters.",
-          "type": "string",
-          "contentEncoding": "base64",
-          "minLength": 4,
-          "maxLength": 87380
-        },
-        "attribution": {
-          "description": "Optional credit line, e.g. the icon source and license (the official catalog uses Devicon, MIT, and Simple Icons, CC0). At most 300 characters.",
-          "type": "string",
-          "maxLength": 300
-        }
-      }
-    },
+    "minRastVersion": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,3}" },
+    "releaseDate": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "notes": { "type": "string", "maxLength": 1000 },
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "executables",
-        "checks"
-      ],
+      "required": ["executables", "checks"],
       "properties": {
         "executables": {
           "type": "array",
@@ -160,18 +65,10 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name",
-              "path"
-            ],
+            "required": ["name", "path"],
             "properties": {
-              "name": {
-                "type": "string",
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$"
-              },
-              "path": {
-                "$ref": "#/$defs/relativePath"
-              }
+              "name": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$" },
+              "path": { "$ref": "#/$defs/relativePath" }
             }
           }
         },
@@ -183,33 +80,12 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "executable",
-              "expect"
-            ],
+            "required": ["executable", "expect"],
             "properties": {
-              "executable": {
-                "type": "string"
-              },
-              "args": {
-                "type": "array",
-                "maxItems": 8,
-                "items": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 64
-                }
-              },
-              "expect": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "label": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 32
-              }
+              "executable": { "type": "string" },
+              "args": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 64 } },
+              "expect": { "type": "string", "minLength": 1, "maxLength": 128 },
+              "label": { "type": "string", "minLength": 1, "maxLength": 32 }
             }
           }
         },
@@ -220,61 +96,14 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "name",
-              "version"
-            ],
+            "required": ["name", "version"],
             "properties": {
-              "name": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 32
-              },
-              "version": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 32
-              }
+              "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+              "version": { "type": "string", "minLength": 1, "maxLength": 32 }
             }
           }
         },
-        "extensions": {
-          "type": "array",
-          "maxItems": 200,
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 48
-          }
-        },
-        "env": {
-          "description": "Environment hints for a shell that uses the runtime; values may use the {root} placeholder for the installed prefix. The installer never sets these.",
-          "type": "object",
-          "maxProperties": 16,
-          "propertyNames": {
-            "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
-          },
-          "additionalProperties": {
-            "type": "string",
-            "maxLength": 512,
-            "pattern": "^\\{root\\}(/[^\\s]+)?$"
-          }
-        },
-        "pathDirs": {
-          "description": "Directories a shell should prepend to PATH, relative to the installed prefix; '.' is the prefix itself (Bun/Deno/.NET put their command at the archive root). Absent means [\"bin\"].",
-          "type": "array",
-          "maxItems": 8,
-          "items": {
-            "anyOf": [
-              {
-                "const": "."
-              },
-              {
-                "$ref": "#/$defs/relativePath"
-              }
-            ]
-          }
-        }
+        "extensions": { "type": "array", "maxItems": 200, "items": { "type": "string", "minLength": 1, "maxLength": 48 } }
       }
     },
     "artifacts": {
@@ -284,154 +113,33 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "target",
-          "url",
-          "sha256",
-          "size",
-          "format",
-          "provenance"
-        ],
+        "required": ["target", "url", "sha256", "size", "format", "provenance"],
         "properties": {
-          "target": {
-            "enum": [
-              "linux-x86_64",
-              "linux-aarch64"
-            ]
-          },
-          "url": {
-            "$ref": "#/$defs/httpsUrl"
-          },
-          "sha256": {
-            "type": "string",
-            "pattern": "^[0-9a-f]{64}$"
-          },
-          "size": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 2147483648
-          },
-          "format": {
-            "description": "tar.gz/tar.xz/zip archive, or phar: a verified single-file PHP phar that is written read-only and never executed at install time.",
-            "enum": [
-              "tar.gz",
-              "tar.xz",
-              "zip",
-              "phar"
-            ]
-          },
-          "stripComponents": {
-            "type": "integer",
-            "minimum": 0,
-            "maximum": 4
-          },
-          "phar": {
-            "description": "Only with format \"phar\": where the verified phar file is written inside the prefix. The runtime executables (which must be bin/<name>) are generated by the installer as shell wrappers running `php \"<prefix>/<path>\" \"$@\"`.",
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "path"
-            ],
-            "properties": {
-              "path": {
-                "type": "string",
-                "maxLength": 200,
-                "pattern": "^[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$"
-              }
-            }
-          },
-          "archives": {
-            "description": "Additional archives extracted into the same prefix after the primary archive (multi-component runtimes such as Rust: rust-std, cargo, rustfmt, clippy).",
-            "type": "array",
-            "maxItems": 7,
-            "items": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "url",
-                "sha256",
-                "size",
-                "format"
-              ],
-              "properties": {
-                "name": {
-                  "type": "string",
-                  "minLength": 1,
-                  "maxLength": 32
-                },
-                "url": {
-                  "$ref": "#/$defs/httpsUrl"
-                },
-                "sha256": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{64}$"
-                },
-                "size": {
-                  "type": "integer",
-                  "minimum": 1,
-                  "maximum": 2147483648
-                },
-                "format": {
-                  "enum": [
-                    "tar.gz",
-                    "tar.xz",
-                    "zip"
-                  ]
-                },
-                "stripComponents": {
-                  "type": "integer",
-                  "minimum": 0,
-                  "maximum": 4
-                }
-              }
-            }
-          },
+          "target": { "enum": ["linux-x86_64", "linux-aarch64"] },
+          "url": { "$ref": "#/$defs/httpsUrl" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "size": { "type": "integer", "minimum": 1, "maximum": 2147483648 },
+          "format": { "const": "tar.gz" },
+          "stripComponents": { "type": "integer", "minimum": 0, "maximum": 4 },
           "requires": {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "glibc": {
-                "type": "string",
-                "pattern": "^[0-9]+(\\.[0-9]+){0,3}$"
-              },
-              "notes": {
-                "type": "string",
-                "maxLength": 500
-              }
+              "glibc": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+){0,3}$" },
+              "notes": { "type": "string", "maxLength": 500 }
             }
           },
           "provenance": {
             "type": "object",
             "additionalProperties": false,
-            "required": [
-              "kind",
-              "source"
-            ],
+            "required": ["kind", "source"],
             "properties": {
-              "kind": {
-                "enum": [
-                  "upstream",
-                  "built"
-                ]
-              },
-              "source": {
-                "$ref": "#/$defs/httpsUrl"
-              },
-              "sourceSha256": {
-                "type": "string",
-                "pattern": "^[0-9a-f]{64}$"
-              },
-              "verification": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 300
-              },
-              "buildUrl": {
-                "$ref": "#/$defs/httpsUrl"
-              },
-              "attestationUrl": {
-                "$ref": "#/$defs/httpsUrl"
-              }
+              "kind": { "enum": ["upstream", "built"] },
+              "source": { "$ref": "#/$defs/httpsUrl" },
+              "sourceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "verification": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "buildUrl": { "$ref": "#/$defs/httpsUrl" },
+              "attestationUrl": { "$ref": "#/$defs/httpsUrl" }
             }
           }
         }
@@ -439,11 +147,7 @@
     }
   },
   "$defs": {
-    "httpsUrl": {
-      "type": "string",
-      "pattern": "^https://[^\\s]+$",
-      "maxLength": 2048
-    },
+    "httpsUrl": { "type": "string", "pattern": "^https://[^\\s]+$", "maxLength": 2048 },
     "relativePath": {
       "description": "Relative path inside the package: no leading slash, no '.' or '..' components, no backslashes.",
       "type": "string",

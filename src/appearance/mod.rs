@@ -142,42 +142,16 @@ pub struct WidgetDto {
     pub id: String,
     pub x: f64,
     pub y: f64,
-    /// Legacy fractional size (older clients).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub w: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub h: Option<f64>,
-    /// Schema version 2: preferred size/placement as fixed CSS pixels on the
-    /// 8px grid. Viewport independent; legacy fractions above are still kept
-    /// for older clients and migrated once by the frontend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grid_version: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_x: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_y: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_w: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_h: Option<f64>,
 }
 
 /// An app placed on the desktop: its grid cell (column, row from the top
 /// left; the desktop keeps a cell visible on smaller screens).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DesktopIconDto {
     pub id: String,
-    /// Legacy coarse cell (approximate for v2 icons).
     pub col: u32,
     pub row: u32,
-    /// Version 2: fine-grid position in CSS pixels (8px grid).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grid_version: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_x: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub px_y: Option<f64>,
 }
 
 /// Grid limits for desktop icons (far beyond any real screen).
@@ -447,43 +421,11 @@ pub fn validate_widgets(widgets: Vec<WidgetDto>) -> AppResult<Vec<WidgetDto>> {
                 return Err(bad_request("widget position must be between 0 and 1"));
             }
         }
-        for value in [widget.w, widget.h].into_iter().flatten() {
-            if !value.is_finite() || !(0.05..=1.0).contains(&value) {
-                return Err(bad_request("widget size must be between 0.05 and 1"));
-            }
-        }
-        if let Some(version) = widget.grid_version {
-            if version != 2 {
-                return Err(bad_request("unsupported widget layout version"));
-            }
-            for value in [widget.px_x, widget.px_y].into_iter().flatten() {
-                if !value.is_finite() || !(0.0..=100_000.0).contains(&value) {
-                    return Err(bad_request("widget pixel position is out of range"));
-                }
-            }
-            for value in [widget.px_w, widget.px_h].into_iter().flatten() {
-                if !value.is_finite() || !(32.0..=10_000.0).contains(&value) {
-                    return Err(bad_request("widget pixel size is out of range"));
-                }
-            }
-        } else if [widget.px_x, widget.px_y, widget.px_w, widget.px_h]
-            .into_iter()
-            .any(|value| value.is_some())
-        {
-            return Err(bad_request("pixel widget fields require gridVersion 2"));
-        }
         seen.push(id.clone());
         out.push(WidgetDto {
             id,
             x: round_fraction(widget.x),
             y: round_fraction(widget.y),
-            w: widget.w.map(round_fraction),
-            h: widget.h.map(round_fraction),
-            grid_version: widget.grid_version,
-            px_x: widget.px_x.map(|value| value.round()),
-            px_y: widget.px_y.map(|value| value.round()),
-            px_w: widget.px_w.map(|value| value.round()),
-            px_h: widget.px_h.map(|value| value.round()),
         });
     }
     Ok(out)
@@ -502,7 +444,7 @@ pub fn validate_taskbar_pins(pins: Vec<String>) -> AppResult<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(pins.len());
     for pin in pins {
         let id = pin.trim().to_ascii_lowercase();
-        if !crate::access::is_shortcut_id(&id) {
+        if !crate::access::is_desktop_app(&id) {
             return Err(bad_request(format!("unknown application {:?}", pin.trim())));
         }
         if out.contains(&id) {
@@ -522,7 +464,7 @@ pub fn validate_desktop_icons(icons: Vec<DesktopIconDto>) -> AppResult<Vec<Deskt
     let mut out: Vec<DesktopIconDto> = Vec::with_capacity(icons.len());
     for icon in icons {
         let id = icon.id.trim().to_ascii_lowercase();
-        if !crate::access::is_shortcut_id(&id) {
+        if !crate::access::is_desktop_app(&id) {
             return Err(bad_request(format!(
                 "unknown application {:?}",
                 icon.id.trim()
@@ -534,56 +476,16 @@ pub fn validate_desktop_icons(icons: Vec<DesktopIconDto>) -> AppResult<Vec<Deskt
         if out.iter().any(|known| known.id == id) {
             return Err(bad_request("each application can be on the desktop once"));
         }
-        if icon.grid_version.is_some() {
-            if icon.grid_version != Some(2) {
-                return Err(bad_request("unsupported desktop icon layout version"));
-            }
-            let (Some(x), Some(y)) = (icon.px_x, icon.px_y) else {
-                return Err(bad_request("fine-grid icons need a pixel position"));
-            };
-            if !x.is_finite()
-                || !y.is_finite()
-                || !(0.0..=100_000.0).contains(&x)
-                || !(0.0..=100_000.0).contains(&y)
-            {
-                return Err(bad_request("desktop icon pixel position is out of range"));
-            }
-            // Fixed shortcut box (including its label) for overlap validation.
-            let rect = (x.round(), y.round(), x.round() + 104.0, y.round() + 112.0);
-            if out.iter().any(|known| {
-                if known.grid_version != Some(2) {
-                    return false;
-                }
-                let (Some(ox), Some(oy)) = (known.px_x, known.px_y) else {
-                    return false;
-                };
-                let other = (
-                    ox.round(),
-                    oy.round(),
-                    ox.round() + 104.0,
-                    oy.round() + 112.0,
-                );
-                rect.0 < other.2 && rect.2 > other.0 && rect.1 < other.3 && rect.3 > other.1
-            }) {
-                return Err(bad_request("two desktop icons cannot overlap"));
-            }
-        } else if [icon.px_x, icon.px_y]
-            .into_iter()
-            .any(|value| value.is_some())
+        if out
+            .iter()
+            .any(|known| known.col == icon.col && known.row == icon.row)
         {
-            return Err(bad_request("pixel icon fields require gridVersion 2"));
-        } else if out.iter().any(|known| {
-            known.grid_version != Some(2) && known.col == icon.col && known.row == icon.row
-        }) {
             return Err(bad_request("two desktop icons cannot share a place"));
         }
         out.push(DesktopIconDto {
             id,
             col: icon.col,
             row: icon.row,
-            grid_version: icon.grid_version,
-            px_x: icon.px_x,
-            px_y: icon.px_y,
         });
     }
     Ok(out)
@@ -597,14 +499,12 @@ fn parse_stored_desktop_icons(raw: Option<&str>) -> Option<Vec<DesktopIconDto>> 
         let Ok(icon) = serde_json::from_value::<DesktopIconDto>(item) else {
             continue;
         };
-        let valid = crate::access::is_shortcut_id(&icon.id)
+        let valid = crate::access::is_desktop_app(&icon.id)
             && icon.col <= MAX_DESKTOP_CELL
             && icon.row <= MAX_DESKTOP_CELL
-            && !out.iter().any(|k| k.id == icon.id)
-            && (icon.grid_version == Some(2)
-                || !out
-                    .iter()
-                    .any(|k| k.grid_version != Some(2) && k.col == icon.col && k.row == icon.row));
+            && !out
+                .iter()
+                .any(|k| k.id == icon.id || (k.col == icon.col && k.row == icon.row));
         if valid {
             out.push(icon);
         }
@@ -620,7 +520,7 @@ fn parse_stored_pins(raw: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for item in items {
         if let Some(id) = item.as_str() {
-            if crate::access::is_shortcut_id(id) && !out.iter().any(|known| known == id) {
+            if crate::access::is_desktop_app(id) && !out.iter().any(|known| known == id) {
                 out.push(id.to_string());
             }
         }
@@ -1660,22 +1560,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[test]
-    fn linux_apps_can_be_pinned_and_placed() {
-        assert_eq!(
-            validate_taskbar_pins(vec!["files".into(), "linux:google-chrome".into()]).unwrap(),
-            vec!["files".to_string(), "linux:google-chrome".to_string()]
-        );
-        for bad in ["linux:", "linux:../x", "linux:Bad Id", "other:files"] {
-            assert!(validate_taskbar_pins(vec![bad.into()]).is_err(), "{bad}");
-        }
-        let stored = parse_stored_pins(r#"["linux:obsidian", "linux:../x", "files"]"#);
-        assert_eq!(
-            stored,
-            vec!["linux:obsidian".to_string(), "files".to_string()]
-        );
-    }
-
     // ------------------------------------------------------------- image tests
 
     #[test]
@@ -1850,39 +1734,7 @@ pub(crate) mod tests {
             id: id.to_string(),
             x,
             y,
-            w: None,
-            h: None,
-            grid_version: None,
-            px_x: None,
-            px_y: None,
-            px_w: None,
-            px_h: None,
         }
-    }
-
-    #[test]
-    fn widget_pixel_layouts_are_validated() {
-        let mut pixel = widget("health", 0.1, 0.2);
-        pixel.grid_version = Some(2);
-        pixel.px_x = Some(16.0);
-        pixel.px_y = Some(24.0);
-        pixel.px_w = Some(232.0);
-        pixel.px_h = Some(312.0);
-        assert!(validate_widgets(vec![pixel.clone()]).is_ok());
-        let invalid_version = widget("health", 0.1, 0.2);
-        let mut bad = invalid_version;
-        bad.grid_version = Some(3);
-        assert!(validate_widgets(vec![bad]).is_err());
-        let mut no_version = widget("cpu-memory", 0.1, 0.2);
-        no_version.px_x = Some(16.0);
-        assert!(validate_widgets(vec![no_version]).is_err());
-        let mut tiny = widget("storage", 0.1, 0.2);
-        tiny.grid_version = Some(2);
-        tiny.px_x = Some(16.0);
-        tiny.px_y = Some(16.0);
-        tiny.px_w = Some(4.0);
-        tiny.px_h = Some(232.0);
-        assert!(validate_widgets(vec![tiny]).is_err());
     }
 
     #[test]
@@ -2099,9 +1951,6 @@ pub(crate) mod tests {
             id: id.into(),
             col,
             row,
-            grid_version: None,
-            px_x: None,
-            px_y: None,
         };
         assert_eq!(
             get(&pool, 1).await.unwrap().desktop_icons,

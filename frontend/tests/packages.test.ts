@@ -227,23 +227,3 @@ test("RAST apps: Installed hides uninstalled ones, Updates has none, search matc
   assert.deepEqual(filterApps(apps, "all", "docker").map((a) => a.id), ["applications"]);
   assert.deepEqual(filterApps(apps, "installed", "docker"), []);
 });
-
-// ---------------------------------------------------------------- package icons
-
-import { packageIconDataUrl } from "../src/apps/packages/format";
-
-test("package icons become safe data URLs and reject untrusted payloads", () => {
-  const svg = btoa('<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>');
-  assert.equal(
-    packageIconDataUrl({ mediaType: "image/svg+xml", data: svg }),
-    `data:image/svg+xml;base64,${svg}`,
-  );
-  const png = btoa("fake-png");
-  assert.equal(packageIconDataUrl({ mediaType: "image/png", data: png }), `data:image/png;base64,${png}`);
-  // Unknown types, script-capable types, bad/empty/oversized base64 and junk are refused.
-  assert.equal(packageIconDataUrl({ mediaType: "text/html", data: png }), null);
-  assert.equal(packageIconDataUrl({ mediaType: "image/svg+xml", data: "<svg/>" }), null);
-  assert.equal(packageIconDataUrl({ mediaType: "image/png", data: "" }), null);
-  assert.equal(packageIconDataUrl({ mediaType: "image/png", data: "a".repeat(96 * 1024 + 4) }), null);
-  assert.equal(packageIconDataUrl(null), null);
-});

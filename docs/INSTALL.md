@@ -268,11 +268,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host  $host;
 
-        # WebSockets (Linux app windows, terminals). Needs, at the http level:
-        #   map $http_upgrade $connection_upgrade { default upgrade; "" ""; }
-        proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-
         # Stream uploads straight through instead of buffering them on disk.
         proxy_request_buffering off;
         proxy_buffering off;
@@ -431,148 +426,6 @@ Set `docker_enabled = true` in `/etc/rast/rast.toml` and restart
 > command whitelist and no shell access, but a compromised worker is still a
 > root-level compromise. See [SECURITY.md](../SECURITY.md).
 
-## Native Linux apps (Xpra)
-
-Native Linux desktop apps (App Center → **Install Linux App**) run directly on the server
-instead of inside a Docker image: each RAST user gets one unprivileged Linux
-identity and one lazily started Xpra seamless graphical session that all their
-applications share. Only the RAST reverse proxy can reach a session: the Xpra
-port is bound to loopback, an nftables rule restricts the display ports to the
-`rast` service account, and the port is never exposed. This is the default
-backend for newly installed desktop apps. Behaviour, window integration and
-limitations are described in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
-
-Requirements:
-
-| Component | Why |
-| --- | --- |
-| Xpra server + HTML5 client (`xpra`, `xpra-html5`, `xpra-codecs`), **6.5+** | Graphical session, window transport and browser client. The installer, `rast doctor` and `rast native-helper --check` detect and reject older versions; the implementation is validated against Xpra 6.5.5 with HTML5 client version 21 |
-| Xvfb | Virtual display for the seamless session (started by Xpra) |
-| Xpra audio (`xpra-audio-server` on modular packages), `pulseaudio`, `pulseaudio-utils`, `python3-gst-1.0`, `gstreamer1.0-pulseaudio`, `gstreamer1.0-plugins-good` | Playback-only output from the account's private virtual speaker to the browser |
-| `nftables` (`nft` command) | Lets the helper restrict the loopback Xpra display ports to the `rast` service account. Without it the native backend still runs, but `rast doctor` and `rast native-helper --check` warn that other local accounts could reach a session's display port |
-| `rast-native.service` (root) | Creates per-user identities, starts transient systemd units and runs allowed APT transactions |
-| `rast-linux.slice` | cgroup accounting and defaults for all native sessions |
-| ACL support (`acl` package, ext4/xfs with ACLs) | Lets a person's app identity read their own RAST home folder |
-| `setfacl`, `getent`, `useradd`, `apt-get`, `dpkg-deb` | Used by the helper |
-
-The official Xpra packages are newer than most distribution packages and are
-required (6.5+). To add the repository (Ubuntu example; use your distribution's
-suite name — `noble`, `resolute`, `bookworm`, …):
-
-```bash
-curl -fsSL https://xpra.org/gpg.asc \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/xpra.gpg
-echo "deb [signed-by=/etc/apt/keyrings/xpra.gpg] https://xpra.org/ resolute main" \
-  | sudo tee /etc/apt/sources.list.d/xpra.list
-sudo apt-get update
-sudo apt-get install -y xpra xpra-html5 xpra-codecs xpra-x11 xvfb \
-  xpra-audio-server pulseaudio pulseaudio-utils python3-gst-1.0 \
-  gstreamer1.0-pulseaudio gstreamer1.0-plugins-good acl dbus nftables
-```
-
-The installer enables native apps automatically when a supported Xpra is
-present (`RAST_NATIVE=auto`); an older Xpra disables native execution with an
-actionable warning. Force it with `RAST_NATIVE=1` (which fails with
-instructions when Xpra is missing or older than 6.5) or disable it with
-`RAST_NATIVE=0`. Manual native setup after a plain install:
-
-```bash
-# 1. Install the units shipped with this release.
-sudo install -m 0644 deploy/rast-linux.slice /etc/systemd/system/
-sudo install -m 0644 deploy/rast-native.service /etc/systemd/system/
-sudo install -m 0644 deploy/rast-native.tmpfiles.conf /etc/tmpfiles.d/rast-native.conf
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/rast-native.conf
-
-# 2. Only the rast account may talk to the helper (peer-uid check).
-sudo mkdir -p /etc/systemd/system/rast-native.service.d
-printf '[Service]\nEnvironment=RAST_NATIVE_ALLOWED_UID=%s\n' "$(id -u rast)" \
-  | sudo tee /etc/systemd/system/rast-native.service.d/20-peer-uid.conf
-
-# 3. Enable it and verify.
-sudo systemctl daemon-reload
-sudo systemctl enable --now rast-native
-sudo -u rast rast doctor
-```
-
-`rast doctor` reports the Xpra binary and version (with a warning below 6.5),
-the display-port firewall (nftables and the uid the ports are restricted to),
-the helper socket, the slice, the `/tmp/.X11-unix` permissions and the
-configured uid range. `rast native-helper --check` performs the same checks
-from the root helper's point of view.
-
-Notes:
-
-* Audio uses a private null sink and authenticated Unix socket inside each
-  account's 0700 runtime directory, not a host audio device. Microphone
-  forwarding is disabled. A click in the native app allows browser playback;
-  browsers may block sound before a user gesture. Sessions created by a release
-  that had no playback audio (before 0.13.1) are detected at startup, ended once
-  and recreated with audio on the next launch — running apps in the stale
-  session are stopped, so save work before upgrading.
-* **Credentials and the keyring:** a headless session has no unlocked OS
-  keyring, so Chromium-family apps always run with Chromium's
-  `--password-store=basic`. Passwords and cookies saved by the app live in the
-  per-person 0700 profile and are protected by the Linux identity permissions,
-  not by keyring encryption; the install preview shows a warning. Install only
-  apps whose credential handling you trust, and do not save credentials you
-  would not keep in that profile. RAST sign-in and the app's own sign-ins are
-  separate.
-* **Files:** the person's RAST home is linked into their app profile and
-  granted a recursive read + traverse (`rx`) ACL — native apps can read it but
-  are **not** granted write access, and files an app writes stay in its
-  profile/session rather than appearing in File Station. Shared folders are
-  **not** mapped into native app profiles; to use a shared file, copy it
-  through File Station into the person's RAST home first. File Station access
-  checks do not constrain a native program once it can read a file. This is a
-  current limitation, not a sandbox guarantee.
-* Per-user limits are configured with `linux_session_*` and `linux_app_*` (see
-  [CONFIGURATION.md](CONFIGURATION.md)); they are enforced with systemd
-  transient units (`rast-xpra-u<id>`, `rast-app-u<id>-…`) inside
-  `rast-linux.slice`.
-* The helper runs `apt-get` for administrator-approved `.deb` applications.
-  Inspect what an install would do in the App Center preview before confirming;
-  uninstalling only removes packages RAST added when nothing else depends on
-  them.
-* `.deb`, AppImage and portable archive uploads work as before (file, drag and
-  drop, File Station, direct HTTPS URL); source archives are rejected with an
-  explanation. A `.deb` must match the host architecture (the preview shows the
-  package architecture and refuses an incompatible one).
-* App data lives in `<data_dir>/linux-apps/profiles/<app>/<user>` and is not
-  reachable by other users; the person's RAST home is exposed read-only with an
-  ACL. Legacy Docker-backed apps keep their per-user volume until an
-  administrator migrates them and explicitly cleans up.
-* Clipboard, keyboard shortcuts, high-DPI displays and the session lifecycle
-  (tab close vs. sign-out vs. force quit) are described in
-  [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
-
-## Native Terminal (optional, no Docker or Xpra)
-
-RAST 0.14 adds a native Terminal application: interactive shells on the server
-as the mapped per-user identity. It uses the same privileged helper as native
-Linux apps (`rast-native.service`) for identity creation, OS ACL mapping and
-systemd transient units, but **none** of the Xpra/nftables/display machinery:
-opening a terminal does not start a graphical session and works with
-`native_enabled = false` or `linux_apps_enabled = false`.
-
-Requirements:
-
-* the `rast-native.service` helper unit installed and running (the installer
-  installs it on Linux; if you quarantined native apps earlier, reinstall the
-  unit and leave `native_enabled = false`);
-* the `acl` package (`setfacl`) so File Station "Open in Terminal" can map RAST
-  folder permissions to OS ACLs;
-* `/bin/bash` (preferred) or `/bin/sh`;
-* `terminal_enabled = true` (default).
-
-Grant the app to groups in Control Panel → Groups → application access.
-Administrators use Terminal without a grant and, by default
-(`terminal_admin_root = true`), receive a real root shell with full server
-access; selected ordinary users always run as their unprivileged
-`rast-u<id>` identity (no sudo/root). Set `terminal_admin_root = false` if
-administrators should not get root through RAST. See
-[TERMINAL.md](TERMINAL.md) for configuration, limits and the runtime
-environment panel.
-
 ## Manual installation (no installer)
 
 1. Download the release assets, verify the checksum and inspect the files:
@@ -606,21 +459,6 @@ environment panel.
 3. Edit `/etc/rast/rast.toml` (at minimum `public_url` and
    `trusted_proxies`), then `sudo systemctl restart rast.service`.
 4. Continue with [Post-install steps](#post-install-steps).
-
-For native Linux apps, also install the helper and its prerequisites (see
-[Native Linux apps (Xpra)](#native-linux-apps-xpra) above):
-
-```bash
-sudo install -m 0644 deploy/rast-linux.slice /etc/systemd/system/
-sudo install -m 0644 deploy/rast-native.service /etc/systemd/system/
-sudo install -m 0644 deploy/rast-native.tmpfiles.conf /etc/tmpfiles.d/rast-native.conf
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/rast-native.conf
-sudo mkdir -p /etc/systemd/system/rast-native.service.d
-printf '[Service]\nEnvironment=RAST_NATIVE_ALLOWED_UID=%s\n' "$(id -u rast)" \
-  | sudo tee /etc/systemd/system/rast-native.service.d/20-peer-uid.conf
-sudo systemctl daemon-reload
-sudo systemctl enable --now rast-native.service
-```
 
 When installing manually, keep the units and the binary updated from the same
 release; `rast update` expects the standard paths.

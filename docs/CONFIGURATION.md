@@ -57,44 +57,9 @@ applied by `src/config.rs`.
 | `db_max_connections` | integer | `8` | 1–64 | `RAST_DB_MAX_CONNECTIONS` |
 | `worker_socket` | path | `"/run/rast/worker.sock"` | Unix socket path of the worker | `RAST_WORKER_SOCKET` |
 | `docker_enabled` | boolean | `false` | Enables the Applications app (needs `rast-worker.service`) | `RAST_DOCKER_ENABLED` |
-| `native_enabled` | boolean | `true` when `linux_xpra_bin` exists on Linux | Native Linux app execution in one shared Xpra session per user (needs `rast-native.service`, Xpra 6.5+ and the `nftables` package; see [INSTALL.md](INSTALL.md#native-linux-apps-xpra) and [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md)). Set `false` to keep installing legacy Docker-backed apps | `RAST_NATIVE_ENABLED` |
-| `linux_apps_enabled` | boolean | `true` | Offer the Linux apps workflow at all. `false` quarantines the whole feature — native and legacy Docker-backed installs, the App Center section and the "Install Linux App" button — while the implementation stays in the binary; existing registry data is not deleted | `RAST_LINUX_APPS_ENABLED` |
-| `terminal_enabled` | boolean | `true` | Offer the native Terminal application (PTY shells as the mapped per-user identity; needs `rast-native.service` and the `acl` package, no Docker/Xpra). Ordinary accounts are denied until a group grant allows the `terminal` app | `RAST_TERMINAL_ENABLED` |
-| `terminal_admin_root` | boolean | `true` | Super administrators get a real root shell in Terminal (full server/filesystem access, `HOME=/root`) instead of their mapped unprivileged identity. Administrators and selected ordinary users always run unprivileged. Set `false` if nobody should get root through RAST | `RAST_TERMINAL_ADMIN_ROOT` |
-| `terminal_admin_account` | string | unset | With `terminal_admin_root`: run the super administrators' terminals as this Linux login account (it must be a member of `sudo`, `admin` or `wheel`) instead of root. The shell is a login shell with the account's own environment, exactly like its SSH login; `sudo` gives root | `RAST_TERMINAL_ADMIN_ACCOUNT` |
-| `terminal_path_extra` | list of strings | `[]` | Absolute directories appended to the `PATH` of administrator root shells, in addition to the per-user tool directories of the accounts in `sudo`/`admin`/`wheel`, which are added automatically (for example `["/home/alice/.local/bin"]`). They come last, so they never shadow a system command; root runs whatever is in them, so list only directories of accounts you trust. At most 16 | `RAST_TERMINAL_PATH_EXTRA` (colon separated) |
-| `terminal_max_sessions` | integer | `8` | Maximum concurrent terminals per account (1-64) | `RAST_TERMINAL_MAX_SESSIONS` |
-| `terminal_grace_seconds` | integer | `30` | Minimum time a terminal without a viewer is kept (0-300) | `RAST_TERMINAL_GRACE_SECONDS` |
-| `terminal_idle_minutes` | integer | `1440` | A terminal keeps running after a page reload or a closed browser; close it after this many minutes without output while nobody views it (`0` = right after the grace, 0-10080) | `RAST_TERMINAL_IDLE_MINUTES` |
-| `terminal_memory_mb` | integer | `1024` | `MemoryMax` of one terminal session | `RAST_TERMINAL_MEMORY_MB` |
-| `terminal_cpus` | integer | `2` | `CPUQuota` of one terminal session, in CPUs | `RAST_TERMINAL_CPUS` |
-| `terminal_tasks` | integer | `512` | `TasksMax` (processes/threads) of one terminal session | `RAST_TERMINAL_TASKS` |
-| `native_helper_socket` | path | `"/run/rast/native.sock"` | Unix socket of the privileged native helper | `RAST_NATIVE_HELPER_SOCKET` |
-| `linux_xpra_bin` | path | `"/usr/bin/xpra"` | Xpra server binary used for the per-user seamless sessions; **Xpra 6.5+ is required** and the version is checked by `rast doctor`, `rast native-helper --check` and the installer | `RAST_LINUX_XPRA_BIN` |
-| `linux_uid_base` | integer | `200000` | First uid of the unprivileged Linux identities; a RAST user `id` gets `linux_uid_base + id`. Must not overlap existing accounts | `RAST_LINUX_UID_BASE` |
-| `linux_idle_minutes` | integer | `15` | 0–10080; extra minutes a person's graphical session keeps running after its last application exits (a short reload grace always applies first; `0` = reclaim right after the grace). Never reclaims while an app runs or a viewer is attached | `RAST_LINUX_IDLE_MINUTES` |
-| `linux_session_memory_mb` | integer | `4096` | 512–262144; cgroup memory limit of one person's graphical session | `RAST_LINUX_SESSION_MEMORY_MB` |
-| `linux_session_cpus` | integer | quarter of the CPUs, 2–8 | 1–256; CPU limit of one person's graphical session | `RAST_LINUX_SESSION_CPUS` |
-| `linux_session_tasks` | integer | `2048` | 64–131072; process limit of one person's graphical session | `RAST_LINUX_SESSION_TASKS` |
-| `linux_app_memory_mb` | integer | `2048` | 128–262144; default cgroup memory limit of one native application | `RAST_LINUX_APP_MEMORY_MB` |
-| `linux_app_cpus` | integer | `2` | 1–256; default CPU limit of one native application | `RAST_LINUX_APP_CPUS` |
-| `linux_app_tasks` | integer | `1024` | 16–131072; default process limit of one native application | `RAST_LINUX_APP_TASKS` |
-| `linux_admission_reserve_mb` | integer | `1024` | 0–1048576; free memory kept in reserve when a new application is admitted | `RAST_LINUX_ADMISSION_RESERVE_MB` |
-| `linux_profile` | string | `balanced` | Adaptive performance profile of the shared session: `responsive` (lowest input latency), `balanced` (Xpra adaptive defaults, the historical behaviour), `media` (smooth video), `quality` (sharp text/images). Explicit settings below override it. See [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md#performance-profiles-and-display-backend) | `RAST_LINUX_PROFILE` |
-| `linux_quality` | integer | unset | 1–100; fixed image quality. Overrides the profile; unset = profile/automatic | `RAST_LINUX_QUALITY` |
-| `linux_min_quality` | integer | unset | 1–100; minimum automatic quality | `RAST_LINUX_MIN_QUALITY` |
-| `linux_speed` | integer | unset | 1–100; fixed encoding speed | `RAST_LINUX_SPEED` |
-| `linux_min_speed` | integer | unset | 1–100; minimum automatic encoding speed | `RAST_LINUX_MIN_SPEED` |
-| `linux_video_scaling` | integer | unset | 0–100; automatic video downscaling | `RAST_LINUX_VIDEO_SCALING` |
-| `linux_av_sync` | boolean | unset | Audio/video synchronisation (unset = profile, normally on) | `RAST_LINUX_AV_SYNC` |
-| `linux_encoding` | string | unset | Preferred encoding: `h264`, `vp8`, `vp9`, `webp`, `jpeg` or `rgb`; unset = Xpra automatic. Forcing a codec the browser cannot decode breaks rendering, so prefer the profiles | `RAST_LINUX_ENCODING` |
-| `linux_display_backend` | string | `auto` | `auto` (starts a verified NVIDIA GPU display when one can be provisioned, custom X server when usable, else Xvfb), `software` (always Xvfb), `gpu` (strict GPU display; session start fails instead of silently using software) or `custom` (expects `linux_xvfb_command`, falls back to Xvfb if unusable) | `RAST_LINUX_DISPLAY_BACKEND` |
-| `linux_xvfb_command` | path | unset | Absolute path of a wrapper script starting an alternative headless X server for GPU-backed rendering; passed as `xpra --xvfb=<path>`. Validate it as described in [GPU-ACCELERATION.md](GPU-ACCELERATION.md) | `RAST_LINUX_XVFB_COMMAND` |
-| `linux_prewarm` | boolean | `false` | Start an eligible person's shared graphical session in the background after sign-in, so the first application launch is warm instead of paying the ~12 s cold Xpra start. Uses ~150–250 MiB idle per signed-in user until the normal idle cleanup; admission and memory checks still apply. `GET/POST /api/linux-apps/session/prewarm` exposes the state | `RAST_LINUX_PREWARM` |
 | `default_quota_bytes` | integer | `21474836480` (20 GiB) | `0` = unlimited; applies to newly created accounts | `RAST_DEFAULT_QUOTA_BYTES` |
 | `secure_cookies` | boolean | auto | Auto = `true` when `public_url` starts with `https://` | `RAST_SECURE_COOKIES` |
 | `job_concurrency` | integer | `2` | 1–8 | `RAST_JOB_CONCURRENCY` |
-| `files_root_enabled` | boolean | `true` | File Station shows the server's own file system ("Root file system") to super administrators, with full access as root. `false` removes it for everyone | `RAST_FILES_ROOT_ENABLED` |
 | `setup_token_required` | boolean | `false` | Require a one-shot token for the web first-run setup; CLI account creation always works | `RAST_SETUP_TOKEN_REQUIRED` |
 | `trust_forwarded_headers` | boolean | auto | Auto = `true` when `trusted_proxies` is non-empty | `RAST_TRUST_FORWARDED_HEADERS` |
 | `packages_catalog_url` | string | official catalog (`https://github.com/Enricko/rast-packages/releases/download/catalog/catalog.json`) | `https://` or `file:///`; the detached signature is read from `<url>.sig` | `RAST_PACKAGES_CATALOG_URL` |
@@ -125,36 +90,9 @@ accept `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off` (case-insensitive).
 | `RAST_DB_MAX_CONNECTIONS` | `db_max_connections` | 1–64 |
 | `RAST_WORKER_SOCKET` | `worker_socket` | Must match the worker unit's runtime directory |
 | `RAST_DOCKER_ENABLED` | `docker_enabled` | `true`/`false` |
-| `RAST_NATIVE_ENABLED` | `native_enabled` | `true`/`false` |
-| `RAST_LINUX_APPS_ENABLED` | `linux_apps_enabled` | `true`/`false` |
-| `RAST_TERMINAL_ENABLED` | `terminal_enabled` | `true`/`false` |
-| `RAST_TERMINAL_ADMIN_ROOT` | `terminal_admin_root` | `true`/`false` |
-| `RAST_TERMINAL_ADMIN_ACCOUNT` | `terminal_admin_account` | account name |
-| `RAST_TERMINAL_PATH_EXTRA` | `terminal_path_extra` | colon-separated directories |
-| `RAST_TERMINAL_MAX_SESSIONS` | `terminal_max_sessions` | integer |
-| `RAST_TERMINAL_GRACE_SECONDS` | `terminal_grace_seconds` | integer |
-| `RAST_TERMINAL_IDLE_MINUTES` | `terminal_idle_minutes` | integer |
-| `RAST_TERMINAL_MEMORY_MB` | `terminal_memory_mb` | integer |
-| `RAST_TERMINAL_CPUS` | `terminal_cpus` | integer |
-| `RAST_TERMINAL_TASKS` | `terminal_tasks` | integer |
-| `RAST_NATIVE_HELPER_SOCKET` | `native_helper_socket` | Must match `rast-native.service` |
-| `RAST_LINUX_XPRA_BIN` | `linux_xpra_bin` | Xpra server binary |
-| `RAST_LINUX_UID_BASE` | `linux_uid_base` | Unprivileged identity uid range start |
-| `RAST_LINUX_IDLE_MINUTES` | `linux_idle_minutes` | 0–10080 |
-| `RAST_LINUX_SESSION_MEMORY_MB` / `RAST_LINUX_SESSION_CPUS` / `RAST_LINUX_SESSION_TASKS` | `linux_session_*` | Session cgroup limits |
-| `RAST_LINUX_APP_MEMORY_MB` / `RAST_LINUX_APP_CPUS` / `RAST_LINUX_APP_TASKS` | `linux_app_*` | Default application cgroup limits |
-| `RAST_LINUX_ADMISSION_RESERVE_MB` | `linux_admission_reserve_mb` | Free-memory reserve for admission |
-| `RAST_LINUX_PROFILE` | `linux_profile` | `responsive`/`balanced`/`media`/`quality` |
-| `RAST_LINUX_QUALITY` / `_MIN_QUALITY` / `_SPEED` / `_MIN_SPEED` / `_VIDEO_SCALING` | `linux_quality` / … | Integer overrides |
-| `RAST_LINUX_AV_SYNC` | `linux_av_sync` | `true`/`false` |
-| `RAST_LINUX_ENCODING` | `linux_encoding` | Codec override |
-| `RAST_LINUX_DISPLAY_BACKEND` | `linux_display_backend` | `auto`/`software`/`custom` |
-| `RAST_LINUX_XVFB_COMMAND` | `linux_xvfb_command` | Absolute wrapper-script path |
-| `RAST_LINUX_PREWARM` | `linux_prewarm` | `true`/`false` |
 | `RAST_DEFAULT_QUOTA_BYTES` | `default_quota_bytes` | New accounts only |
 | `RAST_SECURE_COOKIES` | `secure_cookies` | Force the `Secure` cookie flag |
 | `RAST_JOB_CONCURRENCY` | `job_concurrency` | 1–8 |
-| `RAST_FILES_ROOT_ENABLED` | `files_root_enabled` | `true`/`false` |
 | `RAST_SETUP_TOKEN_REQUIRED` | `setup_token_required` | Harden the web first-run flow |
 | `RAST_PACKAGES_CATALOG_URL` | `packages_catalog_url` | App Center catalog (or a local mirror) |
 | `RAST_PACKAGES_CATALOG_KEYS` | `packages_catalog_keys` | Comma-separated `<key-id>:<base64>` |
@@ -192,19 +130,6 @@ Additional variables that are **not** configuration-file keys:
   accidentally include user files.
 * **`docker_enabled`** alone is not enough: Docker must be installed, the
   worker unit enabled and the `rast-worker` user in the `docker` group.
-* **Native Linux apps** are the default execution backend for newly installed
-  desktop applications. They need the privileged helper unit
-  (`rast-native.service`, root), Xpra 6.5+ and a systemd slice; the web server
-  only talks to the helper's Unix socket. The helper also installs an owned
-  nftables rule (table `inet rast_native`) restricting the loopback Xpra
-  display ports to the `rast` service account, so the `nftables` package is
-  required for that defence in depth (`rast doctor` warns when it is missing).
-  `native_enabled = false` keeps the legacy Docker backend (apps installed that
-  way keep working until they are migrated). The per-user limits are enforced
-  with transient systemd units, so `MemoryMax`/`CPUQuota`/`TasksMax` show up in
-  `systemctl status rast-app-*` and `/sys/fs/cgroup/...`. `linux_uid_base` must
-  not overlap systemd's dynamic uid range or existing local accounts. Session
-  and window behaviour is documented in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
 
 ## Examples
 

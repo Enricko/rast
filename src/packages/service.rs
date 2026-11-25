@@ -100,8 +100,6 @@ pub struct PackageManager {
     system: RwLock<HashMap<String, SystemInstall>>,
     /// Set by tests that provide their own system runtimes.
     system_fixed: std::sync::atomic::AtomicBool,
-    /// The privileged helper, for what the service itself may not read.
-    native: std::sync::OnceLock<crate::native::client::NativeClient>,
     /// The login-shell profile script (see [`shell`]).
     profile: RwLock<std::path::PathBuf>,
     busy: Arc<Mutex<HashSet<String>>>,
@@ -251,14 +249,6 @@ pub struct ConsumerView {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct AppRunOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: Option<i32>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct PackageView {
     pub id: String,
     pub package_type: String,
@@ -290,11 +280,6 @@ pub struct PackageView {
     pub system: Option<SystemInstall>,
     /// What a login shell runs for the main command.
     pub terminal: Option<TerminalView>,
-    /// Presentation for app-type packages (command runner or web entry).
-    pub app: Option<manifest::AppSpec>,
-    /// Package icon from the signed catalog (or the installed manifest for
-    /// GitHub imports); App Center falls back to a monogram when absent.
-    pub icon: Option<manifest::PackageIcon>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -372,7 +357,6 @@ impl PackageManager {
             github_updates: RwLock::new(HashMap::new()),
             system: RwLock::new(HashMap::new()),
             system_fixed: std::sync::atomic::AtomicBool::new(false),
-            native: std::sync::OnceLock::new(),
             profile: RwLock::new(std::path::PathBuf::from(shell::PROFILE_SCRIPT)),
             busy: Arc::new(Mutex::new(HashSet::new())),
             check_lock: tokio::sync::Mutex::new(()),
@@ -384,11 +368,6 @@ impl PackageManager {
     }
 
     /// Restore the persisted check state and start the periodic checker.
-    /// Give the service the privileged helper (before [`Self::start`]).
-    pub fn set_native(&self, client: crate::native::client::NativeClient) {
-        let _ = self.native.set(client);
-    }
-
     pub async fn start(self: &Arc<Self>) {
         self.recover_displaced().await;
         let me = self.clone();
@@ -578,28 +557,9 @@ impl PackageManager {
     pub async fn refresh_system(&self) {
         let root = self.layout.root.clone();
         let scratch = self.layout.staging();
-        let mut found = tokio::task::spawn_blocking(move || system::detect_all(&root, &scratch))
+        let found = tokio::task::spawn_blocking(move || system::detect_all(&root, &scratch))
             .await
             .unwrap_or_default();
-        // Runtimes an administrator installed for their own Linux account
-        // (rustup, Bun, a Flutter checkout): only the privileged helper can
-        // look into /home. Without the helper they are simply not listed.
-        if let Some(helper) = self.native.get() {
-            let skip: Vec<&String> = found.keys().collect();
-            if let Ok(reply) = helper
-                .call_json("runtimes_detect", json!({ "skip": skip }))
-                .await
-            {
-                let extra: HashMap<String, SystemInstall> = reply
-                    .get("runtimes")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                for (id, install) in extra {
-                    found.entry(id).or_insert(install);
-                }
-            }
-        }
         let key = |m: &HashMap<String, SystemInstall>| {
             let mut v: Vec<(String, String, String, Option<String>)> = m
                 .iter()
@@ -937,146 +897,6 @@ impl PackageManager {
         })
     }
 
-    /// Run the installed command of an app-type package (used by App Center's
-    /// Open button). Only the first declared executable is run; arguments come
-    /// from the browser and are passed as argv, never through a shell.
-    pub async fn run_package_app(
-        &self,
-        package_id: &str,
-        args: Vec<String>,
-    ) -> AppResult<AppRunOutput> {
-        if args.len() > 32 {
-            return Err(AppError::bad_request("too many arguments"));
-        }
-        let mut total = 0usize;
-        for arg in &args {
-            total = total.saturating_add(arg.len());
-            if arg.len() > 512 || arg.chars().any(|c| c.is_control()) || total > 4096 {
-                return Err(AppError::bad_request("invalid argument"));
-            }
-        }
-        let versions = store::versions(&self.db, Some(package_id)).await?;
-        let Some(installed) = versions
-            .into_iter()
-            .filter(|version| version.manifest.package_type == "app")
-            .max_by_key(|version| version.installed_at)
-        else {
-            return Err(AppError::NotFound("This application is not installed."));
-        };
-        let executable = installed
-            .manifest
-            .runtime
-            .executables
-            .first()
-            .ok_or_else(|| AppError::bad_request("the package declares no executable"))?;
-        let install_path = std::path::PathBuf::from(&installed.install_path);
-        let program = install_path.join(&executable.path);
-        let resolved = std::fs::canonicalize(&program)
-            .map_err(|_| AppError::NotFound("The application executable is missing."))?;
-        let root = std::fs::canonicalize(&install_path)
-            .map_err(|_| AppError::NotFound("The application installation is missing."))?;
-        if !resolved.starts_with(&root) {
-            return Err(AppError::bad_request(
-                "The application executable is outside its installation.",
-            ));
-        }
-        let mut command = tokio::process::Command::new(&resolved);
-        command
-            .args(&args)
-            .current_dir(&root)
-            .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let child = command.spawn().map_err(|error| {
-            AppError::internal(format!("cannot start the application: {error}"))
-        })?;
-        let output =
-            match tokio::time::timeout(Duration::from_secs(10), child.wait_with_output()).await {
-                Ok(result) => result.map_err(|error| {
-                    AppError::internal(format!("cannot read the application output: {error}"))
-                })?,
-                Err(_) => {
-                    return Err(AppError::bad_request(
-                        "The application did not finish within 10 seconds.",
-                    ))
-                }
-            };
-        fn text(bytes: &[u8]) -> String {
-            let limit = 64 * 1024;
-            let (slice, truncated) = if bytes.len() > limit {
-                (&bytes[..limit], true)
-            } else {
-                (bytes, false)
-            };
-            let mut value = String::from_utf8_lossy(slice).into_owned();
-            if truncated {
-                value.push_str("\n[output truncated]");
-            }
-            value
-        }
-        Ok(AppRunOutput {
-            stdout: text(&output.stdout),
-            stderr: text(&output.stderr),
-            exit_code: output.status.code(),
-        })
-    }
-
-    /// Read one static file of an installed web app package (`app/` tree).
-    pub async fn app_asset(&self, package_id: &str, path: &str) -> AppResult<(Vec<u8>, String)> {
-        let versions = store::versions(&self.db, Some(package_id)).await?;
-        let Some(installed) = versions
-            .into_iter()
-            .filter(|version| version.manifest.package_type == "app")
-            .max_by_key(|version| version.installed_at)
-        else {
-            return Err(AppError::NotFound("This application is not installed."));
-        };
-        let app = installed
-            .manifest
-            .app
-            .as_ref()
-            .filter(|app| app.kind == "web")
-            .ok_or(AppError::NotFound("This application has no web interface."))?;
-        let root = std::path::Path::new(&installed.install_path).join("app");
-        let root = std::fs::canonicalize(&root)
-            .map_err(|_| AppError::NotFound("The application files are missing."))?;
-        let requested = if path.trim().is_empty() {
-            app.entry.as_deref().unwrap_or("index.html").to_string()
-        } else {
-            path.to_string()
-        };
-        if !manifest::is_safe_relative_path(&requested) {
-            return Err(AppError::bad_request("invalid application path"));
-        }
-        let candidate = root.join(&requested);
-        let candidate =
-            std::fs::canonicalize(&candidate).map_err(|_| AppError::NotFound("File not found."))?;
-        if !candidate.starts_with(&root) {
-            return Err(AppError::NotFound("File not found."));
-        }
-        let bytes = std::fs::read(&candidate).map_err(|_| AppError::NotFound("File not found."))?;
-        let content_type = match candidate
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("")
-        {
-            "html" | "htm" => "text/html; charset=utf-8",
-            "css" => "text/css; charset=utf-8",
-            "js" | "mjs" => "application/javascript; charset=utf-8",
-            "json" => "application/json; charset=utf-8",
-            "svg" => "image/svg+xml",
-            "png" => "image/png",
-            "jpg" | "jpeg" => "image/jpeg",
-            "webp" => "image/webp",
-            "woff2" => "font/woff2",
-            "wasm" => "application/wasm",
-            _ => "application/octet-stream",
-        };
-        Ok((bytes, content_type.to_string()))
-    }
-
     pub async fn package(
         &self,
         id: &str,
@@ -1157,11 +977,6 @@ impl PackageManager {
         } else {
             newest_installed
         };
-        // Package-level catalog icons are preferred; imported packages carry
-        // their icon inside the installed manifest.
-        let icon = from_catalog
-            .and_then(|package| package.icon.clone())
-            .or_else(|| base.and_then(|manifest| manifest.icon.clone()));
         // A catalog package without any verified version yet is still listed
         // (with the reason) from its catalog entry.
         if base.is_none() && !(official && from_catalog.is_some()) {
@@ -1293,30 +1108,15 @@ impl PackageManager {
             .map(|v| system::channel_of(v, &channel_ids));
         if let (Some(sv), Some(sch)) = (&system_version, &system_channel) {
             if !channels_installed.contains(sch) {
-                let newer = |c: &&VersionChoice| {
-                    c.compatible
+                let candidate = versions.iter().find(|c| {
+                    &c.channel == sch
+                        && c.compatible
                         && !c.prerelease
                         && version::compare(&c.version, sv) == std::cmp::Ordering::Greater
-                };
-                // The system's own release line first. A line the catalog no
-                // longer carries (Maven 3.9, Node.js 20) moves to the newest
-                // verified version instead of being stuck without an offer.
-                let candidate = versions
-                    .iter()
-                    .filter(newer)
-                    .find(|c| &c.channel == sch)
-                    .or_else(|| {
-                        if channel_ids.contains(sch) {
-                            return None;
-                        }
-                        versions
-                            .iter()
-                            .filter(newer)
-                            .max_by(|a, b| version::compare(&a.version, &b.version))
-                    });
+                });
                 if let Some(c) = candidate {
                     updates.push(UpdateView {
-                        channel: c.channel.clone(),
+                        channel: sch.clone(),
                         from: sv.clone(),
                         to: c.version.clone(),
                         revision: c.revision,
@@ -1496,8 +1296,6 @@ impl PackageManager {
             unavailable_reason,
             system: system.cloned(),
             terminal,
-            app: base.and_then(|b| b.app.clone()),
-            icon,
         })
     }
 
@@ -1616,20 +1414,12 @@ impl PackageManager {
                             .and_then(|s| s.version)
                             .map(|v| system::channel_of(&v, &channel_ids))
                     });
-                let usable = |m: &&Manifest| {
-                    host::incompatibility(m, &self.host).is_none() && !m.is_prerelease()
-                };
-                // The release line in use; the newest verified version when
-                // the catalog does not carry that line.
                 pkg.versions
                     .iter()
-                    .filter(usable)
-                    .find(|m| channel.as_ref().is_none_or(|c| &m.channel() == c))
-                    .or_else(|| {
-                        pkg.versions
-                            .iter()
-                            .filter(usable)
-                            .max_by(|a, b| version::compare(&a.version, &b.version))
+                    .find(|m| {
+                        host::incompatibility(m, &self.host).is_none()
+                            && !m.is_prerelease()
+                            && channel.as_ref().is_none_or(|c| &m.channel() == c)
                     })
                     .ok_or_else(|| AppError::bad_request("No compatible version is available."))?
             }

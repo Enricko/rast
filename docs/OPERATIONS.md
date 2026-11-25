@@ -80,11 +80,6 @@ version, schema version, scope, per-file SHA-256) and, depending on `--scope`:
 | `users` | Copy of user homes and shared folders |
 | `apps` | Managed application definitions (compose files + encrypted env metadata) |
 
-Native Linux app installs and per-person profiles (`<data_dir>/linux-apps`) are
-**not** part of any backup scope: back them up separately when native apps are
-in use (stop `rast-linux.slice` first, then archive the directory; see
-[Upgrade and rollback of native apps](#upgrade-and-rollback-of-native-apps)).
-
 Default scopes: `db,config`. Default output directory: `/var/lib/rast/backups`.
 
 ```bash
@@ -237,39 +232,6 @@ On a fresh host, in this order:
 Without `secret.key`, sessions and encrypted app secrets cannot be recovered;
 everything else still works.
 
-## Atomic deployments (source builds)
-
-Release deployments that replace the binary must keep the running privileged
-helper, worker and web server on a **valid, version-compatible executable**;
-replacing `/usr/local/bin/rast` and restarting only `rast.service` leaves the
-other processes running from an unlinked inode (`/usr/local/bin/rast
-(deleted)`), which breaks Terminal and the root file agent.
-
-Use `scripts/deploy-release.sh` (run as root from a clean `main`):
-
-```bash
-sudo scripts/deploy-release.sh --smoke-terminal
-```
-
-It: requires a clean committed tree and records the source SHA; runs Rust and
-frontend tests; builds the release from that revision; keeps the previous
-binary/config in `/var/backups/rast-deploy-<timestamp>`; installs a versioned
-binary in `/usr/local/lib/rast-releases/` and atomically points
-`/usr/local/bin/rast` at it (the old file stays on disk for running
-processes); restarts `rast-native.service`, `rast-worker.service` and
-`rast.service` together; verifies health, service state, the helper self-check
-and that existing `rast-xpra-*`/`rast-app-*` units survived; runs a real
-browser Terminal smoke test and rolls back automatically if any critical check
-fails. `--skip-tests`, `--dry-run` and `RAST_DEPLOY_SMOKE_USER` are supported.
-
-Rollback (also printed by the script):
-
-```bash
-sudo install -m 0755 /var/backups/rast-deploy-<stamp>/previous-binary /usr/local/bin/rast
-sudo cp -a /var/backups/rast-deploy-<stamp>/rast.toml /etc/rast/rast.toml   # if changed
-sudo systemctl restart rast-native.service rast-worker.service rast.service
-```
-
 ## Updates
 
 Two supported update paths, both checksum-verified:
@@ -291,82 +253,6 @@ curl -fsSL https://github.com/Enricko/rast/releases/latest/download/install.sh \
   | sudo sh -s -- --verify-attestation
 ```
 
-### Native Linux apps after an upgrade (0.12 → 0.13)
-
-0.13 adds the native backend and the new `rast-native.service`. The old
-`rast-worker.service` and all Docker-backed apps keep working untouched.
-`rast update` refuses to leave an enabled native backend without its helper: it
-detects missing native service assets (`rast-native.service`, the tmpfiles
-config, `<data_dir>/linux-apps`) and runs the release installer to add them,
-then restarts the helper with the new binary (it needs curl/wget and the
-standard `/etc/rast/rast.toml` for that). Running the full installer is still
-the recommended path after the upgrade because it also installs the dependency
-packages (`nftables` and the Xpra audio prerequisites):
-
-```bash
-sudo sh install.sh          # detects Xpra, installs rast-native.service, rast-linux.slice and nftables
-sudo rast native-helper --check
-sudo -u rast rast doctor    # the "native Linux apps" section must be clean
-```
-
-Without Xpra the installer leaves native execution disabled and the app center
-keeps installing legacy Docker-backed apps; `native_enabled` defaults to
-"Xpra is installed". Until the helper runs, app installs fail with an
-actionable error (they never fall back silently). Existing Docker-backed apps
-show `backend: docker` in App Center and can be migrated one by one.
-
-#### Upgrade and rollback of native apps
-
-The native feature adds durable per-person state outside the database:
-installed app trees (`<data_dir>/linux-apps/apps`) and per-app per-person
-profiles (`<data_dir>/linux-apps/profiles`). The database schema is **v14**
-(migration `0013_native_linux_apps.sql`: `linux_identities`,
-`linux_sessions`, `linux_runs`; migration `0014_super_admin.sql`: the
-`users.super_admin` flag, set for every administrator that existed at the
-upgrade).
-
-Upgrade:
-
-1. Take a full backup before upgrading:
-   `sudo -u rast rast backup --scope db,config` (the database + configuration).
-   Also copy the native app trees, because `--scope db,config` does not include
-   them:
-   `sudo systemctl stop rast-linux.slice` (ends every native session and
-   application; save work first), then
-   `sudo tar -C /var/lib/rast -czf /var/lib/rast/backups/native-apps-pre-upgrade.tar.gz linux-apps`.
-   `linux-apps` contains the installs, profiles and migration backups; it can
-   be large.
-2. Install the new release with the installer (recommended for native apps) so
-   the systemd units, `nftables` package and Xpra prerequisites are refreshed:
-   `sudo sh install.sh`. `rast update` also replaces the binary and restarts
-   `rast.service`, `rast-worker.service` and `rast-native.service` (and installs
-   missing native service assets through the release installer), but it does
-   not refresh existing unit files or the native dependency plan.
-3. Restarting `rast-native.service` during the upgrade does **not** kill
-   running sessions; they are separate systemd units. Old audio-disabled
-   sessions are recreated once on the next start. If the upgrade changes
-   session flags or the helper protocol incompatibly, finish running work
-   first: `sudo systemctl stop rast-linux.slice`.
-4. Verify: `sudo rast native-helper --check` (Xpra 6.5+, display firewall),
-   `sudo -u rast rast doctor`, then launch one app per test account.
-
-Rollback:
-
-* Migrations are forward-only. To go back to a release whose binary predates
-  schema v13, restore the **matching pre-upgrade database backup** first (the
-  old binary refuses a newer schema), then install the old binary; see
-  [Rollback](#rollback). The native app trees are compatible across releases
-  (restore the `linux-apps` tar if they were damaged or the old release
-  expects its previous layout), but profiles written by the newer release may
-  not be readable by older app versions.
-* Rolling back only the binary while leaving schema v13 in place is supported
-  only between releases that share schema v13; check `rast doctor` (`schema
-  vN`) before swapping binaries.
-* Apps installed natively are host packages/processes: rolling RAST back does
-  not uninstall `.deb` packages or delete profiles. Uninstall or clean up
-  through App Center *before* the rollback if the old release cannot manage
-  them.
-
 ### 2. `rast update` (CLI)
 
 ```bash
@@ -385,15 +271,12 @@ What `rast update` does:
 4. Creates a database backup (`db` scope) **before** any migration can run.
 5. Saves the previous binary as `/usr/local/bin/rast.rollback-<current>`.
 6. Replaces the binary atomically and restarts `rast.service`, then
-   `rast-worker.service` if it is running (`systemctl try-restart`) and
-   `rast-native.service` if it is running, refreshing the native tmpfiles. Both
-   helpers run the same binary; left on the old one they refuse operations
-   added since. Missing native service assets are installed through the release
-   installer before the new binary starts (the update aborts and keeps the old
-   binary when that is not possible). Updates *from* releases before 0.9.1 run
-   the old updater, which skips restarting the helpers: restart them yourself
-   with `sudo systemctl restart rast-worker.service rast-native.service`.
-   `rast doctor` warns when a helper runs a different version.
+   `rast-worker.service` if it is running (`systemctl try-restart`). The Docker
+   helper runs the same binary; left on the old one it refuses Docker actions
+   added since. Updates *from* releases before 0.9.1 run the old updater,
+   which skips this step: restart the helper yourself with
+   `sudo systemctl restart rast-worker.service`. `rast doctor` warns when the
+   helper runs a different version.
 7. Polls `/healthz`; if the service does not become healthy, restores the
    previous binary and restarts again.
 8. Reports the resulting database schema version. Database migrations are
@@ -525,42 +408,6 @@ sudo -u rast rast user reset-password <name> --password-stdin   # revokes that u
 sudo -u rast rast setup-token                                   # one-shot web setup token, 60 min
 ```
 
-### Roles
-
-| Role | What it is for |
-| --- | --- |
-| **Super administrator** | The server owner: everything an administrator does, plus the server itself: File Station's **Root file system**, the root (or `terminal_admin_account`) shell in Terminal, and creating, changing, disabling or resetting **administrator** accounts. |
-| **Administrator** | Runs RAST for its people: users, groups, shared folders, apps, backups, settings. Cannot manage administrator accounts or change roles, has no root file system, and gets the unprivileged identity in Terminal. |
-| **User** | Their own Home, the shared folders and applications they were given. |
-
-The first account (web setup) and accounts made with `rast user create-admin`
-are super administrators. Upgrading to 0.18.0 makes every existing
-administrator a super administrator, so nobody loses access; demote the ones
-who should only run RAST in Control Panel → Users. The last active super
-administrator cannot be demoted or disabled.
-
-An administrator is trusted with the applications of the server (Docker,
-App Center, Linux apps), which run with wide privileges: the role keeps
-day-to-day administration away from the server's own files and shells, it is
-not a sandbox against a hostile administrator.
-
-### Root file system in File Station
-
-Super administrators see a third location in File Station, after Home and
-Shared folders: **Root file system**, the server's own files from `/`, with
-full access as root (browse, preview, download, upload, new folder, rename,
-copy, move, delete). There is no quota and **no recycle bin**: a delete is
-permanent, and File Station asks before every change. New files and folders
-get the owner of the folder they are created in; a replaced file keeps its
-owner and mode. Copy and move work inside the root file system, not between
-it and RAST storage. Every change and download is in the activity log.
-
-The hardened service cannot read system files, so these requests are served
-by a root process in its own unit, `rast-rootfs`, that the helper starts on
-first use and that stops itself after 15 idle minutes
-(`journalctl -u rast-rootfs`). `files_root_enabled = false` removes the
-location for everyone.
-
 ## App Center on the shell PATH
 
 ```bash
@@ -596,130 +443,6 @@ uninstaller. Check with `systemctl status rast-packages-links.path` and
 * Prefer disabling/deleting accounts in the Control Panel over manual SQL.
 * Audit history is available in the Activity Logs app and
   `GET /api/logs`; exports are provided by `GET /api/logs/export`.
-
-## Linux apps
-
-Administrators install desktop Linux apps from App Center (a `.deb`, an
-AppImage or a portable archive from File Station, drag and drop or an HTTPS
-link). Since v0.13 the **native backend** is the default: the app is installed
-on the server and runs natively under the person's own unprivileged Linux
-identity, inside one lazily started **Xpra seamless graphical session per RAST
-user**. Every application that person opens — and every window Chrome opens —
-shares that session and its connection; each normal top-level window is a RAST
-desktop window with its own taskbar entry, while dialogs and popups are attached
-to their parent window and never get one. Legacy Docker-backed apps keep
-working unchanged (they show `backend: docker` in App Center) until an
-administrator migrates them. The user-facing behaviour, security model and
-limitations are in [NATIVE-LINUX-APPS.md](NATIVE-LINUX-APPS.md).
-
-Installed apps are shared with every signed-in user by default, so they appear
-on every account's desktop and in the Applications folder. Everyone launches
-their own processes with their own profile: separate Linux identity, separate
-home, separate browser settings/sign-ins, separate display and sockets. An
-administrator can restrict an app to administrators: App Center → the app →
-More actions → **Who can use it…**. This per-app visibility decides access;
-Linux app windows are outside the group policy's "applications" (Docker) rule.
-
-```bash
-systemctl status rast-native            # privileged helper (root)
-systemctl status 'rast-xpra-*'          # per-person graphical sessions
-systemctl status 'rast-app-*'           # native application processes
-systemd-cgls /rast-linux.slice          # who runs what, with cgroup limits
-ls /var/lib/rast/linux-apps/apps        # managed portable/AppImage installs
-ls /var/lib/rast/linux-apps/profiles    # per-app per-person profiles (0700)
-getfacl /srv/rast/homes/<user>          # read+traverse ACL for their app identity
-xpra info :<display>                    # display/encoding/limits of one session (see `systemctl status`)
-journalctl -u rast-native -n 100        # helper log (no credentials are logged)
-```
-
-* Per-user limits are set by `linux_session_memory_mb/cpus/tasks` and
-  `linux_app_memory_mb/cpus/tasks` (`MemoryMax`, `CPUQuota`, `TasksMax` on the
-  transient units, all inside `rast-linux.slice`). Check live usage with
-  `systemd-cgtop /rast-linux.slice`.
-* A session starts on the first launch and is reclaimed after the last
-  application exits: an empty, viewer-less session first gets a short reload
-  grace (60 s) and then `linux_idle_minutes` extra minutes (`0` = reclaim right
-  after the grace). Never while an app runs or a viewer is attached. A page
-  reload within that window reconnects to the same session.
-* Running apps and windows survive a **restart of the web server**
-  (`systemctl restart rast.service`): the units keep running and the new
-  process adopts them from `linux_sessions`/`linux_runs`. The same applies
-  after a crash. **Restarting `rast-native.service` does not stop running
-  sessions or applications** — they are independent transient systemd units,
-  not helper children, and their display streams keep working because the proxy
-  connects directly to the Xpra port. Only helper-backed actions (launch,
-  close, install) fail while it is down. On start the helper reconciles the
-  nftables display-port set against the live `rast-xpra-*` units. To stop all
-  native sessions on purpose (e.g. before a maintenance window or before
-  stopping RAST for good), run `sudo systemctl stop rast-linux.slice`;
-  orphaned units from an earlier server are also stopped automatically on the
-  next start.
-* The helper installs one nftables rule at startup (table `inet rast_native`)
-  that rejects connections to the loopback Xpra display ports from every uid
-  except the `rast` service account; each session port is added before the
-  session is usable and removed when it stops. This needs the `nftables`
-  package (the installer adds it to the native dependency plan); `rast doctor`
-  reports the firewall state and warns when `nft` is missing.
-* New applications are admitted based on observed memory pressure: free memory
-  must cover the app's limit plus `linux_admission_reserve_mb`; otherwise the
-  launch fails with a 503 that shows both numbers.
-* Closing a RAST window sends the app's normal close request, so unsaved-work
-  dialogs appear inside the session as a dialog window. To terminate a stuck
-  application, use App Center → the app → **End application** (or
-  `POST /api/linux-apps/session/runs/{run}/close`; the shorter
-  `POST /api/linux-apps/session/runs/{run}` is kept as a compatibility alias);
-  that stops the whole process group and leaves other windows/apps running.
-  There is **no "End session" action in the App Center UI**: the whole-session
-  API is `POST /api/linux-apps/session/close` (also reached by closing the
-  fallback "Native desktop" whole-session window), and the operator-level
-  equivalent is `systemctl stop rast-linux.slice`.
-* An explicit sign-out or a revoked browser session closes a live display
-  stream within ~5 s (the proxy revalidates the login every 5 s) but does not
-  kill the person's applications; they keep running until they exit, are ended
-  individually, or are stopped with the session/account. Deactivating an
-  account stops its native session and applications.
-* Running apps and windows survive a restart of the web server and of
-  `rast-native.service` (see above). A reboot ends every process; profiles and
-  installs stay on disk.
-* Chromium browsers keep their sandbox enabled (the person's identity is
-  unprivileged; `/opt/google/chrome/chrome-sandbox` is setuid root and the
-  renderer processes run with `Seccomp: 2`, `NoNewPrivs: 1`). Never add
-  `--no-sandbox`.
-* Uninstall removes a `.deb` package only when RAST added it and nothing else
-  depends on it (the App Center preview warns before a transaction that would
-  remove or downgrade unrelated packages); **Also delete its settings**
-  controls the per-person profiles only, never files in RAST homes.
-* Updates come from the app's official source (apt for `.deb` packages that
-  install a repository, GitHub releases or zsync for AppImages) or from an
-  updated file/link for archives without an update source. Portable updates
-  stage the new version, validate it and switch atomically; the previous
-  directory stays for recovery (`previousPath` in the API) until the next
-  update replaces it.
-* **Migration of Docker-backed apps** is an explicit administrator action
-  (App Center → app → **Migrate to native**) and runs as a job with per-app
-  results. It keeps the app id and shortcuts, installs the native app (asking
-  for the original file if it is no longer staged), copies every person's
-  Docker settings volume into their native profile while the app is stopped,
-  and retains the Docker image and volumes. Use **Roll back** to return to the
-  Docker backend, and **Clean up old Docker data** only after native operation
-  has been verified. The audit log records `linuxapp.migrate`,
-  `linuxapp.rollback` and `linuxapp.cleanup`.
-* Reverse proxies must pass WebSockets on `/linux-apps/` (the session stream
-  and input). For nginx, inside the `location`: `proxy_set_header Upgrade
-  $http_upgrade;` and `proxy_set_header Connection $connection_upgrade;` with
-  `map $http_upgrade $connection_upgrade { default upgrade; "" ""; }` at the
-  `http` level. Turn the access log off for that location: the session address
-  contains a secret key. Without the headers the windows stay black with
-  "disconnected".
-* Legacy Docker apps (only while `backend = "docker"`): `docker ps --filter
-  label=rast.managed=linux-app`, `docker volume ls --filter
-  label=rast.managed=linux-app`. The shared base image is about 3.7 GB and
-  each app image about 1 GB. Docker's build cache is not removed by RAST;
-  reclaim it with `docker builder prune`. Copies left running by a restart are
-  stopped when RAST starts again.
-* Native apps and their session URLs require an authenticated RAST session;
-  the Xpra port binds to loopback only and is never exposed. Session keys are
-  not written to the access log or to application logs.
 
 ## Secrets and key rotation
 
@@ -763,12 +486,6 @@ existing encrypted app secrets unreadable. Procedure if rotation is required:
 | Login blocked | Rate limiting or per-account lockout (15 min after repeated failures); check `login_attempts`, wait or reset the password |
 | Uploads rejected (413) | Proxy body limit vs `RAST_MAX_UPLOAD_BYTES`; Cloudflare plan limits |
 | Docker apps unavailable | `systemctl status rast-worker`, `/var/run/docker.sock`, `rast-worker` in `docker` group, `docker_enabled=true`, restart worker |
-| Native apps unavailable | `systemctl status rast-native`, `rast doctor` (Xpra binary/version, display firewall, helper socket, slice, uid range), `journalctl -u rast-native -n 100`; `native_enabled=true`; the installer disables native apps in auto mode (or fails with `RAST_NATIVE=1`) when Xpra is below 6.5 |
-| Native app shows no window / black | `journalctl -u rast-native`; check the session unit (`systemctl status 'rast-xpra-*'`), the Xpra log under `/run/rast-linux/<uid>/`, and that the reverse proxy forwards WebSockets on `/linux-apps/` |
-| Display firewall warning in `rast doctor` | Install the `nftables` package (`apt-get install nftables`) and restart `rast-native.service`; the helper then restricts the session display ports to the `rast` uid. The native backend works without it, but other local accounts could reach the loopback Xpra ports |
-| App exits with `Authorization required`, `Invalid MIT-MAGIC-COOKIE-1` or `Missing X server or $DISPLAY` | The app got the wrong X11 auth file. The helper derives it from the running Xvfb (`-auth` argument) on every launch, so this means the session is stale/broken: `systemctl stop rast-linux.slice` (or close the session in the UI) and let the next launch start a fresh session. If it persists, check the identity home ownership (`ls -ld /var/lib/rast/linux-users/<id>` must be `700 rast-u<uid>`) and re-run `rast doctor` |
-| Native app cannot open files in the RAST home | `getfacl /srv/rast/homes/<user>` must include the user's `rast-u<id>` identity with `r-x`; re-run `rast doctor`, re-launch the app to repair the ACL. The ACL is read-only by design — the app cannot write to the RAST home, and shared folders are not mapped |
-| Migration fails | The app page shows the exact reason (usually: the original install file is gone — upload it via *Migrate* → provide file). Nothing is deleted; the Docker app keeps working |
 | SQLite `database is locked` | Data dir on NFS/SMB (unsupported) or an external process holding the DB; move to local storage |
 | High memory | Large file operations + many jobs; lower `RAST_JOB_CONCURRENCY`, check systemd `MemoryMax`, inspect `/api/system/info` |
 

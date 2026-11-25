@@ -58,9 +58,6 @@ const KNOWN_EVENTS = [
   "access.changed",
   "package.changed",
   "package.catalog",
-  "linuxapps.changed",
-  "linuxapps.session",
-  "linuxapps.discovered",
 ];
 
 const IDLE_DISCONNECT_MS = 30_000;

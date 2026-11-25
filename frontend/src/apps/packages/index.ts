@@ -16,9 +16,6 @@ import { AppLifecycle } from "../../components/lifecycle";
 import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
 import { openGithubImport } from "./github";
-import { setPackagesFromOverview } from "../package-apps";
-import { LinuxApps } from "./linux";
-import { onLinuxApps } from "../linuxapp/catalog";
 import {
   filterApps,
   filterPackages,
@@ -29,7 +26,6 @@ import {
   linkLabel,
   monogram,
   monogramColor,
-  packageIconDataUrl,
   shortSha,
   sortForTiles,
   stateLabel,
@@ -84,8 +80,6 @@ class PackageCenterApp {
   private readonly search: HTMLInputElement;
   private readonly githubButton: HTMLButtonElement;
   private readonly settingsButton: HTMLButtonElement;
-  private readonly linuxButton: HTMLButtonElement;
-  private readonly linux: LinuxApps;
   private readonly sidebar: HTMLElement;
   private readonly main: HTMLElement;
   private readonly sync: { run: () => void; cancel: () => void };
@@ -102,10 +96,6 @@ class PackageCenterApp {
   private selectedId: string | null = null;
   /** The RAST app whose page is open (instead of a package's). */
   private selectedApp: string | null = null;
-  /** The Linux app whose page is open. */
-  private selectedLinux: string | null = null;
-  private linuxGrid: HTMLElement | null = null;
-  private linuxSection: HTMLElement | null = null;
   /** Apps this account can open now (their tiles offer Open). */
   private openableSignature = "";
   private detail: PackageDetail | null = null;
@@ -147,7 +137,7 @@ class PackageCenterApp {
     this.search = h("input", { class: "input input-search pkg-search", type: "search", placeholder: "Search", ariaLabel: "Search packages" });
     this.search.addEventListener("input", () => {
       this.query = this.search.value;
-      if (this.selectedId || this.selectedApp || this.selectedLinux) this.closeDetail();
+      if (this.selectedId || this.selectedApp) this.closeDetail();
       else this.paintGrid();
     });
     this.githubButton = h(
@@ -164,24 +154,6 @@ class PackageCenterApp {
       h("span", { class: "pkg-btn-label" }, "Settings"),
     );
     this.settingsButton.addEventListener("click", () => this.openSettings());
-    this.linux = new LinuxApps({
-      ctx,
-      lc: this.lc,
-      realtime: this.realtime,
-      readOnly: () => this.readOnly,
-      openPage: (id) => this.openLinuxPage(id),
-    });
-    this.linuxButton = h(
-      "button",
-      {
-        class: "btn btn-primary btn-sm pkg-install-button",
-        type: "button",
-        title: "Install a Linux application on this server",
-      },
-      iconSvg("plus", 14),
-      h("span", { class: "pkg-btn-label" }, "Install Linux App"),
-    );
-    this.linuxButton.addEventListener("click", () => this.linux.openAdd());
     const toolbar = h(
       "div",
       { class: "app-toolbar pkg-toolbar", role: "toolbar", ariaLabel: "App Center" },
@@ -190,7 +162,6 @@ class PackageCenterApp {
       this.search,
       this.githubButton,
       this.settingsButton,
-      this.linuxButton,
       this.live.el,
     );
     this.sidebar = h("nav", { class: "app-sidebar pkg-sidebar", ariaLabel: "Package views" });
@@ -213,41 +184,21 @@ class PackageCenterApp {
     });
     this.applyAccess();
     if (this.denied) return;
-    this.lc.add(onLinuxApps(() => this.render()));
-    this.lc.add(
-      this.realtime.on("linuxapps.discovered", () => {
-        void this.linux.reloadDiscovered().then(() => this.render());
-      }),
-    );
     this.render();
-    void this.linux.reload();
-    void this.linux.reloadDiscovered();
     await this.reload();
   }
 
-  /**
-   * `{ view }` opens a list, `{ app }` an app's page (Applications, the
-   * launcher) and `{ linux }` a Linux app's page (File Station opens it after
-   * starting an install).
-   */
+  /** `{ view }` opens a list, `{ app }` an app's page (Applications, the launcher). */
   private applyParams(params: unknown): void {
-    const wanted = (params ?? {}) as { view?: unknown; app?: unknown; linux?: unknown };
+    const wanted = (params ?? {}) as { view?: unknown; app?: unknown };
     if (wanted.view === "installed" || wanted.view === "all" || wanted.view === "updates") {
       this.view = wanted.view;
       this.selectedId = null;
       this.selectedApp = null;
-      this.selectedLinux = null;
       this.detail = null;
     }
     if (typeof wanted.app === "string" && wanted.app) {
       this.selectedApp = wanted.app;
-      this.selectedId = null;
-      this.selectedLinux = null;
-      this.detail = null;
-    }
-    if (typeof wanted.linux === "string" && wanted.linux) {
-      this.selectedLinux = wanted.linux;
-      this.selectedApp = null;
       this.selectedId = null;
       this.detail = null;
     }
@@ -292,13 +243,12 @@ class PackageCenterApp {
           h("div", { class: "app-access-detail" }, "Your account has no access to App Center. Ask an administrator if you need it."),
         ),
       );
-      for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton, this.linuxButton]) b.classList.add("hidden");
+      for (const b of [this.checkButton, this.githubButton, this.settingsButton, this.backButton]) b.classList.add("hidden");
       this.search.classList.add("hidden");
       return;
     }
     this.checkButton.classList.toggle("hidden", this.readOnly);
     this.githubButton.classList.toggle("hidden", this.readOnly);
-    this.linuxButton.classList.toggle("hidden", this.readOnly || !this.linux.available);
     for (const el of [this.settingsButton, this.backButton, this.search]) el.classList.remove("hidden");
     if (wasDenied) void this.reload();
   }
@@ -306,11 +256,6 @@ class PackageCenterApp {
   // ---------------------------------------------------------------- realtime
 
   private subscribe(): void {
-    // Linux app rows appear and change status during install/update jobs; keep
-    // the list (and the reattached job progress) current without a manual reload.
-    this.lc.add(
-      this.realtime.on<{ id?: string }>("linuxapps.changed", () => void this.linux.reload()),
-    );
     this.lc.add(
       this.realtime.on<PackageEvent>("package.changed", (data) => {
         if (data?.jobId && data.packageId) {
@@ -427,7 +372,6 @@ class PackageCenterApp {
     if (this.disposed || this.denied) return;
     try {
       this.overview = await this.ctx.api.get<Overview>("/api/packages");
-      setPackagesFromOverview(this.overview.packages);
       this.loadError = null;
       this.checking = this.overview.catalog.checking;
       // Forget live jobs the server no longer reports as active.
@@ -471,15 +415,14 @@ class PackageCenterApp {
     if (this.disposed || this.denied) return;
     this.renderChrome();
     this.renderSidebar();
-    if (this.selectedLinux) this.renderLinuxDetail();
-    else if (this.selectedApp) this.renderAppDetail();
+    if (this.selectedApp) this.renderAppDetail();
     else if (this.selectedId) this.renderDetail();
     else this.renderList();
   }
 
   /** Toolbar state: back only on a package page, refresh spins while checking. */
   private renderChrome(): void {
-    this.backButton.disabled = !this.selectedId && !this.selectedApp && !this.selectedLinux;
+    this.backButton.disabled = !this.selectedId && !this.selectedApp;
     const checking = this.checking || Boolean(this.overview?.catalog.checking);
     this.checkButton.disabled = checking;
     this.checkButton.classList.toggle("is-checking", checking);
@@ -490,10 +433,10 @@ class PackageCenterApp {
 
   private renderSidebar(): void {
     clear(this.sidebar);
-    const updates = (this.overview?.counts.updates ?? 0) + this.linux.updateCount();
+    const updates = this.overview?.counts.updates ?? 0;
     const list = h("div", { class: "pkg-nav" });
     for (const v of VIEWS) {
-      const active = !this.selectedId && !this.selectedApp && !this.selectedLinux && this.currentView() === v.id;
+      const active = !this.selectedId && !this.selectedApp && this.currentView() === v.id;
       const count = v.id === "updates" && updates > 0 ? updates : 0;
       const button = h(
         "button",
@@ -506,7 +449,6 @@ class PackageCenterApp {
         this.view = v.id;
         this.selectedId = null;
         this.selectedApp = null;
-        this.selectedLinux = null;
         this.detail = null;
         this.render();
       });
@@ -557,8 +499,6 @@ class PackageCenterApp {
     this.grid = null;
     this.appGrid = null;
     this.appSection = null;
-    this.linuxGrid = null;
-    this.linuxSection = null;
     this.runtimeSection = null;
     if (this.loadError && !this.overview) {
       renderLoadFailure(this.main, this.loadError, { title: "App Center could not load", retry: () => void this.reload() });
@@ -579,22 +519,11 @@ class PackageCenterApp {
       this.appSection = h("section", { class: "pkg-group", ariaLabel: "Apps" }, h("h3", { class: "pkg-group-title" }, "Apps"), this.appGrid);
       content.appendChild(this.appSection);
     }
-    // Linux apps (administrators): Updates lists only those with a newer version.
-    // The whole section disappears when the server quarantines the feature.
-    if (this.linux.enabled && this.linux.offered) {
-      this.linuxGrid = h("div", { class: "pkg-grid" });
-      this.linuxSection = h("section", { class: "pkg-group", ariaLabel: "Linux apps" }, h("h3", { class: "pkg-group-title" }, "Linux apps"), this.linuxGrid);
-      content.appendChild(this.linuxSection);
-    }
-    // Applications installed outside the App Center (owner/approved entries;
-    // administrators also see pending, hidden and unavailable ones).
-    const discovered = this.linux.discoveredSection();
-    if (discovered) content.appendChild(discovered);
     this.grid = h("div", { class: "pkg-grid" });
     this.runtimeSection = h(
       "section",
       { class: "pkg-group", ariaLabel: "Runtimes" },
-      this.appSection || this.linuxSection ? h("h3", { class: "pkg-group-title" }, "Runtimes") : null,
+      this.appSection ? h("h3", { class: "pkg-group-title" }, "Runtimes") : null,
       this.grid,
     );
     content.appendChild(this.runtimeSection);
@@ -647,37 +576,13 @@ class PackageCenterApp {
     clear(grid);
     const view = this.currentView();
     const apps = this.appGrid ? filterApps(this.overview?.apps ?? [], view, this.query) : [];
-    const packageApps = this.appGrid ? this.appPackageViews(view) : [];
     if (this.appGrid && this.appSection) {
       clear(this.appGrid);
       for (const app of apps) this.appGrid.appendChild(this.appTile(app));
-      for (const pkg of packageApps) this.appGrid.appendChild(this.appPackageTile(pkg));
-      this.appSection.hidden = apps.length === 0 && packageApps.length === 0;
+      this.appSection.hidden = apps.length === 0;
     }
-    const linuxApps = this.linux.filtered(view, this.query);
-    if (this.linuxGrid && this.linuxSection) {
-      clear(this.linuxGrid);
-      for (const app of linuxApps) this.linuxGrid.appendChild(this.linux.tile(app));
-      // An empty All Packages list offers the install as a tile.
-      const offerAdd = view === "all" && !this.query && !this.readOnly && this.linux.available;
-      if (offerAdd && linuxApps.length === 0) this.linuxGrid.appendChild(this.linux.addTile());
-      this.linuxSection.hidden = linuxApps.length === 0 && !(offerAdd && linuxApps.length === 0);
-      // Docker -> native migration notice: only when the server supports native apps.
-      this.linuxSection.querySelector(".native-migration-notice")?.remove();
-      const migrationNotice = this.linux.migrationNotice();
-      if (migrationNotice && !this.linuxSection.hidden) {
-        migrationNotice.classList.add("native-migration-notice");
-        this.linuxSection.insertBefore(migrationNotice, this.linuxGrid);
-      }
-    }
-    // App-type packages are shown in the Apps section above, not as runtimes.
-    const runtimePackages = (this.overview?.packages ?? []).filter(
-      (pkg) => pkg.packageType !== "app",
-    );
-    const packages = sortForTiles(filterPackages(runtimePackages, view, this.query));
-    if (this.runtimeSection) {
-      this.runtimeSection.hidden = packages.length === 0 && (apps.length > 0 || linuxApps.length > 0) && (Boolean(this.query) || view === "updates");
-    }
+    const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
+    if (this.runtimeSection) this.runtimeSection.hidden = packages.length === 0 && apps.length > 0 && Boolean(this.query);
     if (packages.length === 0) {
       grid.appendChild(
         this.query
@@ -720,63 +625,6 @@ class PackageCenterApp {
   }
 
   // ------------------------------------------------------------------ apps
-
-  /** Installed app-type packages (from GitHub) shown next to the built-in apps. */
-  private appPackageViews(view: PackageFilter): PackageView[] {
-    const query = this.query.trim().toLowerCase();
-    return (this.overview?.packages ?? []).filter((pkg) => {
-      if (pkg.packageType !== "app" || pkg.installed.length === 0) return false;
-      if (view === "updates" && pkg.updateState !== "ready") return false;
-      if (!query) return true;
-      return (
-        pkg.name.toLowerCase().includes(query) ||
-        pkg.description.toLowerCase().includes(query)
-      );
-    });
-  }
-
-  private appPackageTile(pkg: PackageView): HTMLElement {
-    const installed = pkg.installed[pkg.installed.length - 1];
-    const nameButton = h(
-      "button",
-      { class: "pkg-tile-name", type: "button", title: `About ${pkg.name}` },
-      pkg.name,
-    );
-    nameButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      this.openDetail(pkg.id);
-    });
-    const tile = h(
-      "article",
-      {
-        class: "pkg-tile is-app is-installed",
-        dataset: { appId: pkg.id },
-      },
-      (() => {
-        const icon = this.iconEl(pkg, "tile");
-        icon.classList.add("is-app");
-        return icon;
-      })(),
-      h(
-        "div",
-        { class: "pkg-tile-body" },
-        nameButton,
-        h("div", { class: "pkg-tile-sub" }, `Package app · ${installed?.version ?? ""}`),
-        h(
-          "div",
-          { class: "pkg-tile-foot" },
-          this.pill("Open", "is-quiet", `Open ${pkg.name}`, () =>
-            this.ctx.desktop.openPackageApp(pkg.id),
-          ),
-        ),
-      ),
-    );
-    tile.addEventListener("click", (event) => {
-      if ((event.target as HTMLElement).closest("button, a")) return;
-      this.openDetail(pkg.id);
-    });
-    return tile;
-  }
 
   private appTile(app: AppPackage): HTMLElement {
     const open = h("button", { class: "pkg-tile-name", type: "button", title: `About ${app.name}` }, app.name);
@@ -950,31 +798,6 @@ class PackageCenterApp {
   }
 
   private iconEl(p: PackageView, size: "tile" | "hero"): HTMLElement {
-    const image = packageIconDataUrl(p.icon);
-    if (image) {
-      const imageEl = h("img", { ariaHidden: true });
-      imageEl.src = image;
-      imageEl.alt = "";
-      imageEl.loading = "lazy";
-      imageEl.decoding = "async";
-      const el = h(
-        "div",
-        { class: `pkg-icon pkg-icon-${size} has-image`, ariaHidden: true },
-        imageEl,
-      );
-      el.title = p.icon?.attribution ?? p.name;
-      return el;
-    }
-    if (p.packageType === "app") {
-      // App-type packages without a manifest icon get a neutral app glyph
-      // rather than a letter monogram.
-      const appEl = h(
-        "div",
-        { class: `pkg-icon pkg-icon-${size} is-app`, ariaHidden: true },
-        iconSvg("apps", size === "hero" ? 54 : 34),
-      );
-      return appEl;
-    }
     const text = monogram(p.name, p.id);
     const el = h("div", { class: `pkg-icon pkg-icon-${size}`, ariaHidden: true, dataset: { len: String(text.length) } }, text);
     el.style.setProperty("--pkg-color", monogramColor(p.id));
@@ -1032,31 +855,10 @@ class PackageCenterApp {
     });
   }
 
-  private openLinuxPage(id: string): void {
-    this.selectedLinux = id;
-    this.selectedId = null;
-    this.selectedApp = null;
-    this.detail = null;
-    this.render();
-    this.main.scrollTop = 0;
-  }
-
-  private renderLinuxDetail(): void {
-    const scroll = this.main.scrollTop;
-    clear(this.main);
-    this.grid = null;
-    this.appGrid = null;
-    this.linuxGrid = null;
-    const content = h("div", { class: "app-content pkg-content pkg-detail" }, ...this.linux.page(this.selectedLinux ?? ""));
-    this.main.appendChild(content);
-    this.main.scrollTop = scroll;
-  }
-
   private closeDetail(): void {
-    if (!this.selectedId && !this.selectedApp && !this.selectedLinux) return;
+    if (!this.selectedId && !this.selectedApp) return;
     this.selectedId = null;
     this.selectedApp = null;
-    this.selectedLinux = null;
     this.detail = null;
     this.render();
   }

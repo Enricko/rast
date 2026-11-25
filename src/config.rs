@@ -35,39 +35,6 @@ pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub const DEFAULT_DB_MAX_CONNECTIONS: u32 = 8;
 pub const DEFAULT_QUOTA_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 pub const DEFAULT_JOB_CONCURRENCY: usize = 2;
-pub const DEFAULT_NATIVE_HELPER_SOCKET: &str = "/run/rast/native.sock";
-pub const DEFAULT_LINUX_XPRA_BIN: &str = "/usr/bin/xpra";
-pub const DEFAULT_LINUX_UID_BASE: u32 = 200000;
-pub const DEFAULT_LINUX_IDLE_MINUTES: u64 = 15;
-pub const DEFAULT_LINUX_SESSION_MEMORY_MB: u32 = 4096;
-pub const DEFAULT_LINUX_APP_MEMORY_MB: u32 = 2048;
-pub const DEFAULT_LINUX_APP_CPUS: u32 = 2;
-pub const DEFAULT_LINUX_APP_TASKS: u32 = 1024;
-pub const DEFAULT_LINUX_ADMISSION_RESERVE_MB: u32 = 1024;
-/// Pre-warming is off by default: it trades a little idle memory for a much
-/// faster first application launch and must be an operator decision.
-pub const DEFAULT_LINUX_PREWARM: bool = false;
-/// How often the background scan looks for applications installed outside the
-/// App Center (seconds; 0 disables the periodic scan, an administrator can
-/// always rescan from App Center).
-pub const DEFAULT_LINUX_DISCOVERY_INTERVAL_SECONDS: u64 = 300;
-/// System directories every discovery scan inspects (`.desktop` entries and
-/// AppImages). `linux_discovery_roots` adds operator-chosen roots on top of
-/// these and the per-identity XDG directories.
-pub const DEFAULT_LINUX_DISCOVERY_SYSTEM_ROOTS: [&str; 3] = [
-    "/usr/share/applications",
-    "/usr/local/share/applications",
-    "/opt",
-];
-
-/// Default CPU limit of one user's graphical session: a quarter of the
-/// server's CPUs, at least two and at most eight.
-fn default_linux_cpus() -> u32 {
-    let available = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(4);
-    (available / 4).clamp(2, 8)
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -105,9 +72,6 @@ pub struct FileConfig {
     pub default_quota_bytes: Option<u64>,
     pub secure_cookies: Option<bool>,
     pub job_concurrency: Option<usize>,
-    /// File Station shows the server's own file system to super
-    /// administrators (default: true).
-    pub files_root_enabled: Option<bool>,
     /// Require an operator-provided setup token to create the first admin via
     /// the web UI (`rast setup-token` prints one). CLI creation always works.
     pub setup_token_required: Option<bool>,
@@ -128,229 +92,6 @@ pub struct FileConfig {
     /// Also link the defaults into /usr/local/bin so sudo, services and
     /// scripts run them (needs `packages_shell_path`; root-run link step).
     pub packages_system_wide: Option<bool>,
-
-    // ---- Native Linux apps (Xpra) --------------------------------------
-    /// Native Linux app execution (default: on; Docker stays available for
-    /// apps that have not been migrated yet).
-    pub native_enabled: Option<bool>,
-    /// Offer the Linux apps workflow at all (default: on). Set to `false` to
-    /// quarantine the whole feature — native and legacy Docker-backed
-    /// installs alike — while keeping its implementation in the binary.
-    pub linux_apps_enabled: Option<bool>,
-    /// Unix socket of the privileged native helper (`rast native-helper`).
-    pub native_helper_socket: Option<PathBuf>,
-    /// Xpra server binary used for per-user graphical sessions.
-    pub linux_xpra_bin: Option<PathBuf>,
-    /// First uid assigned to a RAST user's unprivileged Linux identity.
-    pub linux_uid_base: Option<u32>,
-    /// Extra idle minutes before a user's graphical session is stopped after
-    /// its last application exited (an empty, viewer-less session is always
-    /// reclaimed after a short reload grace; 0 stops it right after that).
-    pub linux_idle_minutes: Option<u64>,
-    /// Memory limit of one user's graphical session (MiB).
-    pub linux_session_memory_mb: Option<u32>,
-    /// CPU limit of one user's graphical session (in CPUs).
-    pub linux_session_cpus: Option<u32>,
-    /// Process (task) limit of one user's graphical session.
-    pub linux_session_tasks: Option<u32>,
-    /// Default memory limit of one native application (MiB).
-    pub linux_app_memory_mb: Option<u32>,
-    /// Default CPU limit of one native application (in CPUs).
-    pub linux_app_cpus: Option<u32>,
-    /// Default process (task) limit of one native application.
-    pub linux_app_tasks: Option<u32>,
-    /// Adaptive performance profile for the shared graphical session:
-    /// `responsive`, `balanced` (default), `media` or `quality`.
-    pub linux_profile: Option<String>,
-    /// Fixed image quality (1-100). Overrides the profile; unset = profile.
-    pub linux_quality: Option<u32>,
-    /// Minimum automatic quality (1-100). Overrides the profile.
-    pub linux_min_quality: Option<u32>,
-    /// Fixed encoding speed (1-100). Overrides the profile.
-    pub linux_speed: Option<u32>,
-    /// Minimum automatic encoding speed (1-100). Overrides the profile.
-    pub linux_min_speed: Option<u32>,
-    /// Automatic video downscaling (0-100). Overrides the profile.
-    pub linux_video_scaling: Option<u32>,
-    /// Audio/video synchronisation (default: profile, normally on).
-    pub linux_av_sync: Option<bool>,
-    /// Preferred image/video encoding (`auto`, `h264`, `vp8`, `vp9`, `webp`,
-    /// `jpeg`, `rgb`). Unset = Xpra's automatic selection.
-    pub linux_encoding: Option<String>,
-    /// Display backend: `auto` (default), `software` (Xvfb) or `custom`
-    /// (the `linux_xvfb_command` script, falling back to Xvfb).
-    pub linux_display_backend: Option<String>,
-    /// Absolute path of a wrapper script that starts an alternative headless X
-    /// server (for example a GPU-backed Xorg). Xpra runs it in place of Xvfb.
-    pub linux_xvfb_command: Option<PathBuf>,
-    /// Start each eligible person's graphical session in the background after
-    /// they sign in, so the first application launch does not pay the cold
-    /// Xpra session start (default: off; resource-aware opt-in).
-    pub linux_prewarm: Option<bool>,
-    /// Free memory kept in reserve when admitting a new native application.
-    pub linux_admission_reserve_mb: Option<u32>,
-    /// Scan for applications installed outside the App Center (default: on).
-    pub linux_discovery_enabled: Option<bool>,
-    /// Extra roots the scan walks, in addition to the standard XDG directories,
-    /// `~/Applications`, `~/.local/bin` and the managed application profiles.
-    pub linux_discovery_roots: Option<Vec<String>>,
-    /// System-wide entries policy: `approval` (default), `auto` or `hidden`.
-    pub linux_discovery_system_apps: Option<String>,
-    /// Seconds between background rescans (default 300; 0 disables the timer).
-    pub linux_discovery_interval_seconds: Option<u64>,
-
-    // ---- Native Terminal (PTY) ------------------------------------------
-    /// Enable the server-wide Terminal application (admins must still grant
-    /// the app to groups; ordinary accounts are denied by default).
-    pub terminal_enabled: Option<bool>,
-    /// Administrators get a root shell in Terminal (default: true). Selected
-    /// ordinary users always get their unprivileged `rast-u<id>` identity.
-    pub terminal_admin_root: Option<bool>,
-    /// Maximum concurrent terminal sessions per user.
-    pub terminal_max_sessions: Option<u32>,
-    /// Seconds a disconnected terminal stays alive for reconnection.
-    pub terminal_grace_seconds: Option<u32>,
-    /// Minutes a terminal nobody is viewing (page reloaded, browser closed)
-    /// keeps running without output before it is closed (0 = close right
-    /// after the reconnect grace period).
-    pub terminal_idle_minutes: Option<u32>,
-    /// Memory limit of one terminal session (MiB).
-    pub terminal_memory_mb: Option<u32>,
-    /// CPU limit of one terminal session (in CPUs).
-    pub terminal_cpus: Option<u32>,
-    /// Process (task) limit of one terminal session.
-    pub terminal_tasks: Option<u32>,
-    /// Linux login account administrators' terminals run as, instead of root.
-    pub terminal_admin_account: Option<String>,
-    /// Extra directories at the end of an administrator root shell's PATH.
-    pub terminal_path_extra: Option<Vec<String>>,
-}
-
-/// Adaptive performance profile of the shared Xpra session.
-///
-/// `Balanced` keeps Xpra's own adaptive defaults (the historical behaviour).
-/// The other profiles pin quality/speed/video-scaling for their use case; any
-/// explicit `linux_quality`/`linux_speed`/... setting overrides the profile.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinuxProfile {
-    /// Lowest latency for typing and general interaction.
-    Responsive,
-    /// Adaptive defaults (Xpra decides quality/speed from load).
-    Balanced,
-    /// Smoother video / continuous motion.
-    Media,
-    /// Sharpest text and images for editing and design work.
-    Quality,
-}
-
-impl LinuxProfile {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Responsive => "responsive",
-            Self::Balanced => "balanced",
-            Self::Media => "media",
-            Self::Quality => "quality",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "responsive" => Some(Self::Responsive),
-            "balanced" => Some(Self::Balanced),
-            "media" => Some(Self::Media),
-            "quality" => Some(Self::Quality),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for LinuxProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// How the headless X server for native sessions is chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinuxDisplayBackend {
-    /// Use `linux_xvfb_command` when it is configured and usable, else Xvfb.
-    Auto,
-    /// Always use the bundled Xvfb (software rendering).
-    Software,
-    /// Require `linux_xvfb_command`; fall back to Xvfb at session start if it
-    /// is missing or not executable (never crash the session).
-    Custom,
-    /// Start a privileged per-session NVIDIA Xorg display inside the native
-    /// helper and attach Xpra to it (`--use-display=yes`). If the display
-    /// cannot be started or fails its OpenGL probe, session start fails.
-    Gpu,
-}
-
-impl LinuxDisplayBackend {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Software => "software",
-            Self::Custom => "custom",
-            Self::Gpu => "gpu",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "auto" => Some(Self::Auto),
-            "software" | "xvfb" => Some(Self::Software),
-            "custom" | "xorg" | "nvidia-xorg" => Some(Self::Custom),
-            "gpu" | "nvidia-gpu" | "gpu-xorg" => Some(Self::Gpu),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for LinuxDisplayBackend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Policy for applications discovered system-wide (installed by the OS or an
-/// administrator outside the App Center). They are never silently usable by
-/// ordinary accounts by default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DiscoverySystemApps {
-    /// Administrators must approve each system entry before people can launch
-    /// it (default).
-    Approval,
-    /// System entries are visible and usable immediately.
-    Auto,
-    /// System entries are recorded for administrators but hidden from
-    /// ordinary accounts and never approved automatically.
-    Hidden,
-}
-
-impl DiscoverySystemApps {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Approval => "approval",
-            Self::Auto => "auto",
-            Self::Hidden => "hidden",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "approval" | "approve" | "pending" => Some(Self::Approval),
-            "auto" | "allow" | "allowed" | "open" => Some(Self::Auto),
-            "hidden" | "hide" | "off" => Some(Self::Hidden),
-            _ => None,
-        }
-    }
-}
-
-impl std::fmt::Display for DiscoverySystemApps {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
 }
 
 /// Fully resolved configuration.
@@ -368,13 +109,9 @@ pub struct Config {
     pub db_max_connections: u32,
     pub worker_socket: PathBuf,
     pub docker_enabled: bool,
-    /// Whether App Center offers the Linux apps workflow (native or Docker).
-    pub linux_apps_enabled: bool,
     pub default_quota_bytes: u64,
     pub secure_cookies: bool,
     pub job_concurrency: usize,
-    /// File Station's root file system, for super administrators.
-    pub files_root_enabled: bool,
     pub setup_token_required: bool,
     pub trust_forwarded_headers: bool,
     pub packages_catalog_url: String,
@@ -383,82 +120,8 @@ pub struct Config {
     pub packages_github_token: Option<String>,
     pub packages_shell_path: bool,
     pub packages_system_wide: bool,
-    /// Native Linux app execution through the privileged helper.
-    pub native_enabled: bool,
-    pub native_helper_socket: PathBuf,
-    pub linux_xpra_bin: PathBuf,
-    pub linux_uid_base: u32,
-    pub linux_idle_minutes: u64,
-    pub linux_session_memory_mb: u32,
-    pub linux_session_cpus: u32,
-    pub linux_session_tasks: u32,
-    pub linux_app_memory_mb: u32,
-    pub linux_app_cpus: u32,
-    pub linux_app_tasks: u32,
-    /// Adaptive performance profile for native graphical sessions.
-    pub linux_profile: LinuxProfile,
-    /// Fixed quality override (None = profile).
-    pub linux_quality: Option<u8>,
-    pub linux_min_quality: Option<u8>,
-    pub linux_speed: Option<u8>,
-    pub linux_min_speed: Option<u8>,
-    pub linux_video_scaling: Option<u8>,
-    pub linux_av_sync: Option<bool>,
-    /// Preferred encoding override (None = automatic).
-    pub linux_encoding: Option<String>,
-    pub linux_display_backend: LinuxDisplayBackend,
-    /// Custom headless X server command (see [`LinuxDisplayBackend::Custom`]).
-    pub linux_xvfb_command: Option<PathBuf>,
-    /// Pre-warm the graphical session in the background after sign-in.
-    pub linux_prewarm: bool,
-    pub linux_admission_reserve_mb: u32,
-    /// Discovery of applications installed outside the App Center.
-    pub linux_discovery_enabled: bool,
-    /// Extra scan roots chosen by the operator.
-    pub linux_discovery_roots: Vec<PathBuf>,
-    pub linux_discovery_system_apps: DiscoverySystemApps,
-    pub linux_discovery_interval_seconds: u64,
-    /// Native Terminal settings (PTY shells under the per-user identity).
-    pub terminal: TerminalConfig,
     /// Config file that was actually loaded, if any.
     pub loaded_from: Option<PathBuf>,
-}
-
-/// Settings for the native Terminal application.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TerminalConfig {
-    pub enabled: bool,
-    /// Whether administrators get a root shell (full server access).
-    pub admin_root: bool,
-    pub max_sessions: u32,
-    pub grace_seconds: u32,
-    pub idle_minutes: u32,
-    pub memory_mb: u32,
-    pub cpus: u32,
-    pub tasks: u32,
-    /// With `admin_root`: the Linux login account (in sudo/admin/wheel) the
-    /// administrators' shells run as, with its own login environment.
-    pub admin_account: Option<String>,
-    /// Absolute directories appended to the PATH of administrator root
-    /// shells, for tools installed in another account's home.
-    pub path_extra: Vec<String>,
-}
-
-impl Default for TerminalConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            admin_root: true,
-            max_sessions: 8,
-            grace_seconds: 30,
-            idle_minutes: 1440,
-            memory_mb: 1024,
-            cpus: 2,
-            tasks: 512,
-            path_extra: Vec::new(),
-            admin_account: None,
-        }
-    }
 }
 
 impl Config {
@@ -633,10 +296,6 @@ impl Config {
             ));
         }
 
-        let files_root_enabled =
-            parse_env_bool(&env, "RAST_FILES_ROOT_ENABLED", file.files_root_enabled)?
-                .unwrap_or(true);
-
         // Safe default: the first-run web setup requires an operator-generated
         // token unless an operator explicitly opts out. This prevents the first
         // visitor of a public deployment from taking over the installation.
@@ -701,351 +360,6 @@ impl Config {
             ));
         }
 
-        // ---- Native Linux apps -----------------------------------------
-        let linux_xpra_bin = get_str(
-            file.linux_xpra_bin.map(|p| p.display().to_string()),
-            "RAST_LINUX_XPRA_BIN",
-        )
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_LINUX_XPRA_BIN));
-        // Native execution is the default when Xpra is installed; forcing it
-        // on/off is an operator choice. Without Xpra the Docker backend stays
-        // the default so app installs keep working.
-        let native_enabled = parse_env_bool(&env, "RAST_NATIVE_ENABLED", file.native_enabled)?
-            .unwrap_or_else(|| {
-                cfg!(target_os = "linux") && std::path::Path::new(&linux_xpra_bin).exists()
-            });
-        let linux_apps_enabled =
-            parse_env_bool(&env, "RAST_LINUX_APPS_ENABLED", file.linux_apps_enabled)?
-                .unwrap_or(true);
-        let native_helper_socket = get_str(
-            file.native_helper_socket.map(|p| p.display().to_string()),
-            "RAST_NATIVE_HELPER_SOCKET",
-        )
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_NATIVE_HELPER_SOCKET));
-        let linux_uid_base = parse_env_num(&env, "RAST_LINUX_UID_BASE", file.linux_uid_base)?
-            .unwrap_or(DEFAULT_LINUX_UID_BASE);
-        if !(1000..=2_000_000_000).contains(&linux_uid_base) {
-            return Err(ConfigError::Invalid(
-                "linux_uid_base must be between 1000 and 2000000000".into(),
-            ));
-        }
-        let linux_idle_minutes =
-            parse_env_num(&env, "RAST_LINUX_IDLE_MINUTES", file.linux_idle_minutes)?
-                .unwrap_or(DEFAULT_LINUX_IDLE_MINUTES);
-        if linux_idle_minutes > 7 * 24 * 60 {
-            return Err(ConfigError::Invalid(
-                "linux_idle_minutes must be between 0 and 10080".into(),
-            ));
-        }
-        let linux_session_memory_mb = parse_env_num(
-            &env,
-            "RAST_LINUX_SESSION_MEMORY_MB",
-            file.linux_session_memory_mb,
-        )?
-        .unwrap_or(DEFAULT_LINUX_SESSION_MEMORY_MB);
-        if !(512..=262144).contains(&linux_session_memory_mb) {
-            return Err(ConfigError::Invalid(
-                "linux_session_memory_mb must be between 512 and 262144".into(),
-            ));
-        }
-        let linux_session_cpus =
-            parse_env_num(&env, "RAST_LINUX_SESSION_CPUS", file.linux_session_cpus)?
-                .unwrap_or_else(default_linux_cpus);
-        if !(1..=256).contains(&linux_session_cpus) {
-            return Err(ConfigError::Invalid(
-                "linux_session_cpus must be between 1 and 256".into(),
-            ));
-        }
-        let linux_session_tasks =
-            parse_env_num(&env, "RAST_LINUX_SESSION_TASKS", file.linux_session_tasks)?
-                .unwrap_or(2048);
-        if !(64..=131072).contains(&linux_session_tasks) {
-            return Err(ConfigError::Invalid(
-                "linux_session_tasks must be between 64 and 131072".into(),
-            ));
-        }
-        let linux_app_memory_mb =
-            parse_env_num(&env, "RAST_LINUX_APP_MEMORY_MB", file.linux_app_memory_mb)?
-                .unwrap_or(DEFAULT_LINUX_APP_MEMORY_MB);
-        if !(128..=262144).contains(&linux_app_memory_mb) {
-            return Err(ConfigError::Invalid(
-                "linux_app_memory_mb must be between 128 and 262144".into(),
-            ));
-        }
-        let linux_app_cpus = parse_env_num(&env, "RAST_LINUX_APP_CPUS", file.linux_app_cpus)?
-            .unwrap_or(DEFAULT_LINUX_APP_CPUS);
-        if !(1..=256).contains(&linux_app_cpus) {
-            return Err(ConfigError::Invalid(
-                "linux_app_cpus must be between 1 and 256".into(),
-            ));
-        }
-        let linux_app_tasks = parse_env_num(&env, "RAST_LINUX_APP_TASKS", file.linux_app_tasks)?
-            .unwrap_or(DEFAULT_LINUX_APP_TASKS);
-        if !(16..=131072).contains(&linux_app_tasks) {
-            return Err(ConfigError::Invalid(
-                "linux_app_tasks must be between 16 and 131072".into(),
-            ));
-        }
-        let linux_admission_reserve_mb = parse_env_num(
-            &env,
-            "RAST_LINUX_ADMISSION_RESERVE_MB",
-            file.linux_admission_reserve_mb,
-        )?
-        .unwrap_or(DEFAULT_LINUX_ADMISSION_RESERVE_MB);
-        if !(0..=1_048_576).contains(&linux_admission_reserve_mb) {
-            return Err(ConfigError::Invalid(
-                "linux_admission_reserve_mb must be between 0 and 1048576".into(),
-            ));
-        }
-
-        // ---- Discovered (externally installed) applications --------------
-        let linux_discovery_enabled = parse_env_bool(
-            &env,
-            "RAST_LINUX_DISCOVERY_ENABLED",
-            file.linux_discovery_enabled,
-        )?
-        .unwrap_or(true);
-        let linux_discovery_roots_raw: Vec<String> = match get_str(
-            file.linux_discovery_roots.map(|v| v.join(",")),
-            "RAST_LINUX_DISCOVERY_ROOTS",
-        ) {
-            Some(raw) => raw
-                .split(',')
-                .map(str::trim)
-                .filter(|part| !part.is_empty())
-                .map(str::to_string)
-                .collect(),
-            None => Vec::new(),
-        };
-        let mut linux_discovery_roots = Vec::new();
-        for raw in linux_discovery_roots_raw {
-            let path = PathBuf::from(&raw);
-            if !path.is_absolute() {
-                return Err(ConfigError::Invalid(format!(
-                    "linux_discovery_roots entries must be absolute paths, got {raw:?}"
-                )));
-            }
-            linux_discovery_roots.push(path);
-        }
-        if linux_discovery_roots.len() > 32 {
-            return Err(ConfigError::Invalid(
-                "linux_discovery_roots accepts at most 32 roots".into(),
-            ));
-        }
-        let linux_discovery_system_apps = match get_str(
-            file.linux_discovery_system_apps,
-            "RAST_LINUX_DISCOVERY_SYSTEM_APPS",
-        ) {
-            Some(value) => DiscoverySystemApps::parse(&value).ok_or_else(|| {
-                ConfigError::Invalid(format!(
-                    "linux_discovery_system_apps must be one of approval, auto, hidden (got '{value}')"
-                ))
-            })?,
-            None => DiscoverySystemApps::Approval,
-        };
-        let linux_discovery_interval_seconds = parse_env_num(
-            &env,
-            "RAST_LINUX_DISCOVERY_INTERVAL_SECONDS",
-            file.linux_discovery_interval_seconds,
-        )?
-        .unwrap_or(DEFAULT_LINUX_DISCOVERY_INTERVAL_SECONDS)
-        .clamp(0, 7 * 24 * 60 * 60);
-
-        // ---- Native session runtime profile and display backend ----------
-        let linux_profile = match get_str(
-            file.linux_profile.map(|v| v.to_string()),
-            "RAST_LINUX_PROFILE",
-        ) {
-            Some(value) => LinuxProfile::parse(&value).ok_or_else(|| {
-                ConfigError::Invalid(format!(
-                    "linux_profile must be one of responsive, balanced, media, quality (got '{value}')"
-                ))
-            })?,
-            None => LinuxProfile::Balanced,
-        };
-        fn optional_percent(
-            env: &impl Fn(&str) -> Option<String>,
-            key: &str,
-            file: Option<u32>,
-            name: &str,
-            allow_zero: bool,
-        ) -> Result<Option<u8>, ConfigError> {
-            let Some(value) = parse_env_num(env, key, file)? else {
-                return Ok(None);
-            };
-            let min = if allow_zero { 0 } else { 1 };
-            if !(min..=100).contains(&value) {
-                return Err(ConfigError::Invalid(format!(
-                    "{name} must be between {min} and 100"
-                )));
-            }
-            Ok(Some(value as u8))
-        }
-        let linux_quality = optional_percent(
-            &env,
-            "RAST_LINUX_QUALITY",
-            file.linux_quality,
-            "linux_quality",
-            false,
-        )?;
-        let linux_min_quality = optional_percent(
-            &env,
-            "RAST_LINUX_MIN_QUALITY",
-            file.linux_min_quality,
-            "linux_min_quality",
-            false,
-        )?;
-        let linux_speed = optional_percent(
-            &env,
-            "RAST_LINUX_SPEED",
-            file.linux_speed,
-            "linux_speed",
-            false,
-        )?;
-        let linux_min_speed = optional_percent(
-            &env,
-            "RAST_LINUX_MIN_SPEED",
-            file.linux_min_speed,
-            "linux_min_speed",
-            false,
-        )?;
-        let linux_video_scaling = optional_percent(
-            &env,
-            "RAST_LINUX_VIDEO_SCALING",
-            file.linux_video_scaling,
-            "linux_video_scaling",
-            true,
-        )?;
-        let linux_av_sync = parse_env_bool(&env, "RAST_LINUX_AV_SYNC", file.linux_av_sync)?;
-        let linux_encoding = get_str(file.linux_encoding, "RAST_LINUX_ENCODING")
-            .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| !value.is_empty() && value != "auto");
-        if let Some(encoding) = &linux_encoding {
-            const ALLOWED: &[&str] = &["h264", "vp8", "vp9", "webp", "jpeg", "png", "rgb", "avif"];
-            if !ALLOWED.contains(&encoding.as_str()) {
-                return Err(ConfigError::Invalid(format!(
-                    "linux_encoding must be one of {} (got '{encoding}')",
-                    ALLOWED.join(", ")
-                )));
-            }
-        }
-        let linux_display_backend = match get_str(
-            file.linux_display_backend.map(|v| v.to_string()),
-            "RAST_LINUX_DISPLAY_BACKEND",
-        ) {
-            Some(value) => LinuxDisplayBackend::parse(&value).ok_or_else(|| {
-                ConfigError::Invalid(format!(
-                    "linux_display_backend must be one of auto, software, gpu, custom (got '{value}')"
-                ))
-            })?,
-            None => LinuxDisplayBackend::Auto,
-        };
-        let linux_prewarm = parse_env_bool(&env, "RAST_LINUX_PREWARM", file.linux_prewarm)?
-            .unwrap_or(DEFAULT_LINUX_PREWARM);
-        let linux_xvfb_command = get_str(
-            file.linux_xvfb_command.map(|p| p.display().to_string()),
-            "RAST_LINUX_XVFB_COMMAND",
-        )
-        .map(PathBuf::from)
-        .map(|path| {
-            let text = path.display().to_string();
-            if !path.is_absolute()
-                || text.len() > 512
-                || text.chars().any(|c| c.is_control() || c == '\0')
-            {
-                return Err(ConfigError::Invalid(
-                    "linux_xvfb_command must be an absolute path without control characters".into(),
-                ));
-            }
-            Ok(path)
-        })
-        .transpose()?;
-        if !(0..=1_048_576).contains(&linux_admission_reserve_mb) {
-            return Err(ConfigError::Invalid(
-                "linux_admission_reserve_mb must be between 0 and 1048576".into(),
-            ));
-        }
-
-        let terminal_path_extra: Vec<String> = get_str(
-            file.terminal_path_extra.map(|v| v.join(":")),
-            "RAST_TERMINAL_PATH_EXTRA",
-        )
-        .map(|raw| {
-            raw.split(':')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-        if terminal_path_extra.len() > 16
-            || terminal_path_extra.iter().any(|dir| {
-                !dir.starts_with('/')
-                    || dir.len() > 256
-                    || dir.split('/').any(|part| part == "..")
-                    || dir.chars().any(|c| c.is_control() || c == ':')
-            })
-        {
-            return Err(ConfigError::Invalid(
-                "terminal_path_extra must be at most 16 absolute directories without '..'".into(),
-            ));
-        }
-        let terminal_admin_account =
-            get_str(file.terminal_admin_account, "RAST_TERMINAL_ADMIN_ACCOUNT")
-                .map(|name| name.trim().to_string())
-                .filter(|name| !name.is_empty() && name != "root");
-        if terminal_admin_account.as_ref().is_some_and(|name| {
-            name.len() > 32
-                || name.starts_with('-')
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-        }) {
-            return Err(ConfigError::Invalid(
-                "terminal_admin_account must be a Linux account name".into(),
-            ));
-        }
-        let terminal = TerminalConfig {
-            admin_account: terminal_admin_account,
-            path_extra: terminal_path_extra,
-            enabled: parse_env_bool(&env, "RAST_TERMINAL_ENABLED", file.terminal_enabled)?
-                .unwrap_or(true),
-            admin_root: parse_env_bool(&env, "RAST_TERMINAL_ADMIN_ROOT", file.terminal_admin_root)?
-                .unwrap_or(true),
-            max_sessions: parse_env_num(
-                &env,
-                "RAST_TERMINAL_MAX_SESSIONS",
-                file.terminal_max_sessions,
-            )?
-            .unwrap_or(8)
-            .clamp(1, 64),
-            grace_seconds: parse_env_num(
-                &env,
-                "RAST_TERMINAL_GRACE_SECONDS",
-                file.terminal_grace_seconds,
-            )?
-            .unwrap_or(30)
-            .clamp(0, 300),
-            idle_minutes: parse_env_num(
-                &env,
-                "RAST_TERMINAL_IDLE_MINUTES",
-                file.terminal_idle_minutes,
-            )?
-            .unwrap_or(1440)
-            .clamp(0, 10_080),
-            memory_mb: parse_env_num(&env, "RAST_TERMINAL_MEMORY_MB", file.terminal_memory_mb)?
-                .unwrap_or(1024)
-                .clamp(64, 1_048_576),
-            cpus: parse_env_num(&env, "RAST_TERMINAL_CPUS", file.terminal_cpus)?
-                .unwrap_or(2)
-                .clamp(1, 256),
-            tasks: parse_env_num(&env, "RAST_TERMINAL_TASKS", file.terminal_tasks)?
-                .unwrap_or(512)
-                .clamp(16, 65_536),
-        };
-
         Ok(Self {
             bind,
             public_url,
@@ -1059,11 +373,9 @@ impl Config {
             db_max_connections,
             worker_socket,
             docker_enabled,
-            linux_apps_enabled,
             default_quota_bytes,
             secure_cookies,
             job_concurrency,
-            files_root_enabled,
             setup_token_required,
             trust_forwarded_headers,
             packages_catalog_url,
@@ -1072,34 +384,6 @@ impl Config {
             packages_github_token,
             packages_shell_path,
             packages_system_wide,
-            native_enabled,
-            native_helper_socket,
-            linux_xpra_bin,
-            linux_uid_base,
-            linux_idle_minutes,
-            linux_session_memory_mb,
-            linux_session_cpus,
-            linux_session_tasks,
-            linux_app_memory_mb,
-            linux_app_cpus,
-            linux_app_tasks,
-            linux_admission_reserve_mb,
-            linux_discovery_enabled,
-            linux_discovery_roots,
-            linux_discovery_system_apps,
-            linux_discovery_interval_seconds,
-            linux_profile,
-            linux_quality,
-            linux_min_quality,
-            linux_speed,
-            linux_min_speed,
-            linux_video_scaling,
-            linux_av_sync,
-            linux_encoding,
-            linux_display_backend,
-            linux_xvfb_command,
-            linux_prewarm,
-            terminal,
             loaded_from,
         })
     }
@@ -1116,31 +400,6 @@ impl Config {
     /// App Center root: `<data_dir>/packages`.
     pub fn packages_dir(&self) -> PathBuf {
         self.data_dir.join("packages")
-    }
-    /// Linux app storage: `<data_dir>/linux-apps` (staging, managed installs,
-    /// per-user profiles, migration backups).
-    pub fn linux_apps_dir(&self) -> PathBuf {
-        self.data_dir.join("linux-apps")
-    }
-    /// Managed native application directories.
-    pub fn linux_app_install_dir(&self) -> PathBuf {
-        self.linux_apps_dir().join("apps")
-    }
-    /// Per-user application profiles (settings, sign-ins).
-    pub fn linux_profiles_dir(&self) -> PathBuf {
-        self.linux_apps_dir().join("profiles")
-    }
-    /// Unprivileged Linux identities' homes.
-    pub fn linux_users_dir(&self) -> PathBuf {
-        self.data_dir.join("linux-users")
-    }
-    /// Uploads and staging area for native installs.
-    pub fn linux_staging_dir(&self) -> PathBuf {
-        self.linux_apps_dir().join("staging")
-    }
-    /// Docker -> native migration backups.
-    pub fn linux_migration_dir(&self) -> PathBuf {
-        self.linux_apps_dir().join("migrations")
     }
     pub fn secret_path(&self) -> PathBuf {
         self.data_dir.join("secret.key")
@@ -1176,14 +435,7 @@ impl Config {
         // Center shell PATH, others keep the traverse bit (no listing, no
         // reading): resetting it would hide every installed runtime from
         // other users until the next `rast packages path sync`.
-        // App identities must be able to traverse the data directory to reach
-        // their managed trees (linux-apps/linux-users), exactly like package
-        // runtimes need it with packages_shell_path.
-        let traverse = if self.packages_shell_path || self.native_enabled {
-            0o001
-        } else {
-            0
-        };
+        let traverse = if self.packages_shell_path { 0o001 } else { 0 };
         let _ = std::fs::set_permissions(
             &self.data_dir,
             std::fs::Permissions::from_mode(0o750 | traverse),
@@ -1301,7 +553,6 @@ pub fn to_toml_example(cfg: &Config) -> String {
         db_max_connections: u32,
         worker_socket: String,
         docker_enabled: bool,
-        linux_apps_enabled: bool,
         default_quota_bytes: u64,
         secure_cookies: bool,
         job_concurrency: usize,
@@ -1327,7 +578,6 @@ pub fn to_toml_example(cfg: &Config) -> String {
         db_max_connections: cfg.db_max_connections,
         worker_socket: cfg.worker_socket.display().to_string(),
         docker_enabled: cfg.docker_enabled,
-        linux_apps_enabled: cfg.linux_apps_enabled,
         default_quota_bytes: cfg.default_quota_bytes,
         secure_cookies: cfg.secure_cookies,
         job_concurrency: cfg.job_concurrency,
@@ -1361,54 +611,6 @@ mod tests {
         assert_eq!(cfg.storage_dir, PathBuf::from(DEFAULT_STORAGE_DIR));
         assert!(!cfg.secure_cookies);
         assert!(!cfg.docker_enabled);
-        assert!(cfg.linux_apps_enabled);
-    }
-
-    #[test]
-    fn terminal_admin_root_is_on_by_default_and_configurable() {
-        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
-        assert!(cfg.terminal.enabled);
-        assert!(cfg.terminal.admin_root);
-        let file = FileConfig::from_toml_str("terminal_admin_root = false").unwrap();
-        let cfg = Config::from_parts(None, file, no_env).unwrap();
-        assert!(!cfg.terminal.admin_root);
-        let env = |k: &str| match k {
-            "RAST_TERMINAL_ADMIN_ROOT" => Some("false".into()),
-            _ => None,
-        };
-        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
-        assert!(!cfg.terminal.admin_root);
-    }
-
-    #[test]
-    fn terminal_path_extra_takes_absolute_directories_only() {
-        let no_env = |_: &str| None;
-        let file = FileConfig {
-            terminal_path_extra: Some(vec!["/home/ada/.local/bin".into()]),
-            ..FileConfig::default()
-        };
-        let cfg = Config::from_parts(None, file, no_env).unwrap();
-        assert_eq!(cfg.terminal.path_extra, vec!["/home/ada/.local/bin"]);
-        let env = |k: &str| match k {
-            "RAST_TERMINAL_PATH_EXTRA" => Some("/opt/a/bin:/opt/b/bin".into()),
-            _ => None,
-        };
-        let cfg = Config::from_parts(None, FileConfig::default(), env).unwrap();
-        assert_eq!(cfg.terminal.path_extra, vec!["/opt/a/bin", "/opt/b/bin"]);
-        for bad in ["bin", "/home/ada/../root/bin"] {
-            let file = FileConfig {
-                terminal_path_extra: Some(vec![bad.into()]),
-                ..FileConfig::default()
-            };
-            assert!(Config::from_parts(None, file, no_env).is_err());
-        }
-    }
-
-    #[test]
-    fn linux_apps_can_be_quarantined() {
-        let file = FileConfig::from_toml_str("linux_apps_enabled = false").unwrap();
-        let cfg = Config::from_parts(None, file, no_env).unwrap();
-        assert!(!cfg.linux_apps_enabled);
     }
 
     #[test]
@@ -1433,9 +635,6 @@ mod tests {
     fn ensure_dirs_keeps_the_traverse_bit_for_the_package_shell_path() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        // Pin the native backend off: on a host with Xpra installed the
-        // native-enabled default would add the same traverse bit and make this
-        // test depend on the machine.
         let config = |shell: bool, system_wide: bool| {
             Config::from_parts(
                 None,
@@ -1444,7 +643,6 @@ mod tests {
                     storage_dir: Some(dir.path().join("storage")),
                     packages_shell_path: Some(shell),
                     packages_system_wide: Some(system_wide),
-                    native_enabled: Some(false),
                     ..Default::default()
                 },
                 no_env,
@@ -1473,32 +671,6 @@ mod tests {
             .iter()
             .any(|w| w.contains("packages_system_wide")));
         assert!(!config(true, false).packages_links_enabled());
-    }
-
-    #[test]
-    fn ensure_dirs_adds_the_traverse_bit_when_native_apps_are_enabled() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::from_parts(
-            None,
-            FileConfig {
-                data_dir: Some(dir.path().join("data")),
-                storage_dir: Some(dir.path().join("storage")),
-                packages_shell_path: Some(false),
-                native_enabled: Some(true),
-                ..Default::default()
-            },
-            no_env,
-        )
-        .unwrap();
-        cfg.ensure_dirs().unwrap();
-        // App identities must traverse the data directory to reach profiles.
-        let mode = std::fs::metadata(dir.path().join("data"))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o751);
     }
 
     #[test]
@@ -1554,146 +726,5 @@ mod tests {
         );
         assert_eq!(parsed.packages_check_interval_minutes, Some(360));
         assert!(!text.contains("packages_github_token"));
-    }
-}
-
-#[cfg(test)]
-mod native_runtime_config_tests {
-    use super::*;
-
-    fn no_env(_: &str) -> Option<String> {
-        None
-    }
-
-    #[test]
-    fn native_runtime_defaults_keep_the_historical_behaviour() {
-        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
-        assert_eq!(cfg.linux_profile, LinuxProfile::Balanced);
-        assert_eq!(cfg.linux_display_backend, LinuxDisplayBackend::Auto);
-        assert_eq!(cfg.linux_quality, None);
-        assert_eq!(cfg.linux_speed, None);
-        assert_eq!(cfg.linux_encoding, None);
-        assert_eq!(cfg.linux_av_sync, None);
-        assert_eq!(cfg.linux_xvfb_command, None);
-    }
-
-    #[test]
-    fn prewarm_is_off_by_default_and_parsed_from_file_and_env() {
-        let cfg = Config::from_parts(None, FileConfig::default(), no_env).unwrap();
-        assert!(!cfg.linux_prewarm);
-        let file = FileConfig::from_toml_str("linux_prewarm = true").unwrap();
-        assert!(
-            Config::from_parts(None, file, no_env)
-                .unwrap()
-                .linux_prewarm
-        );
-        let env = |key: &str| (key == "RAST_LINUX_PREWARM").then(|| "true".to_string());
-        assert!(
-            Config::from_parts(None, FileConfig::default(), env)
-                .unwrap()
-                .linux_prewarm
-        );
-    }
-
-    #[test]
-    fn native_runtime_profile_and_overrides_parse() {
-        let file = FileConfig::from_toml_str(
-            r#"
-            linux_profile = "responsive"
-            linux_quality = 42
-            linux_min_quality = 20
-            linux_speed = 80
-            linux_min_speed = 60
-            linux_video_scaling = 0
-            linux_av_sync = false
-            linux_encoding = "WEBP"
-            linux_display_backend = "software"
-            "#,
-        )
-        .unwrap();
-        let cfg = Config::from_parts(None, file, no_env).unwrap();
-        assert_eq!(cfg.linux_profile, LinuxProfile::Responsive);
-        assert_eq!(cfg.linux_quality, Some(42));
-        assert_eq!(cfg.linux_min_quality, Some(20));
-        assert_eq!(cfg.linux_speed, Some(80));
-        assert_eq!(cfg.linux_min_speed, Some(60));
-        assert_eq!(cfg.linux_video_scaling, Some(0));
-        assert_eq!(cfg.linux_av_sync, Some(false));
-        assert_eq!(cfg.linux_encoding.as_deref(), Some("webp"));
-        assert_eq!(cfg.linux_display_backend, LinuxDisplayBackend::Software);
-    }
-
-    #[test]
-    fn invalid_native_runtime_values_are_rejected() {
-        for bad in [
-            "linux_profile = \"turbo\"",
-            "linux_quality = 0",
-            "linux_quality = 101",
-            "linux_min_quality = 101",
-            "linux_speed = 0",
-            "linux_min_speed = 101",
-            "linux_video_scaling = 101",
-            "linux_encoding = \"h265\"",
-            "linux_display_backend = \"vulkan\"",
-            "linux_xvfb_command = \"relative/script.sh\"",
-        ] {
-            let file = FileConfig::from_toml_str(bad).expect("toml parses");
-            assert!(
-                Config::from_parts(None, file, no_env).is_err(),
-                "expected an error for {bad}"
-            );
-        }
-        // 0 is valid for video scaling (disable automatic downscaling).
-        let cfg = Config::from_parts(
-            None,
-            FileConfig::from_toml_str("linux_video_scaling = 0").unwrap(),
-            no_env,
-        )
-        .unwrap();
-        assert_eq!(cfg.linux_video_scaling, Some(0));
-    }
-
-    #[test]
-    fn native_runtime_env_overrides_file() {
-        let file = FileConfig::from_toml_str("linux_profile = \"quality\"").unwrap();
-        let env = |k: &str| match k {
-            "RAST_LINUX_PROFILE" => Some("media".to_string()),
-            "RAST_LINUX_QUALITY" => Some("55".to_string()),
-            _ => None,
-        };
-        let cfg = Config::from_parts(None, file, env).unwrap();
-        assert_eq!(cfg.linux_profile, LinuxProfile::Media);
-        assert_eq!(cfg.linux_quality, Some(55));
-    }
-
-    #[test]
-    fn display_backend_aliases_parse() {
-        assert_eq!(
-            LinuxDisplayBackend::parse("XVFB"),
-            Some(LinuxDisplayBackend::Software)
-        );
-        assert_eq!(
-            LinuxDisplayBackend::parse("nvidia-xorg"),
-            Some(LinuxDisplayBackend::Custom)
-        );
-        assert_eq!(
-            LinuxDisplayBackend::parse("GPU"),
-            Some(LinuxDisplayBackend::Gpu)
-        );
-        assert_eq!(
-            Config::from_parts(
-                None,
-                FileConfig::from_toml_str("linux_display_backend = \"gpu\"").unwrap(),
-                no_env
-            )
-            .unwrap()
-            .linux_display_backend,
-            LinuxDisplayBackend::Gpu
-        );
-        assert_eq!(
-            LinuxProfile::parse(" Quality "),
-            Some(LinuxProfile::Quality)
-        );
-        assert_eq!(LinuxProfile::as_str(LinuxProfile::Balanced), "balanced");
     }
 }

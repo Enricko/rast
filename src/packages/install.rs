@@ -22,7 +22,6 @@
 
 use std::{
     fs, io,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
     time::{Duration, Instant},
@@ -33,7 +32,7 @@ use walkdir::WalkDir;
 
 use super::{
     archive,
-    manifest::{self, Artifact, Manifest},
+    manifest::{Artifact, Manifest},
     net::{self, OriginPolicy},
     sandbox,
 };
@@ -291,14 +290,13 @@ fn install_staged(
     untrusted: bool,
     reporter: &mut dyn Reporter,
 ) -> Result<Installed, String> {
-    // Never fill the disk: every archive must fit with room to spare.
-    let total_size = artifact.total_size();
+    // Never fill the disk: the download must fit with room to spare.
     let free = available_bytes(stage);
     if let Some(free) = free {
-        if free < total_size.saturating_add(DISK_RESERVE) {
+        if free < artifact.size.saturating_add(DISK_RESERVE) {
             return Err(format!(
                 "not enough free disk space: the download needs {} and {} must stay free ({} available)",
-                human(total_size),
+                human(artifact.size),
                 human(DISK_RESERVE),
                 human(free)
             ));
@@ -309,146 +307,72 @@ fn install_staged(
     if reporter.cancelled() {
         return Err("cancelled".into());
     }
-    // 1./2. Download each archive with origin checks (size and SHA-256 must
-    // match the pin), then extract it into the shared staging root with path
-    // and link validation. Multi-component runtimes (Rust) merge several
-    // archives into one standalone prefix.
+    // 1. Download with origin checks; size and SHA-256 must match the pin.
+    let download = stage.join("artifact.tar.gz");
+    reporter.phase(0, artifact.size, "Downloading");
+    let flag = reporter.cancel_flag();
+    {
+        let mut last = Instant::now() - Duration::from_secs(1);
+        let mut progress = |done: u64, total: u64| {
+            if last.elapsed() >= Duration::from_millis(300) || done == total {
+                last = Instant::now();
+                reporter.phase(
+                    done,
+                    total,
+                    &format!("Downloading {} of {}", human(done), human(total)),
+                );
+            }
+        };
+        let cancelled = || flag.load(std::sync::atomic::Ordering::Relaxed);
+        net::download_verified(
+            &artifact.url,
+            policy,
+            &download,
+            artifact.size,
+            &artifact.sha256,
+            &mut progress,
+            &cancelled,
+        )?;
+    }
+    if reporter.cancelled() {
+        return Err("cancelled".into());
+    }
+    reporter.phase(artifact.size, artifact.size, "Verified SHA-256 and size");
+
+    // 2. Extract into a fresh directory with path and link validation.
     let root = stage.join("root");
     fs::create_dir(&root).map_err(|e| format!("cannot create staging root: {e}"))?;
-    let flag = reporter.cancel_flag();
-    let cancelled = || flag.load(std::sync::atomic::Ordering::Relaxed);
-    let parts = artifact.archives();
-    let count = parts.len();
-    let mut stats = archive::ExtractStats::default();
-    let mut downloaded = 0u64;
-    for (index, part) in parts.iter().enumerate() {
-        if reporter.cancelled() {
-            return Err("cancelled".into());
-        }
-        let label = if count == 1 {
-            "archive".to_string()
-        } else {
-            format!("component {}/{count}", index + 1)
-        };
-        let download = stage.join(format!("artifact-{index}.{}", part.format));
-        reporter.phase(
-            downloaded,
-            total_size,
-            &format!(
-                "Downloading {label} ({} of {})",
-                human(downloaded),
-                human(total_size)
-            ),
-        );
-        let base = downloaded;
-        {
-            let mut last = Instant::now() - Duration::from_secs(1);
-            let mut progress = |done: u64, total: u64| {
-                if last.elapsed() >= Duration::from_millis(300) || done == total {
-                    last = Instant::now();
-                    let overall = base + done;
-                    reporter.phase(
-                        overall,
-                        total_size,
-                        &format!(
-                            "Downloading {label} ({} of {})",
-                            human(overall),
-                            human(total_size)
-                        ),
-                    );
-                }
-            };
-            net::download_verified(
-                part.url,
-                policy,
-                &download,
-                part.size,
-                part.sha256,
-                &mut progress,
-                &cancelled,
-            )?;
-        }
-        downloaded += part.size;
-        reporter.phase(downloaded, total_size, "Verified SHA-256 and size");
-        if reporter.cancelled() {
-            return Err("cancelled".into());
-        }
-        let room = available_bytes(stage)
-            .map(|free| free.saturating_sub(DISK_RESERVE))
-            .unwrap_or(u64::MAX);
-        // A phar artifact is one verified single file (Composer): write it
-        // into the prefix, never execute it. Everything else is extracted.
-        if part.format == "phar" {
-            let phar = artifact.phar.as_ref().ok_or_else(|| {
-                "an artifact with format \"phar\" needs a phar destination path".to_string()
-            })?;
-            install_phar(&root, &download, &phar.path)?;
-            stats.files += 1;
-        } else {
-            let files_before = stats.files;
-            let part_stats = archive::extract_archive(
-                &download,
-                &root,
-                part.format,
-                part.strip_components,
-                room,
-                &mut |s| {
-                    reporter.phase(
-                        0,
-                        0,
-                        &format!("Extracting {label} ({} files)", files_before + s.files),
-                    )
-                },
-                &cancelled,
-            )?;
-            stats.files += part_stats.files;
-            stats.dirs += part_stats.dirs;
-            stats.links += part_stats.links;
-            stats.bytes += part_stats.bytes;
-            let _ = fs::remove_file(&download);
-        }
-    }
+    let room = available_bytes(stage)
+        .map(|free| free.saturating_sub(DISK_RESERVE))
+        .unwrap_or(u64::MAX);
+    let stats = archive::extract_tar_gz(
+        &download,
+        &root,
+        artifact.strip_components,
+        room,
+        &mut |s| reporter.phase(0, 0, &format!("Extracting ({} files)", s.files)),
+        &|| flag.load(std::sync::atomic::Ordering::Relaxed),
+    )?;
+    let _ = fs::remove_file(&download);
 
-    // 3. A phar artifact's executables are generated `bin/` wrappers that run
-    // the verified phar with the PHP interpreter found on PATH. They are
-    // written from fixed text (nothing from the manifest is shell-expanded).
-    if let Some(phar) = artifact.phar.as_ref() {
-        write_phar_wrappers(&root, &manifest.runtime.executables, &phar.path)?;
-    }
-
-    // 4. Executables must exist inside the package and be executable.
+    // 3. Executables must exist inside the package and be executable.
     reporter.phase(0, 0, "Checking executables");
     for exe in &manifest.runtime.executables {
         archive::executable_inside(&root, &exe.path)
             .map_err(|e| format!("executable {}: {e}", exe.name))?;
     }
-    // 5. Version checks in the staging location.
+    // 4. Version checks in the staging location.
     if reporter.cancelled() {
         return Err("cancelled".into());
     }
     let home = stage.join("home");
     fs::create_dir_all(&home).ok();
-    run_checks(manifest, &root, &home, untrusted, Some(layout))?;
+    run_checks(manifest, &root, &home, untrusted)?;
     if reporter.cancelled() {
         return Err("cancelled".into());
     }
 
-    // 6. Record what was installed, then move into place. `sha256` stays the
-    // primary archive digest the database records; component digests are
-    // kept for diagnostics.
-    let archives: Vec<serde_json::Value> = artifact
-        .archives()
-        .iter()
-        .map(|part| {
-            serde_json::json!({
-                "name": part.name,
-                "url": part.url,
-                "sha256": part.sha256,
-                "size": part.size,
-                "format": part.format,
-            })
-        })
-        .collect();
+    // 5. Record what was installed, then move into place.
     let marker = serde_json::json!({
         "id": manifest.id,
         "version": manifest.version,
@@ -456,7 +380,6 @@ fn install_staged(
         "target": artifact.target,
         "sha256": artifact.sha256,
         "url": artifact.url,
-        "archives": archives,
         "installedAt": crate::db::now_ms(),
         "files": stats.files,
     });
@@ -487,8 +410,8 @@ fn install_staged(
         }
         return Err(format!("cannot move the version into place: {e}"));
     }
-    // 7. Check again from the final location (relocation must not break it).
-    let checks = match run_checks(manifest, &target, &home, untrusted, Some(layout)) {
+    // 6. Check again from the final location (relocation must not break it).
+    let checks = match run_checks(manifest, &target, &home, untrusted) {
         Ok(checks) => checks,
         Err(e) => {
             let failed = layout
@@ -510,135 +433,18 @@ fn install_staged(
     })
 }
 
-/// Write a verified single-file phar into a fresh staging root with mode
-/// 0644. The installer never executes it; the version checks only run the
-/// generated `bin/` wrapper (with the PHP on `PATH`).
-pub fn install_phar(root: &Path, download: &Path, path: &str) -> Result<(), String> {
-    if !manifest::is_phar_path(path) {
-        return Err(format!(
-            "phar.path {path:?} must be a relative path of [A-Za-z0-9._+-] components"
-        ));
-    }
-    let parts: Vec<&str> = path.split('/').collect();
-    let mut parent = root.to_path_buf();
-    for part in &parts[..parts.len() - 1] {
-        parent.push(part);
-        match fs::symlink_metadata(&parent) {
-            Ok(meta) if meta.is_dir() => {}
-            Ok(_) => return Err(format!("phar.path {path:?} is below a file")),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                fs::create_dir(&parent)
-                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-                fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).ok();
-            }
-            Err(e) => return Err(format!("cannot inspect {}: {e}", parent.display())),
-        }
-    }
-    let dest = root.join(path);
-    if dest.exists() || dest.is_symlink() {
-        return Err(format!("phar.path {path:?} already exists in the package"));
-    }
-    fs::rename(download, &dest).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
-    fs::set_permissions(&dest, fs::Permissions::from_mode(0o644))
-        .map_err(|e| format!("cannot set permissions on {}: {e}", dest.display()))?;
-    Ok(())
-}
-
-/// Generate the `bin/` wrappers of a phar package. The script is fixed text
-/// plus the validated phar path, resolved relative to the wrapper's own
-/// location so it keeps working after the staging tree is moved into place:
-///
-/// ```text
-/// #!/bin/sh
-/// root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
-/// exec php "$root/<phar path>" "$@"
-/// ```
-pub fn write_phar_wrappers(
-    root: &Path,
-    executables: &[manifest::Executable],
-    phar_path: &str,
-) -> Result<(), String> {
-    if !manifest::is_phar_path(phar_path) {
-        return Err(format!(
-            "phar.path {phar_path:?} must be a relative path of [A-Za-z0-9._+-] components"
-        ));
-    }
-    let bin = root.join("bin");
-    fs::create_dir_all(&bin).map_err(|e| format!("cannot create {}: {e}", bin.display()))?;
-    for exe in executables {
-        // The wrapper derives the prefix from `bin/..`; anything else could
-        // point outside the package.
-        if !manifest::is_wrapper_path(&exe.path) {
-            return Err(format!(
-                "executable {} of a phar package must be a wrapper in bin/",
-                exe.name
-            ));
-        }
-        if exe.path == phar_path {
-            return Err(format!(
-                "executable {} would overwrite the phar file",
-                exe.name
-            ));
-        }
-        let body = format!(
-            "#!/bin/sh\n\
-             # Generated by RAST: runs the verified phar with the PHP on PATH.\n\
-             root=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd) || exit 1\n\
-             exec php \"$root/{phar_path}\" \"$@\"\n"
-        );
-        let wrapper = root.join(&exe.path);
-        fs::write(&wrapper, body)
-            .map_err(|e| format!("cannot write {}: {e}", wrapper.display()))?;
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot set permissions on {}: {e}", wrapper.display()))?;
-    }
-    Ok(())
-}
-
 /// Run every declared check: no shell, cleared environment, timeout, and the
 /// confinement described in [`sandbox`] (process group, seccomp, Landlock).
 /// `untrusted` (imported packages) makes Landlock mandatory.
-///
-/// With `layout`, a package from the official catalog also finds the runtimes
-/// already installed by App Center, ahead of the system's: a tool that runs
-/// on another runtime (Composer on PHP) is checked with the interpreter it
-/// will really use. Imported packages never see them.
 pub fn run_checks(
     manifest: &Manifest,
     root: &Path,
     home: &Path,
     untrusted: bool,
-    layout: Option<&Layout>,
 ) -> Result<Vec<CheckResult>, String> {
     let mut results = Vec::new();
     let bin_path = root.join("bin");
-    let layout = layout.filter(|_| !untrusted);
-    let peers: Vec<PathBuf> = layout
-        .map(|layout| vec![layout.bin_dir(), layout.runtimes()])
-        .unwrap_or_default();
-    let path = match layout {
-        Some(layout) => format!(
-            "{}:{}:/usr/local/bin:/usr/bin:/bin",
-            bin_path.display(),
-            layout.bin_dir().display()
-        ),
-        None => format!("{}:/usr/local/bin:/usr/bin:/bin", bin_path.display()),
-    };
-    let confinement = sandbox::Confinement::with_peers(root, home, untrusted, &peers)?;
-    // Runtime env hints (JAVA_HOME, DOTNET_ROOT, …) apply to the checks too;
-    // {root} is the staging or final prefix. They are set before the fixed
-    // entries, so a hint can never replace PATH/HOME/TMPDIR.
-    let hinted: Vec<(String, String)> = manifest
-        .runtime
-        .env
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.clone(),
-                value.replace("{root}", &root.display().to_string()),
-            )
-        })
-        .collect();
+    let confinement = sandbox::Confinement::new(root, home, untrusted)?;
     for check in &manifest.runtime.checks {
         let exe = manifest
             .executable(&check.executable)
@@ -657,8 +463,10 @@ pub fn run_checks(
                 .args(&check.args)
                 .current_dir(root)
                 .env_clear()
-                .envs(hinted.iter().map(|(name, value)| (name, value)))
-                .env("PATH", &path)
+                .env(
+                    "PATH",
+                    format!("{}:/usr/local/bin:/usr/bin:/bin", bin_path.display()),
+                )
                 .env("HOME", home)
                 .env("LANG", "C.UTF-8")
                 .env("TMPDIR", home)
@@ -886,23 +694,10 @@ mod tests {
         archive::extract_tar_gz(&archive_path, &root, 1, u64::MAX, &mut |_| {}, &|| false).unwrap();
         let home = dir.path().join("home");
         fs::create_dir(&home).unwrap();
-        let ok = run_checks(
-            &manifest_for("1.0.0", "demo 1.0.0"),
-            &root,
-            &home,
-            false,
-            None,
-        )
-        .unwrap();
+        let ok = run_checks(&manifest_for("1.0.0", "demo 1.0.0"), &root, &home, false).unwrap();
         assert_eq!(ok[0].output, "demo 1.0.0");
-        let err = run_checks(
-            &manifest_for("1.0.0", "demo 2.0.0"),
-            &root,
-            &home,
-            false,
-            None,
-        )
-        .unwrap_err();
+        let err =
+            run_checks(&manifest_for("1.0.0", "demo 2.0.0"), &root, &home, false).unwrap_err();
         assert!(err.contains("expected it to contain"), "{err}");
     }
 
@@ -948,7 +743,6 @@ mod tests {
         let policy = OriginPolicy {
             hosts: vec![],
             allow_file: true,
-            ..Default::default()
         };
         let mut quiet = Quiet(Default::default());
         let m = manifest_for("1.0.0", "demo 1.0.0");
@@ -987,8 +781,7 @@ mod tests {
         assert!(err.contains("expected it to contain"), "{err}");
         let home = dir.path().join("home");
         fs::create_dir_all(&home).unwrap();
-        let still =
-            run_checks(&m, &layout.version_dir("demo", "1.0.0"), &home, false, None).unwrap();
+        let still = run_checks(&m, &layout.version_dir("demo", "1.0.0"), &home, false).unwrap();
         assert_eq!(still[0].output, "demo 1.0.0");
 
         // Cancellation stops the job without leaving a version behind.
@@ -1097,7 +890,6 @@ mod tests {
         let policy = OriginPolicy {
             hosts: vec![],
             allow_file: true,
-            ..Default::default()
         };
         let mut quiet = Quiet(Default::default());
         let installed =
@@ -1151,69 +943,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
-    fn runtime_env_hints_apply_to_checks() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("root");
-        fs::create_dir_all(root.join("bin")).unwrap();
-        let demo = root.join("bin/demo");
-        fs::write(&demo, "#!/bin/sh\necho \"demo 1.0.0 $DEMO_HOME\"\n").unwrap();
-        fs::set_permissions(&demo, fs::Permissions::from_mode(0o755)).unwrap();
-        let mut v = crate::packages::manifest::tests::sample();
-        v["id"] = "demo".into();
-        v["version"] = "1.0.0".into();
-        v["runtime"] = serde_json::json!({
-            "executables": [{"name": "demo", "path": "bin/demo"}],
-            "checks": [{"executable": "demo", "args": [], "expect": "demo 1.0.0"}],
-            "env": {"DEMO_HOME": "{root}"},
-            "pathDirs": ["bin"]
-        });
-        let m = crate::packages::manifest::parse(&serde_json::to_vec(&v).unwrap()).unwrap();
-        let home = dir.path().join("home");
-        fs::create_dir_all(&home).unwrap();
-        let checks = run_checks(&m, &root, &home, false, None).unwrap();
-        assert_eq!(checks[0].output, format!("demo 1.0.0 {}", root.display()));
-    }
-
-    /// A tool that runs on another runtime (Composer on PHP) is checked with
-    /// the runtime App Center installed, which lives outside its own tree.
-    #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
-    fn checks_find_the_runtimes_app_center_installed() {
-        let dir = tempfile::tempdir().unwrap();
-        let layout = Layout::new(dir.path().join("packages"));
-        layout.ensure().unwrap();
-        // An installed interpreter, linked into the shared bin directory. The
-        // name exists nowhere on the system PATH.
-        let interpreter = layout.version_dir("interp", "1.0.0").join("bin");
-        fs::create_dir_all(&interpreter).unwrap();
-        let program = interpreter.join("rast-test-interp");
-        fs::write(&program, "#!/bin/sh\necho \"demo 1.0.0\"\n").unwrap();
-        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::create_dir_all(layout.bin_dir()).unwrap();
-        std::os::unix::fs::symlink(&program, layout.bin_dir().join("rast-test-interp")).unwrap();
-        // The tool: a wrapper that runs on that interpreter.
-        let root = dir.path().join("tool");
-        fs::create_dir_all(root.join("bin")).unwrap();
-        let wrapper = root.join("bin/demo");
-        fs::write(&wrapper, "#!/bin/sh\nexec rast-test-interp \"$@\"\n").unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-        let home = dir.path().join("home");
-        fs::create_dir(&home).unwrap();
-        let manifest = manifest_for("1.0.0", "demo 1.0.0");
-
-        let ok = run_checks(&manifest, &root, &home, false, Some(&layout)).unwrap();
-        assert_eq!(ok[0].output, "demo 1.0.0");
-        // Without the installed runtimes the interpreter is not found, and an
-        // imported (untrusted) package never gets them.
-        assert!(run_checks(&manifest, &root, &home, false, None).is_err());
-        if sandbox::landlock_abi().is_some() {
-            assert!(run_checks(&manifest, &root, &home, true, Some(&layout)).is_err());
-        }
-    }
-
-    #[test]
     fn replaced_trees_survive_a_restart_until_settled() {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path().join("packages"));
@@ -1260,265 +989,5 @@ mod tests {
         settle_replacement(&target, &again, true).unwrap();
         assert!(!again.exists());
         assert_eq!(read_marker(&target).unwrap().sha256, "old");
-    }
-
-    fn file_bytes(path: &Path) -> (String, u64) {
-        use sha2::{Digest, Sha256};
-        let bytes = fs::read(path).unwrap();
-        (hex::encode(Sha256::digest(&bytes)), bytes.len() as u64)
-    }
-
-    /// A zip artifact like Bun/Deno: bin/demo inside `demo/`, strip 1.
-    #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
-    fn zip_artifacts_install_like_tar_gz() {
-        use crate::packages::archive::tests::{build_zip, ZipItem};
-        let dir = tempfile::tempdir().unwrap();
-        let archive = dir.path().join("demo.zip");
-        build_zip(
-            &archive,
-            &[
-                ZipItem::Dir("demo/"),
-                ZipItem::Dir("demo/bin/"),
-                ZipItem::File("demo/bin/demo", &script("1.0.0"), 0o755),
-            ],
-        );
-        let (sha256, size) = file_bytes(&archive);
-        let mut artifact = crate::packages::manifest::tests::sample_artifact();
-        artifact.url = format!("file://{}", archive.display());
-        artifact.sha256 = sha256;
-        artifact.size = size;
-        artifact.format = "zip".into();
-        artifact.strip_components = 1;
-        let layout = Layout::new(dir.path().join("packages"));
-        let policy = OriginPolicy {
-            hosts: vec![],
-            allow_file: true,
-            ..Default::default()
-        };
-        let mut quiet = Quiet(Default::default());
-        let m = manifest_for("1.0.0", "demo 1.0.0");
-        let installed =
-            install_version(&layout, &m, &artifact, &policy, "zip", false, &mut quiet).unwrap();
-        assert_eq!(installed.checks[0].output, "demo 1.0.0");
-        assert!(installed.path.join("bin/demo").is_file());
-    }
-
-    /// Rust: several archives merge into one prefix before the executables are
-    /// checked (the primary archive alone would not contain `lib/`).
-    #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
-    fn multi_archive_install_merges_components_into_one_prefix() {
-        use crate::packages::manifest::ArchivePart;
-        let dir = tempfile::tempdir().unwrap();
-        let primary_path = dir.path().join("rustc.tar.gz");
-        build(
-            &primary_path,
-            &[
-                Item::Dir("rustc-1.100.0/"),
-                Item::Dir("rustc-1.100.0/rustc/"),
-                Item::Dir("rustc-1.100.0/rustc/bin/"),
-                Item::File("rustc-1.100.0/rustc/bin/demo", &script("1.0.0"), 0o755),
-            ],
-        );
-        let secondary_path = dir.path().join("std.tar.gz");
-        build(
-            &secondary_path,
-            &[
-                Item::Dir("rust-std-1.100.0/"),
-                Item::Dir("rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/"),
-                Item::Dir("rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/lib/"),
-                Item::File(
-                    "rust-std-1.100.0/rust-std-x86_64-unknown-linux-gnu/lib/std.rlib",
-                    b"rlib",
-                    0o644,
-                ),
-            ],
-        );
-        let (primary_sha, primary_size) = file_bytes(&primary_path);
-        let (secondary_sha, secondary_size) = file_bytes(&secondary_path);
-        let mut artifact = crate::packages::manifest::tests::sample_artifact();
-        artifact.url = format!("file://{}", primary_path.display());
-        artifact.sha256 = primary_sha;
-        artifact.size = primary_size;
-        artifact.strip_components = 2;
-        artifact.archives = vec![ArchivePart {
-            name: Some("rust-std".into()),
-            url: format!("file://{}", secondary_path.display()),
-            sha256: secondary_sha,
-            size: secondary_size,
-            format: "tar.gz".into(),
-            strip_components: 2,
-        }];
-        assert_eq!(artifact.archives().len(), 2);
-        let layout = Layout::new(dir.path().join("packages"));
-        let policy = OriginPolicy {
-            hosts: vec![],
-            allow_file: true,
-            ..Default::default()
-        };
-        let mut quiet = Quiet(Default::default());
-        let m = manifest_for("1.0.0", "demo 1.0.0");
-        let installed =
-            install_version(&layout, &m, &artifact, &policy, "multi", false, &mut quiet).unwrap();
-        assert!(installed.path.join("bin/demo").is_file());
-        assert!(installed.path.join("lib/std.rlib").is_file());
-        assert_eq!(installed.checks[0].output, "demo 1.0.0");
-        let marker = read_marker(&installed.path).unwrap();
-        assert_eq!(marker.sha256, artifact.sha256);
-        let raw: serde_json::Value =
-            serde_json::from_slice(&fs::read(installed.path.join(INSTALL_MARKER)).unwrap())
-                .unwrap();
-        assert_eq!(raw["archives"].as_array().unwrap().len(), 2);
-        assert_eq!(raw["archives"][1]["name"], "rust-std");
-
-        // A component digest mismatch fails before anything is installed.
-        let mut tampered = artifact.clone();
-        tampered.archives[0].sha256 = "0".repeat(64);
-        let err =
-            install_version(&layout, &m, &tampered, &policy, "bad", false, &mut quiet).unwrap_err();
-        assert!(err.contains("SHA-256"), "{err}");
-    }
-
-    fn mode(path: &Path) -> u32 {
-        fs::metadata(path).unwrap().permissions().mode() & 0o777
-    }
-
-    /// A phar manifest (Composer shape); tests override the artifact URL.
-    fn phar_manifest(sha256: &str, size: u64) -> Manifest {
-        let mut v = crate::packages::manifest::tests::sample();
-        v["id"] = "composer".into();
-        v["version"] = "2.11.2".into();
-        v["runtime"] = serde_json::json!({
-            "executables": [{"name": "composer", "path": "bin/composer"}],
-            "checks": [{
-                "executable": "composer",
-                "args": ["--version"],
-                "expect": "Composer version 2.11.2"
-            }]
-        });
-        v["artifacts"][0]["format"] = "phar".into();
-        v["artifacts"][0]["stripComponents"] = 0.into();
-        v["artifacts"][0]["url"] =
-            "https://github.com/composer/composer/releases/download/2.11.2/composer.phar".into();
-        v["artifacts"][0]["sha256"] = sha256.into();
-        v["artifacts"][0]["size"] = size.into();
-        v["artifacts"][0]["phar"] = serde_json::json!({"path": "composer.phar"});
-        crate::packages::manifest::parse(&serde_json::to_vec(&v).unwrap()).unwrap()
-    }
-
-    /// The phar itself is written read-only (never executable) and the
-    /// generated wrapper runs `php "<prefix>/composer.phar" "$@"` — proven
-    /// with a fake `php` on PATH, so the test needs no PHP.
-    #[test]
-    fn phar_files_are_read_only_and_wrappers_exec_the_php_on_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join("root");
-        fs::create_dir(&root).unwrap();
-        let download = dir.path().join("composer.phar");
-        fs::write(&download, b"<?php echo 'hi';\n").unwrap();
-        install_phar(&root, &download, "composer.phar").unwrap();
-        let phar = root.join("composer.phar");
-        assert!(
-            !download.exists(),
-            "the verified download is moved into place"
-        );
-        assert_eq!(mode(&phar), 0o644, "the phar must never be executable");
-
-        let exe = manifest::Executable {
-            name: "composer".into(),
-            path: "bin/composer".into(),
-        };
-        write_phar_wrappers(&root, std::slice::from_ref(&exe), "composer.phar").unwrap();
-        let wrapper = root.join("bin/composer");
-        assert_eq!(mode(&wrapper), 0o755);
-        let text = fs::read_to_string(&wrapper).unwrap();
-        assert!(text.starts_with("#!/bin/sh\n"), "{text}");
-        assert!(
-            text.contains("exec php \"$root/composer.phar\" \"$@\""),
-            "{text}"
-        );
-
-        let fake = dir.path().join("fakebin");
-        fs::create_dir(&fake).unwrap();
-        let php = fake.join("php");
-        fs::write(&php, "#!/bin/sh\nprintf 'fake-php %s\\n' \"$*\"\n").unwrap();
-        fs::set_permissions(&php, fs::Permissions::from_mode(0o755)).unwrap();
-        let output = Command::new("/bin/sh")
-            .arg(&wrapper)
-            .arg("--version")
-            .env("PATH", format!("{}:/usr/bin:/bin", fake.display()))
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("fake-php"), "{stdout}");
-        assert!(
-            stdout.contains(&format!("{}/composer.phar --version", root.display())),
-            "{stdout}"
-        );
-
-        // Unsafe destinations and wrappers that could leave the prefix are
-        // refused by the installer even if a manifest skipped validation.
-        for bad in [
-            "../composer.phar",
-            "/etc/composer.phar",
-            "composer$(id).phar",
-            "composer`id`.phar",
-            "a\\b.phar",
-        ] {
-            let copy = dir.path().join("copy.phar");
-            fs::write(&copy, b"x").unwrap();
-            assert!(install_phar(&root, &copy, bad).is_err(), "{bad} accepted");
-        }
-        for bad in ["composer", "bin/x/y", "bin/composer.phar/.."] {
-            let bad_exe = manifest::Executable {
-                name: "composer".into(),
-                path: bad.into(),
-            };
-            assert!(
-                write_phar_wrappers(&root, std::slice::from_ref(&bad_exe), "composer.phar")
-                    .is_err(),
-                "{bad} accepted"
-            );
-        }
-    }
-
-    /// End to end: a verified phar is installed and its generated wrapper is
-    /// run by the version check with the PHP found on PATH.
-    #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
-    fn phar_artifacts_install_and_their_check_runs() {
-        if Command::new("php").arg("--version").output().is_err() {
-            eprintln!("skipping: no PHP on PATH");
-            return;
-        }
-        use sha2::{Digest, Sha256};
-        let dir = tempfile::tempdir().unwrap();
-        let body = b"<?php echo \"Composer version 2.11.2\\n\";\n";
-        let source = dir.path().join("composer.phar");
-        fs::write(&source, body).unwrap();
-        let sha256 = hex::encode(Sha256::digest(body));
-        let manifest = phar_manifest(&sha256, body.len() as u64);
-        let mut artifact = manifest.artifacts[0].clone();
-        artifact.url = format!("file://{}", source.display());
-        let layout = Layout::new(dir.path().join("packages"));
-        let policy = OriginPolicy {
-            hosts: vec![],
-            allow_file: true,
-            ..Default::default()
-        };
-        let mut quiet = Quiet(Default::default());
-        let installed = install_version(
-            &layout, &manifest, &artifact, &policy, "phar", false, &mut quiet,
-        )
-        .unwrap();
-        assert_eq!(installed.checks[0].output, "Composer version 2.11.2");
-        assert_eq!(mode(&installed.path.join("composer.phar")), 0o644);
-        let wrapper = installed.path.join("bin/composer");
-        assert_eq!(mode(&wrapper), 0o755);
-        assert!(fs::read_to_string(&wrapper)
-            .unwrap()
-            .contains("exec php \"$root/composer.phar\" \"$@\""));
     }
 }

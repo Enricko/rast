@@ -185,33 +185,6 @@ impl FromRequestParts<AppState> for AdminUser {
     }
 }
 
-/// Super-administrator-only extractor (the server owner level).
-#[derive(Debug, Clone)]
-pub struct SuperAdminUser(pub AuthUser);
-
-impl FromRequestParts<AppState> for SuperAdminUser {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut axum::http::request::Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let user = AuthUser::from_request_parts(parts, state).await?;
-        require_super_admin(&state.db, &user).await?;
-        Ok(SuperAdminUser(user))
-    }
-}
-
-/// The account must be an active super administrator right now (read from
-/// the database, so a demotion takes effect on the next request).
-pub async fn require_super_admin(pool: &sqlx::SqlitePool, user: &AuthUser) -> Result<(), AppError> {
-    if user.is_admin() && crate::users::is_super_admin(pool, user.id).await {
-        Ok(())
-    } else {
-        Err(AppError::Forbidden("super administrator role required"))
-    }
-}
-
 /// Parse one cookie value from the `Cookie` header.
 pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let header = headers.get(header::COOKIE)?.to_str().ok()?;
@@ -317,11 +290,9 @@ mod tests {
             db_max_connections: 2,
             worker_socket: "/tmp/worker.sock".into(),
             docker_enabled: false,
-            linux_apps_enabled: true,
             default_quota_bytes: 0,
             secure_cookies: false,
             job_concurrency: 1,
-            files_root_enabled: true,
             setup_token_required: true,
             trust_forwarded_headers: true,
             packages_catalog_url: crate::packages::catalog::OFFICIAL_CATALOG_URL.into(),
@@ -330,34 +301,6 @@ mod tests {
             packages_github_token: None,
             packages_shell_path: false,
             packages_system_wide: false,
-            native_enabled: false,
-            native_helper_socket: "/run/rast/native.sock".into(),
-            linux_xpra_bin: "/usr/bin/xpra".into(),
-            linux_uid_base: crate::config::DEFAULT_LINUX_UID_BASE,
-            linux_idle_minutes: crate::config::DEFAULT_LINUX_IDLE_MINUTES,
-            linux_session_memory_mb: crate::config::DEFAULT_LINUX_SESSION_MEMORY_MB,
-            linux_session_cpus: 2,
-            linux_session_tasks: 2048,
-            linux_app_memory_mb: crate::config::DEFAULT_LINUX_APP_MEMORY_MB,
-            linux_app_cpus: crate::config::DEFAULT_LINUX_APP_CPUS,
-            linux_app_tasks: crate::config::DEFAULT_LINUX_APP_TASKS,
-            linux_admission_reserve_mb: crate::config::DEFAULT_LINUX_ADMISSION_RESERVE_MB,
-            linux_discovery_enabled: true,
-            linux_discovery_roots: Vec::new(),
-            linux_discovery_system_apps: crate::config::DiscoverySystemApps::Approval,
-            linux_discovery_interval_seconds: 0,
-            linux_profile: crate::config::LinuxProfile::Balanced,
-            linux_quality: None,
-            linux_min_quality: None,
-            linux_speed: None,
-            linux_min_speed: None,
-            linux_video_scaling: None,
-            linux_av_sync: None,
-            linux_encoding: None,
-            linux_display_backend: crate::config::LinuxDisplayBackend::Auto,
-            linux_xvfb_command: None,
-            linux_prewarm: false,
-            terminal: crate::config::TerminalConfig::default(),
             loaded_from: None,
         }
     }

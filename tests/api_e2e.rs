@@ -65,20 +65,7 @@ impl TestServer {
             None,
         )
         .await
-        .map(|user| user.id)
         .expect("create user");
-        // Like the first-run setup and `rast user create-admin`: an
-        // administrator created on the server itself is a super administrator.
-        if role == Role::Admin {
-            let id = users::find_by_username(&self.state.db, username)
-                .await
-                .expect("lookup")
-                .expect("created user")
-                .id;
-            users::set_super_admin(&self.state.db, id, true)
-                .await
-                .expect("super admin");
-        }
     }
 
     async fn request(
@@ -1658,8 +1645,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-        "0004 to 0014 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+        "0004 to 0009 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -2326,8 +2313,8 @@ async fn effective_access_matches_api_decisions_for_every_account() {
     assert_eq!(page["folders"][0]["level"], "write");
     assert_eq!(
         page["apps"].as_array().unwrap().len(),
-        8,
-        "apps always complete (the Terminal is a first-class app)"
+        7,
+        "apps always complete"
     );
     let (_, _, none_only) = server
         .request(
@@ -2359,194 +2346,6 @@ async fn effective_access_matches_api_decisions_for_every_account() {
         .map(|f| f["shareName"].as_str().unwrap())
         .collect();
     assert_eq!(names, vec!["Projects"]);
-}
-
-/// Three roles: a super administrator manages everyone; a plain
-/// administrator manages ordinary users only and never reaches the root file
-/// system.
-#[tokio::test]
-async fn super_administrators_manage_administrators() {
-    let server = TestServer::start().await;
-    server
-        .create_user("owner", ADMIN_PASSWORD, Role::Admin)
-        .await;
-    server.create_user("alice", USER_PASSWORD, Role::User).await;
-    let owner = server.login("owner", ADMIN_PASSWORD).await;
-
-    // The owner is a super administrator and says so.
-    let (_, _, me) = server
-        .request("GET", "/api/auth/me", None, owner.headers())
-        .await;
-    assert_eq!(me["user"]["role"], "admin");
-    assert_eq!(me["user"]["superAdmin"], true);
-
-    // A plain administrator, created by the owner.
-    let (status, _, body) = server
-        .request(
-            "POST",
-            "/api/users",
-            Some(json!({"username": "helper", "password": USER_PASSWORD, "role": "admin"})),
-            owner.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["role"], "admin");
-    assert_eq!(body["superAdmin"], false);
-    let helper_id = body["id"].as_i64().unwrap();
-    let helper = server.login("helper", USER_PASSWORD).await;
-
-    // The plain administrator manages ordinary users...
-    let (status, _, body) = server
-        .request(
-            "POST",
-            "/api/users",
-            Some(json!({"username": "bob", "password": USER_PASSWORD})),
-            helper.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let bob_id = body["id"].as_i64().unwrap();
-    let (status, _, body) = server
-        .request(
-            "PATCH",
-            &format!("/api/users/{bob_id}"),
-            Some(json!({"displayName": "Bob", "role": "user"})),
-            helper.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-
-    // ...but cannot make administrators, change roles, or touch one.
-    for (method, path, body) in [
-        (
-            "POST",
-            "/api/users".to_string(),
-            json!({"username": "eve", "password": USER_PASSWORD, "role": "admin"}),
-        ),
-        (
-            "POST",
-            "/api/users".to_string(),
-            json!({"username": "eve", "password": USER_PASSWORD, "role": "superadmin"}),
-        ),
-        (
-            "PATCH",
-            format!("/api/users/{bob_id}"),
-            json!({"role": "admin"}),
-        ),
-        (
-            "PATCH",
-            format!("/api/users/{}", owner.user_id),
-            json!({"displayName": "Owned"}),
-        ),
-        (
-            "POST",
-            format!("/api/users/{}/password", owner.user_id),
-            json!({"password": "Another-Password-123!"}),
-        ),
-        (
-            "DELETE",
-            format!("/api/users/{}/sessions", owner.user_id),
-            json!({}),
-        ),
-        ("DELETE", format!("/api/users/{}", owner.user_id), json!({})),
-    ] {
-        let (status, _, reply) = server
-            .request(method, &path, Some(body), helper.headers_with_csrf())
-            .await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "{method} {path} as a plain administrator: {reply}"
-        );
-    }
-    // Their own profile stays editable.
-    let (status, _, body) = server
-        .request(
-            "PATCH",
-            &format!("/api/users/{helper_id}"),
-            Some(json!({"displayName": "Helper", "role": "admin"})),
-            helper.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-
-    // The root file system: listed for the owner only, refused to the rest
-    // before anything reaches the agent.
-    let (_, _, roots) = server
-        .request("GET", "/api/files/roots", None, owner.headers())
-        .await;
-    assert!(roots
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|root| root["kind"] == "system" && root["path"] == "/@root"));
-    let alice = server.login("alice", USER_PASSWORD).await;
-    for session in [&helper, &alice] {
-        let (_, _, roots) = server
-            .request("GET", "/api/files/roots", None, session.headers())
-            .await;
-        assert!(roots
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|root| root["kind"] != "system"));
-        let (status, _, _) = server
-            .request("GET", "/api/files?path=/@root/etc", None, session.headers())
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        let (status, _, _) = server
-            .request(
-                "POST",
-                "/api/files/delete",
-                Some(json!({"paths": ["/@root/etc/hostname"]})),
-                session.headers_with_csrf(),
-            )
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-    }
-    // One request never spans the root file system and storage.
-    let (status, _, _) = server
-        .request(
-            "POST",
-            "/api/files/copy",
-            Some(json!({"paths": ["/@root/etc/hostname"], "destDir": "/"})),
-            owner.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-
-    // The owner promotes and demotes; the last super administrator stays.
-    let (status, _, body) = server
-        .request(
-            "PATCH",
-            &format!("/api/users/{helper_id}"),
-            Some(json!({"role": "superadmin"})),
-            owner.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["superAdmin"], true);
-    let (status, _, body) = server
-        .request(
-            "PATCH",
-            &format!("/api/users/{}", owner.user_id),
-            Some(json!({"role": "admin"})),
-            helper.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["superAdmin"], false);
-    let (status, _, body) = server
-        .request(
-            "PATCH",
-            &format!("/api/users/{helper_id}"),
-            Some(json!({"role": "admin"})),
-            helper.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(users::is_super_admin(&server.state.db, helper_id).await);
-    assert!(!users::is_super_admin(&server.state.db, owner.user_id).await);
 }
 
 /// F6: a former administrator who created a shared folder must not keep an
@@ -3127,7 +2926,7 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         ),
         (
             "unknown application",
-            json!({"appRules": [{"appId": "no-such-app", "rule": "allow"}]}),
+            json!({"appRules": [{"appId": "terminal", "rule": "allow"}]}),
         ),
         (
             "bad application rule",
@@ -3272,151 +3071,4 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-}
-
-// Linux apps: every signed-in user sees the apps shared with all users (once
-// they have a finished build) and opens their own copy; managing an app stays
-// administrator-only, including who may see it.
-#[tokio::test]
-async fn linux_apps_are_shared_per_user_and_managed_by_admins() {
-    let server = TestServer::start().await;
-    server
-        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
-        .await;
-    server.create_user("alice", USER_PASSWORD, Role::User).await;
-    for (id, visibility, status, build) in [
-        ("everyone", "users", "ready", 1_i64),
-        ("staffonly", "admins", "ready", 1_i64),
-        ("pending", "users", "installing", 0_i64),
-    ] {
-        sqlx::query(
-            "INSERT INTO linux_apps \
-             (id, name, format, file_name, status, build, visibility, created_at, updated_at) \
-             VALUES (?, ?, 'deb', 'app.deb', ?, ?, ?, 1, 1)",
-        )
-        .bind(id)
-        .bind(format!("App {id}"))
-        .bind(status)
-        .bind(build)
-        .bind(visibility)
-        .execute(&server.state.db)
-        .await
-        .expect("seed a Linux app");
-    }
-    let admin = server.login("admin", ADMIN_PASSWORD).await;
-    let alice = server.login("alice", USER_PASSWORD).await;
-
-    let app_ids = |body: &Value| -> Vec<String> {
-        body["apps"]
-            .as_array()
-            .expect("apps array")
-            .iter()
-            .map(|app| app["id"].as_str().expect("app id").to_string())
-            .collect()
-    };
-
-    // Administrators see every app, unfinished and restricted ones included.
-    let (status, _, body) = server
-        .request("GET", "/api/linux-apps", None, admin.headers())
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(app_ids(&body), ["everyone", "pending", "staffonly"]);
-
-    // Everyone else sees only shared apps that finished installing.
-    let (status, _, body) = server
-        .request("GET", "/api/linux-apps", None, alice.headers())
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(app_ids(&body), ["everyone"]);
-
-    // A restricted or unfinished app does not exist for them.
-    for id in ["staffonly", "pending"] {
-        let (status, _, body) = server
-            .request(
-                "GET",
-                &format!("/api/linux-apps/{id}"),
-                None,
-                alice.headers(),
-            )
-            .await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {body}");
-        let (status, _, body) = server
-            .request(
-                "POST",
-                &format!("/api/linux-apps/{id}/open"),
-                Some(json!({})),
-                alice.headers_with_csrf(),
-            )
-            .await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "open {id}: {body}");
-    }
-
-    // Managing apps is administrator-only.
-    for (method, path, body) in [
-        (
-            "POST",
-            "/api/linux-apps/install",
-            Some(json!({"url": "https://example.com/app.deb"})),
-        ),
-        (
-            "PATCH",
-            "/api/linux-apps/everyone",
-            Some(json!({"memoryMb": 1024})),
-        ),
-        ("DELETE", "/api/linux-apps/everyone", None),
-        ("POST", "/api/linux-apps/everyone/check", None),
-        ("POST", "/api/linux-apps/everyone/update", None),
-        (
-            "POST",
-            "/api/linux-apps/everyone/visibility",
-            Some(json!({"visibility": "admins"})),
-        ),
-    ] {
-        let (status, _, body) = server
-            .request(method, path, body, alice.headers_with_csrf())
-            .await;
-        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {body}");
-    }
-
-    // An administrator can take a shared app away from other users…
-    let (status, _, body) = server
-        .request(
-            "POST",
-            "/api/linux-apps/everyone/visibility",
-            Some(json!({"visibility": "admins"})),
-            admin.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["visibility"], "admins");
-    let (_, _, body) = server
-        .request("GET", "/api/linux-apps", None, alice.headers())
-        .await;
-    assert!(app_ids(&body).is_empty(), "{body}");
-
-    // …and give it back.
-    let (status, _, body) = server
-        .request(
-            "POST",
-            "/api/linux-apps/everyone/visibility",
-            Some(json!({"visibility": "users"})),
-            admin.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    let (_, _, body) = server
-        .request("GET", "/api/linux-apps", None, alice.headers())
-        .await;
-    assert_eq!(app_ids(&body), ["everyone"]);
-
-    // Unknown values are refused and leave the app alone.
-    let (status, _, body) = server
-        .request(
-            "POST",
-            "/api/linux-apps/everyone/visibility",
-            Some(json!({"visibility": "everyone"})),
-            admin.headers_with_csrf(),
-        )
-        .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
