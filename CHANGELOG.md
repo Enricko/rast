@@ -13,6 +13,19 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.4] - 2026-11-25
+
 ### Fixed
 
 - **Desktop widgets and icons no longer cover each other** when the browser
@@ -30,17 +43,6 @@ this file by `scripts/changelog-section.sh`.
   (updated whenever the server confirms it, removed on sign-out) and a tiny
   script in the page applies it before the app loads. The first load after
   updating still shows the default once.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.3] - 2026-11-25
 
