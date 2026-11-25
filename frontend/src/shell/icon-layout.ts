@@ -17,6 +17,13 @@ export interface Cell {
 /** How icons fill the grid: down each column (desktop) or along each row (phone). */
 export type FillOrder = "columns" | "rows";
 
+/** Cells covered by widgets, as `cellKey`s: icons are not put there while other cells are free. */
+export type BlockedCells = ReadonlySet<string>;
+
+const NONE: BlockedCells = new Set();
+
+export const cellKey = (cell: Cell): string => `${cell.col},${cell.row}`;
+
 const inGrid = (cell: Cell, grid: Grid): boolean =>
   cell.col >= 0 && cell.row >= 0 && cell.col < grid.cols && cell.row < grid.rows;
 
@@ -33,26 +40,31 @@ export function defaultLayout(ids: string[], grid: Grid, order: FillOrder = "col
   return ids.map((id, index) => ({ id, col: Math.floor(index / rows), row: index % rows }));
 }
 
-/** The first free cell in fill order; null when the grid is full. */
-export function firstFreeCell(layout: DesktopIcon[], grid: Grid, order: FillOrder = "columns"): Cell | null {
+/** The first free cell in fill order (not under a widget); null when there is none. */
+export function firstFreeCell(
+  layout: DesktopIcon[],
+  grid: Grid,
+  order: FillOrder = "columns",
+  blocked: BlockedCells = NONE,
+): Cell | null {
   const outer = order === "rows" ? grid.rows : grid.cols;
   const inner = order === "rows" ? grid.cols : grid.rows;
   for (let a = 0; a < outer; a += 1) {
     for (let b = 0; b < inner; b += 1) {
       const cell = order === "rows" ? { col: b, row: a } : { col: a, row: b };
-      if (!taken(layout, cell)) return cell;
+      if (!taken(layout, cell) && !blocked.has(cellKey(cell))) return cell;
     }
   }
   return null;
 }
 
-/** The free cell closest to `cell` (itself when free); null when the grid is full. */
-export function nearestFreeCell(layout: DesktopIcon[], cell: Cell, grid: Grid): Cell | null {
+/** The free cell (not under a widget) closest to `cell`, itself when free; null when there is none. */
+export function nearestFreeCell(layout: DesktopIcon[], cell: Cell, grid: Grid, blocked: BlockedCells = NONE): Cell | null {
   let best: Cell | null = null;
   let bestDistance = Infinity;
   for (let col = 0; col < grid.cols; col += 1) {
     for (let row = 0; row < grid.rows; row += 1) {
-      if (taken(layout, { col, row })) continue;
+      if (taken(layout, { col, row }) || blocked.has(cellKey({ col, row }))) continue;
       const distance = (col - cell.col) ** 2 + (row - cell.row) ** 2;
       if (distance < bestDistance) {
         best = { col, row };
@@ -68,7 +80,9 @@ export function nearestFreeCell(layout: DesktopIcon[], cell: Cell, grid: Grid): 
  * the account may open now. An icon whose cell is off screen (a smaller
  * window than when it was placed) is shown in a free cell instead: the one it
  * is shown in now (`previous`) while that stays free, so it does not jump
- * around while other icons move.
+ * around while other icons move; else the first free cell, preferring cells
+ * no widget covers (icons have priority, so widgets make room when only
+ * covered cells are left).
  */
 export function displayLayout(
   saved: DesktopIcon[] | null,
@@ -76,6 +90,7 @@ export function displayLayout(
   grid: Grid,
   order: FillOrder = "columns",
   previous: DesktopIcon[] = [],
+  blocked: BlockedCells = NONE,
 ): DesktopIcon[] {
   if (saved === null) return defaultLayout(visible, grid, order);
   const shown = saved.filter((icon) => visible.includes(icon.id));
@@ -84,7 +99,9 @@ export function displayLayout(
     if (inGrid(icon, grid)) continue;
     const hint = previous.find((p) => p.id === icon.id);
     const cell =
-      hint && inGrid(hint, grid) && !taken(placed, hint) ? { col: hint.col, row: hint.row } : firstFreeCell(placed, grid, order);
+      hint && inGrid(hint, grid) && !taken(placed, hint)
+        ? { col: hint.col, row: hint.row }
+        : (firstFreeCell(placed, grid, order, blocked) ?? firstFreeCell(placed, grid, order));
     // No room at all: keep it where it was (the browser clips it).
     placed.push(cell ? { id: icon.id, ...cell } : icon);
   }
@@ -103,9 +120,25 @@ export function moveIcon(layout: DesktopIcon[], id: string, cell: Cell): Desktop
 }
 
 /**
+ * Where an icon dragged (or dropped) at `cell` lands: that cell (an icon
+ * there swaps with it) unless a widget covers it, else the nearest free cell
+ * no widget covers, else null (nowhere: it stays where it was).
+ */
+export function dropTarget(layout: DesktopIcon[], id: string, cell: Cell, grid: Grid, blocked: BlockedCells = NONE): Cell | null {
+  if (!inGrid(cell, grid)) return null;
+  if (!blocked.has(cellKey(cell))) return cell;
+  return nearestFreeCell(
+    layout.filter((icon) => icon.id !== id),
+    cell,
+    grid,
+    blocked,
+  );
+}
+
+/**
  * Put an app on the desktop: at `cell` (or the free cell nearest to it), or
- * in the first free cell. An app already on the desktop moves there. Returns
- * null when there is no room.
+ * in the first free cell, avoiding cells widgets cover while others are free.
+ * An app already on the desktop moves there. Returns null when there is no room.
  */
 export function placeIcon(
   layout: DesktopIcon[],
@@ -113,11 +146,16 @@ export function placeIcon(
   cell: Cell | null,
   grid: Grid,
   order: FillOrder = "columns",
+  blocked: BlockedCells = NONE,
 ): DesktopIcon[] | null {
   if (layout.some((icon) => icon.id === id)) {
-    return cell && inGrid(cell, grid) ? moveIcon(layout, id, cell) : layout;
+    const target = cell ? dropTarget(layout, id, cell, grid, blocked) : null;
+    return target ? moveIcon(layout, id, target) : layout;
   }
-  const target = cell && inGrid(cell, grid) ? nearestFreeCell(layout, cell, grid) : firstFreeCell(layout, grid, order);
+  const target =
+    cell && inGrid(cell, grid)
+      ? (nearestFreeCell(layout, cell, grid, blocked) ?? nearestFreeCell(layout, cell, grid))
+      : (firstFreeCell(layout, grid, order, blocked) ?? firstFreeCell(layout, grid, order));
   if (!target) return null;
   return [...layout, { id, ...target }];
 }

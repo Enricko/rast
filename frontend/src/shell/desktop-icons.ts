@@ -5,7 +5,9 @@
 //   * "Remove from desktop" (menu or Delete) hides the shortcut, with Undo;
 //   * arrows move the selection, Alt+arrow moves the selected icon one cell;
 //   * an app dragged out of the Applications folder lands on the cell under
-//     the pointer.
+//     the pointer;
+//   * icons never go under a widget: a drop there lands in the nearest free
+//     cell (the marker shows where), see shell/desktop-space.ts.
 //
 // The layout is saved with the account's appearance (`desktopIcons`). Until
 // the account arranges anything it is null: every app it may open, in order.
@@ -17,14 +19,19 @@ import { h } from "../core/dom";
 import { appIconSvg } from "../core/icons";
 import type { ToastCenter } from "../core/toast";
 import { contextMenu, type ContextMenuEntry } from "../core/ui";
+import { coveredCells, translate, type Rect } from "./desktop-space";
 import {
+  cellKey,
   displayLayout,
+  dropTarget,
   layoutForSave,
   moveIcon,
+  nearestFreeCell,
   neighbour,
   placeIcon,
   readingOrder,
   removeIcon,
+  type BlockedCells,
   type Cell,
   type FillOrder,
   type Grid,
@@ -38,7 +45,7 @@ const CLICK_GUARD_MS = 350;
 const DEFAULT_CELL = { w: 104, h: 108 };
 /** Space between neighbouring icons (their hover backgrounds never touch). */
 const CELL_GAP = 4;
-const NOT_DROPPABLE = ".window, .taskbar, .menu-panel, .context-menu, .modal-backdrop, .desktop-widget, .toast";
+const NOT_DROPPABLE = ".window, .taskbar, .menu-panel, .context-menu, .modal-backdrop, .toast";
 
 export interface DesktopIconsOptions {
   /** The icon layer (`.desktop-icons`), sized to the free desktop area. */
@@ -54,6 +61,10 @@ export interface DesktopIconsOptions {
   menuItems(app: AppDefinition): ContextMenuEntry[];
   /** An icon was dropped on the taskbar. */
   dropOnTaskbar(appId: string): void;
+  /** Widgets on the desktop, in the desktop's pixels (the layers' shared offset parent). */
+  widgetRects?(): Rect[];
+  /** The icons were laid out again (other desktop items make room for them). */
+  onLayout?(): void;
 }
 
 export interface DesktopIcons {
@@ -67,6 +78,8 @@ export interface DesktopIcons {
   reset(): void;
   /** True once the account arranged its own desktop. */
   isCustomized(): boolean;
+  /** The cells icons use now, in the desktop's pixels. */
+  occupiedRects(): Rect[];
   dispose(): void;
 }
 
@@ -130,6 +143,23 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     el.style.height = `${Math.round(cell.h - CELL_GAP)}px`;
   }
 
+  /** Cells a widget covers: icons go elsewhere while other cells are free. */
+  function blockedCells(): BlockedCells {
+    const rects = options.widgetRects?.() ?? [];
+    if (rects.length === 0) return new Set();
+    const local = rects.map((rect) => translate(rect, -layer.offsetLeft, -layer.offsetTop));
+    return coveredCells(local, cell, grid);
+  }
+
+  function occupiedRects(): Rect[] {
+    return shown.map((icon) => ({
+      left: layer.offsetLeft + icon.col * cell.w,
+      top: layer.offsetTop + icon.row * cell.h,
+      width: cell.w,
+      height: cell.h,
+    }));
+  }
+
   /** The cell under an on-screen (client) point. */
   function cellAt(clientX: number, clientY: number): Cell {
     const rect = layer.getBoundingClientRect();
@@ -186,6 +216,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
       grid,
       order,
       shown,
+      blockedCells(),
     );
     const nextSignature = JSON.stringify([shown, grid, cell]);
     if (!force && nextSignature === signature) return;
@@ -206,6 +237,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     }
     updateSelection();
     if (focusedId) buttons.get(focusedId)?.focus();
+    options.onLayout?.();
   }
 
   function iconButton(app: AppDefinition): HTMLButtonElement {
@@ -280,7 +312,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
   function add(id: string, at: Cell | null = null): boolean {
     if (!appById(id)) return false;
     render();
-    const next = placeIcon(shown, id, at, grid, order);
+    const next = placeIcon(shown, id, at, grid, order, blockedCells());
     if (!next) {
       toast.warning("The desktop is full. Remove an icon to make room.");
       return false;
@@ -332,7 +364,10 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     const grabX = (startX - layerRect.left) / f - icon.col * cell.w;
     const grabY = (startY - layerRect.top) / f - icon.row * cell.h;
     let dragging = false;
-    let target: Cell = { col: icon.col, row: icon.row };
+    const home: Cell = { col: icon.col, row: icon.row };
+    let target: Cell = home;
+    // Widgets do not move while an icon is dragged.
+    const blocked = blockedCells();
     let longPress: number | undefined;
     try {
       button.setPointerCapture(event.pointerId);
@@ -361,11 +396,13 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
         hideMarker();
         return;
       }
-      // The cell under the dragged icon's centre.
-      target = cellAtLocal(
+      // The cell under the dragged icon's centre, or the nearest free one
+      // when a widget covers it.
+      const under = cellAtLocal(
         (moveEvent.clientX - layerRect.left) / f - grabX + cell.w / 2,
         (moveEvent.clientY - layerRect.top) / f - grabY + cell.h / 2,
       );
+      target = dropTarget(shown, app.id, under, grid, blocked) ?? home;
       showMarker(target);
     };
     const onUp = (upEvent: PointerEvent): void => {
@@ -467,6 +504,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
       if (event.altKey) {
         const target = { col: icon.col + dc, row: icon.row + dr };
         if (target.col < 0 || target.row < 0 || target.col >= grid.cols || target.row >= grid.rows) return;
+        if (blockedCells().has(cellKey(target))) return;
         moveTo(app.id, target);
         return;
       }
@@ -494,7 +532,12 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     }
     event.preventDefault();
     if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-    showMarker(cellAt(event.clientX, event.clientY));
+    // Over a widget: the nearest free cell, where the drop will land.
+    const under = cellAt(event.clientX, event.clientY);
+    const blocked = blockedCells();
+    const landing = blocked.has(cellKey(under)) ? nearestFreeCell(shown, under, grid, blocked) : under;
+    if (landing) showMarker(landing);
+    else hideMarker();
   };
   const onDrop = (event: DragEvent): void => {
     if (!carriesApp(event) || !droppable(event)) return;
@@ -547,6 +590,7 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     remove: (appId) => remove(appId),
     reset,
     isCustomized: () => savedLayout() !== null,
+    occupiedRects,
     dispose() {
       disposed = true;
       press?.end(false);

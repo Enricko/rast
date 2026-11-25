@@ -48,6 +48,16 @@
   transition: none;
 }
 
+/* Where a dragged widget will land: the nearest spot clear of icons and the
+   other widgets (shell/desktop-space.ts). */
+.widget-drop {
+  position: absolute;
+  border-radius: var(--radius-lg);
+  border: 1.5px dashed color-mix(in srgb, var(--accent) 75%, #fff);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  pointer-events: none;
+}
+
 .widget-head {
   display: flex;
   align-items: center;

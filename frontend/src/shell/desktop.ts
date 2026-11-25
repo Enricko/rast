@@ -38,7 +38,7 @@ import { openDisplaySettings } from "./display-settings";
 import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
-import { createWidgetLayer } from "./widgets";
+import { createWidgetLayer, type WidgetLayer } from "./widgets";
 
 const MAX_PINNED = 8;
 const MAX_WINDOWS = 8;
@@ -98,7 +98,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   const appearance = getAppearanceService(deps.api);
   const appearanceSync = getAppearanceSync(deps.api, deps.events);
   // Desktop icons (arranged per account): created before the appearance
-  // subscription below, which refreshes them.
+  // subscription below, which refreshes them. Icons and widgets share the
+  // desktop's free space (shell/desktop-space.ts): icons keep their cells and
+  // widgets make room; neither is ever dropped on the other.
+  let widgetLayerRef: WidgetLayer | null = null;
   const desktopIcons = createDesktopIcons({
     layer: iconLayer,
     desktop,
@@ -108,6 +111,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     openApp: (appId) => openApp(appId),
     menuItems: iconContextItems,
     dropOnTaskbar: (appId) => pinApp(appId),
+    widgetRects: () => widgetLayerRef?.rects() ?? [],
+    onLayout: () => widgetLayerRef?.arrange(),
   });
   disposers.push(() => desktopIcons.dispose());
   const widgets = createWidgetLayer({
@@ -118,7 +123,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     toast,
     isMonitorAllowed: () => isAppAllowed("monitor", store.get().permissions, store.isAdmin()),
     openMonitor: () => openApp("monitor"),
+    iconRects: () => desktopIcons.occupiedRects(),
   });
+  widgetLayerRef = widgets;
   disposers.push(() => widgets.dispose());
   /** Show the pins being saved, else the account's saved pins. */
   function showSavedPins(): void {

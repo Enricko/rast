@@ -16,6 +16,10 @@
 // below windows). A widget's position is stored as fractions of the free area
 // (desktop size minus widget size), so it always stays fully visible when the
 // browser gets smaller. Changes are saved to the account (appearance API).
+// Widgets and icons never cover each other (shell/desktop-space.ts): a widget
+// whose saved place is taken (a smaller window) is shown in the nearest free
+// spot, or hidden until there is room; a dragged widget lands in the nearest
+// free spot, which a dashed outline shows while dragging.
 
 import type { ApiClient } from "../core/api";
 import { ApiError } from "../core/api";
@@ -28,6 +32,7 @@ import type { RealtimeStore } from "../core/realtime";
 import type { ToastCenter } from "../core/toast";
 import type { ComponentHealth, MonitorDisk, MonitorSnapshot } from "../core/types";
 import { modal, sparkline } from "../core/ui";
+import { arrangeWidgets, inflate, nearestFreeSpot, translate, type Point, type Rect, type Size, type WidgetBox } from "./desktop-space";
 
 export interface WidgetDefinition {
   id: WidgetId;
@@ -436,6 +441,8 @@ export interface WidgetLayerOptions {
   toast: ToastCenter;
   isMonitorAllowed: () => boolean;
   openMonitor: () => void;
+  /** Cells the desktop icons use, in the desktop's pixels (the layers' shared offset parent). */
+  iconRects?: () => Rect[];
 }
 
 export interface WidgetLayer {
@@ -446,10 +453,17 @@ export interface WidgetLayer {
   openCatalog(): void;
   /** Re-evaluate access after a permission change. */
   permissionsChanged(): void;
+  /** Lay the widgets out again around the icons (after the icons moved). */
+  arrange(): void;
+  /** Widgets shown now, in the desktop's pixels. */
+  rects(): Rect[];
   dispose(): void;
 }
 
+/** Space kept between two widgets. */
 const LAYER_GAP = 12;
+/** Space kept between a widget and an icon's cell (the cell has its own 2 px). */
+const ICON_MARGIN = 6;
 const KEY_STEP = 24;
 
 export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
@@ -461,6 +475,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   let disposed = false;
   let keySaveTimer: number | undefined;
   let catalogRefresh: (() => void) | null = null;
+  /** Where each widget is shown now (layer pixels); absent = hidden for lack of room. */
+  const shownAt = new Map<WidgetId, Point>();
+  /** Where a dragged widget will land. */
+  const dropMarker = h("div", { class: "widget-drop", ariaHidden: true, hidden: true });
+  layer.prepend(dropMarker);
 
   const offFeed = feed.subscribe(() => {
     for (const card of cards.values()) renderCard(card);
@@ -481,19 +500,71 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     };
   }
 
-  function position(card: Card, widget: DesktopWidget): void {
+  const sizeOf = (card: Card): Size => ({ width: card.el.offsetWidth, height: card.el.offsetHeight });
+  const bounds = (): Size => ({ width: layer.clientWidth, height: layer.clientHeight });
+
+  /** A widget's saved place on this desktop, in layer pixels. */
+  function desiredFor(card: Card, widget: DesktopWidget): Point {
     const area = freeArea(card);
-    card.el.style.left = `${Math.round(widget.x * area.width)}px`;
-    card.el.style.top = `${Math.round(widget.y * area.height)}px`;
+    return { left: Math.round(widget.x * area.width), top: Math.round(widget.y * area.height) };
   }
 
+  /** Icon cells (with their margin) in layer pixels. */
+  function iconObstacles(): Rect[] {
+    const rects = options.iconRects?.() ?? [];
+    return rects.map((rect) => inflate(translate(rect, -layer.offsetLeft, -layer.offsetTop), ICON_MARGIN));
+  }
+
+  /** Everything a widget must keep clear of: icons and the other shown widgets. */
+  function obstaclesFor(id: WidgetId): Rect[] {
+    const out = iconObstacles();
+    for (const [otherId, at] of shownAt) {
+      const other = cards.get(otherId);
+      if (otherId === id || !other) continue;
+      out.push(inflate({ ...at, ...sizeOf(other) }, LAYER_GAP));
+    }
+    return out;
+  }
+
+  function place(card: Card, at: Point | null): void {
+    const hidden = at === null;
+    if (at) {
+      card.el.style.left = `${Math.round(at.left)}px`;
+      card.el.style.top = `${Math.round(at.top)}px`;
+      shownAt.set(card.id, { left: Math.round(at.left), top: Math.round(at.top) });
+    } else {
+      shownAt.delete(card.id);
+    }
+    // Hidden for lack of room: still measurable (visibility), never focusable.
+    card.el.style.visibility = hidden ? "hidden" : "";
+    card.el.inert = hidden;
+    if (hidden) card.el.dataset.noRoom = "true";
+    else delete card.el.dataset.noRoom;
+  }
+
+  /** Lay every widget out around the icons; the widget moved last keeps its place first. */
   function positionAll(): void {
     if (disposed) return;
-    for (const widget of layout) {
+    const boxes: WidgetBox[] = [];
+    for (const widget of [...layout].reverse()) {
       if (widget.id === dragging) continue;
       const card = cards.get(widget.id);
-      if (card) position(card, widget);
+      if (!card) continue;
+      boxes.push({ id: widget.id, size: sizeOf(card), desired: desiredFor(card, widget), current: shownAt.get(widget.id) ?? null });
     }
+    const draggedCard = dragging ? cards.get(dragging) : undefined;
+    const draggedAt = dragging ? shownAt.get(dragging) : undefined;
+    const obstacles = iconObstacles();
+    if (draggedCard && draggedAt) obstacles.push(inflate({ ...draggedAt, ...sizeOf(draggedCard) }, LAYER_GAP));
+    const placed = arrangeWidgets(boxes, bounds(), obstacles, LAYER_GAP);
+    let visibilityChanged = false;
+    for (const [id, at] of placed) {
+      const card = cards.get(id as WidgetId);
+      if (!card) continue;
+      if (shownAt.has(card.id) !== (at !== null)) visibilityChanged = true;
+      place(card, at);
+    }
+    if (visibilityChanged) catalogRefresh?.();
   }
 
   function fractionsFor(card: Card, left: number, top: number): { x: number; y: number } {
@@ -624,13 +695,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const startY = event.clientY;
       const startLeft = card.el.offsetLeft;
       const startTop = card.el.offsetTop;
+      const wasOnTop = layout[layout.length - 1]?.id === card.id;
       dragging = card.id;
       bringToFront(card.id);
       card.el.classList.add("is-dragging");
       card.head.setPointerCapture(event.pointerId);
       const area = freeArea(card);
+      const size = sizeOf(card);
+      const space = bounds();
+      // Icons and the other widgets do not move while this one is dragged.
+      const obstacles = obstaclesFor(card.id);
       let left = startLeft;
       let top = startTop;
+      let landing: Point | null = { left: startLeft, top: startTop };
       // Pointer deltas are on-screen pixels; widgets are placed in desktop pixels.
       const f = displayFactor();
       const move = (moveEvent: PointerEvent): void => {
@@ -638,23 +715,43 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
         top = Math.max(0, Math.min(area.height, startTop + (moveEvent.clientY - startY) / f));
         card.el.style.left = `${Math.round(left)}px`;
         card.el.style.top = `${Math.round(top)}px`;
+        landing = nearestFreeSpot(size, { left: Math.round(left), top: Math.round(top) }, space, obstacles);
+        showDropMarker(landing, size);
       };
       const end = (): void => {
         card.head.removeEventListener("pointermove", move);
         card.head.removeEventListener("pointerup", end);
         card.head.removeEventListener("pointercancel", end);
         card.el.classList.remove("is-dragging");
+        dropMarker.hidden = true;
         dragging = null;
-        const moved = Math.abs(left - startLeft) > 1 || Math.abs(top - startTop) > 1;
-        const { x, y } = fractionsFor(card, left, top);
-        layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
-        position(card, layout.find((widget) => widget.id === card.id)!);
-        if (moved || layout[layout.length - 1]?.id === card.id) persist();
+        // No free spot anywhere near: back to where it was.
+        const at = landing ?? { left: startLeft, top: startTop };
+        const moved = Math.abs(at.left - startLeft) > 1 || Math.abs(at.top - startTop) > 1;
+        place(card, at);
+        if (moved) {
+          const { x, y } = fractionsFor(card, at.left, at.top);
+          layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
+        }
+        if (moved || !wasOnTop) persist();
+        positionAll();
       };
       card.head.addEventListener("pointermove", move);
       card.head.addEventListener("pointerup", end);
       card.head.addEventListener("pointercancel", end);
     });
+  }
+
+  function showDropMarker(at: Point | null, size: Size): void {
+    if (!at) {
+      dropMarker.hidden = true;
+      return;
+    }
+    dropMarker.style.left = `${Math.round(at.left)}px`;
+    dropMarker.style.top = `${Math.round(at.top)}px`;
+    dropMarker.style.width = `${size.width}px`;
+    dropMarker.style.height = `${size.height}px`;
+    dropMarker.hidden = false;
   }
 
   function attachKeys(card: Card): void {
@@ -678,9 +775,12 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const area = freeArea(card);
       const left = Math.max(0, Math.min(area.width, card.el.offsetLeft + move[0]));
       const top = Math.max(0, Math.min(area.height, card.el.offsetTop + move[1]));
-      const { x, y } = fractionsFor(card, left, top);
+      // Up to the next icon or widget, never over it.
+      const at = nearestFreeSpot(sizeOf(card), { left, top }, bounds(), obstaclesFor(card.id));
+      if (!at || (at.left === card.el.offsetLeft && at.top === card.el.offsetTop)) return;
+      place(card, at);
+      const { x, y } = fractionsFor(card, at.left, at.top);
       layout = layout.map((widget) => (widget.id === card.id ? { ...widget, x, y } : widget));
-      position(card, layout.find((widget) => widget.id === card.id)!);
       window.clearTimeout(keySaveTimer);
       keySaveTimer = window.setTimeout(() => persist(), 500);
     });
@@ -696,26 +796,6 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
   }
 
   // ------------------------------------------------------- add / remove
-  /** First free slot in the right-hand column (icons occupy the left). */
-  function defaultPlacement(card: Card): { x: number; y: number } {
-    const area = freeArea(card);
-    const height = card.el.offsetHeight;
-    const width = card.el.offsetWidth;
-    const right = layer.clientWidth - width;
-    const occupied = layout
-      .map((widget) => cards.get(widget.id))
-      .filter((other): other is Card => Boolean(other) && other !== card)
-      .map((other) => ({ top: other.el.offsetTop, bottom: other.el.offsetTop + other.el.offsetHeight, left: other.el.offsetLeft, right: other.el.offsetLeft + other.el.offsetWidth }));
-    const candidates = [0, ...occupied.map((rect) => rect.bottom + LAYER_GAP)].sort((a, b) => a - b);
-    for (const top of candidates) {
-      if (top + height > layer.clientHeight) break;
-      const overlaps = occupied.some((rect) => top < rect.bottom && top + height > rect.top && right < rect.right && right + width > rect.left);
-      if (!overlaps) return fractionsFor(card, right, top);
-    }
-    // Column full: start a second column to the left.
-    return { x: area.width > 0 ? Math.max(0, (right - width - LAYER_GAP) / area.width) : 0, y: 0 };
-  }
-
   function add(id: WidgetId): void {
     if (!appearance.isKnown) {
       toast.error("Your saved desktop could not be loaded yet, so widgets cannot be changed. Try again in a moment.");
@@ -728,10 +808,22 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     layer.appendChild(card.el);
     if (!feed.isRunning) feed.start();
     renderCard(card);
-    const placement = defaultPlacement(card);
-    layout = [...layout, { id, ...placement }];
-    position(card, layout[layout.length - 1]!);
-    card.el.style.visibility = "";
+    // The free spot nearest to the top right (icons fill from the top left).
+    const size = sizeOf(card);
+    const space = bounds();
+    const at = nearestFreeSpot(size, { left: space.width - size.width, top: 0 }, space, obstaclesFor(id));
+    if (!at) {
+      resizeObserver?.unobserve(card.el);
+      card.el.remove();
+      cards.delete(id);
+      if (layout.length === 0) feed.stop();
+      toast.warning(
+        `There is no free space on the desktop for ${definition(id).title}. Move or remove icons or widgets, make the window bigger, or choose a smaller Scale in Display settings.`,
+      );
+      return;
+    }
+    layout = [...layout, { id, ...fractionsFor(card, at.left, at.top) }];
+    place(card, at);
     persist();
     catalogRefresh?.();
   }
@@ -749,7 +841,10 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       card.el.remove();
       cards.delete(id);
     }
+    shownAt.delete(id);
     if (layout.length === 0) feed.stop();
+    // The space it used may fit a widget that had no room.
+    positionAll();
     persist();
     catalogRefresh?.();
     // Keep keyboard users on the desktop rather than losing focus to <body>.
@@ -772,6 +867,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       resizeObserver?.unobserve(card.el);
       card.el.remove();
       cards.delete(id);
+      shownAt.delete(id);
     }
     for (const widget of layout) {
       let card = cards.get(widget.id);
@@ -807,6 +903,7 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       list.replaceChildren(
         ...WIDGET_CATALOG.map((def) => {
           const active = layout.some((widget) => widget.id === def.id);
+          const noRoom = active && cards.has(def.id) && !shownAt.has(def.id) && dragging !== def.id;
           const button = h(
             "button",
             {
@@ -827,8 +924,19 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
             h(
               "span",
               { class: "widget-catalog-text" },
-              h("span", { class: "widget-catalog-title" }, def.title, active ? h("span", { class: "badge" }, "On desktop") : null),
-              h("span", { class: "widget-catalog-detail" }, def.description),
+              h(
+                "span",
+                { class: "widget-catalog-title" },
+                def.title,
+                active ? h("span", { class: noRoom ? "badge warning" : "badge" }, noRoom ? "No room" : "On desktop") : null,
+              ),
+              h(
+                "span",
+                { class: "widget-catalog-detail" },
+                noRoom
+                  ? "Hidden: there is no free space for it on this screen. It comes back when there is room (a bigger window, a smaller Scale, or fewer icons)."
+                  : def.description,
+              ),
             ),
             button,
           );
@@ -874,7 +982,18 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
     if (!resizeObserver) window.removeEventListener("resize", onWindowResize);
     for (const card of cards.values()) card.el.remove();
     cards.clear();
+    shownAt.clear();
+    dropMarker.remove();
   }
 
-  return { sync, showSaved, openCatalog, permissionsChanged, dispose };
+  function rects(): Rect[] {
+    const out: Rect[] = [];
+    for (const [id, at] of shownAt) {
+      const card = cards.get(id);
+      if (card) out.push(translate({ ...at, ...sizeOf(card) }, layer.offsetLeft, layer.offsetTop));
+    }
+    return out;
+  }
+
+  return { sync, showSaved, openCatalog, permissionsChanged, arrange: positionAll, rects, dispose };
 }
