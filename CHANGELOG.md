@@ -13,6 +13,24 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Fixed
+
+- **Desktop widgets and icons no longer cover each other** when the browser
+  window gets smaller (or the Scale bigger). Icons keep their places; a widget
+  whose place is taken moves to the nearest free spot and goes back when there
+  is room again. If there is no free space at all it is hidden until there is,
+  and the Widgets dialog says so ("No room").
+- **Dragging never drops a widget or an icon on top of another.** A dragged
+  widget lands in the nearest free spot (a dashed outline shows where while
+  dragging); an icon dragged onto a widget lands in the nearest free cell. Newly
+  added widgets and apps also go to free space, and adding a widget when there
+  is none explains how to make room.
+- **The loading screen shows your own wallpaper** instead of the default one.
+  The browser keeps a small copy of the signed-in account's saved wallpaper
+  (updated whenever the server confirms it, removed on sign-out) and a tiny
+  script in the page applies it before the app loads. The first load after
+  updating still shows the default once.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

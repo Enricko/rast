@@ -12,6 +12,9 @@
       type="image/svg+xml"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%232785D8'/%3E%3Cpath d='M32 8 52 19.6v24.8L32 56 12 44.4V19.6z' fill='none' stroke='%23FFFFFF' stroke-width='3.4' stroke-linejoin='round'/%3E%3Cpath d='M32 22.4 40.4 27.4v10L32 42.4 23.6 37.4v-10z' fill='%23FFFFFF'/%3E%3C/svg%3E"
     />
+    <!-- The signed-in account's wallpaper for the loading screen (public/boot-splash.js):
+         a tiny blocking script so the first paint already shows it. -->
+    <script src="/boot-splash.js"></script>
     <!-- Critical splash styling is inlined so the boot screen is correct before
          the module/CSS bundle is parsed. Scripts stay external (CSP: script-src 'self'). -->
     <style>
@@ -118,6 +121,14 @@
           background: rgba(255, 255, 255, 0.72);
           border-color: rgba(30, 58, 110, 0.16);
         }
+      }
+      /* The account's own wallpaper (set by boot-splash.js): wins over the
+         defaults above and the bundle's #boot-splash rules (higher specificity). */
+      html[data-boot-wallpaper] #boot-splash {
+        background:
+          linear-gradient(rgba(12, 18, 26, 0.34), rgba(12, 18, 26, 0.34)),
+          var(--boot-wallpaper-image) var(--boot-wallpaper-position) / var(--boot-wallpaper-size) no-repeat,
+          var(--boot-wallpaper-color);
       }
       @media (prefers-reduced-motion: reduce) {
         .boot-logo,

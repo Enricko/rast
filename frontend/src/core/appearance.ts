@@ -306,8 +306,49 @@ export function writeCachedAppearance(userId: number, appearance: Appearance): v
   }
 }
 
+/** What the loading screen shows (public/boot-splash.js reads it before the app loads). */
+export interface SplashWallpaper {
+  image: string | null;
+  color: string;
+  size: string;
+  position: string;
+}
+
+const SPLASH_KEY = "rast.splash.v1";
+
+export function splashWallpaper(appearance: Appearance): SplashWallpaper {
+  const wallpaper = appearance.wallpaper;
+  const image =
+    wallpaper.kind === "upload" && wallpaper.uploadId
+      ? uploadUrl(wallpaper.uploadId)
+      : wallpaper.kind === "builtin"
+        ? builtinUrl(wallpaper.builtinId)
+        : null;
+  return {
+    image,
+    color: wallpaper.color || DEFAULT_APPEARANCE.wallpaper.color,
+    size: fitCss(wallpaper.fit),
+    position: positionCss(wallpaper.position),
+  };
+}
+
+/** Remember the signed-in account's saved wallpaper for the next loading screen. */
+export function writeSplashWallpaper(appearance: Appearance): void {
+  try {
+    window.localStorage.setItem(SPLASH_KEY, JSON.stringify(splashWallpaper(appearance)));
+  } catch {
+    /* storage disabled or full: the default loading screen shows */
+  }
+}
+
 /** Remove this user's cache (also used on sign-out so accounts never share it). */
 export function clearCachedAppearance(userId?: number | null): void {
+  try {
+    // The loading screen belongs to whoever is signed in: never keep it past them.
+    window.localStorage.removeItem(SPLASH_KEY);
+  } catch {
+    /* ignore */
+  }
   try {
     if (typeof userId === "number") {
       window.localStorage.removeItem(cacheKey(userId));
@@ -645,7 +686,10 @@ export class AppearanceService {
     this.current = next;
     this.statusValue = "ready";
     this.lastErrorValue = null;
-    if (this.userId !== null) writeCachedAppearance(this.userId, next);
+    if (this.userId !== null) {
+      writeCachedAppearance(this.userId, next);
+      writeSplashWallpaper(next);
+    }
     if (options.emit !== false) this.emit();
     return next;
   }
