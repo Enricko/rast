@@ -12,6 +12,7 @@
 
 import { APP_DRAG_TYPE, type AppDefinition } from "../core/app";
 import { MAX_DESKTOP_CELL, type AppearanceService, type DesktopIcon } from "../core/appearance";
+import { displayFactor } from "../core/display";
 import { h } from "../core/dom";
 import { appIconSvg } from "../core/icons";
 import type { ToastCenter } from "../core/toast";
@@ -129,10 +130,17 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     el.style.height = `${Math.round(cell.h - CELL_GAP)}px`;
   }
 
+  /** The cell under an on-screen (client) point. */
   function cellAt(clientX: number, clientY: number): Cell {
     const rect = layer.getBoundingClientRect();
-    const col = Math.floor((clientX - rect.left) / cell.w);
-    const row = Math.floor((clientY - rect.top) / cell.h);
+    const f = displayFactor();
+    return cellAtLocal((clientX - rect.left) / f, (clientY - rect.top) / f);
+  }
+
+  /** The cell under a point in the layer's own (desktop) pixels. */
+  function cellAtLocal(x: number, y: number): Cell {
+    const col = Math.floor(x / cell.w);
+    const row = Math.floor(y / cell.h);
     return {
       col: Math.max(0, Math.min(grid.cols - 1, col)),
       row: Math.max(0, Math.min(grid.rows - 1, row)),
@@ -317,9 +325,12 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
     const startX = event.clientX;
     const startY = event.clientY;
     const layerRect = layer.getBoundingClientRect();
+    // Pointer positions are on-screen pixels; the layer is laid out in desktop
+    // pixels (see core/display.ts).
+    const f = displayFactor();
     // Where in its cell the icon was grabbed, so it does not jump to the pointer.
-    const grabX = startX - layerRect.left - icon.col * cell.w;
-    const grabY = startY - layerRect.top - icon.row * cell.h;
+    const grabX = (startX - layerRect.left) / f - icon.col * cell.w;
+    const grabY = (startY - layerRect.top) / f - icon.row * cell.h;
     let dragging = false;
     let target: Cell = { col: icon.col, row: icon.row };
     let longPress: number | undefined;
@@ -331,10 +342,10 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
 
     const onMove = (moveEvent: PointerEvent): void => {
       if (moveEvent.pointerId !== event.pointerId) return;
-      const dx = moveEvent.clientX - startX;
-      const dy = moveEvent.clientY - startY;
+      const dx = (moveEvent.clientX - startX) / f;
+      const dy = (moveEvent.clientY - startY) / f;
       if (!dragging) {
-        if (Math.hypot(dx, dy) < threshold) return;
+        if (Math.hypot(dx, dy) * f < threshold) return;
         window.clearTimeout(longPress);
         dragging = true;
         arranging = true;
@@ -351,7 +362,10 @@ export function createDesktopIcons(options: DesktopIconsOptions): DesktopIcons {
         return;
       }
       // The cell under the dragged icon's centre.
-      target = cellAt(moveEvent.clientX - grabX + cell.w / 2, moveEvent.clientY - grabY + cell.h / 2);
+      target = cellAtLocal(
+        (moveEvent.clientX - layerRect.left) / f - grabX + cell.w / 2,
+        (moveEvent.clientY - layerRect.top) / f - grabY + cell.h / 2,
+      );
       showMarker(target);
     };
     const onUp = (upEvent: PointerEvent): void => {

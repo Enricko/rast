@@ -1609,7 +1609,7 @@ pre.code {
 }
 
 .personalize-dialog .modal-body {
-  max-height: min(64vh, 640px);
+  max-height: min(calc(64 * var(--vh)), 640px);
 }
 
 /* The save bar sticks to the bottom edge of the scrolling body itself (its
@@ -1628,7 +1628,7 @@ pre.code {
 
 /* --------------------------------------------------------- responsiveness */
 
-@media (max-width: 820px) {
+@container rast-stage (max-width: 820px) {
   .desktop-icon-label {
     font-size: 10px;
     max-width: 86px;

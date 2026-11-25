@@ -5,6 +5,7 @@
 // Dragging a titlebar near the top/left/right edge previews a snap zone; the
 // drop tiles the window or maximizes it.
 
+import { displayFactor, onDisplayChange, stageSize } from "./display";
 import { h } from "./dom";
 import { appIconSvg, iconSvg } from "./icons";
 
@@ -79,8 +80,7 @@ export class WindowManager {
   private zCounter = 10;
   private focusedId: string | null = null;
   private readonly options: WindowManagerOptions;
-  private mobileQuery: MediaQueryList | null = null;
-  private readonly mobileHandler: () => void;
+  private readonly stopDisplayWatch: () => void;
   private readonly resizeHandler: () => void;
   private resizeFrame: number | undefined;
   private cascade = 0;
@@ -90,7 +90,6 @@ export class WindowManager {
   constructor(host: HTMLElement, options: WindowManagerOptions = {}) {
     this.host = host;
     this.options = options;
-    this.mobileHandler = () => this.layoutAll();
     this.resizeHandler = () => {
       if (this.resizeFrame !== undefined) return;
       this.resizeFrame = window.requestAnimationFrame(() => {
@@ -98,15 +97,14 @@ export class WindowManager {
         this.layoutAll();
       });
     };
-    if (typeof window.matchMedia === "function") {
-      this.mobileQuery = window.matchMedia(`(max-width: ${MOBILE_BREAKPOINT}px)`);
-      this.mobileQuery.addEventListener("change", this.mobileHandler);
-    }
+    // The desktop size follows the display (resolution / scale), not the
+    // browser viewport, so a scale change re-lays windows out like a resize.
+    this.stopDisplayWatch = onDisplayChange(() => this.resizeHandler());
     window.addEventListener("resize", this.resizeHandler);
   }
 
   get isMobile(): boolean {
-    return this.mobileQuery?.matches ?? window.innerWidth <= MOBILE_BREAKPOINT;
+    return stageSize().width <= MOBILE_BREAKPOINT;
   }
 
   open(
@@ -263,7 +261,7 @@ export class WindowManager {
     this.snapPreview?.remove();
     this.snapPreview = null;
     window.removeEventListener("resize", this.resizeHandler);
-    this.mobileQuery?.removeEventListener("change", this.mobileHandler);
+    this.stopDisplayWatch();
     this.emitChange();
   }
 
@@ -531,9 +529,10 @@ export class WindowManager {
       return { w: Math.max(320, hostW), h: Math.max(240, hostH) };
     }
     const taskbar = this.options.taskbarHeight ?? 58;
+    const stage = stageSize();
     return {
-      w: Math.max(320, window.innerWidth),
-      h: Math.max(240, window.innerHeight - taskbar),
+      w: Math.max(320, stage.width),
+      h: Math.max(240, stage.height - taskbar),
     };
   }
 
@@ -678,8 +677,9 @@ export class WindowManager {
       const rect = this.rectOf(record);
       const maxX = bounds.w - 80;
       const maxY = bounds.h - 60;
-      const x = Math.min(Math.max(originX + (event.clientX - startX), -rect.w + 120), maxX);
-      const y = Math.min(Math.max(originY + (event.clientY - startY), 0), maxY);
+      const f = displayFactor();
+      const x = Math.min(Math.max(originX + (event.clientX - startX) / f, -rect.w + 120), maxX);
+      const y = Math.min(Math.max(originY + (event.clientY - startY) / f, 0), maxY);
       record.el.style.left = `${Math.round(x)}px`;
       record.el.style.top = `${Math.round(y)}px`;
     };
@@ -745,8 +745,9 @@ export class WindowManager {
     };
     const onPointerMove = (event: PointerEvent) => {
       if (!active || !origin) return;
-      const dx = event.clientX - startX;
-      const dy = event.clientY - startY;
+      const f = displayFactor();
+      const dx = (event.clientX - startX) / f;
+      const dy = (event.clientY - startY) / f;
       let { x, y, w, h } = origin;
       if (active.includes("e")) w = Math.max(minW, origin.w + dx);
       if (active.includes("s")) h = Math.max(minH, origin.h + dy);

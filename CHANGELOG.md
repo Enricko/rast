@@ -11,7 +11,29 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Display settings: a desktop resolution and scale like a real OS.** Browser
+  zoom (50–150 % and beyond) no longer changes the desktop's layout: the
+  desktop's resolution is the browser window in device pixels, so it follows
+  the window when it is resized (like Synology DSM) but not when the page is
+  zoomed. Choose a **Scale** (75–300 %) under right-click on the desktop →
+  *Display settings…* or Start → *Display settings…*; it applies at once and is
+  kept per device and screen. The first scale on each screen is what the page
+  looked like until now, so nothing changes until you pick another one.
+
+### Changed
+
+- The shell's breakpoints (phone layout, taskbar, sign-in) follow the desktop's
+  size instead of the browser viewport, and pointer positions are converted to
+  desktop pixels, so dragging windows, icons and widgets and opening menus stay
+  under the pointer at any zoom or scale.
+
+### Known limitations
+
+- Mouse selection in the Docker container terminal (xterm.js) can be offset
+  when the scale differs from the screen's own (or the page is zoomed);
+  keyboard input is unaffected.
+- Firefox changes `screen.width` with page zoom, so there the layout still
+  follows browser zoom as before.
 
 ### Planned
 

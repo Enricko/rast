@@ -1,5 +1,6 @@
 // Modal dialogs, confirmations and small UI utilities.
 
+import { clientToStage, displayFactor, stageSize } from "./display";
 import { h } from "./dom";
 import { iconSvg } from "./icons";
 
@@ -372,13 +373,19 @@ export function contextMenu(
     menu.appendChild(btn);
   }
 
-  menu.style.left = `${x}px`;
-  menu.style.top = `${y}px`;
+  // Callers pass on-screen (client) coordinates; the menu lives in desktop pixels.
+  const at = clientToStage(x, y);
+  menu.style.left = `${at.x}px`;
+  menu.style.top = `${at.y}px`;
   document.body.appendChild(menu);
-  // Keep the menu inside the viewport.
+  // Keep the menu inside the desktop.
+  const f = displayFactor();
   const rect = menu.getBoundingClientRect();
-  if (rect.right > window.innerWidth - 8) menu.style.left = `${Math.max(8, x - rect.width)}px`;
-  if (rect.bottom > window.innerHeight - 8) menu.style.top = `${Math.max(8, y - rect.height)}px`;
+  const width = rect.width / f;
+  const height = rect.height / f;
+  const stage = stageSize();
+  if (at.x + width > stage.width - 8) menu.style.left = `${Math.max(8, at.x - width)}px`;
+  if (at.y + height > stage.height - 8) menu.style.top = `${Math.max(8, at.y - height)}px`;
   document.addEventListener("pointerdown", outside, true);
   document.addEventListener("keydown", onKey, true);
   window.setTimeout(() => menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")?.focus({ preventScroll: true }), 10);

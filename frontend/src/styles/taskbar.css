@@ -371,7 +371,7 @@
   left: 0;
   top: 0;
   z-index: 9000;
-  max-width: min(320px, calc(100vw - 16px));
+  max-width: min(320px, calc(100 * var(--vw) - 16px));
   padding: 5px 9px;
   border-radius: var(--radius-sm);
   background: var(--taskbar-tooltip-bg);
@@ -428,7 +428,7 @@
   padding: 0 4px;
 }
 
-@media (max-width: 820px) {
+@container rast-stage (max-width: 820px) {
   .taskbar {
     background: var(--taskbar-bg-solid);
     backdrop-filter: none;

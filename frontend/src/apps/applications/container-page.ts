@@ -3,6 +3,7 @@
 // container view). Mounted into the app's main area; the caller disposes it.
 
 import type { AppContext } from "../../core/app";
+import { displayFactor } from "../../core/display";
 import { clear, h } from "../../core/dom";
 import { formatBytes, formatDateTime, formatPercent, formatTime, relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
@@ -114,7 +115,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
       const more = h("button", { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "More actions", ariaLabel: "More actions", disabled: busy }, iconSvg("more", 16));
       more.addEventListener("click", () => {
         const rect = more.getBoundingClientRect();
-        contextMenu(rect.right - 200, rect.bottom + 4, menuItems(), { ariaLabel: c.name });
+        contextMenu(rect.right - 200 * displayFactor(), rect.bottom + 4 * displayFactor(), menuItems(), { ariaLabel: c.name });
       });
       actions.append(more);
     }

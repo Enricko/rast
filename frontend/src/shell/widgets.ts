@@ -20,6 +20,7 @@
 import type { ApiClient } from "../core/api";
 import { ApiError } from "../core/api";
 import type { Appearance, AppearanceService, DesktopWidget, WidgetId } from "../core/appearance";
+import { displayFactor } from "../core/display";
 import { h } from "../core/dom";
 import { formatBytes, formatDuration, formatPercent, formatSpeed, relativeTime } from "../core/format";
 import { iconSvg } from "../core/icons";
@@ -630,9 +631,11 @@ export function createWidgetLayer(options: WidgetLayerOptions): WidgetLayer {
       const area = freeArea(card);
       let left = startLeft;
       let top = startTop;
+      // Pointer deltas are on-screen pixels; widgets are placed in desktop pixels.
+      const f = displayFactor();
       const move = (moveEvent: PointerEvent): void => {
-        left = Math.max(0, Math.min(area.width, startLeft + moveEvent.clientX - startX));
-        top = Math.max(0, Math.min(area.height, startTop + moveEvent.clientY - startY));
+        left = Math.max(0, Math.min(area.width, startLeft + (moveEvent.clientX - startX) / f));
+        top = Math.max(0, Math.min(area.height, startTop + (moveEvent.clientY - startY) / f));
         card.el.style.left = `${Math.round(left)}px`;
         card.el.style.top = `${Math.round(top)}px`;
       };

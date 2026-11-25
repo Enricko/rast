@@ -12,7 +12,11 @@ import "./styles/controls.css";
 import "./styles/taskbar.css";
 import "./styles/widgets.css";
 import "./styles/responsive.css";
+import { startDisplay } from "./core/display";
 import { boot } from "./shell";
+
+// Size the desktop (resolution / scale) before anything renders.
+startDisplay();
 
 const SPLASH_TIMEOUT_MS = 12_000;
 

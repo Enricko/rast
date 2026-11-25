@@ -13,6 +13,7 @@ import { appIconSvg, iconSvg } from "../core/icons";
 import type { ThemePreference } from "../core/store";
 import { getRealtime } from "../core/realtime";
 import { ApiError } from "../core/api";
+import { openDisplaySettings } from "./display-settings";
 import type { ShellDeps } from "./shared";
 
 export interface PanelContext {
@@ -214,6 +215,10 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
     menuItem("wallpaper", "Personalize…", () => {
       onClose();
       ctx.showPersonalize();
+    }),
+    menuItem("monitor", "Display settings…", () => {
+      onClose();
+      openDisplaySettings();
     }),
     menuItem("grid", "Keyboard shortcuts", () => {
       onClose();

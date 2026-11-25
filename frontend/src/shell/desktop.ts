@@ -3,6 +3,7 @@
 
 import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature } from "../apps/registry";
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
+import { rectToStage, stageSize } from "../core/display";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
@@ -33,6 +34,7 @@ import {
   type PanelContext,
 } from "./panels";
 import type { DesktopController, DesktopOptions, SessionSnapshot, ShellDeps } from "./shared";
+import { openDisplaySettings } from "./display-settings";
 import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
@@ -460,6 +462,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       { label: "Reset icon layout", icon: "grid", onClick: () => desktopIcons.reset(), disabled: !desktopIcons.isCustomized() },
       "separator",
       { label: "Personalize…", icon: "wallpaper", onClick: () => showPersonalize() },
+      { label: "Display settings…", icon: "monitor", onClick: () => openDisplaySettings() },
       { label: "Widgets…", icon: "activity", onClick: () => widgets.openCatalog() },
       { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
       "separator",
@@ -567,9 +570,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     taskbarTooltip.textContent = text;
     taskbarTooltip.style.left = "0px";
     taskbarTooltip.style.top = "0px";
-    const anchorRect = anchor.getBoundingClientRect();
-    const tipRect = taskbarTooltip.getBoundingClientRect();
-    const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+    // Measured on screen, placed in desktop pixels (see core/display.ts).
+    const anchorRect = rectToStage(anchor.getBoundingClientRect());
+    const tipRect = rectToStage(taskbarTooltip.getBoundingClientRect());
+    const viewportWidth = stageSize().width;
     const maxLeft = Math.max(TOOLTIP_MARGIN, viewportWidth - tipRect.width - TOOLTIP_MARGIN);
     const left = Math.min(Math.max(anchorRect.left + anchorRect.width / 2 - tipRect.width / 2, TOOLTIP_MARGIN), maxLeft);
     let top = anchorRect.top - tipRect.height - TOOLTIP_MARGIN;

@@ -6,6 +6,7 @@
 
 import type { AppDefinition, AppContext } from "../../core/app";
 import type { ConnectionState } from "../../core/sse";
+import { displayFactor } from "../../core/display";
 import { h, clear, field } from "../../core/dom";
 import { debounceTask, getRealtime, type RealtimeStore } from "../../core/realtime";
 import { createLiveIndicator, NoticeBar, type LiveIndicator } from "../../components/live";
@@ -953,7 +954,7 @@ class ApplicationsApp {
   private menuButton(label: string, items: () => ContextMenuEntry[]): HTMLButtonElement {
     const button = this.iconButton("more", `More actions for ${label}`, () => {
       const rect = button.getBoundingClientRect();
-      contextMenu(rect.right - 210, rect.bottom + 4, items(), { ariaLabel: label });
+      contextMenu(rect.right - 210 * displayFactor(), rect.bottom + 4 * displayFactor(), items(), { ariaLabel: label });
     });
     return button;
   }

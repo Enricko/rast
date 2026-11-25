@@ -1540,8 +1540,10 @@ input[type="radio"]:disabled {
 }
 
 /* Mobile: keep controls comfortable for touch. */
-@media (max-width: 820px) {
-  :root {
+@container rast-stage (max-width: 820px) {
+  /* Was a viewport media query on :root; tokens.css's :root[data-theme="light"]
+     kept 32px in the light theme, so only the dark theme gets taller controls. */
+  :root[data-theme="dark"] body > * {
     --control-h: 38px;
     --control-h-sm: 32px;
     --control-h-lg: 44px;
