@@ -27,7 +27,8 @@ this file by `scripts/changelog-section.sh`.
 ## [0.19.0] - 2026-11-25
 
 This release rolls RAST back to the 0.9.1 code base. The code is identical to
-v0.9.1 (commit `365f0a0`) apart from the version number and this changelog.
+v0.9.1 (commit `365f0a0`) apart from the version number, this changelog and
+one dependency security update (see Security).
 Everything added from 0.10.0 to 0.18.3 is gone, starting with Linux desktop
 apps (Google Chrome was the first app tested with them).
 
@@ -44,6 +45,12 @@ apps (Google Chrome was the first app tested with them).
 - The native runtime work that was on `main` after 0.18.3 and never released
   (session profiles, GPU displays, discovered applications, the native stream
   broker) stays in the git history up to commit `ced5e07`.
+
+### Security
+
+- `url` 2.5.9 (with `form_urlencoded` 1.2.3) fixes RUSTSEC-2026-0592, a stack
+  overflow in `Url::origin()` on nested `blob:` URLs. This is the only code
+  difference from 0.9.1 besides the version number.
 
 ### Upgrade notes
 

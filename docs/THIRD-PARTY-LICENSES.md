@@ -125,7 +125,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `flate2` | 1.1.11 | MIT OR Apache-2.0 | <https://github.com/rust-lang/flate2-rs> |
 | `flume` | 0.12.0 | Apache-2.0/MIT | <https://github.com/zesterer/flume> |
 | `foldhash` | 0.2.0 | Zlib | <https://github.com/orlp/foldhash> |
-| `form_urlencoded` | 1.2.2 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
+| `form_urlencoded` | 1.2.3 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
 | `futures` | 0.3.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/futures-rs> |
 | `futures-channel` | 0.3.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/futures-rs> |
 | `futures-core` | 0.3.34 | MIT OR Apache-2.0 | <https://github.com/rust-lang/futures-rs> |
@@ -316,7 +316,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `untrusted` | 0.9.0 | ISC | <https://github.com/briansmith/untrusted> |
 | `ureq` | 3.5.1 | MIT OR Apache-2.0 | <https://github.com/algesten/ureq> |
 | `ureq-proto` | 0.7.1 | MIT OR Apache-2.0 | <https://github.com/algesten/ureq-proto> |
-| `url` | 2.5.8 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
+| `url` | 2.5.9 | MIT OR Apache-2.0 | <https://github.com/servo/rust-url> |
 | `utf8-zero` | 0.8.1 | MIT OR Apache-2.0 | <https://github.com/algesten/utf8-zero> |
 | `utf8_iter` | 1.1.0 | Apache-2.0 OR MIT | <https://github.com/hsivonen/utf8_iter> |
 | `utf8parse` | 0.2.2 | Apache-2.0 OR MIT | <https://github.com/alacritty/vte> |
