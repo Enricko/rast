@@ -56,6 +56,50 @@ pub const HISTORY_MESSAGES: usize = 60;
 /// Characters of earlier messages sent with each request (the newest ones).
 pub const HISTORY_CHARS: usize = 400_000;
 
+/// How hard a model thinks before it answers (per chat; none = the
+/// provider's default). See [`provider`] for how each protocol asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Max,
+}
+
+impl Effort {
+    /// `""` is the provider's default (`Ok(None)`).
+    pub fn parse(value: &str) -> Result<Option<Self>, String> {
+        match value {
+            "" => Ok(None),
+            "low" => Ok(Some(Self::Low)),
+            "medium" => Ok(Some(Self::Medium)),
+            "high" => Ok(Some(Self::High)),
+            "max" => Ok(Some(Self::Max)),
+            other => Err(format!(
+                "effort {other:?} is not one of low, medium, high, max"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Max => "max",
+        }
+    }
+
+    /// What to ask for when a model refuses this level: max falls back to
+    /// high, the rest to the provider's default.
+    pub fn fallback(self) -> Option<Self> {
+        match self {
+            Self::Max => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 /// The two wire protocols RAST speaks (see [`provider`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -769,6 +813,8 @@ pub struct Conversation {
     pub title: String,
     /// Tools the owner let run without asking in this chat.
     pub allowed_tools: Vec<String>,
+    /// How hard the model thinks (none: the provider's default).
+    pub effort: Option<Effort>,
     /// Its last reply waits for the owner to answer a tool request.
     pub waiting: bool,
     pub created_at: i64,
@@ -785,6 +831,7 @@ impl Conversation {
             "model": self.model,
             "title": self.title,
             "allowedTools": self.allowed_tools,
+            "effort": self.effort.map_or("", Effort::as_str),
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
             "running": running,
@@ -807,6 +854,7 @@ pub fn conversation_from_row(row: &sqlx::sqlite::SqliteRow) -> Conversation {
         title: row.get("title"),
         allowed_tools: serde_json::from_str(&row.get::<String, _>("allowed_tools"))
             .unwrap_or_default(),
+        effort: Effort::parse(&row.get::<String, _>("effort")).unwrap_or(None),
         waiting: row
             .try_get::<Option<String>, _>("last_status")
             .ok()

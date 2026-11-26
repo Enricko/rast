@@ -47,8 +47,20 @@ this file by `scripts/changelog-section.sh`.
   Messages, the rest over chat completions), read from its model list; free
   models only OpenCode's apps may call are left out of the list.
 
+- **Effort and permissions in AI Agent's message box.** An Effort chip sets
+  how hard the model thinks in a chat (Auto, Low, Medium, High, Max; sent as
+  Claude's effort or the OpenAI-style `reasoning_effort`, lowered when a
+  model does not have that level), and new chats start from the last one
+  chosen. A permission chip chooses what the agent may do without asking:
+  ask every time, read files, change files, or files and the web; commands
+  always ask. Database schema v13.
+
 ### Changed
 
+- **AI Agent's chat list** hides and shows with the button at its top (the
+  chat gets the whole window; the header's button brings it back). In a
+  narrow window it slides over the chat and closes again with its button,
+  a click beside it or Escape; before, it could open but not close.
 - **AI Agent's new look.** A new chat greets you with the agent's avatar and
   a few ideas to start from; the agent or model is a chip in the message box
   ("Asks before acting" beside it); replies show who wrote them; tool calls

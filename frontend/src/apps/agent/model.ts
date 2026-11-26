@@ -45,6 +45,8 @@ export interface Conversation {
   title: string;
   /** Tools that run without asking in this chat. */
   allowedTools: string[];
+  /** How hard the model thinks ("" = the provider's default). */
+  effort?: Effort;
   createdAt: number;
   updatedAt: number;
   running: boolean;
@@ -294,6 +296,46 @@ export function toolArgument(block: Pick<ToolBlock, "name" | "input">): string {
   if (typeof block.input === "string") return block.input;
   const value = block.input?.[key];
   return typeof value === "string" ? value : JSON.stringify(block.input ?? {});
+}
+
+/** How hard the model thinks; "" leaves it to the provider. */
+export type Effort = "" | "low" | "medium" | "high" | "max";
+
+export const EFFORTS: ReadonlyArray<{ id: Effort; label: string; hint: string }> = [
+  { id: "", label: "Auto", hint: "The model's own default" },
+  { id: "low", label: "Low", hint: "Quick answers, fewer tokens" },
+  { id: "medium", label: "Medium", hint: "A balance of speed and depth" },
+  { id: "high", label: "High", hint: "Thinks longer on hard tasks" },
+  { id: "max", label: "Max", hint: "Thinks the longest; models without it use High" },
+];
+
+export function effortLabel(effort: string | undefined): string {
+  return EFFORTS.find((e) => e.id === (effort ?? ""))?.label ?? "Auto";
+}
+
+/** What may run without asking: presets of tools (commands always ask). */
+export interface PermissionMode {
+  id: "ask" | "read" | "edit" | "act";
+  label: string;
+  short: string;
+  hint: string;
+  tools: readonly string[];
+}
+
+const READ_TOOLS = ["list_files", "read_file", "search_files"] as const;
+const EDIT_TOOLS = [...READ_TOOLS, "write_file", "create_folder"] as const;
+
+export const PERMISSION_MODES: readonly PermissionMode[] = [
+  { id: "ask", label: "Ask every time", short: "Asks first", hint: "Every step on your files or the web waits for you", tools: [] },
+  { id: "read", label: "Allow reading files", short: "Reads freely", hint: "Lists, reads and searches your files without asking", tools: READ_TOOLS },
+  { id: "edit", label: "Allow file changes", short: "Edits freely", hint: "Also writes files and makes folders without asking", tools: EDIT_TOOLS },
+  { id: "act", label: "Allow files and the web", short: "Acts freely", hint: "Also searches the web and opens pages without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url"] },
+];
+
+/** The preset a chat's allowed tools match, or null (allowed one by one). */
+export function permissionMode(allowed: readonly string[]): PermissionMode | null {
+  const have = new Set(allowed);
+  return PERMISSION_MODES.find((mode) => mode.tools.length === have.size && mode.tools.every((t) => have.has(t))) ?? null;
 }
 
 /** Whether "Allow for this chat" is offered (never for the shell). */

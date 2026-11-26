@@ -16,6 +16,10 @@ import {
   upsertMessage,
   type ContentBlock,
   type Message,
+  EFFORTS,
+  effortLabel,
+  PERMISSION_MODES,
+  permissionMode,
 } from "../src/apps/agent/model";
 
 test("markdown blocks", () => {
@@ -215,4 +219,24 @@ test("an agent keeps its colours", () => {
   assert.deepEqual(agentHues("Writer"), agentHues(" writer "));
   assert.notDeepEqual(agentHues("Writer"), agentHues("Captain"));
   for (const hue of agentHues("Captain")) assert.ok(hue >= 0 && hue < 360);
+});
+
+test("a chat's allowed tools match a permission preset in any order", () => {
+  assert.equal(permissionMode([])?.id, "ask");
+  assert.equal(permissionMode(["search_files", "list_files", "read_file"])?.id, "read");
+  assert.equal(permissionMode(["list_files", "read_file", "search_files", "write_file", "create_folder"])?.id, "edit");
+  assert.equal(permissionMode(PERMISSION_MODES[3]!.tools)?.id, "act");
+  // Allowed one by one ("Allow for this chat" on a single tool).
+  assert.equal(permissionMode(["read_file"]), null);
+  assert.ok(PERMISSION_MODES.every((m) => !m.tools.includes("run_command")));
+});
+
+test("effort levels are labelled, Auto for none", () => {
+  assert.equal(effortLabel(""), "Auto");
+  assert.equal(effortLabel(undefined), "Auto");
+  assert.equal(effortLabel("max"), "Max");
+  assert.deepEqual(
+    EFFORTS.map((e) => e.id),
+    ["", "low", "medium", "high", "max"],
+  );
 });

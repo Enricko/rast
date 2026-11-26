@@ -30,7 +30,7 @@ use std::{
 
 use serde_json::{json, Value};
 
-use super::{Kind, Protocol};
+use super::{Effort, Kind, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Until the provider starts answering (reasoning models think first).
@@ -119,6 +119,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<i64>,
+    /// How hard the model thinks (none: the provider's default).
+    pub effort: Option<Effort>,
     /// A stable id for the conversation, for gateways that ask for one
     /// (OpenCode Go refuses requests without it); "" none.
     pub session: String,
@@ -132,6 +134,8 @@ pub struct Wire {
     pub reasoning_back: bool,
     /// Ask for usage in the stream (`stream_options`); a few servers refuse it.
     pub usage_option: bool,
+    /// The effort asked for (lowered when a model refuses it).
+    pub effort: Option<Effort>,
 }
 
 impl Wire {
@@ -141,6 +145,7 @@ impl Wire {
             protocol: kind.protocol(),
             reasoning_back: kind.wants_reasoning_back(),
             usage_option: true,
+            effort: None,
         }
     }
 }
@@ -514,6 +519,9 @@ pub fn request_body_for(req: &ChatRequest, wire: Wire) -> Value {
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
         }
+        if let Some(effort) = wire.effort {
+            body["output_config"] = json!({"effort": effort.as_str()});
+        }
         if !req.tools.is_empty() {
             body["tools"] = req
                 .tools
@@ -539,6 +547,21 @@ pub fn request_body_for(req: &ChatRequest, wire: Wire) -> Value {
     }
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
+    }
+    if let Some(effort) = wire.effort {
+        let level = match effort {
+            Effort::Low => "low",
+            Effort::Medium => "medium",
+            Effort::High => "high",
+            // OpenAI's own top level; elsewhere the highest common one.
+            Effort::Max if req.kind == Kind::OpenAi => "xhigh",
+            Effort::Max => "high",
+        };
+        if req.kind == Kind::OpenRouter {
+            body["reasoning"] = json!({"effort": level});
+        } else {
+            body["reasoning_effort"] = json!(level);
+        }
     }
     if !req.tools.is_empty() {
         body["tools"] = req
@@ -821,6 +844,7 @@ pub fn stream_chat(
     } else {
         Wire::of(req.kind)
     };
+    wire.effort = req.effort;
     let url = chat_url(req.kind, &req.base_url, wire.protocol);
     let response = loop {
         let body = request_body_for(req, wire).to_string();
@@ -845,6 +869,11 @@ pub fn stream_chat(
         if wire.usage_option && refuses_usage_option(status, &body) {
             // Usage then comes in the last chunk anyway, or not at all.
             wire.usage_option = false;
+            continue;
+        }
+        if let Some(effort) = wire.effort.filter(|_| refuses_effort(status, &body)) {
+            // A model without that level (or without effort at all).
+            wire.effort = effort.fallback();
             continue;
         }
         return Err(ChatError {
@@ -878,6 +907,13 @@ pub fn stream_chat(
 /// Whether a refusal is about `stream_options` (servers that do not know it).
 pub fn refuses_usage_option(status: u16, body: &str) -> bool {
     matches!(status, 400 | 422) && body.contains("stream_options")
+}
+
+/// Whether a refusal is about the effort asked for (`output_config.effort`,
+/// `reasoning_effort` or `reasoning`): models without it, or without that
+/// level.
+pub fn refuses_effort(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 422) && (body.contains("effort") || body.contains("reasoning"))
 }
 
 /// The models a provider offers (`GET {base}/models`), sorted. Gateways
@@ -1047,6 +1083,7 @@ fn gateway_wire(req: &ChatRequest) -> Wire {
         },
         reasoning_back: route.reasoning_back,
         usage_option: true,
+        effort: None,
     }
 }
 
@@ -1168,6 +1205,7 @@ mod tests {
             messages: vec![Turn::User("hi".into())],
             tools: Vec::new(),
             temperature: Some(0.2),
+            effort: None,
             max_output_tokens: Some(100),
             session: String::new(),
         };
@@ -1360,6 +1398,7 @@ mod tests {
                 parameters: json!({"type": "object"}),
             }],
             temperature: None,
+            effort: None,
             max_output_tokens: None,
             session: String::new(),
         };
@@ -1558,6 +1597,11 @@ mod tests {
                         ]})
                         .to_string(),
                     )
+                } else if line.starts_with("POST /inference/anthropic/v1/messages")
+                    && body.pointer("/output_config/effort") == Some(&json!("max"))
+                {
+                    reply("400 Bad Request", "application/json",
+                        r#"{"type":"error","error":{"type":"invalid_request_error","message":"output_config.effort: 'max' is not supported for this model"}}"#.into())
                 } else if line.starts_with("POST /inference/anthropic/v1/messages") {
                     reply("200 OK", "text/event-stream", [
                         r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"from messages"}}"#,
@@ -1589,6 +1633,7 @@ mod tests {
                 messages: vec![Turn::User("hi".into())],
                 tools: Vec::new(),
                 temperature: None,
+                effort: None,
                 max_output_tokens: None,
                 session: "conv-7".into(),
             };
@@ -1621,5 +1666,90 @@ mod tests {
             list_models(Kind::OpenCode, &base, Some("k")).unwrap(),
             vec!["claude-x".to_string(), "kimi-x".to_string()]
         );
+    }
+
+    #[test]
+    fn effort_goes_out_as_each_protocol_asks() {
+        let mut req = ChatRequest {
+            kind: Kind::Anthropic,
+            base_url: String::new(),
+            api_key: None,
+            model: "m".into(),
+            system: String::new(),
+            messages: vec![Turn::User("hi".into())],
+            tools: Vec::new(),
+            temperature: None,
+            effort: Some(Effort::Max),
+            max_output_tokens: None,
+            session: String::new(),
+        };
+        let body = |req: &ChatRequest| {
+            let mut wire = Wire::of(req.kind);
+            wire.effort = req.effort;
+            request_body_for(req, wire)
+        };
+        assert_eq!(body(&req)["output_config"], json!({"effort": "max"}));
+        assert!(body(&req).get("reasoning_effort").is_none());
+        req.kind = Kind::OpenAi;
+        assert_eq!(body(&req)["reasoning_effort"], "xhigh");
+        req.kind = Kind::DeepSeek;
+        assert_eq!(body(&req)["reasoning_effort"], "high");
+        req.effort = Some(Effort::Low);
+        assert_eq!(body(&req)["reasoning_effort"], "low");
+        assert!(body(&req).get("output_config").is_none());
+        req.kind = Kind::OpenRouter;
+        assert_eq!(body(&req)["reasoning"], json!({"effort": "low"}));
+        assert!(body(&req).get("reasoning_effort").is_none());
+        // None: the provider's default, nothing sent.
+        req.effort = None;
+        for kind in [Kind::OpenRouter, Kind::Anthropic, Kind::Ollama] {
+            req.kind = kind;
+            let sent = body(&req);
+            for field in ["reasoning", "reasoning_effort", "output_config"] {
+                assert!(sent.get(field).is_none(), "{kind:?} sent {field}");
+            }
+        }
+        assert_eq!(Effort::parse(""), Ok(None));
+        assert_eq!(Effort::parse("max"), Ok(Some(Effort::Max)));
+        assert!(Effort::parse("extreme").is_err());
+    }
+
+    #[test]
+    fn a_refused_effort_is_asked_again_lower() {
+        let (base, log) = fake_gateway();
+        let req = ChatRequest {
+            kind: Kind::OpenCode,
+            base_url: base.clone(),
+            api_key: Some("k".into()),
+            model: "claude-x".into(),
+            system: String::new(),
+            messages: vec![Turn::User("hi".into())],
+            tools: Vec::new(),
+            temperature: None,
+            effort: Some(Effort::Max),
+            max_output_tokens: None,
+            session: String::new(),
+        };
+        let mut text = String::new();
+        stream_chat(&req, &AtomicBool::new(false), &mut |delta| {
+            if let Delta::Text(t) = delta {
+                text.push_str(&t);
+            }
+        })
+        .unwrap();
+        assert_eq!(text, "from messages");
+        let seen = log.lock().unwrap().clone();
+        let efforts: Vec<&Value> = seen
+            .iter()
+            .filter(|(line, _, _)| line.starts_with("POST"))
+            .map(|(_, _, body)| &body["output_config"]["effort"])
+            .collect();
+        assert_eq!(efforts, [&json!("max"), &json!("high")]);
+        assert!(refuses_effort(
+            400,
+            r#"{"error":{"message":"reasoning_effort is not supported"}}"#
+        ));
+        assert!(!refuses_effort(401, "effort"));
+        assert!(!refuses_effort(400, "model not found"));
     }
 }

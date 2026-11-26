@@ -664,6 +664,44 @@ input[type="radio"]:disabled {
   flex: 0 0 auto;
 }
 
+.menu-item.has-hint {
+  height: auto;
+  min-height: 30px;
+  padding: 6px 8px;
+  align-items: flex-start;
+}
+
+.menu-item.has-hint .icon {
+  margin-top: 1px;
+}
+
+.menu-item-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  max-width: 260px;
+  text-align: left;
+}
+
+.menu-item-hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.menu-item-check {
+  display: inline-flex;
+  margin-left: auto;
+  padding-left: 10px;
+  align-self: center;
+}
+
+.menu-item-check .icon {
+  color: var(--accent);
+}
+
 .menu-item-danger,
 .menu-item-danger .icon {
   color: var(--danger-strong);

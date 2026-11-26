@@ -4961,6 +4961,11 @@ button.pkg-pill {
   letter-spacing: 0.01em;
 }
 
+.ai-side-close {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
 .ai-new {
   display: flex;
   align-items: center;
@@ -5200,8 +5205,28 @@ button.pkg-pill {
   color: var(--warning);
 }
 
-.ai-side-toggle {
+/* The header's chat-list button shows when the list is hidden (and in a
+   narrow window, where the list is a drawer). */
+.ai-head .ai-side-toggle {
   display: none;
+}
+
+.app-agent.ai-side-hidden .ai-head .ai-side-toggle {
+  display: inline-flex;
+}
+
+.ai-scrim {
+  display: none;
+}
+
+@container win (min-width: 681px) {
+  .app-agent.ai-side-hidden {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-agent.ai-side-hidden .ai-side {
+    display: none;
+  }
 }
 
 .ai-scroll {
@@ -5982,15 +6007,46 @@ button.pkg-pill {
   font-size: 13px;
 }
 
-.ai-guard {
+/* Effort and permissions: small chips that open a menu. */
+.ai-chip {
   display: inline-flex;
+  flex: none;
   align-items: center;
   gap: 5px;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-faint);
-  font-size: 11.5px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.ai-chip:hover {
+  background: var(--ai-tint-2);
+  color: var(--text);
+}
+
+.ai-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ai-chip .icon {
+  flex: none;
+}
+
+.ai-chip > .icon:last-child {
+  opacity: 0.7;
+}
+
+.ai-guard.is-on {
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  color: var(--text);
 }
 
 .ai-send {
@@ -6619,15 +6675,29 @@ button.pkg-pill {
     transform: none;
   }
 
-  .ai-side-toggle {
+  .ai-head .ai-side-toggle {
     display: inline-flex;
+  }
+
+  .app-agent.ai-side-open .ai-scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    background: rgb(0 0 0 / 0.28);
   }
 
   .ai-ideas {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .ai-guard {
+  .ai-chip {
+    padding: 0 6px;
+  }
+}
+
+@container win (max-width: 470px) {
+  .ai-chip-label {
     display: none;
   }
 

@@ -18,10 +18,14 @@ import {
   allowanceText,
   allowanceUsed,
   applyDelta,
+  EFFORTS,
+  effortLabel,
   formatTokens,
   groupByDay,
   maySkipAsking,
   messageText,
+  PERMISSION_MODES,
+  permissionMode,
   TOOL_INFO,
   toolArgument,
   toolBlocks,
@@ -31,6 +35,7 @@ import {
   type ConversationDetail,
   type ConversationEvent,
   type DeltaEvent,
+  type Effort,
   type Message,
   type MessageEvent,
   type Options,
@@ -58,20 +63,29 @@ interface Params {
 
 const CHOICE_KEY = "rast.agent.choice";
 
-function readChoice(): string {
+/** Per-browser conveniences (last choice, effort, hidden chat list). */
+function readLocal(key: string): string | null {
   try {
-    return window.localStorage.getItem(CHOICE_KEY) ?? "";
+    return window.localStorage.getItem(key);
   } catch {
-    return "";
+    return null;
   }
 }
 
-function writeChoice(value: string): void {
+function writeLocal(key: string, value: string): void {
   try {
-    window.localStorage.setItem(CHOICE_KEY, value);
+    window.localStorage.setItem(key, value);
   } catch {
     /* per-browser convenience only */
   }
+}
+
+function readChoice(): string {
+  return readLocal(CHOICE_KEY) ?? "";
+}
+
+function writeChoice(value: string): void {
+  writeLocal(CHOICE_KEY, value);
 }
 
 /** Picker values: `agent:<id>` or `model:<providerId>|<model>`. */
@@ -136,10 +150,21 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     h("span", {}, "Settings"),
   );
   if (!isAdmin) settingsButton.classList.add("hidden");
+  const sideClose = h(
+    "button",
+    { class: "btn btn-ghost btn-icon btn-sm ai-side-close", type: "button", title: "Hide chats", ariaLabel: "Hide chats" },
+    iconSvg("menu", 16),
+  );
   const side = h(
     "aside",
     { class: "ai-side" },
-    h("div", { class: "ai-brand" }, h("span", { class: "ai-brand-icon" }, appIconSvg("agent", "activity", 22)), h("span", { class: "ai-brand-name" }, "AI Agent")),
+    h(
+      "div",
+      { class: "ai-brand" },
+      h("span", { class: "ai-brand-icon" }, appIconSvg("agent", "activity", 22)),
+      h("span", { class: "ai-brand-name" }, "AI Agent"),
+      sideClose,
+    ),
     newButton,
     h("label", { class: "ai-search-wrap" }, iconSvg("search", 14), search),
     list,
@@ -185,24 +210,118 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     { class: "btn btn-primary btn-icon ai-send", type: "button", title: "Send (Enter)", ariaLabel: "Send" },
     iconSvg("arrowUp", 17),
   );
+  // What may run without asking, and how hard the model thinks.
+  const guardLabel = h("span", { class: "ai-chip-label" });
   const guard = h(
-    "span",
-    { class: "ai-guard", title: "Agents ask you before they use your files, run a command or open a web page." },
+    "button",
+    { class: "ai-chip ai-guard", type: "button", title: "What the agent may do without asking", ariaLabel: "Permissions" },
     iconSvg("shield", 13),
-    h("span", {}, "Asks before acting"),
+    guardLabel,
+    iconSvg("chevronDown", 12),
   );
+  const effortText = h("span", { class: "ai-chip-label" });
+  const effortButton = h(
+    "button",
+    { class: "ai-chip ai-effort", type: "button", title: "Effort: how hard the model thinks", ariaLabel: "Effort" },
+    iconSvg("gauge", 13),
+    effortText,
+    iconSvg("chevronDown", 12),
+  );
+  guard.setAttribute("aria-haspopup", "menu");
+  effortButton.setAttribute("aria-haspopup", "menu");
   const composerNote = h("div", { class: "ai-composer-note small muted" });
   const composer = h(
     "div",
     { class: "ai-composer" },
     composerNote,
-    h("div", { class: "ai-input-wrap" }, input, h("div", { class: "ai-composer-bar" }, pickWrap, guard, sendButton)),
+    h("div", { class: "ai-input-wrap" }, input, h("div", { class: "ai-composer-bar" }, pickWrap, effortButton, guard, sendButton)),
   );
   const main = h("section", { class: "ai-main" }, head, scroller, composer);
   const settingsHost = h("section", { class: "ai-settings hidden" });
-  ctx.root.append(side, main, settingsHost);
+  const scrim = h("div", { class: "ai-scrim" });
+  ctx.root.append(side, main, settingsHost, scrim);
 
-  sideToggle.addEventListener("click", () => ctx.root.classList.toggle("ai-side-open"));
+  // The chat list: a column that hides in a wide window, a drawer in a
+  // narrow one (where it is positioned over the chat).
+  const SIDE_KEY = "rast.agent.sideHidden";
+  if (readLocal(SIDE_KEY) === "1") ctx.root.classList.add("ai-side-hidden");
+  const isDrawer = () => getComputedStyle(side).position === "absolute";
+  function setDrawer(open: boolean): void {
+    ctx.root.classList.toggle("ai-side-open", open);
+    if (open) window.setTimeout(() => newButton.focus({ preventScroll: true }), 30);
+  }
+  function toggleSide(): void {
+    if (isDrawer()) {
+      setDrawer(!ctx.root.classList.contains("ai-side-open"));
+      return;
+    }
+    const hidden = ctx.root.classList.toggle("ai-side-hidden");
+    writeLocal(SIDE_KEY, hidden ? "1" : "0");
+  }
+  sideToggle.addEventListener("click", toggleSide);
+  sideClose.addEventListener("click", () => {
+    toggleSide();
+    sideToggle.focus({ preventScroll: true });
+  });
+  scrim.addEventListener("click", () => setDrawer(false));
+  ctx.root.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && ctx.root.classList.contains("ai-side-open") && isDrawer()) {
+      event.preventDefault();
+      event.stopPropagation();
+      setDrawer(false);
+      sideToggle.focus({ preventScroll: true });
+    }
+  });
+
+  // New chats start with these (the effort last chosen; asking first).
+  const EFFORT_KEY = "rast.agent.effort";
+  const storedEffort = (): Effort => {
+    const value = readLocal(EFFORT_KEY) ?? "";
+    return EFFORTS.some((e) => e.id === value) ? (value as Effort) : "";
+  };
+  let draftEffort: Effort = storedEffort();
+  let draftAllowed: string[] = [];
+  guard.addEventListener("click", () => {
+    const allowed = current ? current.conversation.allowedTools ?? [] : draftAllowed;
+    const mode = permissionMode(allowed);
+    const icons: Record<string, string> = { ask: "shield", read: "eye", edit: "edit", act: "network" };
+    contextMenu(
+      0,
+      0,
+      [
+        ...PERMISSION_MODES.map((m) => ({
+          label: m.label,
+          hint: m.hint,
+          icon: icons[m.id],
+          checked: mode?.id === m.id,
+          onClick: () => void setPermissions([...m.tools]),
+        })),
+        ...(mode
+          ? []
+          : [
+              {
+                label: "Allowed one by one",
+                hint: allowed.map((name) => TOOL_INFO[name]?.label ?? name).join(", "),
+                icon: "check",
+                checked: true,
+                onClick: () => undefined,
+              },
+            ]),
+        "separator" as const,
+        { label: "Commands always ask first", icon: "terminal", disabled: true, onClick: () => undefined },
+      ],
+      { anchor: guard, ariaLabel: "Permissions" },
+    );
+  });
+  effortButton.addEventListener("click", () => {
+    const effort = current ? current.conversation.effort ?? "" : draftEffort;
+    contextMenu(
+      0,
+      0,
+      EFFORTS.map((e) => ({ label: e.label, hint: e.hint, checked: e.id === effort, onClick: () => void setEffort(e.id) })),
+      { anchor: effortButton, ariaLabel: "Effort" },
+    );
+  });
   search.addEventListener("input", () => renderList());
   input.addEventListener("input", () => {
     autoGrow();
@@ -227,13 +346,9 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   menuButton.addEventListener("click", (event) => {
     if (!current || current.readOnly) return;
     const conversation = current.conversation;
-    const allowed = conversation.allowedTools ?? [];
     contextMenu(event.clientX, event.clientY, [
       { label: "Rename", icon: "rename", onClick: () => void rename(conversation) },
       { label: "Copy chat", icon: "copy", onClick: () => void copyChat() },
-      ...(allowed.length
-        ? [{ label: "Ask before every tool again", icon: "shield", onClick: () => void askAgain(conversation) }]
-        : []),
       "separator",
       { label: "Delete", icon: "trash", danger: true, onClick: () => void remove(conversation) },
     ]);
@@ -294,6 +409,8 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     closeSettings();
     loadToken += 1;
     current = null;
+    draftAllowed = [];
+    draftEffort = storedEffort();
     ctx.saveState({});
     renderAll(true);
     input.focus();
@@ -342,7 +459,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     try {
       let id = current?.conversation.id;
       if (!id) {
-        const created = await ctx.api.post<{ conversation: Conversation }>("/api/ai/conversations", choiceBody(choice));
+        const created = await ctx.api.post<{ conversation: Conversation }>("/api/ai/conversations", {
+          ...choiceBody(choice),
+          effort: draftEffort,
+          allowedTools: draftAllowed,
+        });
         id = created.conversation.id;
         conversations = [created.conversation, ...conversations.filter((c) => c.id !== id)];
         current = { conversation: created.conversation, messages: [], seq: 0, readOnly: false };
@@ -403,15 +524,35 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }
   }
 
-  async function askAgain(conversation: Conversation): Promise<void> {
+  /** What runs without asking: this chat's, or the next new chat's. */
+  async function setPermissions(tools: string[]): Promise<void> {
+    if (!current) {
+      draftAllowed = tools;
+      updateComposer();
+      return;
+    }
+    await patchConversation({ allowedTools: tools });
+  }
+
+  /** How hard the model thinks: this chat's, and new chats' from now on. */
+  async function setEffort(effort: Effort): Promise<void> {
+    writeLocal(EFFORT_KEY, effort);
+    draftEffort = effort;
+    if (!current) {
+      updateComposer();
+      return;
+    }
+    await patchConversation({ effort });
+  }
+
+  async function patchConversation(change: { allowedTools?: string[]; effort?: Effort }): Promise<void> {
+    if (!current || current.readOnly) return;
+    const id = current.conversation.id;
     try {
-      const updated = await ctx.api.patch<{ conversation: Conversation }>(
-        `/api/ai/conversations/${encodeURIComponent(conversation.id)}`,
-        { allowedTools: [] },
-      );
+      const updated = await ctx.api.patch<{ conversation: Conversation }>(`/api/ai/conversations/${encodeURIComponent(id)}`, change);
       upsertConversation(updated.conversation);
-      if (current?.conversation.id === conversation.id) current.conversation = { ...current.conversation, ...updated.conversation };
-      ctx.toast.success("Every tool asks first again in this chat.");
+      if (current?.conversation.id === id) current.conversation = { ...current.conversation, ...updated.conversation };
+      updateComposer();
     } catch (error) {
       ctx.toast.error(errorMessage(error));
     }
@@ -656,6 +797,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     sendButton.setAttribute("aria-label", running ? "Stop" : "Send");
     sendButton.classList.toggle("is-stop", running);
     sendButton.disabled = !running && (!input.value.trim() || !picker.value);
+    const allowed = current ? current.conversation.allowedTools ?? [] : draftAllowed;
+    const mode = permissionMode(allowed);
+    guardLabel.textContent = mode?.short ?? "Some allowed";
+    guard.classList.toggle("is-on", mode?.id !== "ask");
+    effortText.textContent = effortLabel(current ? current.conversation.effort : draftEffort);
     const allowance = options?.allowance;
     const waiting = !running && current?.messages[current.messages.length - 1]?.status === "waiting";
     input.placeholder = waiting ? "Or write something else" : "Message";

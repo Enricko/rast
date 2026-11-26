@@ -324,6 +324,28 @@ struct NewConversation {
     provider_id: Option<String>,
     #[serde(default)]
     model: String,
+    /// How hard the model thinks (`""`: the provider's default).
+    #[serde(default)]
+    effort: String,
+    /// Tools that run without asking from the start.
+    #[serde(default)]
+    allowed_tools: Vec<String>,
+}
+
+/// Tools that may run without asking, without repeats (never the shell).
+fn allowed_tool_list(list: &[String]) -> AppResult<Vec<String>> {
+    let mut allowed: Vec<String> = Vec::new();
+    for name in list {
+        if !tools::may_skip_asking(name) {
+            return Err(AppError::bad_request(format!(
+                "{name:?} cannot run without asking"
+            )));
+        }
+        if !allowed.contains(name) {
+            allowed.push(name.clone());
+        }
+    }
+    Ok(allowed)
 }
 
 /// POST /api/ai/conversations
@@ -332,6 +354,8 @@ async fn create_conversation(
     user: AuthUser,
     Json(body): Json<NewConversation>,
 ) -> AppResult<Json<Value>> {
+    let effort = ai::Effort::parse(&body.effort).map_err(AppError::bad_request)?;
+    let allowed_tools = allowed_tool_list(&body.allowed_tools)?;
     let resolved = resolve(
         &state,
         &user,
@@ -348,20 +372,24 @@ async fn create_conversation(
         provider_id: Some(resolved.provider.id.clone()),
         model: resolved.model.clone(),
         title: String::new(),
-        allowed_tools: Vec::new(),
+        allowed_tools,
+        effort,
         waiting: false,
         created_at: now,
         updated_at: now,
     };
     sqlx::query(
-        "INSERT INTO ai_conversations (id, user_id, agent_id, provider_id, model, title, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, '', ?, ?)",
+        "INSERT INTO ai_conversations (id, user_id, agent_id, provider_id, model, title, allowed_tools,
+                                       effort, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?)",
     )
     .bind(&conversation.id)
     .bind(user.id)
     .bind(&conversation.agent_id)
     .bind(&conversation.provider_id)
     .bind(&conversation.model)
+    .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
+    .bind(conversation.effort.map_or("", ai::Effort::as_str))
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -442,6 +470,8 @@ struct ConversationPatch {
     model: Option<String>,
     /// Tools that run without asking in this chat (`[]`: ask for every call).
     allowed_tools: Option<Vec<String>>,
+    /// How hard the model thinks (`""`: the provider's default).
+    effort: Option<String>,
 }
 
 /// PATCH /api/ai/conversations/{id}
@@ -456,18 +486,10 @@ async fn update_conversation(
         conversation.title = bounded(title.trim(), "the title", 200)?;
     }
     if let Some(list) = &body.allowed_tools {
-        let mut allowed: Vec<String> = Vec::new();
-        for name in list {
-            if !tools::may_skip_asking(name) {
-                return Err(AppError::bad_request(format!(
-                    "{name:?} cannot run without asking"
-                )));
-            }
-            if !allowed.contains(name) {
-                allowed.push(name.clone());
-            }
-        }
-        conversation.allowed_tools = allowed;
+        conversation.allowed_tools = allowed_tool_list(list)?;
+    }
+    if let Some(effort) = &body.effort {
+        conversation.effort = ai::Effort::parse(effort).map_err(AppError::bad_request)?;
     }
     if body.agent_id.is_some() || body.provider_id.is_some() || body.model.is_some() {
         let agent_id = match body.agent_id.as_deref() {
@@ -506,13 +528,14 @@ async fn update_conversation(
     conversation.updated_at = now_ms();
     sqlx::query(
         "UPDATE ai_conversations SET title = ?, agent_id = ?, provider_id = ?, model = ?, allowed_tools = ?,
-         updated_at = ? WHERE id = ?",
+         effort = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&conversation.title)
     .bind(&conversation.agent_id)
     .bind(&conversation.provider_id)
     .bind(&conversation.model)
     .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
+    .bind(conversation.effort.map_or("", ai::Effort::as_str))
     .bind(conversation.updated_at)
     .bind(&conversation.id)
     .execute(&state.db)
@@ -638,6 +661,7 @@ async fn reply_job(
         tools: available.specs(),
         temperature: resolved.agent.as_ref().and_then(|a| a.temperature),
         max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
+        effort: conversation.effort,
         session: conversation.id.clone(),
     };
     Ok(ReplyJob {

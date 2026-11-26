@@ -410,17 +410,24 @@ export interface ContextMenuItem {
   danger?: boolean;
   disabled?: boolean;
   shortcut?: string;
+  /** A second, smaller line under the label. */
+  hint?: string;
+  /** A choice among several: checked shows a tick (menuitemradio). */
+  checked?: boolean;
   onClick: () => void;
 }
 
 export type ContextMenuEntry = ContextMenuItem | "separator";
 
-/** Anchor an accessible context menu at pointer coordinates. */
+/**
+ * Anchor an accessible context menu at pointer coordinates, or under (else
+ * above) an `anchor` element such as the button that opened it.
+ */
 export function contextMenu(
   x: number,
   y: number,
   items: ContextMenuEntry[],
-  options: { ariaLabel?: string } = {},
+  options: { ariaLabel?: string; anchor?: Element } = {},
 ): () => void {
   const menu = h("div", {
     class: "context-menu",
@@ -470,9 +477,9 @@ export function contextMenu(
       continue;
     }
     const btn = h("button", {
-      class: `menu-item${item.danger ? " menu-item-danger" : ""}`,
+      class: `menu-item${item.danger ? " menu-item-danger" : ""}${item.hint ? " has-hint" : ""}`,
       type: "button",
-      role: "menuitem",
+      role: item.checked === undefined ? "menuitem" : "menuitemradio",
       onClick: () => {
         if (btn.disabled) return;
         close();
@@ -480,14 +487,20 @@ export function contextMenu(
       },
     });
     if (item.icon) btn.appendChild(iconSvg(item.icon, 15));
-    btn.appendChild(h("span", { class: "menu-item-label" }, item.label));
+    const label = h("span", { class: "menu-item-label" }, item.label);
+    btn.appendChild(item.hint ? h("span", { class: "menu-item-text" }, label, h("span", { class: "menu-item-hint" }, item.hint)) : label);
     if (item.shortcut) btn.appendChild(h("span", { class: "menu-item-shortcut" }, item.shortcut));
+    if (item.checked !== undefined) {
+      btn.setAttribute("aria-checked", String(item.checked));
+      if (item.checked) btn.appendChild(h("span", { class: "menu-item-check" }, iconSvg("check", 14)));
+    }
     if (item.disabled) btn.disabled = true;
     menu.appendChild(btn);
   }
 
   // Callers pass on-screen (client) coordinates; the menu lives in desktop pixels.
-  const at = clientToStage(x, y);
+  const box = options.anchor?.getBoundingClientRect();
+  const at = box ? clientToStage(box.left, box.bottom + 4) : clientToStage(x, y);
   menu.style.left = `${at.x}px`;
   menu.style.top = `${at.y}px`;
   document.body.appendChild(menu);
@@ -497,11 +510,30 @@ export function contextMenu(
   const width = rect.width / f;
   const height = rect.height / f;
   const stage = stageSize();
-  if (at.x + width > stage.width - 8) menu.style.left = `${Math.max(8, at.x - width)}px`;
-  if (at.y + height > stage.height - 8) menu.style.top = `${Math.max(8, at.y - height)}px`;
+  if (at.x + width > stage.width - 8) {
+    const right = box ? clientToStage(box.right, 0).x : at.x;
+    menu.style.left = `${Math.max(8, right - width)}px`;
+  }
+  if (at.y + height > stage.height - 8) {
+    const top = box ? clientToStage(0, box.top - 4).y : at.y;
+    menu.style.top = `${Math.max(8, top - height)}px`;
+  }
+  if (box) {
+    // Focus returns to the button when the menu is dismissed with Escape.
+    const invoker = options.anchor as HTMLElement;
+    if (!invoker.id) invoker.id = `menu-invoker-${Math.random().toString(36).slice(2, 9)}`;
+    menu.dataset.invoker = invoker.id;
+  }
   document.addEventListener("pointerdown", outside, true);
   document.addEventListener("keydown", onKey, true);
-  window.setTimeout(() => menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")?.focus({ preventScroll: true }), 10);
+  window.setTimeout(
+    () =>
+      (
+        menu.querySelector<HTMLButtonElement>('.menu-item[aria-checked="true"]:not(:disabled)') ??
+        menu.querySelector<HTMLButtonElement>(".menu-item:not(:disabled)")
+      )?.focus({ preventScroll: true }),
+    10,
+  );
   return close;
 }
 

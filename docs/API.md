@@ -287,6 +287,13 @@ not for chat and free ones (OpenCode serves those only to its own apps).
 Requests to them carry the chat's id as `x-opencode-session`, which OpenCode Go
 requires. A server that refuses `stream_options` is asked again without it.
 
+**Effort.** A chat's `effort` (`""` = the provider's default, `low`,
+`medium`, `high`, `max`) goes out as `output_config.effort` over Anthropic
+Messages, `reasoning: {effort}` to OpenRouter and `reasoning_effort` to every
+other chat-completions server (`max` is `xhigh` for OpenAI and `high`
+elsewhere). A model that refuses the level (a 400/422 naming effort or
+reasoning) is asked again with `max` lowered to `high`, then without it.
+
 **Tools.** Agents may act for the account chatting, never with more rights
 than it has ([`src/ai/tools.rs`](../src/ai/tools.rs)):
 
@@ -311,10 +318,10 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | --- | --- | --- |
 | GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality) |
 | GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, monthlyTokens, source}, allowance:{usedToday, usedMonth, dailyTokens, monthlyTokens, dayEndsAt, monthEndsAt, source}}` |
-| GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
-| POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model); a model must be one the provider offers |
+| GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, effort, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
+| POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model; a model must be one the provider offers), plus `effort?` and `allowedTools?` to start with |
 | GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[blocks], providerId, model, inputTokens, outputTokens, status:"streaming"\|"waiting"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`. Blocks: `{type:"text"\|"reasoning", text}` and `{type:"tool", id, name, input, status:"pending"\|"allowed"\|"running"\|"done"\|"error"\|"denied"\|"skipped", output?, error?}`, in reply order. A reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
-| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?, allowedTools?}` (`allowedTools: []` = ask before every tool again; never `run_command`); owner only |
+| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?, allowedTools?, effort?}` (`allowedTools: []` = ask before every tool again; never `run_command`; `effort: ""` = the provider's default); owner only |
 | DELETE | `/api/ai/conversations/{id}` | owner only; stops a running reply |
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
 | POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
