@@ -6,6 +6,7 @@ import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions
 import { rectToStage, stageSize } from "../core/display";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
+import { startMenuHint, watchOsKeyTap } from "../core/os-key";
 import { appIconSvg, iconSvg } from "../core/icons";
 import type { MeResponse, Settings } from "../core/types";
 import {
@@ -492,7 +493,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       type: "button",
       ariaLabel: "Open start menu",
       ariaExpanded: false,
-      dataset: { tip: "Start menu (Ctrl+Space)", panelTrigger: "start" },
+      dataset: { tip: `Start menu (${startMenuHint().tip})`, panelTrigger: "start" },
       onClick: () => toggleStartPanel(startButton),
     },
     iconSvg("logo", 23),
@@ -1029,11 +1030,6 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toggleStartPanel(startButton);
       return;
     }
-    if (event.key === "Meta" && !event.repeat) {
-      event.preventDefault();
-      toggleStartPanel(startButton);
-      return;
-    }
     if (isEditable(event.target)) return;
     if (event.key === "?" || ((event.ctrlKey || event.metaKey) && event.key === "/")) {
       event.preventDefault();
@@ -1042,6 +1038,13 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
   document.addEventListener("keydown", onKeyDown);
   disposers.push(() => document.removeEventListener("keydown", onKeyDown));
+  // Tap ⌘ Cmd (Mac) / the Windows key: open or close the start menu.
+  disposers.push(
+    watchOsKeyTap(() => {
+      if (document.querySelector(".modal-backdrop")) return;
+      toggleStartPanel(startButton);
+    }),
+  );
 
   const onTaskbarContext = (event: MouseEvent): void => {
     const targetEl = event.target as HTMLElement;
@@ -1051,7 +1054,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       event.clientX,
       event.clientY,
       [
-        { label: "Open start menu", icon: "logo", shortcut: "Ctrl+Space", onClick: () => toggleStartPanel(startButton) },
+        { label: "Open start menu", icon: "logo", shortcut: startMenuHint().short, onClick: () => toggleStartPanel(startButton) },
         { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
         "separator",
         { label: "Keyboard shortcuts", icon: "grid", onClick: () => showShortcuts() },

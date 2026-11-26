@@ -10,6 +10,7 @@ import {
   relativeTime,
 } from "../core/format";
 import { appIconSvg, iconSvg } from "../core/icons";
+import { startMenuHint } from "../core/os-key";
 import type { ThemePreference } from "../core/store";
 import { getRealtime } from "../core/realtime";
 import { ApiError } from "../core/api";
@@ -262,7 +263,7 @@ export function buildStartMenu(ctx: PanelContext, onClose: () => void): HTMLElem
           ),
         ),
       ),
-      h("span", { class: "start-hint" }, "Ctrl+Space"),
+      h("span", { class: "start-hint" }, startMenuHint().short),
     ),
     search,
     recentWrap,

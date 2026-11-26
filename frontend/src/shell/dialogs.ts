@@ -5,6 +5,7 @@ import { apiErrorMessage } from "../core/api";
 import { h } from "../core/dom";
 import { formField, passwordField, validatePassword } from "../core/forms";
 import { iconSvg } from "../core/icons";
+import { osKeyLabel } from "../core/os-key";
 import type { ToastCenter } from "../core/toast";
 import type { MeResponse, User } from "../core/types";
 import { modal } from "../core/ui";
@@ -110,7 +111,10 @@ export function forcePasswordChange(
 
 const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
   { keys: ["Ctrl", "Space"], label: "Open the start menu and application search" },
-  { keys: ["Cmd", "Space"], label: "Open the start menu (macOS)" },
+  {
+    keys: [osKeyLabel()],
+    label: "Tap to open or close the start menu (⌘ Cmd on a Mac, the Windows key on Windows)",
+  },
   { keys: ["?"], label: "Show this keyboard shortcuts dialog" },
   { keys: ["Esc"], label: "Close menus, dialogs and popovers" },
   { keys: ["↑", "↓", "←", "→"], label: "Move between desktop icons or search results" },
