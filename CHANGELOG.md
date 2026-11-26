@@ -38,8 +38,26 @@ this file by `scripts/changelog-section.sh`.
   models get their reasoning back between tool steps, and models without
   tool support answer without tools. Database schema v12.
 
+- **26 AI providers** to choose from when adding one: Anthropic, OpenAI,
+  Google Gemini, xAI, DeepSeek, Mistral, Moonshot Kimi, Z.ai, Alibaba Qwen,
+  MiniMax; OpenCode Zen and OpenCode Go, OpenRouter, Vercel AI Gateway, Hugging
+  Face; Groq, Cerebras, Together AI, Fireworks AI, NVIDIA NIM; Ollama, LM
+  Studio, vLLM, llama.cpp; and any OpenAI- or Anthropic-compatible endpoint.
+  OpenCode's models each go over their own protocol (Claude over Anthropic
+  Messages, the rest over chat completions), read from its model list; free
+  models only OpenCode's apps may call are left out of the list.
+
 ### Changed
 
+- **AI Agent's new look.** A new chat greets you with the agent's avatar and
+  a few ideas to start from; the agent or model is a chip in the message box
+  ("Asks before acting" beside it); replies show who wrote them; tool calls
+  read as steps; thinking shows as a pill. Settings tiles show what is
+  connected at a glance, providers are cards with their mark, and adding one
+  starts from a searchable picker grouped by kind, then asks only for what
+  that provider needs (a key with a link to get one; the address under
+  Advanced), loads its models as soon as the key is in and lets you pick them
+  as chips.
 - **An app's dialogs open in its own window**, as on other systems, instead
   of dimming the whole desktop: they cover only that window's content, move
   with it, and close when it closes. The title bar still moves, minimizes and

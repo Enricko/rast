@@ -8,21 +8,29 @@
 //! * Anthropic Messages (`POST {base}/messages`): text and thinking deltas,
 //!   input tokens in `message_start`, output tokens in `message_delta`.
 //!
+//! Gateways that serve each model on its own protocol (OpenCode: Claude and
+//! Qwen on Messages, the rest on chat completions, which translate GPT and
+//! Gemini) say which in their model list; RAST reads it once in a while and
+//! picks the protocol per model (see [`Kind::routes_by_model`]).
+//!
 //! Both carry tools: the model asks for calls (streamed as pieces of JSON),
 //! the harness answers each with a result in the next request.
 //!
 //! Keys only go to the provider's own base URL; redirects are not followed.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Read},
-    sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        LazyLock, Mutex,
+    },
+    time::{Duration, Instant},
 };
 
 use serde_json::{json, Value};
 
-use super::Kind;
+use super::{Kind, Protocol};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// Until the provider starts answering (reasoning models think first).
@@ -32,6 +40,10 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Anthropic needs a maximum; enough for long answers.
 const ANTHROPIC_DEFAULT_MAX_TOKENS: i64 = 16_000;
+/// How long a gateway's model routes are used before they are read again.
+const ROUTES_FOR: Duration = Duration::from_secs(6 * 60 * 60);
+/// …and how long before trying again when they could not be read.
+const ROUTES_RETRY: Duration = Duration::from_secs(60);
 
 /// A tool the model may call: its name, what it does and its arguments'
 /// JSON schema.
@@ -107,6 +119,30 @@ pub struct ChatRequest {
     pub tools: Vec<ToolSpec>,
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<i64>,
+    /// A stable id for the conversation, for gateways that ask for one
+    /// (OpenCode Go refuses requests without it); "" none.
+    pub session: String,
+}
+
+/// How one request goes out: the protocol and its details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wire {
+    pub protocol: Protocol,
+    /// Send the model's reasoning back with its tool calls (`reasoning_content`).
+    pub reasoning_back: bool,
+    /// Ask for usage in the stream (`stream_options`); a few servers refuse it.
+    pub usage_option: bool,
+}
+
+impl Wire {
+    /// What a kind uses for every model.
+    pub fn of(kind: Kind) -> Self {
+        Self {
+            protocol: kind.protocol(),
+            reasoning_back: kind.wants_reasoning_back(),
+            usage_option: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -344,7 +380,7 @@ fn anthropic_turns(turns: &[Turn]) -> Vec<Value> {
     out
 }
 
-fn openai_turns(kind: Kind, turns: &[Turn]) -> Vec<Value> {
+fn openai_turns(reasoning_back: bool, turns: &[Turn]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(turns.len());
     for turn in turns {
         match turn {
@@ -370,9 +406,9 @@ fn openai_turns(kind: Kind, turns: &[Turn]) -> Vec<Value> {
                         })
                         .collect();
                 }
-                // DeepSeek's thinking models want their reasoning back
-                // once tools are in play.
-                if kind == Kind::DeepSeek && !reasoning.is_empty() {
+                // Thinking models (DeepSeek, Kimi, GLM) want their
+                // reasoning back once tools are in play.
+                if reasoning_back && !reasoning.is_empty() {
                     message["reasoning_content"] = json!(reasoning);
                 }
                 out.push(message);
@@ -405,32 +441,67 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .new_agent()
 }
 
-fn headers(kind: Kind, api_key: Option<&str>) -> Vec<(&'static str, String)> {
+fn headers(
+    kind: Kind,
+    protocol: Protocol,
+    api_key: Option<&str>,
+    session: &str,
+) -> Vec<(&'static str, String)> {
     let mut out = vec![("Content-Type", "application/json".to_string())];
-    match kind {
-        Kind::Anthropic => {
-            out.push(("anthropic-version", "2023-06-01".into()));
-            if let Some(key) = api_key {
+    if protocol == Protocol::Anthropic {
+        out.push(("anthropic-version", "2023-06-01".into()));
+    }
+    if let Some(key) = api_key {
+        match kind {
+            Kind::Anthropic => out.push(("x-api-key", key.to_string())),
+            // Anthropic-compatible servers read one or the other.
+            Kind::CustomAnthropic => {
                 out.push(("x-api-key", key.to_string()));
-            }
-        }
-        _ => {
-            if let Some(key) = api_key {
                 out.push(("Authorization", format!("Bearer {key}")));
             }
+            _ => out.push(("Authorization", format!("Bearer {key}"))),
         }
     }
     if kind == Kind::OpenRouter {
         out.push(("HTTP-Referer", "https://github.com/Enricko/rast".into()));
         out.push(("X-Title", "RAST".into()));
     }
+    if kind.routes_by_model() && !session.is_empty() {
+        out.push(("x-opencode-session", session.to_string()));
+    }
     out
 }
 
-/// The request body for a streamed reply.
+/// Where replies are asked for.
+fn chat_url(kind: Kind, base_url: &str, protocol: Protocol) -> String {
+    match (kind.routes_by_model(), protocol) {
+        (true, Protocol::Anthropic) => format!("{base_url}/anthropic/v1/messages"),
+        (true, Protocol::Chat) => format!("{base_url}/openai/v1/chat/completions"),
+        (false, Protocol::Anthropic) => format!("{base_url}/messages"),
+        (false, Protocol::Chat) => format!("{base_url}/chat/completions"),
+    }
+}
+
+/// Where the model list is.
+fn models_url(kind: Kind, base_url: &str) -> String {
+    if kind.routes_by_model() {
+        format!("{base_url}/v1/models")
+    } else if kind.protocol() == Protocol::Anthropic {
+        format!("{base_url}/models?limit=1000")
+    } else {
+        format!("{base_url}/models")
+    }
+}
+
+/// The request body for a streamed reply, as the kind sends every model.
 pub fn request_body(req: &ChatRequest) -> Value {
+    request_body_for(req, Wire::of(req.kind))
+}
+
+/// The request body for a streamed reply over `wire`.
+pub fn request_body_for(req: &ChatRequest, wire: Wire) -> Value {
     let normalized = normalize(req.messages.clone(), !req.tools.is_empty());
-    if req.kind == Kind::Anthropic {
+    if wire.protocol == Protocol::Anthropic {
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_output_tokens.unwrap_or(ANTHROPIC_DEFAULT_MAX_TOKENS),
@@ -452,7 +523,7 @@ pub fn request_body(req: &ChatRequest) -> Value {
         }
         return body;
     }
-    let turns = openai_turns(req.kind, &normalized);
+    let turns = openai_turns(wire.reasoning_back, &normalized);
     let mut messages = Vec::with_capacity(turns.len() + 1);
     if !req.system.is_empty() {
         messages.push(json!({"role": "system", "content": req.system}));
@@ -462,8 +533,10 @@ pub fn request_body(req: &ChatRequest) -> Value {
         "model": req.model,
         "messages": messages,
         "stream": true,
-        "stream_options": {"include_usage": true},
     });
+    if wire.usage_option {
+        body["stream_options"] = json!({"include_usage": true});
+    }
     if let Some(t) = req.temperature {
         body["temperature"] = json!(t);
     }
@@ -505,8 +578,12 @@ pub struct StreamParser {
 
 impl StreamParser {
     pub fn new(kind: Kind) -> Self {
+        Self::for_protocol(kind.protocol())
+    }
+
+    pub fn for_protocol(protocol: Protocol) -> Self {
         Self {
-            anthropic: kind == Kind::Anthropic,
+            anthropic: protocol == Protocol::Anthropic,
             usage: Usage::default(),
             done: false,
             calls: BTreeMap::new(),
@@ -739,29 +816,43 @@ pub fn stream_chat(
     if req.base_url.is_empty() {
         return Err("the provider has no address; set its base URL".into());
     }
-    let url = if req.kind == Kind::Anthropic {
-        format!("{}/messages", req.base_url)
+    let mut wire = if req.kind.routes_by_model() {
+        gateway_wire(req)
     } else {
-        format!("{}/chat/completions", req.base_url)
+        Wire::of(req.kind)
     };
-    let body = request_body(req).to_string();
-    let mut request = agent(REPLY_TIMEOUT).post(&url);
-    for (name, value) in headers(req.kind, req.api_key.as_deref()) {
-        request = request.header(name, value);
-    }
-    request = request.header("Accept", "text/event-stream");
-    let response = request
-        .send(body.as_bytes())
-        .map_err(|e| format!("cannot reach the provider at {}: {e}", req.base_url))?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
+    let url = chat_url(req.kind, &req.base_url, wire.protocol);
+    let response = loop {
+        let body = request_body_for(req, wire).to_string();
+        let mut request = agent(REPLY_TIMEOUT).post(&url);
+        for (name, value) in headers(
+            req.kind,
+            wire.protocol,
+            req.api_key.as_deref(),
+            &req.session,
+        ) {
+            request = request.header(name, value);
+        }
+        request = request.header("Accept", "text/event-stream");
+        let response = request
+            .send(body.as_bytes())
+            .map_err(|e| format!("cannot reach the provider at {}: {e}", req.base_url))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            break response;
+        }
         let body = read_limited(response.into_body(), 16 * 1024);
+        if wire.usage_option && refuses_usage_option(status, &body) {
+            // Usage then comes in the last chunk anyway, or not at all.
+            wire.usage_option = false;
+            continue;
+        }
         return Err(ChatError {
             tools_refused: !req.tools.is_empty() && refuses_tools(status, &body),
             message: refusal(status, &body),
         });
-    }
-    let mut parser = StreamParser::new(req.kind);
+    };
+    let mut parser = StreamParser::for_protocol(wire.protocol);
     let reader = BufReader::new(response.into_body().into_reader());
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -774,7 +865,7 @@ pub fn stream_chat(
         for delta in parser.line(&line)? {
             on_delta(delta);
         }
-        if parser.done && req.kind == Kind::Anthropic {
+        if parser.done && wire.protocol == Protocol::Anthropic {
             break;
         }
     }
@@ -784,7 +875,14 @@ pub fn stream_chat(
     })
 }
 
-/// The models a provider offers (`GET {base}/models`), sorted.
+/// Whether a refusal is about `stream_options` (servers that do not know it).
+pub fn refuses_usage_option(status: u16, body: &str) -> bool {
+    matches!(status, 400 | 422) && body.contains("stream_options")
+}
+
+/// The models a provider offers (`GET {base}/models`), sorted. Gateways
+/// leave out what RAST cannot use: models that are not for chat, and free
+/// ones only their own apps may call.
 pub fn list_models(
     kind: Kind,
     base_url: &str,
@@ -793,13 +891,24 @@ pub fn list_models(
     if base_url.is_empty() {
         return Err("set the provider's base URL first".into());
     }
-    let url = if kind == Kind::Anthropic {
-        format!("{base_url}/models?limit=1000")
-    } else {
-        format!("{base_url}/models")
-    };
-    let mut request = agent(LIST_TIMEOUT).get(&url);
-    for (name, value) in headers(kind, api_key) {
+    if kind.routes_by_model() {
+        let models = gateway_models(kind, base_url, api_key)?;
+        remember_routes(base_url, &models, ROUTES_FOR);
+        let mut ids: Vec<String> = models
+            .into_iter()
+            .filter(|m| m.usable)
+            .map(|m| m.id)
+            .collect();
+        ids.sort();
+        ids.truncate(super::MAX_MODELS);
+        return Ok(ids);
+    }
+    parse_models(&fetch_models(kind, base_url, api_key)?)
+}
+
+fn fetch_models(kind: Kind, base_url: &str, api_key: Option<&str>) -> Result<String, String> {
+    let mut request = agent(LIST_TIMEOUT).get(models_url(kind, base_url));
+    for (name, value) in headers(kind, kind.protocol(), api_key, "") {
         if name != "Content-Type" {
             request = request.header(name, value);
         }
@@ -812,7 +921,133 @@ pub fn list_models(
     if !(200..300).contains(&status) {
         return Err(refusal(status, &body));
     }
-    parse_models(&body)
+    Ok(body)
+}
+
+/// A model of a gateway that routes by model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GatewayModel {
+    pub id: String,
+    pub route: Route,
+    /// A chat model RAST may call (not an embedding or image model, and not
+    /// a free one, which only the gateway's own apps may use).
+    pub usable: bool,
+}
+
+/// How a gateway serves one model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Route {
+    pub anthropic: bool,
+    pub reasoning_back: bool,
+}
+
+impl Route {
+    /// For a model the list did not have (or could not be read).
+    fn guess(model: &str) -> Self {
+        Self {
+            anthropic: model.starts_with("claude-"),
+            reasoning_back: false,
+        }
+    }
+}
+
+fn gateway_models(
+    kind: Kind,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<GatewayModel>, String> {
+    parse_gateway_models(&fetch_models(kind, base_url, api_key)?)
+}
+
+/// A gateway's model list (OpenAI's list shape, each model with
+/// `recommended_api`, `api`, `type` and `cost`).
+pub fn parse_gateway_models(body: &str) -> Result<Vec<GatewayModel>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|_| "the provider's model list is not JSON".to_string())?;
+    let list = value
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "the provider did not send a model list".to_string())?;
+    let price = |m: &Value, side: &str| {
+        m.pointer(&format!("/cost/text/{side}/price"))
+            .and_then(Value::as_f64)
+    };
+    Ok(list
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(Value::as_str)?;
+            if id.is_empty() || id.len() > super::MAX_MODEL_NAME {
+                return None;
+            }
+            let api = m.get("api").cloned().unwrap_or(Value::Null);
+            let chat_api = api.get("chat-completions").is_some();
+            let anthropic = match m.get("recommended_api").and_then(Value::as_str) {
+                Some(recommended) => recommended == "messages",
+                None => api.get("messages").is_some() && !chat_api,
+            };
+            let reasoning_back = api
+                .pointer("/chat-completions/compatibility/reasoning_field")
+                .and_then(Value::as_str)
+                == Some("reasoning_content");
+            let chat = m
+                .get("type")
+                .and_then(Value::as_str)
+                .is_none_or(|t| t == "chat");
+            let free = price(m, "input") == Some(0.0) && price(m, "output") == Some(0.0);
+            Some(GatewayModel {
+                id: id.to_string(),
+                route: Route {
+                    anthropic,
+                    reasoning_back,
+                },
+                usable: chat && !free,
+            })
+        })
+        .collect())
+}
+
+/// Gateways' routes by base URL, and until when they are used.
+type Routes = HashMap<String, (Instant, HashMap<String, Route>)>;
+static ROUTES: LazyLock<Mutex<Routes>> = LazyLock::new(Default::default);
+
+fn remember_routes(base_url: &str, models: &[GatewayModel], keep: Duration) {
+    let routes = models.iter().map(|m| (m.id.clone(), m.route)).collect();
+    ROUTES
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(base_url.to_string(), (Instant::now() + keep, routes));
+}
+
+/// How a gateway wants `req.model` sent (reads its model list when the
+/// routes are old).
+fn gateway_wire(req: &ChatRequest) -> Wire {
+    let known = |routes: &Routes| {
+        routes
+            .get(&req.base_url)
+            .filter(|(until, _)| *until > Instant::now())
+            .map(|(_, models)| models.get(&req.model).copied())
+    };
+    let cached = known(&ROUTES.lock().unwrap_or_else(|e| e.into_inner()));
+    let route = match cached {
+        Some(route) => route,
+        None => {
+            match gateway_models(req.kind, &req.base_url, req.api_key.as_deref()) {
+                Ok(models) => remember_routes(&req.base_url, &models, ROUTES_FOR),
+                Err(_) => remember_routes(&req.base_url, &[], ROUTES_RETRY),
+            }
+            known(&ROUTES.lock().unwrap_or_else(|e| e.into_inner())).flatten()
+        }
+    }
+    .unwrap_or_else(|| Route::guess(&req.model));
+    Wire {
+        protocol: if route.anthropic {
+            Protocol::Anthropic
+        } else {
+            Protocol::Chat
+        },
+        reasoning_back: route.reasoning_back,
+        usage_option: true,
+    }
 }
 
 pub fn parse_models(body: &str) -> Result<Vec<String>, String> {
@@ -934,6 +1169,7 @@ mod tests {
             tools: Vec::new(),
             temperature: Some(0.2),
             max_output_tokens: Some(100),
+            session: String::new(),
         };
         let body = request_body(&req);
         assert_eq!(
@@ -950,7 +1186,7 @@ mod tests {
         assert_eq!(body["system"], "Be brief.");
         assert_eq!(body["messages"], json!([{"role": "user", "content": "hi"}]));
         assert_eq!(body["max_tokens"], ANTHROPIC_DEFAULT_MAX_TOKENS);
-        let h = headers(Kind::Anthropic, Some("sk-ant"));
+        let h = headers(Kind::Anthropic, Protocol::Anthropic, Some("sk-ant"), "");
         assert!(h.contains(&("x-api-key", "sk-ant".to_string())));
         assert!(!h.iter().any(|(name, _)| *name == "Authorization"));
     }
@@ -1125,6 +1361,7 @@ mod tests {
             }],
             temperature: None,
             max_output_tokens: None,
+            session: String::new(),
         };
         let body = request_body(&req);
         assert_eq!(body["tools"][0]["function"]["name"], "list_files");
@@ -1181,5 +1418,208 @@ mod tests {
             vec!["llama3"]
         );
         assert!(parse_models("[]").is_err());
+    }
+
+    #[test]
+    fn every_kind_has_a_preset() {
+        let mut ids = std::collections::HashSet::new();
+        for info in super::super::KINDS.iter() {
+            assert!(ids.insert(info.id), "{} listed twice", info.id);
+            assert_eq!(Kind::parse(info.id), Some(info.kind));
+            assert_eq!(info.kind.as_str(), info.id);
+            let custom = info.group == "custom";
+            assert_eq!(info.base_url.is_empty(), custom, "{}", info.id);
+            if !custom {
+                assert!(super::super::valid_base_url(info.base_url), "{}", info.id);
+            }
+            assert!(info.key_url.is_empty() || info.key_url.starts_with("https://"));
+            assert!(
+                ["maker", "gateway", "fast", "local", "custom"].contains(&info.group),
+                "{}",
+                info.id
+            );
+        }
+        assert_eq!(Kind::CustomAnthropic.protocol(), Protocol::Anthropic);
+        assert_eq!(Kind::Gemini.protocol(), Protocol::Chat);
+    }
+
+    #[test]
+    fn gateways_route_each_model() {
+        let base = "https://opencode.ai/inference";
+        assert_eq!(
+            chat_url(Kind::OpenCode, base, Protocol::Anthropic),
+            "https://opencode.ai/inference/anthropic/v1/messages"
+        );
+        assert_eq!(
+            chat_url(
+                Kind::OpenCodeGo,
+                "https://opencode.ai/inference/go",
+                Protocol::Chat
+            ),
+            "https://opencode.ai/inference/go/openai/v1/chat/completions"
+        );
+        assert_eq!(
+            models_url(Kind::OpenCode, base),
+            "https://opencode.ai/inference/v1/models"
+        );
+        assert_eq!(
+            chat_url(Kind::Groq, "https://api.groq.com/openai/v1", Protocol::Chat),
+            "https://api.groq.com/openai/v1/chat/completions"
+        );
+        let models = parse_gateway_models(
+            &json!({"object": "list", "data": [
+                {"id": "claude-sonnet-5-5", "type": "chat", "recommended_api": "messages",
+                 "api": {"messages": {}}, "cost": {"text": {"input": {"price": 2}, "output": {"price": 10}}}},
+                {"id": "qwen3.8-max", "type": "chat", "recommended_api": "chat-completions",
+                 "api": {"chat-completions": {"compatibility": {"reasoning_field": "reasoning_content"}}}},
+                {"id": "gpt-6-sol", "type": "chat", "recommended_api": "responses", "api": {"responses": {}}},
+                {"id": "big-pickle", "type": "chat", "api": {"chat-completions": {}},
+                 "cost": {"text": {"input": {"price": 0}, "output": {"price": 0}}}},
+                {"id": "text-embedding-3-small", "type": "embedding", "api": {"embeddings": {}}}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let find = |id: &str| models.iter().find(|m| m.id == id).unwrap().clone();
+        assert!(find("claude-sonnet-5-5").route.anthropic);
+        assert!(find("claude-sonnet-5-5").usable);
+        let qwen = find("qwen3.8-max");
+        assert!(!qwen.route.anthropic && qwen.route.reasoning_back);
+        assert!(
+            !find("gpt-6-sol").route.anthropic,
+            "GPT goes through chat completions"
+        );
+        assert!(!find("big-pickle").usable, "free models are OpenCode's own");
+        assert!(!find("text-embedding-3-small").usable);
+        assert!(Route::guess("claude-x").anthropic && !Route::guess("kimi-k3").anthropic);
+
+        let h = headers(Kind::OpenCodeGo, Protocol::Anthropic, Some("k"), "conv-1");
+        assert!(h.contains(&("Authorization", "Bearer k".to_string())));
+        assert!(h.contains(&("x-opencode-session", "conv-1".to_string())));
+        assert!(h.iter().any(|(name, _)| *name == "anthropic-version"));
+        assert!(!headers(Kind::OpenAi, Protocol::Chat, Some("k"), "conv-1")
+            .iter()
+            .any(|(name, _)| *name == "x-opencode-session"));
+        let h = headers(Kind::CustomAnthropic, Protocol::Anthropic, Some("k"), "");
+        assert!(h.contains(&("x-api-key", "k".to_string())));
+        assert!(h.contains(&("Authorization", "Bearer k".to_string())));
+    }
+
+    /// Requests the fake gateway got: request line, session header, body.
+    type GatewayLog = std::sync::Arc<Mutex<Vec<(String, String, Value)>>>;
+
+    /// A gateway like OpenCode on a local port: its model list, Messages for
+    /// Claude, and chat completions that refuse `stream_options` once.
+    fn fake_gateway() -> (String, GatewayLog) {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/inference", listener.local_addr().unwrap());
+        let log: GatewayLog = Default::default();
+        let seen = log.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let (mut session, mut length) = (String::new(), 0usize);
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    let header = header.trim_end();
+                    if header.is_empty() {
+                        break;
+                    }
+                    let (name, value) = header.split_once(':').unwrap();
+                    match name.to_ascii_lowercase().as_str() {
+                        "x-opencode-session" => session = value.trim().to_string(),
+                        "content-length" => length = value.trim().parse().unwrap(),
+                        _ => {}
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                seen.lock()
+                    .unwrap()
+                    .push((line.trim().to_string(), session, body.clone()));
+                let reply = |status: &str, kind: &str, text: String| {
+                    format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                        text.len()
+                    )
+                };
+                let out = if line.starts_with("GET /inference/v1/models") {
+                    reply(
+                        "200 OK",
+                        "application/json",
+                        json!({"data": [
+                            {"id": "claude-x", "type": "chat", "recommended_api": "messages"},
+                            {"id": "kimi-x", "type": "chat", "recommended_api": "chat-completions"}
+                        ]})
+                        .to_string(),
+                    )
+                } else if line.starts_with("POST /inference/anthropic/v1/messages") {
+                    reply("200 OK", "text/event-stream", [
+                        r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"from messages"}}"#,
+                        r#"data: {"type":"message_stop"}"#,
+                    ].map(|l| format!("{l}\n\n")).concat())
+                } else if body.get("stream_options").is_some() {
+                    reply("400 Bad Request", "application/json",
+                        r#"{"error":{"message":"Unrecognized request argument supplied: stream_options"}}"#.into())
+                } else {
+                    reply("200 OK", "text/event-stream",
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"from chat\"}}]}\n\ndata: [DONE]\n\n".into())
+                };
+                let _ = stream.write_all(out.as_bytes());
+            }
+        });
+        (base, log)
+    }
+
+    #[test]
+    fn gateways_get_each_model_on_its_protocol() {
+        let (base, log) = fake_gateway();
+        let ask = |model: &str| {
+            let req = ChatRequest {
+                kind: Kind::OpenCode,
+                base_url: base.clone(),
+                api_key: Some("k".into()),
+                model: model.into(),
+                system: String::new(),
+                messages: vec![Turn::User("hi".into())],
+                tools: Vec::new(),
+                temperature: None,
+                max_output_tokens: None,
+                session: "conv-7".into(),
+            };
+            let mut text = String::new();
+            stream_chat(&req, &AtomicBool::new(false), &mut |delta| {
+                if let Delta::Text(t) = delta {
+                    text.push_str(&t);
+                }
+            })
+            .map(|_| text)
+        };
+        assert_eq!(ask("claude-x").unwrap(), "from messages");
+        assert_eq!(ask("kimi-x").unwrap(), "from chat");
+        let seen = log.lock().unwrap().clone();
+        let lines: Vec<&str> = seen.iter().map(|(line, _, _)| line.as_str()).collect();
+        assert!(
+            lines[0].starts_with("GET /inference/v1/models"),
+            "{lines:?}"
+        );
+        assert!(lines[1].starts_with("POST /inference/anthropic/v1/messages"));
+        // The list is read once; chat completions are asked again without
+        // `stream_options` after refusing it.
+        assert!(lines[2].starts_with("POST /inference/openai/v1/chat/completions"));
+        assert!(seen[2].2.get("stream_options").is_some());
+        assert!(lines[3].starts_with("POST /inference/openai/v1/chat/completions"));
+        assert!(seen[3].2.get("stream_options").is_none());
+        assert_eq!(lines.len(), 4);
+        assert!(seen[1..].iter().all(|(_, session, _)| session == "conv-7"));
+        assert_eq!(
+            list_models(Kind::OpenCode, &base, Some("k")).unwrap(),
+            vec!["claude-x".to_string(), "kimi-x".to_string()]
+        );
     }
 }

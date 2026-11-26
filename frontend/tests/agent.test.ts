@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { agentHues } from "../src/apps/agent/marks";
 import { parseInline, parseMarkdown, safeHref } from "../src/apps/agent/markdown";
 import {
   addToStep,
+  groupKinds,
   allowanceText,
   allowanceUsed,
   applyDelta,
@@ -175,4 +177,42 @@ test("chats group by day", () => {
   const at = (days: number) => ({ id: String(days), userId: 1, agentId: null, providerId: null, model: "", title: "", createdAt: 0, updatedAt: now - days * 86_400_000, running: false });
   const groups = groupByDay([at(0), at(1), at(3), at(30)], now);
   assert.deepEqual(groups.map((g) => g.label), ["Today", "Yesterday", "This week", "Older"]);
+});
+
+test("the provider picker groups kinds and finds them by name or what they offer", () => {
+  const kind = (id: string, group: string, label: string, about = "") => ({
+    id,
+    label,
+    group,
+    about,
+    defaultBaseUrl: "",
+    needsKey: true,
+    keyUrl: "",
+  });
+  const kinds = [
+    kind("anthropic", "maker", "Anthropic", "Claude models"),
+    kind("opencode", "gateway", "OpenCode Zen", "Claude, GPT and more"),
+    kind("ollama", "local", "Ollama"),
+    kind("custom", "custom", "OpenAI-compatible"),
+  ];
+  assert.deepEqual(
+    groupKinds(kinds, "").map((g) => [g.id, g.kinds.map((k) => k.id)]),
+    [
+      ["maker", ["anthropic"]],
+      ["gateway", ["opencode"]],
+      ["local", ["ollama"]],
+      ["custom", ["custom"]],
+    ],
+  );
+  assert.deepEqual(
+    groupKinds(kinds, "claude").map((g) => g.kinds.map((k) => k.id)),
+    [["anthropic"], ["opencode"]],
+  );
+  assert.deepEqual(groupKinds(kinds, "nothing like it"), []);
+});
+
+test("an agent keeps its colours", () => {
+  assert.deepEqual(agentHues("Writer"), agentHues(" writer "));
+  assert.notDeepEqual(agentHues("Writer"), agentHues("Captain"));
+  for (const hue of agentHues("Captain")) assert.ok(hue >= 0 && hue < 360);
 });

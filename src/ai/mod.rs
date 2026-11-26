@@ -56,70 +56,195 @@ pub const HISTORY_MESSAGES: usize = 60;
 /// Characters of earlier messages sent with each request (the newest ones).
 pub const HISTORY_CHARS: usize = 400_000;
 
-/// Provider kinds and their wire protocol (see [`provider`]).
+/// The two wire protocols RAST speaks (see [`provider`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// OpenAI-compatible chat completions.
+    Chat,
+    /// Anthropic Messages.
+    Anthropic,
+}
+
+/// Provider kinds: a preset per provider (address, protocol, whether a key
+/// is needed), plus custom endpoints of either protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Anthropic,
     OpenAi,
+    Gemini,
+    Xai,
     DeepSeek,
+    Mistral,
+    Moonshot,
+    Zai,
+    Qwen,
+    MiniMax,
+    OpenCode,
+    OpenCodeGo,
     OpenRouter,
+    Vercel,
+    HuggingFace,
+    Groq,
+    Cerebras,
+    Together,
+    Fireworks,
+    Nvidia,
     Ollama,
+    LmStudio,
+    Vllm,
+    LlamaCpp,
     Custom,
+    CustomAnthropic,
 }
 
+/// What the settings page shows about a kind, and its defaults.
+#[derive(Debug)]
+pub struct KindInfo {
+    pub kind: Kind,
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Where requests go unless the administrator enters another address.
+    pub base_url: &'static str,
+    pub needs_key: bool,
+    /// "maker", "gateway", "fast", "local" or "custom" (how the page groups them).
+    pub group: &'static str,
+    /// Where an administrator gets a key ("" none).
+    pub key_url: &'static str,
+    /// One line about it.
+    pub about: &'static str,
+}
+
+#[allow(clippy::too_many_arguments)]
+const fn info(
+    kind: Kind,
+    id: &'static str,
+    label: &'static str,
+    base_url: &'static str,
+    needs_key: bool,
+    group: &'static str,
+    key_url: &'static str,
+    about: &'static str,
+) -> KindInfo {
+    KindInfo {
+        kind,
+        id,
+        label,
+        base_url,
+        needs_key,
+        group,
+        key_url,
+        about,
+    }
+}
+
+/// Every kind, in the order the settings page offers them.
+#[rustfmt::skip]
+pub const KINDS: [KindInfo; 26] = [
+    info(Kind::Anthropic, "anthropic", "Anthropic", "https://api.anthropic.com/v1", true, "maker",
+        "https://platform.claude.com/settings/keys", "Claude models"),
+    info(Kind::OpenAi, "openai", "OpenAI", "https://api.openai.com/v1", true, "maker",
+        "https://platform.openai.com/api-keys", "GPT models"),
+    info(Kind::Gemini, "gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", true, "maker",
+        "https://aistudio.google.com/apikey", "Gemini models with an AI Studio key"),
+    info(Kind::Xai, "xai", "xAI", "https://api.x.ai/v1", true, "maker",
+        "https://console.x.ai", "Grok models"),
+    info(Kind::DeepSeek, "deepseek", "DeepSeek", "https://api.deepseek.com/v1", true, "maker",
+        "https://platform.deepseek.com/api_keys", "DeepSeek chat and reasoning models"),
+    info(Kind::Mistral, "mistral", "Mistral", "https://api.mistral.ai/v1", true, "maker",
+        "https://console.mistral.ai/api-keys", "Mistral and Codestral models"),
+    info(Kind::Moonshot, "moonshot", "Moonshot Kimi", "https://api.moonshot.ai/v1", true, "maker",
+        "https://platform.kimi.ai/console/api-keys", "Kimi models"),
+    info(Kind::Zai, "zai", "Z.ai", "https://api.z.ai/api/paas/v4", true, "maker",
+        "https://z.ai/manage-apikey/apikey-list", "GLM models"),
+    info(Kind::Qwen, "qwen", "Alibaba Qwen", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", true, "maker",
+        "https://modelstudio.console.alibabacloud.com", "Qwen models (Model Studio)"),
+    info(Kind::MiniMax, "minimax", "MiniMax", "https://api.minimax.io/v1", true, "maker",
+        "https://platform.minimax.io", "MiniMax models"),
+    info(Kind::OpenCode, "opencode", "OpenCode Zen", "https://opencode.ai/inference", true, "gateway",
+        "https://opencode.ai/docs/console/models/", "Claude, GPT, Gemini, Kimi, GLM and more, pay as you go"),
+    info(Kind::OpenCodeGo, "opencode-go", "OpenCode Go", "https://opencode.ai/inference/go", true, "gateway",
+        "https://opencode.ai/docs/console/go/", "The OpenCode Go subscription's models"),
+    info(Kind::OpenRouter, "openrouter", "OpenRouter", "https://openrouter.ai/api/v1", true, "gateway",
+        "https://openrouter.ai/settings/keys", "Hundreds of models with one key"),
+    info(Kind::Vercel, "vercel", "Vercel AI Gateway", "https://ai-gateway.vercel.sh/v1", true, "gateway",
+        "https://vercel.com/docs/ai-gateway", "Many providers' models with one key"),
+    info(Kind::HuggingFace, "huggingface", "Hugging Face", "https://router.huggingface.co/v1", true, "gateway",
+        "https://huggingface.co/settings/tokens", "Open models through Inference Providers"),
+    info(Kind::Groq, "groq", "Groq", "https://api.groq.com/openai/v1", true, "fast",
+        "https://console.groq.com/keys", "Very fast open models"),
+    info(Kind::Cerebras, "cerebras", "Cerebras", "https://api.cerebras.ai/v1", true, "fast",
+        "https://cloud.cerebras.ai", "Very fast open models"),
+    info(Kind::Together, "together", "Together AI", "https://api.together.xyz/v1", true, "fast",
+        "https://api.together.ai/settings/api-keys", "Open models in the cloud"),
+    info(Kind::Fireworks, "fireworks", "Fireworks AI", "https://api.fireworks.ai/inference/v1", true, "fast",
+        "https://app.fireworks.ai/settings/users/api-keys", "Open models in the cloud"),
+    info(Kind::Nvidia, "nvidia", "NVIDIA NIM", "https://integrate.api.nvidia.com/v1", true, "fast",
+        "https://build.nvidia.com", "Open models on NVIDIA's cloud"),
+    info(Kind::Ollama, "ollama", "Ollama", "http://127.0.0.1:11434/v1", false, "local",
+        "", "Models running on this server or your network"),
+    info(Kind::LmStudio, "lmstudio", "LM Studio", "http://127.0.0.1:1234/v1", false, "local",
+        "", "LM Studio's local server"),
+    info(Kind::Vllm, "vllm", "vLLM", "http://127.0.0.1:8000/v1", false, "local",
+        "", "A vLLM server"),
+    info(Kind::LlamaCpp, "llamacpp", "llama.cpp", "http://127.0.0.1:8080/v1", false, "local",
+        "", "llama.cpp's llama-server"),
+    info(Kind::Custom, "custom", "OpenAI-compatible", "", false, "custom",
+        "", "Any endpoint that speaks OpenAI chat completions"),
+    info(Kind::CustomAnthropic, "custom-anthropic", "Anthropic-compatible", "", false, "custom",
+        "", "Any endpoint that speaks Anthropic Messages"),
+];
+
 impl Kind {
-    pub const ALL: [Kind; 6] = [
-        Kind::Anthropic,
-        Kind::OpenAi,
-        Kind::DeepSeek,
-        Kind::OpenRouter,
-        Kind::Ollama,
-        Kind::Custom,
-    ];
+    pub fn info(self) -> &'static KindInfo {
+        KINDS
+            .iter()
+            .find(|info| info.kind == self)
+            .expect("every kind is listed in KINDS")
+    }
 
     pub fn parse(value: &str) -> Option<Kind> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+        KINDS
+            .iter()
+            .find(|info| info.id == value)
+            .map(|info| info.kind)
     }
 
     pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Anthropic => "anthropic",
-            Kind::OpenAi => "openai",
-            Kind::DeepSeek => "deepseek",
-            Kind::OpenRouter => "openrouter",
-            Kind::Ollama => "ollama",
-            Kind::Custom => "custom",
-        }
+        self.info().id
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            Kind::Anthropic => "Anthropic",
-            Kind::OpenAi => "OpenAI",
-            Kind::DeepSeek => "DeepSeek",
-            Kind::OpenRouter => "OpenRouter",
-            Kind::Ollama => "Ollama (local)",
-            Kind::Custom => "Custom (OpenAI-compatible)",
-        }
+        self.info().label
     }
 
     pub fn default_base_url(self) -> &'static str {
-        match self {
-            Kind::Anthropic => "https://api.anthropic.com/v1",
-            Kind::OpenAi => "https://api.openai.com/v1",
-            Kind::DeepSeek => "https://api.deepseek.com/v1",
-            Kind::OpenRouter => "https://openrouter.ai/api/v1",
-            Kind::Ollama => "http://127.0.0.1:11434/v1",
-            Kind::Custom => "",
-        }
+        self.info().base_url
     }
 
     /// Whether the provider refuses requests without an API key.
     pub fn needs_key(self) -> bool {
-        matches!(
-            self,
-            Kind::Anthropic | Kind::OpenAi | Kind::DeepSeek | Kind::OpenRouter
-        )
+        self.info().needs_key
+    }
+
+    /// The protocol, for kinds that use one for every model.
+    pub fn protocol(self) -> Protocol {
+        match self {
+            Kind::Anthropic | Kind::CustomAnthropic => Protocol::Anthropic,
+            _ => Protocol::Chat,
+        }
+    }
+
+    /// Gateways that serve each model on its own protocol, under
+    /// `{base}/openai/v1` and `{base}/anthropic/v1`, and say which in their
+    /// model list (OpenCode).
+    pub fn routes_by_model(self) -> bool {
+        matches!(self, Kind::OpenCode | Kind::OpenCodeGo)
+    }
+
+    /// Reasoning models that want their reasoning back with tool calls
+    /// (`reasoning_content`).
+    pub fn wants_reasoning_back(self) -> bool {
+        matches!(self, Kind::DeepSeek | Kind::Moonshot | Kind::Zai)
     }
 }
 

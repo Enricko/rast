@@ -124,6 +124,27 @@ export interface ProviderKind {
   label: string;
   defaultBaseUrl: string;
   needsKey: boolean;
+  /** How the picker groups it: maker, gateway, fast, local or custom. */
+  group: string;
+  /** Where to get a key ("" none). */
+  keyUrl: string;
+  about: string;
+}
+
+/** The provider picker's groups, in order. */
+export const KIND_GROUPS: Array<{ id: string; label: string }> = [
+  { id: "maker", label: "Model makers" },
+  { id: "gateway", label: "Gateways and subscriptions" },
+  { id: "fast", label: "Fast open models" },
+  { id: "local", label: "On your network" },
+  { id: "custom", label: "Any other endpoint" },
+];
+
+/** Kinds matching a search, by group (empty groups left out). */
+export function groupKinds(kinds: ProviderKind[], query: string): Array<{ id: string; label: string; kinds: ProviderKind[] }> {
+  const q = query.trim().toLowerCase();
+  const match = (k: ProviderKind) => !q || `${k.label} ${k.about} ${k.id}`.toLowerCase().includes(q);
+  return KIND_GROUPS.map((g) => ({ ...g, kinds: kinds.filter((k) => k.group === g.id && match(k)) })).filter((g) => g.kinds.length);
 }
 
 export interface AdminProvider extends PublicProvider {

@@ -9,9 +9,10 @@
 import type { AppContext, AppDefinition, AppInstance } from "../../core/app";
 import { ApiError } from "../../core/api";
 import { h } from "../../core/dom";
-import { iconSvg } from "../../core/icons";
+import { appIconSvg, iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import { confirmDialog, contextMenu, copyText, errorMessage, promptDialog } from "../../core/ui";
+import { agentAvatar, providerMark } from "./marks";
 import { renderMarkdown } from "./markdown";
 import {
   allowanceText,
@@ -115,12 +116,12 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   // ------------------------------------------------------------- layout
   const newButton = h(
     "button",
-    { class: "btn btn-primary ai-new", type: "button", onClick: () => openNew() },
-    iconSvg("plus", 15),
+    { class: "ai-new", type: "button", onClick: () => openNew() },
+    iconSvg("compose", 16),
     h("span", {}, "New chat"),
   );
   const search = h("input", {
-    class: "input ai-search",
+    class: "ai-search",
     type: "search",
     placeholder: "Search chats",
     ariaLabel: "Search chats",
@@ -135,11 +136,23 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     h("span", {}, "Settings"),
   );
   if (!isAdmin) settingsButton.classList.add("hidden");
-  const side = h("aside", { class: "ai-side" }, newButton, search, list, h("div", { class: "ai-side-foot" }, allowanceEl, settingsButton));
+  const side = h(
+    "aside",
+    { class: "ai-side" },
+    h("div", { class: "ai-brand" }, h("span", { class: "ai-brand-icon" }, appIconSvg("agent", "activity", 22)), h("span", { class: "ai-brand-name" }, "AI Agent")),
+    newButton,
+    h("label", { class: "ai-search-wrap" }, iconSvg("search", 14), search),
+    list,
+    h("div", { class: "ai-side-foot" }, allowanceEl, settingsButton),
+  );
 
   const titleEl = h("h2", { class: "ai-title" }, "New chat");
+  const subEl = h("span", { class: "ai-sub" });
   const ownerEl = h("span", { class: "ai-owner hidden" });
-  const picker = h("select", { class: "select ai-picker", ariaLabel: "Agent or model" });
+  const headAvatar = h("span", { class: "ai-head-avatar" });
+  const picker = h("select", { class: "ai-picker", ariaLabel: "Agent or model" });
+  const pickFace = h("span", { class: "ai-pick-face" });
+  const pickWrap = h("label", { class: "ai-pick", title: "Agent or model" }, pickFace, iconSvg("chevronDown", 13), picker);
   const menuButton = h(
     "button",
     { class: "btn btn-ghost btn-icon btn-sm", type: "button", title: "More", ariaLabel: "More" },
@@ -150,7 +163,14 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     { class: "btn btn-ghost btn-icon btn-sm ai-side-toggle", type: "button", title: "Chats", ariaLabel: "Show chats" },
     iconSvg("menu", 16),
   );
-  const head = h("header", { class: "ai-head" }, sideToggle, h("div", { class: "ai-head-text" }, titleEl, ownerEl), picker, menuButton);
+  const head = h(
+    "header",
+    { class: "ai-head" },
+    sideToggle,
+    headAvatar,
+    h("div", { class: "ai-head-text" }, titleEl, h("span", { class: "ai-head-sub" }, subEl, ownerEl)),
+    menuButton,
+  );
   const thread = h("div", { class: "ai-thread" });
   const scroller = h("div", { class: "ai-scroll" }, thread);
   const input = h("textarea", {
@@ -165,8 +185,19 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     { class: "btn btn-primary btn-icon ai-send", type: "button", title: "Send (Enter)", ariaLabel: "Send" },
     iconSvg("arrowUp", 17),
   );
+  const guard = h(
+    "span",
+    { class: "ai-guard", title: "Agents ask you before they use your files, run a command or open a web page." },
+    iconSvg("shield", 13),
+    h("span", {}, "Asks before acting"),
+  );
   const composerNote = h("div", { class: "ai-composer-note small muted" });
-  const composer = h("div", { class: "ai-composer" }, h("div", { class: "ai-input-wrap" }, input, sendButton), composerNote);
+  const composer = h(
+    "div",
+    { class: "ai-composer" },
+    composerNote,
+    h("div", { class: "ai-input-wrap" }, input, h("div", { class: "ai-composer-bar" }, pickWrap, guard, sendButton)),
+  );
   const main = h("section", { class: "ai-main" }, head, scroller, composer);
   const settingsHost = h("section", { class: "ai-settings hidden" });
   ctx.root.append(side, main, settingsHost);
@@ -187,7 +218,12 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (current?.conversation.running) void stop();
     else void send();
   });
-  picker.addEventListener("change", () => void choose(picker.value));
+  picker.addEventListener("change", () => {
+    drawPickFace();
+    updateTitle();
+    if (!current) renderThread();
+    void choose(picker.value);
+  });
   menuButton.addEventListener("click", (event) => {
     if (!current || current.readOnly) return;
     const conversation = current.conversation;
@@ -485,9 +521,28 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (resetScroll) scrollToEnd(true);
   }
 
+  /** Who answers for a picker value: name, the model behind it, picture. */
+  function describe(choice: string): { name: string; detail: string; picture: (size: number) => HTMLElement } | null {
+    const body = choiceBody(choice);
+    if (body.agentId) {
+      const agent = options?.agents.find((a) => a.id === body.agentId);
+      const name = agent?.name ?? "Agent";
+      return { name, detail: agent?.model ?? "", picture: (size) => agentAvatar(name, size) };
+    }
+    if (body.providerId) {
+      const provider = options?.providers.find((p) => p.id === body.providerId);
+      const kind = provider?.kind ?? "custom";
+      return { name: body.model ?? "", detail: provider?.name ?? "", picture: (size) => providerMark(kind, size) };
+    }
+    return null;
+  }
+
   function updateTitle(): void {
     const conversation = current?.conversation;
     titleEl.textContent = conversation ? conversation.title || "New chat" : "New chat";
+    const who = describe(conversation ? choiceOf(conversation) : picker.value);
+    headAvatar.replaceChildren(who ? who.picture(26) : agentAvatar("AI", 26));
+    subEl.textContent = who ? [who.name, who.detail].filter(Boolean).join(" · ") : "";
     ownerEl.classList.toggle("hidden", !current?.readOnly);
     ownerEl.textContent = current?.readOnly ? `${conversation?.owner ?? "?"}'s chat · read only` : "";
     menuButton.classList.toggle("hidden", !current || current.readOnly);
@@ -570,7 +625,13 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }
     picker.value = values.includes(wanted) ? wanted : (values[0] ?? "");
     picker.disabled = !values.length || Boolean(current?.readOnly);
-    picker.classList.toggle("hidden", !values.length);
+    pickWrap.classList.toggle("hidden", !values.length);
+    drawPickFace();
+  }
+
+  function drawPickFace(): void {
+    const who = describe(picker.value);
+    pickFace.replaceChildren(...(who ? [who.picture(18), h("span", { class: "ai-pick-name" }, who.name)] : [h("span", {}, "Choose")]));
   }
 
   function renderAllowance(): void {
@@ -618,7 +679,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       return;
     }
     if (!current.messages.length) {
-      thread.appendChild(h("div", { class: "ai-welcome" }, h("p", { class: "ai-welcome-title" }, "What can I help with?")));
+      thread.appendChild(welcome());
     }
     for (const message of current.messages) thread.appendChild(messageEl(message));
   }
@@ -649,33 +710,79 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       );
     }
     const agents = options.agents;
+    const who = describe(picker.value);
+    const user = ctx.store.get().user;
+    const first = (user?.displayName || user?.username || "").trim().split(/\s+/)[0] ?? "";
+    const hour = new Date().getHours();
+    const greeting = hour < 5 ? "Working late" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+    const agent = agents.find((a) => `agent:${a.id}` === picker.value);
+    const suggestions: Array<[string, string, string]> = [
+      ["folder", "What's in my home folder?", "List what is in my home folder and tell me what takes the most space."],
+      ["edit", "Write a note", "Write a short note to notes.md with a checklist for today."],
+      isAdmin
+        ? ["terminal", "Check the server", "How is the server doing? Check disk space, memory and uptime."]
+        : ["search", "Find a file", "Find the files in my folders whose name mentions \"invoice\"."],
+      ["external", "Read a web page", "Summarize this page for me: https://"],
+    ];
+    const orb = h("div", { class: "ai-orb" }, who ? who.picture(60) : agentAvatar("AI", 60));
     return h(
       "div",
       { class: "ai-welcome" },
-      h("p", { class: "ai-welcome-title" }, "What can I help with?"),
+      orb,
+      h("p", { class: "ai-welcome-title" }, first ? `${greeting}, ${first}` : greeting),
+      h(
+        "p",
+        { class: "ai-welcome-sub muted" },
+        agent?.description || (who ? `${who.name} is ready. It asks you before it touches your files, runs a command or opens the web.` : ""),
+      ),
       agents.length > 1
         ? h(
             "div",
             { class: "ai-agent-chips" },
-            ...agents.map((agent) =>
+            ...agents.map((a) =>
               h(
                 "button",
                 {
-                  class: `ai-chip${picker.value === `agent:${agent.id}` ? " is-active" : ""}`,
+                  class: `ai-chip${picker.value === `agent:${a.id}` ? " is-active" : ""}`,
                   type: "button",
-                  title: agent.description || agent.name,
+                  title: a.description || a.name,
                   onClick: () => {
-                    picker.value = `agent:${agent.id}`;
+                    picker.value = `agent:${a.id}`;
                     writeChoice(picker.value);
+                    drawPickFace();
+                    updateTitle();
                     renderThread();
                     input.focus();
                   },
                 },
-                agent.name,
+                agentAvatar(a.name, 18),
+                h("span", {}, a.name),
               ),
             ),
           )
         : null,
+      h(
+        "div",
+        { class: "ai-ideas" },
+        ...suggestions.map(([icon, label, prompt]) =>
+          h(
+            "button",
+            {
+              class: "ai-idea",
+              type: "button",
+              onClick: () => {
+                input.value = prompt;
+                autoGrow();
+                updateComposer();
+                input.focus();
+                input.setSelectionRange(prompt.length, prompt.length);
+              },
+            },
+            h("span", { class: "ai-idea-icon" }, iconSvg(icon, 15)),
+            h("span", { class: "ai-idea-label" }, label),
+          ),
+        ),
+      ),
     );
   }
 
@@ -704,7 +811,14 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       );
     }
     const body = h("div", { class: "ai-reply" });
-    const wrap = h("div", { class: "ai-msg ai-msg-assistant", dataset: { id: String(message.id) } }, body);
+    const who = current ? describe(choiceOf(current.conversation)) : null;
+    const name = who?.name || message.model || "Assistant";
+    const wrap = h(
+      "div",
+      { class: "ai-msg ai-msg-assistant", dataset: { id: String(message.id) } },
+      h("div", { class: "ai-who" }, who ? who.picture(22) : agentAvatar(name, 22), h("span", { class: "ai-who-name" }, name)),
+      body,
+    );
     bodies.set(message.id, { el: body, frame: 0 });
     fillReply(body, message);
     return wrap;
@@ -728,7 +842,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
         const key = `reasoning:${index}`;
         const details = h("details", { class: "ai-thinking", dataset: { key } });
         details.open = opened.get(key) ?? live;
-        details.append(h("summary", {}, live ? "Thinking…" : "Thought"), h("div", { class: "ai-thinking-text" }, block.text));
+        details.classList.toggle("is-live", live);
+        details.append(
+          h("summary", {}, iconSvg("sparkle", 13), h("span", {}, live ? "Thinking…" : "Thought it through")),
+          h("div", { class: "ai-thinking-text" }, block.text),
+        );
         parts.push(details);
       } else if (block.type === "text") {
         if (!block.text && !live) return;

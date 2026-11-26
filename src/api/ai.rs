@@ -638,6 +638,7 @@ async fn reply_job(
         tools: available.specs(),
         temperature: resolved.agent.as_ref().and_then(|a| a.temperature),
         max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
+        session: conversation.id.clone(),
     };
     Ok(ReplyJob {
         owner: user.clone(),
@@ -965,14 +966,17 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
         .iter()
         .map(|p| p.admin_json(&state.secrets))
         .collect();
-    let kinds: Vec<Value> = Kind::ALL
+    let kinds: Vec<Value> = ai::KINDS
         .iter()
         .map(|k| {
             json!({
-                "id": k.as_str(),
-                "label": k.label(),
-                "defaultBaseUrl": k.default_base_url(),
-                "needsKey": k.needs_key(),
+                "id": k.id,
+                "label": k.label,
+                "defaultBaseUrl": k.base_url,
+                "needsKey": k.needs_key,
+                "group": k.group,
+                "keyUrl": k.key_url,
+                "about": k.about,
             })
         })
         .collect();
@@ -1242,7 +1246,7 @@ async fn create_provider(
         .ok_or_else(|| AppError::bad_request("pick the kind of provider"))?;
     let name = required(&body.name, "the name", ai::MAX_NAME)?;
     let base_url = checked_base_url(&body.base_url)?;
-    if base_url.is_empty() && kind == Kind::Custom {
+    if base_url.is_empty() && kind.default_base_url().is_empty() {
         return Err(AppError::bad_request(
             "a custom provider needs its base URL",
         ));
@@ -1307,7 +1311,7 @@ async fn update_provider(
     }
     let name = required(&body.name, "the name", ai::MAX_NAME)?;
     let base_url = checked_base_url(&body.base_url)?;
-    if base_url.is_empty() && existing.kind == Kind::Custom {
+    if base_url.is_empty() && existing.kind.default_base_url().is_empty() {
         return Err(AppError::bad_request(
             "a custom provider needs its base URL",
         ));

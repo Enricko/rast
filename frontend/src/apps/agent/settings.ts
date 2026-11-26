@@ -8,8 +8,11 @@ import { switchControl } from "../../core/components";
 import { relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import { confirmDialog, errorMessage, modal } from "../../core/ui";
+import { agentAvatar, providerMark } from "./marks";
 import {
   formatTokens,
+  groupKinds,
+  type ProviderKind,
   type AdminAgent,
   type AdminProvider,
   type Conversation,
@@ -26,14 +29,14 @@ export interface SettingsView {
 
 type Page = "home" | "providers" | "agents" | "skills" | "tools" | "limits" | "chats" | "usage";
 
-const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string }> = [
-  { id: "providers", label: "Providers", icon: "database" },
-  { id: "agents", label: "Agents", icon: "user" },
-  { id: "skills", label: "Skills", icon: "layers" },
-  { id: "tools", label: "Tools", icon: "terminal" },
-  { id: "limits", label: "Limits", icon: "shield" },
-  { id: "chats", label: "Chats", icon: "list" },
-  { id: "usage", label: "Usage", icon: "activity" },
+const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string; hue: number }> = [
+  { id: "providers", label: "Providers", icon: "database", hue: 212 },
+  { id: "agents", label: "Agents", icon: "sparkle", hue: 268 },
+  { id: "skills", label: "Skills", icon: "layers", hue: 172 },
+  { id: "tools", label: "Tools", icon: "terminal", hue: 32 },
+  { id: "limits", label: "Limits", icon: "shield", hue: 145 },
+  { id: "chats", label: "Chats", icon: "list", hue: 198 },
+  { id: "usage", label: "Usage", icon: "activity", hue: 340 },
 ];
 
 const SEARCH_LABELS: Record<SearchSettings["kind"], string> = {
@@ -130,36 +133,48 @@ export function mountSettings(options: {
     const usedToday = data.usage.reduce((sum, u) => sum + u.today, 0);
     const counts: Record<Exclude<Page, "home">, string> = {
       providers: data.providers.length ? `${data.providers.length} connected` : "None yet",
-      agents: `${data.agents.length}`,
-      skills: `${data.skills.length}`,
+      agents: data.agents.length ? `${data.agents.length}` : "None yet",
+      skills: data.skills.length ? `${data.skills.length}` : "None yet",
       tools: data.search.configured ? `Web search: ${SEARCH_LABELS[data.search.kind]}` : "Files, commands, web pages",
       limits: data.limits.length ? `${data.limits.length} rule${data.limits.length === 1 ? "" : "s"}` : "No limits",
       chats: "All accounts",
-      usage: `${formatTokens(usedToday)} today`,
+      usage: `${formatTokens(usedToday)} tokens today`,
+    };
+    // What each tile shows at a glance.
+    const peek: Partial<Record<Exclude<Page, "home">, HTMLElement | null>> = {
+      providers: data.providers.length
+        ? h("span", { class: "ai-stack" }, ...data.providers.slice(0, 5).map((p) => providerMark(p.kind, 22)))
+        : null,
+      agents: data.agents.length ? h("span", { class: "ai-stack" }, ...data.agents.slice(0, 5).map((a) => agentAvatar(a.name, 22))) : null,
     };
     const grid = h("div", { class: "ai-tiles" });
     for (const item of PAGES) {
+      const icon = h("span", { class: "ai-tile-icon" }, iconSvg(item.icon, 20));
+      icon.style.setProperty("--tile-hue", String(item.hue));
       grid.appendChild(
         h(
           "button",
           { class: "ai-tile", type: "button", onClick: () => show(item.id) },
-          h("span", { class: "ai-tile-icon" }, iconSvg(item.icon, 22)),
+          h("span", { class: "ai-tile-top" }, icon, peek[item.id] ?? null),
           h("span", { class: "ai-tile-label" }, item.label),
           h("span", { class: "ai-tile-value small muted" }, counts[item.id]),
         ),
       );
     }
+    if (!data.providers.length) body.appendChild(connectFirst());
     body.appendChild(grid);
-    if (!data.providers.length) {
-      body.appendChild(
-        h(
-          "div",
-          { class: "ai-set-hint" },
-          h("p", {}, "Start by connecting a provider: an API key from Anthropic, OpenAI, DeepSeek or OpenRouter, or a local Ollama."),
-          h("button", { class: "btn btn-primary btn-sm", type: "button", onClick: () => editProvider(null) }, "Add a provider"),
-        ),
-      );
-    }
+  }
+
+  /** The first step, before anything works. */
+  function connectFirst(): HTMLElement {
+    const kinds = overview?.kinds ?? [];
+    return h(
+      "div",
+      { class: "ai-hero" },
+      h("span", { class: "ai-stack ai-stack-lg" }, ...["anthropic", "openai", "gemini", "opencode", "ollama"].filter((k) => kinds.some((x) => x.id === k)).map((k) => providerMark(k, 34))),
+      h("div", { class: "ai-hero-text" }, h("h3", {}, "Connect a model provider"), h("p", { class: "muted" }, `${kinds.length} to choose from: model makers, gateways like OpenCode and OpenRouter, or models on your own network.`)),
+      h("button", { class: "btn btn-primary", type: "button", onClick: () => pickProvider() }, iconSvg("plus", 14), h("span", {}, "Add a provider")),
+    );
   }
 
   function addButton(label: string, onClick: () => void): void {
@@ -174,10 +189,19 @@ export function mountSettings(options: {
     body.appendChild(h("div", { class: "ai-rows" }, ...items));
   }
 
-  function row(opts: { title: string; detail: string; badge?: string; off?: boolean; onClick: () => void; onDelete?: () => void }): HTMLElement {
+  function row(opts: {
+    title: string;
+    detail: string;
+    badge?: string;
+    off?: boolean;
+    lead?: HTMLElement;
+    onClick: () => void;
+    onDelete?: () => void;
+  }): HTMLElement {
     return h(
       "div",
       { class: `ai-row${opts.off ? " is-off" : ""}` },
+      opts.lead ? h("span", { class: "ai-row-lead" }, opts.lead) : null,
       h(
         "button",
         { class: "ai-row-main", type: "button", onClick: opts.onClick },
@@ -213,142 +237,304 @@ export function mountSettings(options: {
 
   // ---------------------------------------------------------- providers
   function renderProviders(data: Overview): void {
-    addButton("Add provider", () => editProvider(null));
-    rows(
-      data.providers.map((p) =>
-        row({
-          title: p.name,
-          badge: p.enabled ? p.kindLabel : "Off",
-          off: !p.enabled,
-          detail: `${p.models.length} model${p.models.length === 1 ? "" : "s"} · ${p.effectiveBaseUrl}${p.hasKey ? ` · key ${p.keyHint}` : ""}`,
-          onClick: () => editProvider(p),
-          onDelete: () => void remove("provider", p.name, `/api/ai/providers/${p.id}`),
-        }),
-      ),
-      "No providers yet.",
-    );
+    addButton("Add provider", () => pickProvider());
+    if (!data.providers.length) {
+      body.appendChild(connectFirst());
+      return;
+    }
+    const grid = h("div", { class: "ai-cards" });
+    for (const p of data.providers) {
+      const models = `${p.models.length} model${p.models.length === 1 ? "" : "s"}`;
+      grid.appendChild(
+        h(
+          "div",
+          { class: `ai-card${p.enabled ? "" : " is-off"}` },
+          h(
+            "button",
+            { class: "ai-card-main", type: "button", onClick: () => editProvider(p) },
+            h(
+              "span",
+              { class: "ai-card-head" },
+              providerMark(p.kind, 34),
+              h("span", { class: "ai-card-names" }, h("span", { class: "ai-card-title" }, p.name), h("span", { class: "ai-card-sub small muted" }, p.kindLabel)),
+            ),
+            h(
+              "span",
+              { class: "ai-card-foot small" },
+              h("span", { class: `ai-pill${p.enabled ? " is-on" : ""}` }, p.enabled ? "On" : "Off"),
+              h("span", { class: "muted" }, models),
+              p.hasKey ? h("span", { class: "muted ai-card-key" }, iconSvg("key", 12), p.keyHint) : null,
+            ),
+          ),
+          h(
+            "button",
+            {
+              class: "btn btn-ghost btn-icon btn-sm ai-card-delete",
+              type: "button",
+              title: "Delete",
+              ariaLabel: `Delete ${p.name}`,
+              onClick: () => void remove("provider", p.name, `/api/ai/providers/${p.id}`),
+            },
+            iconSvg("trash", 14),
+          ),
+        ),
+      );
+    }
+    body.appendChild(grid);
   }
 
-  function editProvider(existing: AdminProvider | null): void {
+  /** Step 1 of adding a provider: which one. */
+  function pickProvider(): void {
     const data = overview;
     if (!data) return;
-    const kind = h("select", { class: "select" });
-    for (const k of data.kinds) kind.appendChild(h("option", { value: k.id }, k.label));
-    kind.value = existing?.kind ?? "anthropic";
-    kind.disabled = Boolean(existing);
-    const name = h("input", { class: "input", value: existing?.name ?? "", autocomplete: "off", placeholder: "e.g. Claude (work)" });
-    const baseUrl = h("input", { class: "input", value: existing?.baseUrl ?? "", autocomplete: "off", spellcheck: false });
-    const key = h("input", { class: "input", type: "password", autocomplete: "new-password", spellcheck: false });
-    const removeKey = switchControl({ label: "Remove the saved key" });
-    const models = h("textarea", { class: "textarea ai-models", rows: 5, spellcheck: false, placeholder: "One model per line" });
-    models.value = (existing?.models ?? []).join("\n");
-    const enabled = switchControl({ label: "On", checked: existing?.enabled ?? true });
-    const status = h("div", { class: "field-error", hidden: true });
-    const picks = h("div", { class: "ai-model-picks hidden" });
-    const keyField = h("label", { class: "field" }, h("span", { class: "field-label" }, "API key"), key, h("span", { class: "field-hint" }));
-
-    const kindInfo = () => data.kinds.find((k) => k.id === kind.value);
-    const sync = () => {
-      const info = kindInfo();
-      baseUrl.placeholder = info?.defaultBaseUrl || "https://…/v1";
-      const hint = keyField.querySelector(".field-hint")!;
-      if (existing?.hasKey) hint.textContent = `Saved (${existing.keyHint}). Leave empty to keep it.`;
-      else hint.textContent = info?.needsKey ? "Required." : "Optional for local models.";
-      if (!existing && (!name.value || data.kinds.some((k) => k.label === name.value))) name.value = info?.label ?? "";
+    const search = h("input", {
+      class: "input ai-kind-search",
+      type: "search",
+      placeholder: `Search ${data.kinds.length} providers`,
+      autocomplete: "off",
+      dataset: { autofocus: "true" },
+    });
+    const listEl = h("div", { class: "ai-kind-groups" });
+    let close: () => void = () => undefined;
+    const draw = () => {
+      const groups = groupKinds(data.kinds, search.value);
+      listEl.replaceChildren(
+        ...groups.map((group) =>
+          h(
+            "section",
+            { class: "ai-kind-group" },
+            h("h4", {}, group.label),
+            h(
+              "div",
+              { class: "ai-kind-grid" },
+              ...group.kinds.map((k) =>
+                h(
+                  "button",
+                  {
+                    class: "ai-kind",
+                    type: "button",
+                    onClick: () => {
+                      close();
+                      editProvider(null, k);
+                    },
+                  },
+                  providerMark(k.id, 32),
+                  h("span", { class: "ai-kind-text" }, h("span", { class: "ai-kind-label" }, k.label), h("span", { class: "ai-kind-about small muted" }, k.about)),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      if (!groups.length) listEl.appendChild(h("p", { class: "ai-set-empty muted" }, "No provider matches. Any OpenAI- or Anthropic-compatible endpoint works under Custom."));
     };
-    kind.addEventListener("change", sync);
-    sync();
+    search.addEventListener("input", draw);
+    search.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      listEl.querySelector<HTMLButtonElement>(".ai-kind")?.click();
+    });
+    draw();
+    close = modal({ within: ctx.root, title: "Add a provider", wide: true, body: h("div", { class: "ai-kind-picker" }, search, listEl) });
+  }
 
-    const loadButton = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, "Load from provider"));
-    loadButton.addEventListener("click", async () => {
+  /** Step 2 (or editing): connect it. */
+  function editProvider(existing: AdminProvider | null, picked?: ProviderKind): void {
+    const data = overview;
+    if (!data) return;
+    const info = data.kinds.find((k) => k.id === (existing?.kind ?? picked?.id));
+    if (!info) return;
+    const custom = info.group === "custom";
+    const local = info.group === "local";
+    const name = h("input", { class: "input", value: existing?.name ?? info.label, autocomplete: "off", placeholder: `e.g. ${info.label} (work)` });
+    const baseUrl = h("input", {
+      class: "input",
+      value: existing?.baseUrl ?? "",
+      autocomplete: "off",
+      spellcheck: false,
+      placeholder: info.defaultBaseUrl || "https://…/v1",
+    });
+    const key = h("input", {
+      class: "input",
+      type: "password",
+      autocomplete: "new-password",
+      spellcheck: false,
+      placeholder: existing?.hasKey ? `Saved (${existing.keyHint})` : info.needsKey ? "Paste the key" : "Optional",
+    });
+    const removeKey = switchControl({ label: "Remove the saved key" });
+    const enabled = switchControl({ label: "People can use it", checked: existing?.enabled ?? true });
+    const status = h("div", { class: "field-error", hidden: true });
+    let selected: string[] = [...(existing?.models ?? [])];
+    let offered: string[] | null = null;
+
+    // Models: chosen ones as chips, the provider's list to pick from.
+    const chips = h("div", { class: "ai-model-chips" });
+    const typed = h("input", { class: "input input-sm ai-model-add", placeholder: "Add a model by name", autocomplete: "off", spellcheck: false });
+    const offerEl = h("div", { class: "ai-model-picks hidden" });
+    const loadButton = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, "Load models"));
+    const drawChips = () => {
+      chips.replaceChildren(
+        ...selected.map((model) =>
+          h(
+            "span",
+            { class: "ai-model-chip" },
+            h("span", {}, model),
+            h(
+              "button",
+              {
+                type: "button",
+                title: `Remove ${model}`,
+                ariaLabel: `Remove ${model}`,
+                onClick: () => {
+                  selected = selected.filter((m) => m !== model);
+                  drawChips();
+                  drawOffer();
+                },
+              },
+              iconSvg("close", 11),
+            ),
+          ),
+        ),
+      );
+      if (!selected.length) chips.appendChild(h("span", { class: "small muted" }, "None yet: load them from the provider, or add one by name."));
+    };
+    const filter = h("input", { class: "input input-sm", type: "search", autocomplete: "off" });
+    const offerList = h("div", { class: "ai-model-list" });
+    const drawOffer = () => {
+      if (!offered) return;
+      const q = filter.value.trim().toLowerCase();
+      const shown = offered.filter((m) => !q || m.toLowerCase().includes(q));
+      offerList.replaceChildren(
+        ...shown.slice(0, 400).map((model) => {
+          const box = h("input", { type: "checkbox", checked: selected.includes(model) });
+          box.addEventListener("change", () => {
+            selected = box.checked ? [...selected, model] : selected.filter((m) => m !== model);
+            drawChips();
+          });
+          return h("label", { class: "ai-model-option" }, box, h("span", {}, model));
+        }),
+      );
+      if (!offered.length) offerList.appendChild(h("p", { class: "small muted" }, "The provider listed no models RAST can use."));
+    };
+    filter.addEventListener("input", drawOffer);
+    const addAll = h("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Select all shown");
+    addAll.addEventListener("click", () => {
+      const q = filter.value.trim().toLowerCase();
+      for (const m of offered ?? []) if ((!q || m.toLowerCase().includes(q)) && !selected.includes(m)) selected.push(m);
+      drawChips();
+      drawOffer();
+    });
+    offerEl.append(h("div", { class: "ai-model-tools" }, filter, addAll), offerList);
+    typed.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const model = typed.value.trim();
+      if (model && !selected.includes(model)) selected.push(model);
+      typed.value = "";
+      drawChips();
+      drawOffer();
+    });
+    const loadModels = async (quiet: boolean) => {
       loadButton.disabled = true;
-      status.hidden = true;
+      if (!quiet) status.hidden = true;
       try {
         const result = await ctx.api.post<{ models: string[] }>("/api/ai/providers/models", {
-          ...(existing ? { providerId: existing.id } : { kind: kind.value }),
+          ...(existing ? { providerId: existing.id } : { kind: info.id }),
           ...(baseUrl.value.trim() ? { baseUrl: baseUrl.value.trim() } : {}),
           ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
         });
-        showPicks(result.models);
+        offered = result.models;
+        filter.placeholder = `Filter ${offered.length} models`;
+        offerEl.classList.remove("hidden");
+        drawOffer();
       } catch (error) {
-        status.textContent = errorMessage(error);
-        status.hidden = false;
+        if (!quiet) {
+          status.textContent = errorMessage(error);
+          status.hidden = false;
+        }
       } finally {
         loadButton.disabled = false;
       }
-    });
-
-    function chosen(): string[] {
-      return models.value.split("\n").map((m) => m.trim()).filter(Boolean);
+    };
+    loadButton.addEventListener("click", () => void loadModels(false));
+    // A new provider's list loads as soon as it can answer.
+    if (!existing) {
+      key.addEventListener("change", () => {
+        if (key.value.trim() && !offered) void loadModels(false);
+      });
+      if (local) void loadModels(true);
     }
+    drawChips();
 
-    function showPicks(all: string[]): void {
-      picks.classList.remove("hidden");
-      const filter = h("input", { class: "input input-sm", type: "search", placeholder: `Filter ${all.length} models`, autocomplete: "off" });
-      const listEl = h("div", { class: "ai-model-list" });
-      const draw = () => {
-        const q = filter.value.trim().toLowerCase();
-        const selected = new Set(chosen());
-        listEl.replaceChildren(
-          ...all
-            .filter((m) => !q || m.toLowerCase().includes(q))
-            .slice(0, 300)
-            .map((model) => {
-              const box = h("input", { type: "checkbox", checked: selected.has(model) });
-              box.addEventListener("change", () => {
-                const current = chosen().filter((m) => m !== model);
-                if (box.checked) current.push(model);
-                models.value = current.join("\n");
-              });
-              return h("label", { class: "ai-model-option" }, box, h("span", {}, model));
-            }),
-        );
-        if (!all.length) listEl.appendChild(h("p", { class: "small muted" }, "The provider listed no models."));
-      };
-      filter.addEventListener("input", draw);
-      picks.replaceChildren(filter, listEl);
-      draw();
-      filter.focus();
-    }
+    const keyLink = info.keyUrl
+      ? h("a", { class: "ai-key-link", href: info.keyUrl, target: "_blank", rel: "noopener noreferrer" }, info.needsKey ? "Get a key" : "Docs", iconSvg("external", 12))
+      : null;
+    const keyField = h(
+      "label",
+      { class: "field" },
+      h("span", { class: "field-label ai-field-row" }, "API key", keyLink),
+      key,
+      existing?.hasKey ? h("span", { class: "field-hint" }, "Leave empty to keep the saved key.") : null,
+    );
+    const urlField = h(
+      "label",
+      { class: "field" },
+      h("span", { class: "field-label" }, custom ? "Base URL" : "Address"),
+      baseUrl,
+      h("span", { class: "field-hint" }, custom ? "Where its API answers, e.g. https://example.com/v1." : `Leave empty for ${info.defaultBaseUrl}.`),
+    );
+    const advanced = h("details", { class: "ai-advanced" }, h("summary", {}, "Advanced"));
+    if (!custom) advanced.appendChild(urlField);
+    if (local) advanced.appendChild(keyField);
+    if (existing?.hasKey) advanced.appendChild(removeKey.el);
+    advanced.open = Boolean(existing?.baseUrl);
 
     const form = h(
       "div",
       { class: "ai-form" },
-      h("label", { class: "field" }, h("span", { class: "field-label" }, "Kind"), kind),
+      h(
+        "div",
+        { class: "ai-connect-head" },
+        providerMark(info.id, 40),
+        h("span", { class: "ai-connect-text" }, h("span", { class: "ai-connect-title" }, info.label), h("span", { class: "small muted" }, info.about)),
+      ),
       h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
-      h("label", { class: "field" }, h("span", { class: "field-label" }, "Base URL"), baseUrl, h("span", { class: "field-hint" }, "Leave empty for the usual address.")),
-      keyField,
-      existing?.hasKey ? removeKey.el : null,
+      custom ? urlField : null,
+      local ? null : keyField,
       h(
         "div",
         { class: "field" },
         h("span", { class: "field-label ai-field-row" }, "Models people can pick", loadButton),
-        models,
-        picks,
+        chips,
+        offerEl,
+        typed,
       ),
+      advanced.childElementCount > 1 ? advanced : null,
       enabled.el,
       status,
     );
     modal({
       within: ctx.root,
-      title: existing ? existing.name : "Add provider",
+      title: existing ? existing.name : `Connect ${info.label}`,
       body: form,
       wide: true,
       actions: [
-        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        existing
+          ? { label: "Cancel", variant: "ghost", onClick: () => undefined }
+          : { label: "Back", variant: "ghost", onClick: () => pickProvider() },
         {
-          label: existing ? "Save" : "Add",
+          label: existing ? "Save" : "Connect",
           variant: "primary",
           keepOpen: true,
           onClick: async (close) => {
             status.hidden = true;
             const payload = {
-              kind: kind.value,
+              kind: info.id,
               name: name.value.trim(),
               baseUrl: baseUrl.value.trim(),
               ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
               ...(existing && removeKey.isChecked() && !key.value.trim() ? { removeKey: true } : {}),
-              models: chosen(),
+              models: selected,
               enabled: enabled.isChecked(),
             };
             try {
@@ -373,6 +559,7 @@ export function mountSettings(options: {
         const provider = data.providers.find((p) => p.id === a.providerId);
         return row({
           title: a.name,
+          lead: agentAvatar(a.name, 30),
           ...(a.enabled ? {} : { badge: "Off" }),
           off: !a.enabled,
           detail: provider ? `${provider.name} · ${a.model}` : "No model set",

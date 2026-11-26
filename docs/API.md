@@ -254,9 +254,8 @@ until then every `/api/ai/*` request is refused (`403`), administrators'
 included. Accounts need the app granted (group or account rule) unless they
 are administrators.
 
-Administrators set up **providers** (`kind`: `anthropic`, `openai`,
-`deepseek`, `openrouter`, `ollama` or `custom` = any OpenAI-compatible
-endpoint; several of one kind are fine), **skills** (instructions) and
+Administrators set up **providers** (several of one kind are fine),
+**skills** (instructions) and
 **agents** (personality, provider and model, skills). API keys are encrypted
 with the server secret and never returned: providers show `hasKey` and
 `keyHint` (`…` and the last four characters). **Limits** decide which
@@ -266,6 +265,27 @@ rules combined with the most generous winning (`group:<id>`), else the
 `default` rule, else no limits. Administrators are not limited. Usage counts
 the tokens the provider reports (about four characters per token when it
 reports none) and stays counted when a chat is deleted.
+
+Provider `kind`s are presets of an address and protocol (`kinds` in the
+admin overview lists them with `group`, `keyUrl` and `about`):
+
+| Group | Kinds |
+| --- | --- |
+| model makers | `anthropic` (Anthropic Messages), `openai`, `gemini` (AI Studio's OpenAI-compatible endpoint), `xai`, `deepseek`, `mistral`, `moonshot`, `zai`, `qwen` (Model Studio), `minimax` |
+| gateways | `opencode` (OpenCode Zen, pay as you go), `opencode-go` (the OpenCode Go subscription), `openrouter`, `vercel` (AI Gateway), `huggingface` (Inference Providers) |
+| fast open models | `groq`, `cerebras`, `together`, `fireworks`, `nvidia` (NIM) |
+| on your network (no key needed) | `ollama`, `lmstudio`, `vllm`, `llamacpp` |
+| custom (base URL required) | `custom` (OpenAI chat completions), `custom-anthropic` (Anthropic Messages; the key goes as `x-api-key` and `Bearer`) |
+
+All but the Anthropic ones speak OpenAI chat completions. The OpenCode kinds
+serve each model on its own protocol under `{base}/openai/v1` and
+`{base}/anthropic/v1`: RAST reads `{base}/v1/models` (every 6 hours) and sends
+models whose `recommended_api` is `messages` (Claude, some Qwen and MiniMax)
+over Anthropic Messages and the rest over chat completions (which OpenCode
+translates for GPT and Gemini); their model list leaves out models that are
+not for chat and free ones (OpenCode serves those only to its own apps).
+Requests to them carry the chat's id as `x-opencode-session`, which OpenCode Go
+requires. A server that refuses `stream_options` is asked again without it.
 
 **Tools.** Agents may act for the account chatting, never with more rights
 than it has ([`src/ai/tools.rs`](../src/ai/tools.rs)):
