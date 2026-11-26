@@ -1,13 +1,14 @@
 # The image of Terminal sandboxes (src/sandbox). Built on the server the
 # first time a sandbox is needed and tagged with a hash of this file, so a
-# changed file means a new image.
+# changed file means a new image. build-essential gives the C library headers
+# and linker files that App Center's Rust and Clang need to build programs.
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash-completion ca-certificates curl file git htop jq less make nano \
-      openssh-client procps python3 python3-pip python3-venv rsync sqlite3 \
-      tmux tree unzip vim-tiny wget xz-utils zip \
+      bash-completion build-essential ca-certificates curl file git htop jq \
+      less make nano openssh-client pkg-config procps python3 python3-pip \
+      python3-venv rsync sqlite3 tmux tree unzip vim-tiny wget xz-utils zip \
  && rm -rf /var/lib/apt/lists/* \
  && (userdel -r ubuntu 2>/dev/null || true)
 RUN printf '%s\n' \

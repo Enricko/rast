@@ -213,6 +213,27 @@
             }
           }
         },
+        "mirror": {
+          "description": "For an SDK that writes into its own folder while it runs (Flutter): each user runs it from a mirror in ~/.cache/rast-sdk/<id>-<version>, built on first use by launchers the installer generates in .rast-mirror/ (command links and checks use them). The mirror has real folders and links to the shared read-only files; small files (under 1 MiB) directly inside each `copy` folder and anywhere below each `copyTree` folder are copied. Executable paths must then be plain paths too.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "copy": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/plainPath"
+              }
+            },
+            "copyTree": {
+              "type": "array",
+              "maxItems": 16,
+              "items": {
+                "$ref": "#/$defs/plainPath"
+              }
+            }
+          }
+        },
         "bundled": {
           "description": "Tools shipped inside the artifact, as found in it (e.g. npm).",
           "type": "array",
@@ -449,6 +470,12 @@
       "type": "string",
       "maxLength": 255,
       "pattern": "^(?!/)(?!.*\\\\)(?!(.*/)?\\.{1,2}(/|$))(?!.*//).+$"
+    },
+    "plainPath": {
+      "description": "Relative path of [A-Za-z0-9._+-] components (no shell syntax), not inside .rast-mirror.",
+      "type": "string",
+      "maxLength": 200,
+      "pattern": "^(?!\\.rast-mirror(/|$))(?!(.*/)?\\.{1,2}(/|$))[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$"
     }
   }
 }

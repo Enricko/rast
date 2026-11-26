@@ -87,9 +87,9 @@ Docker container**, and every shell it opens runs inside it.
 | | |
 | --- | --- |
 | Files | only the account's home folder, at `/home/<name>` (what it creates there shows up in File Station). No shared folders, nothing else of the server |
-| Tools | Ubuntu 24.04 with bash, git, curl, python3 (venv, pip), nano, vim, tmux, htop, jq, sqlite3, make, zip and more; App Center's runtimes (Python, Node.js, Go, PHP, …) read-only and first on `PATH` |
+| Tools | Ubuntu 24.04 with bash, git, curl, python3 (venv, pip), the C toolchain (gcc, make, pkg-config, libc headers), nano, vim, tmux, htop, jq, sqlite3, zip and more; App Center's runtimes (Python, Node.js, Go, PHP, Rust, Java, Clang, Flutter, …) read-only and first on `PATH` |
 | Network | **none.** A container on Docker's network could reach services on the server and on its private networks (LAN, VPN), so sandboxes have no network at all |
-| Privileges | runs as the account that owns the home folders (not root), no capabilities, `no-new-privileges`, read-only system files, `/tmp` in memory (512 MB) |
+| Privileges | runs as the account that owns the home folders (not root), no capabilities, `no-new-privileges`, read-only system files, `/tmp` in memory (512 MB; programs may run from it, as from the home folder) |
 | Limits | 1 GB memory, 2 CPUs, 512 processes per account; 4 shells per account, 16 on the server |
 
 It needs Docker (`docker_enabled = true` and `rast-worker.service` running):
@@ -98,7 +98,7 @@ the Docker worker builds the image, starts the containers and runs the shells
 account only.
 
 **The first time** anyone opens a sandbox, the worker builds the image
-(`rast-shell:<hash>`, about 350 MB, from `src/sandbox/Dockerfile`); this
+(`rast-shell:<hash>`, about 700 MB, from `src/sandbox/Dockerfile`); this
 downloads Ubuntu packages and takes a few minutes. Terminal shows "Setting up
 Terminal" meanwhile. A RAST update that changes the recipe builds a new image
 the next time a sandbox opens.

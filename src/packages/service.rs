@@ -323,7 +323,7 @@ fn exe_paths(base: &str, m: &Manifest) -> Vec<ExecutablePath> {
         .iter()
         .map(|e| ExecutablePath {
             name: e.name.clone(),
-            path: format!("{base}/{}", e.path),
+            path: format!("{base}/{}", m.launch_path(e)),
         })
         .collect()
 }

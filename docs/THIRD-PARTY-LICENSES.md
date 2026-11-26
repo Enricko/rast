@@ -4,7 +4,7 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 327 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 335 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
 
@@ -19,11 +19,11 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 
 | License expression | Packages |
 | --- | ---: |
-| MIT OR Apache-2.0 | 184 |
-| MIT | 51 |
-| Apache-2.0 OR MIT | 23 |
+| MIT OR Apache-2.0 | 185 |
+| MIT | 54 |
+| Apache-2.0 OR MIT | 24 |
 | Unicode-3.0 | 18 |
-| MIT/Apache-2.0 | 8 |
+| MIT/Apache-2.0 | 10 |
 | Zlib OR Apache-2.0 OR MIT | 6 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 5 |
 | Unlicense OR MIT | 5 |
@@ -42,6 +42,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | Apache-2.0/MIT | 1 |
 | BSD-3-Clause | 1 |
 | CC0-1.0 | 1 |
+| CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |
 | CDLA-Permissive-2.0 | 1 |
 | MIT AND BSD-3-Clause | 1 |
 | MIT OR Zlib OR Apache-2.0 | 1 |
@@ -84,6 +85,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `bytes` | 1.12.1 | MIT | <https://github.com/tokio-rs/bytes> |
 | `cc` | 1.11.1 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cc-rs> |
 | `cfg-if` | 1.0.5 | MIT OR Apache-2.0 | <https://github.com/rust-lang/cfg-if> |
+| `cfg_aliases` | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
 | `chacha20` | 0.10.2 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/stream-ciphers> |
 | `chrono` | 0.4.45 | MIT OR Apache-2.0 | <https://github.com/chronotope/chrono> |
 | `cipher` | 0.4.4 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/traits> |
@@ -96,6 +98,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `compression-codecs` | 0.4.47 | MIT OR Apache-2.0 | <https://github.com/Nullus157/async-compression> |
 | `compression-core` | 0.4.34 | MIT OR Apache-2.0 | <https://github.com/Nullus157/async-compression> |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats> |
+| `constant_time_eq` | 0.6.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 | <https://crates.io/crates/constant_time_eq/0.6.2> |
 | `core-foundation-sys` | 0.8.7 | MIT OR Apache-2.0 | <https://github.com/servo/core-foundation-rs> |
 | `cpufeatures` | 0.2.17 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
 | `cpufeatures` | 0.3.1 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/utils> |
@@ -186,6 +189,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `litemap` | 0.8.3 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `lock_api` | 0.4.14 | MIT OR Apache-2.0 | <https://github.com/Amanieu/parking_lot> |
 | `log` | 0.4.35 | MIT OR Apache-2.0 | <https://github.com/rust-lang/log> |
+| `lzma-sys` | 0.1.20 | MIT/Apache-2.0 | <https://github.com/alexcrichton/xz2-rs> |
 | `matchers` | 0.2.0 | MIT | <https://github.com/hawkw/matchers> |
 | `matchit` | 0.8.4 | MIT AND BSD-3-Clause | <https://github.com/ibraheemdev/matchit> |
 | `md-5` | 0.11.0 | MIT OR Apache-2.0 | <https://github.com/RustCrypto/hashes> |
@@ -194,6 +198,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `mime_guess` | 2.0.5 | MIT | <https://github.com/abonander/mime_guess> |
 | `miniz_oxide` | 0.9.1 | MIT OR Zlib OR Apache-2.0 | <https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide> |
 | `mio` | 1.2.4 | MIT | <https://github.com/tokio-rs/mio> |
+| `nix` | 0.32.0 | MIT | <https://github.com/nix-rust/nix> |
 | `notify` | 8.2.2 | CC0-1.0 | <https://github.com/notify-rs/notify.git> |
 | `notify-types` | 2.3.0 | MIT OR Apache-2.0 | <https://github.com/notify-rs/notify.git> |
 | `ntapi` | 0.4.3 | Apache-2.0 OR MIT | <https://github.com/MSxDOS/ntapi> |
@@ -306,6 +311,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `tracing-log` | 0.2.0 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-subscriber` | 0.3.23 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | <https://github.com/snapview/tungstenite-rs> |
+| `typed-path` | 0.13.0 | MIT OR Apache-2.0 | <https://github.com/chipsenkbeil/typed-path> |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | <https://github.com/paholg/typenum> |
 | `unicase` | 2.10.0 | MIT OR Apache-2.0 | <https://github.com/seanmonstar/unicase> |
 | `unicode-bidi` | 0.3.18 | MIT OR Apache-2.0 | <https://github.com/servo/unicode-bidi> |
@@ -365,6 +371,7 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `wit-bindgen` | 0.57.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | <https://github.com/bytecodealliance/wit-bindgen> |
 | `writeable` | 0.6.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `xattr` | 1.7.0 | MIT OR Apache-2.0 | <https://github.com/Stebalien/xattr> |
+| `xz2` | 0.1.7 | MIT/Apache-2.0 | <https://github.com/alexcrichton/xz2-rs> |
 | `yoke` | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `yoke-derive` | 0.8.4 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerocopy` | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT | <https://github.com/google/zerocopy> |
@@ -372,8 +379,10 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 | `zerofrom` | 0.1.8 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerofrom-derive` | 0.1.8 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zeroize` | 1.9.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zerotrie` | 0.2.5 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerovec` | 0.11.9 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
 | `zerovec-derive` | 0.11.7 | Unicode-3.0 | <https://github.com/unicode-org/icu4x> |
+| `zip` | 9.8.2 | MIT | <https://github.com/zip-rs/zip2> |
 | `zlib-rs` | 0.6.8 | Zlib | <https://github.com/trifectatechfoundation/zlib-rs> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |

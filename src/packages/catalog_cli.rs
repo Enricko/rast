@@ -4859,6 +4859,10 @@ fn verify_item(
         // Executables of a phar package are wrappers around the verified phar.
         install::write_phar_wrappers(&root, &spec.executables, phar)?;
     }
+    if let Some(mirror) = &spec.mirror {
+        // Checks run through the per-user mirror launchers, as on a server.
+        install::write_mirror_launchers(&root, &spec.executables, mirror)?;
+    }
     for executable in &spec.executables {
         if !is_executable_file(&root.join(&executable.path)) {
             return Err(format!("executable {} is missing", executable.path));
@@ -4878,9 +4882,14 @@ fn verify_item(
             .iter()
             .find(|executable| executable.name == check.executable)
             .ok_or_else(|| format!("check uses unknown executable {:?}", check.executable))?;
+        let launch = if spec.mirror.is_some() {
+            format!("{}/{}", manifest::MIRROR_DIR, executable.name)
+        } else {
+            executable.path.clone()
+        };
         checks.push(run_check(
             &root,
-            &executable.path,
+            &launch,
             &check.args,
             &check.expect,
             &home,
@@ -5502,7 +5511,26 @@ fn runtime_spec(
         extensions: Vec::new(),
         env,
         path_dirs,
+        mirror: mirror_for(package),
     })
+}
+
+/// SDKs that write into their own folder while they run get a per-user
+/// mirror (see [`manifest::Mirror`]). Flutter rewrites `bin/cache/engine.*`
+/// on every start and runs Git (also `git fetch`) on its own checkout.
+fn mirror_for(package: &str) -> Option<manifest::Mirror> {
+    match package {
+        "flutter" => Some(manifest::Mirror {
+            copy: vec!["bin".into(), "bin/internal".into(), "bin/cache".into()],
+            // Flutter's tool rewrites its own pub state on every start.
+            copy_tree: vec![
+                ".git".into(),
+                ".dart_tool".into(),
+                "packages/flutter_tools/.dart_tool".into(),
+            ],
+        }),
+        _ => None,
+    }
 }
 
 fn base_manifest(cfg: &Config, item: &PlanItem) -> Result<Value, String> {
@@ -6948,7 +6976,14 @@ fn spc_asset_digest(spc_version: &str, asset: &str) -> Result<String, String> {
         .ok_or_else(|| format!("static-php-cli release {spc_version} has no digest for {asset}"))
 }
 
-fn write_php_archive(stage: &Path, package: &str, out: &Path) -> Result<PathBuf, String> {
+/// `<out>/<package>-<target>.tar.gz`: both targets of a version are uploaded
+/// to the same release, so the asset name must carry the target.
+fn write_php_archive(
+    stage: &Path,
+    package: &str,
+    target: &str,
+    out: &Path,
+) -> Result<PathBuf, String> {
     use std::os::unix::fs::PermissionsExt;
     struct Entry {
         relative: PathBuf,
@@ -6973,7 +7008,7 @@ fn write_php_archive(stage: &Path, package: &str, out: &Path) -> Result<PathBuf,
     }
     entries.sort_by(|left, right| left.relative.cmp(&right.relative));
     fs::create_dir_all(out).map_err(|error| format!("cannot create {}: {error}", out.display()))?;
-    let archive = out.join(format!("{package}.tar.gz"));
+    let archive = out.join(format!("{package}-{target}.tar.gz"));
     let file = fs::File::create(&archive)
         .map_err(|error| format!("cannot create {}: {error}", archive.display()))?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::best());
@@ -7076,8 +7111,14 @@ fn cmd_build_php(
         .args(["-e", &format!("SRC_SHA={source_sha256}")])
         .args(["-e", &format!("HOST_UID={}", unsafe { libc::geteuid() })])
         .args(["-e", &format!("HOST_GID={}", unsafe { libc::getegid() })]);
-    if env_nonempty("GITHUB_TOKEN").is_some() || env_nonempty("GH_TOKEN").is_some() {
-        docker.args(["-e", "GITHUB_TOKEN"]);
+    // static-php-cli lists upstream releases through the GitHub API, which
+    // rate-limits anonymous calls (HTTP 403). The workflow provides GH_TOKEN;
+    // hand it to the container as GITHUB_TOKEN (by name, so it stays out of
+    // the process arguments).
+    if let Some(token) = gh_token() {
+        docker
+            .env("GITHUB_TOKEN", token)
+            .args(["-e", "GITHUB_TOKEN"]);
     }
     docker
         .arg(builder_image)
@@ -7134,7 +7175,7 @@ fn cmd_build_php(
         serde_json::to_vec_pretty(&buildinfo).map_err(|error| error.to_string())?,
     )
     .map_err(|error| format!("cannot write BUILDINFO.json: {error}"))?;
-    let archive = write_php_archive(&stage, &package, out)?;
+    let archive = write_php_archive(&stage, &package, target, out)?;
     let sha = sha256_of(&archive)?;
     println!("{sha}  {}", archive.display());
     append_github_output(None, &[format!("archive={}", archive.display())])?;
@@ -7146,6 +7187,29 @@ mod tests {
     use super::*;
     use ring::rand::SystemRandom;
     use ring::signature::KeyPair;
+
+    #[test]
+    fn php_archives_are_named_per_target() {
+        // Both targets of a version are uploaded to one release; a shared
+        // name made one build overwrite the other ("published bytes differ").
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        fs::create_dir_all(stage.join("bin")).unwrap();
+        fs::write(stage.join("bin/php"), b"#!/bin/sh\n").unwrap();
+        let out = dir.path().join("dist");
+        let x86 = write_php_archive(&stage, "php-8.4.28", "linux-x86_64", &out).unwrap();
+        let arm = write_php_archive(&stage, "php-8.4.28", "linux-aarch64", &out).unwrap();
+        assert_eq!(x86.file_name().unwrap(), "php-8.4.28-linux-x86_64.tar.gz");
+        assert_eq!(arm.file_name().unwrap(), "php-8.4.28-linux-aarch64.tar.gz");
+        assert!(x86.is_file() && arm.is_file());
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        archive::extract_tar_gz(&x86, &root, 1, u64::MAX, &mut |_| {}, &|| false).unwrap();
+        assert!(
+            root.join("bin/php").is_file(),
+            "the archive holds php-8.4.28/…"
+        );
+    }
 
     const OFFICIAL_PUBLIC_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
 MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\

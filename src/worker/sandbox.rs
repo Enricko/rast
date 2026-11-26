@@ -262,7 +262,7 @@ impl SandboxLauncher {
             self.image.clone(),
             home.path.display().to_string(),
             format!("{}:{}:{}", home.name, home.uid, home.gid),
-            format!("{MEMORY_MB}/{CPUS}/{PIDS}/{TMP_MB}"),
+            format!("{MEMORY_MB}/{CPUS}/{PIDS}/{TMP_MB}/tmp-exec"),
             identity.display().to_string(),
             format!("{runtimes:?}"),
         ] {
@@ -320,7 +320,9 @@ impl SandboxLauncher {
             &format!("{}:{}", home.uid, home.gid),
             "--read-only",
             "--tmpfs",
-            &format!("/tmp:rw,nosuid,nodev,size={TMP_MB}m,mode=1777"),
+            // exec: tools build into /tmp and run from there (`go run`, pip
+            // builds); the account can already run files from its home.
+            &format!("/tmp:rw,exec,nosuid,nodev,size={TMP_MB}m,mode=1777"),
             "--cap-drop",
             "ALL",
             "--security-opt",

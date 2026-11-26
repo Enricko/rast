@@ -122,7 +122,42 @@ pub struct RuntimeSpec {
     /// itself) a shell should prepend to `PATH`. Absent means `["bin"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_dirs: Vec<String>,
+    /// For an SDK that writes into its own folder while it runs (Flutter
+    /// rewrites stamp files in `bin/cache` on every start): its commands run
+    /// from a per-user mirror instead of the shared, read-only prefix. See
+    /// [`Mirror`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Mirror>,
 }
+
+/// A per-user mirror of an installed prefix, kept in the user's
+/// `~/.cache/rast-sdk/<id>-<version>`: every folder is a real (writable)
+/// folder, every file a link to the shared read-only file, except small
+/// files (under 1 MiB)
+///
+/// * directly inside each `copy` folder (the SDK's own scripts and the stamp
+///   files it rewrites in place), and
+/// * anywhere below each `copyTree` folder (Flutter's `.git`: Git needs real
+///   `HEAD`/ref files, and a `git fetch` then writes into the user's copy;
+///   the large pack files stay links),
+///
+/// which are copied.
+///
+/// The installer writes a launcher per executable in [`MIRROR_DIR`] that
+/// builds the mirror when needed and runs the executable inside it; command
+/// links and checks use the launcher ([`Manifest::launch_path`]). The paths
+/// are restricted like a phar path because the launcher is a shell script.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Mirror {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copy_tree: Vec<String>,
+}
+
+/// Where the installer writes the launchers of a [`Mirror`] package.
+pub const MIRROR_DIR: &str = ".rast-mirror";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -200,7 +235,8 @@ pub struct ArchivePart {
 ///
 /// ```text
 /// #!/bin/sh
-/// root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd) || exit 1
+/// self=$(readlink -f -- "$0" 2>/dev/null) || self=$0
+/// root=$(CDPATH= cd -- "$(dirname -- "$self")/.." && pwd) || exit 1
 /// exec php "$root/<path>" "$@"
 /// ```
 ///
@@ -340,6 +376,16 @@ impl Manifest {
 
     pub fn executable(&self, name: &str) -> Option<&Executable> {
         self.runtime.executables.iter().find(|e| e.name == name)
+    }
+
+    /// What to run for `exe`, relative to the installed prefix: the
+    /// executable itself, or its generated launcher for a [`Mirror`] package.
+    pub fn launch_path(&self, exe: &Executable) -> String {
+        if self.runtime.mirror.is_some() {
+            format!("{MIRROR_DIR}/{}", exe.name)
+        } else {
+            exe.path.clone()
+        }
     }
 }
 
@@ -786,6 +832,26 @@ fn validate_runtime(r: &RuntimeSpec) -> Result<(), String> {
                 "executable path {:?} must be a relative path inside the package",
                 exe.path
             ));
+        }
+    }
+    if let Some(mirror) = &r.mirror {
+        for exe in &r.executables {
+            if !is_phar_path(&exe.path) {
+                return Err(format!(
+                    "executable path {:?} of a mirrored package must use only [A-Za-z0-9._+-] components",
+                    exe.path
+                ));
+            }
+        }
+        if mirror.copy.len() > 16 || mirror.copy_tree.len() > 16 {
+            return Err("runtime.mirror lists at most 16 copy and 16 copyTree entries".into());
+        }
+        for path in mirror.copy.iter().chain(&mirror.copy_tree) {
+            if !is_phar_path(path) || path.starts_with(MIRROR_DIR) {
+                return Err(format!(
+                    "runtime.mirror path {path:?} must be a relative path of [A-Za-z0-9._+-] components"
+                ));
+            }
         }
     }
     if r.checks.is_empty() || r.checks.len() > 8 {
@@ -1330,6 +1396,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn mirrored_packages_launch_through_generated_launchers() {
+        let mut v = sample();
+        v["runtime"]["mirror"] =
+            serde_json::json!({"copy": ["bin", "bin/cache"], "copyTree": [".git"]});
+        let m = parse_value(&v).unwrap();
+        let exe = m.executable("lua").unwrap();
+        assert_eq!(m.launch_path(exe), ".rast-mirror/lua");
+        assert_eq!(parse_value(&sample()).unwrap().launch_path(exe), "bin/lua");
+        // The paths end up in a shell script: no shell syntax, nothing absolute.
+        for bad in [
+            "bin cache",
+            "bin;x",
+            "$HOME",
+            "/etc",
+            "../x",
+            ".rast-mirror",
+        ] {
+            let mut v = sample();
+            v["runtime"]["mirror"] = serde_json::json!({"copy": [bad]});
+            assert!(parse_value(&v).is_err(), "{bad}");
+        }
+        let mut v = sample();
+        v["runtime"]["mirror"] = serde_json::json!({});
+        v["runtime"]["executables"][0]["path"] = "bin/lu a".into();
+        assert!(parse_value(&v).is_err());
+    }
+
+    #[test]
     fn package_icons_are_embedded_and_validated() {
         let mut v = sample();
         v["icon"] = icon("image/svg+xml", tiny_svg().as_bytes());
@@ -1352,12 +1446,9 @@ pub(crate) mod tests {
             Some("Simple Icons (CC0)")
         );
 
-        // A real PNG passes (signature check) and app-type manifests accept
-        // icons too.
+        // A real PNG passes (signature check).
         let png = B64.decode(PNG_1X1_B64).unwrap();
         v["icon"] = icon("image/png", &png);
-        v["type"] = "app".into();
-        v["app"] = serde_json::json!({"kind": "web"});
         let m = parse_value(&v).unwrap();
         assert_eq!(m.icon.as_ref().unwrap().media_type, "image/png");
         assert_eq!(decode_icon(m.icon.as_ref().unwrap()).unwrap(), png);

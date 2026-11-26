@@ -11,7 +11,55 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Thirteen more runtimes in App Center**, each installable, updatable and
+  removable like Python, Go, Node.js and PHP, with their logos:
+  **Rust** (rustc, cargo, rustfmt, clippy), **Java** (Eclipse Temurin JDK 8,
+  11, 17, 21, 25 and 27), **Kotlin**, **Gradle**, **Maven**, **C/C++**
+  (Clang/LLVM with clang++, lld and lldb), **CMake**, **Zig**, **C#/.NET
+  SDK**, **Bun**, **Deno**, **Flutter** (with Dart) and **Composer**. They
+  come from the signed catalog, every download checked against its
+  publisher's checksums and signatures, and run in terminals (root shells and
+  sandboxes) through App Center's command links like the other runtimes.
+  Already-installed copies (from apt or by hand) are detected and offered an
+  update. Note that Clang/LLVM takes about 12 GB once unpacked.
+- **Flutter runs from the shared, read-only install.** Flutter writes into its
+  own folder on every start, so each user runs it from a mirror in
+  `~/.cache/rast-sdk` (real folders, links to the shared files, copies of the
+  small files Flutter rewrites; about 80 MB), built on first use and rebuilt
+  after an update. Manifests can ask for this with `runtime.mirror`.
+- Sandbox shells now include the C toolchain (`build-essential`,
+  `pkg-config`): Rust, Clang and Go with cgo need the C library headers and
+  a system linker to build programs.
+- App Center understands the manifest features these need: several archives
+  per download (Rust), `zip` and `tar.xz` archives, single-file `phar`
+  packages (Composer), and `env`/`pathDirs` hints (JAVA_HOME,
+  LD_LIBRARY_PATH) for the install checks. Package icons are shown on the
+  cards.
+- `rast package …` (validate, write and smoke-test a third-party
+  `rast-package.json`) and `rast catalog …` (the official catalog's
+  discover/verify/build/sign pipeline) commands, used by the
+  rast-packages and rast-package-template repositories.
+
+### Fixed
+
+- **PHP can be installed and updated from App Center again.** The current PHP
+  builds in the catalog use a manifest field 0.9.7 did not know, so App
+  Center showed no PHP version at all.
+- The Gradle install check failed on every server: Java ignores `HOME`, so
+  Gradle tried to write to the service account's real home folder, which the
+  check sandbox does not allow.
+- Composer (and other phar tools) failed when started through App Center's
+  command link ("Could not open input file"): the generated wrapper looked
+  for the phar next to the link instead of next to itself.
+- Sandbox shells could not run programs from `/tmp` (it was mounted
+  `noexec`), which broke `go run` and similar tools. Sandboxes restart with
+  the new settings on their next use.
+- A failed install check now shows the program's own error line instead of
+  only its first output line (often a banner).
+- Catalog pipeline: the PHP builds for both processors were uploaded under
+  one file name, so one replaced the other and publishing failed ("published
+  bytes differ from the manifest"); and the PHP builder container got no
+  GitHub token, so its downloads hit GitHub's rate limit (HTTP 403).
 
 ### Planned
 

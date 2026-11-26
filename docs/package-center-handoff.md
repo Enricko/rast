@@ -1,7 +1,9 @@
 # Package Center — handoff (RAST 0.7.0)
 
 Package Center is a desktop application for administrators. It installs verified
-runtimes — **Python, PHP CLI, Go and Node.js** — side by side, plus packages
+runtimes — **Python, PHP CLI, Go and Node.js**, and since 0.9.8 also Rust,
+Java, Kotlin, Gradle, Maven, Clang/LLVM, CMake, Zig, .NET, Bun, Deno, Flutter
+and Composer ([More runtimes](#more-runtimes-098)) — side by side, plus packages
 published from any GitHub repository in the same manifest format. RAST itself
 stays a single binary. Package definitions, builds and the signed catalog live
 in a separate repository, and third parties start from a template repository.
@@ -135,6 +137,67 @@ before extracting.
 The catalog carries per-target artifacts for `linux-x86_64` and `linux-aarch64`
 (native GitHub runners). RAST picks the artifact for its own target and checks
 `requires.glibc`; versions it cannot use are shown with the reason.
+
+## More runtimes (0.9.8)
+
+Ported from the withdrawn 0.14–0.18 line (minus its Linux-apps, web-app and
+terminal parts) and verified again on 0.9.8. Every artifact is upstream's own
+build; nothing is rebuilt except PHP.
+
+| Runtime | Commands | Source and verification |
+| --- | --- | --- |
+| Rust (stable) | rustc, cargo, rustfmt, cargo-fmt, clippy-driver, cargo-clippy | `static.rust-lang.org` component archives (rustc, rust-std, cargo, rustfmt, clippy) merged into one prefix; SHA-256 from the stable channel manifest, whose OpenPGP signature is checked against the pinned Rust release key. No rustup: `CARGO_HOME` stays in the user's home |
+| Java — Eclipse Temurin JDK 8, 11, 17, 21, 25, 27 | java, javac, jar, jshell | Adoptium API, cross-checked with the GitHub asset digest and the published `.sha256.txt` (8, 11 and 27: x86_64 only) |
+| Kotlin | kotlinc, kotlin | GitHub release digest + published SHA-256; needs Java |
+| Gradle | gradle | services.gradle.org SHA-256; needs Java |
+| Apache Maven 3.10 | mvn | SHA-512 from Apache; needs Java |
+| Clang/LLVM (C/C++) | clang, clang++, ld.lld, lldb | LLVM release tarball; SHA-256 equal to the GitHub digest and LLVM's SLSA provenance, verified with `gh attestation verify`. **About 12 GB unpacked** (1.9 GB download) |
+| CMake | cmake, ctest, cpack | GitHub digest + `SHA-256.txt` |
+| Zig | zig | ziglang.org `index.json` hashes |
+| .NET SDK 10 LTS / 11 | dotnet | Microsoft `releases.json`, SHA-512 |
+| Bun | bun | GitHub release + upstream checksum file |
+| Deno | deno | GitHub release + checksum file + build-provenance attestation |
+| Flutter (with Dart) | flutter, dart | Google's `releases_linux.json` SHA-256 (x86_64 only: Google ships no aarch64 Linux SDK) |
+| Composer | composer | composer.phar from the GitHub release (digest equal to getcomposer.org's checksum), run by a generated `bin/composer` wrapper with the PHP on PATH; needs PHP |
+
+Manifest features they need (all optional, older manifests unchanged): an
+artifact's `archives` (more archives extracted in order into one prefix),
+`zip`, `tar.xz` and single-file `phar` formats, and `runtime.env` /
+`runtime.pathDirs` hints. The `env` hints (JAVA_HOME, DOTNET_ROOT,
+LD_LIBRARY_PATH for lldb) apply to the install checks; shells use the command
+links in `packages/bin`, which these runtimes work through without them. The
+install checks of official packages see the runtimes App Center already
+installed (Composer is checked with App Center's PHP, Kotlin/Gradle/Maven
+with its Java), and Gradle gets `GRADLE_USER_HOME` in the check's scratch
+home (Java ignores `HOME`).
+
+Tools that need another runtime say so on their page; install Java before
+Kotlin, Gradle or Maven, and PHP before Composer.
+
+**Flutter and `runtime.mirror`.** Flutter rewrites files in its own folder on
+every start (`bin/cache/engine.stamp`, `engine.realm`, its tool's
+`.dart_tool` state, Git's `FETCH_HEAD`), so it cannot run from the shared,
+read-only prefix. Its manifest carries `runtime.mirror` (`copy`: `bin`,
+`bin/internal`, `bin/cache`; `copyTree`: `.git`, `.dart_tool`,
+`packages/flutter_tools/.dart_tool`). The installer then writes a launcher per
+executable into `<prefix>/.rast-mirror/` and points the command links and
+install checks at it. On first use the launcher builds
+`~/.cache/rast-sdk/<id>-<version>` with `cp -rs` (real folders, links to the
+shared files), copies the small files (under 1 MiB) of those folders, and
+runs the real executable inside it. The mirror is about 80 MB per user (most
+of it `.git` folders) and takes a few seconds. It is rebuilt when the
+launcher changes (reinstall), and mirrors of versions that are no longer
+installed are deleted on the next build. Verified in a no-network sandbox
+shell (`flutter create --offline`, `flutter test`, `flutter build web`), as
+root, and in the confined install check; the shared prefix stays unchanged.
+
+Sandbox shells have the C toolchain (`build-essential`, `pkg-config`) for
+Rust, Clang and cgo, and `/tmp` allows running programs (`go run`).
+
+The catalog's `minRastVersion` for these packages is **0.9.8**: RAST's version
+line restarted after 0.9.1, so the 0.14–0.16 values the withdrawn line wrote
+were replaced by re-publishing those versions with a revision bump
+(rast-packages `catalog.config.json` → `revisions`).
 
 ## Catalog workflow (rast-packages)
 

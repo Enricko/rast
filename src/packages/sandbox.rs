@@ -562,15 +562,28 @@ pub fn run(
         status if status.success() => Ok(output),
         status => Err(format!(
             "exited with {status}: {}",
-            output
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .unwrap_or("")
-                .chars()
-                .take(200)
-                .collect::<String>()
+            failure_excerpt(&output)
         )),
+    }
+}
+
+/// What a failed check printed, for the job's error: the first few
+/// non-empty lines (a tool's first line is often only a banner or a path;
+/// the reason follows), joined with " / " and kept short.
+fn failure_excerpt(output: &str) -> String {
+    const LINES: usize = 6;
+    const CHARS: usize = 600;
+    let text = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(LINES)
+        .collect::<Vec<_>>()
+        .join(" / ");
+    if text.chars().count() > CHARS {
+        format!("{}…", text.chars().take(CHARS).collect::<String>())
+    } else {
+        text
     }
 }
 
@@ -653,6 +666,26 @@ mod tests {
             .env_clear()
             .env("PATH", "/usr/bin:/bin");
         run(&mut cmd, &confinement, home, timeout, 16 * 1024)
+    }
+
+    #[test]
+    fn a_failed_check_reports_the_reason_after_the_banner() {
+        let (_tmp, root, home) = dirs();
+        let prog = script(
+            &root,
+            "fails",
+            "echo; echo 'FAILURE: Build failed with an exception.'; echo '* What went wrong:'; \
+             echo '> Could not initialize native services.' >&2; exit 1",
+        );
+        let error = exec(&prog, &root, &home, Duration::from_secs(10)).unwrap_err();
+        assert!(error.starts_with("exited with"), "{error}");
+        assert!(error.contains("FAILURE: Build failed"), "{error}");
+        assert!(
+            error.contains("Could not initialize native services"),
+            "{error}"
+        );
+        assert_eq!(failure_excerpt(&"x\n".repeat(50)), "x / x / x / x / x / x");
+        assert!(failure_excerpt(&"y".repeat(2000)).ends_with('…'));
     }
 
     #[test]
