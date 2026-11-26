@@ -388,6 +388,25 @@ export class FileStation {
       const folder = folderParam(params, "folder");
       if (folder) void this.newFolder(folder);
     });
+    // Confirmations open again only for what still exists.
+    const stringList = (params: unknown, key: string): string[] | null => {
+      const value = ((params ?? {}) as Record<string, unknown>)[key];
+      return Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === "string") ? (value as string[]) : null;
+    };
+    this.ctx.onDialog("trash-items", (params) => {
+      const paths = stringList(params, "paths");
+      if (!paths) return;
+      void Promise.all(paths.map((path) => this.ctx.api.get("/api/files/stat", { path }).then(() => true, () => false))).then(
+        (found) => {
+          if (found.every(Boolean)) void this.trashPaths(paths);
+        },
+      );
+    });
+    this.ctx.onDialog("purge-items", (params) => {
+      const ids = stringList(params, "ids");
+      if (ids && ids.every((id) => this.trashItems.some((item) => item.id === id))) void this.purgeIds(ids);
+    });
+    this.ctx.onDialog("empty-bin", () => void this.emptyBin());
     this.ctx.onDialog("rename", (params) => {
       const path = folderParam(params, "path");
       const name = ((params ?? {}) as { name?: unknown }).name;
@@ -1746,17 +1765,22 @@ export class FileStation {
 
   private async deleteSelected(): Promise<void> {
     if (this.selection.size === 0) return;
-    const count = this.selection.size;
-    const confirmed = await this.withEditContext("delete", [...this.selection], () =>
+    await this.trashPaths([...this.selection]);
+  }
+
+  /** Ask, then move `paths` to the recycle bin. */
+  private async trashPaths(paths: string[]): Promise<void> {
+    const count = paths.length;
+    const confirmed = await this.withEditContext("delete", paths, () =>
       confirmDialog({
         title: "Move to recycle bin",
         message: `Move ${count} item(s) to the recycle bin? You can restore them later.`,
         confirmLabel: "Move to recycle bin",
         danger: true,
+        session: this.ctx.dialog("trash-items", { paths }),
       }),
     );
     if (!confirmed) return;
-    const paths = [...this.selection];
     try {
       const response = await this.ctx.api.post<JobRef>("/api/files/delete", { paths });
       this.selection.clear();
@@ -1834,6 +1858,7 @@ export class FileStation {
       confirmLabel: "Delete permanently",
       danger: true,
       requireTyped: "DELETE",
+      session: this.ctx.dialog("purge-items", { ids }),
     });
     if (!confirmed) return;
     try {
@@ -1856,6 +1881,7 @@ export class FileStation {
       confirmLabel: "Empty recycle bin",
       danger: true,
       requireTyped: "EMPTY",
+      session: this.ctx.dialog("empty-bin"),
     });
     if (!confirmed) return;
     try {

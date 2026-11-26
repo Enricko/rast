@@ -16,8 +16,15 @@ export interface SavedDialog {
 
 /** Dialogs kept per window (a dialog may open another on top). */
 export const MAX_DIALOGS = 4;
-/** How long a dialog to open again waits for its app. */
+/**
+ * How long a saved dialog waits for its app after a restore. One that
+ * another page shows (live) waits until that page closes it: this page may
+ * not open it (a "Revoke session" for this very device) but must not drop it
+ * from the session, which would close it there.
+ */
 const REOPEN_MS = 15_000;
+/** How long the next saved dialog waits for the one before to open. */
+const REOPEN_STEP_MS = 5_000;
 const MAX_PARAMS_CHARS = 4_000;
 
 function plainParams(params: unknown): unknown {
@@ -65,9 +72,10 @@ interface PendingDialog {
 
 export class WindowDialogs {
   private readonly open: OpenDialog[] = [];
-  private readonly openers = new Map<string, (params: unknown) => void>();
+  private readonly openers = new Map<string, (params: unknown) => void | Promise<unknown>>();
   private pending: PendingDialog[] = [];
   private ready = false;
+  private reopening = false;
   private disposed = false;
 
   constructor(private readonly onChange: () => void) {}
@@ -111,7 +119,7 @@ export class WindowDialogs {
   }
 
   /** How to open the dialog `name` again (AppContext.onDialog). */
-  register(name: string, reopen: (params: unknown) => void): () => void {
+  register(name: string, reopen: (params: unknown) => void | Promise<unknown>): () => void {
     this.openers.set(name, reopen);
     this.reopenPending();
     return () => {
@@ -146,9 +154,11 @@ export class WindowDialogs {
         open.view.apply(dialog.view, live);
         continue;
       }
+      const expires = live ? Number.POSITIVE_INFINITY : Date.now() + REOPEN_MS;
       const pending = this.pending.find((p) => p.key === dialog.key);
       if (pending) {
         pending.view = dialog.view;
+        if (live) pending.expires = expires;
         continue;
       }
       this.pending.push({
@@ -157,7 +167,7 @@ export class WindowDialogs {
         params: dialog.params,
         view: dialog.view,
         requested: false,
-        expires: Date.now() + REOPEN_MS,
+        expires,
       });
     }
     this.reopenPending();
@@ -187,18 +197,38 @@ export class WindowDialogs {
     for (const dialog of [...this.open]) dialog.close();
   }
 
+  /**
+   * Ask the app to open waiting dialogs, in order: a dialog opened from
+   * another one (a confirmation over a list) opens after it, when its opener
+   * returns a promise that settles once the dialog is open.
+   */
   private reopenPending(): void {
-    if (!this.ready || this.disposed) return;
-    for (const p of this.pending) {
-      if (p.requested) continue;
-      const reopen = this.openers.get(p.name);
-      if (!reopen) continue;
-      p.requested = true;
+    if (!this.ready || this.disposed || this.reopening) return;
+    this.reopening = true;
+    void (async () => {
       try {
-        reopen(p.params);
-      } catch (error) {
-        console.error(`could not open the ${p.name} dialog again`, error);
+        for (;;) {
+          if (this.disposed) return;
+          const next = this.pending.find((p) => !p.requested && this.openers.has(p.name));
+          if (!next) return;
+          next.requested = true;
+          try {
+            const opening = this.openers.get(next.name)?.(next.params);
+            if (opening && typeof (opening as Promise<unknown>).then === "function") {
+              let timer: number | undefined;
+              await Promise.race([
+                Promise.resolve(opening).catch(() => undefined),
+                new Promise((resolve) => (timer = window.setTimeout(resolve, REOPEN_STEP_MS))),
+              ]);
+              window.clearTimeout(timer);
+            }
+          } catch (error) {
+            console.error(`could not open the ${next.name} dialog again`, error);
+          }
+        }
+      } finally {
+        this.reopening = false;
       }
-    }
+    })();
   }
 }

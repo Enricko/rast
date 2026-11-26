@@ -161,6 +161,7 @@ function mountTerminalApp(ctx: AppContext): AppInstance {
           message: `${program} is still running in shell ${info.number}. Closing the shell stops it.`,
           confirmLabel: "Close shell",
           danger: true,
+          session: ctx.dialog("shell-close", { session: info.id }),
         });
         if (!ok) return;
       }
@@ -317,6 +318,25 @@ function mountTerminalApp(ctx: AppContext): AppInstance {
   ctx.setTitle("Terminal");
   void load();
   ctx.onReopen(() => active?.view?.focus());
+  // "Close this shell?" opens again only while that shell still runs
+  // something (otherwise opening it again would close the shell unasked).
+  ctx.onDialog("shell-close", (params) => {
+    const id = ((params ?? {}) as { session?: unknown }).session;
+    if (typeof id !== "string") return;
+    let tries = 0;
+    const look = (): void => {
+      if (disposed) return;
+      const tab = tabs.find((candidate) => candidate.view?.info?.id === id);
+      const info = tab?.view?.info;
+      if (tab && info && tab.view?.phase !== "ended") {
+        if (isBusy(programs.get(info.id) ?? info.program)) void closeTab(tab);
+        return;
+      }
+      tries += 1;
+      if (tries < 20) window.setTimeout(look, 250); // the shells are still connecting
+    };
+    look();
+  });
 
   return {
     destroy() {

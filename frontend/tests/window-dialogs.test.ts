@@ -91,3 +91,41 @@ test("saved dialogs with bad names are ignored", () => {
   dialogs.apply([{ name: "../x" }, { name: "" }, null, "x", { name: "ok" }], false);
   assert.deepEqual(dialogs.capture(), [{ name: "ok" }]);
 });
+
+test("a dialog opened over another opens again after it", async () => {
+  const dialogs = new WindowDialogs(() => undefined);
+  const calls: string[] = [];
+  let listOpen: () => void = () => undefined;
+  dialogs.register("user-sessions", () => {
+    calls.push("list");
+    return new Promise<void>((resolve) => (listOpen = resolve));
+  });
+  dialogs.register("user-sessions-revoke", () => void calls.push("confirm"));
+  dialogs.apply([{ name: "user-sessions", params: { userId: 2 } }, { name: "user-sessions-revoke", params: { userId: 2 } }], false);
+  dialogs.mounted();
+  assert.deepEqual(calls, ["list"], "the confirmation waits for the list");
+  listOpen();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(calls, ["list", "confirm"]);
+});
+
+test("a dialog another page shows is kept even when this page does not open it", () => {
+  const realNow = Date.now;
+  try {
+    const dialogs = new WindowDialogs(() => undefined);
+    dialogs.register("session-revoke", () => undefined); // e.g. this device's own session
+    dialogs.mounted();
+    dialogs.apply([{ name: "session-revoke", params: { sessionId: "s1" } }], true);
+    dialogs.apply([{ name: "new-folder", params: { folder: "/" } }], false);
+    const later = realNow() + 60_000;
+    Date.now = () => later;
+    // Still open on the other page: saving must not close it there. The
+    // restored one nobody opened is dropped.
+    assert.deepEqual(dialogs.capture(), [{ name: "session-revoke", params: { sessionId: "s1" } }]);
+    // The other page closed it.
+    dialogs.apply([], true);
+    assert.equal(dialogs.capture(), undefined);
+  } finally {
+    Date.now = realNow;
+  }
+});

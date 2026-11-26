@@ -58,6 +58,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
   let loadError: unknown = null;
   let tab: Tab = "logs";
   let busy = false;
+  let stopDialog: (() => void) | null = null;
   const timers: number[] = [];
   const stopTimers = (): void => {
     for (const id of timers.splice(0)) lc.clearInterval(id);
@@ -76,6 +77,11 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
       if (disposed) return;
       detail = next;
       loadError = null;
+      // "Delete container" opens again (a reload, another device) once the
+      // container is known to be there.
+      stopDialog ??= ctx.onDialog("container-page-delete", (params) => {
+        if (((params ?? {}) as { containerId?: unknown }).containerId === deps.id && detail) void removeThis();
+      });
     } catch (error) {
       if (disposed || isAbortError(error)) return;
       loadError = error;
@@ -224,6 +230,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
       confirmLabel: "Delete",
       danger: true,
       requireTyped: c.name,
+      session: ctx.dialog("container-page-delete", { containerId: c.id }),
     });
     if (!confirmed || disposed) return;
     try {
@@ -597,6 +604,7 @@ export function mountContainerPage(deps: ContainerPageDeps): ContainerPage {
     refresh: () => void load(),
     dispose: () => {
       disposed = true;
+      stopDialog?.();
       stopTimers();
       terminal?.dispose();
       terminal = null;

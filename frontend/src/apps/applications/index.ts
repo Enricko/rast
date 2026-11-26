@@ -501,6 +501,50 @@ class ApplicationsApp {
     if (saved.view === "images" || saved.view === "volumes") this.view = saved.view;
     // Dialogs that were open (a reload, another device) open again.
     this.ctx.onDialog("image-pull", () => this.openPullDialog());
+    // Confirmations open again only for what is still there (fresh lists).
+    const wanted = (params: unknown): Record<string, unknown> => (params ?? {}) as Record<string, unknown>;
+    this.ctx.onDialog("container-delete", (params) => {
+      void this.loadContainers().then(() => {
+        const container = this.containers.find((c) => c.id === wanted(params).containerId);
+        if (container) void this.deleteContainer(container);
+      });
+    });
+    this.ctx.onDialog("image-delete", (params) => {
+      const { imageId, reference } = wanted(params);
+      void this.loadImages().then(() => {
+        const image = this.images.find((i) => i.id === imageId && (i.reference ?? "") === (reference ?? ""));
+        if (image && !image.inUse) void this.deleteImage(image);
+      });
+    });
+    this.ctx.onDialog("images-prune", () => {
+      void this.loadImages().then(() => {
+        const count = this.images.filter((i) => !i.reference && !i.inUse).length;
+        if (count > 0) void this.pruneImages(count);
+      });
+    });
+    this.ctx.onDialog("volume-delete", (params) => {
+      void this.loadVolumes().then(() => {
+        const volume = this.volumes.find((v) => v.name === wanted(params).name);
+        if (volume && !volume.inUse && !volume.app) void this.deleteVolume(volume);
+      });
+    });
+    this.ctx.onDialog("app-redeploy", (params) => {
+      void this.loadApps().then(() => {
+        const app = this.apps.find((a) => a.id === wanted(params).appId);
+        if (app) void this.performAction(app, "redeploy");
+      });
+    });
+    this.ctx.onDialog("containers-import", (params) => {
+      const { ids, label } = wanted(params);
+      if (!Array.isArray(ids) || typeof label !== "string") return;
+      void this.loadContainers().then(() => {
+        const found = ids.every((id) => this.containers.some((c) => c.id === id));
+        if (!found) return;
+        void this.importContainers(ids as string[], label).then((ok) => {
+          if (ok) this.page?.refresh();
+        });
+      });
+    });
     this.ctx.onDialog("app-deploy", (params) => {
       const rows = ((params ?? {}) as { envRows?: unknown }).envRows;
       void this.openDeployDialog(typeof rows === "number" ? rows : 0);
@@ -1195,6 +1239,7 @@ class ApplicationsApp {
       confirmLabel: "Delete",
       danger: true,
       requireTyped: container.name,
+      session: this.ctx.dialog("container-delete", { containerId: container.id }),
     });
     if (!confirmed || this.disposed) return;
     this.busy.add(container.id);
@@ -1465,6 +1510,7 @@ class ApplicationsApp {
         : `Delete the untagged image ${shortId(image.id)}?`,
       confirmLabel: "Delete",
       danger: true,
+      session: this.ctx.dialog("image-delete", { imageId: image.id, reference: image.reference }),
     });
     if (!confirmed || this.disposed) return;
     const busyKey = `image:${image.id}:${image.reference}`;
@@ -1488,6 +1534,7 @@ class ApplicationsApp {
       message: `Delete ${plural(count, "untagged image")} that no container uses? Tagged images stay.`,
       confirmLabel: "Clean up",
       danger: true,
+      session: this.ctx.dialog("images-prune"),
     });
     if (!confirmed || this.disposed) return;
     try {
@@ -1597,6 +1644,7 @@ class ApplicationsApp {
       confirmLabel: "Delete volume",
       danger: true,
       requireTyped: volume.name,
+      session: this.ctx.dialog("volume-delete", { name: volume.name }),
     });
     if (!confirmed || this.disposed) return;
     const busyKey = `volume:${volume.name}`;
@@ -1640,6 +1688,7 @@ class ApplicationsApp {
         message: `Redeploy “${app.name}”? Its containers are recreated from the saved Compose file; it is briefly offline.`,
         confirmLabel: "Redeploy",
         danger: true,
+        session: this.ctx.dialog("app-redeploy", { appId: app.id }),
       });
       if (!confirmed || this.disposed) return;
     }
@@ -2533,6 +2582,7 @@ class ApplicationsApp {
       title: "Manage as RAST app",
       message: `Turn “${label}” into a RAST app? RAST recreates ${ids.length === 1 ? "the container" : `its ${ids.length} containers`} from a Compose file it keeps, so you can redeploy and back it up. Volumes and data stay.`,
       confirmLabel: "Manage as app",
+      session: this.ctx.dialog("containers-import", { ids, label }),
     });
     if (!confirmed) return false;
     try {

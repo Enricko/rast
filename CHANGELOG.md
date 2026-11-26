@@ -11,7 +11,25 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Confirmations stay open too.** Move to recycle bin, Delete permanently,
+  Empty recycle bin, Delete backup archive, Close this shell?, App Center's
+  Uninstall, Remove, Make default and Use the system version, Delete
+  consumer, Disable account, Revoke session, Revoke all sessions (its
+  Active sessions list comes back under it), Delete shared folder, Reset
+  appearance and Delete wallpaper in Control Panel, and Docker's Delete
+  container, image and volume, Clean up images, Redeploy app and Manage as
+  RAST app now come back after a reload or on another device, with the text
+  typed in them (such as DELETE), and show live on the account's other
+  devices. They never act by themselves: only a click does; answering on
+  one device closes them on the others without running anything again; and
+  after a reload one opens again only while what it is about is still there.
+  Not kept: Sign out and Sign out other sessions (on another device they
+  would mean that device) and the Personalize panel's reset (not a window).
+
+### Fixed
+
+- Escape in a dialog opened over another dialog closed both; it closes the
+  top one only.
 
 ### Planned
 

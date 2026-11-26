@@ -56,7 +56,10 @@ export interface AppContext {
   onPlace(callback: (params: unknown) => void): void;
   /**
    * A dialog that stays with the window: pass the result as `session` to
-   * `modal()` or `promptDialog()`. After a reload, in another tab or on
+   * `modal()`, `promptDialog()` or `confirmDialog()`. A kept confirmation
+   * never acts by itself: answering it on one page closes it (as cancelled)
+   * on the others, and its `onDialog` handler should open it again only
+   * while what it is about still exists. After a reload, in another tab or on
    * another device the dialog opens again, with what was typed in it, by
    * the handler registered with `onDialog(name, …)` called with `params`
    * (plain JSON naming what the dialog is about, e.g. `{ path }`). The
@@ -64,10 +67,13 @@ export interface AppContext {
    */
   dialog(name: string, params?: unknown): DialogSession;
   /**
-   * Open the dialog `name` again for `params` (see `dialog`). Returns a
-   * function that stops it (e.g. when a tab that opens the dialog closes).
+   * Open the dialog `name` again for `params` (see `dialog`). Saved dialogs
+   * open in the order they were opened; `reopen` may return a promise that
+   * settles once its dialog is open (not when it closes) so that a dialog
+   * opened over it comes after. Returns a function that stops it (e.g. when
+   * a tab that opens the dialog closes).
    */
-  onDialog(name: string, reopen: (params: unknown) => void): () => void;
+  onDialog(name: string, reopen: (params: unknown) => void | Promise<unknown>): () => void;
 }
 
 export interface AppInstance {

@@ -409,6 +409,12 @@ class BackupCenterApp {
     // Dialogs that were open (a reload, another device) open again.
     this.ctx.onDialog("backup-create", () => void this.openCreateDialog());
     this.ctx.onDialog("backup-schedule", () => void this.openScheduleEditor());
+    // A confirmation opens again only for a backup that is still there.
+    this.ctx.onDialog("backup-delete", (params) => {
+      const id = ((params ?? {}) as { id?: unknown }).id;
+      const backup = this.backups.find((candidate) => candidate.id === id);
+      if (backup) void this.deleteBackup(backup);
+    });
     this.ctx.setTitle("Backup Center");
     await this.hydratePermissions();
     this.applyAccessPolicy();
@@ -803,6 +809,7 @@ class BackupCenterApp {
       confirmLabel: "Delete archive",
       danger: true,
       requireTyped: "DELETE",
+      session: this.ctx.dialog("backup-delete", { id: backup.id }),
     });
     if (!confirmed) return;
     try {

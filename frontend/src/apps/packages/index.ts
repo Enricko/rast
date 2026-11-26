@@ -198,6 +198,42 @@ class PackageCenterApp {
         })
         .catch(() => undefined);
     });
+    // Confirmations open again only while what they are about is still so.
+    this.ctx.onDialog("app-uninstall", (params) => {
+      const appId = ((params ?? {}) as { appId?: unknown }).appId;
+      const app = this.overview?.apps?.find((candidate) => candidate.id === appId);
+      if (app?.installed && app.removable) void this.setAppInstalled(app, false);
+    });
+    const withPackage = (name: string, show: (p: PackageView, wanted: Record<string, unknown>) => void): void => {
+      this.ctx.onDialog(name, (params) => {
+        const wanted = (params ?? {}) as Record<string, unknown>;
+        if (typeof wanted.packageId !== "string") return;
+        void this.ctx.api
+          .get<PackageDetail>(`/api/packages/${encodeURIComponent(wanted.packageId)}`)
+          .then((detail) => show(detail.package, wanted))
+          .catch(() => undefined);
+      });
+    };
+    withPackage("package-uninstall", (p) => {
+      if (p.installed.length > 0) void this.uninstall(p);
+    });
+    withPackage("package-default", (p, wanted) => {
+      const version = wanted.version;
+      if (typeof version === "string" && p.defaultVersion !== version && p.installed.some((v) => v.version === version)) {
+        void this.makeDefault(p, version);
+      }
+    });
+    withPackage("package-system", (p) => {
+      if (p.system) void this.useSystem(p);
+    });
+    withPackage("package-remove", (p, wanted) => {
+      const installed = p.installed.find((v) => v.version === wanted.version);
+      if (installed) void this.remove(p, installed);
+    });
+    withPackage("consumer-delete", (p, wanted) => {
+      const consumer = p.consumers.find((c) => c.id === wanted.consumerId);
+      if (consumer) void this.deleteConsumer(consumer);
+    });
     // The same window on another page (tab, device) went elsewhere.
     this.ctx.onPlace((params) => {
       const place = (params ?? {}) as { app?: unknown; package?: unknown };
@@ -785,6 +821,7 @@ class PackageCenterApp {
         message: `${app.name} disappears from every desktop and menu, and its windows close for everyone. ${uninstallKeeps(app)} You can install it again at any time.`,
         confirmLabel: "Uninstall",
         danger: true,
+        session: this.ctx.dialog("app-uninstall", { appId: app.id }),
       });
       if (!ok) return;
     }
@@ -1550,6 +1587,7 @@ class PackageCenterApp {
       confirmLabel: "Uninstall",
       danger: true,
       requireTyped: p.id,
+      session: this.ctx.dialog("package-uninstall", { packageId: p.id }),
     });
     if (!ok) return;
     try {
@@ -1572,6 +1610,7 @@ class PackageCenterApp {
       title: `Make ${p.name} ${version} the default?`,
       message: `Terminals and the stable paths under runtimes/${p.id}/current switch to ${version}. Consumers that follow the default switch too; pinned consumers keep their versions.${p.defaultVersion ? ` ${p.defaultVersion} stays installed.` : ""}`,
       confirmLabel: "Make default",
+      session: this.ctx.dialog("package-default", { packageId: p.id, version }),
     });
     if (!ok) return;
     try {
@@ -1594,6 +1633,7 @@ class PackageCenterApp {
       title: `Use the system ${p.name} ${s.version ?? ""}?`.replace(/ \?$/, "?"),
       message: `Terminals run ${s.path} again. ${p.defaultVersion ?? "The installed version"} stays installed and can be made the default again.`,
       confirmLabel: "Use the system version",
+      session: this.ctx.dialog("package-system", { packageId: p.id }),
     });
     if (!ok) return;
     try {
@@ -1612,6 +1652,7 @@ class PackageCenterApp {
       confirmLabel: "Remove",
       danger: true,
       requireTyped: v.version,
+      session: this.ctx.dialog("package-remove", { packageId: p.id, version: v.version }),
     });
     if (!ok) return;
     try {
@@ -1677,6 +1718,7 @@ class PackageCenterApp {
       message: c.followsDefault ? "It no longer follows the default." : `${c.version} will no longer be protected by this pin.`,
       confirmLabel: "Delete",
       danger: true,
+      session: this.ctx.dialog("consumer-delete", { packageId: c.packageId, consumerId: c.id }),
     });
     if (!ok) return;
     try {

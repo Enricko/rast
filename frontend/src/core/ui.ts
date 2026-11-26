@@ -71,6 +71,9 @@ export function modal(options: ModalOptions): () => void {
   };
 
   const onKey = (event: KeyboardEvent) => {
+    // Keys belong to the topmost dialog (one can open over another).
+    const open = document.querySelectorAll(".modal-backdrop:not(.modal-leaving)");
+    if (open.length > 0 && open[open.length - 1] !== backdrop) return;
     if (event.key === "Escape") {
       if (dismissible) {
         event.preventDefault();

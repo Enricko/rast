@@ -11,7 +11,10 @@ import type { MeResponse, SessionInfo } from "../../core/types";
 import { confirmDialog, errorMessage } from "../../core/ui";
 import { describeUserAgent, scrollToSection, type TabRenderContext } from "./common";
 
-export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
+/** Each Control Panel profile page's "Revoke session" reopener (see below). */
+const profileDialogs = new WeakMap<TabRenderContext, () => void>();
+
+export async function renderProfileTab(tab: TabRenderContext): Promise<() => void> {
   const { ctx, host, actions } = tab;
   const me = await ctx.api.get<MeResponse>("/api/auth/me");
   const user = me.user;
@@ -289,6 +292,7 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
       message: `Sign out the session from ${session.ip || "this device"}? The device will need to sign in again.`,
       confirmLabel: "Revoke session",
       danger: true,
+      session: ctx.dialog("session-revoke", { sessionId: session.id }),
     });
     if (!ok) return;
     try {
@@ -336,7 +340,31 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<void> {
     await renderProfileTab(tab);
   }
 
+  // "Revoke session" opens again (a reload, another device) while that
+  // session still exists; on the device it names, confirming signs that
+  // device out, as asked. "Sign out other sessions" is not kept: on another
+  // device it would mean the other sessions of that device.
+  profileDialogs.get(tab)?.();
+  profileDialogs.set(
+    tab,
+    ctx.onDialog("session-revoke", (params) => {
+      const sessionId = ((params ?? {}) as { sessionId?: unknown }).sessionId;
+      if (typeof sessionId !== "string") return;
+      void ctx.api
+        .get<SessionInfo[]>("/api/auth/sessions")
+        .then((sessions) => {
+          const found = sessions.find((candidate) => candidate.id === sessionId);
+          if (found) void revokeSession(found);
+        })
+        .catch(() => undefined);
+    }),
+  );
+
   await loadSessions();
   scrollToSection(host, tab.section);
+  return () => {
+    profileDialogs.get(tab)?.();
+    profileDialogs.delete(tab);
+  };
 }
 

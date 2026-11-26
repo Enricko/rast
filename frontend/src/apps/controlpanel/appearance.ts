@@ -159,6 +159,7 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
     showTheme: true,
     showAccents: true,
     onLocalMutation: () => sync.markLocalSave(),
+    dialogs: { dialog: (name, params) => ctx.dialog(name, params), onDialog: (name, reopen) => ctx.onDialog(name, reopen) },
     onChange: (draft) => {
       enterPreview();
       applyAppearance(draft);
@@ -189,33 +190,39 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
     applySaved();
     workflow?.reset();
   });
-  resetButton.addEventListener("click", () => {
-    void (async () => {
-      const ok = await confirmDialog({
-        title: "Reset appearance",
-        message:
-          "Restore the default wallpaper, fit, position and overlay? Your saved theme and accent are kept. This also clears unsaved preview changes.",
-        confirmLabel: "Reset wallpaper",
-      });
-      if (!ok || workflow?.state === "saving") return;
-      resetting = true;
+  const askReset = async (): Promise<void> => {
+    const ok = await confirmDialog({
+      title: "Reset appearance",
+      message:
+        "Restore the default wallpaper, fit, position and overlay? Your saved theme and accent are kept. This also clears unsaved preview changes.",
+      confirmLabel: "Reset wallpaper",
+      session: ctx.dialog("appearance-reset"),
+    });
+    if (!ok || workflow?.state === "saving") return;
+    resetting = true;
+    syncSecondaryActions(workflow?.state ?? "clean");
+    try {
+      const reset = await editor!.reset();
+      sync.markLocalSave();
+      exitPreview();
+      applyAppearance(reset);
+      ctx.store.setThemePreference(reset.theme);
+      workflow?.reset();
+      ctx.toast.success("Wallpaper reset to default");
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+      workflow?.setDirty(true);
+    } finally {
+      resetting = false;
       syncSecondaryActions(workflow?.state ?? "clean");
-      try {
-        const reset = await editor!.reset();
-        sync.markLocalSave();
-        exitPreview();
-        applyAppearance(reset);
-        ctx.store.setThemePreference(reset.theme);
-        workflow?.reset();
-        ctx.toast.success("Wallpaper reset to default");
-      } catch (error) {
-        ctx.toast.error(errorMessage(error));
-        workflow?.setDirty(true);
-      } finally {
-        resetting = false;
-        syncSecondaryActions(workflow?.state ?? "clean");
-      }
-    })();
+    }
+  };
+  resetButton.addEventListener("click", () => {
+    if (!resetButton.disabled) void askReset();
+  });
+  // The confirmation opens again (a reload, another device) unless a save runs.
+  const stopDialog = ctx.onDialog("appearance-reset", () => {
+    if (!resetButton.disabled) void askReset();
   });
   const leadingRow = h("div", { class: "appearance-actions-leading" }, resetButton, discardButton);
   workflow.el.querySelector(".appearance-actions")?.prepend(leadingRow);
@@ -303,6 +310,7 @@ async function mountAppearance(tab: TabRenderContext, retry: () => void): Promis
   host.append(intro, conflictHost, saveHost, editor.el);
 
   const cleanup = (): void => {
+    stopDialog();
     unsubscribeConflict();
     unsubscribeAdopt();
     unsubscribeDirty();

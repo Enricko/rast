@@ -25,6 +25,7 @@ import { segmented } from "./components";
 import { h } from "./dom";
 import { formatBytes } from "./format";
 import { iconSvg } from "./icons";
+import type { AppContext } from "./app";
 import type { ToastCenter } from "./toast";
 import { confirmDialog, errorMessage } from "./ui";
 
@@ -44,6 +45,8 @@ export interface AppearanceEditorOptions {
   onLocalMutation?: () => void;
   /** Max upload size from the server (bytes). */
   maxUploadBytes?: number;
+  /** In a window: confirmations stay with it (see AppContext.dialog). */
+  dialogs?: Pick<AppContext, "dialog" | "onDialog">;
 }
 
 export interface AppearanceEditor {
@@ -77,6 +80,33 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
   const maxBytes = options.maxUploadBytes ?? service.value.limits?.maxBytes ?? 10 * 1024 * 1024;
   let draft = normalizeAppearance(service.value);
   const disposers: Array<() => void> = [];
+
+  async function askDeleteUpload(uploadId: string): Promise<void> {
+    const ok = await confirmDialog({
+      title: "Delete wallpaper",
+      message: "Delete this uploaded wallpaper? If it is currently active the desktop falls back to the default wallpaper.",
+      confirmLabel: "Delete",
+      danger: true,
+      ...(options.dialogs ? { session: options.dialogs.dialog("wallpaper-delete", { uploadId }) } : {}),
+    });
+    if (!ok) return;
+    options.onLocalMutation?.();
+    try {
+      const updated = await service.removeUpload(uploadId);
+      // Keep the rest of the draft; only a draft that pointed at
+      // the deleted image falls back to the saved wallpaper.
+      const usedDeleted = draft.wallpaper.kind === "upload" && draft.wallpaper.uploadId === uploadId;
+      draft = normalizeAppearance({
+        ...draft,
+        uploads: updated.uploads,
+        wallpaper: usedDeleted ? updated.wallpaper : draft.wallpaper,
+      });
+      emitChange();
+      toast.success("Wallpaper deleted");
+    } catch (error) {
+      toast.error(errorMessage(error));
+    }
+  }
 
   const themeSection = options.showTheme === false ? null : buildThemeSection();
   const accentSection = options.showAccents === false ? null : buildAccentSection();
@@ -468,31 +498,7 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
               type: "button",
               title: "Delete this wallpaper",
               ariaLabel: "Delete this wallpaper",
-              onClick: async () => {
-                const ok = await confirmDialog({
-                  title: "Delete wallpaper",
-                  message: "Delete this uploaded wallpaper? If it is currently active the desktop falls back to the default wallpaper.",
-                  confirmLabel: "Delete",
-                  danger: true,
-                });
-                if (!ok) return;
-                options.onLocalMutation?.();
-                try {
-                  const updated = await service.removeUpload(upload.id);
-                  // Keep the rest of the draft; only a draft that pointed at
-                  // the deleted image falls back to the saved wallpaper.
-                  const usedDeleted = draft.wallpaper.kind === "upload" && draft.wallpaper.uploadId === upload.id;
-                  draft = normalizeAppearance({
-                    ...draft,
-                    uploads: updated.uploads,
-                    wallpaper: usedDeleted ? updated.wallpaper : draft.wallpaper,
-                  });
-                  emitChange();
-                  toast.success("Wallpaper deleted");
-                } catch (error) {
-                  toast.error(errorMessage(error));
-                }
-              },
+              onClick: () => void askDeleteUpload(upload.id),
             },
             iconSvg("trash", 14),
           );
@@ -622,6 +628,19 @@ export function createAppearanceEditor(options: AppearanceEditorOptions): Appear
   }
 
   refresh();
+
+  // "Delete wallpaper" opens again in a window (a reload, another device)
+  // while the wallpaper is still there.
+  if (options.dialogs) {
+    disposers.push(
+      options.dialogs.onDialog("wallpaper-delete", (params) => {
+        const uploadId = ((params ?? {}) as { uploadId?: unknown }).uploadId;
+        if (typeof uploadId === "string" && (draft.uploads ?? []).some((upload) => upload.id === uploadId)) {
+          void askDeleteUpload(uploadId);
+        }
+      }),
+    );
+  }
 
   return {
     el,

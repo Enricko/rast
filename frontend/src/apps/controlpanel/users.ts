@@ -1186,30 +1186,38 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       }
     };
     void refresh();
+    const revokeAll = async (): Promise<void> => {
+      const ok = await confirmDialog({
+        title: "Revoke all sessions",
+        message: `Sign out every active session for ${user.username}? They will need to sign in again.`,
+        confirmLabel: "Revoke all",
+        danger: true,
+        session: ctx.dialog("user-sessions-revoke", { userId: user.id }),
+      });
+      if (!ok) return;
+      try {
+        await ctx.api.del(`/api/users/${user.id}/sessions`);
+        ctx.toast.success("Sessions revoked");
+        await refresh();
+      } catch (error) {
+        ctx.toast.error(apiErrorMessage(error));
+      }
+    };
+    // The confirmation opens again over this list (a reload, another device).
+    const stopRevoke = ctx.onDialog("user-sessions-revoke", (params) => {
+      if (((params ?? {}) as { userId?: unknown }).userId === user.id) void revokeAll();
+    });
     modal({
       title: `Active sessions — ${user.username}`,
       body: hostEl,
+      session: ctx.dialog("user-sessions", { userId: user.id, username: user.username }),
+      onClose: stopRevoke,
       actions: [
         {
           label: "Revoke all sessions",
           variant: "danger",
           keepOpen: true,
-          onClick: async () => {
-            const ok = await confirmDialog({
-              title: "Revoke all sessions",
-              message: `Sign out every active session for ${user.username}? They will need to sign in again.`,
-              confirmLabel: "Revoke all",
-              danger: true,
-            });
-            if (!ok) return;
-            try {
-              await ctx.api.del(`/api/users/${user.id}/sessions`);
-              ctx.toast.success("Sessions revoked");
-              await refresh();
-            } catch (error) {
-              ctx.toast.error(apiErrorMessage(error));
-            }
-          },
+          onClick: () => revokeAll(),
         },
         { label: "Close", variant: "ghost", onClick: () => {} },
       ],
@@ -1222,6 +1230,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       message: `Disable ${user.username}? Their files are preserved, their sessions are revoked and they can no longer sign in. You can re-enable the account later.`,
       confirmLabel: "Disable account",
       danger: true,
+      session: ctx.dialog("user-disable", { userId: user.id, username: user.username }),
     });
     if (!ok) return;
     try {
@@ -1270,20 +1279,35 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
   });
 
   // Dialogs that were open (a reload, another device) open again.
+  const savedUser = async (params: unknown): Promise<User | null> => {
+    const wanted = (params ?? {}) as { userId?: unknown; username?: unknown };
+    if (typeof wanted.userId !== "number" || typeof wanted.username !== "string") return null;
+    const { userId, username } = wanted;
+    try {
+      const found = await ctx.api.get<Page<User>>("/api/users", { page: 1, perPage: 100, q: username });
+      return found.items.find((candidate) => candidate.id === userId) ?? null;
+    } catch {
+      return null;
+    }
+  };
   const stopDialogs = [
     ctx.onDialog("user-create", () => openCreateModal()),
-    ctx.onDialog("user-edit", (params) => {
-      const wanted = (params ?? {}) as { userId?: unknown; username?: unknown };
-      if (typeof wanted.userId !== "number" || typeof wanted.username !== "string") return;
-      const { userId, username } = wanted;
-      void ctx.api
-        .get<Page<User>>("/api/users", { page: 1, perPage: 100, q: username })
-        .then((found) => {
-          const user = found.items.find((candidate) => candidate.id === userId);
-          if (user) openEditModal(user);
-        })
-        .catch(() => undefined);
-    }),
+    ctx.onDialog("user-edit", (params) =>
+      savedUser(params).then((user) => {
+        if (user) openEditModal(user);
+      }),
+    ),
+    ctx.onDialog("user-sessions", (params) =>
+      savedUser(params).then((user) => {
+        if (user) openSessionsModal(user);
+      }),
+    ),
+    // Opens again only while the account is still enabled.
+    ctx.onDialog("user-disable", (params) =>
+      savedUser(params).then((user) => {
+        if (user?.active) void deactivateUser(user);
+      }),
+    ),
   ];
 
   await refreshAdminCount();

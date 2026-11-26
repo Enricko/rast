@@ -199,6 +199,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
       confirmLabel: "Delete definition",
       danger: true,
       requireTyped: share.name,
+      session: ctx.dialog("share-delete", { shareId: share.id }),
     });
     if (!ok) return;
     try {
@@ -423,27 +424,38 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
   const unsubscribeUsers = realtime.on("user.changed", () => reloadShares.run());
   const unsubscribeResync = realtime.onResync(() => reloadShares.run());
 
-  // A dialog that was open (a reload, another device) opens again.
-  const stopDialog = ctx.onDialog("share-edit", (params) => {
+  // A dialog that was open (a reload, another device) opens again; a
+  // confirmation only for a shared folder that is still there.
+  const savedShare = (params: unknown): Promise<Share | null> => {
     const shareId = ((params ?? {}) as { shareId?: unknown }).shareId;
-    if (shareId === null) {
-      void openShareModal();
-    } else if (typeof shareId === "string") {
-      void ctx.api
-        .get<Share[]>("/api/shares")
-        .then((shares) => {
-          const share = shares.find((candidate) => candidate.id === shareId);
-          if (share) void openShareModal(share);
-        })
-        .catch(() => undefined);
-    }
-  });
+    if (typeof shareId !== "string") return Promise.resolve(null);
+    return ctx.api
+      .get<Share[]>("/api/shares")
+      .then((shares) => shares.find((candidate) => candidate.id === shareId) ?? null)
+      .catch(() => null);
+  };
+  const stopDialogs = [
+    ctx.onDialog("share-edit", (params) => {
+      if (((params ?? {}) as { shareId?: unknown }).shareId === null) {
+        void openShareModal();
+        return;
+      }
+      void savedShare(params).then((share) => {
+        if (share) void openShareModal(share);
+      });
+    }),
+    ctx.onDialog("share-delete", (params) => {
+      void savedShare(params).then((share) => {
+        if (share) void deleteShare(share);
+      });
+    }),
+  ];
 
   void unavailable;
   await load();
 
   return () => {
-    stopDialog();
+    for (const stop of stopDialogs) stop();
     reloadShares.cancel();
     unsubscribeAudit();
     unsubscribeUsers();
