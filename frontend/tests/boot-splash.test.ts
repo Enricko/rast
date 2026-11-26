@@ -7,7 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
-import { DEFAULT_APPEARANCE, normalizeAppearance, splashWallpaper } from "../src/core/appearance";
+import { DEFAULT_APPEARANCE, nextSplash, normalizeAppearance, splashWallpaper } from "../src/core/appearance";
 
 const script = readFileSync(join(process.cwd(), "public", "boot-splash.js"), "utf8");
 
@@ -67,6 +67,35 @@ test("boot-splash.js paints the stored wallpaper before the app loads", () => {
   });
   const plain = boot(JSON.stringify({ image: null, color: "#224466", size: "cover", position: "center" }));
   assert.equal(plain.props["--boot-wallpaper-image"], "none");
+});
+
+test("an uploaded wallpaper keeps its reduced copy until the upload changes", () => {
+  const upload = (uploadId: string, fit: "cover" | "center" = "cover") =>
+    normalizeAppearance({ ...DEFAULT_APPEARANCE, wallpaper: { ...DEFAULT_APPEARANCE.wallpaper, kind: "upload", uploadId, fit } });
+  // No copy yet: the upload's address (works while signed in) + which upload.
+  const first = nextSplash(upload("aa11"), null);
+  assert.equal(first.image, "/api/appearance/wallpapers/aa11");
+  assert.equal(first.uploadId, "aa11");
+  // Once the copy exists it is kept on every later load of the same upload…
+  const copy = { ...first, image: "data:image/jpeg;base64,QUJD", uploadSize: "3840px 2160px" };
+  assert.equal(nextSplash(upload("aa11"), copy).image, copy.image);
+  // …the "center" fit shows it at the upload's own size…
+  assert.equal(nextSplash(upload("aa11", "center"), copy).size, "3840px 2160px");
+  assert.equal(nextSplash(upload("aa11"), copy).size, "cover");
+  // …and another upload or a built-in wallpaper drops it.
+  assert.equal(nextSplash(upload("bb22"), copy).image, "/api/appearance/wallpapers/bb22");
+  const builtin = nextSplash(normalizeAppearance(DEFAULT_APPEARANCE), copy);
+  assert.equal(builtin.image, "/wallpapers/alpine-dawn.jpg");
+  assert.equal(builtin.uploadId, undefined);
+});
+
+test("boot-splash.js accepts the reduced copy and its size", () => {
+  const { props } = boot(JSON.stringify({ image: "data:image/jpeg;base64,QUJD+/9=", color: "#224466", size: "3840px 2160px", position: "center" }));
+  assert.equal(props["--boot-wallpaper-image"], 'url("data:image/jpeg;base64,QUJD+/9=")');
+  assert.equal(props["--boot-wallpaper-size"], "3840px 2160px");
+  const svg = boot(JSON.stringify({ image: 'data:image/svg+xml;base64,QUJD") ; x', size: "1px 1px; color: red" }));
+  assert.equal(svg.props["--boot-wallpaper-image"], "none");
+  assert.equal(svg.props["--boot-wallpaper-size"], "cover");
 });
 
 test("boot-splash.js keeps the default without a stored value and rejects unsafe ones", () => {

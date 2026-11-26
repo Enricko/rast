@@ -639,6 +639,15 @@ pre {
     var(--bg-deep);
 }
 
+/* The last account's wallpaper on this browser, like the loading screen
+   (public/boot-splash.js, core/appearance.ts writeSplashWallpaper). */
+html[data-boot-wallpaper] .auth-shell {
+  background:
+    linear-gradient(rgba(12, 18, 26, 0.32), rgba(12, 18, 26, 0.32)),
+    var(--boot-wallpaper-image) var(--boot-wallpaper-position) / var(--boot-wallpaper-size) no-repeat,
+    var(--boot-wallpaper-color);
+}
+
 .auth-layout {
   background: transparent;
 }

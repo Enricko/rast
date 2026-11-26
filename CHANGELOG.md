@@ -11,7 +11,24 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Tap ⌘ Cmd (Mac) or the Windows key (Windows) to open or close the start
+  menu**, like on the computer's own desktop. It opens when the key is released
+  without any other key, click or scroll in between, so shortcuts such as ⌘C,
+  ⌘V or ⌘⇧4 no longer open it (until now it opened as soon as the key went
+  down, on every such shortcut). The start button's tooltip, the start menu and
+  *Keyboard shortcuts* show the key for your computer. Windows also opens its
+  own Start menu for that key; a web page cannot prevent that outside full
+  screen. Ctrl+Space keeps working everywhere.
+
+### Changed
+
+- **The sign-in screen and the loading screen show the last account's
+  wallpaper** on this browser, also after signing out (like a lock screen), and
+  uploaded wallpapers too: the browser keeps a reduced copy (JPEG, at most
+  1920×1200), because an upload is only served to its owner. Until now signing
+  out went back to the default wallpaper, and the sign-in screen always showed
+  it. Anyone who uses that browser afterwards sees the wallpaper; the next
+  account to sign in replaces it with its own.
 
 ### Planned
 

@@ -332,23 +332,138 @@ export function splashWallpaper(appearance: Appearance): SplashWallpaper {
   };
 }
 
-/** Remember the signed-in account's saved wallpaper for the next loading screen. */
-export function writeSplashWallpaper(appearance: Appearance): void {
+/**
+ * What is stored for the loading and sign-in screens. An uploaded wallpaper is
+ * served to its owner only, so once its copy is made the entry holds a reduced
+ * JPEG of it (`data:` URL, `uploadId` says which upload); `uploadSize` is that
+ * upload's natural size when the copy is smaller (for the "center" fit).
+ */
+export interface StoredSplash extends SplashWallpaper {
+  uploadId?: string;
+  uploadSize?: string;
+}
+
+/** The largest copy kept of an uploaded wallpaper (a 1080p/1200p screen). */
+const SPLASH_COPY_MAX = { width: 1920, height: 1200 };
+const SPLASH_COPY_QUALITY = 0.82;
+/** Above this the copy is not kept (localStorage is ~5 MB per site). */
+const SPLASH_COPY_LIMIT = 1_500_000;
+
+function readSplash(): StoredSplash | null {
   try {
-    window.localStorage.setItem(SPLASH_KEY, JSON.stringify(splashWallpaper(appearance)));
+    const raw = window.localStorage.getItem(SPLASH_KEY);
+    const parsed = raw ? (JSON.parse(raw) as StoredSplash) : null;
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch {
-    /* storage disabled or full: the default loading screen shows */
+    return null;
+  }
+}
+
+/**
+ * The entry for `appearance`, keeping the copy already made of the same
+ * uploaded wallpaper (`previous`): pure, so it is tested without a browser.
+ */
+export function nextSplash(appearance: Appearance, previous: StoredSplash | null): StoredSplash {
+  const base: StoredSplash = splashWallpaper(appearance);
+  const wallpaper = appearance.wallpaper;
+  if (wallpaper.kind !== "upload" || !wallpaper.uploadId) return base;
+  base.uploadId = wallpaper.uploadId;
+  const copy = previous?.uploadId === wallpaper.uploadId && previous.image?.startsWith("data:image/") ? previous : null;
+  if (!copy) return base;
+  const entry: StoredSplash = { ...base, image: copy.image };
+  if (copy.uploadSize) {
+    entry.uploadSize = copy.uploadSize;
+    if (base.size === "auto") entry.size = copy.uploadSize;
+  }
+  return entry;
+}
+
+/** Show `entry` on the sign-in screen now (the loading screen reads it at boot). */
+function applySplash(entry: StoredSplash): void {
+  if (typeof document === "undefined") return;
+  const root = document.documentElement;
+  root.style.setProperty("--boot-wallpaper-image", entry.image ? `url("${entry.image}")` : "none");
+  root.style.setProperty("--boot-wallpaper-color", entry.color);
+  root.style.setProperty("--boot-wallpaper-size", entry.size);
+  root.style.setProperty("--boot-wallpaper-position", entry.position);
+  root.setAttribute("data-boot-wallpaper", "");
+}
+
+function storeSplash(entry: StoredSplash): boolean {
+  try {
+    window.localStorage.setItem(SPLASH_KEY, JSON.stringify(entry));
+    return true;
+  } catch {
+    return false; /* storage disabled or full: the default screens show */
+  }
+}
+
+let splashCopying: string | null = null;
+
+/** Make the reduced copy of an uploaded wallpaper (once per upload). */
+async function copyUploadForSplash(uploadId: string, url: string): Promise<void> {
+  if (splashCopying === uploadId || typeof document === "undefined") return;
+  splashCopying = uploadId;
+  try {
+    const image = new Image();
+    image.src = url;
+    await image.decode();
+    const width = image.naturalWidth;
+    const height = image.naturalHeight;
+    if (!width || !height) return;
+    const scale = Math.min(1, SPLASH_COPY_MAX.width / width, SPLASH_COPY_MAX.height / height);
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(width * scale));
+    canvas.height = Math.max(1, Math.round(height * scale));
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    const current = readSplash();
+    context.fillStyle = current?.color ?? DEFAULT_APPEARANCE.wallpaper.color; // under transparent pixels
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", SPLASH_COPY_QUALITY));
+    if (!blob) return;
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(blob);
+    });
+    if (dataUrl.length > SPLASH_COPY_LIMIT) return;
+    // Still the same wallpaper (the account may have changed it meanwhile)?
+    const latest = readSplash();
+    if (!latest || latest.uploadId !== uploadId || latest.image !== url) return;
+    const entry: StoredSplash = { ...latest, image: dataUrl };
+    if (scale < 1) {
+      entry.uploadSize = `${width}px ${height}px`;
+      if (entry.size === "auto") entry.size = entry.uploadSize;
+    }
+    if (storeSplash(entry)) applySplash(entry);
+  } catch {
+    /* no copy: the loading screen uses the upload's address while signed in */
+  } finally {
+    splashCopying = null;
+  }
+}
+
+/**
+ * Remember the account's saved wallpaper for the loading screen and the
+ * sign-in screen. It stays after sign-out (like an OS lock screen) and is
+ * replaced when another account signs in on this browser.
+ */
+export function writeSplashWallpaper(appearance: Appearance): void {
+  const entry = nextSplash(appearance, readSplash());
+  if (!storeSplash(entry)) return;
+  applySplash(entry);
+  if (entry.uploadId && entry.image && !entry.image.startsWith("data:")) {
+    void copyUploadForSplash(entry.uploadId, entry.image);
   }
 }
 
 /** Remove this user's cache (also used on sign-out so accounts never share it). */
 export function clearCachedAppearance(userId?: number | null): void {
-  try {
-    // The loading screen belongs to whoever is signed in: never keep it past them.
-    window.localStorage.removeItem(SPLASH_KEY);
-  } catch {
-    /* ignore */
-  }
+  // The loading/sign-in screen wallpaper (SPLASH_KEY) is kept on purpose: it
+  // is what the next loading and sign-in screens show, like a lock screen.
   try {
     if (typeof userId === "number") {
       window.localStorage.removeItem(cacheKey(userId));
