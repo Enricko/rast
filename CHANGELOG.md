@@ -24,6 +24,19 @@ this file by `scripts/changelog-section.sh`.
   where it is, and Stop works from any of them. Reasoning models show their
   thinking; replies render Markdown (code blocks with Copy, tables, lists).
   Database schema v11.
+- **AI Agent tools**, each asking first: agents can list, read, find and
+  write the person's files (with File Station's checks and quota), run a
+  command (administrators: as root on the server through the Terminal
+  helper; accounts granted Terminal: in their own sandbox), open public web
+  pages and search the web (Brave, Tavily or SearXNG, set up under Settings →
+  Tools). Every call shows as a card in the chat with what it would do
+  (the command, the file's content) and runs only once the chat's owner
+  allows it; "Allow for this chat" skips asking for that tool (never for
+  commands), and writing a message or Stop instead skips the request. A
+  waiting request survives reloads and restarts; calls that ran are in the
+  activity log. Administrators choose each agent's tools. DeepSeek's thinking
+  models get their reasoning back between tool steps, and models without
+  tool support answer without tools. Database schema v12.
 
 ### Planned
 

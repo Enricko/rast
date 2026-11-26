@@ -2,7 +2,19 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseInline, parseMarkdown, safeHref } from "../src/apps/agent/markdown";
-import { allowanceText, allowanceUsed, applyDelta, groupByDay, messageText, upsertMessage, type Message } from "../src/apps/agent/model";
+import {
+  addToStep,
+  allowanceText,
+  allowanceUsed,
+  applyDelta,
+  groupByDay,
+  maySkipAsking,
+  messageText,
+  toolArgument,
+  upsertMessage,
+  type ContentBlock,
+  type Message,
+} from "../src/apps/agent/model";
 
 test("markdown blocks", () => {
   const blocks = parseMarkdown(
@@ -109,6 +121,37 @@ test("deltas apply in order and report gaps", () => {
   assert.equal(applyDelta(detail, { conversationId: "c", messageId: 9, seq: 3, text: "!", reasoning: "" }), "stale");
   detail.messages[0]!.status = "done";
   assert.equal(applyDelta(detail, { conversationId: "c", messageId: 5, seq: 3, text: "!", reasoning: "" }), "ignored");
+});
+
+test("deltas fill the current step, as on the server", () => {
+  // Same cases as src/ai/mod.rs deltas_fill_the_current_step.
+  const blocks: ContentBlock[] = [];
+  addToStep(blocks, "", "think");
+  addToStep(blocks, "Hel", "");
+  addToStep(blocks, "lo", " more");
+  assert.deepEqual(blocks, [
+    { type: "reasoning", text: "think more" },
+    { type: "text", text: "Hello" },
+  ]);
+  blocks.push({ type: "tool", id: "c1", name: "list_files", input: { path: "/" }, status: "pending" });
+  addToStep(blocks, "Found", "");
+  addToStep(blocks, "", "again");
+  assert.deepEqual(blocks.slice(2), [
+    { type: "tool", id: "c1", name: "list_files", input: { path: "/" }, status: "pending" },
+    { type: "reasoning", text: "again" },
+    { type: "text", text: "Found" },
+  ]);
+  assert.equal(messageText({ content: blocks }), "HelloFound");
+});
+
+test("tool cards show their main argument", () => {
+  assert.equal(toolArgument({ name: "run_command", input: { command: "ls -la" } }), "ls -la");
+  assert.equal(toolArgument({ name: "fetch_url", input: { url: "https://x.io" } }), "https://x.io");
+  assert.equal(toolArgument({ name: "read_file", input: "not json" }), "not json");
+  assert.equal(toolArgument({ name: "unknown", input: { a: 1 } }), '{"a":1}');
+  assert.equal(maySkipAsking("write_file"), true);
+  assert.equal(maySkipAsking("run_command"), false);
+  assert.equal(maySkipAsking("format_disk"), false);
 });
 
 test("messages stay in id order", () => {

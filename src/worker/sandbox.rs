@@ -382,6 +382,61 @@ impl SandboxLauncher {
         let _ = std::fs::remove_dir_all(self.identities.join(owner.to_string()));
     }
 
+    /// `docker exec` into the account's container, up to the container name
+    /// (returned): as the account, in its home folder, with a terminal or
+    /// without one (no colours or pagers then).
+    async fn exec(
+        &self,
+        owner: i64,
+        owner_name: &str,
+        tty: bool,
+    ) -> Result<(Command, String), Refusal> {
+        let home = self.home(owner_name)?;
+        if !self.image_present().await {
+            self.start_build();
+            return Err(Refusal::new(
+                "preparing",
+                "Terminal is still being set up on this server; try again in a few minutes",
+            ));
+        }
+        let container = self.ensure_container(owner, &home).await?;
+        let home_target = format!("/home/{}", home.name);
+        let mut command = docker_command(&self.options);
+        command.args(if tty {
+            &["exec", "-i", "-t", "-u"][..]
+        } else {
+            &["exec", "-i", "-u"][..]
+        });
+        command
+            .arg(format!("{}:{}", home.uid, home.gid))
+            .args(["-w", &home_target])
+            .args(["-e", &format!("HOME={home_target}")])
+            .args(["-e", &format!("USER={}", home.name)])
+            .args(["-e", &format!("LOGNAME={}", home.name)])
+            .args(["-e", &format!("RAST_USER={}", home.name)])
+            .args(["-e", "SHELL=/bin/bash"])
+            .args(["-e", "LANG=C.UTF-8"]);
+        if tty {
+            command.args(["-e", "TERM=xterm-256color", "-e", "COLORTERM=truecolor"]);
+        } else {
+            for setting in [
+                "TERM=dumb",
+                "PAGER=cat",
+                "GIT_PAGER=cat",
+                "NO_COLOR=1",
+                "DEBIAN_FRONTEND=noninteractive",
+            ] {
+                command.args(["-e", setting]);
+            }
+        }
+        if let Some((bin, _)) = self.runtimes() {
+            let mut env = OsString::from("RAST_PACKAGES_BIN=");
+            env.push(bin);
+            command.arg("-e").arg(env);
+        }
+        Ok((command, container))
+    }
+
     /// Accounts that have a sandbox container (running or not).
     async fn containers(&self) -> Vec<i64> {
         let filter = format!("label={LABEL}=1");
@@ -431,37 +486,29 @@ impl Launcher for SandboxLauncher {
     }
 
     async fn command(&self, owner: i64, owner_name: &str) -> Result<Command, Refusal> {
-        let home = self.home(owner_name)?;
-        if !self.image_present().await {
-            self.start_build();
-            return Err(Refusal::new(
-                "preparing",
-                "Terminal is still being set up on this server; try again in a few minutes",
-            ));
-        }
-        let container = self.ensure_container(owner, &home).await?;
-        let home_target = format!("/home/{}", home.name);
-        let mut command = docker_command(&self.options);
-        command
-            .args(["exec", "-i", "-t", "-u"])
-            .arg(format!("{}:{}", home.uid, home.gid))
-            .args(["-w", &home_target])
-            .args(["-e", &format!("HOME={home_target}")])
-            .args(["-e", &format!("USER={}", home.name)])
-            .args(["-e", &format!("LOGNAME={}", home.name)])
-            .args(["-e", &format!("RAST_USER={}", home.name)])
-            .args(["-e", "SHELL=/bin/bash"])
-            .args(["-e", "TERM=xterm-256color"])
-            .args(["-e", "COLORTERM=truecolor"])
-            .args(["-e", "LANG=C.UTF-8"]);
-        if let Some((bin, _)) = self.runtimes() {
-            let mut env = OsString::from("RAST_PACKAGES_BIN=");
-            env.push(bin);
-            command.arg("-e").arg(env);
-        }
+        let (mut command, container) = self.exec(owner, owner_name, true).await?;
         command
             .args([container.as_str(), "/bin/bash", "-l"])
             .env("TERM", "xterm-256color");
+        Ok(command)
+    }
+
+    async fn run_command(
+        &self,
+        owner: i64,
+        owner_name: &str,
+        script: &str,
+        timeout: Duration,
+    ) -> Result<Command, Refusal> {
+        let (mut command, container) = self.exec(owner, owner_name, false).await?;
+        // Killing `docker exec` leaves the command running in the
+        // container: `timeout` stops it there.
+        command
+            .arg(container)
+            .args(["timeout", "-k", "5"])
+            .arg(timeout.as_secs().max(1).to_string())
+            .args(["/bin/bash", "-l", "-c"])
+            .arg(script);
         Ok(command)
     }
 

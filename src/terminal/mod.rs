@@ -19,6 +19,7 @@
 //! stops.
 //!
 //! Wire format: one JSON request line ([`Request`]), one JSON response line;
+//! `run` answers with the command's output once it ends;
 //! `open` and `attach` then switch to the binary frames of
 //! [`crate::docker::exec`] (data, resize, exit, close = end the shell,
 //! detached = another window took the shell over). Ending the connection
@@ -59,6 +60,14 @@ pub const DETACHED_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const MAX_LINE: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest a `run` command may take.
+pub const MAX_RUN_SECS: u32 = 600;
+/// Longest `run` command line.
+pub const MAX_RUN_COMMAND: usize = 32 * 1024;
+/// Output kept per stream of a `run` command.
+pub const RUN_OUTPUT: usize = 64 * 1024;
+/// Largest `run` answer line (output escaped as JSON).
+const MAX_RUN_LINE: usize = 1024 * 1024;
 
 /// The helper's socket (`RAST_TERMINAL_SOCKET`, for tests and development).
 pub fn socket_path() -> PathBuf {
@@ -105,6 +114,30 @@ pub enum Request {
         #[serde(rename = "userName")]
         user_name: String,
     },
+    /// Run one command for the account in a fresh login shell without a
+    /// terminal (the AI Agent's shell tool) and answer [`RunOutput`] when it
+    /// ends; it is stopped after `timeoutSecs`.
+    Run {
+        user: i64,
+        #[serde(rename = "userName")]
+        user_name: String,
+        command: String,
+        #[serde(rename = "timeoutSecs")]
+        timeout_secs: u32,
+    },
+}
+
+/// What a `run` command printed and how it ended.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunOutput {
+    /// `None` when it was stopped (timed out or killed by a signal).
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    /// Output beyond [`RUN_OUTPUT`] per stream was left out.
+    pub truncated: bool,
+    pub timed_out: bool,
 }
 
 /// One shell, as listed to its owner.
@@ -210,12 +243,16 @@ impl TerminalClient {
             .await
             .map_err(|e| TerminalError::Io(e.to_string()))?;
         let mut reader = BufReader::new(read);
-        let wait = if matches!(request, Request::Open { .. }) {
-            self.open_timeout
-        } else {
-            RESPONSE_TIMEOUT
+        let (wait, cap) = match request {
+            Request::Open { .. } => (self.open_timeout, MAX_LINE),
+            // Starting a sandbox, then the command itself.
+            Request::Run { timeout_secs, .. } => (
+                self.open_timeout + Duration::from_secs(u64::from(*timeout_secs) + 15),
+                MAX_RUN_LINE,
+            ),
+            _ => (RESPONSE_TIMEOUT, MAX_LINE),
         };
-        let answer = tokio::time::timeout(wait, read_line_capped(&mut reader, MAX_LINE))
+        let answer = tokio::time::timeout(wait, read_line_capped(&mut reader, cap))
             .await
             .map_err(|_| TerminalError::Io("no answer".into()))?
             .map_err(|e| TerminalError::Io(e.to_string()))?
@@ -281,6 +318,25 @@ impl TerminalClient {
             })
             .await?
             .0)
+    }
+
+    /// Run `command` for `user` (see [`Request::Run`]).
+    pub async fn run(
+        &self,
+        user: i64,
+        user_name: &str,
+        command: &str,
+        timeout_secs: u32,
+    ) -> Result<RunOutput, TerminalError> {
+        let (value, ..) = self
+            .request(&Request::Run {
+                user,
+                user_name: user_name.to_string(),
+                command: command.to_string(),
+                timeout_secs: timeout_secs.clamp(1, MAX_RUN_SECS),
+            })
+            .await?;
+        serde_json::from_value(value).map_err(|e| TerminalError::Io(e.to_string()))
     }
 
     pub async fn open(

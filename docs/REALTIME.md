@@ -78,10 +78,10 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `backup.changed` | Admin | `{reason, id?}` |
 | `package.changed` | Accounts allowed to open App Center (admins, group `allow`) | `{packageId, version?, reason:"queued"\|"started"\|"installed"\|"failed"\|"default"\|"removed"\|"consumers", jobId?, error?}` |
 | `package.catalog` | Accounts allowed to open App Center | `{reason:"checking"}`, then `{reason:"checked", changed, sequence, error}` after every manual or automatic check |
-| `ai.delta` | User(owner), app `agent` | `{conversationId, messageId, seq, text, reasoning}`: text a running reply added since the previous delta (`seq` from 1; a gap means: load the chat again) |
-| `ai.message` | UserAndAdmin(owner), app `agent` | `{conversationId, message, running}` for each stored message and when a reply ends |
+| `ai.delta` | User(owner), app `agent` | `{conversationId, messageId, seq, text, reasoning}`: text a running reply added to its current step (after its last tool block) since the previous delta (`seq` from 1 per run; a gap means: load the chat again) |
+| `ai.message` | UserAndAdmin(owner), app `agent` | `{conversationId, message, running, seq?}` for each stored message, when a reply's tool calls change (`seq`: deltas already in it), and when a reply ends or waits for a tool answer |
 | `ai.conversation` | UserAndAdmin(owner), app `agent` | `{conversation, deleted?}` |
-| `ai.config` | Broadcast, app `agent` | `{what:"providers"\|"agents"\|"skills"\|"limits"}` after an administrator changes the setup |
+| `ai.config` | Broadcast, app `agent` | `{what:"providers"\|"agents"\|"skills"\|"limits"\|"search"}` after an administrator changes the setup |
 | `audit.created` | UserAndAdmin(actor) / Admin | audit row (already emitted by `audit::record`) |
 | `user.changed` | Admin | `{userId, event:"created"|"updated"|"deactivated"}` |
 | `settings.changed` | Admin | `{keys:[...]}` |

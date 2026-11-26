@@ -4,7 +4,8 @@
 //! (`/api/ai/options`, `/api/ai/conversations…`, `/api/ai/usage`).
 //! Administrators also set up providers, agents, skills and limits, and read
 //! every account's conversations (each read of someone else's conversation
-//! is audited).
+//! is audited). Tool calls wait for the conversation's owner:
+//! `POST /api/ai/conversations/{id}/tools/{callId}`.
 
 use axum::{
     extract::{Path, Query, State},
@@ -16,7 +17,7 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::{
-    ai::{self, provider, run::ReplyJob, Kind, LimitRule},
+    ai::{self, provider, run::ReplyJob, tools, Kind, LimitRule},
     audit::{self, AuditLog},
     auth::{AdminUser, AuthUser, ClientIp},
     db::now_ms,
@@ -40,6 +41,12 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/ai/conversations/{id}/messages", post(send_message))
         .route("/api/ai/conversations/{id}/stop", post(stop_reply))
+        .route(
+            "/api/ai/conversations/{id}/tools/{call_id}",
+            post(decide_tool),
+        )
+        .route("/api/ai/search", get(get_search).put(put_search))
+        .route("/api/ai/search/test", post(test_search))
         .route("/api/ai/admin/overview", get(admin_overview))
         .route("/api/ai/admin/conversations", get(admin_conversations))
         .route("/api/ai/providers", post(create_provider))
@@ -289,8 +296,10 @@ async fn list_conversations(
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
     let pattern = format!("%{}%", query.q.as_deref().unwrap_or("").trim());
     let rows = sqlx::query(
-        "SELECT * FROM ai_conversations WHERE user_id = ? AND title LIKE ?
-         ORDER BY updated_at DESC LIMIT ?",
+        "SELECT c.*, (SELECT status FROM ai_messages m WHERE m.conversation_id = c.id
+                      ORDER BY m.id DESC LIMIT 1) AS last_status
+         FROM ai_conversations c WHERE c.user_id = ? AND c.title LIKE ?
+         ORDER BY c.updated_at DESC LIMIT ?",
     )
     .bind(user.id)
     .bind(&pattern)
@@ -339,6 +348,8 @@ async fn create_conversation(
         provider_id: Some(resolved.provider.id.clone()),
         model: resolved.model.clone(),
         title: String::new(),
+        allowed_tools: Vec::new(),
+        waiting: false,
         created_at: now,
         updated_at: now,
     };
@@ -409,7 +420,7 @@ async fn get_conversation(
         let message_id = run.message_id();
         for message in &mut messages {
             if message["id"] == message_id && message["status"] == "streaming" {
-                message["content"] = ai::reply_content(&snapshot.reasoning, &snapshot.text);
+                message["content"] = Value::Array(snapshot.blocks.clone());
             }
         }
     }
@@ -429,6 +440,8 @@ struct ConversationPatch {
     agent_id: Option<String>,
     provider_id: Option<String>,
     model: Option<String>,
+    /// Tools that run without asking in this chat (`[]`: ask for every call).
+    allowed_tools: Option<Vec<String>>,
 }
 
 /// PATCH /api/ai/conversations/{id}
@@ -441,6 +454,20 @@ async fn update_conversation(
     let mut conversation = owned(&state, &user, &id, true).await?;
     if let Some(title) = &body.title {
         conversation.title = bounded(title.trim(), "the title", 200)?;
+    }
+    if let Some(list) = &body.allowed_tools {
+        let mut allowed: Vec<String> = Vec::new();
+        for name in list {
+            if !tools::may_skip_asking(name) {
+                return Err(AppError::bad_request(format!(
+                    "{name:?} cannot run without asking"
+                )));
+            }
+            if !allowed.contains(name) {
+                allowed.push(name.clone());
+            }
+        }
+        conversation.allowed_tools = allowed;
     }
     if body.agent_id.is_some() || body.provider_id.is_some() || body.model.is_some() {
         let agent_id = match body.agent_id.as_deref() {
@@ -478,12 +505,14 @@ async fn update_conversation(
     }
     conversation.updated_at = now_ms();
     sqlx::query(
-        "UPDATE ai_conversations SET title = ?, agent_id = ?, provider_id = ?, model = ?, updated_at = ? WHERE id = ?",
+        "UPDATE ai_conversations SET title = ?, agent_id = ?, provider_id = ?, model = ?, allowed_tools = ?,
+         updated_at = ? WHERE id = ?",
     )
     .bind(&conversation.title)
     .bind(&conversation.agent_id)
     .bind(&conversation.provider_id)
     .bind(&conversation.model)
+    .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
     .bind(conversation.updated_at)
     .bind(&conversation.id)
     .execute(&state.db)
@@ -525,14 +554,164 @@ struct NewMessage {
     text: String,
 }
 
+/// What a run is checked against before it starts.
+struct Prepared {
+    resolved: Resolved,
+    api_key: Option<String>,
+    limits: ai::Effective,
+}
+
+/// Check that `user` may go on in the conversation now: its agent and
+/// model, the allowance, the provider's key.
+async fn prepare(
+    state: &AppState,
+    user: &AuthUser,
+    conversation: &ai::Conversation,
+) -> AppResult<Prepared> {
+    let resolved = resolve(
+        state,
+        user,
+        conversation.agent_id.as_deref(),
+        conversation.provider_id.as_deref(),
+        &conversation.model,
+    )
+    .await?;
+    let limits = ai::effective_limits(&state.db, user).await?;
+    ai::check_allowance(&state.db, user.id, &limits).await?;
+    let api_key = resolved.provider.api_key(&state.secrets)?;
+    if api_key.is_none() && resolved.provider.kind.needs_key() {
+        return Err(AppError::bad_request(format!(
+            "{} has no API key yet; an administrator adds it in the AI Agent settings",
+            resolved.provider.name
+        )));
+    }
+    Ok(Prepared {
+        resolved,
+        api_key,
+        limits,
+    })
+}
+
+/// The run for reply `message_id` (its history: the messages before it).
+async fn reply_job(
+    state: &AppState,
+    user: &AuthUser,
+    conversation: &ai::Conversation,
+    prepared: Prepared,
+    message_id: i64,
+    blocks: Vec<Value>,
+    tokens: (i64, i64),
+) -> AppResult<ReplyJob> {
+    let Prepared {
+        resolved,
+        api_key,
+        limits,
+    } = prepared;
+    let earlier: Vec<ai::Message> = ai::messages(&state.db, &conversation.id)
+        .await?
+        .into_iter()
+        .filter(|m| m.id < message_id)
+        .collect();
+    let all_skills = ai::skills(&state.db).await?;
+    let skills: Vec<ai::Skill> = resolved
+        .agent
+        .as_ref()
+        .map(|agent| {
+            agent
+                .skills
+                .iter()
+                .filter_map(|id| all_skills.iter().find(|s| &s.id == id).cloned())
+                .collect()
+        })
+        .unwrap_or_default();
+    let available = tools::available(state, user)
+        .await
+        .restrict(resolved.agent.as_ref().and_then(|a| a.tools.as_deref()));
+    let today = chrono::Local::now().format("%A, %-d %B %Y").to_string();
+    let request = provider::ChatRequest {
+        kind: resolved.provider.kind,
+        base_url: resolved.provider.effective_base_url(),
+        api_key,
+        model: resolved.model.clone(),
+        system: ai::system_prompt(resolved.agent.as_ref(), &skills, user, &today, &available),
+        messages: ai::history(&earlier),
+        tools: available.specs(),
+        temperature: resolved.agent.as_ref().and_then(|a| a.temperature),
+        max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
+    };
+    Ok(ReplyJob {
+        owner: user.clone(),
+        conversation_id: conversation.id.clone(),
+        message_id,
+        provider_id: resolved.provider.id.clone(),
+        model: resolved.model,
+        request,
+        tools: available,
+        allowed_tools: conversation.allowed_tools.clone(),
+        blocks,
+        limits,
+        tokens,
+    })
+}
+
+async fn last_message(state: &AppState, conversation_id: &str) -> AppResult<Option<ai::Message>> {
+    let row =
+        sqlx::query("SELECT * FROM ai_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1")
+            .bind(conversation_id)
+            .fetch_optional(&state.db)
+            .await?;
+    Ok(row.as_ref().map(ai::message_from_row))
+}
+
+fn publish_message(state: &AppState, owner_id: i64, message: &ai::Message, running: bool) {
+    state.events.publish_user_and_admin(
+        "ai.message",
+        owner_id,
+        json!({"conversationId": message.conversation_id, "message": message.json(), "running": running, "seq": 0}),
+    );
+}
+
+/// End a reply that waits for tool answers (stopped, its calls not run).
+/// Call with `decide` held. Returns whether one waited.
+async fn end_waiting(state: &AppState, conversation: &ai::Conversation) -> AppResult<bool> {
+    let Some(mut message) = last_message(state, &conversation.id).await? else {
+        return Ok(false);
+    };
+    if message.status != "waiting" {
+        return Ok(false);
+    }
+    if let Some(blocks) = message.content.as_array_mut() {
+        for block in blocks.iter_mut().filter(|b| ai::is_tool_block(b)) {
+            if matches!(block["status"].as_str(), Some("pending" | "allowed")) {
+                block["status"] = json!("skipped");
+            }
+        }
+    }
+    let now = now_ms();
+    sqlx::query(
+        "UPDATE ai_messages SET content = ?, status = 'stopped', finished_at = ? WHERE id = ?",
+    )
+    .bind(message.content.to_string())
+    .bind(now)
+    .bind(message.id)
+    .execute(&state.db)
+    .await?;
+    message.status = "stopped".into();
+    message.finished_at = Some(now);
+    publish_message(state, conversation.user_id, &message, false);
+    Ok(true)
+}
+
 /// POST /api/ai/conversations/{id}/messages — the reply is written in the
-/// background (`ai.delta`, then `ai.message`).
+/// background (`ai.delta`, then `ai.message`). A reply waiting for tool
+/// answers ends first (its calls are not run).
 async fn send_message(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
     Json(body): Json<NewMessage>,
 ) -> AppResult<Json<Value>> {
+    let _deciding = state.ai.decide.lock().await;
     let mut conversation = owned(&state, &user, &id, true).await?;
     let text = body.text.trim_end().to_string();
     if text.trim().is_empty() {
@@ -544,27 +723,16 @@ async fn send_message(
             ai::MAX_MESSAGE / 1024
         )));
     }
-    let resolved = resolve(
-        &state,
-        &user,
-        conversation.agent_id.as_deref(),
-        conversation.provider_id.as_deref(),
-        &conversation.model,
-    )
-    .await?;
-    let limits = ai::effective_limits(&state.db, &user).await?;
-    ai::check_allowance(&state.db, user.id, &limits).await?;
+    let prepared = prepare(&state, &user, &conversation).await?;
     let reservation = state
         .ai
         .reserve(&conversation.id)
         .ok_or_else(|| AppError::conflict("a reply is still being written; stop it or wait"))?;
-    let api_key = resolved.provider.api_key(&state.secrets)?;
-    if api_key.is_none() && resolved.provider.kind.needs_key() {
-        return Err(AppError::bad_request(format!(
-            "{} has no API key yet; an administrator adds it in the AI Agent settings",
-            resolved.provider.name
-        )));
-    }
+    end_waiting(&state, &conversation).await?;
+    let (provider_id, model) = (
+        prepared.resolved.provider.id.clone(),
+        prepared.resolved.model.clone(),
+    );
 
     let now = now_ms();
     let user_content = json!([{ "type": "text", "text": text }]);
@@ -583,8 +751,8 @@ async fn send_message(
          VALUES (?, 'assistant', '[]', ?, ?, 'streaming', ?) RETURNING id",
     )
     .bind(&conversation.id)
-    .bind(&resolved.provider.id)
-    .bind(&resolved.model)
+    .bind(&provider_id)
+    .bind(&model)
     .bind(now)
     .fetch_one(&state.db)
     .await?;
@@ -599,41 +767,18 @@ async fn send_message(
         .execute(&state.db)
         .await?;
 
-    let history = ai::history(&ai::messages(&state.db, &conversation.id).await?);
-    let all_skills = ai::skills(&state.db).await?;
-    let skills: Vec<ai::Skill> = resolved
-        .agent
-        .as_ref()
-        .map(|agent| {
-            agent
-                .skills
-                .iter()
-                .filter_map(|id| all_skills.iter().find(|s| &s.id == id).cloned())
-                .collect()
-        })
-        .unwrap_or_default();
-    let today = chrono::Local::now().format("%A, %-d %B %Y").to_string();
-    let request = provider::ChatRequest {
-        kind: resolved.provider.kind,
-        base_url: resolved.provider.effective_base_url(),
-        api_key,
-        model: resolved.model.clone(),
-        system: ai::system_prompt(resolved.agent.as_ref(), &skills, &user, &today),
-        messages: history,
-        temperature: resolved.agent.as_ref().and_then(|a| a.temperature),
-        max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
-    };
-    reservation.start(
-        state.clone(),
-        ReplyJob {
-            owner_id: user.id,
-            conversation_id: conversation.id.clone(),
-            message_id: reply_id,
-            provider_id: resolved.provider.id.clone(),
-            model: resolved.model.clone(),
-            request,
-        },
-    );
+    conversation.waiting = false;
+    let job = reply_job(
+        &state,
+        &user,
+        &conversation,
+        prepared,
+        reply_id,
+        Vec::new(),
+        (0, 0),
+    )
+    .await?;
+    reservation.start(state.clone(), job);
 
     let sent = ai::message(&state.db, user_id).await?.map(|m| m.json());
     let reply = ai::message(&state.db, reply_id).await?.map(|m| m.json());
@@ -657,14 +802,157 @@ async fn send_message(
     })))
 }
 
-/// POST /api/ai/conversations/{id}/stop
+/// POST /api/ai/conversations/{id}/stop — also ends a reply waiting for
+/// tool answers.
 async fn stop_reply(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let conversation = owned(&state, &user, &id, true).await?;
-    Ok(Json(json!({ "stopped": state.ai.stop(&conversation.id) })))
+    let _deciding = state.ai.decide.lock().await;
+    let mut conversation = owned(&state, &user, &id, true).await?;
+    if state.ai.stop(&conversation.id) {
+        return Ok(Json(json!({ "stopped": true })));
+    }
+    let ended = end_waiting(&state, &conversation).await?;
+    if ended {
+        conversation.waiting = false;
+        state.events.publish_user_and_admin(
+            "ai.conversation",
+            user.id,
+            json!({ "conversation": conversation.json(Some(&user.username), false) }),
+        );
+    }
+    Ok(Json(json!({ "stopped": ended })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ToolDecision {
+    /// `allow` or `deny`.
+    decision: String,
+    /// With `allow`: let this tool run without asking for the rest of the
+    /// chat (not the shell).
+    #[serde(default)]
+    always: bool,
+}
+
+/// POST /api/ai/conversations/{id}/tools/{callId} — the owner's answer to a
+/// tool request. Once every call of the reply is answered it goes on.
+async fn decide_tool(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, call_id)): Path<(String, String)>,
+    Json(body): Json<ToolDecision>,
+) -> AppResult<Json<Value>> {
+    let allow = match body.decision.as_str() {
+        "allow" => true,
+        "deny" => false,
+        _ => return Err(AppError::bad_request("the decision is allow or deny")),
+    };
+    let _deciding = state.ai.decide.lock().await;
+    let mut conversation = owned(&state, &user, &id, true).await?;
+    if state.ai.running(&conversation.id) {
+        return Err(AppError::conflict("a reply is still being written"));
+    }
+    let mut message = last_message(&state, &conversation.id)
+        .await?
+        .filter(|m| m.role == "assistant" && m.status == "waiting")
+        .ok_or_else(|| AppError::conflict("this chat is not waiting for an answer"))?;
+    let mut blocks: Vec<Value> = message.content.as_array().cloned().unwrap_or_default();
+    let at = blocks
+        .iter()
+        .position(|b| {
+            ai::is_tool_block(b) && b["id"] == call_id.as_str() && b["status"] == "pending"
+        })
+        .ok_or_else(|| AppError::conflict("that request was already answered"))?;
+    let name = blocks[at]["name"].as_str().unwrap_or("").to_string();
+    let mut allowed_tools = conversation.allowed_tools.clone();
+    if allow {
+        blocks[at]["status"] = json!("allowed");
+        if body.always && tools::may_skip_asking(&name) {
+            for block in blocks.iter_mut().filter(|b| ai::is_tool_block(b)) {
+                if block["name"] == name.as_str() && block["status"] == "pending" {
+                    block["status"] = json!("allowed");
+                }
+            }
+            if !allowed_tools.contains(&name) {
+                allowed_tools.push(name.clone());
+            }
+        }
+    } else {
+        blocks[at]["status"] = json!("denied");
+    }
+    let save_allowed = |conversation: &mut ai::Conversation| {
+        let changed = conversation.allowed_tools != allowed_tools;
+        conversation.allowed_tools = allowed_tools.clone();
+        changed
+    };
+    let answered = !blocks.iter().any(|b| b["status"] == "pending");
+    if !answered {
+        let changed = save_allowed(&mut conversation);
+        message.content = Value::Array(blocks);
+        sqlx::query("UPDATE ai_messages SET content = ? WHERE id = ?")
+            .bind(message.content.to_string())
+            .bind(message.id)
+            .execute(&state.db)
+            .await?;
+        if changed {
+            store_allowed_tools(&state, &conversation).await?;
+        }
+        publish_message(&state, user.id, &message, false);
+        return Ok(Json(
+            json!({ "message": message.json(), "conversation": conversation.json(None, false) }),
+        ));
+    }
+    // Every call answered: the reply goes on (checked as a new message).
+    let prepared = prepare(&state, &user, &conversation).await?;
+    let reservation = state
+        .ai
+        .reserve(&conversation.id)
+        .ok_or_else(|| AppError::conflict("a reply is still being written"))?;
+    let changed = save_allowed(&mut conversation);
+    if changed {
+        store_allowed_tools(&state, &conversation).await?;
+    }
+    message.content = Value::Array(blocks.clone());
+    message.status = "streaming".into();
+    sqlx::query("UPDATE ai_messages SET content = ?, status = 'streaming' WHERE id = ?")
+        .bind(message.content.to_string())
+        .bind(message.id)
+        .execute(&state.db)
+        .await?;
+    conversation.waiting = false;
+    let job = reply_job(
+        &state,
+        &user,
+        &conversation,
+        prepared,
+        message.id,
+        blocks,
+        (message.input_tokens, message.output_tokens),
+    )
+    .await?;
+    // Before the run publishes anything of its own.
+    publish_message(&state, user.id, &message, true);
+    reservation.start(state.clone(), job);
+    state.events.publish_user_and_admin(
+        "ai.conversation",
+        user.id,
+        json!({ "conversation": conversation.json(Some(&user.username), true) }),
+    );
+    Ok(Json(
+        json!({ "message": message.json(), "conversation": conversation.json(None, true) }),
+    ))
+}
+
+async fn store_allowed_tools(state: &AppState, conversation: &ai::Conversation) -> AppResult<()> {
+    sqlx::query("UPDATE ai_conversations SET allowed_tools = ? WHERE id = ?")
+        .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
+        .bind(&conversation.id)
+        .execute(&state.db)
+        .await?;
+    Ok(())
 }
 
 // -------------------------------------------------------- administrators
@@ -740,6 +1028,123 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
         "users": users,
         "groups": groups,
         "usage": usage,
+        "tools": tools::ALL.iter().map(|name| json!({"name": name, "label": tools::label(name)})).collect::<Vec<_>>(),
+        "search": tools::search_config(&state.db).await.public_json(&state.secrets),
+    })))
+}
+
+const SEARCH_KINDS: [&str; 4] = ["", "brave", "tavily", "searxng"];
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchBody {
+    /// `brave`, `tavily`, `searxng`, or `""` for none.
+    kind: String,
+    #[serde(default)]
+    url: String,
+    /// New key (absent or empty: keep the current one).
+    api_key: Option<String>,
+    #[serde(default)]
+    remove_key: bool,
+}
+
+/// GET /api/ai/search — the web search service agents use.
+async fn get_search(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+    let _ = admin;
+    Ok(Json(
+        json!({ "search": tools::search_config(&state.db).await.public_json(&state.secrets) }),
+    ))
+}
+
+/// PUT /api/ai/search
+async fn put_search(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(body): Json<SearchBody>,
+) -> AppResult<Json<Value>> {
+    if !SEARCH_KINDS.contains(&body.kind.as_str()) {
+        return Err(AppError::bad_request("pick Brave, Tavily or SearXNG"));
+    }
+    let current = tools::search_config(&state.db).await;
+    let mut config = tools::SearchConfig {
+        kind: body.kind.clone(),
+        url: String::new(),
+        key: if body.kind == current.kind {
+            current.key
+        } else {
+            String::new()
+        },
+    };
+    match body.kind.as_str() {
+        "" => config.key.clear(),
+        "searxng" => {
+            let url = body.url.trim().trim_end_matches('/').to_string();
+            if !ai::valid_base_url(&url) {
+                return Err(AppError::bad_request(
+                    "enter the SearXNG address, like http://127.0.0.1:8888",
+                ));
+            }
+            config.url = url;
+            config.key.clear();
+        }
+        _ => {
+            if let Some(key) = body
+                .api_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+            {
+                if key.len() > 500 {
+                    return Err(AppError::bad_request("that is not an API key"));
+                }
+                config.key = ai::seal_key(&state.secrets, key)?;
+            } else if body.remove_key {
+                config.key.clear();
+            }
+            if config.key.is_empty() {
+                return Err(AppError::bad_request("enter the service's API key"));
+            }
+        }
+    }
+    tools::save_search_config(&state.db, &config).await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.search.update",
+        "ai_search",
+        "search",
+        if config.kind.is_empty() {
+            "none"
+        } else {
+            &config.kind
+        },
+    )
+    .await;
+    config_changed(&state, "search");
+    Ok(Json(
+        json!({ "search": config.public_json(&state.secrets) }),
+    ))
+}
+
+/// POST /api/ai/search/test — one search with the saved service.
+async fn test_search(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+    let _ = admin;
+    let config = tools::search_config(&state.db).await;
+    if !config.is_configured() {
+        return Err(AppError::bad_request("connect a search service first"));
+    }
+    let key = config.key(&state.secrets);
+    let hits = tokio::task::spawn_blocking(move || {
+        tools::web_search(&config, key.as_deref(), "RAST self-hosted server")
+    })
+    .await
+    .map_err(|e| AppError::Unavailable(e.to_string()))?
+    .map_err(AppError::bad_request)?;
+    Ok(Json(json!({
+        "results": hits.len(),
+        "first": hits.first().map(|h| json!({"title": h.title, "url": h.url})),
     })))
 }
 
@@ -754,7 +1159,9 @@ async fn admin_conversations(
     let pattern = format!("%{}%", query.q.as_deref().unwrap_or("").trim());
     let rows = sqlx::query(
         "SELECT c.*, u.username AS owner,
-                (SELECT COUNT(*) FROM ai_messages m WHERE m.conversation_id = c.id) AS message_count
+                (SELECT COUNT(*) FROM ai_messages m WHERE m.conversation_id = c.id) AS message_count,
+                (SELECT status FROM ai_messages m WHERE m.conversation_id = c.id
+                 ORDER BY m.id DESC LIMIT 1) AS last_status
          FROM ai_conversations c JOIN users u ON u.id = c.user_id
          WHERE (? IS NULL OR c.user_id = ?) AND (c.title LIKE ? OR u.username LIKE ?)
          ORDER BY c.updated_at DESC LIMIT ?",
@@ -1040,6 +1447,9 @@ struct AgentBody {
     model: String,
     #[serde(default)]
     skills: Vec<String>,
+    /// Tools it may use (absent or `null`: all).
+    #[serde(default)]
+    tools: Option<Vec<String>>,
     temperature: Option<f64>,
     max_output_tokens: Option<i64>,
     #[serde(default = "yes")]
@@ -1053,6 +1463,7 @@ struct CheckedAgent {
     provider_id: Option<String>,
     model: String,
     skills: Vec<String>,
+    tools: Option<String>,
 }
 
 async fn check_agent(state: &AppState, body: &AgentBody) -> AppResult<CheckedAgent> {
@@ -1108,6 +1519,21 @@ async fn check_agent(state: &AppState, body: &AgentBody) -> AppResult<CheckedAge
             ));
         }
     }
+    let tools = match &body.tools {
+        None => None,
+        Some(list) => {
+            let mut picked: Vec<&str> = Vec::new();
+            for name in list {
+                if !tools::is_tool(name) {
+                    return Err(AppError::bad_request(format!("there is no tool {name:?}")));
+                }
+                if !picked.contains(&name.as_str()) {
+                    picked.push(name);
+                }
+            }
+            Some(serde_json::to_string(&picked).unwrap_or_else(|_| "[]".into()))
+        }
+    };
     Ok(CheckedAgent {
         name,
         description,
@@ -1115,6 +1541,7 @@ async fn check_agent(state: &AppState, body: &AgentBody) -> AppResult<CheckedAge
         provider_id,
         model,
         skills,
+        tools,
     })
 }
 
@@ -1129,9 +1556,9 @@ async fn create_agent(
     let id = ai::new_id();
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO ai_agents (id, name, description, system_prompt, provider_id, model, skills,
+        "INSERT INTO ai_agents (id, name, description, system_prompt, provider_id, model, skills, tools,
                                 temperature, max_output_tokens, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&agent.name)
@@ -1140,6 +1567,7 @@ async fn create_agent(
     .bind(&agent.provider_id)
     .bind(&agent.model)
     .bind(serde_json::to_string(&agent.skills).unwrap_or_else(|_| "[]".into()))
+    .bind(&agent.tools)
     .bind(body.temperature)
     .bind(body.max_output_tokens)
     .bind(body.enabled as i64)
@@ -1175,7 +1603,7 @@ async fn update_agent(
     let agent = check_agent(&state, &body).await?;
     sqlx::query(
         "UPDATE ai_agents SET name = ?, description = ?, system_prompt = ?, provider_id = ?, model = ?,
-                skills = ?, temperature = ?, max_output_tokens = ?, enabled = ?, updated_at = ?
+                skills = ?, tools = ?, temperature = ?, max_output_tokens = ?, enabled = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(&agent.name)
@@ -1184,6 +1612,7 @@ async fn update_agent(
     .bind(&agent.provider_id)
     .bind(&agent.model)
     .bind(serde_json::to_string(&agent.skills).unwrap_or_else(|_| "[]".into()))
+    .bind(&agent.tools)
     .bind(body.temperature)
     .bind(body.max_output_tokens)
     .bind(body.enabled as i64)

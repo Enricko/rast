@@ -267,23 +267,46 @@ rules combined with the most generous winning (`group:<id>`), else the
 the tokens the provider reports (about four characters per token when it
 reports none) and stays counted when a chat is deleted.
 
+**Tools.** Agents may act for the account chatting, never with more rights
+than it has ([`src/ai/tools.rs`](../src/ai/tools.rs)):
+
+| Tool | What | Who |
+| --- | --- | --- |
+| `list_files`, `read_file`, `search_files`, `write_file`, `create_folder` | the account's RAST files (`/` = home, `/shared/<name>` = shares it may open), through the same checks and quota as File Station | accounts that may open File Station |
+| `run_command` | one command in a fresh `bash -l` without a terminal (default 60 s, at most 600 s; 64 KB of output per stream) | administrators: root on the server via `rast-terminal.service`; accounts granted Terminal: their own sandbox |
+| `web_search` | the search service an administrator connects (Brave, Tavily or SearXNG) | everyone, once connected |
+| `fetch_url` | a public web page as text; addresses on the server or private networks are refused, redirects included | everyone |
+
+An agent's `tools` list narrows this (`null` = all). Every call waits for the
+chat's owner: the reply is stored with `status:"waiting"` and a block
+`{type:"tool", id, name, input, status:"pending"}`; the owner answers
+`allow` or `deny`, and once every call is answered the reply goes on (calls
+run in order, then the model hears their results). The owner may let a tool
+other than `run_command` run without asking for the rest of a chat
+(`always:true`, kept in `allowedTools`). Sending a message or stopping instead
+ends the request (its calls become `skipped`). Each call that runs is audited
+(`ai.tool.<name>`). A reply makes at most 25 model calls per run.
+
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality) |
 | GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, monthlyTokens, source}, allowance:{usedToday, usedMonth, dailyTokens, monthlyTokens, dayEndsAt, monthEndsAt, source}}` |
-| GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, createdAt, updatedAt, running}]}` |
+| GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
 | POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model); a model must be one the provider offers |
-| GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[{type:"text"\|"reasoning", text}], providerId, model, inputTokens, outputTokens, status:"streaming"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`; a reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
-| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?}`; owner only |
+| GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[blocks], providerId, model, inputTokens, outputTokens, status:"streaming"\|"waiting"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`. Blocks: `{type:"text"\|"reasoning", text}` and `{type:"tool", id, name, input, status:"pending"\|"allowed"\|"running"\|"done"\|"error"\|"denied"\|"skipped", output?, error?}`, in reply order. A reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
+| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?, allowedTools?}` (`allowedTools: []` = ask before every tool again; never `run_command`); owner only |
 | DELETE | `/api/ai/conversations/{id}` | owner only; stops a running reply |
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
-| POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`) |
-| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}]}` |
+| POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
+| POST | `/api/ai/conversations/{id}/tools/{callId}` | owner only: `{decision:"allow"\|"deny", always?}` → `{message, conversation}`; once no call is `pending` the reply goes on (checked like a new message: `429`, `403`, …). `409` when the chat is not waiting or the call was answered |
+| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}], tools:[{name, label}], search}` |
+| GET / PUT | `/api/ai/search` | admin: the web search service `{kind:"brave"\|"tavily"\|"searxng"\|"", url, hasKey, keyHint, configured}`; PUT `{kind, url?` (SearXNG)`, apiKey?` (absent = keep)`}`; audited `ai.search.update` |
+| POST | `/api/ai/search/test` | admin: one search with the saved service → `{results, first}` |
 | GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |
 | POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], enabled?}` |
 | PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove) |
 | POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models}` |
-| POST | `/api/ai/agents` | admin: `{name, description?, systemPrompt?, providerId?, model?, skills:[ids], temperature?` (0–2)`, maxOutputTokens?, enabled?}` |
+| POST | `/api/ai/agents` | admin: `{name, description?, systemPrompt?, providerId?, model?, skills:[ids], tools?:[names] \| null, temperature?` (0–2)`, maxOutputTokens?, enabled?}` |
 | PUT / DELETE | `/api/ai/agents/{id}` | admin |
 | POST | `/api/ai/skills` | admin: `{name, description?, instructions}` → `{id}` |
 | PUT / DELETE | `/api/ai/skills/{id}` | admin (agents stop carrying a deleted skill) |
@@ -291,13 +314,18 @@ reports none) and stays counted when a chat is deleted.
 
 Replies are written on the server, one per chat at a time, and stream to the
 owner's pages as `ai.delta` events `{conversationId, messageId, seq, text,
-reasoning}` (text added since the previous delta; `seq` counts up from 1, so a
-gap means the page should load the chat again). `ai.message`
-`{conversationId, message, running}` carries each stored message (the owner
-and administrators), `ai.conversation` `{conversation, deleted?}` chat
-changes, and `ai.config` `{what}` setup changes. A reply cut off by a restart
-is marked `error` ("Interrupted") when RAST starts. Configuration changes are
-audited (`ai.provider.*`, `ai.agent.*`, `ai.skill.*`, `ai.limit.*`).
+reasoning}` (text added since the previous delta; `seq` counts up from 1 in
+each run, so a gap means the page should load the chat again). A delta goes
+to the reply's current step, after its last tool block: reasoning into the
+step's reasoning block (made at the step's start), text into the text block
+that ends it (or a new one). `ai.message` `{conversationId, message, running,
+seq?}` carries each stored message (the owner and administrators), also
+whenever a running reply's tool calls change (`seq`: deltas already in it),
+`ai.conversation` `{conversation, deleted?}` chat changes, and `ai.config`
+`{what}` setup changes. A reply cut off by a restart is marked `error`
+("Interrupted") when RAST starts; a reply waiting for an answer keeps waiting.
+Configuration changes are audited (`ai.provider.*`, `ai.agent.*`,
+`ai.skill.*`, `ai.limit.*`, `ai.search.update`).
 
 ## Resource monitor
 

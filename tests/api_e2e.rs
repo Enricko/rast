@@ -1714,7 +1714,7 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         "0004 to 0011 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
@@ -3517,6 +3517,10 @@ fn serve_fake(mut stream: std::net::TcpStream, log: &FakeLog) {
         let _ = stream.write_all(b"data: [DONE]\n\n");
         return;
     }
+    if body["model"] == "tools" {
+        let _ = stream.write_all(fake_tool_reply(&body).as_bytes());
+        return;
+    }
     let mut out = String::new();
     out.push_str(&event(json!({"role": "assistant", "content": ""})));
     out.push_str(&event(json!({"reasoning_content": "The user greets me."})));
@@ -3528,6 +3532,63 @@ fn serve_fake(mut stream: std::net::TcpStream, log: &FakeLog) {
     ));
     out.push_str("data: [DONE]\n\n");
     let _ = stream.write_all(out.as_bytes());
+}
+
+/// The fake "tools" model: after tool results it says what they returned;
+/// otherwise it asks for the calls the person's words name.
+fn fake_tool_reply(body: &Value) -> String {
+    let event = |delta: Value| format!("data: {}\n\n", json!({"choices": [{"delta": delta}]}));
+    let messages = body["messages"].as_array().cloned().unwrap_or_default();
+    let mut out = String::new();
+    let last = messages.last().cloned().unwrap_or(Value::Null);
+    if last["role"] == "tool" {
+        let said: Vec<String> = messages
+            .iter()
+            .rev()
+            .take_while(|m| m["role"] == "tool")
+            .map(|m| m["content"].as_str().unwrap_or("").to_string())
+            .collect();
+        out.push_str(&event(
+            json!({"content": format!("Tool said: {}", said.join(" | "))}),
+        ));
+    } else {
+        let text = last["content"].as_str().unwrap_or("").to_string();
+        let mut calls: Vec<(&str, Value)> = Vec::new();
+        if text.contains("write") {
+            calls.push((
+                "write_file",
+                json!({"path": "/hello.txt", "content": "Hi from the agent"}),
+            ));
+        }
+        if text.contains("list") {
+            calls.push(("list_files", json!({"path": "/"})));
+        }
+        if text.contains("fetch") {
+            calls.push(("fetch_url", json!({"url": "http://127.0.0.1:9/secret"})));
+        }
+        if text.contains("shell") {
+            calls.push(("run_command", json!({"command": "id"})));
+        }
+        if calls.is_empty() {
+            out.push_str(&event(json!({"content": "Nothing to do."})));
+        } else {
+            out.push_str(&event(json!({"content": "On it."})));
+        }
+        for (index, (name, input)) in calls.iter().enumerate() {
+            let arguments = input.to_string();
+            let (first, rest) = arguments.split_at(arguments.len() / 2);
+            out.push_str(&event(json!({"tool_calls": [{"index": index, "id": format!("call_{index}_{name}"), "type": "function", "function": {"name": name, "arguments": first}}]})));
+            out.push_str(&event(
+                json!({"tool_calls": [{"index": index, "function": {"arguments": rest}}]}),
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "data: {}\n\n",
+        json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 3}})
+    ));
+    out.push_str("data: [DONE]\n\n");
+    out
 }
 
 /// Poll a conversation until its last reply is no longer being written.
@@ -3974,6 +4035,448 @@ async fn ai_agent_chat_limits_and_admin_view() {
     assert_eq!(status, StatusCode::OK);
     let (status, _, _) = server
         .request("GET", "/api/ai/options", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+async fn ai_say(server: &TestServer, session: &Session, id: &str, text: &str) -> Value {
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{id}/messages"),
+            Some(json!({ "text": text })),
+            session.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body = ai_finished(server, session, id).await;
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap()
+}
+
+fn ai_tools(message: &Value) -> Vec<Value> {
+    message["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b["type"] == "tool")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn ai_agent_tools_ask_before_acting() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let alice_id = server.user_id("alice").await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{alice_id}/access-rules"),
+            Some(json!({"folderRules": [], "appRules": [
+                {"appId": "agent", "rule": "allow"},
+                {"appId": "files", "rule": "allow"}
+            ]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (addr, log) = fake_provider();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({
+                "kind": "custom",
+                "name": "Local",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "sk-test-secret-1234",
+                "models": ["tools"],
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider_id = body["provider"]["id"].as_str().unwrap().to_string();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "tools"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = body["conversation"]["id"].as_str().unwrap().to_string();
+    let decide = |call: &str, decision: &str, always: bool| {
+        (
+            format!("/api/ai/conversations/{id}/tools/{call}"),
+            json!({"decision": decision, "always": always}),
+        )
+    };
+
+    // The model asks to write a file: nothing happens until Alice answers.
+    let reply = ai_say(&server, &alice, &id, "please write a note").await;
+    assert_eq!(reply["status"], "waiting", "{reply}");
+    assert_eq!(ai_text(&reply), "On it.");
+    let calls = ai_tools(&reply);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["name"], "write_file");
+    assert_eq!(calls[0]["status"], "pending");
+    assert_eq!(calls[0]["input"]["path"], "/hello.txt");
+    let sent = log.lock().unwrap().last().unwrap().2.clone();
+    let offered: Vec<&str> = sent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        vec![
+            "list_files",
+            "read_file",
+            "search_files",
+            "write_file",
+            "create_folder",
+            "fetch_url"
+        ],
+        "no shell without Terminal, no web search without a service"
+    );
+    let (_, _, body) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{id}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(body["conversation"]["waiting"], true);
+    let (status, _, _) = server
+        .request(
+            "GET",
+            "/api/files/stat?path=/hello.txt",
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "not written before it is allowed"
+    );
+    // Only the owner answers.
+    let (path, answer) = decide("call_0_write_file", "allow", false);
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(answer.clone()),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"decision": "maybe"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(answer.clone()),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body = ai_finished(&server, &alice, &id).await;
+    let reply = body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(reply["status"], "done", "{reply}");
+    let calls = ai_tools(&reply);
+    assert_eq!(calls[0]["status"], "done");
+    assert_eq!(calls[0]["output"], "Created /hello.txt (17 B).");
+    assert_eq!(
+        ai_text(&reply),
+        "On it.Tool said: Created /hello.txt (17 B)."
+    );
+    assert!(
+        reply["inputTokens"].as_i64().unwrap() >= 20,
+        "both steps counted: {reply}"
+    );
+    assert_eq!(body["conversation"]["waiting"], false);
+    let (status, _, body) = server
+        .request(
+            "GET",
+            "/api/files/text?path=/hello.txt",
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["content"], "Hi from the agent");
+    let sent = log.lock().unwrap().last().unwrap().2.clone();
+    let turns = sent["messages"].as_array().unwrap();
+    let assistant = &turns[turns.len() - 2];
+    assert_eq!(assistant["tool_calls"][0]["id"], "call_0_write_file");
+    assert_eq!(turns.last().unwrap()["tool_call_id"], "call_0_write_file");
+    // A second answer to the same call is refused.
+    let (status, _, _) = server
+        .request("POST", &path, Some(answer), alice.headers_with_csrf())
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Denied: the model hears so.
+    let reply = ai_say(&server, &alice, &id, "list my files").await;
+    assert_eq!(reply["status"], "waiting");
+    let (path, answer) = decide("call_0_list_files", "deny", false);
+    let (status, _, body) = server
+        .request("POST", &path, Some(answer), alice.headers_with_csrf())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let body = ai_finished(&server, &alice, &id).await;
+    let reply = body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(ai_tools(&reply)[0]["status"], "denied");
+    assert!(
+        ai_text(&reply).contains("Error: The person did not allow this call."),
+        "{reply}"
+    );
+
+    // Allowed for the chat: the next list runs without asking.
+    let reply = ai_say(&server, &alice, &id, "list my files").await;
+    let (path, answer) = decide("call_0_list_files", "allow", true);
+    assert_eq!(reply["status"], "waiting");
+    let (status, _, body) = server
+        .request("POST", &path, Some(answer), alice.headers_with_csrf())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["conversation"]["allowedTools"], json!(["list_files"]));
+    ai_finished(&server, &alice, &id).await;
+    let reply = ai_say(&server, &alice, &id, "list my files again").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    let calls = ai_tools(&reply);
+    assert_eq!(calls[0]["status"], "done");
+    assert!(
+        calls[0]["output"].as_str().unwrap().contains("hello.txt"),
+        "{reply}"
+    );
+    // The shell never skips asking; Alice may go back to asking for all.
+    let (status, _, _) = server
+        .request(
+            "PATCH",
+            &format!("/api/ai/conversations/{id}"),
+            Some(json!({"allowedTools": ["run_command"]})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            &format!("/api/ai/conversations/{id}"),
+            Some(json!({"allowedTools": []})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["conversation"]["allowedTools"], json!([]));
+
+    // Addresses on this server or private networks are not opened.
+    let reply = ai_say(&server, &alice, &id, "fetch that page").await;
+    let (path, answer) = decide("call_0_fetch_url", "allow", false);
+    assert_eq!(reply["status"], "waiting");
+    server
+        .request("POST", &path, Some(answer), alice.headers_with_csrf())
+        .await;
+    let body = ai_finished(&server, &alice, &id).await;
+    let reply = body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    let calls = ai_tools(&reply);
+    assert_eq!(calls[0]["status"], "error");
+    assert!(
+        calls[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("private network"),
+        "{reply}"
+    );
+    // A tool the account may not use fails without asking.
+    let reply = ai_say(&server, &alice, &id, "use the shell").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    assert_eq!(ai_tools(&reply)[0]["status"], "error");
+
+    // Stop while waiting: the call is skipped.
+    let reply = ai_say(&server, &alice, &id, "write it again").await;
+    assert_eq!(reply["status"], "waiting");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{id}/stop"),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["stopped"], true);
+    let (_, _, body) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{id}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    let reply = body["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .cloned()
+        .unwrap();
+    assert_eq!(reply["status"], "stopped");
+    assert_eq!(ai_tools(&reply)[0]["status"], "skipped");
+
+    // Writing instead of answering ends the request too; the model hears it.
+    let reply = ai_say(&server, &alice, &id, "write once more").await;
+    assert_eq!(reply["status"], "waiting");
+    let reply = ai_say(&server, &alice, &id, "never mind").await;
+    assert_eq!(ai_text(&reply), "Nothing to do.");
+    let (_, _, body) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{id}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    let messages = body["messages"].as_array().unwrap();
+    let skipped = &messages[messages.len() - 3];
+    assert_eq!(skipped["status"], "stopped");
+    assert_eq!(ai_tools(skipped)[0]["status"], "skipped");
+    let sent = log.lock().unwrap().last().unwrap().2.clone();
+    let turns = sent["messages"].as_array().unwrap();
+    assert!(turns.iter().any(|t| t["role"] == "tool"
+        && t["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("wrote a new message instead")));
+    assert_eq!(turns.last().unwrap()["content"], "never mind");
+
+    // An agent's tool list limits what the model is offered.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/agents",
+            Some(json!({"name": "Reader", "providerId": provider_id, "model": "tools", "tools": ["read_file", "list_files"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["agent"]["tools"], json!(["read_file", "list_files"]));
+    let agent_id = body["agent"]["id"].as_str().unwrap().to_string();
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/ai/agents",
+            Some(json!({"name": "Bad", "tools": ["format_disk"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"agentId": agent_id})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    let reader = body["conversation"]["id"].as_str().unwrap().to_string();
+    ai_say(&server, &alice, &reader, "hello").await;
+    let sent = log.lock().unwrap().last().unwrap().2.clone();
+    let offered: Vec<&str> = sent["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["function"]["name"].as_str())
+        .collect();
+    assert_eq!(offered, vec!["list_files", "read_file"]);
+    assert!(sent["messages"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("# Tools"));
+
+    // Web search settings: keys stay secret.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/ai/search",
+            Some(json!({"kind": "brave", "apiKey": "brave-secret-9876"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["search"]["keyHint"], "…9876");
+    assert_eq!(body["search"]["configured"], true);
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    assert!(!body.to_string().contains("brave-secret"));
+    assert_eq!(body["search"]["kind"], "brave");
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/ai/search",
+            Some(json!({"kind": "searxng", "url": "nope"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/ai/search",
+            Some(json!({"kind": ""})),
+            alice.headers_with_csrf(),
+        )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }

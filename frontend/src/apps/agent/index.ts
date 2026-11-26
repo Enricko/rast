@@ -3,7 +3,8 @@
 // the server and stream to every open page (`ai.delta`), so a reload or
 // another device picks a reply up where it is. Administrators also get the
 // settings (providers, agents, skills, limits) and can read everyone's
-// conversations (settings.ts).
+// conversations (settings.ts). Agents may ask to use tools (files, commands,
+// the web); each call shows as a card the chat's owner allows or denies.
 
 import type { AppContext, AppDefinition, AppInstance } from "../../core/app";
 import { ApiError } from "../../core/api";
@@ -18,9 +19,13 @@ import {
   applyDelta,
   formatTokens,
   groupByDay,
-  messageReasoning,
+  maySkipAsking,
   messageText,
+  TOOL_INFO,
+  toolArgument,
+  toolBlocks,
   upsertMessage,
+  type ContentBlock,
   type Conversation,
   type ConversationDetail,
   type ConversationEvent,
@@ -28,6 +33,7 @@ import {
   type Message,
   type MessageEvent,
   type Options,
+  type ToolBlock,
 } from "./model";
 import { mountSettings, type SettingsView } from "./settings";
 
@@ -185,9 +191,13 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   menuButton.addEventListener("click", (event) => {
     if (!current || current.readOnly) return;
     const conversation = current.conversation;
+    const allowed = conversation.allowedTools ?? [];
     contextMenu(event.clientX, event.clientY, [
       { label: "Rename", icon: "rename", onClick: () => void rename(conversation) },
       { label: "Copy chat", icon: "copy", onClick: () => void copyChat() },
+      ...(allowed.length
+        ? [{ label: "Ask before every tool again", icon: "shield", onClick: () => void askAgain(conversation) }]
+        : []),
       "separator",
       { label: "Delete", icon: "trash", danger: true, onClick: () => void remove(conversation) },
     ]);
@@ -334,6 +344,48 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }
   }
 
+  /** The owner's answer to a tool request. */
+  async function decide(call: ToolBlock, decision: "allow" | "deny", always = false): Promise<void> {
+    if (!current || current.readOnly) return;
+    const id = current.conversation.id;
+    try {
+      const body = await ctx.api.post<{ message: Message; conversation: Conversation }>(
+        `/api/ai/conversations/${encodeURIComponent(id)}/tools/${encodeURIComponent(call.id)}`,
+        { decision, always },
+      );
+      if (current?.conversation.id !== id) return;
+      upsertMessage(current.messages, body.message);
+      current.conversation = { ...current.conversation, ...body.conversation };
+      if (body.conversation.running) current.seq = 0;
+      upsertConversation(body.conversation);
+      refreshMessage(body.message);
+      updateComposer();
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+      if (error instanceof ApiError && error.isConflict) void openConversation(id, { quiet: true });
+      else refreshCurrent();
+    }
+  }
+
+  async function askAgain(conversation: Conversation): Promise<void> {
+    try {
+      const updated = await ctx.api.patch<{ conversation: Conversation }>(
+        `/api/ai/conversations/${encodeURIComponent(conversation.id)}`,
+        { allowedTools: [] },
+      );
+      upsertConversation(updated.conversation);
+      if (current?.conversation.id === conversation.id) current.conversation = { ...current.conversation, ...updated.conversation };
+      ctx.toast.success("Every tool asks first again in this chat.");
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+    }
+  }
+
+  function refreshCurrent(): void {
+    const reply = current?.messages[current.messages.length - 1];
+    if (reply) refreshMessage(reply);
+  }
+
   async function choose(choice: string): Promise<void> {
     writeChoice(choice);
     if (!current || current.readOnly) return;
@@ -396,7 +448,10 @@ function mountAgentApp(ctx: AppContext): AppInstance {
 
   async function copyChat(): Promise<void> {
     if (!current) return;
-    const lines = current.messages.map((m) => `${m.role === "user" ? "You" : "Assistant"}:\n${messageText(m)}`);
+    const lines = current.messages.map((m) => {
+      const calls = toolBlocks(m).map((call) => `[${TOOL_INFO[call.name]?.label ?? call.name}: ${toolArgument(call)} (${call.status})]`);
+      return `${m.role === "user" ? "You" : "Assistant"}:\n${[messageText(m), ...calls].filter(Boolean).join("\n")}`;
+    });
     if (await copyText(lines.join("\n\n"))) ctx.toast.success("Chat copied.");
   }
 
@@ -470,7 +525,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
             },
           },
           h("span", { class: "ai-list-title" }, item.title || "New chat"),
-          item.running ? h("span", { class: "ai-dot", title: "Writing a reply" }) : null,
+          item.running
+            ? h("span", { class: "ai-dot", title: "Writing a reply" })
+            : item.waiting
+              ? h("span", { class: "ai-dot is-waiting", title: "Waiting for your answer" })
+              : null,
         );
         list.appendChild(row);
       }
@@ -537,8 +596,14 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     sendButton.classList.toggle("is-stop", running);
     sendButton.disabled = !running && (!input.value.trim() || !picker.value);
     const allowance = options?.allowance;
+    const waiting = !running && current?.messages[current.messages.length - 1]?.status === "waiting";
+    input.placeholder = waiting ? "Or write something else" : "Message";
     composerNote.textContent =
-      allowance && allowanceUsed(allowance) === 1 ? "You have used your AI allowance for now." : "";
+      allowance && allowanceUsed(allowance) === 1
+        ? "You have used your AI allowance for now."
+        : waiting
+          ? "The agent is waiting for your answer above. Writing a message instead skips its request."
+          : "";
   }
 
   const bodies = new Map<number, { el: HTMLElement; frame: number }>();
@@ -647,28 +712,48 @@ function mountAgentApp(ctx: AppContext): AppInstance {
 
   function fillReply(body: HTMLElement, message: Message): void {
     const text = messageText(message);
-    const reasoning = messageReasoning(message);
     const streaming = message.status === "streaming";
-    const parts: HTMLElement[] = [];
-    if (reasoning) {
-      const previous = body.querySelector("details");
-      const details = h("details", { class: "ai-thinking" });
-      details.open = previous ? (previous as HTMLDetailsElement).open : streaming && !text;
-      const summary = h("summary", {}, streaming && !text ? "Thinking…" : "Thought");
-      const inner = h("div", { class: "ai-thinking-text" }, reasoning);
-      details.append(summary, inner);
-      parts.push(details);
+    // Opened sections stay open while the reply changes.
+    const opened = new Map<string, boolean>();
+    for (const details of body.querySelectorAll<HTMLDetailsElement>("details[data-key]")) {
+      opened.set(details.dataset.key ?? "", details.open);
     }
-    const md = h("div", { class: "ai-md" });
-    renderMarkdown(md, text, {
-      onCopy: (code) => void copyText(code).then((ok) => ok && ctx.toast.success("Code copied.")),
+    const parts: HTMLElement[] = [];
+    const blocks: ContentBlock[] = message.content;
+    const last = blocks.length - 1;
+    blocks.forEach((block, index) => {
+      const live = streaming && index === last;
+      if (block.type === "reasoning") {
+        if (!block.text) return;
+        const key = `reasoning:${index}`;
+        const details = h("details", { class: "ai-thinking", dataset: { key } });
+        details.open = opened.get(key) ?? live;
+        details.append(h("summary", {}, live ? "Thinking…" : "Thought"), h("div", { class: "ai-thinking-text" }, block.text));
+        parts.push(details);
+      } else if (block.type === "text") {
+        if (!block.text && !live) return;
+        const md = h("div", { class: "ai-md" });
+        renderMarkdown(md, block.text, {
+          onCopy: (code) => void copyText(code).then((ok) => ok && ctx.toast.success("Code copied.")),
+        });
+        if (live) caretInto(md);
+        parts.push(md);
+      } else if (block.type === "tool") {
+        parts.push(toolCard(message, block, opened));
+      }
     });
-    if (streaming) caretInto(md);
-    parts.push(md);
+    // Between steps: still working.
+    const tail = blocks[last];
+    const toolBusy = tail?.type === "tool" && (tail.status === "running" || tail.status === "allowed");
+    if (streaming && tail?.type !== "text" && !toolBusy && !(tail?.type === "reasoning")) {
+      const md = h("div", { class: "ai-md" });
+      caretInto(md);
+      parts.push(md);
+    }
     if (message.status === "error") {
       parts.push(h("div", { class: "ai-error", role: "alert" }, iconSvg("warning", 14), h("span", {}, message.error || "The reply failed.")));
     }
-    if (!streaming) {
+    if (!streaming && message.status !== "waiting") {
       const meta: string[] = [];
       if (message.model) meta.push(message.model);
       if (message.status === "stopped") meta.push("stopped");
@@ -695,6 +780,80 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       );
     }
     body.replaceChildren(...parts);
+  }
+
+  function toolCard(message: Message, block: ToolBlock, opened: Map<string, boolean>): HTMLElement {
+    const info = TOOL_INFO[block.name];
+    const arg = toolArgument(block);
+    const waiting = message.status === "waiting" && block.status === "pending";
+    const canAnswer = waiting && !current?.readOnly;
+    const state: Record<ToolBlock["status"], [string, string]> = {
+      pending: ["clock", "Asks first"],
+      allowed: ["clock", "Allowed"],
+      running: ["refresh", "Running"],
+      done: ["check", "Done"],
+      error: ["warning", "Failed"],
+      denied: ["close", "Not allowed"],
+      skipped: ["close", "Not run"],
+    };
+    const [icon, label] = state[block.status] ?? ["info", block.status];
+    const card = h(
+      "div",
+      { class: `ai-tool is-${block.status}`, dataset: { call: block.id } },
+      h(
+        "div",
+        { class: "ai-tool-head" },
+        h("span", { class: "ai-tool-icon" }, iconSvg(info?.icon ?? "apps", 14)),
+        h("span", { class: "ai-tool-label" }, info?.label ?? block.name),
+        h("span", { class: "ai-tool-arg", title: arg }, arg),
+        h("span", { class: "ai-tool-state small" }, iconSvg(icon, 12), h("span", {}, label)),
+      ),
+    );
+    const input = typeof block.input === "object" && block.input ? block.input : {};
+    // What exactly would run or be written.
+    if (block.name === "run_command" && (waiting || arg.length > 60 || arg.includes("\n"))) {
+      card.appendChild(h("pre", { class: "ai-tool-code" }, arg));
+    }
+    if (block.name === "write_file" && typeof input.content === "string") {
+      const key = `content:${block.id}`;
+      const details = h("details", { class: "ai-tool-more", dataset: { key } });
+      details.open = opened.get(key) ?? false;
+      const size = new TextEncoder().encode(input.content).length;
+      details.append(h("summary", {}, `Content · ${size.toLocaleString()} bytes`), h("pre", { class: "ai-tool-code" }, input.content));
+      card.appendChild(details);
+    }
+    if (canAnswer) {
+      const buttons: HTMLButtonElement[] = [];
+      const act = (decision: "allow" | "deny", always: boolean) => () => {
+        for (const button of buttons) button.disabled = true;
+        void decide(block, decision, always);
+      };
+      buttons.push(h("button", { class: "btn btn-primary btn-sm", type: "button", onClick: act("allow", false) }, "Allow"));
+      if (maySkipAsking(block.name)) {
+        buttons.push(
+          h(
+            "button",
+            { class: "btn btn-sm", type: "button", title: `Run "${info?.label ?? block.name}" without asking for the rest of this chat`, onClick: act("allow", true) },
+            "Allow for this chat",
+          ),
+        );
+      }
+      buttons.push(h("button", { class: "btn btn-ghost btn-sm", type: "button", onClick: act("deny", false) }, "Deny"));
+      card.appendChild(h("div", { class: "ai-tool-actions" }, ...buttons));
+    } else if (waiting) {
+      card.appendChild(h("p", { class: "ai-tool-note small muted" }, `Waiting for ${current?.conversation.owner ?? "the owner"} to answer.`));
+    }
+    if (block.status === "error" && block.error) {
+      card.appendChild(h("p", { class: "ai-tool-error small" }, block.error));
+    }
+    if (block.status === "done" && block.output) {
+      const key = `output:${block.id}`;
+      const details = h("details", { class: "ai-tool-more", dataset: { key } });
+      details.open = opened.get(key) ?? false;
+      details.append(h("summary", {}, "Result"), h("pre", { class: "ai-tool-code" }, block.output));
+      card.appendChild(details);
+    }
+    return card;
   }
 
   /** The typing caret goes at the end of the last line of text. */
@@ -750,8 +909,10 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }),
     realtime.on<MessageEvent>("ai.message", (event) => {
       const listed = conversations.find((c) => c.id === event.conversationId);
-      if (listed && listed.running !== event.running) {
+      const waiting = event.message.role === "assistant" ? event.message.status === "waiting" : listed?.waiting;
+      if (listed && (listed.running !== event.running || listed.waiting !== waiting)) {
         listed.running = event.running;
+        listed.waiting = Boolean(waiting);
         renderList();
       }
       if (listed && !event.running && event.message.role === "assistant" && options?.allowance && allowanceText(options.allowance)) {
@@ -762,6 +923,8 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       upsertMessage(current.messages, event.message);
       current.conversation.running = event.running;
       if (!event.running) current.seq = 0;
+      else if (typeof event.seq === "number" && event.message.status === "streaming") current.seq = event.seq;
+      if (event.message.role === "assistant") current.conversation.waiting = event.message.status === "waiting";
       if (known) refreshMessage(event.message);
       else {
         const stick = nearBottom();

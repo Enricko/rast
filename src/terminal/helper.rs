@@ -36,8 +36,8 @@ use tokio::{
 };
 
 use super::{
-    socket_path, valid_session_id, Request, SessionInfo, DEFAULT_PEER_USER, DETACHED_IDLE,
-    MAX_LINE, MAX_SESSIONS, SCROLLBACK,
+    socket_path, valid_session_id, Request, RunOutput, SessionInfo, DEFAULT_PEER_USER,
+    DETACHED_IDLE, MAX_LINE, MAX_RUN_COMMAND, MAX_RUN_SECS, MAX_SESSIONS, RUN_OUTPUT, SCROLLBACK,
 };
 use crate::{
     docker::exec::{clamp_size, read_frame, read_line_capped, write_frame, Frame},
@@ -138,6 +138,17 @@ pub trait Launcher: Send + Sync + 'static {
     }
     /// The command of a new shell for `owner`, run on the shell's terminal.
     async fn command(&self, owner: i64, owner_name: &str) -> Result<Command, Refusal>;
+    /// The command that runs `script` once for `owner` in a login shell
+    /// without a terminal (stdin empty), within `timeout` (the helper also
+    /// stops it then; launchers whose processes the helper cannot stop by
+    /// itself, such as containers, stop it inside too).
+    async fn run_command(
+        &self,
+        owner: i64,
+        owner_name: &str,
+        script: &str,
+        timeout: Duration,
+    ) -> Result<Command, Refusal>;
     /// Whether the shell's foreground program can be read from `/proc`
     /// (not for shells inside containers).
     fn shows_program(&self) -> bool {
@@ -161,6 +172,156 @@ impl Launcher for HostLauncher {
     async fn command(&self, _owner: i64, owner_name: &str) -> Result<Command, Refusal> {
         Ok(self.0.command(owner_name))
     }
+
+    async fn run_command(
+        &self,
+        _owner: i64,
+        owner_name: &str,
+        script: &str,
+        _timeout: Duration,
+    ) -> Result<Command, Refusal> {
+        let mut command = self.0.command(owner_name);
+        command.arg("-c").arg(script);
+        quiet_env(&mut command);
+        Ok(command)
+    }
+}
+
+/// No colours, pagers or prompts in output nobody watches live.
+pub fn quiet_env(command: &mut Command) {
+    command
+        .env("TERM", "dumb")
+        .env("PAGER", "cat")
+        .env("GIT_PAGER", "cat")
+        .env("SYSTEMD_PAGER", "")
+        .env("NO_COLOR", "1")
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .env_remove("COLORTERM");
+}
+
+/// Run a launcher's command to the end (or until `timeout`, then its whole
+/// process group is killed) and keep up to [`RUN_OUTPUT`] of each stream.
+pub async fn run_once(mut command: Command, timeout: Duration) -> RunOutput {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return RunOutput {
+                stderr: format!("cannot start the shell: {error}"),
+                ..RunOutput::default()
+            }
+        }
+    };
+    let pid = child.id();
+    async fn keep(stream: Option<impl tokio::io::AsyncRead + Unpin>) -> (Vec<u8>, bool) {
+        let mut kept = Vec::new();
+        let mut truncated = false;
+        let Some(mut stream) = stream else {
+            return (kept, truncated);
+        };
+        let mut buffer = [0u8; 8192];
+        loop {
+            match stream.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = RUN_OUTPUT.saturating_sub(kept.len());
+                    kept.extend_from_slice(&buffer[..n.min(room)]);
+                    truncated |= n > room;
+                }
+            }
+        }
+        (kept, truncated)
+    }
+    let out = tokio::spawn(keep(child.stdout.take()));
+    let err = tokio::spawn(keep(child.stderr.take()));
+    let (status, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => (status.ok(), false),
+        Err(_) => {
+            if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
+                // SAFETY: signalling the process group this helper started.
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
+            }
+            let _ = child.kill().await;
+            (None, true)
+        }
+    };
+    // Programs that left the group may hold the pipes open: stop waiting.
+    let collect = |task: tokio::task::JoinHandle<(Vec<u8>, bool)>| async move {
+        match tokio::time::timeout(Duration::from_secs(2), task).await {
+            Ok(Ok(kept)) => kept,
+            _ => (Vec::new(), true),
+        }
+    };
+    let (stdout, cut_out) = collect(out).await;
+    let (stderr, cut_err) = collect(err).await;
+    RunOutput {
+        exit_code: status.and_then(|s| s.code()),
+        stdout: clean_output(&stdout),
+        stderr: clean_output(&stderr),
+        truncated: cut_out || cut_err,
+        timed_out,
+    }
+}
+
+/// Text of a command's output: escape sequences and control characters
+/// removed, a line redrawn with carriage returns kept as last drawn.
+pub fn clean_output(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI (`ESC [ … final`), OSC (`ESC ] … BEL/ST`) or a two-character escape.
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' || (c == '\u{1b}' && chars.peek() == Some(&'\\')) {
+                            if c == '\u{1b}' {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                Some(_) => {
+                    chars.next();
+                }
+                None => {}
+            }
+            continue;
+        }
+        if c == '\n' || c == '\t' || c == '\r' || !c.is_control() {
+            plain.push(c);
+        }
+    }
+    plain
+        .split('\n')
+        .map(|line| {
+            line.trim_end_matches('\r')
+                .rsplit('\r')
+                .next()
+                .unwrap_or("")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How many shells a helper keeps open.
@@ -738,6 +899,39 @@ pub async fn serve_connection(helper: Arc<Helper>, stream: UnixStream) {
             let killed = helper.kill_user(user).await;
             let _ = respond(&mut writer, json!({"ok": true, "killed": killed})).await;
         }
+        Request::Run {
+            user,
+            user_name,
+            command,
+            timeout_secs,
+        } => {
+            if command.trim().is_empty()
+                || command.len() > MAX_RUN_COMMAND
+                || command.contains('\0')
+            {
+                refuse(
+                    &mut writer,
+                    Refusal::new("invalid", "no command, or too long"),
+                )
+                .await;
+                return;
+            }
+            let timeout = Duration::from_secs(u64::from(timeout_secs.clamp(1, MAX_RUN_SECS)));
+            let name = clean_name(&user_name);
+            match helper
+                .launcher
+                .run_command(user, &name, &command, timeout)
+                .await
+            {
+                Ok(launch) => {
+                    let output = run_once(launch, timeout).await;
+                    let mut answer = serde_json::to_value(&output).unwrap_or_else(|_| json!({}));
+                    merge(&mut answer, json!({"ok": true}));
+                    let _ = respond(&mut writer, answer).await;
+                }
+                Err(refusal) => refuse(&mut writer, refusal).await,
+            }
+        }
         Request::Open {
             user,
             user_name,
@@ -1070,6 +1264,80 @@ mod tests {
         shell.program = PathBuf::from("/bin/sh");
         shell.args = Vec::new();
         shell
+    }
+
+    #[test]
+    fn command_output_is_plain_text() {
+        let raw = b"\x1b[1;32mok\x1b[0m done\r\nprogress 10%\rprogress 100%\n\x1b]0;title\x07tab\there\x00";
+        assert_eq!(clean_output(raw), "ok done\nprogress 100%\ntab\there");
+    }
+
+    #[tokio::test]
+    async fn commands_run_once_with_their_output_and_time_limit() {
+        let dir = std::env::temp_dir().join(format!("rast-term-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("h.sock");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        // SAFETY: getuid never fails.
+        let uid = unsafe { libc::getuid() };
+        let (stop, stopped) = oneshot::channel::<()>();
+        let helper = Helper::new(
+            Arc::new(HostLauncher(test_shell())),
+            Limits {
+                total: 8,
+                per_owner: 3,
+            },
+        );
+        let server = tokio::spawn(serve(helper.clone(), listener, uid, async {
+            let _ = stopped.await;
+        }));
+        let client = TerminalClient::new(&socket);
+        let out = client
+            .run(
+                1,
+                "alice",
+                "echo hello; echo oops >&2; printf 'TERM=%s' \"$TERM\"; exit 3",
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out.exit_code, Some(3));
+        assert_eq!(out.stdout, "hello\nTERM=dumb");
+        assert_eq!(out.stderr, "oops\n");
+        assert!(!out.timed_out && !out.truncated);
+        // stdin is empty: `cat` ends at once.
+        assert_eq!(
+            client
+                .run(1, "alice", "cat; echo end", 10)
+                .await
+                .unwrap()
+                .stdout,
+            "end\n"
+        );
+        let started = Instant::now();
+        let out = client
+            .run(1, "alice", "echo before; sleep 30; echo after", 1)
+            .await
+            .unwrap();
+        assert!(out.timed_out);
+        assert_eq!(out.exit_code, None);
+        assert_eq!(out.stdout, "before\n");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let big = client
+            .run(1, "alice", "head -c 200000 /dev/zero | tr '\\0' a", 10)
+            .await
+            .unwrap();
+        assert!(big.truncated);
+        assert_eq!(big.stdout.len(), RUN_OUTPUT);
+        assert!(matches!(
+            client.run(1, "alice", "   ", 10).await,
+            Err(TerminalError::Refused { .. })
+        ));
+        assert!(helper.list(1).is_empty(), "no shell is left open");
+        let _ = stop.send(());
+        let _ = server.await;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     async fn read_until(session: &mut crate::terminal::HostSession, needle: &str) -> String {

@@ -1,10 +1,25 @@
 // AI Agent data shapes (`/api/ai/*`, see src/api/ai.rs) and the pure parts of
 // the chat: applying streamed deltas, the text of a message, allowance text.
 
-export interface ContentBlock {
+export interface WordsBlock {
   type: "text" | "reasoning";
   text: string;
 }
+
+export type ToolStatus = "pending" | "allowed" | "running" | "done" | "error" | "denied" | "skipped";
+
+/** A call the agent asked for (see src/ai/tools.rs). */
+export interface ToolBlock {
+  type: "tool";
+  id: string;
+  name: string;
+  input: Record<string, unknown> | string;
+  status: ToolStatus;
+  output?: string;
+  error?: string;
+}
+
+export type ContentBlock = WordsBlock | ToolBlock;
 
 export interface Message {
   id: number;
@@ -15,7 +30,7 @@ export interface Message {
   model: string;
   inputTokens: number;
   outputTokens: number;
-  status: "streaming" | "done" | "stopped" | "error";
+  status: "streaming" | "waiting" | "done" | "stopped" | "error";
   error: string;
   createdAt: number;
   finishedAt: number | null;
@@ -28,9 +43,13 @@ export interface Conversation {
   providerId: string | null;
   model: string;
   title: string;
+  /** Tools that run without asking in this chat. */
+  allowedTools: string[];
   createdAt: number;
   updatedAt: number;
   running: boolean;
+  /** Its last reply waits for the owner to answer a tool request. */
+  waiting: boolean;
   owner?: string;
   messageCount?: number;
 }
@@ -89,6 +108,8 @@ export interface MessageEvent {
   conversationId: string;
   message: Message;
   running: boolean;
+  /** Deltas of the running reply already in `message`. */
+  seq?: number;
 }
 
 export interface ConversationEvent {
@@ -123,6 +144,8 @@ export interface AdminAgent {
   providerId: string | null;
   model: string;
   skills: string[];
+  /** Tools it may use (null: all). */
+  tools: string[] | null;
   temperature: number | null;
   maxOutputTokens: number | null;
   enabled: boolean;
@@ -155,23 +178,63 @@ export interface Overview {
   users: Array<{ id: number; username: string; displayName: string; isAdmin: boolean; active: boolean }>;
   groups: Array<{ id: number; name: string }>;
   usage: Array<{ userId: number; today: number; month: number }>;
+  tools: Array<{ name: string; label: string }>;
+  search: SearchSettings;
+}
+
+export interface SearchSettings {
+  kind: "" | "brave" | "tavily" | "searxng";
+  url: string;
+  hasKey: boolean;
+  keyHint: string;
+  configured: boolean;
 }
 
 // ------------------------------------------------------------- pure logic
 
-/** The visible text of a message (reasoning left out). */
+/** The visible text of a message (reasoning and tools left out). */
 export function messageText(message: Pick<Message, "content">): string {
   return message.content
-    .filter((block) => block.type === "text")
+    .filter((block): block is WordsBlock => block.type === "text")
     .map((block) => block.text)
     .join("");
 }
 
 export function messageReasoning(message: Pick<Message, "content">): string {
   return message.content
-    .filter((block) => block.type === "reasoning")
+    .filter((block): block is WordsBlock => block.type === "reasoning")
     .map((block) => block.text)
     .join("");
+}
+
+export function toolBlocks(message: Pick<Message, "content">): ToolBlock[] {
+  return message.content.filter((block): block is ToolBlock => block.type === "tool");
+}
+
+/**
+ * Add streamed text to a reply's current step (after its last tool block),
+ * exactly as the server does (src/ai/mod.rs `apply_delta`): reasoning into
+ * the step's reasoning block (made at the step's start), text into the
+ * text block that ends it (or a new one).
+ */
+export function addToStep(blocks: ContentBlock[], text: string, reasoning: string): void {
+  let start = 0;
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i]?.type === "tool") {
+      start = i + 1;
+      break;
+    }
+  }
+  if (reasoning) {
+    const at = blocks.slice(start).findIndex((b) => b.type === "reasoning");
+    if (at >= 0) (blocks[start + at] as WordsBlock).text += reasoning;
+    else blocks.splice(start, 0, { type: "reasoning", text: reasoning });
+  }
+  if (text) {
+    const last = blocks[blocks.length - 1];
+    if (blocks.length > start && last?.type === "text") last.text += text;
+    else blocks.push({ type: "text", text });
+  }
 }
 
 /**
@@ -187,14 +250,34 @@ export function applyDelta(
   if (!message || message.status !== "streaming") return message ? "ignored" : "stale";
   if (delta.seq <= detail.seq) return "ignored";
   if (delta.seq !== detail.seq + 1) return "stale";
-  const reasoning = messageReasoning(message) + delta.reasoning;
-  const text = messageText(message) + delta.text;
-  message.content = [
-    ...(reasoning ? [{ type: "reasoning" as const, text: reasoning }] : []),
-    { type: "text" as const, text },
-  ];
+  addToStep(message.content, delta.text, delta.reasoning);
   detail.seq = delta.seq;
   return "applied";
+}
+
+/** Tools by name: label and the argument a card shows. */
+export const TOOL_INFO: Record<string, { label: string; doing: string; arg: string; icon: string }> = {
+  list_files: { label: "List a folder", doing: "Listing", arg: "path", icon: "folder" },
+  read_file: { label: "Read a file", doing: "Reading", arg: "path", icon: "file" },
+  search_files: { label: "Find files", doing: "Finding", arg: "query", icon: "search" },
+  write_file: { label: "Write a file", doing: "Writing", arg: "path", icon: "edit" },
+  create_folder: { label: "Create a folder", doing: "Creating", arg: "path", icon: "folder" },
+  run_command: { label: "Run a command", doing: "Running", arg: "command", icon: "terminal" },
+  web_search: { label: "Search the web", doing: "Searching", arg: "query", icon: "network" },
+  fetch_url: { label: "Open a web page", doing: "Opening", arg: "url", icon: "external" },
+};
+
+/** The argument a tool card shows (its path, command, query or address). */
+export function toolArgument(block: Pick<ToolBlock, "name" | "input">): string {
+  const key = TOOL_INFO[block.name]?.arg ?? "path";
+  if (typeof block.input === "string") return block.input;
+  const value = block.input?.[key];
+  return typeof value === "string" ? value : JSON.stringify(block.input ?? {});
+}
+
+/** Whether "Allow for this chat" is offered (never for the shell). */
+export function maySkipAsking(name: string): boolean {
+  return name in TOOL_INFO && name !== "run_command";
 }
 
 /** Insert or replace a message, keeping id order. */

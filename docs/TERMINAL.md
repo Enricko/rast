@@ -73,6 +73,15 @@ with a clean environment (`HOME=/root`, a standard `PATH`, `TERM`,
 `RAST_USER=<who opened it>`), so `/etc/profile`, `/etc/profile.d` (including
 App Center's runtimes) and root's own profile apply.
 
+The AI Agent's `run_command` tool uses the same helper (and the same sandboxes
+for other accounts) through a one-off `run` request: one command in a fresh
+login shell without a terminal (`TERM=dumb`, no pager, empty input), stopped
+after its time limit with everything it started, answered with the exit code
+and up to 64 KB of each output stream. Each call is allowed by the chat's
+owner first. A helper started before this existed refuses `run`; restart it
+once (`sudo systemctl restart rast-terminal.service`, which ends open
+shells).
+
 For development, `RAST_TERMINAL_SOCKET` moves the socket and
 `RAST_TERMINAL_PEER_USER` names the account allowed to connect (the helper's
 shells then run as whoever starts it).

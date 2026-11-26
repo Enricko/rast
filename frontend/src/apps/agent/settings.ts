@@ -1,5 +1,6 @@
 // AI Agent settings, for administrators: tiles for providers, agents, skills,
-// limits, everyone's chats and usage; each opens its own page.
+// tools (web search), limits, everyone's chats and usage; each opens its own
+// page.
 
 import type { AppContext } from "../../core/app";
 import { h } from "../../core/dom";
@@ -14,6 +15,7 @@ import {
   type Conversation,
   type LimitRule,
   type Overview,
+  type SearchSettings,
   type Skill,
 } from "./model";
 
@@ -22,16 +24,24 @@ export interface SettingsView {
   destroy(): void;
 }
 
-type Page = "home" | "providers" | "agents" | "skills" | "limits" | "chats" | "usage";
+type Page = "home" | "providers" | "agents" | "skills" | "tools" | "limits" | "chats" | "usage";
 
 const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string }> = [
   { id: "providers", label: "Providers", icon: "database" },
   { id: "agents", label: "Agents", icon: "user" },
   { id: "skills", label: "Skills", icon: "layers" },
+  { id: "tools", label: "Tools", icon: "terminal" },
   { id: "limits", label: "Limits", icon: "shield" },
   { id: "chats", label: "Chats", icon: "list" },
   { id: "usage", label: "Usage", icon: "activity" },
 ];
+
+const SEARCH_LABELS: Record<SearchSettings["kind"], string> = {
+  "": "Off",
+  brave: "Brave Search",
+  tavily: "Tavily",
+  searxng: "SearXNG",
+};
 
 function numberOrNull(value: string): number | null {
   const trimmed = value.trim().replace(/[,_\s]/g, "");
@@ -104,6 +114,8 @@ export function mountSettings(options: {
         return renderAgents(overview);
       case "skills":
         return renderSkills(overview);
+      case "tools":
+        return renderTools(overview);
       case "limits":
         return renderLimits(overview);
       case "chats":
@@ -120,6 +132,7 @@ export function mountSettings(options: {
       providers: data.providers.length ? `${data.providers.length} connected` : "None yet",
       agents: `${data.agents.length}`,
       skills: `${data.skills.length}`,
+      tools: data.search.configured ? `Web search: ${SEARCH_LABELS[data.search.kind]}` : "Files, commands, web pages",
       limits: data.limits.length ? `${data.limits.length} rule${data.limits.length === 1 ? "" : "s"}` : "No limits",
       chats: "All accounts",
       usage: `${formatTokens(usedToday)} today`,
@@ -400,6 +413,10 @@ export function mountSettings(options: {
       const box = h("input", { type: "checkbox", checked: existing?.skills.includes(skill.id) ?? false });
       return { skill, box, el: h("label", { class: "ai-check" }, box, h("span", {}, skill.name)) };
     });
+    const toolBoxes = data.tools.map((tool) => {
+      const box = h("input", { type: "checkbox", checked: existing?.tools ? existing.tools.includes(tool.name) : true });
+      return { tool, box, el: h("label", { class: "ai-check" }, box, h("span", {}, tool.label)) };
+    });
     const temperature = h("input", { class: "input", inputMode: "decimal", value: existing?.temperature?.toString() ?? "", placeholder: "Default" });
     const maxTokens = h("input", { class: "input", inputMode: "numeric", value: existing?.maxOutputTokens?.toString() ?? "", placeholder: "Default" });
     const enabled = switchControl({ label: "On", checked: existing?.enabled ?? true });
@@ -419,6 +436,13 @@ export function mountSettings(options: {
       skillBoxes.length
         ? h("div", { class: "field" }, h("span", { class: "field-label" }, "Skills"), h("div", { class: "ai-checks" }, ...skillBoxes.map((s) => s.el)))
         : null,
+      h(
+        "div",
+        { class: "field" },
+        h("span", { class: "field-label" }, "Tools"),
+        h("div", { class: "ai-checks" }, ...toolBoxes.map((t) => t.el)),
+        h("span", { class: "field-hint" }, "Only those the person chatting may use; each call asks them first."),
+      ),
       h(
         "div",
         { class: "ai-form-row" },
@@ -450,6 +474,7 @@ export function mountSettings(options: {
               providerId: provider.value || null,
               model: model.value.trim(),
               skills: skillBoxes.filter((s) => s.box.checked).map((s) => s.skill.id),
+              tools: toolBoxes.every((t) => t.box.checked) ? null : toolBoxes.filter((t) => t.box.checked).map((t) => t.tool.name),
               temperature: temp,
               maxOutputTokens: max,
               enabled: enabled.isChecked(),
@@ -457,6 +482,99 @@ export function mountSettings(options: {
             try {
               if (existing) await ctx.api.put(`/api/ai/agents/${existing.id}`, payload);
               else await ctx.api.post("/api/ai/agents", payload);
+            } catch (error) {
+              formError(status, error);
+            }
+            close();
+            await load();
+          },
+        },
+      ],
+    });
+  }
+
+  // -------------------------------------------------------------- tools
+  function renderTools(data: Overview): void {
+    const search = data.search;
+    const items: Array<[string, string, string]> = [
+      ["folder", "Files", "List, read, find and write files in the person's home and the shared folders they can open (accounts that may use File Station)."],
+      ["terminal", "Commands", "Administrators: as root on this server, once Terminal is turned on. Others: in their own sandbox, when they may use Terminal."],
+      ["external", "Web pages", "Public pages only; addresses on this server or private networks are refused."],
+      ["network", "Web search", search.configured ? `Through ${SEARCH_LABELS[search.kind]}.` : "Needs a search service, below."],
+    ];
+    body.append(
+      h(
+        "div",
+        { class: "ai-tool-info" },
+        ...items.map(([icon, label, detail]) =>
+          h(
+            "div",
+            { class: "ai-tool-info-row" },
+            h("span", { class: "ai-tile-icon" }, iconSvg(icon, 18)),
+            h("span", {}, h("span", { class: "ai-row-title" }, label), h("span", { class: "ai-row-detail small muted" }, detail)),
+          ),
+        ),
+      ),
+      h("p", { class: "ai-set-note small muted" }, "Every tool call shows in the chat and runs only once its owner allows it. Turn tools off per agent in Agents."),
+    );
+    const detail = search.configured
+      ? search.kind === "searxng"
+        ? `${SEARCH_LABELS[search.kind]} · ${search.url}`
+        : `${SEARCH_LABELS[search.kind]} · key ${search.keyHint}`
+      : "Off. Connect Brave Search, Tavily or a SearXNG server.";
+    body.appendChild(h("h3", { class: "ai-set-subtitle" }, "Web search"));
+    rows([row({ title: search.configured ? SEARCH_LABELS[search.kind] : "Not connected", detail, onClick: () => editSearch(search) })], "");
+    if (search.configured) {
+      const test = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("search", 13), h("span", {}, "Try a search"));
+      test.addEventListener("click", async () => {
+        test.disabled = true;
+        try {
+          const result = await ctx.api.post<{ results: number; first: { title: string } | null }>("/api/ai/search/test");
+          ctx.toast.success(result.results ? `Web search works: ${result.results} results.` : "Web search answered, without results.");
+        } catch (error) {
+          ctx.toast.error(errorMessage(error));
+        } finally {
+          test.disabled = false;
+        }
+      });
+      body.appendChild(h("div", { class: "ai-set-row-actions" }, test));
+    }
+  }
+
+  function editSearch(existing: SearchSettings): void {
+    const kind = h("select", { class: "select" });
+    for (const [value, label] of Object.entries(SEARCH_LABELS)) kind.appendChild(h("option", { value }, value ? label : "None"));
+    kind.value = existing.kind;
+    const url = h("input", { class: "input", value: existing.url, autocomplete: "off", spellcheck: false, placeholder: "http://127.0.0.1:8888" });
+    const key = h("input", { class: "input", type: "password", autocomplete: "new-password", spellcheck: false });
+    const urlField = h("label", { class: "field" }, h("span", { class: "field-label" }, "Address"), url, h("span", { class: "field-hint" }, "Its JSON output must be turned on (search.formats: json)."));
+    const keyHint = h("span", { class: "field-hint" });
+    const keyField = h("label", { class: "field" }, h("span", { class: "field-label" }, "API key"), key, keyHint);
+    const status = h("div", { class: "field-error", hidden: true });
+    const sync = () => {
+      urlField.hidden = kind.value !== "searxng";
+      keyField.hidden = kind.value !== "brave" && kind.value !== "tavily";
+      keyHint.textContent = existing.hasKey && kind.value === existing.kind ? `Saved (${existing.keyHint}). Leave empty to keep it.` : "Required.";
+    };
+    kind.addEventListener("change", sync);
+    sync();
+    modal({
+      title: "Web search",
+      body: h("div", { class: "ai-form" }, h("label", { class: "field" }, h("span", { class: "field-label" }, "Service"), kind), urlField, keyField, status),
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Save",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            status.hidden = true;
+            try {
+              await ctx.api.put("/api/ai/search", {
+                kind: kind.value,
+                url: url.value.trim(),
+                ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
+              });
             } catch (error) {
               formError(status, error);
             }
