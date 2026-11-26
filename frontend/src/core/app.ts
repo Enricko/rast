@@ -42,6 +42,12 @@ export interface AppContext {
   onDispose(callback: () => void): () => void;
   /** A singleton window was opened again with new parameters (e.g. a page to show). */
   onReopen(callback: (params: unknown) => void): void;
+  /**
+   * Where the app is now (e.g. `{ path }` in File Station), in the shape its
+   * `params` accept: the desktop saves it with the window and passes it back
+   * as `params` when the window opens again (reload, another device).
+   */
+  saveState(state: unknown): void;
 }
 
 export interface AppInstance {

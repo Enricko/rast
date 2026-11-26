@@ -12,6 +12,7 @@ pub mod appearance;
 pub mod apps;
 pub mod auth;
 pub mod backup;
+pub mod desktop;
 pub mod docker;
 pub mod events;
 pub mod files;
@@ -38,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .merge(files::routes())
         .merge(groups::routes())
         .merge(appearance::routes())
+        .merge(desktop::routes())
         .merge(apps::routes())
         .merge(docker::routes())
         .merge(terminal::routes())

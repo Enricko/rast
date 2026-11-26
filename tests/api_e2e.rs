@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
-        "0004 to 0009 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        "0004 to 0010 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3140,4 +3140,124 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn desktop_sessions_follow_the_account_and_stay_private() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+
+    // Nothing saved yet.
+    let (status, _, body) = server
+        .request("GET", "/api/desktop/session", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["session"], Value::Null);
+
+    let session = json!({
+        "version": 1,
+        "windows": [
+            {"key": "w-a", "appId": "files", "params": {"path": "/Documents"},
+             "rect": {"x": 40, "y": 30, "w": 900, "h": 600}, "state": "normal", "minimized": false},
+            {"key": "w-b", "appId": "monitor", "rect": null, "state": "maximized", "minimized": true}
+        ],
+        "focused": "w-a",
+        "stage": {"w": 1920, "h": 1022}
+    });
+    // A write needs the CSRF token like every other change.
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(session.clone()),
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(session.clone()),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Another browser of the same account (a new sign-in) gets it back.
+    let alice_elsewhere = server.login("alice", USER_PASSWORD).await;
+    let (_, _, body) = server
+        .request(
+            "GET",
+            "/api/desktop/session",
+            None,
+            alice_elsewhere.headers(),
+        )
+        .await;
+    assert_eq!(
+        body["session"]["windows"][0]["params"]["path"],
+        "/Documents"
+    );
+    assert_eq!(body["session"]["windows"][1]["state"], "maximized");
+    assert_eq!(body["session"]["windows"][1]["minimized"], true);
+    assert_eq!(body["session"]["focused"], "w-a");
+
+    // Other accounts, administrators included, only ever see their own.
+    let (_, _, body) = server
+        .request("GET", "/api/desktop/session", None, admin.headers())
+        .await;
+    assert_eq!(body["session"], Value::Null);
+
+    // Invalid sessions are refused and leave the saved one alone.
+    for bad in [
+        json!({"version": 1, "windows": [], "focused": "w-x"}),
+        json!({"version": 1, "windows": [
+            {"key": "w-a", "appId": "files", "rect": {"x": 0, "y": 0, "w": 0, "h": 10}, "state": "normal"}
+        ]}),
+        json!({"version": 1, "windows": [
+            {"key": "w-a", "appId": "files", "state": "normal"},
+            {"key": "w-a", "appId": "logs", "state": "normal"}
+        ]}),
+    ] {
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                "/api/desktop/session",
+                Some(bad),
+                alice.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(json!({"version": 1, "windows": [], "secret": "x"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert!(status.is_client_error());
+    let (_, _, body) = server
+        .request("GET", "/api/desktop/session", None, alice.headers())
+        .await;
+    assert_eq!(body["session"]["windows"].as_array().map(Vec::len), Some(2));
+
+    // Deleting the account deletes its session.
+    let alice_id = server.user_id("alice").await;
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(alice_id)
+        .execute(&server.state.db)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM desktop_sessions")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
 }

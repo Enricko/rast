@@ -11,7 +11,25 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Windows stay open across reloads, tabs and devices.** The desktop keeps
+  each account's open windows on the server. Reloading the page, closing the
+  tab, opening a new one or signing in on another device brings back the
+  same windows: the same apps, where they were, their size, whether they were
+  minimized, maximized or snapped, which one was in front, and where each app
+  was. File Station reopens in its folder or the Recycle bin, Control Panel on
+  its tab, App Center on its list or package page, and Docker on its list or
+  container page. Terminal shells were already kept by the server and
+  reconnect. Phones show the windows full screen without changing their
+  places on the desktop. Signing out keeps the windows for the next sign-in.
+  This adds migration `0010` (schema v10), which an older binary cannot
+  reverse: going back to 0.9.10 or older needs the database backup that
+  `rast update` takes before migrating.
+
+### Fixed
+
+- **Phones show the window you switch to.** With two or more apps open on a
+  phone, switching to one of them could leave the screen empty: only the
+  first window in the page could be shown.
 
 ### Planned
 

@@ -493,10 +493,22 @@ class ApplicationsApp {
 
   async start(): Promise<void> {
     this.ctx.setTitle("Docker");
+    // A reopened window (reload, another device) shows the list or the
+    // container page it showed.
+    const saved = (this.ctx.params ?? {}) as { view?: unknown; container?: unknown };
+    if (saved.view === "images" || saved.view === "volumes") this.view = saved.view;
     await this.hydratePermissions();
     this.applyAccessPolicy();
     if (this.denied) return;
     await this.refreshAll();
+    if (typeof saved.container === "string" && saved.container && !this.page && this.engineAccess()) {
+      this.openPage(saved.container);
+    }
+  }
+
+  /** Where Docker is, saved with its window. */
+  private savePlace(container?: string): void {
+    this.ctx.saveState(container ? { view: this.view, container } : { view: this.view });
   }
 
   /** Older shells may not copy `permissions` into the store yet. */
@@ -786,6 +798,7 @@ class ApplicationsApp {
       return;
     }
     this.view = view;
+    this.savePlace();
     this.query = "";
     this.search.value = "";
     this.render();
@@ -1170,6 +1183,7 @@ class ApplicationsApp {
 
   private openPage(id: string): void {
     if (!this.engineAccess()) return;
+    this.savePlace(id);
     this.page?.dispose();
     clear(this.viewHost);
     this.page = mountContainerPage({
@@ -1191,6 +1205,7 @@ class ApplicationsApp {
     if (!this.page) return;
     this.page.dispose();
     this.page = null;
+    this.savePlace();
     if (rerender) {
       this.render();
       void this.loadStats();

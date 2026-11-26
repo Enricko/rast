@@ -399,6 +399,31 @@ the client keeps only a small per-user paint cache that is cleared on sign-out.
 Every successful change publishes an `appearance.changed` event to the owner's
 other sessions (`{reason, originSessionId, appearance}`).
 
+## Desktop session (per user)
+
+The windows an account has open. The desktop saves the session shortly after
+every change (opening, moving, resizing, minimizing, maximizing, snapping,
+focusing, closing, an app moving to another folder or page) and right away
+when the page is hidden or closed. It opens the same windows when it starts,
+so a reload, another tab or another device shows them again. Phones show every
+window full screen but keep the desktop places. Each account reads and writes
+only its own session; deleting the account deletes it.
+
+| Method | Path | Body / Response |
+| --- | --- | --- |
+| GET | `/api/desktop/session` | `{session, updatedAt}`; `session` is `null` until the desktop saved one (or when a saved one cannot be read) |
+| PUT | `/api/desktop/session` | `{version: 1, windows: [{key, appId, params?, rect: {x,y,w,h}\|null, state, minimized}], focused: key\|null, stage: {w,h}\|null}` -> `{updatedAt}`; replaces the session |
+
+`windows` are listed from the bottom of the stack to the top (at most 16).
+`key` is the window's id in the session and `appId` the application (both 1–64
+letters, digits, `-` or `_`, keys unique). `params` is where the app was, in the
+shape the app accepts when it opens: `{path}` or `{section: "trash"}` (File
+Station), `{tab}` (Control Panel), `{view?, package?}` or `{app}` (App Center),
+`{view, container?}` (Docker). At most 4 KiB per window. `rect` is the position
+and size when the window is neither maximized nor snapped, in desktop pixels
+(`null`: the default place). `state` is `normal|maximized|left|right`. Unknown
+fields, invalid values and a `focused` key that is not in `windows` are `400`.
+
 
 
 ## Users, groups and access policy (admin)

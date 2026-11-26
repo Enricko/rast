@@ -364,9 +364,23 @@ export class FileStation {
   }
 
   async start(): Promise<void> {
-    this.ctx.setTitle("File Station");
+    // A reopened window (reload, another device) shows the folder it showed.
+    const saved = (this.ctx.params ?? {}) as { path?: unknown; section?: unknown };
+    if (typeof saved.path === "string" && saved.path.startsWith("/") && saved.path.length <= 2048) {
+      this.path = saved.path;
+    }
+    this.ctx.setTitle(this.path === "/" ? "File Station" : `File Station — ${this.path}`);
     this.renderUsage();
+    if (saved.section === "trash") {
+      await Promise.all([this.loadRoots(), this.loadUsage(), this.showSection("trash")]);
+      return;
+    }
     await Promise.all([this.loadRoots(), this.loadListing(), this.loadUsage()]);
+  }
+
+  /** Where File Station is, saved with its window. */
+  private savePlace(): void {
+    this.ctx.saveState(this.section === "trash" ? { section: "trash" } : { path: this.path });
   }
 
   // ------------------------------------------------------------- lifecycle
@@ -1496,6 +1510,7 @@ export class FileStation {
     this.section = "files";
     this.accessBlocked = false;
     this.path = path || "/";
+    this.savePlace();
     this.page = 1;
     this.query = "";
     this.searchInput.value = "";
@@ -1513,6 +1528,7 @@ export class FileStation {
   private async showSection(section: Section): Promise<void> {
     if (section === this.section) return;
     this.section = section;
+    this.savePlace();
     this.selection.clear();
     this.anchorPath = null;
     this.trashSelection.clear();

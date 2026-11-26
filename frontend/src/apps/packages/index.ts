@@ -189,9 +189,12 @@ class PackageCenterApp {
     await this.reload();
   }
 
-  /** `{ view }` opens a list, `{ app }` an app's page (Applications, the launcher). */
+  /**
+   * `{ view }` opens a list, `{ app }` an app's page (Applications, the
+   * launcher), `{ package }` a package's page (a reopened window).
+   */
   private applyParams(params: unknown): void {
-    const wanted = (params ?? {}) as { view?: unknown; app?: unknown };
+    const wanted = (params ?? {}) as { view?: unknown; app?: unknown; package?: unknown };
     if (wanted.view === "installed" || wanted.view === "all" || wanted.view === "updates") {
       this.view = wanted.view;
       this.selectedId = null;
@@ -201,6 +204,10 @@ class PackageCenterApp {
     if (typeof wanted.app === "string" && wanted.app) {
       this.selectedApp = wanted.app;
       this.selectedId = null;
+      this.detail = null;
+    } else if (typeof wanted.package === "string" && wanted.package) {
+      this.selectedId = wanted.package;
+      this.selectedApp = null;
       this.detail = null;
     }
   }
@@ -414,6 +421,11 @@ class PackageCenterApp {
 
   private render(): void {
     if (this.disposed || this.denied) return;
+    // Reopened windows (reload, another device) come back to this page.
+    this.ctx.saveState({
+      ...(this.view ? { view: this.view } : {}),
+      ...(this.selectedApp ? { app: this.selectedApp } : this.selectedId ? { package: this.selectedId } : {}),
+    });
     this.renderChrome();
     this.renderSidebar();
     if (this.selectedApp) this.renderAppDetail();

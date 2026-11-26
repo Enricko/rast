@@ -23,7 +23,7 @@ import {
 import { ToastCenter } from "../core/toast";
 import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from "../core/ui";
 import { getRealtime } from "../core/realtime";
-import { WindowManager, type WindowInfo } from "../core/wm";
+import { WindowManager, type WindowInfo, type WindowPlacement } from "../core/wm";
 import { setFavicon } from "./brand";
 import { forcePasswordChange, showAboutDialog, showShortcutsDialog } from "./dialogs";
 import {
@@ -40,9 +40,18 @@ import { openPersonalizeDialog } from "./personalize";
 import { taskbarSlots } from "./taskbar-order";
 import { createDesktopIcons } from "./desktop-icons";
 import { createWidgetLayer, type WidgetLayer } from "./widgets";
+import {
+  MAX_SESSION_WINDOWS,
+  createSessionSaver,
+  loadSession,
+  newWindowKey,
+  placementOf,
+  storableParams,
+  type SavedSession,
+  type SavedWindow,
+} from "./window-session";
 
 const MAX_PINNED = 8;
-const MAX_WINDOWS = 8;
 const MAX_TASKBAR_WINDOWS = 10;
 const SESSION_WARNING_MS = 10 * 60_000;
 
@@ -84,16 +93,27 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   let panel: HTMLElement | null = null;
   let panelKind: string | null = null;
   let disposed = false;
+  /** Where each window's app is (launch parameters, then `ctx.saveState`). */
   const windowParams = new Map<string, unknown>();
+  /** Stable key of each window in the saved desktop session. */
+  const windowKeys = new Map<string, string>();
+  /** Saving starts once the saved session was opened (or there was none). */
+  let sessionReady = false;
   /** Singleton windows that show new parameters when opened again. */
   const reopenListeners = new Map<string, (params: unknown) => void>();
   const disposers: Array<() => void> = [];
 
   const wm = new WindowManager(windowsLayer, {
     taskbarHeight: 58,
-    onChange: () => renderTaskbar(),
+    onChange: () => {
+      renderTaskbar();
+      if (sessionReady) sessionSaver.schedule();
+    },
   });
   disposers.push(() => wm.destroy());
+  // Open windows follow the account: a reload, another tab or another device
+  // shows the same windows (see window-session.ts).
+  const sessionSaver = createSessionSaver(deps.api, captureSession);
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
@@ -194,7 +214,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   // ------------------------------------------------------------ app launch
-  function openApp(appId: string, params?: unknown): void {
+  function openApp(
+    appId: string,
+    params?: unknown,
+    restore?: { key: string; placement: WindowPlacement },
+  ): void {
     const app: AppDefinition | undefined = findApp(appId);
     if (!app) {
       toast.error(`Unknown application: ${appId}`);
@@ -204,13 +228,20 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toast.warning(`${app.name} is not available for your account`);
       return;
     }
-    closePanel();
-    pushRecentApp(app.id);
+    if (!restore) {
+      closePanel();
+      pushRecentApp(app.id);
+    }
     const openBefore = new Set(wm.list().map((win) => win.id));
     const handle = wm.open(
       app,
       params,
       async (mount) => {
+        const windowId = mount.window.id;
+        mount.onDispose(() => {
+          windowParams.delete(windowId);
+          windowKeys.delete(windowId);
+        });
         mount.contentEl.replaceChildren();
         const appHost = h("div", { class: "app" });
         mount.contentEl.appendChild(appHost);
@@ -259,17 +290,100 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           onResize: (callback: () => void) => mount.onResize(callback),
           onDispose: (callback: () => void) => mount.onDispose(callback),
           onReopen: (callback: (next: unknown) => void) => {
-            const windowId = mount.window.id;
             reopenListeners.set(windowId, callback);
             mount.onDispose(() => reopenListeners.delete(windowId));
+          },
+          saveState: (state: unknown) => {
+            if (mount.window.isClosed()) return;
+            windowParams.set(windowId, storableParams(state));
+            if (sessionReady) sessionSaver.schedule();
           },
         };
         await app.mount(ctx);
       },
-      { singleton: app.singleton },
+      { singleton: app.singleton, ...(restore ? { placement: restore.placement } : {}) },
     );
-    if (openBefore.has(handle.id) && params !== undefined) reopenListeners.get(handle.id)?.(params);
-    windowParams.set(handle.id, params);
+    if (!openBefore.has(handle.id)) {
+      windowKeys.set(handle.id, restore?.key ?? newWindowKey());
+      windowParams.set(handle.id, storableParams(params));
+    } else if (params !== undefined) {
+      // A singleton shown again with a new place to show.
+      windowParams.set(handle.id, storableParams(params));
+      reopenListeners.get(handle.id)?.(params);
+    }
+    if (sessionReady) sessionSaver.schedule();
+  }
+
+  // ------------------------------------------------------- desktop session
+  function captureSession(): SavedSession {
+    const infos = new Map(wm.list().map((win) => [win.id, win]));
+    const windows: SavedWindow[] = [];
+    let focused: string | null = null;
+    for (const id of wm.stackOrder().slice(-MAX_SESSION_WINDOWS)) {
+      const info = infos.get(id);
+      const placement = wm.placement(id);
+      const key = windowKeys.get(id);
+      if (!info || !placement || !key) continue;
+      const rect = placement.rect;
+      const entry: SavedWindow = {
+        key,
+        appId: info.appId,
+        rect:
+          rect && rect.w > 0 && rect.h > 0
+            ? { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.w), h: Math.round(rect.h) }
+            : null,
+        state: placement.state,
+        minimized: placement.minimized,
+      };
+      const params = windowParams.get(id);
+      if (params !== undefined) entry.params = params;
+      windows.push(entry);
+      if (info.focused && !placement.minimized) focused = key;
+    }
+    const stage = stageSize();
+    return {
+      version: 1,
+      windows,
+      focused,
+      stage: { w: Math.max(1, Math.round(stage.width)), h: Math.max(1, Math.round(stage.height)) },
+    };
+  }
+
+  function restoreSession(session: SavedSession): void {
+    for (const entry of session.windows.slice(-MAX_SESSION_WINDOWS)) {
+      if (!entry || typeof entry.appId !== "string" || typeof entry.key !== "string") continue;
+      if (!isAppAllowed(entry.appId, store.get().permissions, store.isAdmin())) continue;
+      openApp(entry.appId, entry.params, { key: entry.key, placement: placementOf(entry) });
+    }
+    if (session.focused) {
+      for (const [id, key] of windowKeys) {
+        if (key !== session.focused) continue;
+        const win = wm.list().find((candidate) => candidate.id === id);
+        if (win && !win.minimized) wm.focus(id);
+      }
+    }
+  }
+
+  async function startSession(fromMemory: SavedSession | null): Promise<void> {
+    let session = fromMemory;
+    if (!session) {
+      // A failed load must not let the next change replace the saved
+      // windows with whatever this page has open: try a few times first.
+      for (const wait of [0, 2_000, 5_000]) {
+        if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
+        if (disposed) return;
+        try {
+          session = await loadSession(deps.api);
+          break;
+        } catch {
+          session = null;
+        }
+      }
+    }
+    if (disposed) return;
+    if (session) restoreSession(session);
+    sessionReady = true;
+    sessionSaver.schedule();
   }
 
   function openAccount(tab: string, section?: string): void {
@@ -443,11 +557,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     closePanel();
     const ok = await confirmDialog({
       title: "Sign out",
-      message: "Sign out of RAST? Open applications will close and any unsaved form state will be lost.",
+      message: "Sign out of RAST? Your windows open again the next time you sign in; anything typed but not saved is lost.",
       confirmLabel: "Sign out",
       danger: true,
     });
     if (!ok) return;
+    if (sessionReady) await sessionSaver.flush();
     try {
       await deps.api.post("/api/auth/logout");
     } catch {
@@ -1145,20 +1260,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       .catch(() => undefined);
   }
 
-  // --------------------------------------------------- restore after login
-  if (options.restore) {
-    const toRestore = options.restore.apps.slice(0, MAX_WINDOWS);
-    for (const entry of toRestore) {
-      const app = findApp(entry.appId);
-      if (!app || !isAppAllowed(app.id, store.get().permissions, store.isAdmin())) continue;
-      openApp(entry.appId, entry.params);
-    }
-    const focusedAppId = options.restore.focusedAppId;
-    if (focusedAppId) {
-      const focused = wm.list().find((win) => win.appId === focusedAppId);
-      if (focused) wm.focus(focused.id);
-    }
-  }
+  // ------------------------------------------- reopen the account's windows
+  // After an expired session, the windows of this page (newer than the last
+  // save); otherwise the session saved on the server.
+  const inMemory = options.restore && options.restore.userId === me.user.id ? options.restore.session : null;
+  void startSession(inMemory);
 
   renderTaskbar();
   updateTray();
@@ -1167,19 +1273,14 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   (window as unknown as { rast?: unknown }).rast = { store, wm, api: deps.api, openApp, toast };
 
   function snapshot(): SessionSnapshot {
-    const snapshotApps: SessionSnapshot["apps"] = [];
-    for (const win of wm.list().slice(0, MAX_WINDOWS)) {
-      const entry: { appId: string; params?: unknown } = { appId: win.appId };
-      const params = windowParams.get(win.id);
-      if (params !== undefined) entry.params = params;
-      snapshotApps.push(entry);
-    }
-    return { apps: snapshotApps, focusedAppId: wm.focusedAppId() };
+    return { userId: me.user.id, session: captureSession() };
   }
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
+    // Closing the desktop closes its windows; the saved session keeps them.
+    sessionSaver.stop();
     closePanel();
     for (const disposer of disposers.splice(0)) {
       try {

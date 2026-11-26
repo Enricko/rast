@@ -16,6 +16,20 @@ export interface WindowRect {
   h: number;
 }
 
+/** How a window is shown when it is not minimized. */
+export type WindowState = "normal" | "maximized" | "left" | "right";
+
+/**
+ * Where a window is, independent of the screen it is shown on: its position
+ * and size when neither maximized nor snapped (`null`: the default place),
+ * its state and whether it is minimized. Saved with the desktop session.
+ */
+export interface WindowPlacement {
+  rect: WindowRect | null;
+  state: WindowState;
+  minimized: boolean;
+}
+
 export interface WindowInfo {
   id: string;
   appId: string;
@@ -56,6 +70,13 @@ interface WindowRecord {
   maximized: boolean;
   tiled: "left" | "right" | null;
   prevRect: WindowRect | null;
+  /**
+   * The placement on a desktop-sized screen while the window is shown full
+   * screen on a phone (restored when the screen is large again, and saved
+   * instead of the phone's full-screen layout).
+   */
+  desktopPlacement: Omit<WindowPlacement, "minimized"> | null;
+  defaultSize: { w: number; h: number };
   resizeCallbacks: Set<() => void>;
   closeCallbacks: Set<() => void>;
   cleanup: Array<() => void>;
@@ -122,7 +143,7 @@ export class WindowManager {
       onResize: (cb: () => void) => () => void;
       onDispose: (cb: () => void) => () => void;
     }) => void | Promise<void>,
-    options: { singleton?: boolean } = {},
+    options: { singleton?: boolean; placement?: WindowPlacement } = {},
   ): WindowHandle {
     if (options.singleton) {
       const existing = this.findByApp(app.id);
@@ -177,13 +198,30 @@ export class WindowManager {
       maximized: false,
       tiled: null,
       prevRect: null,
+      desktopPlacement: null,
+      defaultSize: app.defaultSize ?? DEFAULT_SIZE,
       resizeCallbacks: new Set(),
       closeCallbacks: new Set(),
       cleanup: [],
     };
     this.records.set(id, record);
     this.host.appendChild(el);
-    this.applyDefaultRect(record, app.defaultSize ?? DEFAULT_SIZE);
+    const size = app.defaultSize ?? DEFAULT_SIZE;
+    const placement = options.placement;
+    if (this.isMobile) {
+      // Full screen here; a desktop-sized screen shows it as it was saved
+      // (or in the default place, not at a phone's size).
+      this.applyDefaultRect(record, size);
+      record.desktopPlacement = { rect: placement?.rect ?? null, state: placement?.state ?? "normal" };
+    } else if (placement) {
+      this.applyPlacement(record, placement, size);
+    } else {
+      this.applyDefaultRect(record, size);
+    }
+    if (placement?.minimized) {
+      record.minimized = true;
+      el.classList.add("is-minimized");
+    }
 
     // Drag and resize.
     record.cleanup.push(this.attachDrag(record));
@@ -217,7 +255,12 @@ export class WindowManager {
       return () => record.closeCallbacks.delete(cb);
     };
 
-    this.focus(id);
+    if (record.minimized) {
+      this.zCounter += 1;
+      el.style.zIndex = String(this.zCounter);
+    } else {
+      this.focus(id);
+    }
     this.emitChange();
     requestAnimationFrame(() => el.classList.remove("entering"));
 
@@ -478,6 +521,64 @@ export class WindowManager {
     }));
   }
 
+  /** Window ids from the bottom of the stack to the top. */
+  stackOrder(): string[] {
+    return Array.from(this.records.values())
+      .sort((a, b) => Number(a.el.style.zIndex || 0) - Number(b.el.style.zIndex || 0))
+      .map((record) => record.id);
+  }
+
+  /** Where a window is, as it would be shown on a desktop-sized screen. */
+  placement(id: string): WindowPlacement | null {
+    const record = this.records.get(id);
+    if (!record) return null;
+    const base = record.el.classList.contains("is-mobile")
+      ? (record.desktopPlacement ?? { rect: null, state: "normal" as WindowState })
+      : this.desktopPlacementOf(record);
+    return { rect: base.rect ? { ...base.rect } : null, state: base.state, minimized: record.minimized };
+  }
+
+  private desktopPlacementOf(record: WindowRecord): Omit<WindowPlacement, "minimized"> {
+    if (record.maximized) return { rect: record.prevRect ? { ...record.prevRect } : null, state: "maximized" };
+    if (record.tiled) return { rect: this.rectOf(record), state: record.tiled };
+    return { rect: this.rectOf(record), state: "normal" };
+  }
+
+  /** Show a window at a saved placement (desktop-sized screens). */
+  private applyPlacement(
+    record: WindowRecord,
+    placement: Omit<WindowPlacement, "minimized">,
+    size: { w: number; h: number },
+  ): void {
+    record.maximized = false;
+    record.tiled = null;
+    record.prevRect = null;
+    record.el.classList.remove("is-maximized", "is-tiled");
+    if (placement.rect) this.setRect(record, placement.rect);
+    else this.applyDefaultRect(record, size);
+    if (placement.state === "maximized") {
+      record.prevRect = this.rectOf(record);
+      record.maximized = true;
+      record.el.classList.add("is-maximized");
+      const bounds = this.bounds();
+      this.setRect(record, { x: 0, y: 0, w: bounds.w, h: bounds.h });
+    } else if (placement.state === "left" || placement.state === "right") {
+      record.tiled = placement.state;
+      record.el.classList.add("is-tiled");
+      this.setRect(record, this.tileRect(placement.state));
+    }
+  }
+
+  private tileRect(side: "left" | "right"): WindowRect {
+    const bounds = this.bounds();
+    return {
+      x: side === "left" ? 0 : Math.round(bounds.w / 2),
+      y: 0,
+      w: Math.round(bounds.w / 2),
+      h: bounds.h,
+    };
+  }
+
   /** Bring all windows back into the viewport after a viewport change. */
   layoutAll(): void {
     for (const record of this.records.values()) this.layout(record);
@@ -485,8 +586,9 @@ export class WindowManager {
 
   private layout(record: WindowRecord): void {
     if (this.isMobile) {
-      if (!record.maximized) {
-        record.prevRect = this.rectOf(record);
+      if (!record.el.classList.contains("is-mobile")) {
+        // Remember how it is shown on the desktop, then go full screen.
+        record.desktopPlacement ??= this.desktopPlacementOf(record);
         record.maximized = true;
         record.tiled = null;
         record.el.classList.remove("is-tiled");
@@ -498,12 +600,14 @@ export class WindowManager {
     }
     if (record.el.classList.contains("is-mobile")) {
       record.el.classList.remove("is-mobile");
-      if (record.maximized) {
-        record.maximized = false;
-        record.el.classList.remove("is-maximized");
-        if (record.prevRect) this.setRect(record, record.prevRect);
-        record.prevRect = null;
-      }
+      const placement = record.desktopPlacement ?? { rect: null, state: "normal" as WindowState };
+      record.desktopPlacement = null;
+      this.applyPlacement(record, placement, record.defaultSize);
+      record.resizeCallbacks.forEach((cb) => cb());
+    }
+    if (record.tiled) {
+      this.setRect(record, this.tileRect(record.tiled));
+      return;
     }
     if (record.maximized) {
       const bounds = this.bounds();
@@ -691,7 +795,10 @@ export class WindowManager {
       if (record.titlebar.hasPointerCapture(event.pointerId)) {
         record.titlebar.releasePointerCapture(event.pointerId);
       }
-      if (moved) this.applySnap(record);
+      if (moved) {
+        this.applySnap(record);
+        this.emitChange();
+      }
       this.hideSnapPreview();
     };
 
@@ -769,6 +876,7 @@ export class WindowManager {
       origin = null;
       record.el.classList.remove("is-resizing");
       record.resizeCallbacks.forEach((cb) => cb());
+      this.emitChange();
     };
 
     record.el.addEventListener("pointerdown", onPointerDown);

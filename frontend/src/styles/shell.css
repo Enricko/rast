@@ -1743,10 +1743,7 @@ body.app-ready #boot-splash {
     -webkit-line-clamp: 2;
   }
 
-  .window.is-mobile + .window.is-mobile {
-    display: none;
-  }
-
+  /* One window at a time: the focused one (whatever its place in the page). */
   .window.is-mobile:not(.is-focused) {
     display: none;
   }

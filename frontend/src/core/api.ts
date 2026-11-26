@@ -62,6 +62,8 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** Do not throw on 401 (useful for probing). */
   allowUnauthorized?: boolean;
+  /** Let the request finish after the page is closed (small bodies only). */
+  keepalive?: boolean;
 }
 
 /** Human message for API errors, with optional retry countdown for 429. */
@@ -153,6 +155,7 @@ export class ApiClient {
         credentials: "same-origin",
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: options.signal,
+        keepalive: options.keepalive,
       });
     } catch (error) {
       if ((error as Error).name === "AbortError") throw error;

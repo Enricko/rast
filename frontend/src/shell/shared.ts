@@ -4,6 +4,7 @@ import type { ApiClient } from "../core/api";
 import type { MeResponse } from "../core/types";
 import type { EventStream } from "../core/sse";
 import type { Store } from "../core/store";
+import type { SavedSession } from "./window-session";
 
 export interface ShellDeps {
   api: ApiClient;
@@ -12,10 +13,10 @@ export interface ShellDeps {
   root: HTMLElement;
 }
 
-/** Enough state to reopen the same applications after a session expires. */
+/** The windows of a desktop whose session expired, to reopen after sign-in. */
 export interface SessionSnapshot {
-  apps: Array<{ appId: string; params?: unknown }>;
-  focusedAppId: string | null;
+  userId: number;
+  session: SavedSession;
 }
 
 export interface DesktopController {

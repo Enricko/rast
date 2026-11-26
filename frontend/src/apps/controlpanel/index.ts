@@ -121,6 +121,7 @@ async function mountControlPanel(ctx: AppContext): Promise<void> {
     const tab = tabs.find((candidate) => candidate.id === tabId);
     if (!tab) return;
     active = tab.id;
+    ctx.saveState({ tab: tab.id });
     renderNav();
     setHeader(tab.label, tabDescription(tab.id));
     headerActions.replaceChildren();
