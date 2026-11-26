@@ -8,6 +8,7 @@ use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, R
 
 use crate::{auth::middleware::require_auth, error::AppError, server, state::AppState};
 
+pub mod ai;
 pub mod appearance;
 pub mod apps;
 pub mod auth;
@@ -47,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
+        .merge(ai::routes())
         .route("/api/events", get(events::stream))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

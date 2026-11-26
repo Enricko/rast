@@ -43,6 +43,8 @@ pub fn app_for_path(path: &str) -> Option<&'static str> {
         Some("backup")
     } else if path == "/api/terminal" || path.starts_with("/api/terminal/") {
         Some("terminal")
+    } else if path == "/api/ai" || path.starts_with("/api/ai/") {
+        Some("agent")
     } else {
         None
     }
@@ -103,6 +105,11 @@ mod tests {
             Some("controlpanel")
         );
         assert_eq!(app_for_path("/api/groups"), Some("controlpanel"));
+        assert_eq!(
+            app_for_path("/api/ai/conversations/x/messages"),
+            Some("agent")
+        );
+        assert_eq!(app_for_path("/api/aix"), None);
         assert_eq!(app_for_path("/api/shares/team"), Some("controlpanel"));
         assert_eq!(
             app_for_path("/api/apps/123/logs/stream"),

@@ -31,6 +31,8 @@ pub struct AppState {
     pub storage: Arc<crate::storage::Storage>,
     pub docker: Arc<crate::docker::DockerManager>,
     pub packages: Arc<crate::packages::PackageManager>,
+    /// AI Agent replies being written.
+    pub ai: Arc<crate::ai::Runs>,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -84,6 +86,8 @@ impl AppState {
         crate::docker::reconcile::spawn(&config, db.clone(), docker.clone(), events.clone());
         // Terminal: end shells of accounts that lost access to them.
         crate::sandbox::spawn_access_sweeper(db.clone(), config.clone());
+        // AI Agent: replies cut off by a restart are marked interrupted.
+        crate::ai::run::recover(&db).await;
 
         Ok(Self {
             config,
@@ -95,6 +99,7 @@ impl AppState {
             storage,
             docker,
             packages,
+            ai: crate::ai::Runs::new(),
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

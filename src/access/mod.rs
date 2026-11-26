@@ -41,6 +41,7 @@ pub const APP_IDS: &[&str] = &[
     "logs",
     "controlpanel",
     "terminal",
+    "agent",
 ];
 
 /// The "Applications" folder on the desktop: lists every installed app the
@@ -52,9 +53,21 @@ pub const LAUNCHER_APP: &str = "launcher";
 /// Apps App Center can uninstall and install again. Uninstalling hides
 /// the app and closes its API for everyone (administrators included); its
 /// data, schedules and running containers stay. Every other app is built in.
-pub const REMOVABLE_APPS: &[&str] = &["applications", "backup"];
+pub const REMOVABLE_APPS: &[&str] = &["applications", "backup", "agent"];
+
+/// Removable apps that start uninstalled: App Center installs them when an
+/// administrator asks (they are listed in [`ADDED_APPS_SETTING`] then).
+pub const OPTIONAL_APPS: &[&str] = &["agent"];
 
 const REMOVED_APPS_SETTING: &str = "apps.removed";
+const ADDED_APPS_SETTING: &str = "apps.added";
+
+async fn app_list_setting(pool: &SqlitePool, key: &str) -> Vec<String> {
+    crate::db::get_setting(pool, key)
+        .await
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .unwrap_or_default()
+}
 
 /// Ids that may be pinned to the taskbar or placed on the desktop.
 pub fn is_desktop_app(app_id: &str) -> bool {
@@ -62,14 +75,21 @@ pub fn is_desktop_app(app_id: &str) -> bool {
 }
 
 /// Removable apps that were uninstalled in App Center.
+/// Removable apps that are not installed: uninstalled ones, and optional
+/// ones nobody installed yet.
 pub async fn removed_apps(pool: &SqlitePool) -> Vec<String> {
-    crate::db::get_setting(pool, REMOVED_APPS_SETTING)
+    let added = app_list_setting(pool, ADDED_APPS_SETTING).await;
+    let mut removed: Vec<String> = app_list_setting(pool, REMOVED_APPS_SETTING)
         .await
-        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
-        .unwrap_or_default()
         .into_iter()
-        .filter(|id| REMOVABLE_APPS.contains(&id.as_str()))
-        .collect()
+        .filter(|id| REMOVABLE_APPS.contains(&id.as_str()) && !OPTIONAL_APPS.contains(&id.as_str()))
+        .collect();
+    for id in OPTIONAL_APPS {
+        if !added.iter().any(|a| a == id) {
+            removed.push((*id).to_string());
+        }
+    }
+    removed
 }
 
 /// Whether an app is installed (built-in apps always are).
@@ -89,21 +109,26 @@ pub async fn set_app_installed(
             app_label(app_id)
         )));
     }
-    let mut removed = removed_apps(pool).await;
-    let was_installed = !removed.iter().any(|id| id == app_id);
+    let was_installed = !removed_apps(pool).await.iter().any(|id| id == app_id);
     if was_installed == installed {
         return Ok(false);
     }
-    if installed {
-        removed.retain(|id| id != app_id);
+    // Optional apps are recorded when installed; the others when removed.
+    let (key, listed) = if OPTIONAL_APPS.contains(&app_id) {
+        (ADDED_APPS_SETTING, installed)
     } else {
-        removed.push(app_id.to_string());
+        (REMOVED_APPS_SETTING, !installed)
+    };
+    let mut list = app_list_setting(pool, key).await;
+    list.retain(|id| id != app_id);
+    if listed {
+        list.push(app_id.to_string());
     }
-    removed.sort();
+    list.sort();
     crate::db::set_setting(
         pool,
-        REMOVED_APPS_SETTING,
-        &serde_json::to_string(&removed).unwrap_or_else(|_| "[]".into()),
+        key,
+        &serde_json::to_string(&list).unwrap_or_else(|_| "[]".into()),
     )
     .await?;
     bump_generation();
@@ -121,6 +146,7 @@ pub fn app_label(app_id: &str) -> &'static str {
         "logs" => "Activity Logs",
         "controlpanel" => "Control Panel",
         "terminal" => "Terminal",
+        "agent" => "AI Agent",
         _ => "Unknown application",
     }
 }
@@ -138,6 +164,9 @@ pub fn app_description(app_id: &str) -> &'static str {
         "controlpanel" => "Profile, users, shared folders, storage and system settings.",
         "terminal" => {
             "Shells: root on this server for administrators, a private sandbox for others."
+        }
+        "agent" => {
+            "Chat with AI agents on the models your administrator sets up: Claude, GPT, DeepSeek, OpenRouter, local models and more."
         }
         _ => "",
     }
@@ -158,7 +187,7 @@ fn app_default_read_only(_app_id: &str) -> bool {
 /// administrator-only); members granted Terminal get shells in their own
 /// sandbox container (`crate::sandbox`), never on the server itself.
 fn app_grant_manages(app_id: &str) -> bool {
-    matches!(app_id, "packages" | "terminal")
+    matches!(app_id, "packages" | "terminal" | "agent")
 }
 
 /// Whether an explicit group allow is read-only for this application.
@@ -976,6 +1005,7 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
         "package.changed" | "package.catalog" => Some("packages"),
         "audit.created" => Some("logs"),
         "user.changed" | "settings.changed" | "group.changed" => Some("controlpanel"),
+        "ai.delta" | "ai.message" | "ai.conversation" | "ai.config" => Some("agent"),
         "job.queued" | "job.start" | "job.progress" | "job.done" | "job.failed"
         | "job.cancelled" => {
             let job_kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
