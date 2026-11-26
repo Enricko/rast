@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.5] - 2026-11-26
+
+### Added
+
 - **Tap ⌘ Cmd (Mac) or the Windows key (Windows) to open or close the start
   menu**, like on the computer's own desktop. It opens when the key is released
   without any other key, click or scroll in between, so shortcuts such as ⌘C,
@@ -29,17 +46,6 @@ this file by `scripts/changelog-section.sh`.
   out went back to the default wallpaper, and the sign-in screen always showed
   it. Anyone who uses that browser afterwards sees the wallpaper; the next
   account to sign in replaces it with its own.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.4] - 2026-11-25
 
