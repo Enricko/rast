@@ -171,6 +171,14 @@ export interface Publisher {
   url?: string | null;
 }
 
+/** Icon published with a package (signed catalog or manifest). */
+export interface PackageIcon {
+  mediaType: "image/svg+xml" | "image/png" | string;
+  /** Standard base64, no data: prefix. */
+  data: string;
+  attribution?: string | null;
+}
+
 export interface PackageView {
   id: string;
   packageType: string;
@@ -198,6 +206,8 @@ export interface PackageView {
   unavailableReason?: string | null;
   system?: SystemInstall | null;
   terminal?: TerminalView | null;
+  /** Package icon; absent for older catalogs/imports (the UI falls back to a monogram). */
+  icon?: PackageIcon | null;
 }
 
 export interface CatalogStatus {

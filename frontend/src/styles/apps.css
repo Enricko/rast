@@ -2669,6 +2669,24 @@ button.pkg-pill {
   --pkg-size: 92px;
 }
 
+/* Package-provided SVG/PNG icons sit on a plain tile and are never stretched. */
+/* The official runtime logos are full colour, but several are dark marks
+   (Rust, Deno, Gradle): a light plate in both themes keeps every icon
+   readable. */
+.pkg-icon.has-image {
+  background: #eef2f7;
+  border: 1px solid rgba(12, 18, 26, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
+  overflow: hidden;
+}
+
+.pkg-icon.has-image img {
+  display: block;
+  width: 72%;
+  height: 72%;
+  object-fit: contain;
+}
+
 /* RAST's own apps keep their app icon on a plain tile. */
 .pkg-icon.is-app {
   background: var(--surface);

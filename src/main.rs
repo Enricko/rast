@@ -1,7 +1,8 @@
 //! RAST command-line interface and server entry point.
 //!
 //! Commands: `serve`, `status`, `doctor`, `user create-admin`, `setup-token`,
-//! `backup`, `update`, `version`, `worker` (internal), `restore`.
+//! `backup`, `update`, `version`, `package` (authoring), `worker` (internal),
+//! `restore`.
 
 use std::{
     io::{IsTerminal, Read, Write},
@@ -88,6 +89,16 @@ enum Command {
         #[command(subcommand)]
         cmd: PackagesCommand,
     },
+    /// Author or verify a package repository release (no server needed)
+    Package {
+        #[command(subcommand)]
+        cmd: PackageCommand,
+    },
+    /// Discover, verify, assemble, sign and check the official catalog
+    Catalog {
+        #[command(subcommand)]
+        cmd: CatalogCommand,
+    },
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
@@ -123,6 +134,199 @@ enum TerminalCommand {
     /// Internal: the root helper run by rast-terminal.service
     #[command(hide = true)]
     Helper,
+}
+
+#[derive(Subcommand, Debug)]
+enum PackageCommand {
+    /// Validate rast-package.json (optionally against local archives)
+    Validate {
+        /// Manifest to check (default: rast-package.json)
+        manifest: Option<PathBuf>,
+        /// Directory that holds the release archives
+        #[arg(long, value_name = "DIR")]
+        dist: Option<PathBuf>,
+    },
+    /// Embed an SVG/PNG icon into a package manifest (default rast-package.json)
+    EmbedIcon {
+        /// SVG or PNG icon to embed (max 64 KiB)
+        image: PathBuf,
+        /// Manifest to update (default: rast-package.json)
+        #[arg(long, value_name = "FILE")]
+        manifest: Option<PathBuf>,
+    },
+    /// Write rast-package.json for a release tag from archives in dist/
+    Manifest {
+        /// Repository package.json with the manifest template
+        #[arg(long, value_name = "FILE", default_value = "package.json")]
+        package: PathBuf,
+        /// Release tag, e.g. v5.4.9-1
+        #[arg(long, value_name = "TAG")]
+        tag: String,
+        /// GitHub repository, owner/name
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: String,
+        /// Directory with the built archives (default: dist)
+        #[arg(long, value_name = "DIR", default_value = "dist")]
+        dist: PathBuf,
+        /// Attestation URL per target, as TARGET=URL (repeatable)
+        #[arg(long, value_name = "TARGET=URL")]
+        attestation: Vec<String>,
+        /// Skip targets whose archive has not been built
+        #[arg(long)]
+        allow_missing: bool,
+        /// Output file (default: rast-package.json)
+        #[arg(long, value_name = "FILE", default_value = "rast-package.json")]
+        out: PathBuf,
+    },
+    /// Extract an archive like the installer and run the manifest checks
+    Smoke {
+        /// Built archive to test
+        archive: PathBuf,
+        /// Repository package.json with the manifest template
+        #[arg(long, value_name = "FILE", default_value = "package.json")]
+        package: PathBuf,
+    },
+    /// Cross-check a published GitHub release like Install from GitHub does
+    CheckRelease {
+        /// GitHub repository, owner/name
+        #[arg(long, value_name = "OWNER/NAME")]
+        repo: String,
+        /// Release tag, e.g. v5.4.9-1
+        #[arg(long, value_name = "TAG")]
+        tag: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CatalogCommand {
+    /// Fetch and verify the published catalog (absent on the first run)
+    Previous {
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        out: PathBuf,
+    },
+    /// Discover upstream versions and write the catalog plan
+    Discover {
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        out: PathBuf,
+        /// Versions to withhold, comma separated (e.g. go@1.26.11,nodejs@24.22.2)
+        #[arg(long, value_name = "LIST", default_value = "")]
+        withhold: String,
+        /// Re-verify versions that are already in the catalog
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Publish-ready catalog that lists new versions as detected
+    Interim {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "FILE", default_value = "work/out/catalog.json")]
+        out: PathBuf,
+    },
+    /// Download, verify and smoke-test upstream artifacts for one target
+    Verify {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Smoke-test a CI-built PHP archive and record the result
+    PhpResult {
+        #[arg(long, value_name = "FILE")]
+        archive: PathBuf,
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "URL", default_value = "")]
+        attestation_url: String,
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+    },
+    /// Final catalog: carried versions plus newly verified ones
+    Assemble {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/previous")]
+        previous: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work/results")]
+        results: PathBuf,
+        /// JSON object of PHP release tags per version, or a file containing it
+        #[arg(long, value_name = "JSON|FILE", default_value = "")]
+        php_releases: String,
+        #[arg(long, value_name = "FILE", default_value = "work/out/catalog.json")]
+        out: PathBuf,
+    },
+    /// Ed25519 signature (catalog.json.sig) for a catalog
+    Sign {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+    },
+    /// Validate every manifest and verify the signature
+    Check {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "")]
+        previous: String,
+        #[arg(long, value_name = "new|all", value_parser = ["new", "all"])]
+        download: Option<String>,
+    },
+    /// Print the PHP build inputs for a workflow step
+    PhpInputs {
+        #[arg(long, value_name = "FILE", default_value = "work/plan.json")]
+        plan: PathBuf,
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Publish CI-built PHP archives as releases and report their tags
+    PhpPublish {
+        #[arg(long, value_name = "DIR")]
+        results: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        archives: PathBuf,
+        #[arg(long, value_name = "FILE")]
+        github_output: Option<PathBuf>,
+    },
+    /// Collect downloaded workflow artifacts into a work directory
+    Collect {
+        #[arg(long, value_name = "DIR")]
+        artifacts: PathBuf,
+        #[arg(long, value_name = "DIR", default_value = "work")]
+        work: PathBuf,
+        #[arg(long, value_name = "RESULT", default_value = "")]
+        verify_result: String,
+    },
+    /// Print a catalog's sequence number
+    Sequence {
+        #[arg(value_name = "CATALOG")]
+        catalog: PathBuf,
+    },
+    /// Build a static PHP CLI for one target with static-php-cli in Docker
+    BuildPhp {
+        #[arg(long, value_name = "VERSION")]
+        version: String,
+        #[arg(long, value_name = "TARGET")]
+        target: String,
+        #[arg(long, value_name = "SHA256")]
+        source_sha256: String,
+        #[arg(long, value_name = "LIST")]
+        extensions: String,
+        #[arg(long, value_name = "VERSION")]
+        spc_version: String,
+        #[arg(long, value_name = "IMAGE")]
+        builder: String,
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -218,6 +422,8 @@ async fn run(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match command {
         Command::Serve { bind } => serve(config_path, log_level, bind).await,
+        Command::Package { cmd } => package_command(cmd),
+        Command::Catalog { cmd } => catalog_command(cmd),
         Command::Version => {
             // Render once and tolerate a closed stdout: release pipelines and
             // shell recipes routinely run `rast version | head -n 1`, which is
@@ -297,7 +503,10 @@ async fn run(
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
                 Command::Terminal { cmd } => terminal_command(&cfg, cmd).await,
-                Command::Serve { .. } | Command::Version => unreachable!(),
+                Command::Serve { .. }
+                | Command::Version
+                | Command::Package { .. }
+                | Command::Catalog { .. } => unreachable!(),
             }
         }
     }
@@ -334,6 +543,214 @@ async fn terminal_command(
         ),
         Err(line) => println!("terminal: {line}"),
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn package_command(cmd: PackageCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::authoring;
+    use std::collections::BTreeMap;
+    match cmd {
+        PackageCommand::Validate { manifest, dist } => {
+            let path = manifest.unwrap_or_else(|| PathBuf::from("rast-package.json"));
+            let value = authoring::validate_file(&path, dist.as_deref())?;
+            println!(
+                "{}: valid ({} {} rev {})",
+                path.display(),
+                value.id,
+                value.version,
+                value.revision
+            );
+        }
+        PackageCommand::EmbedIcon { image, manifest } => {
+            let path = manifest.unwrap_or_else(|| PathBuf::from("rast-package.json"));
+            let package = authoring::embed_icon(&path, &image)?;
+            let icon = package.icon.as_ref().expect("embed_icon sets the icon");
+            println!(
+                "{}: embedded {} icon ({} base64 chars) for {} {}",
+                path.display(),
+                icon.media_type,
+                icon.data.len(),
+                package.id,
+                package.version
+            );
+        }
+        PackageCommand::Manifest {
+            package,
+            tag,
+            repo,
+            dist,
+            attestation,
+            allow_missing,
+            out,
+        } => {
+            let template = authoring::load_template(&package)?;
+            let mut attestations = BTreeMap::new();
+            for entry in attestation {
+                let (target, url) = entry
+                    .split_once('=')
+                    .ok_or_else(|| format!("--attestation expects TARGET=URL, got {entry:?}"))?;
+                attestations.insert(target.trim().to_string(), url.trim().to_string());
+            }
+            let run_url = std::env::var("GITHUB_RUN_ID").ok().map(|id| {
+                format!(
+                    "{}/{}/actions/runs/{id}",
+                    std::env::var("GITHUB_SERVER_URL")
+                        .unwrap_or_else(|_| "https://github.com".into()),
+                    std::env::var("GITHUB_REPOSITORY").unwrap_or_default()
+                )
+            });
+            let manifest = authoring::build_manifest(
+                &template,
+                &tag,
+                &repo,
+                &dist,
+                &attestations,
+                allow_missing,
+                run_url.as_deref(),
+            )?;
+            let bytes = serde_json::to_vec_pretty(&manifest)?;
+            std::fs::write(&out, [bytes.as_slice(), b"\n"].concat())?;
+            println!(
+                "wrote {}: {} {} revision {}, targets {:?}",
+                out.display(),
+                manifest.id,
+                manifest.version,
+                manifest.revision,
+                manifest.targets()
+            );
+        }
+        PackageCommand::Smoke { archive, package } => {
+            let template = authoring::load_template(&package)?;
+            for line in authoring::smoke(&archive, &template)? {
+                println!("{line}");
+            }
+        }
+        PackageCommand::CheckRelease { repo, tag } => {
+            let token = std::env::var("GH_TOKEN")
+                .or_else(|_| std::env::var("GITHUB_TOKEN"))
+                .ok();
+            for line in authoring::check_release(&repo, &tag, token.as_deref())? {
+                println!("{line}");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn catalog_command(cmd: CatalogCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::packages::catalog_cli::{self, Command as PortCommand, DownloadMode};
+    let command = match cmd {
+        CatalogCommand::Previous { out } => PortCommand::Previous { out },
+        CatalogCommand::Discover {
+            previous,
+            out,
+            withhold,
+            force,
+            github_output,
+        } => PortCommand::Discover {
+            previous,
+            out,
+            withhold,
+            force,
+            github_output,
+        },
+        CatalogCommand::Interim {
+            plan,
+            previous,
+            out,
+        } => PortCommand::Interim {
+            plan,
+            previous,
+            out,
+        },
+        CatalogCommand::Verify { plan, target, out } => PortCommand::Verify { plan, target, out },
+        CatalogCommand::PhpResult {
+            archive,
+            version,
+            target,
+            attestation_url,
+            out,
+        } => PortCommand::PhpResult {
+            archive,
+            version,
+            target,
+            attestation_url,
+            out,
+        },
+        CatalogCommand::Assemble {
+            plan,
+            previous,
+            results,
+            php_releases,
+            out,
+        } => PortCommand::Assemble {
+            plan,
+            previous,
+            results,
+            php_releases: (!php_releases.is_empty()).then(|| PathBuf::from(php_releases)),
+            out,
+        },
+        CatalogCommand::Sign { catalog } => PortCommand::Sign { catalog },
+        CatalogCommand::Check {
+            catalog,
+            previous,
+            download,
+        } => PortCommand::Check {
+            catalog,
+            previous: (!previous.is_empty()).then(|| PathBuf::from(previous)),
+            download: match download.as_deref() {
+                Some("new") => Some(DownloadMode::New),
+                Some("all") => Some(DownloadMode::All),
+                _ => None,
+            },
+        },
+        CatalogCommand::PhpInputs {
+            plan,
+            version,
+            github_output,
+        } => PortCommand::PhpInputs {
+            plan,
+            version,
+            github_output,
+        },
+        CatalogCommand::PhpPublish {
+            results,
+            archives,
+            github_output,
+        } => PortCommand::PhpPublish {
+            results,
+            archives,
+            github_output,
+        },
+        CatalogCommand::Collect {
+            artifacts,
+            work,
+            verify_result,
+        } => PortCommand::Collect {
+            artifacts,
+            work,
+            verify_result,
+        },
+        CatalogCommand::Sequence { catalog } => PortCommand::Sequence { catalog },
+        CatalogCommand::BuildPhp {
+            version,
+            target,
+            source_sha256,
+            extensions,
+            spc_version,
+            builder,
+            out,
+        } => PortCommand::BuildPhp {
+            version,
+            target,
+            source_sha256,
+            extensions,
+            spc_version,
+            builder,
+            out,
+        },
+    };
+    catalog_cli::run(command).map_err(std::io::Error::other)?;
     Ok(ExitCode::SUCCESS)
 }
 

@@ -11,7 +11,9 @@
 //! * [`service`] — the orchestration used by the HTTP API.
 
 pub mod archive;
+pub mod authoring;
 pub mod catalog;
+pub mod catalog_cli;
 pub mod github;
 pub mod host;
 pub mod install;

@@ -52,6 +52,8 @@ ipnet = "2"
 walkdir = "2"
 flate2 = "1"
 tar = "0.4"
+xz2 = "0.1"
+zip = { version = "9.5.1", default-features = false, features = ["deflate-flate2"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 ring = "0.17"
 async-trait = "0.1"
