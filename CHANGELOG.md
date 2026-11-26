@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.8] - 2026-11-26
+
+### Added
+
 - **Thirteen more runtimes in App Center**, each installable, updatable and
   removable like Python, Go, Node.js and PHP, with their logos:
   **Rust** (rustc, cargo, rustfmt, clippy), **Java** (Eclipse Temurin JDK 8,
@@ -60,17 +77,6 @@ this file by `scripts/changelog-section.sh`.
   one file name, so one replaced the other and publishing failed ("published
   bytes differ from the manifest"); and the PHP builder container got no
   GitHub token, so its downloads hit GitHub's rate limit (HTTP 403).
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.7] - 2026-11-26
 
