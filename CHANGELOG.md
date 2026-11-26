@@ -9,6 +9,23 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.10] - 2026-11-26
+
 ### Fixed
 
 - **App Center lists the runtimes the server actually runs.** When the
@@ -22,17 +39,6 @@ this file by `scripts/changelog-section.sh`.
   runs becomes the default again. Recovered versions show as installed by
   "App Center (recovered)" and are recorded in Activity Logs
   (`package.recover`).
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.9] - 2026-11-26
 
