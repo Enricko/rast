@@ -172,6 +172,19 @@ sudo -u rast rast doctor
 # sign in through the browser and check audit logs / files
 ```
 
+**App Center runtimes.** A restored database can be older than runtimes
+installed since the backup. Their files stay in `/var/lib/rast/packages`, and
+a terminal keeps running them. When RAST starts, and after every catalog
+check, App Center records such versions again if their install marker
+(`.rast-install.json`) names exactly the archives the signed catalog lists for
+this server and their version checks pass where they are. The version the
+`current` link points to becomes the default again. These show as installed
+by "App Center (recovered)", with a `package.recover` entry in Activity Logs.
+Anything else is left alone and logged as a warning: a version no longer in
+the catalog, one that does not match it, or a GitHub import. Remove those with
+`sudo -u rast rm -rf /var/lib/rast/packages/runtimes/<id>/<version>`, along
+with any of their links in `/var/lib/rast/packages/bin`.
+
 ### Restoring user files from an archive
 
 `rast restore` replaces the **database** only. A `users`-scope archive also

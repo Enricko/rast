@@ -256,6 +256,7 @@ impl Server {
                 size_bytes: 10,
                 check_output: &format!("lua -v: Lua {v}"),
                 installed_by: "admin",
+                installed_at: None,
             },
         )
         .await
@@ -1198,4 +1199,84 @@ async fn optional_apps_are_uninstalled_and_installed_in_package_center() {
         .request("GET", "/api/auth/me", None, admin.clone())
         .await;
     assert_eq!(me["permissions"]["apps"]["backup"]["installed"], true);
+}
+
+/// Write an installed tree with its install marker, as an install would,
+/// but without a database record (lost to a restored backup or rollback).
+fn unrecorded_tree(server: &Server, v: &str, prints: &str, sha256: &str) -> PathBuf {
+    let layout = &server.state.packages.layout;
+    let root = layout.version_dir("lua", v);
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    write_script(&root.join("bin/lua"), prints);
+    std::fs::write(
+        root.join(".rast-install.json"),
+        serde_json::to_vec(&json!({
+            "id": "lua",
+            "version": v,
+            "revision": 1,
+            "target": server.state.packages.host.target,
+            "sha256": sha256,
+            "url": "https://github.com/example/lua/releases/download/lua.tar.gz",
+            "installedAt": 1_700_000_000_000i64,
+            "files": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    root
+}
+
+#[tokio::test]
+async fn installs_the_database_lost_are_recorded_again_from_their_files() {
+    let server = Server::start().await;
+    let admin = server.login("admin", Role::Admin).await;
+    let layout = &server.state.packages.layout;
+    // Lua 5.4.8 is installed and is what a terminal runs (`current` and the
+    // shim point at it), but the database was restored from before it.
+    let root = unrecorded_tree(&server, "5.4.8", "Lua 5.4.8", &"a".repeat(64));
+    std::os::unix::fs::symlink("5.4.8", layout.current_link("lua")).unwrap();
+    std::fs::create_dir_all(layout.bin_dir()).unwrap();
+    std::os::unix::fs::symlink(
+        "../runtimes/lua/current/bin/lua",
+        layout.bin_dir().join("lua"),
+    )
+    .unwrap();
+    // 5.4.7's files no longer pass its check, and 5.4.5 is not in the
+    // catalog: both are left alone.
+    let broken = unrecorded_tree(&server, "5.4.7", "Lua 9.9.9", &"a".repeat(64));
+    let unknown = unrecorded_tree(&server, "5.4.5", "Lua 5.4.5", &"a".repeat(64));
+
+    let bytes = catalog(1);
+    server.publish(&bytes, &server.signer.sign(&bytes));
+    let (status, _) = server
+        .request("POST", "/api/packages/check", None, admin.clone())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = server
+        .request("GET", "/api/packages", None, admin.clone())
+        .await;
+    let pkg = lua(&body);
+    let installed = pkg["installed"].as_array().unwrap();
+    assert_eq!(installed.len(), 1, "{pkg}");
+    assert_eq!(installed[0]["version"], "5.4.8");
+    assert_eq!(installed[0]["installedBy"], "App Center (recovered)");
+    assert_eq!(installed[0]["installedAt"], 1_700_000_000_000i64);
+    assert_eq!(installed[0]["path"], root.display().to_string());
+    assert_eq!(installed[0]["isDefault"], true);
+    assert_eq!(pkg["defaultVersion"], "5.4.8");
+    // Nothing to install: 5.4.8 is the newest verified 5.4 (5.4.9 is only
+    // detected upstream).
+    assert_eq!(pkg["updates"], json!([]));
+    assert!(broken.is_dir() && unknown.is_dir());
+    assert_eq!(
+        server.audit("package.recover").await,
+        vec![("success".to_string(), "lua 5.4.8".to_string())]
+    );
+
+    // Another check finds nothing new to record.
+    server
+        .request("POST", "/api/packages/check", None, admin.clone())
+        .await;
+    assert_eq!(server.audit("package.recover").await.len(), 1);
 }

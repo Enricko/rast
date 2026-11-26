@@ -9,9 +9,19 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-### Added
+### Fixed
 
-- Nothing yet.
+- **App Center lists the runtimes the server actually runs.** When the
+  database was restored from an older backup, or RAST was rolled back, App
+  Center lost track of runtimes installed after that point. Their files stayed
+  in place and the terminal kept using them. So Python offered an update to
+  the version already running, and Rust showed Install although `rustc`
+  worked. Now, when RAST starts and after each catalog check, App Center
+  records such versions again. It does this only when their files match the
+  signed catalog exactly and pass their version checks. The version a terminal
+  runs becomes the default again. Recovered versions show as installed by
+  "App Center (recovered)" and are recorded in Activity Logs
+  (`package.recover`).
 
 ### Planned
 

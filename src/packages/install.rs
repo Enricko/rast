@@ -200,6 +200,123 @@ pub fn read_marker(dir: &Path) -> Option<Marker> {
     (safe(&marker.id) && safe(&marker.version)).then_some(marker)
 }
 
+/// What an install marker records about how a version tree was installed.
+#[derive(Debug, Clone)]
+pub struct Receipt {
+    pub marker: Marker,
+    pub target: Option<String>,
+    /// SHA-256 of every archive extracted into the tree (empty in markers
+    /// written before multi-archive runtimes, which had one archive).
+    pub archives: Vec<String>,
+    pub installed_at: Option<i64>,
+}
+
+impl Receipt {
+    /// Whether the tree was extracted from exactly this artifact's archives.
+    pub fn matches(&self, artifact: &Artifact) -> bool {
+        let mut want: Vec<String> = artifact
+            .archives()
+            .iter()
+            .map(|a| a.sha256.to_ascii_lowercase())
+            .collect();
+        let mut have: Vec<String> = if self.archives.is_empty() {
+            vec![self.marker.sha256.to_ascii_lowercase()]
+        } else {
+            self.archives
+                .iter()
+                .map(|s| s.to_ascii_lowercase())
+                .collect()
+        };
+        want.sort();
+        have.sort();
+        self.target.as_deref() == Some(artifact.target.as_str())
+            && self.marker.sha256.eq_ignore_ascii_case(&artifact.sha256)
+            && want == have
+    }
+}
+
+pub fn read_receipt(dir: &Path) -> Option<Receipt> {
+    let marker = read_marker(dir)?;
+    let bytes = fs::read(dir.join(INSTALL_MARKER)).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let archives = value
+        .get("archives")
+        .and_then(|a| a.as_array())
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|p| p.get("sha256").and_then(|s| s.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(Receipt {
+        marker,
+        target: value
+            .get("target")
+            .and_then(|t| t.as_str())
+            .map(str::to_string),
+        archives,
+        installed_at: value.get("installedAt").and_then(|t| t.as_i64()),
+    })
+}
+
+impl Layout {
+    /// Installed version trees (`runtimes/<id>/<version>`) whose install
+    /// marker names that same package and version.
+    pub fn version_trees(&self) -> Vec<(PathBuf, Receipt)> {
+        let mut out = Vec::new();
+        let Ok(packages) = fs::read_dir(self.runtimes()) else {
+            return out;
+        };
+        for package in packages.flatten() {
+            let Ok(versions) = fs::read_dir(package.path()) else {
+                continue;
+            };
+            for entry in versions.flatten() {
+                let path = entry.path();
+                if path.is_symlink() || !path.is_dir() {
+                    continue;
+                }
+                let Some(receipt) = read_receipt(&path) else {
+                    continue;
+                };
+                if *package.file_name() == *receipt.marker.id
+                    && *entry.file_name() == *receipt.marker.version
+                {
+                    out.push((path, receipt));
+                }
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+}
+
+/// Verify a version tree where it is (one the database lost, see
+/// `PackageManager::adopt_unrecorded`): its executables exist and its checks
+/// pass, as after an install.
+pub fn verify_in_place(
+    layout: &Layout,
+    manifest: &Manifest,
+    dir: &Path,
+) -> Result<Vec<CheckResult>, String> {
+    for exe in &manifest.runtime.executables {
+        archive::executable_inside(dir, &exe.path)
+            .map_err(|e| format!("executable {}: {e}", exe.name))?;
+        archive::executable_inside(dir, &manifest.launch_path(exe))
+            .map_err(|e| format!("executable {}: {e}", exe.name))?;
+    }
+    let scratch = layout
+        .staging()
+        .join(format!("verify-{}", uuid::Uuid::new_v4()));
+    let home = scratch.join("home");
+    fs::create_dir_all(&home).map_err(|e| format!("cannot create a check folder: {e}"))?;
+    let result = run_checks(manifest, dir, &home, false, Some(layout));
+    let _ = fs::remove_dir_all(&scratch);
+    result
+}
+
 /// Finish a replacement: keep the new tree at `target` and delete the old one
 /// at `aside`, or (when the new one was not recorded) put the old one back.
 pub fn settle_replacement(target: &Path, aside: &Path, keep_new: bool) -> Result<(), String> {
@@ -1570,6 +1687,35 @@ mod tests {
                 .unwrap();
         assert_eq!(raw["archives"].as_array().unwrap().len(), 2);
         assert_eq!(raw["archives"][1]["name"], "rust-std");
+
+        // The marker names exactly these archives, so a tree whose database
+        // record was lost can be matched with the catalog again.
+        let receipt = read_receipt(&installed.path).unwrap();
+        assert!(receipt.matches(&artifact));
+        let mut other = artifact.clone();
+        other.archives[0].sha256 = "0".repeat(64);
+        assert!(!receipt.matches(&other));
+        let mut fewer = artifact.clone();
+        fewer.archives.clear();
+        assert!(!receipt.matches(&fewer));
+        let mut elsewhere = artifact.clone();
+        elsewhere.target = format!("{}-other", artifact.target);
+        assert!(!receipt.matches(&elsewhere));
+        // A copied marker that names another version is not that version.
+        let copy = layout.version_dir("demo", "9.9.9");
+        fs::create_dir_all(&copy).unwrap();
+        fs::copy(
+            installed.path.join(INSTALL_MARKER),
+            copy.join(INSTALL_MARKER),
+        )
+        .unwrap();
+        let trees: Vec<PathBuf> = layout.version_trees().into_iter().map(|t| t.0).collect();
+        assert_eq!(trees, vec![installed.path.clone()]);
+        let checks = verify_in_place(&layout, &m, &installed.path).unwrap();
+        assert_eq!(checks[0].output, "demo 1.0.0");
+        fs::remove_file(installed.path.join("bin/demo")).unwrap();
+        assert!(verify_in_place(&layout, &m, &installed.path).is_err());
+        fs::remove_dir_all(&copy).unwrap();
 
         // A component digest mismatch fails before anything is installed.
         let mut tampered = artifact.clone();

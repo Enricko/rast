@@ -140,6 +140,8 @@ pub struct NewVersion<'a> {
     pub size_bytes: u64,
     pub check_output: &'a str,
     pub installed_by: &'a str,
+    /// When the files were installed, if not now (a recovered install).
+    pub installed_at: Option<i64>,
 }
 
 /// Whether a package row belongs to this source: the same kind of source,
@@ -229,7 +231,7 @@ pub async fn record_install(pool: &SqlitePool, v: NewVersion<'_>) -> AppResult<(
     .bind(v.size_bytes as i64)
     .bind(v.check_output)
     .bind(v.installed_by)
-    .bind(now)
+    .bind(v.installed_at.unwrap_or(now))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -441,6 +443,7 @@ mod tests {
             size_bytes: 1,
             check_output: "",
             installed_by: "admin",
+            installed_at: None,
         }
     }
 

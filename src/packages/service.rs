@@ -40,6 +40,8 @@ use crate::{
 };
 
 const INSPECTION_TTL_MS: i64 = 30 * 60 * 1000;
+/// "Installed by" of a version recorded again from its files on disk.
+const RECOVERED_BY: &str = "App Center (recovered)";
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -413,6 +415,12 @@ impl PackageManager {
             status.last_attempt_at = attempt;
             status.last_error = error;
         }
+        // With the accepted catalog: versions whose records were lost.
+        let me = self.clone();
+        tokio::spawn(async move {
+            let _check = me.check_lock.lock().await;
+            me.adopt_unrecorded().await;
+        });
         let interval = self.config.packages_check_interval_minutes;
         if interval == 0 {
             return;
@@ -515,6 +523,148 @@ impl PackageManager {
                 }
                 Err(e) => tracing::warn!(error = %e, "package recovery task failed"),
             }
+        }
+    }
+
+    /// Record again the versions App Center installed that its database no
+    /// longer lists (a database restored from an older backup, a rollback of
+    /// RAST): their files, and the commands a terminal runs, are still there.
+    /// A tree qualifies only when its install marker names exactly the
+    /// archives the signed catalog lists for this server and its checks pass
+    /// where it is; anything else is left alone. When the package has no
+    /// default and its `current` link points at the tree, it becomes the
+    /// default again, which matches what a terminal already runs.
+    async fn adopt_unrecorded(&self) {
+        let Some(catalog) = self.current_catalog() else {
+            return;
+        };
+        if catalog.expires_at_ms().is_some_and(|t| db::now_ms() > t) {
+            return;
+        }
+        let layout = self.layout.clone();
+        let trees = tokio::task::spawn_blocking(move || layout.version_trees())
+            .await
+            .unwrap_or_default();
+        for (dir, receipt) in trees {
+            let id = receipt.marker.id.clone();
+            let version = receipt.marker.version.clone();
+            let recorded = |versions: &[VersionRow]| versions.iter().any(|v| v.version == version);
+            match store::versions(&self.db, Some(&id)).await {
+                Ok(versions) if !recorded(&versions) => {}
+                _ => continue,
+            }
+            if let Ok(Some(row)) = store::package(&self.db, &id).await {
+                if row.source != "official" {
+                    continue;
+                }
+            }
+            let Some(manifest) = catalog
+                .package(&id)
+                .and_then(|p| p.versions.iter().find(|m| m.version == version))
+                .cloned()
+            else {
+                tracing::warn!(package = %id, %version, "an unrecorded package version is not in the catalog; leaving it alone");
+                continue;
+            };
+            let artifact = manifest.artifact_for(&self.host.target).cloned();
+            let Some(artifact) = artifact.filter(|a| {
+                receipt.matches(a) && host::incompatibility(&manifest, &self.host).is_none()
+            }) else {
+                tracing::warn!(package = %id, %version, "an unrecorded package version does not match the catalog; leaving it alone");
+                continue;
+            };
+            // An install or removal of this package is running: next time.
+            let Ok(_guard) = self.lock(&id, &manifest.name) else {
+                continue;
+            };
+            match store::versions(&self.db, Some(&id)).await {
+                Ok(versions) if !recorded(&versions) => {}
+                _ => continue,
+            }
+            let layout = self.layout.clone();
+            let (m, d) = (manifest.clone(), dir.clone());
+            let verified = tokio::task::spawn_blocking(move || {
+                install::verify_in_place(&layout, &m, &d)
+                    .map(|checks| (checks, install::dir_size(&d)))
+            })
+            .await;
+            let (checks, size_bytes) = match verified {
+                Ok(Ok(found)) => found,
+                Ok(Err(e)) => {
+                    tracing::warn!(package = %id, %version, error = %e, "an unrecorded package version failed its checks; leaving it alone");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(package = %id, error = %e, "package verification task failed");
+                    continue;
+                }
+            };
+            if self.config.packages_shell_path {
+                if let Err(e) = shell::share_version(&self.layout, &id, &version) {
+                    tracing::warn!(package = %id, error = %e, "cannot make the recovered version readable by other users");
+                }
+            }
+            let check_output = checks
+                .iter()
+                .map(|c| format!("{}: {}", c.command, c.output))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let recorded = store::record_install(
+                &self.db,
+                store::NewVersion {
+                    manifest: &manifest,
+                    source: "official",
+                    source_repo: None,
+                    target: &artifact.target,
+                    artifact_url: &artifact.url,
+                    artifact_sha256: &artifact.sha256,
+                    release_tag: None,
+                    install_path: &dir.display().to_string(),
+                    size_bytes,
+                    check_output: &check_output,
+                    installed_by: RECOVERED_BY,
+                    installed_at: receipt.installed_at,
+                },
+            )
+            .await;
+            if let Err(e) = recorded {
+                tracing::warn!(package = %id, %version, error = %e, "cannot record a recovered package version");
+                continue;
+            }
+            let no_default = store::package(&self.db, &id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.default_version.is_none());
+            let current = std::fs::read_link(self.layout.current_link(&id)).ok();
+            let mut default = false;
+            if no_default && current.as_deref() == Some(Path::new(&version)) {
+                match self.activate_version(&id, &version).await {
+                    Ok(_) => default = true,
+                    Err(e) => {
+                        tracing::warn!(package = %id, %version, error = %e, "cannot make a recovered version the default")
+                    }
+                }
+            }
+            tracing::warn!(package = %id, %version, default, "recorded a package version the database had lost");
+            audit::record_with_events(
+                &self.db,
+                &self.events,
+                AuditLog::new("package.recover")
+                    .anonymous(RECOVERED_BY)
+                    .object("package", id.clone())
+                    .path(format!("{id} {version}"))
+                    .success()
+                    .detail(format!(
+                        "version={version} revision={} sha256={} default={default} (installed files found without a record)",
+                        manifest.revision, artifact.sha256
+                    )),
+            )
+            .await;
+            self.events.publish(
+                "package.changed",
+                json!({"packageId": id, "version": version, "reason": "recovered"}),
+            );
         }
     }
 
@@ -753,6 +903,9 @@ impl PackageManager {
             s.last_error = error.clone();
         }
         let github_changed = self.check_github_sources().await;
+        if error.is_none() {
+            self.adopt_unrecorded().await;
+        }
         self.refresh_system().await;
         if let Ok(mut s) = self.status.write() {
             s.checking = false;
@@ -1792,6 +1945,7 @@ impl PackageManager {
                 size_bytes: installed.size_bytes,
                 check_output: &check_output,
                 installed_by: &actor.username,
+                installed_at: None,
             },
         )
         .await;
