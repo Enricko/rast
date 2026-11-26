@@ -19,6 +19,7 @@ use std::{
     io::{self, Read},
     os::unix::fs::PermissionsExt,
     path::{Component, Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use flate2::read::GzDecoder;
@@ -316,6 +317,12 @@ fn extract_tar<R: Read>(
                 if copied != size {
                     return Err(format!("archive entry {} is truncated", parts.join("/")));
                 }
+                // Keep the file's time: tools compare them (Flutter rebuilds
+                // its tool when pubspec.yaml is newer than pubspec.lock,
+                // Python's .pyc files are tied to their sources' times).
+                if let Some(when) = entry.header().mtime().ok().and_then(archive_time) {
+                    out.set_modified(when).ok();
+                }
                 // Keep execute bits; drop setuid/setgid/sticky and group/other write.
                 let safe = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
                 fs::set_permissions(&dest, fs::Permissions::from_mode(safe)).ok();
@@ -375,6 +382,13 @@ fn extract_tar<R: Read>(
     verify_links(root, &links)?;
     progress(&stats);
     Ok(stats)
+}
+
+/// An archive entry's modification time as a file time, except 0 and times
+/// in the future (those files keep the extraction time).
+fn archive_time(secs: u64) -> Option<SystemTime> {
+    let when = UNIX_EPOCH.checked_add(Duration::from_secs(secs))?;
+    (secs > 0 && when <= SystemTime::now()).then_some(when)
 }
 
 /// Physical check once every entry exists: each link resolves inside root.
@@ -589,6 +603,9 @@ pub(crate) mod tests {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write as _;
 
+    /// The modification time of every test archive entry.
+    pub const TEST_MTIME: u64 = 1_700_000_000;
+
     pub enum Item<'a> {
         Dir(&'a str),
         File(&'a str, &'a [u8], u32),
@@ -602,7 +619,7 @@ pub(crate) mod tests {
         header.set_entry_type(kind);
         header.set_mode(mode);
         header.set_size(size);
-        header.set_mtime(0);
+        header.set_mtime(TEST_MTIME);
         {
             let old = header.as_old_mut();
             old.name[..name.len()].copy_from_slice(name.as_bytes());
@@ -706,6 +723,25 @@ pub(crate) mod tests {
             & 0o7777;
         assert_eq!(mode, 0o755, "setuid and write bits dropped");
         assert!(executable_inside(&root, "bin/tool").is_ok());
+        // File times come from the archive (tools compare them).
+        let mtime = |p: &str| {
+            fs::metadata(root.join(p))
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        assert_eq!(mtime("bin/tool-1.0"), TEST_MTIME);
+        assert_eq!(mtime("lib/data.txt"), TEST_MTIME);
+        assert_eq!(archive_time(0), None, "no time: keep the extraction time");
+        let future = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 86_400;
+        assert_eq!(archive_time(future), None, "future times are not kept");
 
         // Escapes are refused exactly like in the gzip path.
         let evil = dir.path().join("evil.tar.xz");
