@@ -15,10 +15,13 @@
 
 import type { ApiClient } from "../core/api";
 import type { WindowPlacement, WindowRect, WindowState } from "../core/wm";
+import type { WindowView } from "./window-view";
 
 export const SESSION_PATH = "/api/desktop/session";
 /** Header naming the page that saved, echoed in the realtime event. */
 export const ORIGIN_HEADER = "X-RAST-Desktop";
+/** Sessions larger than this are not sent with `keepalive` (browsers refuse). */
+const KEEPALIVE_MAX_CHARS = 60_000;
 /** Windows saved and restored (the most recent ones when there are more). */
 export const MAX_SESSION_WINDOWS = 12;
 const SAVE_DELAY_MS = 700;
@@ -32,6 +35,8 @@ export interface SavedWindow {
   rect: WindowRect | null;
   state: WindowState;
   minimized: boolean;
+  /** Scroll positions and typed text inside the window. */
+  view?: WindowView;
 }
 
 export interface SavedSession {
@@ -141,7 +146,7 @@ export function createSessionSaver(
     inFlight = text;
     try {
       const response = await api.request<{ updatedAt?: unknown } | undefined>("PUT", SESSION_PATH, session, {
-        keepalive,
+        keepalive: keepalive && text.length <= KEEPALIVE_MAX_CHARS,
         headers: { [ORIGIN_HEADER]: pageId },
       });
       confirmed = text;

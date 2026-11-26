@@ -54,6 +54,8 @@ interface Tab {
 
 function mountTerminalApp(ctx: AppContext): AppInstance {
   ctx.root.classList.add("app-terminal");
+  // The shell keeps what was typed and shown: the desktop session does not.
+  ctx.root.dataset.sync = "off";
   let disposed = false;
   let max = 8;
   let pollTimer = 0;

@@ -11,7 +11,18 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Scroll positions and typed text follow the windows.** What a window
+  shows is now kept with it: how far its lists and pages are scrolled, and
+  text typed into its boxes and not saved yet (a search, a name, a note).
+  Both come back after a reload, in a new tab or on another device, and
+  follow live on the account's other open devices, within about a second.
+  A phone or a screen of another width scrolls about as far down. Text in a
+  box someone is typing in on a device is never replaced from another one.
+  Passwords, one-time codes and card numbers are never saved or sent, and
+  neither is the Terminal (its shell already keeps everything). Text typed
+  in a pop-up dialog is still lost when the page reloads, since the dialog
+  closes. Going back to 0.9.12 or older opens an empty desktop once (the
+  older version cannot read the new session); nothing else changes.
 
 ### Planned
 

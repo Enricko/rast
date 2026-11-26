@@ -7,6 +7,10 @@
 //! the app reads when it opens). Each account only ever reads and writes its
 //! own session.
 //!
+//! A window may also keep what is inside it (`view`): where its scrollable
+//! areas are scrolled to and what was typed into its text fields and not
+//! saved yet (never password fields; the browser leaves them out).
+//!
 //! Every save is published to the account's open pages as a
 //! `desktop.session` event (`{session, updatedAt, origin}`), so the other
 //! tabs and devices show the change live. `updatedAt` only ever grows for an
@@ -32,6 +36,15 @@ const MAX_WINDOWS: usize = 16;
 const MAX_PARAMS_BYTES: usize = 4 * 1024;
 /// Far outside any screen: a window there is a bug, not a position.
 const MAX_COORDINATE: f64 = 100_000.0;
+/// Scroll positions and typed text of one window.
+const MAX_VIEW_BYTES: usize = 192 * 1024;
+const MAX_VIEW_SCROLLS: usize = 32;
+const MAX_VIEW_FIELDS: usize = 64;
+const MAX_FIELD_BYTES: usize = 64 * 1024;
+/// A scroll area or a field is named by where it is in the window.
+const MAX_VIEW_NAME: usize = 512;
+/// Pixels scrolled: far more than any page.
+const MAX_SCROLL: f64 = 10_000_000.0;
 /// Header naming the page that saved (echoed as the event's `origin`).
 pub const ORIGIN_HEADER: &str = "x-rast-desktop";
 /// Realtime event published to the account's pages after every save.
@@ -69,6 +82,78 @@ pub struct SavedWindow {
     pub state: WindowState,
     #[serde(default)]
     pub minimized: bool,
+    /// Scroll positions and typed text inside the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<WindowView>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WindowView {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scroll: Vec<ScrollPosition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<FieldText>,
+}
+
+/// A scrolled area: pixels (on a window as wide as `width`) and the share
+/// of the way down (`ratio`, for windows of another width).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScrollPosition {
+    pub path: String,
+    pub x: f64,
+    pub y: f64,
+    pub ratio: f64,
+    pub width: f64,
+}
+
+/// Text typed into a field of the window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FieldText {
+    pub field: String,
+    pub value: String,
+}
+
+impl WindowView {
+    fn validate(&self, app_id: &str) -> Result<(), String> {
+        if self.scroll.len() > MAX_VIEW_SCROLLS || self.fields.len() > MAX_VIEW_FIELDS {
+            return Err(format!(
+                "{app_id} keeps too many scroll positions or fields"
+            ));
+        }
+        for position in &self.scroll {
+            let pixels = |v: f64| v.is_finite() && (0.0..=MAX_SCROLL).contains(&v);
+            if position.path.len() > MAX_VIEW_NAME
+                || !pixels(position.x)
+                || !pixels(position.y)
+                || !pixels(position.width)
+                || !(position.ratio.is_finite() && (0.0..=1.0).contains(&position.ratio))
+            {
+                return Err(format!("a scroll position of {app_id} is not valid"));
+            }
+        }
+        for field in &self.fields {
+            if field.field.is_empty() || field.field.len() > MAX_VIEW_NAME {
+                return Err(format!("a field name of {app_id} is not valid"));
+            }
+            if field.value.len() > MAX_FIELD_BYTES {
+                return Err(format!(
+                    "text typed in {app_id} is longer than {MAX_FIELD_BYTES} bytes"
+                ));
+            }
+        }
+        let size = serde_json::to_vec(self)
+            .map(|b| b.len())
+            .unwrap_or(usize::MAX);
+        if size > MAX_VIEW_BYTES {
+            return Err(format!(
+                "what {app_id} keeps is larger than {MAX_VIEW_BYTES} bytes"
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -144,6 +229,9 @@ impl DesktopSession {
                         window.app_id
                     ));
                 }
+            }
+            if let Some(view) = &window.view {
+                view.validate(&window.app_id)?;
             }
             if let Some(r) = window.rect {
                 if !(coordinate(r.x) && coordinate(r.y) && positive(r.w) && positive(r.h)) {
@@ -241,6 +329,7 @@ mod tests {
             }),
             state: WindowState::Normal,
             minimized: false,
+            view: None,
         }
     }
 
@@ -289,6 +378,59 @@ mod tests {
             .map(|i| window(&format!("w{i}")))
             .collect();
         assert!(session(many).validate().is_err());
+        // What is inside a window: scroll positions and typed text.
+        let mut w = window("a");
+        w.view = Some(WindowView {
+            scroll: vec![ScrollPosition {
+                path: "div.app>div.fs-list".into(),
+                x: 0.0,
+                y: 1200.0,
+                ratio: 0.4,
+                width: 900.0,
+            }],
+            fields: vec![FieldText {
+                field: "input|Search|0".into(),
+                value: "draft".into(),
+            }],
+        });
+        assert!(session(vec![w.clone()]).validate().is_ok());
+        let mut bad = w.clone();
+        bad.view.as_mut().unwrap().scroll[0].ratio = 1.5;
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w.clone();
+        bad.view.as_mut().unwrap().scroll[0].y = -1.0;
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w.clone();
+        bad.view.as_mut().unwrap().fields[0].value = "x".repeat(MAX_FIELD_BYTES + 1);
+        assert!(session(vec![bad])
+            .validate()
+            .unwrap_err()
+            .contains("longer"));
+        let mut bad = w.clone();
+        bad.view.as_mut().unwrap().fields = (0..=MAX_VIEW_FIELDS)
+            .map(|i| FieldText {
+                field: format!("f{i}"),
+                value: String::new(),
+            })
+            .collect();
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w;
+        bad.view.as_mut().unwrap().fields = (0..4)
+            .map(|i| FieldText {
+                field: format!("f{i}"),
+                value: "x".repeat(MAX_FIELD_BYTES - 16),
+            })
+            .collect();
+        assert!(session(vec![bad])
+            .validate()
+            .unwrap_err()
+            .contains("larger"));
+        assert!(serde_json::from_value::<DesktopSession>(json!({
+            "version": 1,
+            "windows": [{"key": "a", "appId": "files", "state": "normal",
+                         "view": {"fields": [{"field": "f", "value": "v", "secret": 1}]}}]
+        }))
+        .is_err());
         // Unknown fields are refused rather than stored.
         assert!(serde_json::from_value::<DesktopSession>(json!({
             "version": 1, "windows": [], "extra": true

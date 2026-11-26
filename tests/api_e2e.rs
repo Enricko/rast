@@ -3249,6 +3249,43 @@ async fn desktop_sessions_follow_the_account_and_stay_private() {
     assert_eq!(body["session"]["windows"][1]["minimized"], true);
     assert_eq!(body["session"]["focused"], "w-a");
 
+    // What is inside a window comes back too: scroll positions, typed text.
+    let mut with_view = session.clone();
+    with_view["windows"][0]["view"] = json!({
+        "scroll": [{"path": "div.app>div.fs-table-wrap", "x": 0, "y": 960, "ratio": 0.6, "width": 868}],
+        "fields": [{"field": "input|Search this folder…|0", "value": "draft"}]
+    });
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(with_view.clone()),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, _, body) = server
+        .request("GET", "/api/desktop/session", None, alice.headers())
+        .await;
+    let view = &body["session"]["windows"][0]["view"];
+    assert_eq!(view["fields"], with_view["windows"][0]["view"]["fields"]);
+    assert_eq!(view["scroll"][0]["path"], "div.app>div.fs-table-wrap");
+    assert_eq!(view["scroll"][0]["y"].as_f64(), Some(960.0));
+    assert_eq!(view["scroll"][0]["ratio"].as_f64(), Some(0.6));
+    assert_eq!(view["scroll"][0]["width"].as_f64(), Some(868.0));
+    assert!(body["session"]["windows"][1].get("view").is_none());
+    let mut bad_view = with_view.clone();
+    bad_view["windows"][0]["view"]["scroll"][0]["ratio"] = json!(3);
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(bad_view),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     // Other accounts, administrators included, only ever see their own.
     let (_, _, body) = server
         .request("GET", "/api/desktop/session", None, admin.headers())

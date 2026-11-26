@@ -51,6 +51,7 @@ import {
   type SavedWindow,
   type SessionUpdate,
 } from "./window-session";
+import { ViewTracker, type WindowView } from "./window-view";
 
 const MAX_PINNED = 8;
 const MAX_TASKBAR_WINDOWS = 10;
@@ -111,6 +112,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
    * screen does not move the windows on a larger one).
    */
   const sessionPlaces = new Map<string, { shown: WindowPlacement; saved: WindowPlacement }>();
+  /** Scroll positions and typed text inside each window. */
+  const windowViews = new Map<string, ViewTracker>();
   const disposers: Array<() => void> = [];
 
   const wm = new WindowManager(windowsLayer, {
@@ -230,7 +233,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   function openApp(
     appId: string,
     params?: unknown,
-    restore?: { key: string; placement: WindowPlacement },
+    restore?: { key: string; placement: WindowPlacement; view?: WindowView | undefined },
   ): void {
     const app: AppDefinition | undefined = findApp(appId);
     if (!app) {
@@ -258,6 +261,16 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           sessionPlaces.delete(windowId);
         });
         mount.contentEl.replaceChildren();
+        const view = new ViewTracker(mount.contentEl, () => {
+          if (sessionReady) sessionSaver.schedule();
+        });
+        windowViews.set(windowId, view);
+        mount.onDispose(() => {
+          view.dispose();
+          windowViews.delete(windowId);
+        });
+        // Scrolled to and typed as saved, as soon as the app shows it.
+        if (restore?.view) view.apply(restore.view, false);
         const appHost = h("div", { class: "app" });
         mount.contentEl.appendChild(appHost);
         const busyLabel = h("span", { class: "busy-label" }, "Working…");
@@ -385,6 +398,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       };
       const params = windowParams.get(id);
       if (params !== undefined) entry.params = params;
+      const view = windowViews.get(id)?.capture();
+      if (view) entry.view = view;
       windows.push(entry);
       if (info.focused && !placement.minimized) focused = key;
     }
@@ -401,7 +416,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     for (const entry of session.windows.slice(-MAX_SESSION_WINDOWS)) {
       if (!entry || typeof entry.appId !== "string" || typeof entry.key !== "string") continue;
       if (!isAppAllowed(entry.appId, store.get().permissions, store.isAdmin())) continue;
-      openApp(entry.appId, entry.params, { key: entry.key, placement: placementOf(entry) });
+      openApp(entry.appId, entry.params, { key: entry.key, placement: placementOf(entry), view: entry.view });
     }
     if (session.focused) {
       for (const [id, key] of windowKeys) {
@@ -446,7 +461,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       const target = placementOf(entry);
       const id = idOf.get(entry.key);
       if (!id) {
-        openApp(entry.appId, entry.params, { key: entry.key, placement: target });
+        openApp(entry.appId, entry.params, { key: entry.key, placement: target, view: entry.view });
         continue;
       }
       const current = sessionPlacement(id);
@@ -463,6 +478,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           console.error(`${entry.appId} could not show its new place`, error);
         }
       }
+      windowViews.get(id)?.apply(entry.view, true);
     }
 
     const order: string[] = [];
@@ -680,7 +696,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     closePanel();
     const ok = await confirmDialog({
       title: "Sign out",
-      message: "Sign out of RAST? Your windows open again the next time you sign in; anything typed but not saved is lost.",
+      message: "Sign out of RAST? Your windows and what you typed in them come back the next time you sign in; text in an open dialog is lost.",
       confirmLabel: "Sign out",
       danger: true,
     });

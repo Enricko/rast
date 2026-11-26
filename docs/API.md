@@ -429,7 +429,15 @@ realtime stream was interrupted.
 letters, digits, `-` or `_`, keys unique). `params` is where the app was, in the
 shape the app accepts when it opens: `{path}` or `{section: "trash"}` (File
 Station), `{tab}` (Control Panel), `{view?, package?}` or `{app}` (App Center),
-`{view, container?}` (Docker). At most 4 KiB per window. `rect` is the position
+`{view, container?}` (Docker). At most 4 KiB per window. `view` (optional)
+is what is inside the window: `{scroll?: [{path, x, y, ratio, width}],
+fields?: [{field, value}]}`. `path` and `field` name a scroll area and a text
+field by where they are in the window (at most 512 bytes); `x`/`y` are pixels
+for an area `width` pixels wide and `ratio` (`0..1`) how far down it is, used
+on screens of another width. `fields` holds text typed into the window's text
+fields and not saved yet; the desktop never includes password, one-time-code
+or card fields, the Terminal, or text in pop-up dialogs. At most 32 scroll
+areas, 64 fields, 64 KiB per field and 192 KiB per window. `rect` is the position
 and size when the window is neither maximized nor snapped, in desktop pixels
 (`null`: the default place). `state` is `normal|maximized|left|right`. Unknown
 fields, invalid values and a `focused` key that is not in `windows` are `400`.
