@@ -11,7 +11,28 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Terminal for accounts that are not administrators, in their own
+  sandbox.** Allow *Terminal* in a group's (or one account's) application
+  rules and its members get shells in a Docker container of their own: only
+  their home folder (at `/home/<name>`, files show up in File Station), Ubuntu
+  tools (git, python3, nano, vim, tmux, …) and App Center's runtimes
+  read-only, **no network**, no privileges, a read-only system, and limits of
+  1 GB memory, 2 CPUs and 512 processes. Shells keep running across reloads
+  like administrators' root shells. The first sandbox builds the image on the
+  server (a few minutes; Terminal shows "Setting up Terminal"). The container
+  is removed after 15 minutes without a shell or when the account loses
+  access; the home folder stays. Administrators still get root shells. See
+  [docs/TERMINAL.md](docs/TERMINAL.md).
+
+### Security
+
+- **File Station refuses special files** (pipes, sockets) when opening,
+  downloading or copying, instead of waiting forever on a pipe.
+- **Opening the first sandbox closes the storage folders** (`homes`,
+  `shared`) to other accounts on the server (`0750`), since files made in a
+  sandbox belong to the RAST service account.
+- Every minute the server ends root shells of accounts that are no longer
+  active administrators and sandbox shells of accounts that lost Terminal.
 
 ### Planned
 

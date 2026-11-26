@@ -20,6 +20,7 @@ pub mod monitor;
 pub mod packages;
 pub mod pty;
 pub mod realtime;
+pub mod sandbox;
 pub mod secrets;
 pub mod server;
 pub mod state;

@@ -417,6 +417,13 @@ pub fn copy_tree_blocking(src: &Path, dst: &Path) -> std::io::Result<()> {
             copy_tree_blocking(&entry.path(), &dst.join(entry.file_name()))?;
         }
         Ok(())
+    } else if !meta.is_file() {
+        // FIFOs, sockets (a Terminal sandbox can make them): copying a FIFO
+        // would wait for a writer forever.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "special files (pipes, sockets) cannot be copied",
+        ))
     } else {
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;

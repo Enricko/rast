@@ -731,7 +731,7 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
         h(
           "p",
           { class: "section-note muted" },
-          "Allow grants interaction with an application; for Docker and Backup Center a group allowance is read-only, for App Center it lets members install, update and uninstall. No Access blocks the app and its live events.",
+          "Allow grants interaction with an application; for Docker and Backup Center a group allowance is read-only, for App Center it lets members install, update and uninstall, and for Terminal it gives members shells in their own sandbox (only their home folder, no network). No Access blocks the app and its live events.",
         ),
         appTable,
       ),

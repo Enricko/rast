@@ -73,6 +73,7 @@ across renames.
 | `applications` | Docker | **denied** (admin-only) | read-only status metadata: list/detail (no env values → `envCount`/`secretCount`, no compose), history without `detail`, container inventory in Resource Monitor. Logs, log stream, deploy/start/stop/delete remain admin-only |
 | `backup` | Backup Center | **denied** (admin-only) | read-only status metadata: list (no file name/checksum/note, `downloadable:false`) and schedule. Archive download, restore guide, create/delete/verify/schedule-write remain admin-only (archives contain the account DB, the master key and possibly every user's files) |
 | `packages` | App Center | **denied** (admin-only) | manage packages: check the catalog, install, update, change the default, remove versions, uninstall, cancel package jobs, edit consumers. Approving a new GitHub source stays admin-only. With `packages_system_wide`, what they install runs for `sudo` and services too, so grant it only to people you would trust with root on runtimes |
+| `terminal` | Terminal | **denied** (administrators get root shells) | shells in the account's own sandbox container: only its home folder, no network, no privileges, memory/CPU/process limits ([TERMINAL.md](TERMINAL.md)). Never a shell on the server itself |
 
 Explicit `none` always wins and blocks the API prefix + live events + launcher.
 
@@ -124,7 +125,7 @@ just-revoked grant cannot outlive the revocation in the cache).
 ## 4. Rust evaluator (`src/access/mod.rs`)
 
 ```rust
-pub const APP_IDS: &[&str] = &["files","applications","monitor","backup","logs","controlpanel"];
+pub const APP_IDS: &[&str] = &["files","applications","monitor","backup","packages","logs","controlpanel","terminal"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum FolderRule { Inherit, None, Read, Write }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)] pub enum AppRule { Inherit, None, Allow }
@@ -205,7 +206,8 @@ for the group editor. Rename keeps rules (stable ids); delete cascades rules.
 * API middleware (`src/access/middleware.rs`): after authentication, non-admin
   requests are mapped to an app prefix (`/api/files`→files, `/api/monitor`→monitor,
   `/api/logs`→logs, `/api/users|/api/shares|/api/settings`→controlpanel,
-  `/api/apps|/api/docker`→applications, `/api/backups`→backup) and denied with
+  `/api/apps|/api/docker`→applications, `/api/backups`→backup,
+  `/api/terminal`→terminal) and denied with
   `403 {"error":{"code":"forbidden","message":"…access denied by group policy"}}`
   when the app is denied. Read-only app grants allow `GET/HEAD/OPTIONS` only for
   applications/backup; writes still hit the existing `AdminUser` checks.

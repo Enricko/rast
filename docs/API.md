@@ -223,14 +223,16 @@ lost admin role sends an `error` message and closes the terminal. A terminal
 without keyboard input for 60 minutes is closed. Every opening is audited as
 `docker.container.exec` (success or failure, never the typed commands).
 
-## Terminal (administrators)
+## Terminal
 
-Root shells on the server ([TERMINAL.md](TERMINAL.md)); off until
-`sudo rast terminal enable`.
+Root shells on the server for administrators; shells in their own sandbox
+container for accounts granted the `terminal` app ([TERMINAL.md](TERMINAL.md)).
+The app policy refuses everyone else (`403`).
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/terminal` | `{available:true, shellUser, open, max, sessions:[{id, number, createdAt, attached, program}]}` (the caller's shells), or `{available:false, reason:"off"\|"error", message?, enableCommand}` |
+| GET | `/api/terminal` | administrators: `{available:true, mode:"root", shellUser, open, max, sessions:[{id, number, createdAt, attached, program}]}` or `{available:false, reason:"off"\|"error", message?, enableCommand}`; others: `{available:true, mode:"sandbox", shellUser, image:"ready"\|"building"\|"missing"\|"failed", imageError, limits:{memoryMb, cpus, network}, max, sessions}` or `{available:false, mode:"sandbox", reason:"docker"\|"error", message}` |
+| POST | `/api/terminal/setup` | sandboxes: start building the image if it is missing (returns at once: `{image, imageError}`; poll `GET /api/terminal`) |
 | DELETE | `/api/terminal/sessions/{id}` | end one of the caller's shells (audited `terminal.close`) |
 | GET (WebSocket) | `/api/terminal/ws` | open a shell or show an open one again; see below |
 
@@ -240,7 +242,9 @@ differences: the start message may carry `"session":"<id>"` to reattach to an
 open shell (its recent output is sent first); `ready` is
 `{"type":"ready","session":{…},"created":bool}`; a shell opened in another
 window sends `{"type":"detached"}` to this one; and closing the WebSocket only
-detaches — the shell keeps running. A new shell is audited as `terminal.open`.
+detaches — the shell keeps running. A new shell is audited as `terminal.open`
+(detail `root` or `sandbox`). A new sandbox shell is refused while the image
+is not built yet or the home folder is over its quota.
 
 ## Resource monitor
 

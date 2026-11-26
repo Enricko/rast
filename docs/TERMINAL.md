@@ -1,8 +1,13 @@
 # Terminal
 
-The **Terminal** app gives RAST administrators a root shell on the server in
-the browser, with a tab per shell. It is **off** until the server owner turns
-it on from the server itself:
+The **Terminal** app gives shells in the browser, with a tab per shell:
+
+- **administrators** get a **root shell on the server** (below);
+- **other accounts** an administrator grants the app get shells in **their own
+  sandbox container** ([Sandboxes for other accounts](#sandboxes-for-other-accounts)).
+
+Root shells are **off** until the server owner turns them on from the server
+itself:
 
 ```sh
 sudo rast terminal enable    # install and start rast-terminal.service
@@ -14,10 +19,11 @@ sudo rast terminal disable   # stop and remove it (open shells end)
 
 ## Who can use it
 
-Only administrators. Terminal is not one of the applications a group rule can
-grant (it is not in `APP_IDS`), so no group, per-user override or App Center
-setting can open it to other accounts. When an administrator is changed to a
-user or deactivated, their shells are ended.
+Root shells: only administrators. A group or per-account rule that allows
+Terminal never gives a shell on the server, only a sandbox. When an
+administrator is changed to a user or deactivated, their root shells end
+(and the server checks every minute that every open root shell still belongs
+to an active administrator).
 
 A root shell controls the whole server, including RAST's own database and
 secrets: anyone who can sign in as an administrator can do anything on the
@@ -70,3 +76,54 @@ App Center's runtimes) and root's own profile apply.
 For development, `RAST_TERMINAL_SOCKET` moves the socket and
 `RAST_TERMINAL_PEER_USER` names the account allowed to connect (the helper's
 shells then run as whoever starts it).
+
+## Sandboxes for other accounts
+
+Administrators can give other accounts a terminal too: allow **Terminal** in a
+group's (or one account's) application rules in Control Panel. It is denied by
+default. Those accounts never get a shell on the server: each gets **its own
+Docker container**, and every shell it opens runs inside it.
+
+| | |
+| --- | --- |
+| Files | only the account's home folder, at `/home/<name>` (what it creates there shows up in File Station). No shared folders, nothing else of the server |
+| Tools | Ubuntu 24.04 with bash, git, curl, python3 (venv, pip), nano, vim, tmux, htop, jq, sqlite3, make, zip and more; App Center's runtimes (Python, Node.js, Go, PHP, …) read-only and first on `PATH` |
+| Network | **none.** A container on Docker's network could reach services on the server and on its private networks (LAN, VPN), so sandboxes have no network at all |
+| Privileges | runs as the account that owns the home folders (not root), no capabilities, `no-new-privileges`, read-only system files, `/tmp` in memory (512 MB) |
+| Limits | 1 GB memory, 2 CPUs, 512 processes per account; 4 shells per account, 16 on the server |
+
+It needs Docker (`docker_enabled = true` and `rast-worker.service` running):
+the Docker worker builds the image, starts the containers and runs the shells
+(`docker exec`), serving them on `/run/rast/shells.sock` to the web server's
+account only.
+
+**The first time** anyone opens a sandbox, the worker builds the image
+(`rast-shell:<hash>`, about 350 MB, from `src/sandbox/Dockerfile`); this
+downloads Ubuntu packages and takes a few minutes. Terminal shows "Setting up
+Terminal" meanwhile. A RAST update that changes the recipe builds a new image
+the next time a sandbox opens.
+
+Sandbox shells keep running across reloads like root shells. One container
+per account holds all its shells (programs started in the background keep
+running while any shell is open); it is removed after 15 minutes without a
+shell, when the account loses access to Terminal (checked every minute), is
+deactivated or becomes an administrator. Restarting or updating RAST's worker
+ends the open sandbox shells. The home folder always stays.
+
+**Quota.** RAST cannot limit what a shell writes while it runs. Opening a
+shell counts the home folder again and refuses when it is over its quota.
+
+**Safety notes.**
+
+- Files a shell creates belong to the RAST service account on the server.
+  Because a shell can set the set-user-id bit on its own files, the first
+  sandbox also closes the storage folders (`<storage>/homes`,
+  `<storage>/shared`) to other accounts on the server (mode `0750`).
+- File Station refuses symbolic links and special files (pipes, sockets) a
+  shell may create, so they cannot be used to read outside the home folder or
+  to hang a download.
+- The containers share the server's kernel, as all containers do. Grant
+  Terminal to people you trust with code running on your server.
+
+Opening and closing sandbox shells is recorded in Activity Logs like root
+shells (with `sandbox` as the detail).

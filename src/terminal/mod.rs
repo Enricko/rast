@@ -93,8 +93,18 @@ pub enum Request {
     },
     /// End one of the account's shells.
     Kill { user: i64, session: String },
-    /// End every shell of the account (it stopped being an administrator).
+    /// End every shell of the account (it lost access) and clean up after
+    /// them (sandboxes: remove the account's container).
     KillUser { user: i64 },
+    /// Accounts that have shells open: `{owners: [id, …]}`.
+    Owners,
+    /// Get ready to open shells for the account without waiting (sandboxes:
+    /// build the image). Answers like `status`.
+    Prepare {
+        user: i64,
+        #[serde(rename = "userName")]
+        user_name: String,
+    },
 }
 
 /// One shell, as listed to its owner.
@@ -141,10 +151,13 @@ pub struct HostSession {
     pub writer: OwnedWriteHalf,
 }
 
-/// The web server's side of the helper socket.
+/// The web server's side of a helper socket (the root helper's, or the
+/// Docker worker's for sandboxes).
 #[derive(Debug, Clone)]
 pub struct TerminalClient {
     socket: PathBuf,
+    /// How long `open` may take to answer (starting a sandbox container).
+    open_timeout: Duration,
 }
 
 impl Default for TerminalClient {
@@ -157,7 +170,14 @@ impl TerminalClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            open_timeout: RESPONSE_TIMEOUT,
         }
+    }
+
+    /// Wait up to `timeout` for `open` to answer.
+    pub fn with_open_timeout(mut self, timeout: Duration) -> Self {
+        self.open_timeout = timeout;
+        self
     }
 
     pub fn socket(&self) -> &Path {
@@ -190,12 +210,16 @@ impl TerminalClient {
             .await
             .map_err(|e| TerminalError::Io(e.to_string()))?;
         let mut reader = BufReader::new(read);
-        let answer =
-            tokio::time::timeout(RESPONSE_TIMEOUT, read_line_capped(&mut reader, MAX_LINE))
-                .await
-                .map_err(|_| TerminalError::Io("no answer".into()))?
-                .map_err(|e| TerminalError::Io(e.to_string()))?
-                .ok_or_else(|| TerminalError::Io("the helper closed the connection".into()))?;
+        let wait = if matches!(request, Request::Open { .. }) {
+            self.open_timeout
+        } else {
+            RESPONSE_TIMEOUT
+        };
+        let answer = tokio::time::timeout(wait, read_line_capped(&mut reader, MAX_LINE))
+            .await
+            .map_err(|_| TerminalError::Io("no answer".into()))?
+            .map_err(|e| TerminalError::Io(e.to_string()))?
+            .ok_or_else(|| TerminalError::Io("the helper closed the connection".into()))?;
         let value: Value =
             serde_json::from_slice(&answer).map_err(|e| TerminalError::Io(e.to_string()))?;
         if value.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -239,6 +263,24 @@ impl TerminalClient {
     pub async fn kill_user(&self, user: i64) -> Result<u64, TerminalError> {
         let (value, ..) = self.request(&Request::KillUser { user }).await?;
         Ok(value.get("killed").and_then(Value::as_u64).unwrap_or(0))
+    }
+
+    /// Accounts that have shells open.
+    pub async fn owners(&self) -> Result<Vec<i64>, TerminalError> {
+        let (value, ..) = self.request(&Request::Owners).await?;
+        serde_json::from_value(value.get("owners").cloned().unwrap_or(Value::Null))
+            .map_err(|e| TerminalError::Io(e.to_string()))
+    }
+
+    /// Get ready to open shells for `user` (answers like `status`).
+    pub async fn prepare(&self, user: i64, user_name: &str) -> Result<Value, TerminalError> {
+        Ok(self
+            .request(&Request::Prepare {
+                user,
+                user_name: user_name.to_string(),
+            })
+            .await?
+            .0)
     }
 
     pub async fn open(

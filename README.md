@@ -19,7 +19,7 @@ RAST bundles the day-to-day server admin tools into one web desktop:
 | **Backup Center** | Consistent SQLite + configuration backups with schedules, retention and restore guidance. Optional: can be uninstalled in App Center. |
 | **App Center** | RAST's own apps (install or uninstall the optional ones) and verified Python, PHP CLI, Go and Node.js runtimes from a signed catalog, side by side with a selectable default, updates with rollback, and packages imported from GitHub releases ([handoff](docs/package-center-handoff.md)). |
 | **Activity Logs** | Auditable record of every action: who, what, when, result. |
-| **Terminal** | Root shells on the server for administrators, a tab per shell; shells keep running across reloads. Off until `sudo rast terminal enable` ([details](docs/TERMINAL.md)). |
+| **Terminal** | Shells in the browser, a tab per shell, kept running across reloads: root shells on the server for administrators (off until `sudo rast terminal enable`), and for accounts granted the app, shells in their own sandbox container with only their home folder and no network ([details](docs/TERMINAL.md)). |
 
 [![CI](https://github.com/Enricko/rast/actions/workflows/ci.yml/badge.svg)](https://github.com/Enricko/rast/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Enricko/rast?include_prereleases)](https://github.com/Enricko/rast/releases)

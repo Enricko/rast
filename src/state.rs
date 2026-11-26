@@ -82,6 +82,8 @@ impl AppState {
         crate::realtime::watch::spawn(&config, db.clone(), events.clone());
         // Realtime container/application reconciler (external Docker changes).
         crate::docker::reconcile::spawn(&config, db.clone(), docker.clone(), events.clone());
+        // Terminal: end shells of accounts that lost access to them.
+        crate::sandbox::spawn_access_sweeper(db.clone(), config.clone());
 
         Ok(Self {
             config,

@@ -40,6 +40,7 @@ pub const APP_IDS: &[&str] = &[
     "packages",
     "logs",
     "controlpanel",
+    "terminal",
 ];
 
 /// The "Applications" folder on the desktop: lists every installed app the
@@ -47,11 +48,6 @@ pub const APP_IDS: &[&str] = &[
 /// to other apps), so it is not in [`APP_IDS`]; it can be pinned and placed
 /// on the desktop like the others.
 pub const LAUNCHER_APP: &str = "launcher";
-
-/// Apps only administrators can open, whatever the groups say: they are not
-/// in [`APP_IDS`], so no group rule can grant them. Terminal gives a root
-/// shell on the server.
-pub const ADMIN_APPS: &[&str] = &["terminal"];
 
 /// Apps App Center can uninstall and install again. Uninstalling hides
 /// the app and closes its API for everyone (administrators included); its
@@ -62,7 +58,7 @@ const REMOVED_APPS_SETTING: &str = "apps.removed";
 
 /// Ids that may be pinned to the taskbar or placed on the desktop.
 pub fn is_desktop_app(app_id: &str) -> bool {
-    app_id == LAUNCHER_APP || APP_IDS.contains(&app_id) || ADMIN_APPS.contains(&app_id)
+    app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
 }
 
 /// Removable apps that were uninstalled in App Center.
@@ -140,7 +136,9 @@ pub fn app_description(app_id: &str) -> &'static str {
         "packages" => "Install and manage apps and verified runtimes.",
         "logs" => "Audit trail of sign-ins, file operations and administrative actions.",
         "controlpanel" => "Profile, users, shared folders, storage and system settings.",
-        "terminal" => "Root shells on this server, for administrators.",
+        "terminal" => {
+            "Shells: root on this server for administrators, a private sandbox for others."
+        }
         _ => "",
     }
 }
@@ -157,9 +155,10 @@ fn app_default_read_only(_app_id: &str) -> bool {
 /// Admin-only surfaces whose group grant is a full grant rather than
 /// read-only: members of a group granted App Center install, update,
 /// uninstall and cancel packages (approving a new GitHub source stays
-/// administrator-only).
+/// administrator-only); members granted Terminal get shells in their own
+/// sandbox container (`crate::sandbox`), never on the server itself.
 fn app_grant_manages(app_id: &str) -> bool {
-    matches!(app_id, "packages")
+    matches!(app_id, "packages" | "terminal")
 }
 
 /// Whether an explicit group allow is read-only for this application.
@@ -1103,6 +1102,9 @@ mod tests {
             (false, false)
         );
         assert_eq!(merge_app("files", None, ["allow"]), (true, false));
+        // Terminal: off by default, a grant gives a (sandbox) shell.
+        assert_eq!(merge_app("terminal", None, ["inherit"]), (false, false));
+        assert_eq!(merge_app("terminal", None, ["allow"]), (true, false));
     }
 
     #[test]

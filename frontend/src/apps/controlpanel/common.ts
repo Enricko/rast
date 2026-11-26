@@ -443,6 +443,7 @@ export const RULE_APPS: Array<{ id: string; label: string }> = [
   { id: "packages", label: "App Center" },
   { id: "logs", label: "Activity Logs" },
   { id: "controlpanel", label: "Control Panel" },
+  { id: "terminal", label: "Terminal" },
 ];
 
 export function appLabel(appId: string): string {

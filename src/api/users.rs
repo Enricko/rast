@@ -264,8 +264,12 @@ pub async fn update_user(
     )
     .await?;
     if !updated.active || updated.role != Role::Admin {
-        // Terminal shells are for administrators only.
+        // Root shells are for administrators only.
         crate::terminal::end_shells_of(id).await;
+    }
+    if !updated.active || updated.role == Role::Admin {
+        // Sandbox shells are for everyone else (administrators get root).
+        crate::sandbox::end_shells_of(&state.config, id).await;
     }
     state.events.publish_admin(
         "user.changed",
@@ -309,6 +313,7 @@ pub async fn deactivate_user(
         .ok_or(AppError::NotFound("user not found"))?;
     users::deactivate(&state.db, id).await?;
     crate::terminal::end_shells_of(id).await;
+    crate::sandbox::end_shells_of(&state.config, id).await;
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "deactivated"}),

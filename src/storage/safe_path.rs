@@ -325,12 +325,16 @@ pub fn verify_no_symlinks(root: &Path, physical: &Path) -> AppResult<bool> {
     Ok(true)
 }
 
-/// Open a file for reading **without following a final symlink**.
+/// Open a regular file for reading **without following a final symlink**.
 ///
 /// On Unix this passes `O_NOFOLLOW` (callers also perform the
 /// [`verify_same_inode`] check after opening). A symlink planted between path
 /// validation and the `open` call therefore fails with `ELOOP` instead of
 /// leaking a file from outside the storage root.
+///
+/// Anything but a regular file is refused (`InvalidInput`). Terminal
+/// sandboxes can create FIFOs in a home folder; `O_NONBLOCK` keeps opening one
+/// from waiting for a writer forever (it has no effect on regular files).
 pub fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -339,9 +343,16 @@ pub fn open_read_no_follow(path: &Path) -> std::io::Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         // The value differs per platform (x86_64 Linux 0o400000, aarch64
         // Linux 0o100000, macOS 0x100): take it from libc.
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
-    options.open(path)
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    Ok(file)
 }
 
 /// Async variant of [`open_read_no_follow`] returning a `tokio` file.
@@ -355,6 +366,9 @@ pub async fn open_read_no_follow_async(path: &Path) -> AppResult<tokio::fs::File
         Err(error) if is_symlink_refusal(&error) => {
             // ELOOP: the final component is a symlink.
             Err(AppError::Forbidden("symbolic links are not supported"))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+            Err(AppError::bad_request("only regular files can be opened"))
         }
         Err(error) => Err(error.into()),
     }
@@ -560,6 +574,15 @@ mod tests {
         std::os::unix::fs::symlink(&other, &link).unwrap();
         let refused = open_read_no_follow(&link).expect_err("O_NOFOLLOW must reject symlinks");
         assert!(is_symlink_refusal(&refused), "{refused:?}");
+
+        // A FIFO (a Terminal sandbox can make one) is refused at once
+        // instead of waiting for a writer.
+        let fifo = dir.path().join("pipe");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let refused = open_read_no_follow(&fifo).expect_err("a FIFO is not a file");
+        assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]

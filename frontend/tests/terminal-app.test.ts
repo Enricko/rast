@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isBusy, MAX_RECONNECTS, parseShellList, parseShellMessage, reconnectDelay, shellSocketUrl, tabLabel } from "../src/apps/terminal/shell";
+import { isBusy, MAX_RECONNECTS, parseShellList, parseShellMessage, reconnectDelay, sandboxSummary, shellSocketUrl, tabLabel } from "../src/apps/terminal/shell";
 
 const shell = { id: "0123456789abcdef", number: 2, createdAt: 1, attached: false, program: "htop" };
 
@@ -40,4 +40,10 @@ test("reconnects back off and give up after about two minutes", () => {
   let total = 0;
   for (let attempt = 0; attempt < MAX_RECONNECTS; attempt += 1) total += reconnectDelay(attempt);
   assert.ok(total >= 90_000 && total <= 150_000, String(total));
+});
+
+test("a sandbox badge says what the sandbox allows", () => {
+  assert.equal(sandboxSummary({ memoryMb: 1024, cpus: "2", network: false }), "Your own sandbox: only your home folder, no network, 1 GB memory, 2 CPUs");
+  assert.equal(sandboxSummary({ memoryMb: 512, cpus: "1" }), "Your own sandbox: only your home folder, 512 MB memory, 1 CPU");
+  assert.equal(sandboxSummary(undefined), "Your own sandbox: only your home folder");
 });

@@ -1,9 +1,12 @@
-//! The terminal helper: `rast terminal helper`, run as root by
-//! `rast-terminal.service`. See [`crate::terminal`] for the design.
+//! The terminal helper: shells that outlive their browser tab. See
+//! [`crate::terminal`] for the design.
 //!
-//! Each shell is a login shell of the account the helper runs as (root on a
-//! server) on its own pseudo terminal, owned by a task that keeps its recent
-//! output and forwards it to at most one viewer at a time.
+//! Each shell runs on its own pseudo terminal, owned by a task that keeps its
+//! recent output and forwards it to at most one viewer at a time. What a
+//! shell *is* comes from a [`Launcher`]: `rast terminal helper` (root, from
+//! `rast-terminal.service`) starts login shells of its own account
+//! ([`HostLauncher`]); the Docker worker starts shells in per-account
+//! sandbox containers (`crate::worker::sandbox`).
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -21,6 +24,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use rand::RngCore;
 use serde_json::{json, Value};
 use tokio::{
@@ -121,6 +125,61 @@ impl ShellSpec {
     }
 }
 
+/// What the helper's shells are, and how they start.
+#[async_trait]
+pub trait Launcher: Send + Sync + 'static {
+    /// Fields added to the `status` answer (`user`: who the shells run as).
+    async fn status(&self) -> Value;
+    /// Get ready to start shells for `owner` without waiting (sandboxes:
+    /// build the image in the background). Answers like [`Self::status`].
+    async fn prepare(&self, owner: i64, owner_name: &str) -> Result<Value, Refusal> {
+        let _ = (owner, owner_name);
+        Ok(self.status().await)
+    }
+    /// The command of a new shell for `owner`, run on the shell's terminal.
+    async fn command(&self, owner: i64, owner_name: &str) -> Result<Command, Refusal>;
+    /// Whether the shell's foreground program can be read from `/proc`
+    /// (not for shells inside containers).
+    fn shows_program(&self) -> bool {
+        true
+    }
+    /// `owner` lost access: their shells were ended, clean up after them.
+    async fn forget(&self, owner: i64) {
+        let _ = owner;
+    }
+}
+
+/// Login shells of the helper's own account (root on a server).
+pub struct HostLauncher(pub ShellSpec);
+
+#[async_trait]
+impl Launcher for HostLauncher {
+    async fn status(&self) -> Value {
+        json!({"user": self.0.user})
+    }
+
+    async fn command(&self, _owner: i64, owner_name: &str) -> Result<Command, Refusal> {
+        Ok(self.0.command(owner_name))
+    }
+}
+
+/// How many shells a helper keeps open.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// On the whole server.
+    pub total: usize,
+    /// Per account.
+    pub per_owner: usize,
+}
+
+impl Limits {
+    /// The root helper's limits.
+    pub const HOST: Self = Self {
+        total: MAX_SESSIONS,
+        per_owner: MAX_SESSIONS,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Sessions
 
@@ -219,19 +278,21 @@ impl Scrollback {
 
 /// The shells of this helper.
 pub struct Helper {
-    shell: ShellSpec,
+    launcher: Arc<dyn Launcher>,
+    limits: Limits,
     sessions: Mutex<HashMap<String, Arc<SessionHandle>>>,
     viewers: AtomicU64,
 }
 
+/// Why a request was refused: a stable `code` and a message for people.
 #[derive(Debug)]
-struct Refusal {
-    code: &'static str,
-    message: String,
+pub struct Refusal {
+    pub code: &'static str,
+    pub message: String,
 }
 
 impl Refusal {
-    fn new(code: &'static str, message: impl Into<String>) -> Self {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -240,12 +301,21 @@ impl Refusal {
 }
 
 impl Helper {
-    pub fn new(shell: ShellSpec) -> Arc<Self> {
+    pub fn new(launcher: Arc<dyn Launcher>, limits: Limits) -> Arc<Self> {
         Arc::new(Self {
-            shell,
+            launcher,
+            limits,
             sessions: Mutex::new(HashMap::new()),
             viewers: AtomicU64::new(1),
         })
+    }
+
+    /// Accounts that have shells open.
+    pub fn owners(&self) -> Vec<i64> {
+        let mut owners: Vec<i64> = self.lock().values().map(|s| s.owner).collect();
+        owners.sort_unstable();
+        owners.dedup();
+        owners
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<SessionHandle>>> {
@@ -287,7 +357,39 @@ impl Helper {
         for session in &sessions {
             let _ = session.cmd.send(Cmd::Kill).await;
         }
+        // Let the shells hang up before cleaning up after them.
+        for _ in 0..40 {
+            if !self.lock().values().any(|s| s.owner == owner) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        self.launcher.forget(owner).await;
         sessions.len()
+    }
+
+    /// Refuse a new shell for `owner` when a limit is reached.
+    fn check_limits(&self, owner: i64) -> Result<(), Refusal> {
+        let sessions = self.lock();
+        if sessions.len() >= self.limits.total {
+            return Err(Refusal::new(
+                "busy",
+                format!(
+                    "{} terminals are already open on this server; close one first",
+                    self.limits.total
+                ),
+            ));
+        }
+        if sessions.values().filter(|s| s.owner == owner).count() >= self.limits.per_owner {
+            return Err(Refusal::new(
+                "busy",
+                format!(
+                    "You already have {} terminals open; close one first",
+                    self.limits.per_owner
+                ),
+            ));
+        }
+        Ok(())
     }
 
     async fn kill_all(&self) {
@@ -298,22 +400,17 @@ impl Helper {
     }
 
     /// Start a shell for `owner`.
-    fn spawn(
+    async fn spawn(
         self: &Arc<Self>,
         owner: i64,
         owner_name: &str,
         cols: u16,
         rows: u16,
     ) -> Result<Arc<SessionHandle>, Refusal> {
+        self.check_limits(owner)?;
+        let command = self.launcher.command(owner, owner_name).await?;
+        self.check_limits(owner)?;
         let mut sessions = self.lock();
-        if sessions.len() >= MAX_SESSIONS {
-            return Err(Refusal::new(
-                "busy",
-                format!(
-                    "{MAX_SESSIONS} terminals are already open on this server; close one first"
-                ),
-            ));
-        }
         let used: Vec<u32> = sessions
             .values()
             .filter(|s| s.owner == owner)
@@ -333,9 +430,18 @@ impl Helper {
         };
         let (master, slave) =
             open_pty(cols, rows).map_err(|e| unavailable("open a terminal", e))?;
-        let child = spawn_on_pty(self.shell.command(owner_name), slave)
-            .map_err(|e| unavailable(&format!("start {}", self.shell.program.display()), e))?;
-        let pid = child.id().unwrap_or(0);
+        let program = command
+            .as_std()
+            .get_program()
+            .to_string_lossy()
+            .into_owned();
+        let child = spawn_on_pty(command, slave)
+            .map_err(|e| unavailable(&format!("start {program}"), e))?;
+        let pid = if self.launcher.shows_program() {
+            child.id().unwrap_or(0)
+        } else {
+            0
+        };
         set_nonblocking(master.as_raw_fd())
             .map_err(|e| unavailable("configure the terminal", e))?;
         // SAFETY: an OwnedFd stays open and keeps returning the same descriptor
@@ -587,11 +693,28 @@ pub async fn serve_connection(helper: Arc<Helper>, stream: UnixStream) {
     match request {
         Request::Status => {
             let open = helper.lock().len();
-            let _ = respond(
-                &mut writer,
-                json!({"ok": true, "version": crate::VERSION, "sessions": open, "max": MAX_SESSIONS, "user": helper.shell.user}),
-            )
-            .await;
+            let mut answer = json!({
+                "ok": true,
+                "version": crate::VERSION,
+                "sessions": open,
+                "max": helper.limits.total,
+                "perUser": helper.limits.per_owner,
+            });
+            merge(&mut answer, helper.launcher.status().await);
+            let _ = respond(&mut writer, answer).await;
+        }
+        Request::Owners => {
+            let _ = respond(&mut writer, json!({"ok": true, "owners": helper.owners()})).await;
+        }
+        Request::Prepare { user, user_name } => {
+            match helper.launcher.prepare(user, &clean_name(&user_name)).await {
+                Ok(state) => {
+                    let mut answer = json!({"ok": true});
+                    merge(&mut answer, state);
+                    let _ = respond(&mut writer, answer).await;
+                }
+                Err(refusal) => refuse(&mut writer, refusal).await,
+            }
         }
         Request::List { user } => {
             let _ = respond(
@@ -621,13 +744,9 @@ pub async fn serve_connection(helper: Arc<Helper>, stream: UnixStream) {
             cols,
             rows,
         } => {
-            let name: String = user_name
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-                .take(64)
-                .collect();
+            let name = clean_name(&user_name);
             let (cols, rows) = clamp_size(Some(cols), Some(rows));
-            match helper.spawn(user, &name, cols, rows) {
+            match helper.spawn(user, &name, cols, rows).await {
                 Ok(session) => attach(helper, session, cols, rows, reader, writer).await,
                 Err(refusal) => refuse(&mut writer, refusal).await,
             }
@@ -654,6 +773,23 @@ pub async fn serve_connection(helper: Arc<Helper>, stream: UnixStream) {
                     .await;
                 }
             }
+        }
+    }
+}
+
+/// An account name as it may appear in an environment variable.
+fn clean_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(64)
+        .collect()
+}
+
+/// Add `extra`'s fields to the object `answer`.
+fn merge(answer: &mut Value, extra: Value) {
+    if let (Some(answer), Value::Object(extra)) = (answer.as_object_mut(), extra) {
+        for (key, value) in extra {
+            answer.entry(key).or_insert(value);
         }
     }
 }
@@ -826,7 +962,13 @@ pub async fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
             _ = tokio::signal::ctrl_c() => {},
         }
     };
-    serve(Helper::new(shell), listener, peer.uid, shutdown).await;
+    serve(
+        Helper::new(Arc::new(HostLauncher(shell)), Limits::HOST),
+        listener,
+        peer.uid,
+        shutdown,
+    )
+    .await;
     let _ = std::fs::remove_file(&socket);
     Ok(ExitCode::SUCCESS)
 }
@@ -956,7 +1098,14 @@ mod tests {
         // SAFETY: getuid never fails.
         let uid = unsafe { libc::getuid() };
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = tokio::spawn(serve(Helper::new(test_shell()), listener, uid, async {
+        let helper = Helper::new(
+            Arc::new(HostLauncher(test_shell())),
+            Limits {
+                total: 8,
+                per_owner: 3,
+            },
+        );
+        let server = tokio::spawn(serve(helper.clone(), listener, uid, async {
             let _ = stopped.await;
         }));
         let client = TerminalClient::new(&socket);
@@ -1029,8 +1178,15 @@ mod tests {
         let a = client.open(1, "admin", 80, 24).await.unwrap();
         let b = client.open(1, "admin", 80, 24).await.unwrap();
         assert_eq!((a.info.number, b.info.number), (1, 2));
-        drop((a, b));
-        assert_eq!(client.kill_user(1).await.unwrap(), 2);
+        assert_eq!(helper.owners(), vec![1]);
+        // The per-account limit (3 here).
+        let c = client.open(1, "admin", 80, 24).await.unwrap();
+        assert!(matches!(
+            client.open(1, "admin", 80, 24).await,
+            Err(TerminalError::Refused { code, .. }) if code == "busy"
+        ));
+        drop((a, b, c));
+        assert_eq!(client.kill_user(1).await.unwrap(), 3);
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(client.list(1).await.unwrap().is_empty());
 

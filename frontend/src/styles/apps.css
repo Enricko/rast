@@ -4827,3 +4827,19 @@ button.pkg-pill {
   font-family: var(--font-mono);
   font-size: 13px;
 }
+
+.term-setup-spin {
+  animation: term-spin 1.4s linear infinite;
+}
+
+@keyframes term-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term-setup-spin {
+    animation: none;
+  }
+}

@@ -24,6 +24,15 @@ export type ShellMessage =
 
 export type ShellPhase = "loading" | "connecting" | "ready" | "reconnecting" | "detached" | "ended" | "failed";
 
+/** What the account badge says about a sandbox (its limits). */
+export function sandboxSummary(limits?: { memoryMb?: number; cpus?: string; network?: boolean }): string {
+  const parts = ["Your own sandbox: only your home folder"];
+  if (limits?.network === false) parts.push("no network");
+  if (limits?.memoryMb) parts.push(`${limits.memoryMb >= 1024 ? `${limits.memoryMb / 1024} GB` : `${limits.memoryMb} MB`} memory`);
+  if (limits?.cpus) parts.push(`${limits.cpus} CPU${limits.cpus === "1" ? "" : "s"}`);
+  return parts.join(", ");
+}
+
 /** WebSocket address of the Terminal, on the page's own host. */
 export function shellSocketUrl(location: Pick<Location, "protocol" | "host">): string {
   return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/terminal/ws`;

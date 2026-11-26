@@ -329,6 +329,30 @@ if [ -f "$UNIT_DIR/$TERMINAL_UNIT" ] && head -n 1 "$UNIT_DIR/$TERMINAL_UNIT" | g
 fi
 
 # ---------------------------------------------------------------------------
+# Terminal sandboxes: RAST's own throwaway containers (label rast.shell=1)
+# and their image. Files they wrote live in the home folders and stay.
+# Docker Compose apps deployed through RAST are not touched.
+# ---------------------------------------------------------------------------
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    _shells=$(docker ps -aq --filter label=rast.shell=1 2>/dev/null || true)
+    _images=$(docker image ls rast-shell --format '{{.Repository}}:{{.Tag}}' 2>/dev/null || true)
+    if [ "$DRY_RUN" -eq 1 ]; then
+        [ -n "$_shells" ] && log "dry run: would remove the Terminal sandbox containers"
+        [ -n "$_images" ] && log "dry run: would remove the Terminal sandbox image"
+    else
+        if [ -n "$_shells" ]; then
+            # shellcheck disable=SC2086 # one id per word
+            run docker rm -f $_shells >/dev/null 2>&1 || warn "could not remove the Terminal sandbox containers"
+            log "removed the Terminal sandbox containers"
+        fi
+        if [ -n "$_images" ]; then
+            # shellcheck disable=SC2086 # one image per word
+            run docker image rm $_images >/dev/null 2>&1 || warn "could not remove the Terminal sandbox image"
+        fi
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # Stop and remove services
 # ---------------------------------------------------------------------------
 for _unit in $UNITS; do

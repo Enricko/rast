@@ -43,9 +43,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     process::Command,
-    sync::{oneshot, Semaphore},
+    sync::Semaphore,
 };
 
+pub(crate) mod sandbox;
 mod terminal;
 
 use crate::{
@@ -169,20 +170,31 @@ pub async fn run(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
         apps_dir = %options.apps_dir.display(),
         "starting privileged docker worker"
     );
-    let (tx, rx) = oneshot::channel::<()>();
-    let shutdown = async move {
-        let _ = rx.await;
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    let stopped = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
+        let _ = rx.wait_for(|stop| *stop).await;
     };
-    // Bridge OS signals to the oneshot shutdown used by `serve`.
+    // Bridge OS signals to the shutdown used by both servers.
     tokio::spawn(async move {
         shutdown_signal().await;
-        let _ = tx.send(());
+        let _ = tx.send(true);
     });
-    serve(options, shutdown)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> {
-            format!("docker worker failed: {e}").into()
-        })?;
+    // Terminal sandboxes for accounts that are not administrators.
+    let options = Arc::new(options);
+    let shells = match sandbox::start(&cfg, &options) {
+        Ok(shells) => Some(tokio::spawn(shells.serve(stopped(rx.clone())))),
+        Err(error) => {
+            tracing::warn!(error = %error, "Terminal sandboxes are unavailable");
+            None
+        }
+    };
+    let served = serve(Arc::unwrap_or_clone(options), stopped(rx.clone())).await;
+    if let Some(shells) = shells {
+        let _ = shells.await;
+    }
+    served.map_err(|e| -> Box<dyn std::error::Error> {
+        format!("docker worker failed: {e}").into()
+    })?;
     tracing::info!("docker worker stopped");
     Ok(ExitCode::SUCCESS)
 }
@@ -1318,7 +1330,7 @@ fn valid_volume_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-struct CommandOutput {
+pub(crate) struct CommandOutput {
     success: bool,
     stdout: String,
     stderr: String,

@@ -68,6 +68,14 @@ impl TestServer {
         .expect("create user");
     }
 
+    async fn user_id(&self, username: &str) -> i64 {
+        sqlx::query_scalar("SELECT id FROM users WHERE username = ?")
+            .bind(username)
+            .fetch_one(&self.state.db)
+            .await
+            .expect("user id")
+    }
+
     async fn request(
         &self,
         method: &str,
@@ -747,6 +755,27 @@ async fn terminal_is_for_administrators_and_off_until_enabled() {
     assert_eq!(body["reason"], "off");
     assert_eq!(body["enableCommand"], "sudo rast terminal enable");
     // (Cross-site WebSockets: `api::terminal::same_origin`, unit tested.)
+
+    // An administrator grants Terminal to alice: she gets a sandbox, which
+    // needs Docker (not running here).
+    let alice_id = server.user_id("alice").await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{alice_id}/access-rules"),
+            Some(json!({"folderRules": [], "appRules": [{"appId": "terminal", "rule": "allow"}]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request("GET", "/api/terminal", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["mode"], "sandbox");
+    assert_eq!(body["available"], false);
+    assert_eq!(body["reason"], "docker");
+    assert_eq!(body.get("enableCommand"), None);
 }
 
 #[tokio::test]
@@ -2353,7 +2382,7 @@ async fn effective_access_matches_api_decisions_for_every_account() {
     assert_eq!(page["folders"][0]["level"], "write");
     assert_eq!(
         page["apps"].as_array().unwrap().len(),
-        7,
+        8,
         "apps always complete"
     );
     let (_, _, none_only) = server
@@ -2966,7 +2995,7 @@ async fn create_user_saves_groups_rules_and_options_with_the_account() {
         ),
         (
             "unknown application",
-            json!({"appRules": [{"appId": "terminal", "rule": "allow"}]}),
+            json!({"appRules": [{"appId": "rootshell", "rule": "allow"}]}),
         ),
         (
             "bad application rule",
