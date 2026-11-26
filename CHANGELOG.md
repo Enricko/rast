@@ -11,17 +11,7 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- **Dialogs stay open with what you typed in them.** A dialog open in a
-  window now comes back after a reload, in a new tab or on another device,
-  with the text typed into it, and shows (and closes) live on the account's
-  other open devices: File Station's New folder and Rename; Control Panel's
-  Add user, Edit user, Create or edit group and New or edit shared folder;
-  Backup Center's Create backup and Backup schedule; App Center's Install
-  from GitHub and consumer editor; Docker's Pull image, Deploy application
-  and Run (with the variable and volume rows you added). Passwords are
-  never kept. Confirmations ("Delete …?") are not kept on purpose, so they
-  never pop up on another device; neither is the rename prompt of an upload
-  (the upload itself stops on a reload).
+- Nothing yet.
 
 ### Planned
 
@@ -33,6 +23,22 @@ this file by `scripts/changelog-section.sh`.
 - Automated restore drills and a documented JSON schema for backup manifests.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.14] - 2026-11-26
+
+### Added
+
+- **Dialogs stay open with what you typed in them.** A dialog open in a
+  window now comes back after a reload, in a new tab or on another device,
+  with the text typed into it, and shows (and closes) live on the account's
+  other open devices: File Station's New folder and Rename; Control Panel's
+  Add user, Edit user, Create or edit group and New or edit shared folder;
+  Backup Center's Create backup and Backup schedule; App Center's Install
+  from GitHub and consumer editor; Docker's Pull image, Deploy application
+  and Run (with the variable and volume rows you added). Passwords are
+  never kept. Confirmations ("Delete …?") are not kept on purpose, so they
+  never pop up on another device; neither is the rename prompt of an upload
+  (the upload itself stops on a reload).
 
 ## [0.9.13] - 2026-11-26
 
