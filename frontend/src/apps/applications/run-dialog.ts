@@ -183,6 +183,7 @@ function showDialog(deps: RunDialogDeps, details: ImageDetails): void {
 
   let submitted = false;
   modal({
+    within: deps.ctx.root,
     title: `Run ${plan.name}`,
     body,
     wide: true,

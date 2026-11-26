@@ -138,6 +138,7 @@ export function openPreview(ctx: AppContext, lifecycle: AppLifecycle, entry: Fil
   }
 
   modal({
+    within: ctx.root,
     title: `Preview — ${entry.name}`,
     body,
     wide: true,

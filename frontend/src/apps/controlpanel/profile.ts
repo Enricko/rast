@@ -306,6 +306,7 @@ export async function renderProfileTab(tab: TabRenderContext): Promise<() => voi
 
   async function revokeOtherSessions(): Promise<void> {
     const ok = await confirmDialog({
+      within: ctx.root,
       title: "Sign out other sessions",
       message: "Sign out every session except this one? Other devices will need to sign in again.",
       confirmLabel: "Sign out others",

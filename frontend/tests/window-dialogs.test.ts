@@ -129,3 +129,11 @@ test("a dialog another page shows is kept even when this page does not open it",
     Date.now = realNow;
   }
 });
+
+test("a window's dialogs open over that window; the desktop's over the desktop", () => {
+  const content = { tag: "win-body" } as unknown as HTMLElement;
+  const windowDialogs = new WindowDialogs(() => undefined, content);
+  assert.equal(windowDialogs.session("rename", { path: "/a" }).host, content);
+  const desktopDialogs = new WindowDialogs(() => undefined);
+  assert.equal(desktopDialogs.session("sign-out").host, undefined);
+});

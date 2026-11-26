@@ -126,6 +126,7 @@ export function pickDestination(
     };
 
     modal({
+      within: ctx.root,
       title: options.title,
       body,
       wide: true,

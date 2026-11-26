@@ -487,6 +487,7 @@ export class UploadManager {
         h("p", { class: "small muted" }, "Choose what should happen to the new file. The existing file is never removed unless you choose Overwrite."),
       );
       const close = modal({
+        within: this.ctx.root,
         title: "File name conflict",
         body,
         onClose: () => {
@@ -503,6 +504,7 @@ export class UploadManager {
             keepOpen: true,
             onClick: async () => {
               const next = await promptDialog({
+                within: this.ctx.root,
                 title: "Rename upload",
                 label: "New file name",
                 value: name,

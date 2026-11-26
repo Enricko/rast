@@ -1545,6 +1545,52 @@ body.app-ready #boot-splash {
   z-index: 700;
 }
 
+/* An app's dialog covers that app's window only, as on other systems: the
+   rest of the desktop stays usable, and the title bar still moves, minimizes
+   and closes the window (closing it closes the dialog). */
+.modal-backdrop.modal-in-window {
+  position: absolute;
+  inset: var(--titlebar-h) 0 0 0;
+  z-index: 2;
+  padding: 14px;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  backdrop-filter: blur(1.5px);
+}
+
+.window.is-maximized .modal-backdrop.modal-in-window,
+.window.is-tiled .modal-backdrop.modal-in-window,
+.window.is-mobile .modal-backdrop.modal-in-window {
+  border-radius: 0;
+}
+
+.modal-in-window .modal {
+  max-height: 100%;
+}
+
+/* Clicked beside the dialog: it asks for attention instead of closing. */
+.modal.modal-nudge {
+  animation: modal-nudge 0.3s ease;
+}
+
+@keyframes modal-nudge {
+  20% {
+    transform: translateX(-6px);
+  }
+  50% {
+    transform: translateX(5px);
+  }
+  80% {
+    transform: translateX(-2px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal.modal-nudge {
+    animation: none;
+    outline: 2px solid var(--accent);
+  }
+}
+
 .modal-close {
   margin-left: auto;
 }

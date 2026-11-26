@@ -610,7 +610,7 @@ async function mountLogs(ctx: AppContext): Promise<() => void> {
         ),
       ),
     );
-    modal({ title: `Activity #${entry.id}`, body, wide: true });
+    modal({ within: ctx.root, title: `Activity #${entry.id}`, body, wide: true });
   }
 
   function applyFilterInputs(next: Filters): void {

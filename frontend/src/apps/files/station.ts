@@ -14,7 +14,7 @@ import {
   relativeTime,
 } from "../../core/format";
 import { fileIcon, iconSvg } from "../../core/icons";
-import { confirmDialog, contextMenu, promptDialog } from "../../core/ui";
+import { confirmDialog, contextMenu, dialogOpen, promptDialog } from "../../core/ui";
 import type { FileEntry, FileListing, FileRoot, TrashEntry } from "../../core/types";
 import { AppLifecycle, isAbortError } from "../../components/lifecycle";
 import { watchJob, jobProgressFraction, jobProgressLabel, type JobUpdate } from "../../components/jobs";
@@ -645,7 +645,7 @@ export class FileStation {
   private onKeyDown(event: KeyboardEvent): void {
     if (this.disposed) return;
     if (!this.windowFocused()) return;
-    if (document.querySelector(".modal-backdrop")) return;
+    if (dialogOpen(this.ctx.root)) return;
     const target = event.target;
     if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable='true']")) return;
 

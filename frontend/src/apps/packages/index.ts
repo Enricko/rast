@@ -1403,6 +1403,7 @@ class PackageCenterApp {
       info,
     );
     close = modal({
+      within: this.ctx.root,
       title: `Install ${p.name}`,
       body,
       wide: true,
@@ -1487,7 +1488,7 @@ class PackageCenterApp {
         ]),
       ),
     );
-    close = modal({ title: "App Center settings", body, actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }] });
+    close = modal({ within: this.ctx.root, title: "App Center settings", body, actions: [{ label: "Close", variant: "ghost", onClick: (done) => done() }] });
   }
 
   // ---------------------------------------------------------------- actions

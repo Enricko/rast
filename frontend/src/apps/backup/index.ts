@@ -773,6 +773,7 @@ class BackupCenterApp {
     const status = h("div", { class: "small muted" }, "Running integrity check…");
     body.appendChild(status);
     const closeDialog = modal({
+      within: this.ctx.root,
       title: "Verify backup",
       body,
       actions: [{ label: "Close", variant: "ghost", onClick: () => {} }],
@@ -1123,7 +1124,7 @@ class BackupCenterApp {
       ),
       h("p", { class: "small muted" }, "Keep at least two archives and copy important ones off the server."),
     );
-    const close = modal({ title: "How retention works", body, actions: [{ label: "Close", variant: "ghost", onClick: () => {} }] });
+    const close = modal({ within: this.ctx.root, title: "How retention works", body, actions: [{ label: "Close", variant: "ghost", onClick: () => {} }] });
     this.lc.add(close);
   }
 
@@ -1146,6 +1147,7 @@ class BackupCenterApp {
       stepsHost,
     );
     const close = modal({
+      within: this.ctx.root,
       title: `Restore guide — ${backup.fileName || backup.id}`,
       body,
       wide: true,

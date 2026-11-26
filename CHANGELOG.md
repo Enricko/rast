@@ -38,6 +38,16 @@ this file by `scripts/changelog-section.sh`.
   models get their reasoning back between tool steps, and models without
   tool support answer without tools. Database schema v12.
 
+### Changed
+
+- **An app's dialogs open in its own window**, as on other systems, instead
+  of dimming the whole desktop: they cover only that window's content, move
+  with it, and close when it closes. The title bar still moves, minimizes and
+  closes the window, and every other window, the taskbar and the start menu
+  stay usable meanwhile. Clicking the window's dimmed content draws
+  attention to its dialog instead of closing it. Desktop dialogs (Sign out,
+  Personalize, keyboard shortcuts) still cover the desktop.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless

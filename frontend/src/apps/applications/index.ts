@@ -1799,6 +1799,7 @@ class ApplicationsApp {
 
     let submitted = false;
     const close = modal({
+      within: this.ctx.root,
       title: "Deploy application",
       body,
       wide: true,
@@ -2430,6 +2431,7 @@ class ApplicationsApp {
     renderOverview();
 
     const close = modal({
+      within: this.ctx.root,
       title: `Application — ${detail.name || detail.slug}`,
       body,
       wide: true,
@@ -2535,6 +2537,7 @@ class ApplicationsApp {
       validation,
     );
     modal({
+      within: this.ctx.root,
       title: "Delete application",
       body,
       onClose: () => undefined,

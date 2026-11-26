@@ -78,7 +78,14 @@ export class WindowDialogs {
   private reopening = false;
   private disposed = false;
 
-  constructor(private readonly onChange: () => void) {}
+  /**
+   * `host`: something inside the window (its content), so that its dialogs
+   * open over that window; none for the desktop's own dialogs.
+   */
+  constructor(
+    private readonly onChange: () => void,
+    private readonly host?: HTMLElement,
+  ) {}
 
   /** The `session` for a dialog `name` about `params` (AppContext.dialog). */
   session(name: string, params?: unknown): DialogSession {
@@ -86,6 +93,7 @@ export class WindowDialogs {
     let key = dialogKey(name, stored);
     let entry: OpenDialog | null = null;
     return {
+      ...(this.host ? { host: this.host } : {}),
       update: (next) => {
         stored = plainParams(next);
         key = dialogKey(name, stored);

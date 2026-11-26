@@ -21,7 +21,7 @@ import {
   type ThemeSetting,
 } from "../core/appearance";
 import { ToastCenter } from "../core/toast";
-import { confirmDialog, contextMenu, errorMessage, type ContextMenuEntry } from "../core/ui";
+import { confirmDialog, contextMenu, dialogOpen, errorMessage, type ContextMenuEntry } from "../core/ui";
 import { getRealtime } from "../core/realtime";
 import { WindowManager, type WindowInfo, type WindowPlacement } from "../core/wm";
 import { setFavicon } from "./brand";
@@ -289,7 +289,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         if (restore?.view) view.apply(restore.view, false);
         const dialogs = new WindowDialogs(() => {
           if (sessionReady) sessionSaver.schedule();
-        });
+        }, mount.contentEl);
         windowDialogs.set(windowId, dialogs);
         mount.onDispose(() => {
           dialogs.dispose();
@@ -1333,7 +1333,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (document.querySelector(".modal-backdrop")) return;
+    if (dialogOpen()) return;
     if (event.key === "Escape") {
       if (panel) {
         closePanel();
@@ -1357,7 +1357,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // Tap ⌘ Cmd (Mac) / the Windows key: open or close the start menu.
   disposers.push(
     watchOsKeyTap(() => {
-      if (document.querySelector(".modal-backdrop")) return;
+      if (dialogOpen()) return;
       toggleStartPanel(startButton);
     }),
   );

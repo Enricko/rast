@@ -1100,6 +1100,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     const forceChange = switchControl({ label: "Require password change at next sign-in", checked: true });
     const alert = h("div", { class: "banner banner-error", hidden: true, role: "alert" });
     modal({
+      within: ctx.root,
       title: `Reset password — ${user.username}`,
       body: h(
         "div",

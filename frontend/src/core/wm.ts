@@ -8,6 +8,7 @@
 import { displayFactor, onDisplayChange, stageSize } from "./display";
 import { h } from "./dom";
 import { appIconSvg, iconSvg } from "./icons";
+import { WINDOW_CLOSING } from "./ui";
 
 export interface WindowRect {
   x: number;
@@ -485,6 +486,8 @@ export class WindowManager {
       }
     }
     this.records.delete(id);
+    // Dialogs opened over this window close with it.
+    record.el.dispatchEvent(new CustomEvent(WINDOW_CLOSING));
     record.el.classList.add("closing");
     const el = record.el;
     window.setTimeout(() => el.remove(), 130);

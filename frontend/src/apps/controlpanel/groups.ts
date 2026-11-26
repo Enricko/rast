@@ -363,6 +363,7 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
       );
 
       closeFn = modal({
+        within: ctx.root,
         title: "Delete group",
         body,
         wide: Boolean(impact && impact.lines.length > 0),

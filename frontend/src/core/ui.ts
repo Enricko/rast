@@ -11,6 +11,8 @@ import { iconSvg } from "./icons";
 export interface ModalSession {
   opened(el: HTMLElement, close: () => void): void;
   closed(): void;
+  /** Something inside the window the dialog belongs to: it opens over that window. */
+  readonly host?: HTMLElement;
 }
 
 /** A dialog kept with its window (`AppContext.dialog`). */
@@ -37,6 +39,37 @@ export interface ModalOptions {
   onClose?: () => void;
   /** Keep the dialog with its window (see `AppContext.dialog`). */
   session?: ModalSession;
+  /**
+   * Something inside the app window the dialog belongs to (e.g. `ctx.root`):
+   * the dialog opens over that window only, like an app's dialog on other
+   * systems, and leaves the rest of the desktop usable. Without it (and
+   * without a window's `session`) the dialog covers the whole desktop.
+   */
+  within?: HTMLElement;
+}
+
+/** Sent to a window's element when it closes: its dialogs close too. */
+export const WINDOW_CLOSING = "rast:window-closing";
+
+/** The window a dialog opened `within` this element belongs to, if any. */
+function ownerWindow(el: HTMLElement | undefined): HTMLElement | null {
+  return el?.closest<HTMLElement>(".window") ?? null;
+}
+
+/** Dialogs that cover the whole desktop (not one window). */
+function desktopDialogs(): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>("body > .modal-backdrop:not(.modal-leaving)"));
+}
+
+/**
+ * Whether a dialog keeps the user from working at `el`: one over the whole
+ * desktop, or one over the window `el` is in. Global shortcuts pass nothing
+ * and only stop for dialogs over the whole desktop.
+ */
+export function dialogOpen(el?: Element | null): boolean {
+  if (desktopDialogs().length > 0) return true;
+  const win = el?.closest(".window");
+  return Boolean(win?.querySelector(":scope > .modal-backdrop:not(.modal-leaving)"));
 }
 
 function focusables(root: HTMLElement): HTMLElement[] {
@@ -50,7 +83,11 @@ function focusables(root: HTMLElement): HTMLElement[] {
 export function modal(options: ModalOptions): () => void {
   const dismissible = options.dismissible !== false;
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  const backdrop = h("div", { class: "modal-backdrop", role: "presentation" });
+  const owner = ownerWindow(options.within ?? options.session?.host);
+  const backdrop = h("div", {
+    class: `modal-backdrop${owner ? " modal-in-window" : ""}`,
+    role: "presentation",
+  });
   const modalEl = h(
     "div",
     { class: `modal${options.wide ? " modal-wide" : ""}`, role: "dialog", ariaModal: true, ariaLabel: options.title },
@@ -62,18 +99,36 @@ export function modal(options: ModalOptions): () => void {
     closed = true;
     backdrop.classList.add("modal-leaving");
     document.removeEventListener("keydown", onKey, true);
+    owner?.removeEventListener(WINDOW_CLOSING, close);
     window.setTimeout(() => {
       backdrop.remove();
-      previousFocus?.focus({ preventScroll: true });
+      // Back to where the user was, unless they went on to work elsewhere.
+      const active = document.activeElement;
+      if (!owner || !active || active === document.body || owner.contains(active)) {
+        previousFocus?.focus({ preventScroll: true });
+      }
     }, 120);
     options.session?.closed();
     options.onClose?.();
   };
 
+  /** Keys belong to the topmost dialog of where the user is working. */
+  const ownsKeys = (): boolean => {
+    if (!backdrop.isConnected) return false;
+    const desktop = desktopDialogs();
+    if (!owner) return desktop[desktop.length - 1] === backdrop;
+    if (desktop.length > 0) return false;
+    // Only while its window is the one in front, and the keys are not for
+    // something outside it (the start menu, another window's field).
+    if (!owner.classList.contains("is-focused")) return false;
+    const active = document.activeElement;
+    if (active && active !== document.body && !owner.contains(active)) return false;
+    const mine = owner.querySelectorAll(":scope > .modal-backdrop:not(.modal-leaving)");
+    return mine[mine.length - 1] === backdrop;
+  };
+
   const onKey = (event: KeyboardEvent) => {
-    // Keys belong to the topmost dialog (one can open over another).
-    const open = document.querySelectorAll(".modal-backdrop:not(.modal-leaving)");
-    if (open.length > 0 && open[open.length - 1] !== backdrop) return;
+    if (!ownsKeys()) return;
     if (event.key === "Escape") {
       if (dismissible) {
         event.preventDefault();
@@ -88,7 +143,10 @@ export function modal(options: ModalOptions): () => void {
     const first = items[0];
     const last = items[items.length - 1];
     if (!first || !last) return;
-    if (event.shiftKey && document.activeElement === first) {
+    if (!modalEl.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && document.activeElement === first) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && document.activeElement === last) {
@@ -149,20 +207,40 @@ export function modal(options: ModalOptions): () => void {
     modalEl.appendChild(foot);
   }
 
+  const focusInitial = () => {
+    const initial =
+      modalEl.querySelector<HTMLElement>("[data-autofocus]") ??
+      focusables(modalEl).find((el) => !el.classList.contains("modal-close")) ??
+      modalEl.querySelector<HTMLElement>(".modal-foot .btn-primary");
+    initial?.focus({ preventScroll: true });
+  };
+
   backdrop.appendChild(modalEl);
   backdrop.addEventListener("pointerdown", (event) => {
-    if (event.target === backdrop && dismissible) close();
+    if (event.target !== backdrop) return;
+    if (owner) {
+      // The window's content waits for its dialog (as on other systems):
+      // clicking it brings the dialog back to attention instead of closing it.
+      event.preventDefault();
+      modalEl.classList.remove("modal-nudge");
+      void modalEl.offsetWidth;
+      modalEl.classList.add("modal-nudge");
+      if (!modalEl.contains(document.activeElement)) focusInitial();
+    } else if (dismissible) {
+      close();
+    }
   });
   document.addEventListener("keydown", onKey, true);
-  document.body.appendChild(backdrop);
+  if (owner) {
+    owner.appendChild(backdrop);
+    owner.addEventListener(WINDOW_CLOSING, close);
+  } else {
+    document.body.appendChild(backdrop);
+  }
   options.session?.opened(modalEl, close);
 
   // Move focus inside the dialog once it is attached.
-  const initial =
-    modalEl.querySelector<HTMLElement>("[data-autofocus]") ??
-    focusables(modalEl).find((el) => !el.classList.contains("modal-close")) ??
-    modalEl.querySelector<HTMLElement>(".modal-foot .btn-primary");
-  window.setTimeout(() => initial?.focus({ preventScroll: true }), 20);
+  window.setTimeout(focusInitial, 20);
   return close;
 }
 
@@ -175,6 +253,8 @@ export function confirmDialog(options: {
   dismissible?: boolean;
   requireTyped?: string;
   session?: ModalSession;
+  /** See `ModalOptions.within`. */
+  within?: HTMLElement;
 }): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -203,6 +283,7 @@ export function confirmDialog(options: {
     };
     closeFn = modal({
       ...(options.session ? { session: options.session } : {}),
+      ...(options.within ? { within: options.within } : {}),
       title: options.title,
       body,
       dismissible: options.dismissible !== false,
@@ -249,6 +330,8 @@ export function promptDialog(options: {
   autocomplete?: string;
   validate?: (value: string) => string | null;
   session?: ModalSession;
+  /** See `ModalOptions.within`. */
+  within?: HTMLElement;
 }): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
@@ -276,6 +359,7 @@ export function promptDialog(options: {
     };
     closeFn = modal({
       ...(options.session ? { session: options.session } : {}),
+      ...(options.within ? { within: options.within } : {}),
       title: options.title,
       body,
       onClose: () => finish(null),

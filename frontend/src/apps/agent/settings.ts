@@ -196,6 +196,7 @@ export function mountSettings(options: {
 
   async function remove(what: string, name: string, path: string): Promise<void> {
     const ok = await confirmDialog({
+      within: ctx.root,
       title: `Delete ${what}`,
       message: `Delete "${name}"?`,
       confirmLabel: "Delete",
@@ -329,6 +330,7 @@ export function mountSettings(options: {
       status,
     );
     modal({
+      within: ctx.root,
       title: existing ? existing.name : "Add provider",
       body: form,
       wide: true,
@@ -453,6 +455,7 @@ export function mountSettings(options: {
       status,
     );
     modal({
+      within: ctx.root,
       title: existing ? existing.name : "Add agent",
       body: form,
       wide: true,
@@ -559,6 +562,7 @@ export function mountSettings(options: {
     kind.addEventListener("change", sync);
     sync();
     modal({
+      within: ctx.root,
       title: "Web search",
       body: h("div", { class: "ai-form" }, h("label", { class: "field" }, h("span", { class: "field-label" }, "Service"), kind), urlField, keyField, status),
       actions: [
@@ -610,6 +614,7 @@ export function mountSettings(options: {
     instructions.value = existing?.instructions ?? "";
     const status = h("div", { class: "field-error", hidden: true });
     modal({
+      within: ctx.root,
       title: existing ? existing.name : "Add skill",
       wide: true,
       body: h(
@@ -719,6 +724,7 @@ export function mountSettings(options: {
     const monthly = h("input", { class: "input", inputMode: "numeric", value: existing?.monthlyTokens?.toString() ?? "", placeholder: "No limit" });
     const status = h("div", { class: "field-error", hidden: true });
     modal({
+      within: ctx.root,
       title: existing ? subjectLabel(data, existing.subject) : "Add rule",
       body: h(
         "div",
