@@ -24,6 +24,18 @@ this file by `scripts/changelog-section.sh`.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
+## [0.9.9] - 2026-11-26
+
+### Fixed
+
+- **Flutter installs from App Center.** App Center gave every unpacked file
+  the time of the install instead of its time in the archive, so Flutter
+  took its own tool for out of date and tried to rebuild it during the
+  install check, which failed. Unpacked files now keep their archive times;
+  this also lets Python use its precompiled `.pyc` files again instead of
+  recompiling its standard library in memory on every start (for Python
+  versions installed from now on).
+
 ## [0.9.8] - 2026-11-26
 
 ### Added
