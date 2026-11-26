@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.11] - 2026-11-26
+
+### Added
+
 - **Windows stay open across reloads, tabs and devices.** The desktop keeps
   each account's open windows on the server. Reloading the page, closing the
   tab, opening a new one or signing in on another device brings back the
@@ -30,17 +47,6 @@ this file by `scripts/changelog-section.sh`.
 - **Phones show the window you switch to.** With two or more apps open on a
   phone, switching to one of them could leave the screen empty: only the
   first window in the page could be shown.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.10] - 2026-11-26
 
