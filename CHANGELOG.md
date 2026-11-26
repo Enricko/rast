@@ -13,6 +13,14 @@ this file by `scripts/changelog-section.sh`.
 
 - Nothing yet.
 
+### Fixed
+
+- **After an update the loading screen could use the previous version's
+  start-up script for hours** (browsers and Cloudflare cached
+  `/boot-splash.js`), so an uploaded wallpaper showed as a plain colour there
+  after 0.9.5. The page now loads it under an address that changes with its
+  contents.
+
 ### Planned
 
 - Project-key release signatures (minisign/cosign) in addition to the keyless
