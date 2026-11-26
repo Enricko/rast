@@ -534,6 +534,7 @@ impl SessionRun {
 }
 
 /// The name of the program in the shell's foreground (`bash`, `htop`, …).
+/// Linux only (`/proc`); `None` elsewhere.
 fn foreground_program(pid: u32) -> Option<String> {
     if pid == 0 {
         return None;
@@ -912,6 +913,8 @@ mod tests {
         assert_eq!(scrollback.snapshot(), b"defghij\n");
     }
 
+    // Reads /proc: on other systems tabs show only the shell number.
+    #[cfg(target_os = "linux")]
     #[test]
     fn foreground_program_of_this_process() {
         // Not in a terminal here, so it falls back to the process itself.
