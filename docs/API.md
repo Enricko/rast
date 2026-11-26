@@ -442,8 +442,11 @@ areas, 64 fields, 64 KiB per field and 192 KiB per window. `dialogs`
 view?}]`, where `name` is the app's name for the dialog (1–64 letters, digits,
 `-` or `_`), `params` what it is about, in the shape the app opens it with
 (at most 4 KiB, e.g. `{folder}` for File Station's New folder), and `view` the
-text typed in it (as above). The app opens them again with that text. `rect` is the position
-and size when the window is neither maximized nor snapped, in desktop pixels
+text typed in it (as above). The app opens them again with that text.
+The session's own `dialogs` (optional, same shape and limits) are dialogs of
+the desktop itself, outside any window; today only `{"name": "sign-out"}`.
+`rect` is the position and size when the window is neither maximized nor
+snapped, in desktop pixels
 (`null`: the default place). `state` is `normal|maximized|left|right`. Unknown
 fields, invalid values and a `focused` key that is not in `windows` are `400`.
 

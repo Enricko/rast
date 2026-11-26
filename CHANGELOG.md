@@ -11,7 +11,14 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Sign out asks the same way on every device.** "Sign out?" now stays
+  open like the other confirmations: it comes back after a reload or in a
+  new tab and shows live on the account's other devices. Confirming signs
+  out the device you confirm on (the others stay signed in) and closes it
+  everywhere else; cancelling anywhere closes it everywhere. Signing in
+  again never starts with it, also after a session ran out while it was
+  open. Its message no longer says text in dialogs is lost (they have been
+  kept since 0.9.14).
 
 ### Planned
 

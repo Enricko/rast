@@ -49,6 +49,8 @@ export interface SavedSession {
   /** Key of the focused window. */
   focused: string | null;
   stage: { w: number; h: number } | null;
+  /** Dialogs of the desktop itself ("Sign out?"), not in a window. */
+  dialogs?: SavedDialog[];
 }
 
 /** A saved session and its version, from a load or the realtime event. */

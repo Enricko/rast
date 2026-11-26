@@ -3297,6 +3297,22 @@ async fn desktop_sessions_follow_the_account_and_stay_private() {
         body["session"]["windows"][0]["dialogs"],
         with_dialog["windows"][0]["dialogs"]
     );
+    // The desktop's own dialogs ("Sign out?").
+    let mut signing_out = with_dialog.clone();
+    signing_out["dialogs"] = json!([{"name": "sign-out"}]);
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(signing_out.clone()),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, _, body) = server
+        .request("GET", "/api/desktop/session", None, alice.headers())
+        .await;
+    assert_eq!(body["session"]["dialogs"], json!([{"name": "sign-out"}]));
     let mut bad_dialog = with_dialog.clone();
     bad_dialog["windows"][0]["dialogs"][0]["name"] = json!("new folder!");
     let (status, _, _) = server

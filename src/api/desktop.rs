@@ -11,7 +11,9 @@
 //! areas are scrolled to and what was typed into its text fields and not
 //! saved yet (never password fields; the browser leaves them out), and the
 //! dialogs open in it (`dialogs`: the app's name for each, what it is about,
-//! and its own `view`), which the app opens again.
+//! and its own `view`), which the app opens again. Dialogs of the desktop
+//! itself (outside any window, such as "Sign out?") are kept the same way in
+//! the session's own `dialogs`.
 //!
 //! Every save is published to the account's open pages as a
 //! `desktop.session` event (`{session, updatedAt, origin}`), so the other
@@ -69,6 +71,9 @@ pub struct DesktopSession {
     /// Size of the desktop the session was saved on.
     #[serde(default)]
     pub stage: Option<Size>,
+    /// Dialogs of the desktop itself (not in a window).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<SavedDialog>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -215,8 +220,38 @@ fn positive(value: f64) -> bool {
     coordinate(value) && value > 0.0
 }
 
+/// Dialogs kept in a window (`owner` is its app) or on the desktop.
+fn validate_dialogs(dialogs: &[SavedDialog], owner: &str) -> Result<(), String> {
+    if dialogs.len() > MAX_DIALOGS {
+        return Err(format!(
+            "at most {MAX_DIALOGS} dialogs per window can be saved"
+        ));
+    }
+    for dialog in dialogs {
+        if !plain_id(&dialog.name, 64) {
+            return Err("a dialog name must be 1-64 letters, digits, '-' or '_'".into());
+        }
+        if let Some(params) = &dialog.params {
+            let size = serde_json::to_vec(params)
+                .map(|b| b.len())
+                .unwrap_or(usize::MAX);
+            if size > MAX_PARAMS_BYTES {
+                return Err(format!(
+                    "what the {} dialog is about is larger than {MAX_PARAMS_BYTES} bytes",
+                    dialog.name
+                ));
+            }
+        }
+        if let Some(view) = &dialog.view {
+            view.validate(owner)?;
+        }
+    }
+    Ok(())
+}
+
 impl DesktopSession {
     pub fn validate(&self) -> Result<(), String> {
+        validate_dialogs(&self.dialogs, "desktop")?;
         if self.version != 1 {
             return Err(format!(
                 "unsupported desktop session version {}",
@@ -251,30 +286,7 @@ impl DesktopSession {
             if let Some(view) = &window.view {
                 view.validate(&window.app_id)?;
             }
-            if window.dialogs.len() > MAX_DIALOGS {
-                return Err(format!(
-                    "at most {MAX_DIALOGS} dialogs per window can be saved"
-                ));
-            }
-            for dialog in &window.dialogs {
-                if !plain_id(&dialog.name, 64) {
-                    return Err("a dialog name must be 1-64 letters, digits, '-' or '_'".into());
-                }
-                if let Some(params) = &dialog.params {
-                    let size = serde_json::to_vec(params)
-                        .map(|b| b.len())
-                        .unwrap_or(usize::MAX);
-                    if size > MAX_PARAMS_BYTES {
-                        return Err(format!(
-                            "what the {} dialog is about is larger than {MAX_PARAMS_BYTES} bytes",
-                            dialog.name
-                        ));
-                    }
-                }
-                if let Some(view) = &dialog.view {
-                    view.validate(&window.app_id)?;
-                }
-            }
+            validate_dialogs(&window.dialogs, &window.app_id)?;
             if let Some(r) = window.rect {
                 if !(coordinate(r.x) && coordinate(r.y) && positive(r.w) && positive(r.h)) {
                     return Err(format!(
@@ -385,6 +397,7 @@ mod tests {
                 w: 1920.0,
                 h: 1022.0,
             }),
+            dialogs: Vec::new(),
         }
     }
 
@@ -500,6 +513,26 @@ mod tests {
         let mut bad = w;
         bad.dialogs[0].view.as_mut().unwrap().fields[0].value = "x".repeat(MAX_FIELD_BYTES + 1);
         assert!(session(vec![bad]).validate().is_err());
+        // Dialogs of the desktop itself ("Sign out?").
+        let mut desktop = session(vec![window("a")]);
+        desktop.dialogs = vec![SavedDialog {
+            name: "sign-out".into(),
+            params: None,
+            view: None,
+        }];
+        assert!(desktop.validate().is_ok());
+        desktop.dialogs[0].name = "sign out".into();
+        assert!(desktop.validate().is_err());
+        let mut desktop = session(Vec::new());
+        desktop.dialogs = vec![
+            SavedDialog {
+                name: "sign-out".into(),
+                params: None,
+                view: None,
+            };
+            MAX_DIALOGS + 1
+        ];
+        assert!(desktop.validate().is_err());
         // Unknown fields are refused rather than stored.
         assert!(serde_json::from_value::<DesktopSession>(json!({
             "version": 1, "windows": [], "extra": true

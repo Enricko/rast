@@ -133,6 +133,14 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     apply: applySession,
     busy: () => wm.isInteracting(),
   });
+  // Dialogs of the desktop itself stay too ("Sign out?"): after a reload,
+  // in another tab or on another device, and live.
+  const desktopDialogs = new WindowDialogs(() => {
+    if (sessionReady) sessionSaver.schedule();
+  });
+  desktopDialogs.register("sign-out", () => void requestSignOut());
+  desktopDialogs.mounted();
+  disposers.push(() => desktopDialogs.dispose());
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
@@ -427,15 +435,19 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       if (info.focused && !placement.minimized) focused = key;
     }
     const stage = stageSize();
-    return {
+    const session: SavedSession = {
       version: 1,
       windows,
       focused,
       stage: { w: Math.max(1, Math.round(stage.width)), h: Math.max(1, Math.round(stage.height)) },
     };
+    const dialogs = desktopDialogs.capture();
+    if (dialogs) session.dialogs = dialogs;
+    return session;
   }
 
   function restoreSession(session: SavedSession): void {
+    desktopDialogs.apply(session.dialogs ?? [], false);
     for (const entry of session.windows.slice(-MAX_SESSION_WINDOWS)) {
       if (!entry || typeof entry.appId !== "string" || typeof entry.key !== "string") continue;
       if (!isAppAllowed(entry.appId, store.get().permissions, store.isAdmin())) continue;
@@ -466,6 +478,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       typeof entry?.appId === "string" &&
       typeof entry.key === "string" &&
       isAppAllowed(entry.appId, store.get().permissions, store.isAdmin());
+    desktopDialogs.apply(session.dialogs ?? [], true);
     const entries = session.windows.slice(-MAX_SESSION_WINDOWS).filter(allowed);
     const wanted = new Set(entries.map((entry) => entry.key));
     const appOf = new Map(wm.list().map((win) => [win.id, win.appId]));
@@ -728,11 +741,14 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
 
   async function requestSignOut(): Promise<void> {
     closePanel();
+    // Kept like a window's dialogs: confirming signs out the device it is
+    // confirmed on, and closes it (as cancelled) everywhere else.
     const ok = await confirmDialog({
       title: "Sign out",
-      message: "Sign out of RAST? Your windows and what you typed in them come back the next time you sign in; text in an open dialog is lost.",
+      message: "Sign out of RAST? Your windows, and what you typed in them, come back the next time you sign in.",
       confirmLabel: "Sign out",
       danger: true,
+      session: desktopDialogs.session("sign-out"),
     });
     if (!ok) return;
     if (sessionReady) await sessionSaver.flush();
@@ -1458,7 +1474,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   (window as unknown as { rast?: unknown }).rast = { store, wm, api: deps.api, openApp, toast };
 
   function snapshot(): SessionSnapshot {
-    return { userId: me.user.id, session: captureSession(), version: sessionSaver.version };
+    // Signing in again after the session was lost: the windows come back,
+    // a "Sign out?" that was open does not.
+    const session = captureSession();
+    delete session.dialogs;
+    return { userId: me.user.id, session, version: sessionSaver.version };
   }
 
   function dispose(): void {
