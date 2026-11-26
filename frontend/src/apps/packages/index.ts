@@ -183,6 +183,17 @@ class PackageCenterApp {
       this.applyParams(params);
       this.render();
     });
+    // The same window on another page (tab, device) went elsewhere.
+    this.ctx.onPlace((params) => {
+      const place = (params ?? {}) as { app?: unknown; package?: unknown };
+      if (!place.app && !place.package) {
+        this.selectedId = null;
+        this.selectedApp = null;
+        this.detail = null;
+      }
+      this.applyParams(params);
+      this.render();
+    });
     this.applyAccess();
     if (this.denied) return;
     this.render();

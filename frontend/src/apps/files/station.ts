@@ -370,6 +370,15 @@ export class FileStation {
       this.path = saved.path;
     }
     this.ctx.setTitle(this.path === "/" ? "File Station" : `File Station — ${this.path}`);
+    // The same window on another page (tab, device) went elsewhere.
+    this.ctx.onPlace((params) => {
+      const place = (params ?? {}) as { path?: unknown; section?: unknown };
+      if (place.section === "trash") {
+        void this.showSection("trash");
+      } else if (typeof place.path === "string" && place.path.startsWith("/") && place.path.length <= 2048) {
+        if (this.section !== "files" || place.path !== this.path) void this.navigate(place.path);
+      }
+    });
     this.renderUsage();
     if (saved.section === "trash") {
       await Promise.all([this.loadRoots(), this.loadUsage(), this.showSection("trash")]);

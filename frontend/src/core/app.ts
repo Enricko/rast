@@ -48,6 +48,11 @@ export interface AppContext {
    * as `params` when the window opens again (reload, another device).
    */
   saveState(state: unknown): void;
+  /**
+   * Another of the account's pages (a tab, another device) moved this
+   * window's app elsewhere: show `params` (the shape `saveState` saves).
+   */
+  onPlace(callback: (params: unknown) => void): void;
 }
 
 export interface AppInstance {

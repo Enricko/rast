@@ -64,6 +64,8 @@ export interface RequestOptions {
   allowUnauthorized?: boolean;
   /** Let the request finish after the page is closed (small bodies only). */
   keepalive?: boolean;
+  /** Extra request headers. */
+  headers?: Record<string, string>;
 }
 
 /** Human message for API errors, with optional retry countdown for 429. */
@@ -143,7 +145,7 @@ export class ApiClient {
     body?: unknown,
     options: RequestOptions = {},
   ): Promise<T> {
-    const headers: Record<string, string> = { Accept: "application/json" };
+    const headers: Record<string, string> = { ...options.headers, Accept: "application/json" };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (method !== "GET" && method !== "HEAD") headers["X-CSRF-Token"] = this.csrfToken;
 

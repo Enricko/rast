@@ -154,6 +154,11 @@ async function mountControlPanel(ctx: AppContext): Promise<void> {
   }
 
   renderNav();
+  // The same window on another page (tab, device) switched tabs.
+  ctx.onPlace((next) => {
+    const tab = (next ?? {}) as { tab?: unknown };
+    if (typeof tab.tab === "string" && tab.tab !== active) void selectTab(tab.tab);
+  });
   await selectTab(active);
 
   ctx.onDispose(() => {

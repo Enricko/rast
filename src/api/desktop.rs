@@ -6,8 +6,15 @@
 //! or snapped, their stacking order and where each app was (`params`, which
 //! the app reads when it opens). Each account only ever reads and writes its
 //! own session.
+//!
+//! Every save is published to the account's open pages as a
+//! `desktop.session` event (`{session, updatedAt, origin}`), so the other
+//! tabs and devices show the change live. `updatedAt` only ever grows for an
+//! account: pages apply a session only when it is newer than the one they
+//! have, and ignore their own saves by `origin` (the `X-RAST-Desktop` header
+//! the page sent, a random id per page).
 
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{extract::State, http::HeaderMap, routing::get, Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -25,6 +32,10 @@ const MAX_WINDOWS: usize = 16;
 const MAX_PARAMS_BYTES: usize = 4 * 1024;
 /// Far outside any screen: a window there is a bug, not a position.
 const MAX_COORDINATE: f64 = 100_000.0;
+/// Header naming the page that saved (echoed as the event's `origin`).
+pub const ORIGIN_HEADER: &str = "x-rast-desktop";
+/// Realtime event published to the account's pages after every save.
+pub const SESSION_EVENT: &str = "desktop.session";
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/api/desktop/session", get(get_session).put(put_session))
@@ -181,22 +192,36 @@ pub async fn get_session(State(state): State<AppState>, user: AuthUser) -> AppRe
 pub async fn put_session(
     State(state): State<AppState>,
     user: AuthUser,
+    headers: HeaderMap,
     Json(session): Json<DesktopSession>,
 ) -> AppResult<Json<Value>> {
     session.validate().map_err(AppError::bad_request)?;
+    let origin = headers
+        .get(ORIGIN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| plain_id(v, 64))
+        .map(str::to_string);
     let raw = serde_json::to_string(&session)
         .map_err(|e| AppError::internal(format!("cannot store the desktop session: {e}")))?;
-    let now = db::now_ms();
-    sqlx::query(
+    // The version only grows, even for two saves in the same millisecond, so
+    // pages can tell which of two sessions is newer.
+    let updated_at: i64 = sqlx::query_scalar(
         "INSERT INTO desktop_sessions (user_id, state, updated_at) VALUES (?, ?, ?)
-         ON CONFLICT(user_id) DO UPDATE SET state = excluded.state, updated_at = excluded.updated_at",
+         ON CONFLICT(user_id) DO UPDATE SET state = excluded.state,
+             updated_at = MAX(excluded.updated_at, desktop_sessions.updated_at + 1)
+         RETURNING updated_at",
     )
     .bind(user.id)
     .bind(raw)
-    .bind(now)
-    .execute(&state.db)
+    .bind(db::now_ms())
+    .fetch_one(&state.db)
     .await?;
-    Ok(Json(json!({"updatedAt": now})))
+    state.events.publish_user(
+        SESSION_EVENT,
+        user.id,
+        json!({"session": session, "updatedAt": updated_at, "origin": origin}),
+    );
+    Ok(Json(json!({"updatedAt": updated_at})))
 }
 
 #[cfg(test)]

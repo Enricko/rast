@@ -3179,15 +3179,57 @@ async fn desktop_sessions_follow_the_account_and_stay_private() {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+    let mut rx = server.state.events.subscribe();
+    let mut from_page = alice.headers_with_csrf();
+    from_page.insert("x-rast-desktop", "p-tab1".parse().unwrap());
     let (status, _, body) = server
         .request(
             "PUT",
             "/api/desktop/session",
             Some(session.clone()),
-            alice.headers_with_csrf(),
+            from_page.clone(),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    let first = body["updatedAt"].as_i64().expect("a version");
+
+    // The account's other open pages are told at once (live sync), with the
+    // page that saved, so that page ignores its own save.
+    let events = drain_events(&mut rx, std::time::Duration::from_millis(300)).await;
+    let saved = events
+        .iter()
+        .find(|event| event.kind == "desktop.session")
+        .expect("no desktop.session event");
+    assert_eq!(
+        saved.scope,
+        rast::events::EventScope::User(alice.user_id),
+        "only the owner's pages see where its windows are"
+    );
+    assert_eq!(saved.data["origin"], "p-tab1");
+    assert_eq!(saved.data["updatedAt"], first);
+    assert_eq!(saved.data["session"]["windows"][0]["key"], "w-a");
+    // Every save is newer than the one before, even within a millisecond.
+    let mut last = first;
+    for _ in 0..3 {
+        let (_, _, body) = server
+            .request(
+                "PUT",
+                "/api/desktop/session",
+                Some(session.clone()),
+                alice.headers_with_csrf(),
+            )
+            .await;
+        let next = body["updatedAt"].as_i64().expect("a version");
+        assert!(next > last, "{next} after {last}");
+        last = next;
+    }
+    let events = drain_events(&mut rx, std::time::Duration::from_millis(300)).await;
+    let anonymous = events
+        .iter()
+        .filter(|event| event.kind == "desktop.session")
+        .collect::<Vec<_>>();
+    assert_eq!(anonymous.len(), 3);
+    assert!(anonymous.iter().all(|event| event.data["origin"].is_null()));
 
     // Another browser of the same account (a new sign-in) gets it back.
     let alice_elsewhere = server.login("alice", USER_PASSWORD).await;

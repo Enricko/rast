@@ -538,6 +538,50 @@ export class WindowManager {
     return { rect: base.rect ? { ...base.rect } : null, state: base.state, minimized: record.minimized };
   }
 
+  /** Move an open window to a placement (another page of the account moved it). */
+  arrange(id: string, placement: WindowPlacement): void {
+    const record = this.records.get(id);
+    if (!record) return;
+    if (record.el.classList.contains("is-mobile")) {
+      record.desktopPlacement = { rect: placement.rect ? { ...placement.rect } : null, state: placement.state };
+    } else {
+      this.applyPlacement(record, placement, record.defaultSize);
+      this.layout(record);
+    }
+    record.minimized = placement.minimized;
+    record.el.classList.toggle("is-minimized", placement.minimized);
+    if (placement.minimized && this.focusedId === id) {
+      this.focusedId = null;
+      record.el.classList.remove("is-focused");
+    }
+    record.resizeCallbacks.forEach((cb) => cb());
+    this.emitChange();
+  }
+
+  /** Stack windows in this order (bottom first) and focus one, or none. */
+  setStack(ids: string[], focusedId: string | null): void {
+    for (const id of ids) {
+      const record = this.records.get(id);
+      if (!record) continue;
+      this.zCounter += 1;
+      record.el.style.zIndex = String(this.zCounter);
+    }
+    const target = focusedId ? this.records.get(focusedId) : undefined;
+    this.focusedId = target && !target.minimized ? target.id : null;
+    for (const other of this.records.values()) {
+      other.el.classList.toggle("is-focused", other.id === this.focusedId);
+    }
+    this.emitChange();
+  }
+
+  /** A window is being dragged or resized. */
+  isInteracting(): boolean {
+    for (const record of this.records.values()) {
+      if (record.el.classList.contains("is-dragging") || record.el.classList.contains("is-resizing")) return true;
+    }
+    return false;
+  }
+
   private desktopPlacementOf(record: WindowRecord): Omit<WindowPlacement, "minimized"> {
     if (record.maximized) return { rect: record.prevRect ? { ...record.prevRect } : null, state: "maximized" };
     if (record.tiled) return { rect: this.rectOf(record), state: record.tiled };

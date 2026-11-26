@@ -17,6 +17,8 @@ export interface ShellDeps {
 export interface SessionSnapshot {
   userId: number;
   session: SavedSession;
+  /** Version of the saved session the page had shown or saved. */
+  version: number;
 }
 
 export interface DesktopController {

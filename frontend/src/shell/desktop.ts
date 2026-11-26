@@ -49,6 +49,7 @@ import {
   storableParams,
   type SavedSession,
   type SavedWindow,
+  type SessionUpdate,
 } from "./window-session";
 
 const MAX_PINNED = 8;
@@ -101,6 +102,15 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   let sessionReady = false;
   /** Singleton windows that show new parameters when opened again. */
   const reopenListeners = new Map<string, (params: unknown) => void>();
+  /** Apps that follow another page moving them elsewhere. */
+  const placeListeners = new Map<string, (params: unknown) => void>();
+  /**
+   * Windows opened or moved from a saved session, with the placement saved
+   * and the one shown: a smaller screen moves windows to fit, and as long as
+   * the window stays there the session keeps the saved placement (so this
+   * screen does not move the windows on a larger one).
+   */
+  const sessionPlaces = new Map<string, { shown: WindowPlacement; saved: WindowPlacement }>();
   const disposers: Array<() => void> = [];
 
   const wm = new WindowManager(windowsLayer, {
@@ -113,7 +123,10 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   disposers.push(() => wm.destroy());
   // Open windows follow the account: a reload, another tab or another device
   // shows the same windows (see window-session.ts).
-  const sessionSaver = createSessionSaver(deps.api, captureSession);
+  const sessionSaver = createSessionSaver(deps.api, captureSession, {
+    apply: applySession,
+    busy: () => wm.isInteracting(),
+  });
 
   // ------------------------------------------------------ per-user appearance
   const appearance = getAppearanceService(deps.api);
@@ -241,6 +254,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         mount.onDispose(() => {
           windowParams.delete(windowId);
           windowKeys.delete(windowId);
+          placeListeners.delete(windowId);
+          sessionPlaces.delete(windowId);
         });
         mount.contentEl.replaceChildren();
         const appHost = h("div", { class: "app" });
@@ -298,6 +313,9 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
             windowParams.set(windowId, storableParams(state));
             if (sessionReady) sessionSaver.schedule();
           },
+          onPlace: (callback: (next: unknown) => void) => {
+            placeListeners.set(windowId, callback);
+          },
         };
         await app.mount(ctx);
       },
@@ -306,6 +324,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     if (!openBefore.has(handle.id)) {
       windowKeys.set(handle.id, restore?.key ?? newWindowKey());
       windowParams.set(handle.id, storableParams(params));
+      if (restore) rememberPlace(handle.id, restore.placement);
     } else if (params !== undefined) {
       // A singleton shown again with a new place to show.
       windowParams.set(handle.id, storableParams(params));
@@ -315,13 +334,42 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   }
 
   // ------------------------------------------------------- desktop session
+  function samePlace(a: WindowPlacement, b: WindowPlacement): boolean {
+    if (a.state !== b.state || a.minimized !== b.minimized) return false;
+    if (!a.rect || !b.rect) return a.rect === b.rect;
+    return (
+      Math.round(a.rect.x) === Math.round(b.rect.x) &&
+      Math.round(a.rect.y) === Math.round(b.rect.y) &&
+      Math.round(a.rect.w) === Math.round(b.rect.w) &&
+      Math.round(a.rect.h) === Math.round(b.rect.h)
+    );
+  }
+
+  function rememberPlace(id: string, saved: WindowPlacement): void {
+    const shown = wm.placement(id);
+    if (shown) sessionPlaces.set(id, { shown, saved: { ...saved, rect: saved.rect ? { ...saved.rect } : null } });
+  }
+
+  /** Where a window is, for the session (see `sessionPlaces`). */
+  function sessionPlacement(id: string): WindowPlacement | null {
+    const placement = wm.placement(id);
+    if (!placement) return null;
+    const kept = sessionPlaces.get(id);
+    if (kept) {
+      const shown = { ...kept.shown, minimized: placement.minimized };
+      if (samePlace(shown, placement)) return { ...kept.saved, minimized: placement.minimized };
+      sessionPlaces.delete(id);
+    }
+    return placement;
+  }
+
   function captureSession(): SavedSession {
     const infos = new Map(wm.list().map((win) => [win.id, win]));
     const windows: SavedWindow[] = [];
     let focused: string | null = null;
     for (const id of wm.stackOrder().slice(-MAX_SESSION_WINDOWS)) {
       const info = infos.get(id);
-      const placement = wm.placement(id);
+      const placement = sessionPlacement(id);
       const key = windowKeys.get(id);
       if (!info || !placement || !key) continue;
       const rect = placement.rect;
@@ -364,26 +412,101 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     }
   }
 
-  async function startSession(fromMemory: SavedSession | null): Promise<void> {
-    let session = fromMemory;
-    if (!session) {
-      // A failed load must not let the next change replace the saved
-      // windows with whatever this page has open: try a few times first.
-      for (const wait of [0, 2_000, 5_000]) {
-        if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
-        if (disposed) return;
+  /**
+   * Show the session another page saved: open, move, restack and close
+   * windows until this page shows the same desktop. Windows stay mounted
+   * when they only moved; their apps follow a new place (`ctx.onPlace`).
+   */
+  function applySession(session: SavedSession): void {
+    const allowed = (entry: SavedWindow | null | undefined): entry is SavedWindow =>
+      Boolean(entry) &&
+      typeof entry?.appId === "string" &&
+      typeof entry.key === "string" &&
+      isAppAllowed(entry.appId, store.get().permissions, store.isAdmin());
+    const entries = session.windows.slice(-MAX_SESSION_WINDOWS).filter(allowed);
+    const wanted = new Set(entries.map((entry) => entry.key));
+    const appOf = new Map(wm.list().map((win) => [win.id, win.appId]));
+    const idOf = new Map<string, string>();
+    for (const [id, key] of windowKeys) if (wanted.has(key)) idOf.set(key, id);
+    // A window this page opened while the other page opened the same app
+    // has another key: keep it (mounted) as that window.
+    const spare = wm.stackOrder().filter((id) => !wanted.has(windowKeys.get(id) ?? ""));
+    for (const entry of entries) {
+      if (idOf.has(entry.key)) continue;
+      const index = spare.findIndex((id) => appOf.get(id) === entry.appId);
+      if (index < 0) continue;
+      const [id] = spare.splice(index, 1);
+      if (!id) continue;
+      windowKeys.set(id, entry.key);
+      idOf.set(entry.key, id);
+    }
+    for (const id of spare) wm.close(id);
+
+    for (const entry of entries) {
+      const target = placementOf(entry);
+      const id = idOf.get(entry.key);
+      if (!id) {
+        openApp(entry.appId, entry.params, { key: entry.key, placement: target });
+        continue;
+      }
+      const current = sessionPlacement(id);
+      if (!current || !samePlace(current, target)) {
+        wm.arrange(id, target);
+        rememberPlace(id, target);
+      }
+      const params = storableParams(entry.params);
+      if (params !== undefined && JSON.stringify(params) !== JSON.stringify(windowParams.get(id))) {
+        windowParams.set(id, params);
         try {
-          session = await loadSession(deps.api);
-          break;
-        } catch {
-          session = null;
+          placeListeners.get(id)?.(params);
+        } catch (error) {
+          console.error(`${entry.appId} could not show its new place`, error);
         }
       }
     }
+
+    const order: string[] = [];
+    let focusedId: string | null = null;
+    for (const [id, key] of windowKeys) {
+      if (key === session.focused) focusedId = id;
+    }
+    for (const entry of entries) {
+      for (const [id, key] of windowKeys) if (key === entry.key) order.push(id);
+    }
+    const focusedNow = wm.list().find((win) => win.focused)?.id ?? null;
+    const stackNow = wm.stackOrder();
+    if (focusedNow !== focusedId || order.join() !== stackNow.join()) wm.setStack(order, focusedId);
+  }
+
+  async function startSession(fromMemory: SessionSnapshot | null): Promise<void> {
+    // A failed load must not let the next change replace the saved windows
+    // with whatever this page has open: try a few times first (once when
+    // this page's own windows are at hand).
+    let loaded: SessionUpdate | null = null;
+    for (const wait of fromMemory ? [0] : [0, 2_000, 5_000]) {
+      if (wait) await new Promise((resolve) => window.setTimeout(resolve, wait));
+      if (disposed) return;
+      try {
+        loaded = await loadSession(deps.api);
+        break;
+      } catch {
+        loaded = null;
+      }
+    }
     if (disposed) return;
-    if (session) restoreSession(session);
+    const newer = loaded?.session && (loaded.updatedAt ?? 0) > (fromMemory?.version ?? 0) ? loaded.session : null;
+    if (fromMemory && !newer) {
+      // Signed in again in this page: its windows, saved if they changed.
+      restoreSession(fromMemory.session);
+      sessionReady = true;
+      sessionSaver.started(fromMemory.version, false);
+      sessionSaver.schedule();
+      return;
+    }
+    if (loaded?.session) restoreSession(loaded.session);
     sessionReady = true;
-    sessionSaver.schedule();
+    sessionSaver.started(loaded?.updatedAt ?? null, loaded !== null);
+    if (!loaded) sessionSaver.schedule();
   }
 
   function openAccount(tab: string, section?: string): void {
@@ -971,6 +1094,18 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
 
   // --------------------------------------------------------- realtime stream
   const realtime = getRealtime(deps.events);
+  // The account's other pages saved their windows: show them here too.
+  disposers.push(realtime.on<SessionUpdate>("desktop.session", (data) => sessionSaver.receive(data)));
+  disposers.push(
+    realtime.onResync(() => {
+      // Events may have been missed (asleep, offline): catch up.
+      if (!sessionReady || disposed) return;
+      loadSession(deps.api).then(
+        (update) => sessionSaver.receive({ ...update, origin: null }),
+        () => undefined,
+      );
+    }),
+  );
   let everConnected = deps.events.status === "connected";
   let warnedDisconnected = false;
   let disconnectTimer: number | undefined;
@@ -1263,7 +1398,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   // ------------------------------------------- reopen the account's windows
   // After an expired session, the windows of this page (newer than the last
   // save); otherwise the session saved on the server.
-  const inMemory = options.restore && options.restore.userId === me.user.id ? options.restore.session : null;
+  const inMemory = options.restore && options.restore.userId === me.user.id ? options.restore : null;
   void startSession(inMemory);
 
   renderTaskbar();
@@ -1273,7 +1408,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   (window as unknown as { rast?: unknown }).rast = { store, wm, api: deps.api, openApp, toast };
 
   function snapshot(): SessionSnapshot {
-    return { userId: me.user.id, session: captureSession() };
+    return { userId: me.user.id, session: captureSession(), version: sessionSaver.version };
   }
 
   function dispose(): void {

@@ -11,7 +11,15 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Windows stay in sync live between your devices.** With RAST open on
+  several devices or tabs at once, each one shows a change made on another
+  within about a second: windows that open or close, move, resize, get
+  minimized, maximized or snapped, come to the front, and apps that go to
+  another folder, tab or page. A smaller screen fits the windows on it
+  without moving them on a larger one. A device that was asleep or offline
+  catches up when it reconnects. When two devices change something at the
+  same moment, the later change wins on all of them. Loading the desktop no
+  longer saves the windows again when nothing changed.
 
 ### Planned
 

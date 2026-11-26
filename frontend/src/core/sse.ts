@@ -54,6 +54,7 @@ const KNOWN_EVENTS = [
   "user.changed",
   "settings.changed",
   "appearance.changed",
+  "desktop.session",
   "group.changed",
   "access.changed",
   "package.changed",

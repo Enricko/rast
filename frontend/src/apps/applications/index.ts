@@ -208,6 +208,8 @@ class ApplicationsApp {
   private volumeFilter: UsageFilter = "all";
   private readonly expanded = new Set<string>();
   private page: ContainerPage | null = null;
+  /** Container the page shows. */
+  private pageContainer: string | null = null;
   private busy = new Set<string>();
 
   private docker: DockerStatus | null = null;
@@ -497,6 +499,18 @@ class ApplicationsApp {
     // container page it showed.
     const saved = (this.ctx.params ?? {}) as { view?: unknown; container?: unknown };
     if (saved.view === "images" || saved.view === "volumes") this.view = saved.view;
+    // The same window on another page (tab, device) went elsewhere.
+    this.ctx.onPlace((params) => {
+      if (this.disposed || this.denied) return;
+      const place = (params ?? {}) as { view?: unknown; container?: unknown };
+      const view = place.view === "images" || place.view === "volumes" || place.view === "containers" ? place.view : null;
+      if (view && view !== this.view) this.switchView(view);
+      if (typeof place.container === "string" && place.container) {
+        if (place.container !== this.pageContainer) this.openPage(place.container);
+      } else if (this.page) {
+        this.closePage(true);
+      }
+    });
     await this.hydratePermissions();
     this.applyAccessPolicy();
     if (this.denied) return;
@@ -1184,6 +1198,7 @@ class ApplicationsApp {
   private openPage(id: string): void {
     if (!this.engineAccess()) return;
     this.savePlace(id);
+    this.pageContainer = id;
     this.page?.dispose();
     clear(this.viewHost);
     this.page = mountContainerPage({
@@ -1205,6 +1220,7 @@ class ApplicationsApp {
     if (!this.page) return;
     this.page.dispose();
     this.page = null;
+    this.pageContainer = null;
     this.savePlace();
     if (rerender) {
       this.render();

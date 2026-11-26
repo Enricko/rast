@@ -990,7 +990,8 @@ pub fn event_app(kind: &str, data: &serde_json::Value) -> Option<&'static str> {
             }
         }
         // Ownership-scoped administrative events are delivered to their audience.
-        "access.changed" | "appearance.changed" | "notice" | "hello" | "ping" | "resync" => None,
+        "access.changed" | "appearance.changed" | "desktop.session" | "notice" | "hello"
+        | "ping" | "resync" => None,
         _ => None,
     }
 }

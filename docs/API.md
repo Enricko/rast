@@ -409,10 +409,20 @@ so a reload, another tab or another device shows them again. Phones show every
 window full screen but keep the desktop places. Each account reads and writes
 only its own session; deleting the account deletes it.
 
+Pages that are open at the same time stay in sync: every save is published to
+the account's pages as a `desktop.session` event (`{session, updatedAt,
+origin}`), and they open, move, restack and close windows to match.
+`updatedAt` is the session's version and grows with every save, even two in
+the same millisecond. A page sends a random id of its own in the
+`X-RAST-Desktop` header (1–64 letters, digits, `-` or `_`; echoed as `origin`,
+otherwise `null`) and ignores its own saves. A page shows a session only when
+it is newer than the one it has, and loads the session again after its
+realtime stream was interrupted.
+
 | Method | Path | Body / Response |
 | --- | --- | --- |
 | GET | `/api/desktop/session` | `{session, updatedAt}`; `session` is `null` until the desktop saved one (or when a saved one cannot be read) |
-| PUT | `/api/desktop/session` | `{version: 1, windows: [{key, appId, params?, rect: {x,y,w,h}\|null, state, minimized}], focused: key\|null, stage: {w,h}\|null}` -> `{updatedAt}`; replaces the session |
+| PUT | `/api/desktop/session` | `{version: 1, windows: [{key, appId, params?, rect: {x,y,w,h}\|null, state, minimized}], focused: key\|null, stage: {w,h}\|null}` -> `{updatedAt}`; replaces the session and publishes `desktop.session` |
 
 `windows` are listed from the bottom of the stack to the top (at most 16).
 `key` is the window's id in the session and `appId` the application (both 1–64

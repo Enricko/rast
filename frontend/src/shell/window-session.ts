@@ -6,14 +6,24 @@
 // and right away when the page is hidden or closed, and opens the same
 // windows when it starts — after a reload, in another tab or on another
 // device. Phones show every window full screen but save the desktop places.
+//
+// Live: every save reaches the account's other open pages (`desktop.session`
+// event), which show it at once. Sessions carry the server's version
+// (`updatedAt`, which only grows); a page shows a session only when it is
+// newer than the one it has, and never while it has a change of its own on
+// the way (its save is newer and the other pages show it instead).
 
 import type { ApiClient } from "../core/api";
 import type { WindowPlacement, WindowRect, WindowState } from "../core/wm";
 
 export const SESSION_PATH = "/api/desktop/session";
+/** Header naming the page that saved, echoed in the realtime event. */
+export const ORIGIN_HEADER = "X-RAST-Desktop";
 /** Windows saved and restored (the most recent ones when there are more). */
 export const MAX_SESSION_WINDOWS = 12;
 const SAVE_DELAY_MS = 700;
+/** While a window is being dragged, look again for a session to show. */
+const BUSY_RETRY_MS = 1_000;
 
 export interface SavedWindow {
   key: string;
@@ -33,16 +43,29 @@ export interface SavedSession {
   stage: { w: number; h: number } | null;
 }
 
+/** A saved session and its version, from a load or the realtime event. */
+export interface SessionUpdate {
+  session: SavedSession | null;
+  updatedAt: number | null;
+  /** The page that saved it (realtime event only). */
+  origin?: string | null;
+}
+
 export function placementOf(window: SavedWindow): WindowPlacement {
   return { rect: window.rect, state: window.state, minimized: window.minimized };
 }
 
-/** Load the account's saved session (`null` when none or unreadable). */
-export async function loadSession(api: ApiClient): Promise<SavedSession | null> {
-  const response = await api.get<{ session: SavedSession | null }>(SESSION_PATH);
-  const session = response?.session;
+function readableSession(value: unknown): SavedSession | null {
+  const session = value as SavedSession | null | undefined;
   if (!session || session.version !== 1 || !Array.isArray(session.windows)) return null;
   return session;
+}
+
+/** Load the account's saved session (`session: null` when none or unreadable). */
+export async function loadSession(api: ApiClient): Promise<SessionUpdate> {
+  const response = await api.get<{ session: SavedSession | null; updatedAt: number | null }>(SESSION_PATH);
+  const updatedAt = typeof response?.updatedAt === "number" ? response.updatedAt : null;
+  return { session: readableSession(response?.session), updatedAt };
 }
 
 export function newWindowKey(): string {
@@ -65,28 +88,65 @@ export function storableParams(params: unknown): unknown {
   }
 }
 
+export interface SessionSyncOptions {
+  /** Show a session another page saved (open, move and close windows). */
+  apply?: (session: SavedSession) => void;
+  /** A window is being dragged or resized: show other pages' changes after. */
+  busy?: () => boolean;
+}
+
 export interface SessionSaver {
+  /** Random id of this page, sent with every save. */
+  readonly pageId: string;
+  /** Version of the newest session this page has shown or saved. */
+  readonly version: number;
   /** Save soon (changes in the meantime are folded in). */
   schedule(): void;
   /** Save now if anything changed. */
   flush(keepalive?: boolean): Promise<void>;
-  /** Save nothing more (before the desktop closes its windows). */
+  /**
+   * The desktop shows its starting windows: the session of `version` when
+   * `saved` (nothing to save until they change), otherwise windows the
+   * server does not have yet. Sessions from other pages are shown from now.
+   */
+  started(version: number | null, saved: boolean): void;
+  /** A session a page saved (realtime event, or a load after a gap). */
+  receive(update: SessionUpdate): void;
+  /** Save and show nothing more (before the desktop closes its windows). */
   stop(): void;
 }
 
-export function createSessionSaver(api: ApiClient, capture: () => SavedSession): SessionSaver {
+export function createSessionSaver(
+  api: ApiClient,
+  capture: () => SavedSession,
+  options: SessionSyncOptions = {},
+): SessionSaver {
+  const pageId = newWindowKey().replace(/^w-/, "p-");
   let timer: number | undefined;
+  let retry: number | undefined;
   let stopped = false;
+  let ready = false;
+  let applying = false;
   /** What the server has; what is on its way there. */
   let confirmed: string | null = null;
   let inFlight: string | null = null;
   let queue: Promise<void> = Promise.resolve();
+  let version = 0;
+  /** The newest session from another page, waiting for this page's own save. */
+  let pending: { session: SavedSession; version: number } | null = null;
+
+  const dirty = (): boolean => timer !== undefined || inFlight !== null;
 
   const send = async (text: string, session: SavedSession, keepalive: boolean): Promise<void> => {
     inFlight = text;
     try {
-      await api.request("PUT", SESSION_PATH, session, { keepalive });
+      const response = await api.request<{ updatedAt?: unknown } | undefined>("PUT", SESSION_PATH, session, {
+        keepalive,
+        headers: { [ORIGIN_HEADER]: pageId },
+      });
       confirmed = text;
+      const saved = response?.updatedAt;
+      if (typeof saved === "number" && Number.isFinite(saved)) version = Math.max(version, saved);
     } catch {
       // Offline or signed out: the next change tries again.
     } finally {
@@ -105,6 +165,42 @@ export function createSessionSaver(api: ApiClient, capture: () => SavedSession):
     return text === confirmed || text === inFlight ? null : { text, session };
   };
 
+  const show = (session: SavedSession, shownVersion: number): void => {
+    applying = true;
+    try {
+      options.apply?.(session);
+    } catch (error) {
+      console.error("could not show the desktop session", error);
+    } finally {
+      applying = false;
+    }
+    version = Math.max(version, shownVersion);
+    // What the page shows now is what the server has: nothing to save back.
+    confirmed = JSON.stringify(capture());
+  };
+
+  /** Show the waiting session once this page has nothing of its own on the way. */
+  const settle = (): void => {
+    if (stopped || !ready || !pending) return;
+    if (pending.version <= version) {
+      pending = null; // this page saved after it: the server has this page's
+      return;
+    }
+    if (dirty()) return; // the save (or its answer) settles again
+    if (options.busy?.()) {
+      if (retry === undefined) {
+        retry = window.setTimeout(() => {
+          retry = undefined;
+          settle();
+        }, BUSY_RETRY_MS);
+      }
+      return;
+    }
+    const next = pending;
+    pending = null;
+    show(next.session, next.version);
+  };
+
   function flush(keepalive = false): Promise<void> {
     if (keepalive) {
       // The page is going away: send now, without waiting for a save that
@@ -112,9 +208,10 @@ export function createSessionSaver(api: ApiClient, capture: () => SavedSession):
       const next = take();
       return next ? send(next.text, next.session, true) : Promise.resolve();
     }
-    queue = queue.then(() => {
+    queue = queue.then(async () => {
       const next = take();
-      return next ? send(next.text, next.session, false) : undefined;
+      if (next) await send(next.text, next.session, false);
+      settle();
     });
     return queue;
   }
@@ -127,8 +224,13 @@ export function createSessionSaver(api: ApiClient, capture: () => SavedSession):
   window.addEventListener("pagehide", onPageHide);
 
   return {
+    pageId,
+    get version() {
+      return version;
+    },
     schedule() {
-      if (stopped) return;
+      // Showing another page's session is not a change of this page's.
+      if (stopped || applying) return;
       if (timer !== undefined) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         timer = undefined;
@@ -136,10 +238,36 @@ export function createSessionSaver(api: ApiClient, capture: () => SavedSession):
       }, SAVE_DELAY_MS);
     },
     flush,
+    started(startVersion, saved) {
+      if (stopped) return;
+      ready = true;
+      if (typeof startVersion === "number" && Number.isFinite(startVersion)) {
+        version = Math.max(version, startVersion);
+      }
+      if (saved) confirmed = JSON.stringify(capture());
+      settle();
+    },
+    receive(update) {
+      if (stopped) return;
+      const updateVersion = update?.updatedAt;
+      if (typeof updateVersion !== "number" || !Number.isFinite(updateVersion)) return;
+      if (update.origin === pageId) {
+        version = Math.max(version, updateVersion);
+        return;
+      }
+      if (updateVersion <= version) return;
+      const session = readableSession(update.session);
+      if (!session) return;
+      if (!pending || updateVersion > pending.version) pending = { session, version: updateVersion };
+      settle();
+    },
     stop() {
       stopped = true;
+      pending = null;
       if (timer !== undefined) window.clearTimeout(timer);
+      if (retry !== undefined) window.clearTimeout(retry);
       timer = undefined;
+      retry = undefined;
       document.removeEventListener("visibilitychange", onHidden);
       window.removeEventListener("pagehide", onPageHide);
     },
