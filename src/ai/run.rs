@@ -147,7 +147,7 @@ impl Reservation {
         let run = self.run.clone();
         tokio::spawn(async move {
             let conversation_id = job.conversation_id.clone();
-            reply(&state, &run, job).await;
+            reply(&state, &runs, &run, job).await;
             runs.finish(&conversation_id, &run);
         });
     }
@@ -158,7 +158,7 @@ enum End {
     Stopped,
 }
 
-async fn reply(state: &AppState, run: &Arc<Active>, job: ReplyJob) {
+async fn reply(state: &AppState, runs: &Runs, run: &Arc<Active>, job: ReplyJob) {
     let (tx, mut rx) = mpsc::unbounded_channel::<Delta>();
     let cancel = run.cancel.clone();
     let request = job.request.clone();
@@ -257,6 +257,9 @@ async fn reply(state: &AppState, run: &Arc<Active>, job: ReplyJob) {
     {
         tracing::warn!(error = %e, "could not record AI usage");
     }
+    // Stored and counted: the conversation takes the next message now
+    // (before pages hear the reply ended and send one).
+    runs.finish(&job.conversation_id, run);
     if let Ok(Some(message)) = super::message(&state.db, job.message_id).await {
         state.events.publish_user_and_admin(
             "ai.message",

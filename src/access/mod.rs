@@ -74,7 +74,6 @@ pub fn is_desktop_app(app_id: &str) -> bool {
     app_id == LAUNCHER_APP || APP_IDS.contains(&app_id)
 }
 
-/// Removable apps that were uninstalled in App Center.
 /// Removable apps that are not installed: uninstalled ones, and optional
 /// ones nobody installed yet.
 pub async fn removed_apps(pool: &SqlitePool) -> Vec<String> {

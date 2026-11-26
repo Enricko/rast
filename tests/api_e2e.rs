@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "0004 to 0010 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        "0004 to 0011 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -2382,7 +2382,7 @@ async fn effective_access_matches_api_decisions_for_every_account() {
     assert_eq!(page["folders"][0]["level"], "write");
     assert_eq!(
         page["apps"].as_array().unwrap().len(),
-        8,
+        9,
         "apps always complete"
     );
     let (_, _, none_only) = server
@@ -3424,4 +3424,569 @@ async fn access_decisions_are_not_shared_between_servers() {
         .request("GET", "/api/backups", None, alice.headers())
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------- AI Agent
+
+type FakeLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
+
+/// A local OpenAI-compatible provider: lists three models, streams
+/// "Ahoy there!" (with reasoning and usage) or, for the model `slow`, four
+/// words 700 ms apart. Chat requests need the key `sk-test-secret-1234`.
+fn fake_provider() -> (SocketAddr, FakeLog) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
+    let addr = listener.local_addr().expect("address");
+    let log: FakeLog = Default::default();
+    let requests = log.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let requests = requests.clone();
+            std::thread::spawn(move || serve_fake(stream, &requests));
+        }
+    });
+    (addr, log)
+}
+
+fn serve_fake(mut stream: std::net::TcpStream, log: &FakeLog) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+        return;
+    }
+    let (mut auth, mut length) = (String::new(), 0usize);
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header).unwrap_or(0) == 0 {
+            return;
+        }
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            match name.to_ascii_lowercase().as_str() {
+                "authorization" => auth = value.trim().to_string(),
+                "content-length" => length = value.trim().parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    let request_line = request_line.trim().to_string();
+    log.lock()
+        .unwrap()
+        .push((request_line.clone(), auth.clone(), body.clone()));
+    if request_line.starts_with("GET /v1/models") {
+        let json = r#"{"data":[{"id":"fake-2"},{"id":"fake-1"},{"id":"slow"}]}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+            json.len()
+        );
+        return;
+    }
+    if auth != "Bearer sk-test-secret-1234" {
+        let json = r#"{"error":{"message":"Invalid API key"}}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+            json.len()
+        );
+        return;
+    }
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+    );
+    let event = |delta: Value| format!("data: {}\n\n", json!({"choices": [{"delta": delta}]}));
+    if body["model"] == "slow" {
+        for word in ["Once ", "upon ", "a ", "time"] {
+            if stream
+                .write_all(event(json!({"content": word})).as_bytes())
+                .is_err()
+            {
+                return;
+            }
+            let _ = stream.flush();
+            std::thread::sleep(std::time::Duration::from_millis(700));
+        }
+        let _ = stream.write_all(b"data: [DONE]\n\n");
+        return;
+    }
+    let mut out = String::new();
+    out.push_str(&event(json!({"role": "assistant", "content": ""})));
+    out.push_str(&event(json!({"reasoning_content": "The user greets me."})));
+    out.push_str(&event(json!({"content": "Ahoy "})));
+    out.push_str(&event(json!({"content": "there!"})));
+    out.push_str(&format!(
+        "data: {}\n\n",
+        json!({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5}})
+    ));
+    out.push_str("data: [DONE]\n\n");
+    let _ = stream.write_all(out.as_bytes());
+}
+
+/// Poll a conversation until its last reply is no longer being written.
+async fn ai_finished(server: &TestServer, session: &Session, id: &str) -> Value {
+    for _ in 0..200 {
+        let (status, _, body) = server
+            .request(
+                "GET",
+                &format!("/api/ai/conversations/{id}"),
+                None,
+                session.headers(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let last = body["messages"].as_array().unwrap().last().cloned();
+        if last.is_some_and(|m| m["status"] != "streaming") {
+            return body;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the reply did not finish");
+}
+
+#[tokio::test]
+async fn ai_agent_chat_limits_and_admin_view() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    server.create_user("bob", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let bob = server.login("bob", USER_PASSWORD).await;
+    let alice_id = server.user_id("alice").await;
+    for name in ["alice", "bob"] {
+        let id = server.user_id(name).await;
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                &format!("/api/users/{id}/access-rules"),
+                Some(json!({"folderRules": [], "appRules": [{"appId": "agent", "rule": "allow"}]})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    // The app starts uninstalled, for administrators too.
+    let (status, _, _) = server
+        .request("GET", "/api/ai/options", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request("GET", "/api/ai/options", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["configured"], false);
+
+    // Setup: a provider (its key stays secret), a skill, an agent.
+    let (addr, log) = fake_provider();
+    let base_url = format!("http://{addr}/v1");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/models",
+            Some(json!({"kind": "custom", "baseUrl": base_url})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["models"], json!(["fake-1", "fake-2", "slow"]));
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({"kind": "custom", "name": "Local", "baseUrl": base_url})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "only administrators set up");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({
+                "kind": "custom",
+                "name": "Local",
+                "baseUrl": format!("{base_url}/"),
+                "apiKey": "sk-test-secret-1234",
+                "models": ["fake-1", "slow"],
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider_id = body["provider"]["id"].as_str().unwrap().to_string();
+    assert_eq!(body["provider"]["baseUrl"], base_url);
+    assert_eq!(body["provider"]["hasKey"], true);
+    assert_eq!(body["provider"]["keyHint"], "…1234");
+    assert!(!body.to_string().contains("sk-test-secret"), "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/skills",
+            Some(json!({"name": "Pirate", "instructions": "Always end with Arr."})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let skill_id = body["id"].as_str().unwrap().to_string();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/agents",
+            Some(json!({
+                "name": "Captain",
+                "systemPrompt": "Talk like a ship's captain.",
+                "providerId": provider_id,
+                "model": "fake-1",
+                "skills": [skill_id],
+                "temperature": 0.3,
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let agent_id = body["agent"]["id"].as_str().unwrap().to_string();
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!body.to_string().contains("sk-test-secret"));
+    assert_eq!(body["agents"][0]["skills"], json!([skill_id]));
+
+    // Alice sees the agent but not its personality.
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, alice.headers())
+        .await;
+    assert_eq!(body["configured"], true);
+    assert_eq!(body["agents"][0]["name"], "Captain");
+    assert!(body["agents"][0].get("systemPrompt").is_none());
+    assert_eq!(body["providers"][0]["models"], json!(["fake-1", "slow"]));
+
+    // A model the provider does not offer is refused.
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "fake-2"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"agentId": agent_id})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let conversation = body["conversation"]["id"].as_str().unwrap().to_string();
+    assert_eq!(body["conversation"]["model"], "fake-1");
+    let path = format!("/api/ai/conversations/{conversation}/messages");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "Hello?\nAre you there?"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["reply"]["status"], "streaming");
+    assert_eq!(body["conversation"]["title"], "Hello?");
+    let done = ai_finished(&server, &alice, &conversation).await;
+    let reply = done["messages"][1].clone();
+    assert_eq!(reply["status"], "done", "{reply}");
+    assert_eq!(
+        reply["content"],
+        json!([{"type": "reasoning", "text": "The user greets me."}, {"type": "text", "text": "Ahoy there!"}])
+    );
+    assert_eq!(
+        (
+            reply["inputTokens"].as_i64(),
+            reply["outputTokens"].as_i64()
+        ),
+        (Some(12), Some(5))
+    );
+    {
+        let requests = log.lock().unwrap();
+        let (line, auth, sent) = requests.last().unwrap();
+        assert!(line.starts_with("POST /v1/chat/completions"), "{line}");
+        assert_eq!(auth, "Bearer sk-test-secret-1234");
+        assert_eq!(sent["model"], "fake-1");
+        assert_eq!(sent["stream"], true);
+        assert_eq!(sent["temperature"], 0.3);
+        let system = sent["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            system.starts_with("Talk like a ship's captain."),
+            "{system}"
+        );
+        assert!(system.contains("Always end with Arr."), "{system}");
+        assert_eq!(
+            sent["messages"][1],
+            json!({"role": "user", "content": "Hello?\nAre you there?"})
+        );
+    }
+
+    // The next request carries the conversation so far.
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "Again"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    ai_finished(&server, &alice, &conversation).await;
+    {
+        let requests = log.lock().unwrap();
+        let sent = &requests.last().unwrap().2;
+        let roles: Vec<&str> = sent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["system", "user", "assistant", "user"]);
+        assert_eq!(sent["messages"][2]["content"], "Ahoy there!");
+    }
+    let (_, _, body) = server
+        .request("GET", "/api/ai/usage", None, alice.headers())
+        .await;
+    assert_eq!(body["allowance"]["usedToday"], 34);
+
+    // A slow reply can be stopped; only one runs per conversation.
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            &format!("/api/ai/conversations/{conversation}"),
+            Some(json!({"model": "slow", "title": "Pirates"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["conversation"]["agentId"], agent_id);
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "A story"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "Another"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    let (_, _, live) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(live["conversation"]["running"], true);
+    assert!(live["seq"].as_u64().unwrap() >= 1, "{live}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{conversation}/stop"),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["stopped"], true);
+    let done = ai_finished(&server, &alice, &conversation).await;
+    let last = done["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["status"], "stopped", "{last}");
+    assert!(
+        ai_text(&last).starts_with("Once"),
+        "what was written is kept: {last}"
+    );
+
+    // Bob cannot see Alice's conversation; an administrator can read it
+    // (audited) but not write in it.
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            bob.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, _, body) = server
+        .request("GET", "/api/ai/conversations", None, bob.headers())
+        .await;
+    assert_eq!(body["items"], json!([]));
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/conversations", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["owner"], "alice");
+    assert_eq!(body["items"][0]["title"], "Pirates");
+    assert_eq!(body["items"][0]["messageCount"], 6);
+    let (status, _, body) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["readOnly"], true);
+    assert_eq!(body["conversation"]["owner"], "alice");
+    let viewed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE action = 'ai.conversation.view'")
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_eq!(viewed, 1);
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "hi"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Limits: allowance used up, then no providers.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/limits/user:{alice_id}"),
+            Some(json!({"dailyTokens": 20})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "more"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/limits/user:{alice_id}"),
+            Some(json!({"providers": []})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, alice.headers())
+        .await;
+    assert_eq!(body["providers"], json!([]));
+    assert_eq!(body["agents"], json!([]));
+    let (status, _, _) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "more"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/ai/limits/user:abc",
+            Some(json!({})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/limits/user:{alice_id}"),
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Deleting the conversation keeps what it used counted.
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, body) = server
+        .request("GET", "/api/ai/usage", None, alice.headers())
+        .await;
+    assert!(
+        body["allowance"]["usedToday"].as_i64().unwrap() > 34,
+        "{body}"
+    );
+
+    // Uninstalling closes the API again.
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            "/api/packages/apps/agent?confirm=agent",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = server
+        .request("GET", "/api/ai/options", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+fn ai_text(message: &Value) -> String {
+    message["content"]
+        .as_array()
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b["type"] == "text")
+                .filter_map(|b| b["text"].as_str())
+                .collect()
+        })
+        .unwrap_or_default()
 }

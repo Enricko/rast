@@ -131,6 +131,7 @@ const APP_ICONS: Record<string, string> = {
   controlpanel: `<circle cx="12" cy="12" r="3" fill="none" stroke="#5A6673" stroke-width="2"/><path d="M12 2.9v3M12 18.1v3M2.9 12h3M18.1 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="#5A6673" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.3" fill="#2785D8"/>`,
   packages: `<path d="M12 2.8 20.4 7.3v9.4L12 21.2 3.6 16.7V7.3z" fill="#7B5BD6"/><path d="M3.6 7.3 12 11.8l8.4-4.5L12 2.8z" fill="#9C82EA"/><path d="M12 11.8v9.4l8.4-4.5V7.3z" fill="#6446BF"/><path d="M7.6 5 16.2 9.6v3.2" fill="none" stroke="#F1ECFF" stroke-width="1.5" stroke-linejoin="round"/>`,
   terminal: `<rect x="2.8" y="4" width="18.4" height="16" rx="2.6" fill="#1D2733"/><path d="M2.8 6.6c0-1.4 1.2-2.6 2.6-2.6h13.2c1.4 0 2.6 1.2 2.6 2.6v.8H2.8z" fill="#3A4757"/><path d="m6.6 11 3 2.4-3 2.4" fill="none" stroke="#5FD48A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M11.8 16.4h5" stroke="#D5DDE6" stroke-width="1.6" stroke-linecap="round"/>`,
+  agent: `<rect x="3" y="3" width="18" height="18" rx="5" fill="#0F8F86"/><path d="M7.4 9.2c0-1.4 1.1-2.4 2.4-2.4h4.4c1.3 0 2.4 1 2.4 2.4v3.4c0 1.4-1.1 2.4-2.4 2.4h-2.6l-2.6 2.2V15c-.9-.3-1.6-1.2-1.6-2.3z" fill="#E6FAF7"/><circle cx="10.3" cy="10.9" r="1" fill="#0F8F86"/><circle cx="13.7" cy="10.9" r="1" fill="#0F8F86"/><path d="M17.6 4.6l.5 1.3 1.3.5-1.3.5-.5 1.3-.5-1.3-1.3-.5 1.3-.5z" fill="#FFD66B"/>`,
   logs: `<path d="M5.4 3.6h9.2l4 4v12.8H5.4z" fill="#F3F5F7" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M14.4 3.8v4h4" fill="none" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M8.2 10.4h7.4M8.2 13h7.4M8.2 15.6h4.6" stroke="#2785D8" stroke-width="1.3" stroke-linecap="round"/>`,
 };
 
@@ -144,6 +145,7 @@ const APP_ACCENT: Record<string, string> = {
   controlpanel: "controlpanel",
   logs: "logs",
   terminal: "terminal",
+  agent: "agent",
 };
 
 export function appAccentClass(appId: string): string {

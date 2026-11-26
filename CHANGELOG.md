@@ -11,7 +11,19 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **AI Agent**, a new app installed from App Center: chat with AI agents on
+  models an administrator connects. Providers: Anthropic, OpenAI, DeepSeek,
+  OpenRouter, a local Ollama or any OpenAI-compatible endpoint, as many
+  accounts of each as needed (API keys are stored encrypted and never shown
+  again). Administrators set up agents (a personality, a model and skills),
+  skills (reusable instructions) and limits (which providers an account or
+  group may use and how many tokens per day and month), see usage, and can
+  read everyone's chats (each read is recorded in the activity log). Each
+  account has its own chats; replies are written on the server and stream
+  live to every open page, so a reload or another device picks a reply up
+  where it is, and Stop works from any of them. Reasoning models show their
+  thinking; replies render Markdown (code blocks with Copy, tables, lists).
+  Database schema v11.
 
 ### Planned
 

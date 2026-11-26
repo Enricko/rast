@@ -78,6 +78,10 @@ is not held open by connected browsers; clients reconnect and resynchronise.
 | `backup.changed` | Admin | `{reason, id?}` |
 | `package.changed` | Accounts allowed to open App Center (admins, group `allow`) | `{packageId, version?, reason:"queued"\|"started"\|"installed"\|"failed"\|"default"\|"removed"\|"consumers", jobId?, error?}` |
 | `package.catalog` | Accounts allowed to open App Center | `{reason:"checking"}`, then `{reason:"checked", changed, sequence, error}` after every manual or automatic check |
+| `ai.delta` | User(owner), app `agent` | `{conversationId, messageId, seq, text, reasoning}`: text a running reply added since the previous delta (`seq` from 1; a gap means: load the chat again) |
+| `ai.message` | UserAndAdmin(owner), app `agent` | `{conversationId, message, running}` for each stored message and when a reply ends |
+| `ai.conversation` | UserAndAdmin(owner), app `agent` | `{conversation, deleted?}` |
+| `ai.config` | Broadcast, app `agent` | `{what:"providers"\|"agents"\|"skills"\|"limits"}` after an administrator changes the setup |
 | `audit.created` | UserAndAdmin(actor) / Admin | audit row (already emitted by `audit::record`) |
 | `user.changed` | Admin | `{userId, event:"created"|"updated"|"deactivated"}` |
 | `settings.changed` | Admin | `{keys:[...]}` |

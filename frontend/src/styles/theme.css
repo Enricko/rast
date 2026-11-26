@@ -284,6 +284,9 @@ pre {
 .app-icon--terminal {
   color: #1d2733;
 }
+.app-icon--agent {
+  color: #0f8f86;
+}
 
 /* Taskbar colours and states live in taskbar.css (theme + accent tokens). */
 

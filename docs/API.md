@@ -246,6 +246,59 @@ detaches — the shell keeps running. A new shell is audited as `terminal.open`
 (detail `root` or `sandbox`). A new sandbox shell is refused while the image
 is not built yet or the home folder is over its quota.
 
+## AI Agent (app id `agent`)
+
+RAST's own agent harness ([`src/ai`](../src/ai)). The app starts uninstalled:
+an administrator installs it in App Center (`POST /api/packages/apps/agent/install`);
+until then every `/api/ai/*` request is refused (`403`), administrators'
+included. Accounts need the app granted (group or account rule) unless they
+are administrators.
+
+Administrators set up **providers** (`kind`: `anthropic`, `openai`,
+`deepseek`, `openrouter`, `ollama` or `custom` = any OpenAI-compatible
+endpoint; several of one kind are fine), **skills** (instructions) and
+**agents** (personality, provider and model, skills). API keys are encrypted
+with the server secret and never returned: providers show `hasKey` and
+`keyHint` (`…` and the last four characters). **Limits** decide which
+providers an account may use and how many tokens it may spend per day and per
+month (server time): the account's own rule (`user:<id>`), else its groups'
+rules combined with the most generous winning (`group:<id>`), else the
+`default` rule, else no limits. Administrators are not limited. Usage counts
+the tokens the provider reports (about four characters per token when it
+reports none) and stays counted when a chat is deleted.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality) |
+| GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, monthlyTokens, source}, allowance:{usedToday, usedMonth, dailyTokens, monthlyTokens, dayEndsAt, monthEndsAt, source}}` |
+| GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, createdAt, updatedAt, running}]}` |
+| POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model); a model must be one the provider offers |
+| GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[{type:"text"\|"reasoning", text}], providerId, model, inputTokens, outputTokens, status:"streaming"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`; a reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
+| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?}`; owner only |
+| DELETE | `/api/ai/conversations/{id}` | owner only; stops a running reply |
+| POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
+| POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`) |
+| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}]}` |
+| GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |
+| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], enabled?}` |
+| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove) |
+| POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models}` |
+| POST | `/api/ai/agents` | admin: `{name, description?, systemPrompt?, providerId?, model?, skills:[ids], temperature?` (0–2)`, maxOutputTokens?, enabled?}` |
+| PUT / DELETE | `/api/ai/agents/{id}` | admin |
+| POST | `/api/ai/skills` | admin: `{name, description?, instructions}` → `{id}` |
+| PUT / DELETE | `/api/ai/skills/{id}` | admin (agents stop carrying a deleted skill) |
+| PUT / DELETE | `/api/ai/limits/{subject}` | admin: `subject` is `default`, `group:<id>` or `user:<id>`; body `{providers: [ids] \| null, dailyTokens: n \| null, monthlyTokens: n \| null}` (`null` = all / no limit) |
+
+Replies are written on the server, one per chat at a time, and stream to the
+owner's pages as `ai.delta` events `{conversationId, messageId, seq, text,
+reasoning}` (text added since the previous delta; `seq` counts up from 1, so a
+gap means the page should load the chat again). `ai.message`
+`{conversationId, message, running}` carries each stored message (the owner
+and administrators), `ai.conversation` `{conversation, deleted?}` chat
+changes, and `ai.config` `{what}` setup changes. A reply cut off by a restart
+is marked `error` ("Interrupted") when RAST starts. Configuration changes are
+audited (`ai.provider.*`, `ai.agent.*`, `ai.skill.*`, `ai.limit.*`).
+
 ## Resource monitor
 
 | Method | Path | Notes |
@@ -520,7 +573,8 @@ never appear in the event URL.
 Event kinds include `monitor`, `file.changed`, `file.quota`, `files.resync`,
 `job.*`, `app.changed`, `app.logs`, `docker.changed`, `backup.changed`,
 `audit.created`, `user.changed`, `settings.changed`, `appearance.changed`,
-`package.changed`, `package.catalog`.
+`package.changed`, `package.catalog`, `ai.delta`, `ai.message`,
+`ai.conversation`, `ai.config`.
 
 ## Conventions for implementers
 

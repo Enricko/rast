@@ -444,6 +444,7 @@ export const RULE_APPS: Array<{ id: string; label: string }> = [
   { id: "logs", label: "Activity Logs" },
   { id: "controlpanel", label: "Control Panel" },
   { id: "terminal", label: "Terminal" },
+  { id: "agent", label: "AI Agent" },
 ];
 
 export function appLabel(appId: string): string {

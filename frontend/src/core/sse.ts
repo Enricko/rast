@@ -59,6 +59,10 @@ const KNOWN_EVENTS = [
   "access.changed",
   "package.changed",
   "package.catalog",
+  "ai.delta",
+  "ai.message",
+  "ai.conversation",
+  "ai.config",
 ];
 
 const IDLE_DISCONNECT_MS = 30_000;
