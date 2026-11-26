@@ -436,8 +436,13 @@ field by where they are in the window (at most 512 bytes); `x`/`y` are pixels
 for an area `width` pixels wide and `ratio` (`0..1`) how far down it is, used
 on screens of another width. `fields` holds text typed into the window's text
 fields and not saved yet; the desktop never includes password, one-time-code
-or card fields, the Terminal, or text in pop-up dialogs. At most 32 scroll
-areas, 64 fields, 64 KiB per field and 192 KiB per window. `rect` is the position
+or card fields, or the Terminal. At most 32 scroll
+areas, 64 fields, 64 KiB per field and 192 KiB per window. `dialogs`
+(optional, at most 4) are the dialogs open in the window: `[{name, params?,
+view?}]`, where `name` is the app's name for the dialog (1–64 letters, digits,
+`-` or `_`), `params` what it is about, in the shape the app opens it with
+(at most 4 KiB, e.g. `{folder}` for File Station's New folder), and `view` the
+text typed in it (as above). The app opens them again with that text. `rect` is the position
 and size when the window is neither maximized nor snapped, in desktop pixels
 (`null`: the default place). `state` is `normal|maximized|left|right`. Unknown
 fields, invalid values and a `focused` key that is not in `windows` are `400`.

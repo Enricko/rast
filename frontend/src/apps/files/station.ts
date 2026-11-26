@@ -379,6 +379,20 @@ export class FileStation {
         if (this.section !== "files" || place.path !== this.path) void this.navigate(place.path);
       }
     });
+    // Dialogs that were open (a reload, another device) open again.
+    const folderParam = (params: unknown, key: string): string | null => {
+      const value = ((params ?? {}) as Record<string, unknown>)[key];
+      return typeof value === "string" && value.startsWith("/") && value.length <= 2048 ? value : null;
+    };
+    this.ctx.onDialog("new-folder", (params) => {
+      const folder = folderParam(params, "folder");
+      if (folder) void this.newFolder(folder);
+    });
+    this.ctx.onDialog("rename", (params) => {
+      const path = folderParam(params, "path");
+      const name = ((params ?? {}) as { name?: unknown }).name;
+      if (path && typeof name === "string") void this.renameEntry(path, name);
+    });
     this.renderUsage();
     if (saved.section === "trash") {
       await Promise.all([this.loadRoots(), this.loadUsage(), this.showSection("trash")]);
@@ -1626,20 +1640,25 @@ export class FileStation {
 
   // ---------------------------------------------------------------- actions
 
-  private async newFolder(): Promise<void> {
-    if (this.section !== "files") return;
-    const name = await this.withEditContext("new folder", [this.path], () =>
+  /** Ask for a name and create a folder in `folder` (the one shown). */
+  private async newFolder(folder?: string): Promise<void> {
+    if (folder === undefined) {
+      if (this.section !== "files") return;
+      folder = this.path;
+    }
+    const name = await this.withEditContext("new folder", [folder], () =>
       promptDialog({
         title: "New folder",
         label: "Folder name",
         placeholder: "New folder",
         confirmLabel: "Create",
         validate: validateFileName,
+        session: this.ctx.dialog("new-folder", { folder }),
       }),
     );
     if (!name) return;
     try {
-      await this.ctx.api.post("/api/files/mkdir", { path: joinPath(this.path, name.trim()) });
+      await this.ctx.api.post("/api/files/mkdir", { path: joinPath(folder, name.trim()) });
       this.ctx.toast.success("Folder created");
       this.markSelfChange();
       await this.loadListing();
@@ -1653,18 +1672,24 @@ export class FileStation {
     if (this.selection.size !== 1) return;
     const entry = listingItems(this.listing).find((candidate) => this.selection.has(candidate.path));
     if (!entry) return;
-    const name = await this.withEditContext("rename", [entry.path], () =>
+    await this.renameEntry(entry.path, entry.name);
+  }
+
+  /** Ask for a new name for `path` (now called `current`) and rename it. */
+  private async renameEntry(path: string, current: string): Promise<void> {
+    const name = await this.withEditContext("rename", [path], () =>
       promptDialog({
         title: "Rename",
         label: "New name",
-        value: entry.name,
+        value: current,
         confirmLabel: "Rename",
         validate: validateFileName,
+        session: this.ctx.dialog("rename", { path, name: current }),
       }),
     );
-    if (!name || name.trim() === entry.name) return;
+    if (!name || name.trim() === current) return;
     try {
-      await this.ctx.api.post("/api/files/rename", { path: entry.path, newName: name.trim() });
+      await this.ctx.api.post("/api/files/rename", { path, newName: name.trim() });
       this.ctx.toast.success("Renamed");
       this.markSelfChange();
       this.selection.clear();

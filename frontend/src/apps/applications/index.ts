@@ -499,6 +499,23 @@ class ApplicationsApp {
     // container page it showed.
     const saved = (this.ctx.params ?? {}) as { view?: unknown; container?: unknown };
     if (saved.view === "images" || saved.view === "volumes") this.view = saved.view;
+    // Dialogs that were open (a reload, another device) open again.
+    this.ctx.onDialog("image-pull", () => this.openPullDialog());
+    this.ctx.onDialog("app-deploy", (params) => {
+      const rows = ((params ?? {}) as { envRows?: unknown }).envRows;
+      void this.openDeployDialog(typeof rows === "number" ? rows : 0);
+    });
+    this.ctx.onDialog("image-run", (params) => {
+      const wanted = (params ?? {}) as { reference?: unknown; volumes?: unknown; env?: unknown };
+      if (typeof wanted.reference !== "string" || !wanted.reference) return;
+      const count = (value: unknown): number | undefined => (typeof value === "number" ? value : undefined);
+      const volumes = count(wanted.volumes);
+      const env = count(wanted.env);
+      void this.runImage(wanted.reference, `run:${wanted.reference}`, {
+        ...(volumes !== undefined ? { volumes } : {}),
+        ...(env !== undefined ? { env } : {}),
+      });
+    });
     // The same window on another page (tab, device) went elsewhere.
     this.ctx.onPlace((params) => {
       if (this.disposed || this.denied) return;
@@ -1349,7 +1366,11 @@ class ApplicationsApp {
   }
 
   /** Run an image as a new RAST app (Docker Desktop's Run). */
-  private async runImage(reference: string, busyKey: string): Promise<void> {
+  private async runImage(
+    reference: string,
+    busyKey: string,
+    rows?: { volumes?: number; env?: number },
+  ): Promise<void> {
     if (!this.canChange() || this.busy.has(busyKey)) return;
     if (!this.dockerUsable()) {
       this.ctx.toast.warning("Docker is not ready, so the image cannot run now.");
@@ -1363,6 +1384,7 @@ class ApplicationsApp {
         lc: this.lc,
         reference,
         containers: this.containers,
+        ...(rows ? { rows } : {}),
         onStarted: () => {
           void Promise.all([this.loadApps(), this.loadContainers(), this.loadImages()]);
           this.switchView("containers");
@@ -1387,6 +1409,7 @@ class ApplicationsApp {
     const close = modal({
       title: "Pull image",
       body,
+      session: this.ctx.dialog("image-pull"),
       onClose: () => undefined,
       actions: [
         { label: "Cancel", variant: "ghost", onClick: () => {} },
@@ -1644,7 +1667,8 @@ class ApplicationsApp {
 
   // ---------------------------------------------------------------- deploy
 
-  private async openDeployDialog(): Promise<void> {
+  /** `envRows`: variables rows to show (a dialog opened again). */
+  private async openDeployDialog(envRowsWanted = 0): Promise<void> {
     if (this.denied || this.readOnly) {
       this.ctx.toast.warning(
         this.denied ? "Your access to Docker was changed." : "You have read-only access to Docker.",
@@ -1662,6 +1686,8 @@ class ApplicationsApp {
     });
     const envRows = h("div", { class: "appmgmt-env-rows" });
     const envList: Array<{ key: HTMLInputElement; value: HTMLInputElement; secret: HTMLInputElement; root: HTMLElement }> = [];
+    // Kept with the window: opened again with as many variable rows.
+    const session = this.ctx.dialog("app-deploy", { envRows: 0 });
     const validation = formError("");
     const submitProgress = progressBar();
     submitProgress.el.classList.add("hidden");
@@ -1689,12 +1715,15 @@ class ApplicationsApp {
         const index = envList.findIndex((row) => row.root === root);
         if (index >= 0) envList.splice(index, 1);
         root.remove();
+        session.update({ envRows: envList.length });
       });
       envList.push({ key, value, secret, root });
       envRows.appendChild(root);
+      session.update({ envRows: envList.length });
     };
     const addButton = h("button", { class: "btn btn-subtle btn-sm", type: "button" }, iconSvg("plus", 13), document.createTextNode("Add variable"));
     addButton.addEventListener("click", () => addRow());
+    while (envList.length < Math.min(envRowsWanted, 50)) addRow();
 
     const header = h(
       "div",
@@ -1724,6 +1753,7 @@ class ApplicationsApp {
       title: "Deploy application",
       body,
       wide: true,
+      session,
       onClose: () => {
         /* nothing to abort: the request completes server-side */
       },

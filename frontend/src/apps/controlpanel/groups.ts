@@ -759,6 +759,7 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
       title: groupId === null ? "Create group" : `Edit group — ${initial.name}`,
       body: bodyHost,
       wide: true,
+      session: ctx.dialog("group-edit", { groupId }),
       onClose: () => {
         openEditor = null;
         workflow.dispose();
@@ -855,9 +856,16 @@ export async function renderGroupsView(tab: TabRenderContext): Promise<() => voi
   const unsubscribeUsers = realtime.on("user.changed", () => refreshGroups.run());
   const unsubscribeResync = realtime.onResync(() => refreshGroups.run());
 
+  // A dialog that was open (a reload, another device) opens again.
+  const stopDialog = ctx.onDialog("group-edit", (params) => {
+    const groupId = ((params ?? {}) as { groupId?: unknown }).groupId;
+    if (groupId === null || typeof groupId === "number") void openGroupEditor(groupId);
+  });
+
   await load();
 
   return () => {
+    stopDialog();
     refreshGroups.cancel();
     unsubscribeGroup();
     unsubscribeUsers();

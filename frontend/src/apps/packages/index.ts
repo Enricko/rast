@@ -183,6 +183,21 @@ class PackageCenterApp {
       this.applyParams(params);
       this.render();
     });
+    // Dialogs that were open (a reload, another device) open again.
+    this.ctx.onDialog("github-import", () => this.openImport());
+    this.ctx.onDialog("consumer-edit", (params) => {
+      const wanted = (params ?? {}) as { packageId?: unknown; consumerId?: unknown };
+      if (typeof wanted.packageId !== "string") return;
+      const consumerId = wanted.consumerId;
+      void this.ctx.api
+        .get<PackageDetail>(`/api/packages/${encodeURIComponent(wanted.packageId)}`)
+        .then((detail) => {
+          const p = detail.package;
+          const existing = consumerId === null ? null : p.consumers.find((c) => c.id === consumerId);
+          if (existing !== undefined) void this.editConsumer(p, existing);
+        })
+        .catch(() => undefined);
+    });
     // The same window on another page (tab, device) went elsewhere.
     this.ctx.onPlace((params) => {
       const place = (params ?? {}) as { app?: unknown; package?: unknown };
@@ -1629,6 +1644,7 @@ class PackageCenterApp {
       modal({
         title: existing ? `Edit ${existing.name}` : `Add a ${p.name} consumer`,
         body,
+        session: this.ctx.dialog("consumer-edit", { packageId: p.id, consumerId: existing?.id ?? null }),
         onClose: () => resolve(),
         actions: [
           { label: "Cancel", variant: "ghost", onClick: (close) => close() },

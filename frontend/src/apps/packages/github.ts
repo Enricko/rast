@@ -185,6 +185,7 @@ export function openGithubImport(ctx: AppContext, callbacks: ImportCallbacks): v
     title: "Install from GitHub",
     body,
     wide: true,
+    session: ctx.dialog("github-import"),
     actions: [{ label: "Close", variant: "ghost", onClick: (c) => c() }],
   });
 }

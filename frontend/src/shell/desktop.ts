@@ -52,6 +52,7 @@ import {
   type SessionUpdate,
 } from "./window-session";
 import { ViewTracker, type WindowView } from "./window-view";
+import { WindowDialogs, type SavedDialog } from "./window-dialogs";
 
 const MAX_PINNED = 8;
 const MAX_TASKBAR_WINDOWS = 10;
@@ -114,6 +115,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   const sessionPlaces = new Map<string, { shown: WindowPlacement; saved: WindowPlacement }>();
   /** Scroll positions and typed text inside each window. */
   const windowViews = new Map<string, ViewTracker>();
+  /** Dialogs each window keeps (AppContext.dialog). */
+  const windowDialogs = new Map<string, WindowDialogs>();
   const disposers: Array<() => void> = [];
 
   const wm = new WindowManager(windowsLayer, {
@@ -233,7 +236,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   function openApp(
     appId: string,
     params?: unknown,
-    restore?: { key: string; placement: WindowPlacement; view?: WindowView | undefined },
+    restore?: {
+      key: string;
+      placement: WindowPlacement;
+      view?: WindowView | undefined;
+      dialogs?: SavedDialog[] | undefined;
+    },
   ): void {
     const app: AppDefinition | undefined = findApp(appId);
     if (!app) {
@@ -271,6 +279,15 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         });
         // Scrolled to and typed as saved, as soon as the app shows it.
         if (restore?.view) view.apply(restore.view, false);
+        const dialogs = new WindowDialogs(() => {
+          if (sessionReady) sessionSaver.schedule();
+        });
+        windowDialogs.set(windowId, dialogs);
+        mount.onDispose(() => {
+          dialogs.dispose();
+          windowDialogs.delete(windowId);
+        });
+        if (restore?.dialogs) dialogs.apply(restore.dialogs, false);
         const appHost = h("div", { class: "app" });
         mount.contentEl.appendChild(appHost);
         const busyLabel = h("span", { class: "busy-label" }, "Working…");
@@ -329,8 +346,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
           onPlace: (callback: (next: unknown) => void) => {
             placeListeners.set(windowId, callback);
           },
+          dialog: (name: string, dialogParams?: unknown) => dialogs.session(name, dialogParams),
+          onDialog: (name: string, reopen: (next: unknown) => void) => dialogs.register(name, reopen),
         };
         await app.mount(ctx);
+        // Dialogs the window had open open again now that the app runs.
+        dialogs.mounted();
       },
       { singleton: app.singleton, ...(restore ? { placement: restore.placement } : {}) },
     );
@@ -400,6 +421,8 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       if (params !== undefined) entry.params = params;
       const view = windowViews.get(id)?.capture();
       if (view) entry.view = view;
+      const dialogs = windowDialogs.get(id)?.capture();
+      if (dialogs) entry.dialogs = dialogs;
       windows.push(entry);
       if (info.focused && !placement.minimized) focused = key;
     }
@@ -416,7 +439,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     for (const entry of session.windows.slice(-MAX_SESSION_WINDOWS)) {
       if (!entry || typeof entry.appId !== "string" || typeof entry.key !== "string") continue;
       if (!isAppAllowed(entry.appId, store.get().permissions, store.isAdmin())) continue;
-      openApp(entry.appId, entry.params, { key: entry.key, placement: placementOf(entry), view: entry.view });
+      openApp(entry.appId, entry.params, {
+        key: entry.key,
+        placement: placementOf(entry),
+        view: entry.view,
+        dialogs: entry.dialogs,
+      });
     }
     if (session.focused) {
       for (const [id, key] of windowKeys) {
@@ -461,7 +489,12 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       const target = placementOf(entry);
       const id = idOf.get(entry.key);
       if (!id) {
-        openApp(entry.appId, entry.params, { key: entry.key, placement: target, view: entry.view });
+        openApp(entry.appId, entry.params, {
+          key: entry.key,
+          placement: target,
+          view: entry.view,
+          dialogs: entry.dialogs,
+        });
         continue;
       }
       const current = sessionPlacement(id);
@@ -479,6 +512,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
         }
       }
       windowViews.get(id)?.apply(entry.view, true);
+      windowDialogs.get(id)?.apply(entry.dialogs ?? [], true);
     }
 
     const order: string[] = [];

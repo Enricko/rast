@@ -4,6 +4,24 @@ import { clientToStage, displayFactor, stageSize } from "./display";
 import { h } from "./dom";
 import { iconSvg } from "./icons";
 
+/**
+ * Ties a dialog to the window that opened it (`AppContext.dialog`): the
+ * desktop keeps it, and what is typed in it, with the window.
+ */
+export interface ModalSession {
+  opened(el: HTMLElement, close: () => void): void;
+  closed(): void;
+}
+
+/** A dialog kept with its window (`AppContext.dialog`). */
+export interface DialogSession extends ModalSession {
+  /**
+   * What the dialog is about changed while it is open (e.g. how many rows it
+   * has), so that opening it again builds the same dialog.
+   */
+  update(params: unknown): void;
+}
+
 export interface ModalOptions {
   title: string;
   body?: Node | string;
@@ -17,6 +35,8 @@ export interface ModalOptions {
     keepOpen?: boolean;
   }>;
   onClose?: () => void;
+  /** Keep the dialog with its window (see `AppContext.dialog`). */
+  session?: ModalSession;
 }
 
 function focusables(root: HTMLElement): HTMLElement[] {
@@ -46,6 +66,7 @@ export function modal(options: ModalOptions): () => void {
       backdrop.remove();
       previousFocus?.focus({ preventScroll: true });
     }, 120);
+    options.session?.closed();
     options.onClose?.();
   };
 
@@ -131,6 +152,7 @@ export function modal(options: ModalOptions): () => void {
   });
   document.addEventListener("keydown", onKey, true);
   document.body.appendChild(backdrop);
+  options.session?.opened(modalEl, close);
 
   // Move focus inside the dialog once it is attached.
   const initial =
@@ -149,6 +171,7 @@ export function confirmDialog(options: {
   danger?: boolean;
   dismissible?: boolean;
   requireTyped?: string;
+  session?: ModalSession;
 }): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;
@@ -176,6 +199,7 @@ export function confirmDialog(options: {
       resolve(value);
     };
     closeFn = modal({
+      ...(options.session ? { session: options.session } : {}),
       title: options.title,
       body,
       dismissible: options.dismissible !== false,
@@ -221,6 +245,7 @@ export function promptDialog(options: {
   confirmLabel?: string;
   autocomplete?: string;
   validate?: (value: string) => string | null;
+  session?: ModalSession;
 }): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
@@ -247,6 +272,7 @@ export function promptDialog(options: {
       resolve(value);
     };
     closeFn = modal({
+      ...(options.session ? { session: options.session } : {}),
       title: options.title,
       body,
       onClose: () => finish(null),

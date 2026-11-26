@@ -15,6 +15,7 @@
 
 import type { ApiClient } from "../core/api";
 import type { WindowPlacement, WindowRect, WindowState } from "../core/wm";
+import type { SavedDialog } from "./window-dialogs";
 import type { WindowView } from "./window-view";
 
 export const SESSION_PATH = "/api/desktop/session";
@@ -37,6 +38,8 @@ export interface SavedWindow {
   minimized: boolean;
   /** Scroll positions and typed text inside the window. */
   view?: WindowView;
+  /** Dialogs open in the window, with what was typed in them. */
+  dialogs?: SavedDialog[];
 }
 
 export interface SavedSession {

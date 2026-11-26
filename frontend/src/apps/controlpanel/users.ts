@@ -594,6 +594,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       title: "Add user",
       body,
       wide: true,
+      session: ctx.dialog("user-create"),
       onClose: () => {
         creating = false;
         groupPicker.dispose();
@@ -1064,6 +1065,7 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
       title: `Edit ${user.username}`,
       body: bodyHost,
       wide: true,
+      session: ctx.dialog("user-edit", { userId: user.id, username: user.username }),
       onClose: () => {
         closing = true;
         openAccessEditor = null;
@@ -1267,10 +1269,28 @@ async function renderUsersView(tab: TabRenderContext): Promise<() => void> {
     if (openAccessEditor && !openAccessEditor.busy() && !openAccessEditor.isDirty()) void openAccessEditor.refreshAccess();
   });
 
+  // Dialogs that were open (a reload, another device) open again.
+  const stopDialogs = [
+    ctx.onDialog("user-create", () => openCreateModal()),
+    ctx.onDialog("user-edit", (params) => {
+      const wanted = (params ?? {}) as { userId?: unknown; username?: unknown };
+      if (typeof wanted.userId !== "number" || typeof wanted.username !== "string") return;
+      const { userId, username } = wanted;
+      void ctx.api
+        .get<Page<User>>("/api/users", { page: 1, perPage: 100, q: username })
+        .then((found) => {
+          const user = found.items.find((candidate) => candidate.id === userId);
+          if (user) openEditModal(user);
+        })
+        .catch(() => undefined);
+    }),
+  ];
+
   await refreshAdminCount();
   await load();
 
   return () => {
+    for (const stop of stopDialogs) stop();
     reloadUsers.cancel();
     unsubscribeUsers();
     unsubscribeGroups();

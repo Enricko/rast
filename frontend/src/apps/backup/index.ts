@@ -406,6 +406,9 @@ class BackupCenterApp {
   }
 
   async start(): Promise<void> {
+    // Dialogs that were open (a reload, another device) open again.
+    this.ctx.onDialog("backup-create", () => void this.openCreateDialog());
+    this.ctx.onDialog("backup-schedule", () => void this.openScheduleEditor());
     this.ctx.setTitle("Backup Center");
     await this.hydratePermissions();
     this.applyAccessPolicy();
@@ -870,6 +873,7 @@ class BackupCenterApp {
       title: "Create backup",
       body,
       wide: true,
+      session: this.ctx.dialog("backup-create"),
       onClose: () => {
         this.activeModalClose = null;
       },
@@ -1045,6 +1049,7 @@ class BackupCenterApp {
       title: "Backup schedule",
       body,
       wide: true,
+      session: this.ctx.dialog("backup-schedule"),
       onClose: () => {
         this.scheduleEditorConflict = null;
         this.scheduleEditorDirty = false;

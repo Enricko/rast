@@ -5,6 +5,7 @@ import type { EventStream } from "./sse";
 import type { Store } from "./store";
 import type { ToastCenter } from "./toast";
 import type { WindowHandle } from "./wm";
+import type { DialogSession } from "./ui";
 
 /** Drag-and-drop type carried by app tiles (Applications folder, desktop icons). */
 export const APP_DRAG_TYPE = "application/x-rast-app";
@@ -53,6 +54,20 @@ export interface AppContext {
    * window's app elsewhere: show `params` (the shape `saveState` saves).
    */
   onPlace(callback: (params: unknown) => void): void;
+  /**
+   * A dialog that stays with the window: pass the result as `session` to
+   * `modal()` or `promptDialog()`. After a reload, in another tab or on
+   * another device the dialog opens again, with what was typed in it, by
+   * the handler registered with `onDialog(name, …)` called with `params`
+   * (plain JSON naming what the dialog is about, e.g. `{ path }`). The
+   * account's other open pages show it too, and close it when it closes.
+   */
+  dialog(name: string, params?: unknown): DialogSession;
+  /**
+   * Open the dialog `name` again for `params` (see `dialog`). Returns a
+   * function that stops it (e.g. when a tab that opens the dialog closes).
+   */
+  onDialog(name: string, reopen: (params: unknown) => void): () => void;
 }
 
 export interface AppInstance {

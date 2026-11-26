@@ -3274,6 +3274,40 @@ async fn desktop_sessions_follow_the_account_and_stay_private() {
     assert_eq!(view["scroll"][0]["ratio"].as_f64(), Some(0.6));
     assert_eq!(view["scroll"][0]["width"].as_f64(), Some(868.0));
     assert!(body["session"]["windows"][1].get("view").is_none());
+    // Dialogs open in a window, with what was typed in them.
+    let mut with_dialog = with_view.clone();
+    with_dialog["windows"][0]["dialogs"] = json!([{
+        "name": "new-folder",
+        "params": {"folder": "/Documents"},
+        "view": {"fields": [{"field": "input|New folder|0", "value": "Reports"}]}
+    }]);
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(with_dialog.clone()),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, _, body) = server
+        .request("GET", "/api/desktop/session", None, alice.headers())
+        .await;
+    assert_eq!(
+        body["session"]["windows"][0]["dialogs"],
+        with_dialog["windows"][0]["dialogs"]
+    );
+    let mut bad_dialog = with_dialog.clone();
+    bad_dialog["windows"][0]["dialogs"][0]["name"] = json!("new folder!");
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            "/api/desktop/session",
+            Some(bad_dialog),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     let mut bad_view = with_view.clone();
     bad_view["windows"][0]["view"]["scroll"][0]["ratio"] = json!(3);
     let (status, _, _) = server

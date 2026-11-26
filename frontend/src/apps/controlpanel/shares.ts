@@ -344,6 +344,7 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
       title: existing ? `Edit shared folder — ${existing.name}` : "New shared folder",
       body,
       wide: true,
+      session: ctx.dialog("share-edit", { shareId: existing?.id ?? null }),
       onClose: () => {
         shareDialogOpen = false;
         if (pendingReload) {
@@ -422,10 +423,27 @@ export async function renderSharesTab(tab: TabRenderContext): Promise<() => void
   const unsubscribeUsers = realtime.on("user.changed", () => reloadShares.run());
   const unsubscribeResync = realtime.onResync(() => reloadShares.run());
 
+  // A dialog that was open (a reload, another device) opens again.
+  const stopDialog = ctx.onDialog("share-edit", (params) => {
+    const shareId = ((params ?? {}) as { shareId?: unknown }).shareId;
+    if (shareId === null) {
+      void openShareModal();
+    } else if (typeof shareId === "string") {
+      void ctx.api
+        .get<Share[]>("/api/shares")
+        .then((shares) => {
+          const share = shares.find((candidate) => candidate.id === shareId);
+          if (share) void openShareModal(share);
+        })
+        .catch(() => undefined);
+    }
+  });
+
   void unavailable;
   await load();
 
   return () => {
+    stopDialog();
     reloadShares.cancel();
     unsubscribeAudit();
     unsubscribeUsers();

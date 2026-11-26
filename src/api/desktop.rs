@@ -9,7 +9,9 @@
 //!
 //! A window may also keep what is inside it (`view`): where its scrollable
 //! areas are scrolled to and what was typed into its text fields and not
-//! saved yet (never password fields; the browser leaves them out).
+//! saved yet (never password fields; the browser leaves them out), and the
+//! dialogs open in it (`dialogs`: the app's name for each, what it is about,
+//! and its own `view`), which the app opens again.
 //!
 //! Every save is published to the account's open pages as a
 //! `desktop.session` event (`{session, updatedAt, origin}`), so the other
@@ -45,6 +47,8 @@ const MAX_FIELD_BYTES: usize = 64 * 1024;
 const MAX_VIEW_NAME: usize = 512;
 /// Pixels scrolled: far more than any page.
 const MAX_SCROLL: f64 = 10_000_000.0;
+/// Dialogs open in one window (one may open another on top).
+const MAX_DIALOGS: usize = 4;
 /// Header naming the page that saved (echoed as the event's `origin`).
 pub const ORIGIN_HEADER: &str = "x-rast-desktop";
 /// Realtime event published to the account's pages after every save.
@@ -83,6 +87,20 @@ pub struct SavedWindow {
     #[serde(default)]
     pub minimized: bool,
     /// Scroll positions and typed text inside the window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<WindowView>,
+    /// Dialogs open in the window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<SavedDialog>,
+}
+
+/// A dialog the app opens again: its name, what it is about, what was typed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SavedDialog {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<WindowView>,
 }
@@ -233,6 +251,30 @@ impl DesktopSession {
             if let Some(view) = &window.view {
                 view.validate(&window.app_id)?;
             }
+            if window.dialogs.len() > MAX_DIALOGS {
+                return Err(format!(
+                    "at most {MAX_DIALOGS} dialogs per window can be saved"
+                ));
+            }
+            for dialog in &window.dialogs {
+                if !plain_id(&dialog.name, 64) {
+                    return Err("a dialog name must be 1-64 letters, digits, '-' or '_'".into());
+                }
+                if let Some(params) = &dialog.params {
+                    let size = serde_json::to_vec(params)
+                        .map(|b| b.len())
+                        .unwrap_or(usize::MAX);
+                    if size > MAX_PARAMS_BYTES {
+                        return Err(format!(
+                            "what the {} dialog is about is larger than {MAX_PARAMS_BYTES} bytes",
+                            dialog.name
+                        ));
+                    }
+                }
+                if let Some(view) = &dialog.view {
+                    view.validate(&window.app_id)?;
+                }
+            }
             if let Some(r) = window.rect {
                 if !(coordinate(r.x) && coordinate(r.y) && positive(r.w) && positive(r.h)) {
                     return Err(format!(
@@ -330,6 +372,7 @@ mod tests {
             state: WindowState::Normal,
             minimized: false,
             view: None,
+            dialogs: Vec::new(),
         }
     }
 
@@ -431,6 +474,32 @@ mod tests {
                          "view": {"fields": [{"field": "f", "value": "v", "secret": 1}]}}]
         }))
         .is_err());
+        // Dialogs open in a window, with what was typed in them.
+        let mut w = window("a");
+        w.dialogs = vec![SavedDialog {
+            name: "new-folder".into(),
+            params: Some(json!({"folder": "/Projects"})),
+            view: Some(WindowView {
+                scroll: Vec::new(),
+                fields: vec![FieldText {
+                    field: "input|Folder name|0".into(),
+                    value: "Reports".into(),
+                }],
+            }),
+        }];
+        assert!(session(vec![w.clone()]).validate().is_ok());
+        let mut bad = w.clone();
+        bad.dialogs[0].name = "new folder".into();
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w.clone();
+        bad.dialogs[0].params = Some(json!({"x": "y".repeat(MAX_PARAMS_BYTES)}));
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w.clone();
+        bad.dialogs = vec![bad.dialogs[0].clone(); MAX_DIALOGS + 1];
+        assert!(session(vec![bad]).validate().is_err());
+        let mut bad = w;
+        bad.dialogs[0].view.as_mut().unwrap().fields[0].value = "x".repeat(MAX_FIELD_BYTES + 1);
+        assert!(session(vec![bad]).validate().is_err());
         // Unknown fields are refused rather than stored.
         assert!(serde_json::from_value::<DesktopSession>(json!({
             "version": 1, "windows": [], "extra": true

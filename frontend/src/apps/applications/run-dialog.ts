@@ -29,6 +29,8 @@ export interface RunDialogDeps {
   containers: EngineContainer[];
   /** The app was created and deployed. */
   onStarted: (name: string) => void;
+  /** Rows to show (a dialog opened again after a reload or on another device). */
+  rows?: { volumes?: number; env?: number };
 }
 
 /** Load the image details, then show the dialog. Resolves once it is shown. */
@@ -48,6 +50,13 @@ function showDialog(deps: RunDialogDeps, details: ImageDetails): void {
   const { ctx } = deps;
   const used = usedHostPorts(deps.containers);
   const plan = initialRunPlan(deps.reference, details, deps.containers);
+  // Kept with the window: opened again for this image with as many rows.
+  const session = ctx.dialog("image-run", { reference: deps.reference, volumes: 0, env: 0 });
+  // Counted once both lists exist (rows are added while they are built).
+  let rowsBuilt = false;
+  const syncRows = (): void => {
+    if (rowsBuilt) session.update({ reference: deps.reference, volumes: volumeList.length, env: envList.length });
+  };
 
   const nameInput = h("input", { class: "input", type: "text", value: plan.name, autocomplete: "off", spellcheck: false, ariaLabel: "App name" });
 
@@ -92,11 +101,19 @@ function showDialog(deps: RunDialogDeps, details: ImageDetails): void {
     remove.addEventListener("click", () => {
       volumeList.splice(volumeList.findIndex((row) => row.root === root), 1);
       root.remove();
+      syncRows();
     });
     volumeList.push({ name, path, root });
     volumeRows.append(root);
+    syncRows();
   };
   for (const volume of plan.volumes) addVolume(volume);
+  const wantedVolumes = deps.rows?.volumes;
+  if (typeof wantedVolumes === "number" && wantedVolumes >= 0) {
+    while (volumeList.length < Math.min(wantedVolumes, 50)) addVolume();
+    while (volumeList.length > wantedVolumes) volumeList.pop()?.root.remove();
+    syncRows();
+  }
   const addVolumeButton = h("button", { class: "btn btn-subtle btn-sm", type: "button" }, iconSvg("plus", 13), h("span", {}, "Add volume"));
   addVolumeButton.addEventListener("click", () => addVolume());
 
@@ -115,13 +132,18 @@ function showDialog(deps: RunDialogDeps, details: ImageDetails): void {
     remove.addEventListener("click", () => {
       envList.splice(envList.findIndex((row) => row.root === root), 1);
       root.remove();
+      syncRows();
     });
     envList.push({ key, value, secret, root });
     envRows.append(root);
+    syncRows();
     key.focus();
   };
   const addEnvButton = h("button", { class: "btn btn-subtle btn-sm", type: "button" }, iconSvg("plus", 13), h("span", {}, "Add variable"));
   addEnvButton.addEventListener("click", () => addEnv());
+  while (envList.length < Math.min(deps.rows?.env ?? 0, 50)) addEnv();
+  rowsBuilt = true;
+  syncRows();
   const defaults = details.env.map((entry) => entry.key).filter((key) => key !== "PATH");
   const defaultsHint = defaults.length ? h("span", { class: "field-hint" }, `The image already sets ${defaults.slice(0, 6).join(", ")}${defaults.length > 6 ? "…" : ""}. Add a variable with the same name to change it.`) : null;
 
@@ -164,6 +186,7 @@ function showDialog(deps: RunDialogDeps, details: ImageDetails): void {
     title: `Run ${plan.name}`,
     body,
     wide: true,
+    session,
     actions: [
       { label: "Cancel", variant: "ghost", onClick: () => {} },
       {
