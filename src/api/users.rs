@@ -263,6 +263,10 @@ pub async fn update_user(
         body.must_change_password,
     )
     .await?;
+    if !updated.active || updated.role != Role::Admin {
+        // Terminal shells are for administrators only.
+        crate::terminal::end_shells_of(id).await;
+    }
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "updated"}),
@@ -304,6 +308,7 @@ pub async fn deactivate_user(
         .await?
         .ok_or(AppError::NotFound("user not found"))?;
     users::deactivate(&state.db, id).await?;
+    crate::terminal::end_shells_of(id).await;
     state.events.publish_admin(
         "user.changed",
         serde_json::json!({"userId": id, "event": "deactivated"}),

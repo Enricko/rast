@@ -102,6 +102,7 @@ pub async fn apps_state(state: &AppState) -> Vec<AppPackage> {
     let removed = access::removed_apps(&state.db).await;
     std::iter::once(access::LAUNCHER_APP)
         .chain(access::APP_IDS.iter().copied())
+        .chain(access::ADMIN_APPS.iter().copied())
         .map(|id| AppPackage {
             id: id.to_string(),
             name: access::app_label(id).to_string(),

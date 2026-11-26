@@ -281,6 +281,9 @@ pre {
 .app-icon--logs {
   color: #77879c;
 }
+.app-icon--terminal {
+  color: #1d2733;
+}
 
 /* Taskbar colours and states live in taskbar.css (theme + accent tokens). */
 

@@ -130,6 +130,7 @@ const APP_ICONS: Record<string, string> = {
   backup: `<path d="M12 3.4a8.4 8.4 0 1 1-7.6 4.9" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round"/><path d="M4 3.6v5h5" fill="none" stroke="#D9772A" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><rect x="7.8" y="10" width="8.4" height="7.6" rx="1.2" fill="#F4C39A"/><path d="M10.4 12.4h3.2M10.4 14.6h3.2" stroke="#C25E19" stroke-width="1" stroke-linecap="round"/>`,
   controlpanel: `<circle cx="12" cy="12" r="3" fill="none" stroke="#5A6673" stroke-width="2"/><path d="M12 2.9v3M12 18.1v3M2.9 12h3M18.1 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" stroke="#5A6673" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="1.3" fill="#2785D8"/>`,
   packages: `<path d="M12 2.8 20.4 7.3v9.4L12 21.2 3.6 16.7V7.3z" fill="#7B5BD6"/><path d="M3.6 7.3 12 11.8l8.4-4.5L12 2.8z" fill="#9C82EA"/><path d="M12 11.8v9.4l8.4-4.5V7.3z" fill="#6446BF"/><path d="M7.6 5 16.2 9.6v3.2" fill="none" stroke="#F1ECFF" stroke-width="1.5" stroke-linejoin="round"/>`,
+  terminal: `<rect x="2.8" y="4" width="18.4" height="16" rx="2.6" fill="#1D2733"/><path d="M2.8 6.6c0-1.4 1.2-2.6 2.6-2.6h13.2c1.4 0 2.6 1.2 2.6 2.6v.8H2.8z" fill="#3A4757"/><path d="m6.6 11 3 2.4-3 2.4" fill="none" stroke="#5FD48A" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M11.8 16.4h5" stroke="#D5DDE6" stroke-width="1.6" stroke-linecap="round"/>`,
   logs: `<path d="M5.4 3.6h9.2l4 4v12.8H5.4z" fill="#F3F5F7" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M14.4 3.8v4h4" fill="none" stroke="#8C98A6" stroke-width="1.4" stroke-linejoin="round"/><path d="M8.2 10.4h7.4M8.2 13h7.4M8.2 15.6h4.6" stroke="#2785D8" stroke-width="1.3" stroke-linecap="round"/>`,
 };
 
@@ -142,6 +143,7 @@ const APP_ACCENT: Record<string, string> = {
   packages: "packages",
   controlpanel: "controlpanel",
   logs: "logs",
+  terminal: "terminal",
 };
 
 export function appAccentClass(appId: string): string {

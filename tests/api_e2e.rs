@@ -710,6 +710,46 @@ async fn setup_is_disabled_after_first_admin() {
 }
 
 #[tokio::test]
+async fn terminal_is_for_administrators_and_off_until_enabled() {
+    // No helper at this address: the Terminal reads as off.
+    std::env::set_var(
+        "RAST_TERMINAL_SOCKET",
+        "/nonexistent/rast-terminal-test.sock",
+    );
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+
+    for (method, path) in [
+        ("GET", "/api/terminal"),
+        ("GET", "/api/terminal/ws"),
+        ("DELETE", "/api/terminal/sessions/0123456789abcdef"),
+    ] {
+        let (status, _, _) = server.request(method, path, None, alice.headers()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path} for a user");
+        let (status, _, _) = server.request(method, path, None, HeaderMap::new()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} signed out"
+        );
+    }
+
+    let (status, _, body) = server
+        .request("GET", "/api/terminal", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["available"], false);
+    assert_eq!(body["reason"], "off");
+    assert_eq!(body["enableCommand"], "sudo rast terminal enable");
+    // (Cross-site WebSockets: `api::terminal::same_origin`, unit tested.)
+}
+
+#[tokio::test]
 async fn metrics_is_not_public() {
     let server = TestServer::start().await;
     server

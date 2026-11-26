@@ -16,6 +16,7 @@ pub mod docker;
 pub mod events;
 pub mod files;
 pub mod groups;
+pub mod host_terminal;
 pub mod jobs;
 pub mod logs;
 pub mod monitor;
@@ -40,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .merge(apps::routes())
         .merge(docker::routes())
         .merge(terminal::routes())
+        .merge(host_terminal::routes())
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())

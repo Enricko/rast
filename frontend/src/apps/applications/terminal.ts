@@ -57,7 +57,7 @@ export function exitNotice(code: number | null, quick = false): string {
 
 // Colours of the terminal itself; it stays dark in both themes, like the
 // log viewer next to it.
-const THEME = {
+export const TERMINAL_THEME = {
   background: "#0f1419",
   foreground: "#d5dde6",
   cursor: "#d5dde6",
@@ -160,7 +160,7 @@ export function mountTerminal(options: { ctx: AppContext; id: string; name: stri
         fontSize: 13,
         lineHeight: 1.15,
         scrollback: 5000,
-        theme: THEME,
+        theme: TERMINAL_THEME,
         convertEol: false,
       });
       fit = new xterm.FitAddon();

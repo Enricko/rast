@@ -9,12 +9,10 @@
 
 use std::{
     collections::VecDeque,
-    io,
     os::{
-        fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsRawFd, OwnedFd},
         unix::process::ExitStatusExt,
     },
-    process::Stdio,
     sync::Arc,
     time::Duration,
 };
@@ -42,6 +40,7 @@ use crate::docker::{
         validate_container_id, validate_request, ValidatedAction, WorkerRequest, WorkerResponse,
     },
 };
+use crate::pty::{open_pty, read_fd, set_nonblocking, set_window_size, spawn_on_pty, write_fd};
 
 /// Bytes read from the terminal at a time.
 const READ_CHUNK: usize = 16 * 1024;
@@ -221,12 +220,6 @@ fn spawn_shell(
     container: &str,
     slave: OwnedFd,
 ) -> Result<Child, WorkerError> {
-    let clone = |fd: &OwnedFd| {
-        fd.try_clone()
-            .map_err(|error| WorkerError::unavailable(format!("cannot open a terminal: {error}")))
-    };
-    let stdin = clone(&slave)?;
-    let stdout = clone(&slave)?;
     let mut command = docker_command(options);
     command
         .args([
@@ -242,34 +235,13 @@ fn spawn_shell(
             "-c",
             SHELL_SCRIPT,
         ])
-        .env("TERM", "xterm-256color")
-        .stdin(Stdio::from(stdin))
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(slave));
-    // SAFETY: only async-signal-safe calls (setsid, ioctl) run between fork
-    // and exec. They make the terminal the child's controlling terminal, so
-    // window size changes reach `docker exec` as SIGWINCH.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let child = command.spawn().map_err(|error| {
+        .env("TERM", "xterm-256color");
+    spawn_on_pty(command, slave).map_err(|error| {
         WorkerError::unavailable(format!(
             "cannot execute docker ({}): {error}",
             options.docker_bin.display()
         ))
-    })?;
-    // The command holds copies of the terminal's other end; close them so the
-    // terminal reports the end once the shell is gone.
-    drop(command);
-    Ok(child)
+    })
 }
 
 /// Move bytes between the client and the terminal until something ends.
@@ -290,7 +262,7 @@ async fn bridge(
                         break;
                     }
                 }
-                Ok(Some(Frame::Close)) | Ok(None) => break,
+                Ok(Some(Frame::Close | Frame::Detached)) | Ok(None) => break,
                 Ok(Some(Frame::Exit(_))) => {
                     tracing::warn!("terminal client sent an exit frame; closing");
                     break;
@@ -392,89 +364,4 @@ async fn hang_up(mut child: Child, master: AsyncFd<OwnedFd>) {
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
-}
-
-// ---------------------------------------------------------------------------
-// Pseudo terminal helpers
-
-fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut master: libc::c_int = -1;
-    let mut slave: libc::c_int = -1;
-    let mut size = window_size(cols, rows);
-    // SAFETY: valid out pointers; the name and termios arguments are optional.
-    let rc = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::addr_of_mut!(size),
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: openpty returned two new descriptors that nothing else owns.
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-    set_cloexec(master.as_raw_fd())?;
-    set_cloexec(slave.as_raw_fd())?;
-    Ok((master, slave))
-}
-
-fn window_size(cols: u16, rows: u16) -> libc::winsize {
-    libc::winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    }
-}
-
-fn set_window_size(fd: RawFd, cols: u16, rows: u16) -> io::Result<()> {
-    let size = window_size(cols, rows);
-    // SAFETY: TIOCSWINSZ reads one winsize from the pointer.
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &size) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    // SAFETY: plain descriptor flag calls on a descriptor we own.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFD);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-fn set_nonblocking(fd: RawFd) -> io::Result<()> {
-    // SAFETY: plain status flag calls on a descriptor we own.
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
-}
-
-fn read_fd(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
-    // SAFETY: the buffer is valid for `len` bytes.
-    let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(n as usize)
-}
-
-fn write_fd(fd: RawFd, bytes: &[u8]) -> io::Result<usize> {
-    // SAFETY: the slice is valid for `len` bytes.
-    let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
-    if n < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(n as usize)
 }

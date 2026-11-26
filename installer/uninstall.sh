@@ -30,6 +30,8 @@ MAIN_DROPIN_DIR="/etc/systemd/system/rast.service.d"
 WORKER_DROPIN_DIR="/etc/systemd/system/rast-worker.service.d"
 UNITS="rast.service rast-worker.service"
 LINK_UNITS="rast-packages-links.path rast-packages-links.service"
+# Terminal app helper (`rast terminal enable`); only removed when RAST wrote it.
+TERMINAL_UNIT="rast-terminal.service"
 PROFILE_SCRIPT="/etc/profile.d/rast-packages.sh"
 
 RAST_PURGE=${RAST_PURGE:-0}
@@ -313,6 +315,18 @@ for _aside in "$LINKS_BIN"/.rast-displaced.*; do
         log "put back: $LINKS_BIN/$_name"
     fi
 done
+
+# ---------------------------------------------------------------------------
+# Terminal app: stop the helper (this ends every open shell) and remove it.
+# ---------------------------------------------------------------------------
+if [ -f "$UNIT_DIR/$TERMINAL_UNIT" ] && head -n 1 "$UNIT_DIR/$TERMINAL_UNIT" | grep -q '^# Managed by RAST'; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log "dry run: would stop, disable and remove $TERMINAL_UNIT"
+    else
+        systemctl_maybe disable --now "$TERMINAL_UNIT"
+        remove_file "$UNIT_DIR/$TERMINAL_UNIT"
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Stop and remove services

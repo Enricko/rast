@@ -91,6 +91,11 @@ enum Command {
     /// Internal: privileged administrative worker (Docker operations)
     #[command(hide = true)]
     Worker,
+    /// The Terminal app: administrators' shells on this server
+    Terminal {
+        #[command(subcommand)]
+        cmd: TerminalCommand,
+    },
     /// Restore a database from a backup archive (offline operation)
     Restore {
         /// Backup archive produced by `rast backup`
@@ -103,6 +108,21 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum TerminalCommand {
+    /// Turn the Terminal app on: install and start rast-terminal.service,
+    /// which gives administrators root shells in the browser (needs root)
+    Enable,
+    /// Turn it off: stop and remove rast-terminal.service; open shells end
+    /// (needs root)
+    Disable,
+    /// Show whether the Terminal app is on
+    Status,
+    /// Internal: the root helper run by rast-terminal.service
+    #[command(hide = true)]
+    Helper,
 }
 
 #[derive(Subcommand, Debug)]
@@ -276,10 +296,45 @@ async fn run(
                     cmd: PackagesCommand::Path { cmd },
                 } => packages_path(&cfg, cmd),
                 Command::Worker => rast::worker::run(cfg).await,
+                Command::Terminal { cmd } => terminal_command(&cfg, cmd).await,
                 Command::Serve { .. } | Command::Version => unreachable!(),
             }
         }
     }
+}
+
+async fn terminal_command(
+    cfg: &Config,
+    cmd: TerminalCommand,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    use rast::terminal::{helper, unit};
+    let done = match cmd {
+        TerminalCommand::Helper => return helper::run().await,
+        TerminalCommand::Status => {
+            return Ok(match unit::describe().await {
+                Ok(line) => {
+                    println!("terminal: {line}");
+                    ExitCode::SUCCESS
+                }
+                Err(line) => {
+                    println!("terminal: {line}");
+                    ExitCode::from(3)
+                }
+            });
+        }
+        TerminalCommand::Enable => unit::enable(cfg).await?,
+        TerminalCommand::Disable => unit::disable()?,
+    };
+    for line in done {
+        println!("{line}");
+    }
+    match unit::describe().await {
+        Ok(line) => println!(
+            "terminal: {line}\nAdministrators can now open root shells in RAST: Start → Terminal."
+        ),
+        Err(line) => println!("terminal: {line}"),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn packages_path(cfg: &Config, cmd: PathCommand) -> Result<ExitCode, Box<dyn std::error::Error>> {
@@ -666,6 +721,12 @@ async fn doctor(cfg: Config) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 println!("FAIL: {} ({e})", cfg.bind);
             }
         }
+    }
+
+    // Terminal app (optional, off until `sudo rast terminal enable`).
+    print!("[    ] terminal ... ");
+    match rast::terminal::unit::describe().await {
+        Ok(line) | Err(line) => println!("{line}"),
     }
 
     // Docker (optional). The web service intentionally has no Docker socket

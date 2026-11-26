@@ -15,6 +15,8 @@
 //! | 2    | server → worker  | new size: cols u16 BE, rows u16 BE        |
 //! | 3    | worker → server  | exit status of the shell: i32 BE         |
 //! | 4    | server → worker  | close the session                         |
+//! | 5    | worker → server  | the viewer was detached (terminal helper: |
+//! |      |                  | the shell was opened in another window)   |
 //!
 //! This module also holds [`terminal_policy`], shared by the API (to explain
 //! why a terminal is unavailable) and by the worker (which re-checks it right
@@ -33,6 +35,9 @@ pub const FRAME_RESIZE: u8 = 2;
 pub const FRAME_EXIT: u8 = 3;
 /// Close the session (server → worker).
 pub const FRAME_CLOSE: u8 = 4;
+/// This viewer was detached; the shell keeps running (terminal helper →
+/// server, [`crate::terminal`]).
+pub const FRAME_DETACHED: u8 = 5;
 
 /// Largest payload of one frame.
 pub const MAX_FRAME_PAYLOAD: usize = 64 * 1024;
@@ -63,6 +68,7 @@ pub enum Frame {
     Resize { cols: u16, rows: u16 },
     Exit(i32),
     Close,
+    Detached,
 }
 
 /// Clamp a requested terminal size into the accepted range.
@@ -95,6 +101,7 @@ where
         }
         Frame::Exit(code) => write_raw(writer, FRAME_EXIT, &code.to_be_bytes()).await?,
         Frame::Close => write_raw(writer, FRAME_CLOSE, &[]).await?,
+        Frame::Detached => write_raw(writer, FRAME_DETACHED, &[]).await?,
     }
     writer.flush().await
 }
@@ -157,6 +164,8 @@ where
         }
         FRAME_CLOSE if payload.is_empty() => Ok(Some(Frame::Close)),
         FRAME_CLOSE => Err(invalid("close frame carries no payload")),
+        FRAME_DETACHED if payload.is_empty() => Ok(Some(Frame::Detached)),
+        FRAME_DETACHED => Err(invalid("detached frame carries no payload")),
         _ => Err(invalid("unknown frame kind")),
     }
 }

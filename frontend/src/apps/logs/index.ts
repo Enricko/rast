@@ -85,6 +85,8 @@ function humanizeAction(action: string): string {
     "docker.container.restart": "Container restarted",
     "docker.container.remove": "Container deleted",
     "docker.container.exec": "Container terminal opened",
+    "terminal.open": "Terminal shell opened",
+    "terminal.close": "Terminal shell closed",
     "docker.image.pull": "Image pulled",
     "docker.image.remove": "Image deleted",
     "docker.image.prune": "Unused images removed",

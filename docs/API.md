@@ -223,6 +223,25 @@ lost admin role sends an `error` message and closes the terminal. A terminal
 without keyboard input for 60 minutes is closed. Every opening is audited as
 `docker.container.exec` (success or failure, never the typed commands).
 
+## Terminal (administrators)
+
+Root shells on the server ([TERMINAL.md](TERMINAL.md)); off until
+`sudo rast terminal enable`.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| GET | `/api/terminal` | `{available:true, shellUser, open, max, sessions:[{id, number, createdAt, attached, program}]}` (the caller's shells), or `{available:false, reason:"off"\|"error", message?, enableCommand}` |
+| DELETE | `/api/terminal/sessions/{id}` | end one of the caller's shells (audited `terminal.close`) |
+| GET (WebSocket) | `/api/terminal/ws` | open a shell or show an open one again; see below |
+
+The WebSocket follows the container terminal's rules (same origin, CSRF token
+in the first message, session re-checked every minute) with these
+differences: the start message may carry `"session":"<id>"` to reattach to an
+open shell (its recent output is sent first); `ready` is
+`{"type":"ready","session":{…},"created":bool}`; a shell opened in another
+window sends `{"type":"detached"}` to this one; and closing the WebSocket only
+detaches — the shell keeps running. A new shell is audited as `terminal.open`.
+
 ## Resource monitor
 
 | Method | Path | Notes |

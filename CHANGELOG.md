@@ -11,7 +11,19 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- Nothing yet.
+- **Terminal: root shells on the server for administrators**, in the browser,
+  with a tab per shell. Shells keep running when the window closes, the page
+  reloads or the network drops; opening Terminal again shows them with their
+  recent output. A shell opened in another window moves there (the first
+  window can take it back); closing a tab ends the shell, and asks first when a
+  program is still running in it. It is **off until the server owner runs
+  `sudo rast terminal enable`** (which installs `rast-terminal.service`, a
+  small root helper the web server reaches over a socket only its own account
+  may use); `sudo rast terminal disable` removes it, and `rast doctor` shows
+  it. Only administrators can open it: no group rule can grant it, and an
+  administrator's shells end when the account becomes a user or is
+  deactivated. Opening and closing shells is recorded in Activity Logs. See
+  [docs/TERMINAL.md](docs/TERMINAL.md).
 
 ### Fixed
 

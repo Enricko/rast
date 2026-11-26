@@ -108,7 +108,7 @@ pub async fn container_terminal(
 /// Whether the WebSocket request comes from the RAST page: browsers always
 /// send `Origin` on WebSocket requests, and it must name this server (the
 /// configured public URL or the host the request was sent to).
-fn same_origin(headers: &HeaderMap, cfg: &Config) -> bool {
+pub(super) fn same_origin(headers: &HeaderMap, cfg: &Config) -> bool {
     if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
         if site.eq_ignore_ascii_case("cross-site") {
             return false;
@@ -316,7 +316,7 @@ async fn bridge(
 
 /// The session that opened the terminal is still valid and still belongs to
 /// an active administrator. Read only: it does not extend the session.
-async fn still_admin(state: &AppState, user: &AuthUser) -> bool {
+pub(super) async fn still_admin(state: &AppState, user: &AuthUser) -> bool {
     let found: Result<Option<i64>, _> = sqlx::query_scalar(
         "SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
          WHERE s.id = ? AND s.user_id = ? AND s.revoked_at IS NULL AND s.expires_at > ?
@@ -331,7 +331,7 @@ async fn still_admin(state: &AppState, user: &AuthUser) -> bool {
 }
 
 /// Tell the browser why the terminal is not available, then close.
-async fn refuse(socket: &mut WebSocket, message: &str) {
+pub(super) async fn refuse(socket: &mut WebSocket, message: &str) {
     let error = json!({"type": "error", "message": message}).to_string();
     let _ = socket.send(Message::Text(error.into())).await;
     let _ = socket.send(Message::Close(None)).await;

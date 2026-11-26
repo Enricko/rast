@@ -10,6 +10,7 @@ import { launcherApp } from "./launcher";
 import { logsApp } from "./logs";
 import { monitorApp } from "./monitor";
 import { packagesApp } from "./packages";
+import { terminalApp } from "./terminal";
 
 export const APPS: AppDefinition[] = [
   launcherApp,
@@ -20,6 +21,7 @@ export const APPS: AppDefinition[] = [
   packagesApp,
   controlPanelApp,
   logsApp,
+  terminalApp,
 ];
 
 export function findApp(id: string): AppDefinition | undefined {
