@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.7] - 2026-11-26
+
+### Added
+
 - **Terminal for accounts that are not administrators, in their own
   sandbox.** Allow *Terminal* in a group's (or one account's) application
   rules and its members get shells in a Docker container of their own: only
@@ -33,17 +50,6 @@ this file by `scripts/changelog-section.sh`.
   sandbox belong to the RAST service account.
 - Every minute the server ends root shells of accounts that are no longer
   active administrators and sandbox shells of accounts that lost Terminal.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.6] - 2026-11-26
 
