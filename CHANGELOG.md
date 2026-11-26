@@ -11,14 +11,7 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
-- **Sign out asks the same way on every device.** "Sign out?" now stays
-  open like the other confirmations: it comes back after a reload or in a
-  new tab and shows live on the account's other devices. Confirming signs
-  out the device you confirm on (the others stay signed in) and closes it
-  everywhere else; cancelling anywhere closes it everywhere. Signing in
-  again never starts with it, also after a session ran out while it was
-  open. Its message no longer says text in dialogs is lost (they have been
-  kept since 0.9.14).
+- Nothing yet.
 
 ### Planned
 
@@ -30,6 +23,19 @@ this file by `scripts/changelog-section.sh`.
 - Automated restore drills and a documented JSON schema for backup manifests.
 - Static musl builds are **not** planned for 0.1.x (see
   [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.16] - 2026-11-26
+
+### Added
+
+- **Sign out asks the same way on every device.** "Sign out?" now stays
+  open like the other confirmations: it comes back after a reload or in a
+  new tab and shows live on the account's other devices. Confirming signs
+  out the device you confirm on (the others stay signed in) and closes it
+  everywhere else; cancelling anywhere closes it everywhere. Signing in
+  again never starts with it, also after a session ran out while it was
+  open. Its message no longer says text in dialogs is lost (they have been
+  kept since 0.9.14).
 
 ## [0.9.15] - 2026-11-26
 
