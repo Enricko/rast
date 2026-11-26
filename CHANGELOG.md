@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.13] - 2026-11-26
+
+### Added
+
 - **Scroll positions and typed text follow the windows.** What a window
   shows is now kept with it: how far its lists and pages are scrolled, and
   text typed into its boxes and not saved yet (a search, a name, a note).
@@ -23,17 +40,6 @@ this file by `scripts/changelog-section.sh`.
   in a pop-up dialog is still lost when the page reloads, since the dialog
   closes. Going back to 0.9.12 or older opens an empty desktop once (the
   older version cannot read the new session); nothing else changes.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.12] - 2026-11-26
 
