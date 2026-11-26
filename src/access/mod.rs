@@ -345,12 +345,19 @@ fn cache_put(user_id: i64, key: &str, read_at: u64, value: Cached) {
     }
 }
 
-fn folder_cache_key(share_id: &str) -> String {
-    format!("folder:{share_id}")
+/// The database a decision was read from. One server has one database, but
+/// the cache is process-wide: tests run several servers in one process, each
+/// with its own database whose account ids start at 1.
+fn db_scope(pool: &SqlitePool) -> String {
+    pool.connect_options().get_filename().display().to_string()
 }
 
-fn app_cache_key(app_id: &str) -> String {
-    format!("app:{app_id}")
+fn folder_cache_key(pool: &SqlitePool, share_id: &str) -> String {
+    format!("{}|folder:{share_id}", db_scope(pool))
+}
+
+fn app_cache_key(pool: &SqlitePool, app_id: &str) -> String {
+    format!("{}|app:{app_id}", db_scope(pool))
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +391,7 @@ pub async fn folder_access_by_name(
         .await?
         .ok_or(AppError::NotFound("path not found"))?;
     let share_id: String = row.get("id");
-    let key = folder_cache_key(&share_id);
+    let key = folder_cache_key(pool, &share_id);
     if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
@@ -420,7 +427,7 @@ pub async fn folder_access_by_id(
         .await?
         .ok_or(AppError::NotFound("path not found"))?;
     let share_id: String = row.get("id");
-    let key = folder_cache_key(&share_id);
+    let key = folder_cache_key(pool, &share_id);
     if let Some(Cached::Folder(access)) = cache_get(user.id, &key) {
         return Ok(access);
     }
@@ -583,7 +590,7 @@ pub async fn app_access(pool: &SqlitePool, user: &AuthUser, app_id: &str) -> App
             fallback: "admin".into(),
         });
     }
-    let key = app_cache_key(app_id);
+    let key = app_cache_key(pool, app_id);
     let read_at = current_generation();
     if let Some(Cached::App(access)) = cache_get(user.id, &key) {
         return Ok(access);

@@ -3261,3 +3261,38 @@ async fn desktop_sessions_follow_the_account_and_stay_private() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+/// Access decisions are cached per process; two servers in one process (as
+/// in these tests) each have their own accounts with the same ids, and one
+/// server's grant must never answer for the other.
+#[tokio::test]
+async fn access_decisions_are_not_shared_between_servers() {
+    let granted = TestServer::start().await;
+    let other = TestServer::start().await;
+    for server in [&granted, &other] {
+        server
+            .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+            .await;
+        server.create_user("alice", USER_PASSWORD, Role::User).await;
+    }
+    let id = granted.user_id("alice").await;
+    assert_eq!(id, other.user_id("alice").await, "same account id on both");
+    sqlx::query("INSERT INTO user_app_rules (user_id, app_id, rule) VALUES (?, 'backup', 'allow')")
+        .bind(id)
+        .execute(&granted.state.db)
+        .await
+        .unwrap();
+    rast::access::bump_generation();
+
+    let alice = granted.login("alice", USER_PASSWORD).await;
+    let (status, _, body) = granted
+        .request("GET", "/api/backups", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // The decision above is cached; the other server's alice has no grant.
+    let alice = other.login("alice", USER_PASSWORD).await;
+    let (status, _, _) = other
+        .request("GET", "/api/backups", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
