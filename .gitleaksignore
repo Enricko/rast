@@ -2,3 +2,6 @@
 # The test now passes the password through a constant; this entry keeps
 # full-history scans clean for the commit that had it inline.
 404faf3e71f37061a11a0a5334e1477e9a00f8ef:tests/packages_e2e.rs:generic-api-key:207
+# catalog_cli.rs test: PEM wrapper around an Ed25519 key generated at test
+# time (the label is now passed in, so newer commits do not match).
+538dc241280465a0b2f975b2625080a2153fa274:src/packages/catalog_cli.rs:private-key:7380

@@ -7440,8 +7440,11 @@ MCowBQYDK2VwAyEAckXYZF+YAsH3mbVaukQbzqNKfaER3ognkhuqtmZxV4M=\n\
         let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         let mut spki = ED25519_SPKI_PREFIX.to_vec();
         spki.extend_from_slice(pair.public_key().as_ref());
+        // The label is passed in so secret scanners do not take this
+        // throwaway test key for a committed one.
+        let label = "PRIVATE KEY";
         let private_pem = format!(
-            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
+            "-----BEGIN {label}-----\n{}\n-----END {label}-----\n",
             B64.encode(pkcs8.as_ref())
         );
         let public_pem = format!(

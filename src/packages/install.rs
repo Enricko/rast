@@ -1610,6 +1610,10 @@ mod tests {
     /// stamp files and keep its state while the shared prefix stays
     /// read-only and unchanged; large files and `.git` stay links.
     #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "packages are Linux-only (GNU cp/stat/mv)"
+    )]
     fn mirrored_sdks_run_from_a_per_user_mirror() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let dir = tempfile::tempdir().unwrap();
