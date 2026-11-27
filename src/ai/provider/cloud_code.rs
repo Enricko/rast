@@ -41,10 +41,23 @@ use super::{
 };
 use crate::ai::{Kind, MAX_MODELS, MAX_MODEL_NAME};
 
-/// Antigravity's bundled client identity: the Hub desktop build the IDE ships
-/// (`antigravity/cli/1.3.4 (aidev_client; <platform>; <arch>)` in the plugin).
-pub(crate) const ANTIGRAVITY_USER_AGENT: &str =
-    "antigravity/cli/1.3.4 (aidev_client; linux; x86_64)";
+/// Antigravity's current client identity: the official `agy` CLI 1.5.5 on
+/// consumer auth (the fingerprint the actively maintained clients present,
+/// e.g. pi-antigravity). The backend gates its model catalog and some
+/// endpoints on it, so it must track the CLI rather than the older Hub build.
+pub(crate) const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.5.5 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)";
+
+/// The identity the real Antigravity client opens every request's system
+/// prompt with (pi-antigravity builds its requests the same way).
+pub(crate) const ANTIGRAVITY_IDENTITY: &str = "You are Antigravity, a powerful agentic AI coding assistant designed by Google DeepMind. You are pair programming with a user to solve coding tasks. Be concise, practical, and tool-aware.";
+
+/// The `loadCodeAssist`/`onboardUser` metadata as the current Antigravity
+/// client sends it: only the IDE type, in the enum's name form. The plugin
+/// and 9router's older flows sent the numeric platform/plugin enums; the
+/// current CLI leaves them for Google to infer.
+pub(crate) fn antigravity_metadata() -> Value {
+    json!({ "ideType": "ANTIGRAVITY" })
+}
 
 /// The Gemini CLI version its user agent carries (9router registry: 0.34.0).
 pub(crate) const GEMINI_CLI_VERSION: &str = "0.34.0";
@@ -96,8 +109,9 @@ pub(crate) fn platform_enum() -> u8 {
     }
 }
 
-/// The `metadata` every Cloud Code client sends to `loadCodeAssist` and
-/// `onboardUser` (both Google plans use the same numeric enum form).
+/// The numeric client metadata the Gemini CLI sends to `loadCodeAssist` and
+/// `onboardUser` (Antigravity has its own minimal
+/// [`antigravity_metadata`]).
 pub(crate) fn metadata() -> Value {
     json!({
         "ideType": IDE_ANTIGRAVITY,
@@ -1402,7 +1416,9 @@ mod tests {
     /// CLI user agent names the model and the host's platform).
     #[test]
     fn client_identities_are_the_references() {
-        assert!(ANTIGRAVITY_USER_AGENT.starts_with("antigravity/cli/1.3.4 (aidev_client; "));
+        assert!(ANTIGRAVITY_USER_AGENT.starts_with("antigravity/cli/1.5.5 (aidev_client; "));
+        assert!(ANTIGRAVITY_USER_AGENT.ends_with("auth_method=consumer)"));
+        assert_eq!(antigravity_metadata()["ideType"], "ANTIGRAVITY");
         let user_agent = gemini_cli_user_agent("gemini-3-pro-preview");
         assert!(
             user_agent.starts_with("GeminiCLI/0.34.0/gemini-3-pro-preview ("),

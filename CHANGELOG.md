@@ -114,7 +114,12 @@ this file by `scripts/changelog-section.sh`.
   with ChatGPT Codex now covers Claude Pro/Max, Grok (X Premium), GitHub
   Copilot, Google Antigravity, Gemini CLI, Qwen Chat, iFlow and Kimi: add one
   by signing in with your own account instead of a key, the way 9router,
-  OpenCode and the providers' own CLIs do it. A browser flow opens the
+  OpenCode and the providers' own CLIs do it. Google Antigravity follows the current
+  Antigravity CLI's wire (its `aicode` scope and user agent); when Google
+  answers only its shared consumer project (`aicode-consumers`), which
+  generation refuses, the sign-in onboards again and falls back to a stable
+  per-account project id — older sign-ins that stored the shared project
+  repair themselves before the next request. A browser flow opens the
   provider's page (PKCE, a checked state) and takes back the address the
   browser ends on; GitHub Copilot, Qwen and Kimi instead show a code to type
   on the provider's site, and RAST polls for the tokens. Claude can also

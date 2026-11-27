@@ -560,6 +560,43 @@ pub fn seal_credentials(secrets: &Secrets, credentials: &signin::Credentials) ->
 static REFRESHING: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
 
+/// Re-read a stored sign-in's Cloud Code project when it carries one that
+/// cannot be used (the older Antigravity flow could store Google's shared
+/// consumer project); the tokens are kept.
+async fn repaired_credentials(
+    pool: &SqlitePool,
+    secrets: &Secrets,
+    provider: &Provider,
+    plan: signin::Plan,
+    credentials: signin::Credentials,
+    now: i64,
+) -> AppResult<signin::Credentials> {
+    if !signin::needs_repair(plan, &credentials) {
+        return Ok(credentials);
+    }
+    let old = credentials.clone();
+    let repaired = tokio::task::spawn_blocking(move || signin::repair(plan, &old, now))
+        .await
+        .map_err(|e| AppError::internal(format!("sign-in repair failed: {e}")))?;
+    match repaired {
+        Ok(Some(fresh)) => {
+            sqlx::query("UPDATE ai_providers SET sign_in = ?, updated_at = ? WHERE id = ?")
+                .bind(seal_credentials(secrets, &fresh)?)
+                .bind(now)
+                .bind(&provider.id)
+                .execute(pool)
+                .await?;
+            Ok(fresh)
+        }
+        Ok(None) => Ok(credentials),
+        // The reply's own refusal explains a project that still does not work.
+        Err(error) => {
+            tracing::warn!(provider = %provider.name, %error, "AI sign-in project repair failed");
+            Ok(credentials)
+        }
+    }
+}
+
 /// A signed-in provider's access token and account id, refreshed first
 /// when it is about to expire (and stored at once).
 pub async fn signed_in_token(
@@ -577,9 +614,11 @@ pub async fn signed_in_token(
     let plan = provider.kind.plan().ok_or_else(again)?;
     let credentials = provider.credentials(secrets)?.ok_or_else(again)?;
     if !credentials.needs_refresh(now) {
+        let credentials =
+            repaired_credentials(pool, secrets, provider, plan, credentials, now).await?;
         return Ok((credentials.access_token, credentials.account_id));
     }
-    let _one = REFRESHING.lock().await;
+    let one = REFRESHING.lock().await;
     // Another request may have refreshed it meanwhile.
     let current = self::provider(pool, &provider.id)
         .await?
@@ -587,6 +626,9 @@ pub async fn signed_in_token(
     let credentials = current.credentials(secrets)?.ok_or_else(again)?;
     let now = now_ms();
     if !credentials.needs_refresh(now) {
+        drop(one);
+        let credentials =
+            repaired_credentials(pool, secrets, provider, plan, credentials, now).await?;
         return Ok((credentials.access_token, credentials.account_id));
     }
     let old = credentials.clone();
@@ -601,11 +643,14 @@ pub async fn signed_in_token(
                 .bind(&provider.id)
                 .execute(pool)
                 .await?;
+            let fresh = repaired_credentials(pool, secrets, provider, plan, fresh, now).await?;
             Ok((fresh.access_token, fresh.account_id))
         }
         // Still valid for a while: use it, try again next time.
         Err(error) if !credentials.expired(now + 60_000) => {
             tracing::warn!(provider = %provider.name, %error, "AI sign-in refresh failed; using the current token");
+            let credentials =
+                repaired_credentials(pool, secrets, provider, plan, credentials, now).await?;
             Ok((credentials.access_token, credentials.account_id))
         }
         Err(error) => Err(AppError::bad_request(format!(

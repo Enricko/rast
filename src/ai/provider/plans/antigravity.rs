@@ -10,11 +10,12 @@
 //!   host the IDE is served from; 9router pins it because production
 //!   rate-limits the IDE), while `loadCodeAssist`/`onboardUser` stay on
 //!   production — the daily host refuses those (see `ai::signin::antigravity`).
-//! * The client presents as the bundled Hub desktop build
-//!   (`antigravity/cli/1.3.4 (aidev_client; …)`), and the Cloud Code project
-//!   travels both in the envelope and as `x-goog-user-project`.
+//! * The client presents as the current `agy` CLI (`antigravity/cli/1.5.5`,
+//!   consumer auth) and opens the system prompt with its own identity, which
+//!   the consumer endpoints check; the Cloud Code project travels in the
+//!   envelope.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::super::cloud_code::ANTIGRAVITY_USER_AGENT;
 use super::super::{cloud_code, refusal as generic_refusal, ChatRequest, Turn, Wire};
@@ -73,7 +74,38 @@ pub(crate) fn override_body(_req: &ChatRequest, _wire: Wire, _turns: &[Turn]) ->
     None
 }
 
-pub(crate) fn tweak_body(_req: &ChatRequest, _wire: Wire, _body: &mut Value) {}
+pub(crate) fn tweak_body(req: &ChatRequest, wire: Wire, body: &mut Value) {
+    if wire.protocol != Protocol::CloudCode {
+        return;
+    }
+    let Some(request) = body.get_mut("request").and_then(Value::as_object_mut) else {
+        return;
+    };
+    // The real client opens the system prompt with its own identity and keeps
+    // the whole system text as the first user turn: the consumer endpoints
+    // answer a long wire-native `systemInstruction` with a generic 429 (the
+    // reference clients inline it the same way).
+    request.remove("systemInstruction");
+    let mut instruction = String::from(cloud_code::ANTIGRAVITY_IDENTITY);
+    let system = req.system.trim();
+    if !system.is_empty() {
+        instruction.push_str("\n\n");
+        instruction.push_str(system);
+    }
+    let part = json!({ "text": instruction });
+    let contents = request.entry("contents").or_insert_with(|| json!([]));
+    let Some(contents) = contents.as_array_mut() else {
+        return;
+    };
+    match contents.first_mut().and_then(Value::as_object_mut) {
+        Some(first) if first.get("role").and_then(Value::as_str) == Some("user") => {
+            if let Some(parts) = first.get_mut("parts").and_then(Value::as_array_mut) {
+                parts.insert(0, part);
+            }
+        }
+        _ => contents.insert(0, json!({ "role": "user", "parts": [part] })),
+    }
+}
 
 /// `POST {daily}/v1internal:fetchAvailableModels {project}` with the bearer.
 pub(crate) fn catalog(base_url: &str, token: &str, account: &str) -> Result<Vec<String>, String> {
@@ -101,11 +133,16 @@ pub(crate) fn chat_url(base_url: &str) -> Option<String> {
 /// sign-in is the common failure, then the plan limit, then a project that
 /// was never onboarded.
 pub(crate) fn refusal(status: u16, body: &str) -> Option<String> {
+    let lower = body.to_ascii_lowercase();
     let what = match status {
-        401 | 403 => {
-            "Google refused the Antigravity sign-in; sign in again under AI Agent settings → Providers"
-                .to_string()
+        401 => "Google refused the Antigravity sign-in; sign in again under AI Agent settings → Providers".to_string(),
+        403 if lower.contains("serviceusage")
+            || lower.contains("permission")
+            || lower.contains("aicode-consumers") =>
+        {
+            "Google refused the request for this account's Antigravity project: finish the Antigravity onboarding (open the Antigravity app once, signed in with the same account), then Sign out and Sign in again under AI Agent settings → Providers".to_string()
         }
+        403 => "Google refused the request; if this keeps happening, Sign out and Sign in again under AI Agent settings → Providers".to_string(),
         429 => "Google's Antigravity limit is used up for now; try again later".to_string(),
         400 => "Google refused the request; the Cloud Code project may not be onboarded, so sign in again under AI Agent settings → Providers".to_string(),
         // Anything else is not about the sign-in: the generic refusal says it.
@@ -162,7 +199,7 @@ mod tests {
         };
         assert_eq!(
             find("User-Agent"),
-            Some("antigravity/cli/1.3.4 (aidev_client; linux; x86_64)")
+            Some("antigravity/cli/1.5.5 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
         );
         assert_eq!(find("x-goog-user-project"), Some("project-1"));
         assert!(extra_headers("", "", "")
@@ -197,6 +234,58 @@ mod tests {
         assert_eq!(protocol_for("gemini-3-pro-preview"), Protocol::CloudCode);
     }
 
+    /// The body opens every request with the client's identity and keeps the
+    /// system text in the first user turn (a long wire-native
+    /// `systemInstruction` gets a generic 429 from the consumer endpoints).
+    #[test]
+    fn the_body_presents_as_the_antigravity_client() {
+        let req = ChatRequest {
+            kind: crate::ai::Kind::Antigravity,
+            base_url: PROD_BASE.into(),
+            api_key: Some("token-1".into()),
+            model: "gemini-3-pro-preview".into(),
+            system: "be brief".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            max_output_tokens: None,
+            effort: None,
+            session: String::new(),
+            account: "project-1".into(),
+        };
+        let wire = Wire {
+            protocol: Protocol::CloudCode,
+            ..Wire::of(crate::ai::Kind::Antigravity)
+        };
+        let mut body = json!({
+            "project": "project-1",
+            "request": {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "systemInstruction": {"parts": [{"text": "be brief"}]},
+            }
+        });
+        tweak_body(&req, wire, &mut body);
+        assert!(body.pointer("/request/systemInstruction").is_none());
+        assert_eq!(
+            body.pointer("/request/contents/0/parts/0/text"),
+            Some(&json!(format!(
+                "{}\n\nbe brief",
+                cloud_code::ANTIGRAVITY_IDENTITY
+            )))
+        );
+        assert_eq!(
+            body.pointer("/request/contents/0/parts/1/text"),
+            Some(&json!("hi"))
+        );
+        // A request without user content still gets the identity.
+        let mut empty = json!({"request": {"contents": []}});
+        tweak_body(&req, wire, &mut empty);
+        assert_eq!(
+            empty.pointer("/request/contents/0/role"),
+            Some(&json!("user"))
+        );
+    }
+
     /// Refusals in Antigravity's terms: a rejected sign-in, the plan limit,
     /// and a project that needs onboarding; anything else is generic.
     #[test]
@@ -207,7 +296,13 @@ mod tests {
             "{refused}"
         );
         assert!(refused.contains("invalid token"), "{refused}");
-        assert!(refusal(403, "").unwrap().contains("sign in again"));
+        assert!(refusal(403, "").unwrap().contains("Sign in again"));
+        let project = refusal(
+            403,
+            r#"{"error":{"message":"Caller does not have required permission to use project aicode-consumers"}}"#,
+        )
+        .unwrap();
+        assert!(project.contains("Antigravity onboarding"), "{project}");
         let limited = refusal(429, "").unwrap();
         assert!(limited.contains("limit is used up"), "{limited}");
         let project = refusal(400, "").unwrap();

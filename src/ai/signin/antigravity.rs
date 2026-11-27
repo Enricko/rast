@@ -17,8 +17,12 @@ use super::{Credentials, Pending, Plan, Started};
 /// Where Google sends the browser back; a server elsewhere never receives it,
 /// so the person pastes the address.
 const REDIRECT_URI: &str = "http://localhost:56123/oauth-callback";
-/// The app's scopes.
+/// The client's scopes: the `aicode` scope the Antigravity CLI requests
+/// (without it Google treats the token as a plain consumer one — it answers
+/// the shared `aicode-consumers` project, which generation refuses), Cloud
+/// Code, its logs and experiments, plus identity.
 const SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/aicode",
     "openid",
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -69,6 +73,32 @@ pub(crate) fn exchange(pending: &Pending, code: &str, now_ms: i64) -> Result<Cre
 /// New tokens for old (blocking).
 pub(crate) fn refresh(old: &Credentials, now_ms: i64) -> Result<Credentials, String> {
     google::refresh(&config()?, old, now_ms)
+}
+
+/// Whether the stored sign-in carries a project that is missing or Google's
+/// shared consumer one (the older sign-in flow could store that, and
+/// generation against it is refused).
+pub(crate) fn needs_repair(old: &Credentials) -> bool {
+    let project = if old.project_id.is_empty() {
+        old.account_id.as_str()
+    } else {
+        old.project_id.as_str()
+    };
+    project.trim().is_empty() || project.trim().eq_ignore_ascii_case("aicode-consumers")
+}
+
+/// Find a usable project with the tokens the sign-in already has (blocking,
+/// one request): the Cloud Code project Google names, else the account's
+/// stable synthetic id. The tokens themselves are untouched.
+pub(crate) fn repair(old: &Credentials, _now_ms: i64) -> Result<Option<Credentials>, String> {
+    let project = google::repair_project(&config()?, &old.access_token, &old.email);
+    if project.is_empty() || project == old.project_id {
+        return Ok(None);
+    }
+    let mut fresh = old.clone();
+    fresh.account_id = project.clone();
+    fresh.project_id = project;
+    Ok(Some(fresh))
 }
 
 #[cfg(test)]
@@ -142,6 +172,30 @@ mod tests {
         assert!(crate::ai::signin::take_pending(&state, 7).is_err());
     }
 
+    /// A stored sign-in with no project, or with Google's shared consumer
+    /// project, is re-read before the next request; a real project is left
+    /// alone.
+    #[test]
+    fn a_shared_or_missing_project_is_repaired() {
+        let credentials = |project: &str| Credentials {
+            access_token: "at".into(),
+            refresh_token: "rt".into(),
+            expires_at: 0,
+            refreshed_at: 0,
+            account_id: project.into(),
+            email: "someone@example.com".into(),
+            plan: String::new(),
+            project_id: project.into(),
+        };
+        assert!(needs_repair(&credentials("aicode-consumers")));
+        assert!(needs_repair(&credentials(" AICODE-CONSUMERS ")));
+        assert!(needs_repair(&credentials("")));
+        assert!(!needs_repair(&credentials("gen-lang-client-123")));
+        assert!(!needs_repair(&credentials(
+            "00000000-0000-5000-8000-000000000000"
+        )));
+    }
+
     /// The client the references pin, and the identity the Cloud Code
     /// handshake presents (the IDE's user agent, not the node client's).
     #[test]
@@ -157,7 +211,10 @@ mod tests {
             std::env::var("RAST_ANTIGRAVITY_CLIENT_SECRET").unwrap()
         );
         assert_eq!(config.redirect_uri, "http://localhost:56123/oauth-callback");
-        assert_eq!(config.scopes.len(), 6);
+        assert_eq!(config.scopes.len(), 7);
+        assert!(config
+            .scopes
+            .contains(&"https://www.googleapis.com/auth/aicode"));
         assert!(config
             .scopes
             .contains(&"https://www.googleapis.com/auth/cloud-platform"));

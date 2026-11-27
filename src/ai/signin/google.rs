@@ -23,6 +23,7 @@
 use std::time::Duration;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use super::{http, pkce, store, Credentials, Pending, Plan, Started};
 use crate::ai::provider::cloud_code;
@@ -199,7 +200,7 @@ pub(crate) fn exchange(
     let access_token = text(&tokens, "access_token")
         .ok_or_else(|| format!("Google's sign-in sent {} no access token", config.label))?;
     let email = user_info(access_token);
-    let account = discover_account(config, access_token)?;
+    let account = discover_account(config, access_token, &email)?;
     credentials_from(&tokens, config, account, email, now_ms)
 }
 
@@ -338,9 +339,17 @@ fn user_info(access_token: &str) -> String {
         .to_string()
 }
 
-/// Read the Cloud Code project and plan from `loadCodeAssist`, onboarding the
-/// account when it has no project yet.
-fn discover_account(config: &Config, access_token: &str) -> Result<Account, String> {
+/// Read the Cloud Code project and plan from `loadCodeAssist`, then make sure
+/// the project is one the account can actually use.
+///
+/// Google answers the shared consumer project (`aicode-consumers`) for
+/// accounts it has not provisioned a Cloud Code project for; generation with
+/// that project is refused (the caller lacks `serviceusage.services.use` on
+/// it). So: onboard when the answer is empty or shared — a fresh project is
+/// created for the account — and, for Antigravity, fall back to a stable
+/// per-account project id when Google still offers only the shared one (the
+/// current clients send such an id when discovery finds nothing).
+fn discover_account(config: &Config, access_token: &str, seed: &str) -> Result<Account, String> {
     let load = call_method(
         config,
         "loadCodeAssist",
@@ -349,13 +358,78 @@ fn discover_account(config: &Config, access_token: &str) -> Result<Account, Stri
     )?;
     let plan = plan_of(&load);
     let mut project = project_of(&load);
-    if project.is_empty() {
-        project = onboard(config, access_token, &default_tier(&load))?;
+    if project.is_empty() || is_shared_project(&project) {
+        if let Ok(found) = onboard(config, access_token, &default_tier(&load)) {
+            if !found.is_empty() && !is_shared_project(&found) {
+                project = found;
+            }
+        }
     }
-    if project.is_empty() {
+    if (project.is_empty() || is_shared_project(&project))
+        && config.identity == Identity::Antigravity
+    {
+        project = synthetic_project(seed);
+    }
+    if project.is_empty() || is_shared_project(&project) {
         return Err(no_project_error(config));
     }
     Ok(Account { project, plan })
+}
+
+/// Google's shared consumer project: usable for the consumer clients'
+/// metadata calls, but generation against it is refused for a normal account.
+const SHARED_CONSUMER_PROJECT: &str = "aicode-consumers";
+
+fn is_shared_project(project: &str) -> bool {
+    project.trim().eq_ignore_ascii_case(SHARED_CONSUMER_PROJECT)
+}
+
+/// A stable project id for an account Google would not provision one for
+/// (`<uuid>` shaped, derived from the account's email): the current
+/// Antigravity clients send such an id, and the backend accepts it for
+/// generation. Empty seeds still get a deterministic id.
+fn synthetic_project(seed: &str) -> String {
+    let seed = seed.trim();
+    let seed = if seed.is_empty() {
+        "antigravity-default"
+    } else {
+        seed
+    };
+    let digest = Sha256::digest(format!("antigravity:{seed}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    // UUID version 5-ish and RFC 4122 variant, as the reference derives it.
+    bytes[6] = (bytes[6] & 0x0f) | 0x50;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = hex::encode(bytes);
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Re-read the project for a sign-in that already has tokens (no onboarding:
+/// it was attempted at sign-in, and a first chat must not wait for it). A
+/// project Google will not provision (empty or the shared consumer one) falls
+/// back to the account's stable synthetic id.
+pub(crate) fn repair_project(config: &Config, access_token: &str, seed: &str) -> String {
+    let load = call_method(
+        config,
+        "loadCodeAssist",
+        &load_body(config.identity),
+        access_token,
+    );
+    if let Ok(load) = load {
+        let project = project_of(&load);
+        if !project.is_empty() && !is_shared_project(&project) {
+            return project;
+        }
+    }
+    synthetic_project(seed)
 }
 
 /// What a person can do when Google has no project for the account.
@@ -371,7 +445,12 @@ fn no_project_error(config: &Config) -> String {
 /// hang forever).
 fn onboard(config: &Config, access_token: &str, tier: &str) -> Result<String, String> {
     for attempt in 0..ONBOARD_ATTEMPTS {
-        let reply = call_method(config, "onboardUser", &onboard_body(tier), access_token)?;
+        let reply = call_method(
+            config,
+            "onboardUser",
+            &onboard_body(config.identity, tier),
+            access_token,
+        )?;
         if reply.get("done").and_then(Value::as_bool) == Some(true) {
             let project = reply.get("response").map(project_of).unwrap_or_default();
             if !project.is_empty() {
@@ -388,21 +467,25 @@ fn onboard(config: &Config, access_token: &str, tier: &str) -> Result<String, St
     )
 }
 
-/// The `loadCodeAssist` request. The Gemini CLI's node client also sends
-/// `mode: 1`, which 9router's flow carries; the IDE does not.
+/// The `loadCodeAssist` request: each client presents its own metadata, and
+/// the Gemini CLI's node client also sends `mode: 1`, which 9router's flow
+/// carries; the Antigravity client does not.
 fn load_body(identity: Identity) -> Value {
-    let mut body = json!({ "metadata": cloud_code::metadata() });
-    if identity == Identity::GeminiCli {
-        body["mode"] = json!(1);
+    match identity {
+        Identity::Antigravity => json!({ "metadata": cloud_code::antigravity_metadata() }),
+        Identity::GeminiCli => json!({ "metadata": cloud_code::metadata(), "mode": 1 }),
     }
-    body
 }
 
-/// The `onboardUser` request.
-fn onboard_body(tier: &str) -> Value {
+/// The `onboardUser` request, with the client's own metadata.
+fn onboard_body(identity: Identity, tier: &str) -> Value {
+    let metadata = match identity {
+        Identity::Antigravity => cloud_code::antigravity_metadata(),
+        Identity::GeminiCli => cloud_code::metadata(),
+    };
     json!({
         "tierId": tier,
-        "metadata": cloud_code::metadata(),
+        "metadata": metadata,
     })
 }
 
@@ -455,18 +538,50 @@ fn call_method(
     Ok(reply.value)
 }
 
-/// The project `loadCodeAssist`/`onboardUser` answers with: a bare id or an
-/// `{id}` object (both shapes are seen in the references).
+/// The project `loadCodeAssist`/`onboardUser` answers with. Google has used
+/// several field names for it and both a bare id and an `{id}` object; the
+/// current clients read all of them (pi-antigravity's `extractProjectId`).
 fn project_of(value: &Value) -> String {
-    match value.get("cloudaicompanionProject") {
-        Some(Value::String(project)) => project.trim().to_string(),
-        Some(Value::Object(fields)) => fields
+    for key in [
+        "antigravityProjectId",
+        "projectId",
+        "backendProjectId",
+        "userDefinedCloudaicompanionProject",
+        "cloudaicompanionProject",
+        "project",
+    ] {
+        if let Some(project) = project_string(value.get(key)) {
+            return project;
+        }
+    }
+    for key in ["projects", "projectIds", "cloudaicompanionProjects"] {
+        if let Some(items) = value.get(key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(project) = project_string(Some(item)) {
+                    return project;
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// One project field: a bare id or an `{id}` object.
+fn project_string(value: Option<&Value>) -> Option<String> {
+    let project = match value? {
+        Value::String(project) => project.trim().to_string(),
+        Value::Object(fields) => fields
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or("")
             .trim()
             .to_string(),
         _ => String::new(),
+    };
+    if project.is_empty() {
+        None
+    } else {
+        Some(project)
     }
 }
 
@@ -580,24 +695,33 @@ mod tests {
         assert!(has("client_secret", "secret-1"));
     }
 
-    /// The Cloud Code handshake's request bodies: the numeric client
-    /// metadata, the Gemini CLI's `mode: 1`, and the default tier.
+    /// The Cloud Code handshake's request bodies: Antigravity's minimal
+    /// metadata, the Gemini CLI's numeric metadata with `mode: 1`, and the
+    /// default tier.
     #[test]
     fn the_handshake_bodies_are_cloud_codes() {
         let load = load_body(Identity::Antigravity);
+        assert_eq!(
+            load,
+            json!({"metadata": {"ideType": "ANTIGRAVITY"}}),
+            "{load}"
+        );
+        assert!(load.get("mode").is_none());
+        let load = load_body(Identity::GeminiCli);
         assert_eq!(load["metadata"]["ideType"], 9);
         assert_eq!(load["metadata"]["pluginType"], 2);
         assert!(load["metadata"]["platform"].is_number());
-        assert!(load.get("mode").is_none());
-        let load = load_body(Identity::GeminiCli);
         assert_eq!(load["mode"], 1);
-        let onboard = onboard_body("free-tier");
+        let onboard = onboard_body(Identity::Antigravity, "free-tier");
         assert_eq!(onboard["tierId"], "free-tier");
+        assert_eq!(onboard["metadata"]["ideType"], "ANTIGRAVITY");
+        let onboard = onboard_body(Identity::GeminiCli, "free-tier");
         assert_eq!(onboard["metadata"]["ideType"], 9);
     }
 
-    /// The two project shapes, the plan tiers and the default tier are read as
-    /// the references show them.
+    /// The project shapes, the plan tiers and the default tier are read as
+    /// the current clients read them (several field names, a bare id or an
+    /// `{id}` object, plus the list forms).
     #[test]
     fn the_project_plan_and_tier_are_read() {
         assert_eq!(
@@ -607,6 +731,15 @@ mod tests {
         assert_eq!(
             project_of(&json!({"cloudaicompanionProject": {"id": " project-2 "}})),
             "project-2"
+        );
+        assert_eq!(
+            project_of(&json!({"antigravityProjectId": " project-3 "})),
+            "project-3"
+        );
+        assert_eq!(project_of(&json!({"projectId": "project-4"})), "project-4");
+        assert_eq!(
+            project_of(&json!({"cloudaicompanionProjects": [{"id": "project-5"}]})),
+            "project-5"
         );
         assert_eq!(project_of(&json!({})), "");
         assert_eq!(
@@ -626,6 +759,26 @@ mod tests {
             "free-tier"
         );
         assert_eq!(default_tier(&json!({})), "legacy-tier");
+    }
+
+    /// Google's shared consumer project is never used: generation against it
+    /// is refused for a normal account. Antigravity falls back to a stable
+    /// per-account id instead (the current clients send one too).
+    #[test]
+    fn the_shared_consumer_project_is_not_used() {
+        assert!(is_shared_project("aicode-consumers"));
+        assert!(is_shared_project(" AICode-Consumers "));
+        assert!(!is_shared_project("gen-lang-client-1"));
+        let first = synthetic_project("someone@example.com");
+        assert_eq!(first, synthetic_project("someone@example.com"));
+        assert_ne!(first, synthetic_project("other@example.com"));
+        assert_ne!(first, synthetic_project(""));
+        assert_eq!(first.len(), 36, "{first}");
+        let pieces: Vec<&str> = first.split('-').collect();
+        assert_eq!(
+            pieces.iter().map(|piece| piece.len()).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
     }
 
     /// A refused token exchange and a refused onboarding are worded with the

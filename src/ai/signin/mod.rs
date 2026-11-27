@@ -562,6 +562,29 @@ pub fn refresh(plan: Plan, old: &Credentials, now_ms: i64) -> Result<Credentials
     }
 }
 
+/// Whether a stored sign-in should re-read its Cloud Code project before the
+/// next request: the older Antigravity flow could store the shared
+/// `aicode-consumers` project, which generation refuses.
+pub fn needs_repair(plan: Plan, credentials: &Credentials) -> bool {
+    match plan {
+        Plan::Antigravity => antigravity::needs_repair(credentials),
+        _ => false,
+    }
+}
+
+/// Fill in what [`needs_repair`] found (blocking: one request, no onboarding).
+/// `Ok(None)` when there was nothing to change.
+pub fn repair(
+    plan: Plan,
+    credentials: &Credentials,
+    now_ms: i64,
+) -> Result<Option<Credentials>, String> {
+    match plan {
+        Plan::Antigravity => antigravity::repair(credentials, now_ms),
+        _ => Ok(None),
+    }
+}
+
 /// Read the login the Claude Code CLI already has on this server
 /// (`~/.claude/.credentials.json`, or `$CLAUDE_CONFIG_DIR/.credentials.json`)
 /// and return its tokens, so an administrator who ran `claude` to sign in
