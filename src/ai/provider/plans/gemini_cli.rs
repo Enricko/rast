@@ -48,19 +48,15 @@ pub(crate) fn protocol_for(_model: &str) -> Protocol {
 pub(crate) fn extra_headers(
     model: &str,
     _session: &str,
-    account: &str,
+    _account: &str,
 ) -> Vec<(&'static str, String)> {
-    let mut out = vec![
+    vec![
         ("User-Agent", cloud_code::gemini_cli_user_agent(model)),
         (
             "X-Goog-Api-Client",
             cloud_code::GEMINI_CLI_API_CLIENT.to_string(),
         ),
-    ];
-    if !account.is_empty() {
-        out.push(("x-goog-user-project", account.to_string()));
-    }
-    out
+    ]
 }
 
 /// The envelope is [`cloud_code::body`]'s.
@@ -158,7 +154,7 @@ mod tests {
             find("X-Goog-Api-Client"),
             Some("google-genai-sdk/1.41.0 gl-node/v22.19.0")
         );
-        assert_eq!(find("x-goog-user-project"), Some("project-1"));
+        assert_eq!(find("x-goog-user-project"), None);
         // An unfilled model still gives the CLI's user-agent shape.
         assert!(extra_headers("", "", "")
             .iter()

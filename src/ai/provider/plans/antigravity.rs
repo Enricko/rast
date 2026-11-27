@@ -84,19 +84,22 @@ pub(crate) fn protocol_for(_model: &str) -> Protocol {
     Protocol::CloudCode
 }
 
-/// The IDE identity: the client's user agent and the Cloud Code project.
-/// The bearer token, `Content-Type` and `Accept` come from the generic
-/// headers (`headers`/`stream_chat`).
+/// The IDE identity: only the client's user agent. The bearer token,
+/// `Content-Type` and `Accept` come from the generic headers
+/// (`headers`/`stream_chat`).
+///
+/// Deliberately no `x-goog-user-project`: that header names a real Google
+/// Cloud quota project, and Antigravity's project is not one (for a consumer
+/// account it is Google's shared `aicode-consumers`, and RAST may hold a
+/// stable synthetic id). Sending it makes the host answer
+/// `400 Project 'projects/…' not found or deleted` (or `403`) while the same
+/// request without it succeeds — verified against the live host 2026-11-27.
 pub(crate) fn extra_headers(
     _model: &str,
     _session: &str,
-    account: &str,
+    _account: &str,
 ) -> Vec<(&'static str, String)> {
-    let mut out = vec![("User-Agent", ANTIGRAVITY_USER_AGENT.to_string())];
-    if !account.is_empty() {
-        out.push(("x-goog-user-project", account.to_string()));
-    }
-    out
+    vec![("User-Agent", ANTIGRAVITY_USER_AGENT.to_string())]
 }
 
 /// The envelope is [`cloud_code::body`]'s.
@@ -231,7 +234,7 @@ mod tests {
             find("User-Agent"),
             Some("antigravity/cli/1.5.5 (aidev_client; os_type=linux; arch=amd64; cl=982146307; auth_method=consumer)")
         );
-        assert_eq!(find("x-goog-user-project"), Some("project-1"));
+        assert_eq!(find("x-goog-user-project"), None);
         assert!(extra_headers("", "", "")
             .iter()
             .all(|(name, _)| *name != "x-goog-user-project"));
