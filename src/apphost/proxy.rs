@@ -56,9 +56,9 @@ pub async fn forward(
     to_app(&state, &app, &user, ip, request).await
 }
 
-/// A part of RAST that an app package took over (AI Agent's `/api/ai`,
-/// answered by its own server once its package is installed) hands its
-/// requests to the app; otherwise RAST answers them itself.
+/// Routes mounted beside RAST's own (AI Agent's `/api/ai` in its tests, see
+/// [`crate::api::router_with`]) hand their requests to the app package
+/// that serves the same paths while it runs; otherwise they answer them.
 pub async fn hand_to_app(
     State(state): State<AppState>,
     request: Request,

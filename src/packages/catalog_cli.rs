@@ -93,8 +93,9 @@ const ADOPTIUM_AVAILABLE: &str = "https://api.adoptium.net/v3/info/available_rel
 const ADOPTIUM_LATEST: &str = "https://api.adoptium.net/v3/assets/latest/{feature}/hotspot?architecture={arch}&image_type=jdk&os=linux&vendor=eclipse";
 /// GitHub repositories whose stable releases provide self-contained binaries.
 const BUN_REPO: &str = "oven-sh/bun";
-/// RAST's own repository: AI Agent's App Center package is released there
-/// (`ai-agent-v<version>`, by .github/workflows/ai-agent.yml).
+/// Where AI Agent's App Center package was released before its source moved
+/// to the package repository (`ai-agent-v<version>`); the default of
+/// `packages.ai-agent.releaseRepos`.
 const RAST_REPO: &str = "Enricko/rast";
 const DENO_REPO: &str = "denoland/deno";
 /// Deno attests with the in-toto release predicate, not SLSA provenance v1.
@@ -490,6 +491,11 @@ struct PackageConfig {
     /// Oldest RAST this package's versions need (default: the catalog's).
     #[serde(default)]
     min_rast_version: Option<String>,
+    /// GitHub repositories (`owner/name`) whose releases provide an app
+    /// package's versions, newest home first; a version found in several is
+    /// taken from the first. AI Agent: default [`RAST_REPO`].
+    #[serde(default)]
+    release_repos: Vec<String>,
     channels: Vec<Value>,
 }
 
@@ -2124,8 +2130,36 @@ fn discover_ai_agent(
     if package.app.is_none() {
         return Err("catalog.config.json packages.ai-agent needs its app section".into());
     }
-    let releases = github_stable_releases(RAST_REPO, token)?;
+    let mut releases = Vec::new();
+    for repo in ai_agent_repos(package) {
+        releases.extend(github_stable_releases(&repo, token)?);
+    }
     ai_agent_plan_from_releases(cfg, package, &releases, held)
+}
+
+/// The repositories AI Agent's releases come from.
+fn ai_agent_repos(package: &PackageConfig) -> Vec<String> {
+    if package.release_repos.is_empty() {
+        vec![RAST_REPO.to_string()]
+    } else {
+        package.release_repos.clone()
+    }
+}
+
+/// `owner/name` of a GitHub release page (`https://github.com/owner/name/releases/…`).
+fn github_repo_of(url: &str) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let mut parts = rest.splitn(3, '/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    let valid = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(name) && parts.next()?.starts_with("releases/"))
+        .then(|| format!("{owner}/{name}"))
 }
 
 /// Pure part of the AI Agent provider: RAST's `ai-agent-v<version>` releases
@@ -2136,11 +2170,12 @@ fn ai_agent_plan_from_releases(
     releases: &[Value],
     held: &BTreeSet<String>,
 ) -> Result<Vec<PlanItem>, String> {
-    let mut found = Vec::new();
+    let mut found: Vec<PlanItem> = Vec::new();
     for release in releases {
         match ai_agent_plan_from_release(cfg, package, release) {
             Ok(Some(item)) => {
-                if !held.contains(&format!("ai-agent@{}", item.version)) {
+                let known = found.iter().any(|f| f.version == item.version);
+                if !known && !held.contains(&format!("ai-agent@{}", item.version)) {
                     found.push(item);
                 }
             }
@@ -4893,7 +4928,13 @@ fn verify_item(
             match item.package.as_str() {
                 "python" => verify_attestation(&archive_path, PBS_REPO)?,
                 "clang" if item.attestations => verify_attestation(&archive_path, CLANG_REPO)?,
-                "ai-agent" if item.attestations => verify_attestation(&archive_path, RAST_REPO)?,
+                "ai-agent" if item.attestations => {
+                    let repo =
+                        info.source.as_deref().and_then(github_repo_of).ok_or(
+                            "ai-agent: the plan does not say which repository released it",
+                        )?;
+                    verify_attestation(&archive_path, &repo)?
+                }
                 "deno" if item.attestations => {
                     verify_deno_release_attestation(&sha256, gh_token().as_deref())?
                 }
@@ -9382,6 +9423,61 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
             entries.iter().find(|(id, _)| id == "bun").unwrap().1["type"],
             "runtime"
         );
+    }
+
+    #[test]
+    fn ai_agent_releases_come_from_its_repositories_newest_home_first() {
+        let mut cfg = ai_agent_config();
+        // Older catalogs' config: RAST's repository.
+        let package = package_config(&cfg, "ai-agent").unwrap().clone();
+        assert_eq!(ai_agent_repos(&package), ["Enricko/rast"]);
+        let entry = cfg
+            .packages
+            .entries
+            .iter_mut()
+            .find(|(id, _)| id == "ai-agent")
+            .unwrap();
+        entry.1.release_repos = vec!["Enricko/rast-packages".into(), "Enricko/rast".into()];
+        let package = package_config(&cfg, "ai-agent").unwrap().clone();
+        assert_eq!(
+            ai_agent_repos(&package),
+            ["Enricko/rast-packages", "Enricko/rast"]
+        );
+        let moved = |tag: &str, version: &str| {
+            let text = ai_agent_release(tag, version)
+                .to_string()
+                .replace("Enricko/rast/", "Enricko/rast-packages/");
+            serde_json::from_str::<Value>(&text).unwrap()
+        };
+        // 1.3.0 in both: the package repository's is taken.
+        let releases = [
+            moved("ai-agent-v1.4.0", "1.4.0"),
+            moved("ai-agent-v1.3.0", "1.3.0"),
+            ai_agent_release("ai-agent-v1.3.0", "1.3.0"),
+            ai_agent_release("ai-agent-v1.2.0", "1.2.0"),
+        ];
+        let items =
+            ai_agent_plan_from_releases(&cfg, &package, &releases, &BTreeSet::new()).unwrap();
+        let versions: Vec<&str> = items.iter().map(|i| i.version.as_str()).collect();
+        assert_eq!(versions, ["1.4.0", "1.3.0"]);
+        let source = items[1].targets["linux-x86_64"].source.as_deref().unwrap();
+        assert_eq!(
+            github_repo_of(source).as_deref(),
+            Some("Enricko/rast-packages")
+        );
+        assert_eq!(
+            github_repo_of("https://github.com/Enricko/rast/releases/tag/ai-agent-v1.2.0")
+                .as_deref(),
+            Some("Enricko/rast")
+        );
+        for url in [
+            "https://github.com/Enricko/rast",
+            "https://github.com/Enricko/rast/tree/main",
+            "https://example.com/Enricko/rast/releases/tag/x",
+            "https://github.com/../rast/releases/tag/x",
+        ] {
+            assert_eq!(github_repo_of(url), None, "{url}");
+        }
     }
 
     #[test]

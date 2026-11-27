@@ -227,8 +227,7 @@ jobs:
           path: frontend/dist
 
       - name: Build release binary
-        # AI Agent's program (rast-ai-agent) ships in its own App Center
-        # package: .github/workflows/ai-agent.yml.
+        # AI Agent is an App Center package built in Enricko/rast-packages.
         run: cargo build --release --locked --bin rast
 
       - name: Verify binary version

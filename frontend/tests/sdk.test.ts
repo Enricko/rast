@@ -13,15 +13,24 @@ test("SDK v1 keeps every export package apps were built against", () => {
 });
 
 test("a Package Center app takes the place of a built-in app with its id", () => {
-  const builtIn = findApp("agent");
+  const builtIn = findApp("terminal");
   assert.ok(builtIn && !builtIn.packageVersion);
-  const packaged = { id: "agent", name: "AI Agent", icon: "package", description: "", packageVersion: "1.0.0", mount() {} };
+  const packaged = { id: "terminal", name: "Terminal", icon: "package", description: "", packageVersion: "1.0.0", mount() {} };
   const before = permissionsSignature(null, true);
   assert.equal(setPackageApps([packaged]), true);
   assert.equal(setPackageApps([{ ...packaged }]), false, "same versions: unchanged");
-  assert.equal(findApp("agent")?.packageVersion, "1.0.0");
-  assert.equal(allApps().filter((app) => app.id === "agent").length, 1);
+  assert.equal(findApp("terminal")?.packageVersion, "1.0.0");
+  assert.equal(allApps().filter((app) => app.id === "terminal").length, 1);
   assert.notEqual(permissionsSignature(null, true), before, "an update shows in the signature");
   assert.equal(setPackageApps([]), true);
-  assert.equal(findApp("agent"), builtIn);
+  assert.equal(findApp("terminal"), builtIn);
+});
+
+test("AI Agent comes from App Center only", () => {
+  assert.equal(findApp("agent"), undefined);
+  const agent = { id: "agent", name: "AI Agent", icon: "package", description: "", packageVersion: "1.4.0", mount() {} };
+  assert.equal(setPackageApps([agent]), true);
+  assert.equal(findApp("agent")?.packageVersion, "1.4.0");
+  assert.equal(setPackageApps([]), true);
+  assert.equal(findApp("agent"), undefined);
 });

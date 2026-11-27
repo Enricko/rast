@@ -8,7 +8,6 @@ use axum::{http::StatusCode, middleware, response::IntoResponse, routing::get, R
 
 use crate::{auth::middleware::require_auth, error::AppError, server, state::AppState};
 
-pub mod ai;
 pub mod appearance;
 pub mod apps;
 pub mod auth;
@@ -30,6 +29,13 @@ pub mod users;
 
 /// Build the complete application router (API + embedded frontend).
 pub fn router(state: AppState) -> Router {
+    router_with(state, Router::new())
+}
+
+/// The router with more signed-in routes, behind the same sign-in and app
+/// access checks as RAST's own: an app package's API served in the same
+/// program (AI Agent's tests mount `/api/ai/*` this way).
+pub fn router_with(state: AppState, extra: Router<AppState>) -> Router {
     let protected: Router<AppState> = Router::new()
         .merge(auth::routes())
         .merge(users::routes())
@@ -48,16 +54,7 @@ pub fn router(state: AppState) -> Router {
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
-        // AI Agent, built in (its Package Center app takes over /api/ai/*
-        // once RAST stops answering it here).
-        .merge(
-            ai::routes()
-                .with_state(crate::ai::host::Agent::built_in(&state))
-                .layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::apphost::proxy::hand_to_app,
-                )),
-        )
+        .merge(extra)
         .route("/api/events", get(events::stream))
         // Package Center apps: their windows, and their APIs (any
         // `/api/<segment>` RAST does not answer itself).

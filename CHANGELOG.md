@@ -9,65 +9,22 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-### Added
-
-- **AI Agent updates from its own window.** When App Center has a newer AI
-  Agent, administrators get "AI Agent x is ready · Update" under the chat
-  list; Update installs it with its progress as a bar, and the desktop opens
-  the window again on the new version, where it was and without a page
-  reload. Any Package Center app's open windows now follow an update this
-  way, from App Center too.
-- **AI Agent: What's new, once per version.** After an update each account
-  sees what changed, in a dialog over the window (`POST /api/ai/whats-new`;
-  `/api/ai/options` says the version).
-- **AI Agent settings → Quota: bars on every card, and limits per account.**
-  Accounts whose provider reports nothing show what RAST counted in the last
-  5 hours and 7 days as bars against limits set in RAST (Limits on the card
-  or in the account dialog, `PUT
-  /api/ai/providers/{id}/accounts/{account_id}/limits`, kept in settings);
-  at a limit the account rests and the next account answers. Without a limit
-  set, the bar measures against about what RAST had counted when the
-  provider last said the account was out, else beside the provider's busiest
-  account. Per-model use shows as bars too, and ChatGPT Codex plans are asked
-  for their limits as Quota opens. Ships as AI Agent 1.3.0.
-- **AI Agent: one provider, several accounts.** A provider's dialog lists
-  its accounts with Add account (sign in with another plan account, or
-  paste another API key). Replies take the accounts by the provider's turn
-  order: **Fill first** uses the first account and moves to the next when
-  it reaches a limit; **Round robin** takes them in turn (a set number of
-  replies each), so they reach their limits together. An account whose
-  provider answers that it reached a limit rests until the reset time the
-  provider gives (one minute when it gives none) and the reply goes on with
-  the next account. Each account can be set aside, moved up or down, signed
-  in again, woken with Use now, or removed. Sign-ins of one person to the
-  same plan become accounts of one provider on upgrade (the two Google
-  Antigravity sign-ins become one provider with two accounts); chats,
-  agents, limits and usage follow. Database schema v21; ships to App Center
-  as AI Agent 1.1.0 (package `ai-agent`, its own database v2).
-- **AI Agent: Round robin as a switch, for one provider or all.** A
-  provider's dialog has 9router's Round robin switch with Sticky (replies in
-  a row per account), applied at once; **Round robin for all** (Providers
-  and Quota) turns it on or off for every provider and for the ones added
-  later. Ships as AI Agent 1.2.0 with the quota tracker below.
-- **AI Agent settings → Quota, a quota tracker like 9router's**: filters by
-  provider, each provider's accounts under it with its Round robin switch,
-  and a card per account with Refresh (ChatGPT Codex plans are asked for
-  their 5-hour and weekly use, as `codex /status` shows it), Edit, Remove
-  and an on/off switch. Cards show the limits the provider reports as bars
-  coloured by what is left, with the counts and "Resets in …", the
-  account's rest with Use now, and for providers that report nothing, the
-  tokens RAST counted per model in the last 5 hours and 7 days. Refresh all
-  and Auto-refresh (every minute) ask the providers again.
-
-### Fixed
-
-- AI Agent settings → Providers: a long account email stays inside its card
-  (shortened with "…") instead of running into the next card, and the
-  models count stays on one line. A provider with several accounts says how
-  many.
-
 ### Changed
 
+- **AI Agent moved out of RAST.** Its source, tests, API reference and
+  releases live in the package repository
+  ([Enricko/rast-packages, `apps/ai-agent`](https://github.com/Enricko/rast-packages/tree/main/apps/ai-agent)),
+  built against a pinned RAST commit, so AI Agent changes ship as App Center
+  updates without RAST changes. RAST no longer contains a built-in AI
+  Agent: install it from App Center (a server that used the built-in one
+  keeps its data: the package takes it over on its first start, as
+  before). The `rast-ai-agent` program, `migrations-agent/` and
+  `.github/workflows/ai-agent.yml` left this repository; AI Agent's changes
+  since 0.9.17 (1.1.0–1.3.0) are in its own changelog.
+- `rast catalog discover` takes AI Agent's versions from
+  `packages.ai-agent.releaseRepos` (GitHub `owner/name`, newest home first;
+  default `Enricko/rast`) and verifies each archive's build provenance
+  against the repository that released it.
 - **AI Agent installs and updates from its own tile in App Center.** When
   the catalog offers AI Agent's package, the AI Agent tile under Apps says
   which version is available and offers Install (later Update, with the
@@ -75,6 +32,19 @@ this file by `scripts/changelog-section.sh`.
   The package no longer shows a second "AI Agent" tile under Runtimes; the
   Updates view still lists it when an update is ready. App Center's package
   list names the app an app package provides (`appId`).
+
+### Added
+
+- **Package Center apps' open windows follow an update.** When an app
+  package changes version (updated in App Center, or from the app itself),
+  its open windows open again on the new version, where they were and with
+  what they kept (parameters, scroll, typed text, dialogs), without a page
+  reload.
+- `api::router_with(state, routes)`: more signed-in routes behind RAST's own
+  sign-in and app access checks (AI Agent's tests mount its API with it).
+- Database schema v21: plan sign-ins of one person to the same plan become
+  accounts of one provider in the AI Agent data an older RAST kept, before
+  the package takes it over.
 
 ### Planned
 

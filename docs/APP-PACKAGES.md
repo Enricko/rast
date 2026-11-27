@@ -82,13 +82,12 @@ one disappears.
 
 ## AI Agent
 
-- Window: `node scripts/build-app.mjs src/apps/agent/package.ts <out>/ui`.
-- Server: `cargo build --release --bin rast-ai-agent` (`src/ai/app.rs`;
-  schema in `migrations-agent/`). Its state is `ai::host::Agent`, which
-  reaches RAST through `ai::host::Host`: inside RAST it calls RAST directly,
-  as the package it asks the host API.
-- On its first start it takes AI Agent's data from RAST once (dump and
-  restore; RAST opens the values it sealed, the app seals them again with
-  its own key) and copies the chat files; RAST keeps its tables.
-- While the package's server runs, RAST hands `/api/ai/*` to it
-  (`apphost::proxy::hand_to_app`); otherwise RAST answers them itself.
+AI Agent's source lives in the package repository
+(<https://github.com/Enricko/rast-packages/tree/main/apps/ai-agent>): a Rust
+crate built against a pinned RAST commit (RAST's library gives it accounts,
+the audit log, the sandbox and the host API) and a window built with
+`frontend/scripts/build-app.mjs` from a RAST checkout. Its workflow there
+releases `ai-agent-v<version>`; the catalog takes AI Agent's versions from
+`packages.ai-agent.releaseRepos` (newest home first). RAST hands `/api/ai/*`
+to the package's server while it runs; on its first start the package takes
+the AI Agent data an older RAST kept (`apphost::migrate`).

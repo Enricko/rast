@@ -31,8 +31,6 @@ pub struct AppState {
     pub storage: Arc<crate::storage::Storage>,
     pub docker: Arc<crate::docker::DockerManager>,
     pub packages: Arc<crate::packages::PackageManager>,
-    /// AI Agent replies being written.
-    pub ai: Arc<crate::ai::Runs>,
     /// Package Center apps RAST runs (see `crate::apphost`).
     pub apps: crate::apphost::AppHost,
     pub started_at: i64,
@@ -88,13 +86,7 @@ impl AppState {
         crate::docker::reconcile::spawn(&config, db.clone(), docker.clone(), events.clone());
         // Terminal: end shells of accounts that lost access to them.
         crate::sandbox::spawn_access_sweeper(db.clone(), config.clone());
-        // AI Agent: replies cut off by a restart are marked interrupted.
-        crate::ai::run::recover(&db).await;
-        // AI Agent: files never sent, or left by removed accounts and chats.
-        crate::ai::files::sweep(&db, &config.data_dir).await;
         let secrets = Arc::new(secrets);
-        // AI Agent: model prices from the providers' lists, kept fresh.
-        crate::ai::spawn_price_refresh(db.clone(), secrets.clone());
 
         Ok(Self {
             config,
@@ -106,7 +98,6 @@ impl AppState {
             storage,
             docker,
             packages,
-            ai: crate::ai::Runs::new(),
             apps: crate::apphost::AppHost::new(),
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),

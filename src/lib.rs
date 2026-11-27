@@ -5,7 +5,6 @@
 //! backups and audit logs — shipped as a single Rust binary.
 
 pub mod access;
-pub mod ai;
 pub mod api;
 pub mod appearance;
 pub mod apphost;

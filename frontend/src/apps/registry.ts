@@ -2,7 +2,6 @@
 
 import type { AppDefinition } from "../core/app";
 import type { Permissions } from "../core/types";
-import { agentApp } from "./agent";
 import { applicationsApp } from "./applications";
 import { backupApp } from "./backup";
 import { controlPanelApp } from "./controlpanel";
@@ -23,7 +22,6 @@ export const APPS: AppDefinition[] = [
   controlPanelApp,
   logsApp,
   terminalApp,
-  agentApp,
 ];
 
 // Package Center apps (see core/package-apps.ts): they join the built-in
