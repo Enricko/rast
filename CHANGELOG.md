@@ -145,6 +145,10 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **AI Agent chats can be pinned.** "Pin to top" in a chat's menu (right
+  click in the list, or the chat's ⋯ menu) keeps it in a Pinned group at the
+  top of the list; Unpin sends it back to its day. Pinning leaves the chat's
+  place in time as it is. Database schema v19.
 - **AI Agent's chat list is divided by time:** Today, Yesterday, Previous 7
   days, Previous 30 days, then each earlier month of this year and each
   earlier year. Typing while the AI Agent window is in front writes in the

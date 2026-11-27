@@ -324,7 +324,7 @@ async fn list_conversations(
         "SELECT c.*, (SELECT status FROM ai_messages m WHERE m.conversation_id = c.id
                       ORDER BY m.id DESC LIMIT 1) AS last_status
          FROM ai_conversations c WHERE c.user_id = ? AND c.title LIKE ?
-         ORDER BY c.updated_at DESC LIMIT ?",
+         ORDER BY c.pinned_at IS NULL, c.updated_at DESC LIMIT ?",
     )
     .bind(user.id)
     .bind(&pattern)
@@ -400,6 +400,7 @@ async fn create_conversation(
         allowed_tools,
         effort,
         waiting: false,
+        pinned_at: None,
         created_at: now,
         updated_at: now,
     };
@@ -497,6 +498,9 @@ struct ConversationPatch {
     allowed_tools: Option<Vec<String>>,
     /// How hard the model thinks (`""`: the provider's default).
     effort: Option<String>,
+    /// Keep it at the top of the list (pinning alone leaves its place in
+    /// time as it is).
+    pinned: Option<bool>,
 }
 
 /// PATCH /api/ai/conversations/{id}
@@ -550,10 +554,26 @@ async fn update_conversation(
         conversation.provider_id = Some(resolved.provider.id);
         conversation.model = resolved.model;
     }
-    conversation.updated_at = now_ms();
+    if let Some(pinned) = body.pinned {
+        conversation.pinned_at = if pinned {
+            conversation.pinned_at.or(Some(now_ms()))
+        } else {
+            None
+        };
+    }
+    let only_pinned = body.pinned.is_some()
+        && body.title.is_none()
+        && body.agent_id.is_none()
+        && body.provider_id.is_none()
+        && body.model.is_none()
+        && body.allowed_tools.is_none()
+        && body.effort.is_none();
+    if !only_pinned {
+        conversation.updated_at = now_ms();
+    }
     sqlx::query(
         "UPDATE ai_conversations SET title = ?, agent_id = ?, provider_id = ?, model = ?, allowed_tools = ?,
-         effort = ?, updated_at = ? WHERE id = ?",
+         effort = ?, pinned_at = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&conversation.title)
     .bind(&conversation.agent_id)
@@ -561,6 +581,7 @@ async fn update_conversation(
     .bind(&conversation.model)
     .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
     .bind(conversation.effort.map_or("", ai::Effort::as_str))
+    .bind(conversation.pinned_at)
     .bind(conversation.updated_at)
     .bind(&conversation.id)
     .execute(&state.db)

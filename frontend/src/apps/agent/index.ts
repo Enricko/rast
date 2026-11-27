@@ -405,6 +405,9 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (!current || current.readOnly) return;
     const conversation = current.conversation;
     contextMenu(event.clientX, event.clientY, [
+      conversation.pinnedAt
+        ? { label: "Unpin", icon: "unpin", onClick: () => void pin(conversation, false) }
+        : { label: "Pin to top", icon: "pin", onClick: () => void pin(conversation, true) },
       { label: "Rename", icon: "rename", onClick: () => void rename(conversation) },
       { label: "Copy chat", icon: "copy", onClick: () => void copyChat() },
       "separator",
@@ -657,6 +660,21 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }
   }
 
+  /** Keep a chat at the top of the list (or let it go back to its day). */
+  async function pin(conversation: Conversation, pinned: boolean): Promise<void> {
+    try {
+      const updated = await ctx.api.patch<{ conversation: Conversation }>(
+        `/api/ai/conversations/${encodeURIComponent(conversation.id)}`,
+        { pinned },
+      );
+      upsertConversation(updated.conversation);
+      if (current?.conversation.id === conversation.id) current.conversation = updated.conversation;
+      renderList();
+    } catch (error) {
+      ctx.toast.error(errorMessage(error));
+    }
+  }
+
   async function rename(conversation: Conversation): Promise<void> {
     const title = await promptDialog({
       title: "Rename chat",
@@ -796,12 +814,16 @@ function mountAgentApp(ctx: AppContext): AppInstance {
             onContextMenu: (event) => {
               event.preventDefault();
               contextMenu(event.clientX, event.clientY, [
+                item.pinnedAt
+                  ? { label: "Unpin", icon: "unpin", onClick: () => void pin(item, false) }
+                  : { label: "Pin to top", icon: "pin", onClick: () => void pin(item, true) },
                 { label: "Rename", icon: "rename", onClick: () => void rename(item) },
                 { label: "Delete", icon: "trash", danger: true, onClick: () => void remove(item) },
               ]);
             },
           },
           h("span", { class: "ai-list-title" }, item.title || "New chat"),
+          item.pinnedAt && !item.running && !item.waiting ? h("span", { class: "ai-list-pin", title: "Pinned", ariaHidden: true }, iconSvg("pin", 12)) : null,
           item.running
             ? h("span", { class: "ai-dot", title: "Writing a reply" })
             : item.waiting

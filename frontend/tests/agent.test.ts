@@ -227,6 +227,21 @@ test("chats group by day, week, month and year", () => {
   );
 });
 
+test("pinned chats come first, whatever their age", () => {
+  const now = new Date(2026, 10, 26, 15).getTime();
+  const at = (id: string, days: number, pinnedAt: number | null = null) =>
+    ({ id, userId: 1, agentId: null, providerId: null, model: "", title: "", createdAt: 0, updatedAt: now - days * 86_400_000, pinnedAt, running: false }) as never;
+  const groups = groupByDay([at("a", 0), at("old", 400, now), at("b", 2), at("week", 3, now - 5)], now);
+  assert.deepEqual(
+    groups.map((g: { label: string; items: Array<{ id: string }> }) => [g.label, g.items.map((c) => c.id)]),
+    [
+      ["Pinned", ["week", "old"]],
+      ["Today", ["a"]],
+      ["Previous 7 days", ["b"]],
+    ],
+  );
+});
+
 test("the provider picker groups kinds and finds them by name or what they offer", () => {
   const kind = (id: string, group: string, label: string, about = "") => ({
     id,

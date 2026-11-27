@@ -5095,6 +5095,13 @@ button.pkg-pill {
   white-space: nowrap;
 }
 
+.ai-list-pin {
+  flex: none;
+  display: inline-flex;
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+
 .ai-dot {
   flex: none;
   width: 7px;

@@ -1462,6 +1462,8 @@ pub struct Conversation {
     pub effort: Option<Effort>,
     /// Its last reply waits for the owner to answer a tool request.
     pub waiting: bool,
+    /// When its owner pinned it to the top of the list.
+    pub pinned_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1477,6 +1479,7 @@ impl Conversation {
             "title": self.title,
             "allowedTools": self.allowed_tools,
             "effort": self.effort.map_or("", Effort::as_str),
+            "pinnedAt": self.pinned_at,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
             "running": running,
@@ -1506,6 +1509,7 @@ pub fn conversation_from_row(row: &sqlx::sqlite::SqliteRow) -> Conversation {
             .flatten()
             .as_deref()
             == Some("waiting"),
+        pinned_at: row.get("pinned_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

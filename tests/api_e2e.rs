@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-        "0004 to 0018 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        "0004 to 0019 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -4513,6 +4513,64 @@ async fn ai_agent_files_go_with_messages() {
         .request_raw("GET", &image_url, Vec::new(), "", bob.headers())
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Pinned chats come first; pinning leaves the chat's time as it is.
+    let (_, _, newer) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "fake-1"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    let newer = newer["conversation"]["id"].as_str().unwrap().to_string();
+    let ids = |body: &Value| -> Vec<String> {
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let (_, _, list) = server
+        .request("GET", "/api/ai/conversations", None, alice.headers())
+        .await;
+    assert_eq!(ids(&list), [newer.clone(), conversation.clone()]);
+    let before = list["items"][1]["updatedAt"].clone();
+    let chat_url = format!("/api/ai/conversations/{conversation}");
+    let (status, _, body) = server
+        .request(
+            "PATCH",
+            &chat_url,
+            Some(json!({"pinned": true})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["conversation"]["pinnedAt"].is_i64(), "{body}");
+    assert_eq!(body["conversation"]["updatedAt"], before);
+    let (_, _, list) = server
+        .request("GET", "/api/ai/conversations", None, alice.headers())
+        .await;
+    assert_eq!(ids(&list), [conversation.clone(), newer.clone()]);
+    let (_, _, body) = server
+        .request(
+            "PATCH",
+            &chat_url,
+            Some(json!({"pinned": false})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert!(body["conversation"]["pinnedAt"].is_null(), "{body}");
+    let (status, _, _) = server
+        .request(
+            "PATCH",
+            &chat_url,
+            Some(json!({"pinned": true})),
+            bob.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "only its owner pins it");
 
     // Deleting the chat removes its files.
     let alice_id = server.user_id("alice").await;

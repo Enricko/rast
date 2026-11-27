@@ -71,6 +71,8 @@ export interface Conversation {
   allowedTools: string[];
   /** How hard the model thinks ("" = the provider's default). */
   effort?: Effort;
+  /** When its owner pinned it to the top of the list (null: not pinned). */
+  pinnedAt?: number | null;
   createdAt: number;
   updatedAt: number;
   running: boolean;
@@ -693,9 +695,10 @@ export function allowanceUsed(allowance: Allowance): number | null {
 
 /** Group conversations by when they were last used. */
 /**
- * Chats by when they were last used, newest first: Today, Yesterday,
- * Previous 7 days, Previous 30 days, then each earlier month of this year
- * ("October"), then each earlier year ("2025"). Local time.
+ * Chats by when they were last used, newest first: Pinned on top, then
+ * Today, Yesterday, Previous 7 days, Previous 30 days, then each earlier
+ * month of this year ("October"), then each earlier year ("2025"). Local
+ * time.
  */
 export function groupByDay(items: Conversation[], now = Date.now()): Array<{ label: string; items: Conversation[] }> {
   const start = new Date(now);
@@ -719,7 +722,7 @@ export function groupByDay(items: Conversation[], now = Date.now()): Array<{ lab
   };
   const groups: Array<{ label: string; items: Conversation[]; newest: number }> = [];
   for (const item of items) {
-    const name = label(item.updatedAt);
+    const name = item.pinnedAt ? "Pinned" : label(item.updatedAt);
     let group = groups.find((g) => g.label === name);
     if (!group) {
       group = { label: name, items: [], newest: item.updatedAt };
@@ -728,7 +731,8 @@ export function groupByDay(items: Conversation[], now = Date.now()): Array<{ lab
     group.items.push(item);
     group.newest = Math.max(group.newest, item.updatedAt);
   }
+  const pinned = (g: { label: string }) => (g.label === "Pinned" ? 1 : 0);
   return groups
-    .sort((a, b) => b.newest - a.newest)
+    .sort((a, b) => pinned(b) - pinned(a) || b.newest - a.newest)
     .map(({ label, items }) => ({ label, items: [...items].sort((a, b) => b.updatedAt - a.updatedAt) }));
 }
