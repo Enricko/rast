@@ -84,6 +84,9 @@ pub fn routes() -> Router<Agent> {
             put(update_account).delete(delete_account),
         )
         .route("/api/ai/admin/quota", get(admin_quota))
+        .route("/api/ai/admin/quota/refresh", post(refresh_quota))
+        .route("/api/ai/admin/rotation", put(put_rotation_for_all))
+        .route("/api/ai/providers/{id}/rotation", put(put_rotation))
         .route("/api/ai/agents", post(create_agent))
         .route(
             "/api/ai/agents/{id}",
@@ -1390,6 +1393,7 @@ async fn admin_overview(State(state): State<Agent>, admin: AdminUser) -> AppResu
         .collect();
     Ok(Json(json!({
         "kinds": kinds,
+        "rotation": ai::accounts::default_rotation(&state.db).await,
         "providers": providers,
         "agents": ai::agents(&state.db).await?,
         "skills": ai::skills(&state.db).await?,
@@ -1770,8 +1774,8 @@ async fn create_provider(
     let now = now_ms();
     sqlx::query(
         "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
-             prices_checked_at, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             prices_checked_at, enabled, created_at, updated_at, rotation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(kind.as_str())
@@ -1788,6 +1792,7 @@ async fn create_provider(
     .bind(body.enabled as i64)
     .bind(now)
     .bind(now)
+    .bind(ai::accounts::default_rotation(&state.db).await.to_json())
     .execute(&state.db)
     .await?;
     audit_admin(
@@ -1826,7 +1831,7 @@ async fn update_provider(
         ));
     }
     let rotation = match body.rotation {
-        Some(rotation) if !(1..=ai::accounts::MAX_STICKY).contains(&rotation.sticky) => {
+        Some(rotation) if !rotation.valid() => {
             return Err(AppError::bad_request(format!(
                 "replies in a row per account go from 1 to {}",
                 ai::accounts::MAX_STICKY
@@ -2215,8 +2220,8 @@ async fn store_signed_in(
             };
             sqlx::query(
                 "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
-                     enabled, created_at, updated_at, owner_id, sign_in, pool_id, position)
-                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?, ?, ?)",
+                     enabled, created_at, updated_at, owner_id, sign_in, pool_id, position, rotation)
+                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(kind.as_str())
@@ -2231,6 +2236,7 @@ async fn store_signed_in(
             .bind(&sealed)
             .bind(add_to)
             .bind(position)
+            .bind(ai::accounts::default_rotation(&state.db).await.to_json())
             .execute(&state.db)
             .await?;
             id
@@ -3386,36 +3392,58 @@ async fn delete_account(
 
 /// GET /api/ai/admin/quota — every account's limits as its provider last
 /// reported them, its rest, and what RAST counted for it (model calls and
-/// tokens in the last 5 hours, 24 hours and 7 days).
+/// tokens in the last 5 hours, 24 hours and 7 days, and per model).
 async fn admin_quota(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
+    Ok(Json(quota_overview(&state, &Default::default()).await?))
+}
+
+/// Whether RAST can ask the account's provider for its limits on demand
+/// (ChatGPT's Codex plans).
+fn can_check(account: &ai::Provider) -> bool {
+    account.kind == Kind::Codex
+}
+
+async fn quota_overview(
+    state: &Agent,
+    checks: &std::collections::HashMap<String, String>,
+) -> AppResult<Value> {
     let now = now_ms();
     let (h5, d1, d7) = (now - 5 * 3_600_000, now - 86_400_000, now - 7 * 86_400_000);
     let rows = sqlx::query(
-        "SELECT account_id,
+        "SELECT account_id, model,
              SUM(created_at >= ?1), SUM(CASE WHEN created_at >= ?1 THEN input_tokens + output_tokens ELSE 0 END),
              SUM(created_at >= ?2), SUM(CASE WHEN created_at >= ?2 THEN input_tokens + output_tokens ELSE 0 END),
              COUNT(*), SUM(input_tokens + output_tokens)
-         FROM ai_usage WHERE created_at >= ?3 AND account_id IS NOT NULL GROUP BY account_id",
+         FROM ai_usage WHERE created_at >= ?3 AND account_id IS NOT NULL
+         GROUP BY account_id, model",
     )
     .bind(h5)
     .bind(d1)
     .bind(d7)
     .fetch_all(&state.db)
     .await?;
-    let mut counted: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-    for row in &rows {
-        let window = |calls: usize, tokens: usize| {
-            json!({
-                "calls": row.try_get::<i64, _>(calls).unwrap_or(0),
-                "tokens": row.try_get::<i64, _>(tokens).unwrap_or(0),
-            })
-        };
-        counted.insert(
-            row.get::<String, _>(0),
-            json!({ "hours5": window(1, 2), "day": window(3, 4), "week": window(5, 6) }),
-        );
+    // Per account: totals per window, and per model.
+    #[derive(Default)]
+    struct Counts {
+        totals: [i64; 6],
+        models: Vec<(String, [i64; 6])>,
     }
+    let mut counted: std::collections::HashMap<String, Counts> = std::collections::HashMap::new();
+    for row in &rows {
+        let account: String = row.get(0);
+        let model: String = row.get(1);
+        let mut values = [0i64; 6];
+        for (i, value) in values.iter_mut().enumerate() {
+            *value = row.try_get::<i64, _>(i + 2).unwrap_or(0);
+        }
+        let entry = counted.entry(account).or_default();
+        for (total, value) in entry.totals.iter_mut().zip(values) {
+            *total += value;
+        }
+        entry.models.push((model, values));
+    }
+    let window = |v: &[i64; 6], at: usize| json!({"calls": v[at], "tokens": v[at + 1]});
     let mut providers = Vec::new();
     for provider in ai::providers(&state.db).await? {
         let accounts: Vec<Value> = ai::accounts::of(&state.db, &provider)
@@ -3423,10 +3451,28 @@ async fn admin_quota(State(state): State<Agent>, admin: AdminUser) -> AppResult<
             .iter()
             .map(|a| {
                 let mut json = a.account_json(&state.secrets, now);
-                json["counted"] = counted.get(&a.id).cloned().unwrap_or_else(|| {
-                    let zero = json!({"calls": 0, "tokens": 0});
-                    json!({ "hours5": zero, "day": zero, "week": zero })
+                let counts = counted.get(&a.id);
+                let totals = counts.map(|c| c.totals).unwrap_or_default();
+                json["counted"] = json!({
+                    "hours5": window(&totals, 0),
+                    "day": window(&totals, 2),
+                    "week": window(&totals, 4),
                 });
+                let mut models: Vec<&(String, [i64; 6])> = counts
+                    .map(|c| c.models.iter().collect())
+                    .unwrap_or_default();
+                models.sort_by(|x, y| y.1[5].cmp(&x.1[5]).then_with(|| x.0.cmp(&y.0)));
+                json["models"] = models
+                    .iter()
+                    .take(8)
+                    .map(|(model, v)| {
+                        json!({"model": model, "hours5": window(v, 0), "week": window(v, 4)})
+                    })
+                    .collect();
+                json["canCheck"] = json!(can_check(a) && a.has_credentials());
+                if let Some(error) = checks.get(&a.id) {
+                    json["checkError"] = json!(error);
+                }
                 json
             })
             .collect();
@@ -3435,10 +3481,142 @@ async fn admin_quota(State(state): State<Agent>, admin: AdminUser) -> AppResult<
             "name": provider.name,
             "kind": provider.kind.as_str(),
             "kindLabel": provider.kind.label(),
+            "signsIn": provider.kind.signs_in(),
             "enabled": provider.enabled,
             "rotation": provider.rotation,
             "accounts": accounts,
         }));
     }
-    Ok(Json(json!({ "providers": providers, "now": now })))
+    Ok(json!({
+        "providers": providers,
+        "rotation": ai::accounts::default_rotation(&state.db).await,
+        "now": now,
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuotaRefresh {
+    /// One account (absent: every account RAST can ask, unless asked in the
+    /// last minute).
+    account_id: Option<String>,
+}
+
+/// POST /api/ai/admin/quota/refresh — ask the providers that say on demand
+/// (ChatGPT's Codex plans) for their accounts' limits now; returns the
+/// quota page with any account whose provider could not be asked.
+async fn refresh_quota(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    body: Option<Json<QuotaRefresh>>,
+) -> AppResult<Json<Value>> {
+    let _ = admin;
+    let only = body.and_then(|Json(b)| b.account_id);
+    let now = now_ms();
+    let mut checks = std::collections::HashMap::new();
+    for provider in ai::providers(&state.db).await? {
+        for account in ai::accounts::of(&state.db, &provider).await? {
+            let asked = only.as_deref().is_some_and(|id| id == account.id);
+            if only.is_some() && !asked {
+                continue;
+            }
+            if !can_check(&account) || !account.has_credentials() {
+                continue;
+            }
+            // Every minute at most, unless this account was asked for.
+            if !asked && now - account.quota.checked_at < 60_000 {
+                continue;
+            }
+            let result = match ai::signed_in_token(&state.db, &state.secrets, &account).await {
+                Ok((token, account_ref)) => {
+                    let base = account.effective_base_url();
+                    tokio::task::spawn_blocking(move || {
+                        provider::plans::codex::codex_usage(&base, &token, &account_ref, now_ms())
+                    })
+                    .await
+                    .map_err(|e| e.to_string())
+                    .and_then(|r| r)
+                }
+                Err(error) => Err(error.public_message()),
+            };
+            match result {
+                Ok((windows, _plan)) => {
+                    let quota = provider::limits::Quota {
+                        windows,
+                        checked_at: now_ms(),
+                    };
+                    ai::accounts::store_quota(&state.db, &account.id, &quota).await;
+                }
+                Err(error) => {
+                    checks.insert(account.id.clone(), error);
+                }
+            }
+        }
+    }
+    Ok(Json(quota_overview(&state, &checks).await?))
+}
+
+/// PUT /api/ai/admin/rotation — round robin (or fill first) for every
+/// provider's accounts, and for providers added later.
+async fn put_rotation_for_all(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(rotation): Json<ai::accounts::Rotation>,
+) -> AppResult<Json<Value>> {
+    if !rotation.valid() {
+        return Err(AppError::bad_request(format!(
+            "replies in a row per account go from 1 to {}",
+            ai::accounts::MAX_STICKY
+        )));
+    }
+    ai::accounts::set_rotation_for_all(&state.db, rotation).await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.rotation_all",
+        "ai_settings",
+        "rotation",
+        &rotation.to_json(),
+    )
+    .await;
+    config_changed(&state, "providers");
+    Ok(Json(json!({ "rotation": rotation })))
+}
+
+/// PUT /api/ai/providers/{id}/rotation — how one provider's accounts take
+/// turns.
+async fn put_rotation(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path(id): Path<String>,
+    Json(rotation): Json<ai::accounts::Rotation>,
+) -> AppResult<Json<Value>> {
+    let provider = first_account(&state, &id).await?;
+    if !rotation.valid() {
+        return Err(AppError::bad_request(format!(
+            "replies in a row per account go from 1 to {}",
+            ai::accounts::MAX_STICKY
+        )));
+    }
+    ai::accounts::set_rotation(&state.db, &provider.id, rotation).await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.rotation",
+        "ai_provider",
+        &provider.id,
+        &provider.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    let provider = ai::provider(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    Ok(Json(
+        json!({ "provider": provider_json(&state, &provider).await? }),
+    ))
 }

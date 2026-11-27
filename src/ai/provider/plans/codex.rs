@@ -73,6 +73,78 @@ pub fn list_codex_models(
     parse_codex_models(&body)
 }
 
+/// What ChatGPT says a plan has used of its Codex limits, as the Codex
+/// CLI's status shows it (`GET {backend-api}/wham/usage`): the windows and
+/// the plan's name.
+pub fn codex_usage(
+    base_url: &str,
+    token: &str,
+    account: &str,
+    now_ms: i64,
+) -> Result<(Vec<super::super::limits::Window>, String), String> {
+    let base = base_url.trim_end_matches('/');
+    let backend = base.strip_suffix("/codex").unwrap_or(base);
+    let mut request = agent(LIST_TIMEOUT)
+        .get(format!("{backend}/wham/usage"))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json");
+    for (name, value) in codex_headers("", account, "") {
+        request = request.header(name, value);
+    }
+    let response = request
+        .call()
+        .map_err(|e| format!("cannot reach ChatGPT: {e}"))?;
+    let status = response.status().as_u16();
+    let body = read_limited(response.into_body(), 1024 * 1024);
+    if !(200..300).contains(&status) {
+        return Err(codex_refusal(status, &body));
+    }
+    parse_codex_usage(&body, now_ms)
+}
+
+/// `{plan_type, rate_limit: {primary_window, secondary_window}}`, each
+/// window `{used_percent, limit_window_seconds, reset_after_seconds,
+/// reset_at}`.
+pub fn parse_codex_usage(
+    body: &str,
+    now_ms: i64,
+) -> Result<(Vec<super::super::limits::Window>, String), String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|_| "ChatGPT answered with something other than its usage".to_string())?;
+    let plan = value["plan_type"].as_str().unwrap_or_default().to_string();
+    let limits = &value["rate_limit"];
+    let mut windows = Vec::new();
+    for (key, fallback) in [
+        ("primary_window", "5 hours"),
+        ("secondary_window", "Weekly"),
+    ] {
+        let w = &limits[key];
+        let Some(used) = w["used_percent"].as_f64() else {
+            continue;
+        };
+        let name = w["limit_window_seconds"]
+            .as_i64()
+            .filter(|s| *s > 0)
+            .map(|s| super::super::limits::window_name(s / 60))
+            .unwrap_or_else(|| fallback.to_string());
+        let resets_at = w["reset_at"]
+            .as_i64()
+            .filter(|s| *s > 0)
+            .map(|s| s * 1000)
+            .or_else(|| w["reset_after_seconds"].as_i64().map(|s| now_ms + s * 1000));
+        windows.push(super::super::limits::Window {
+            name,
+            used_percent: Some(used.clamp(0.0, 100.0)),
+            resets_at,
+            ..Default::default()
+        });
+    }
+    if windows.is_empty() && !limits.is_object() && plan.is_empty() {
+        return Err("ChatGPT's answer had no Codex limits".into());
+    }
+    Ok((windows, plan))
+}
+
 /// Codex's model list: `models` (or `data`) of `{slug, display_name,
 /// visibility}`; models it hides from pickers, and image or speech models,
 /// are left out.
@@ -172,4 +244,32 @@ pub(crate) fn chat_url(_base_url: &str) -> Option<String> {
 /// "ChatGPT refused the sign-in", "Codex limit is used up", …
 pub(crate) fn refusal(status: u16, body: &str) -> Option<String> {
     Some(codex_refusal(status, body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_usage_reads_both_windows_and_the_plan() {
+        let now = 1_800_000_000_000;
+        let body = r#"{"plan_type":"plus","rate_limit":{"allowed":true,"limit_reached":false,
+            "primary_window":{"used_percent":42,"limit_window_seconds":18000,"reset_after_seconds":3600,"reset_at":1800003600},
+            "secondary_window":{"used_percent":7,"limit_window_seconds":604800,"reset_after_seconds":86400}},
+            "credits":null}"#;
+        let (windows, plan) = parse_codex_usage(body, now).unwrap();
+        assert_eq!(plan, "plus");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].name, "5 hours");
+        assert_eq!(windows[0].used_percent, Some(42.0));
+        assert_eq!(windows[0].resets_at, Some(1_800_003_600_000));
+        assert_eq!(windows[1].name, "Weekly");
+        assert_eq!(windows[1].resets_at, Some(now + 86_400_000));
+        // A plan without limits yet: none, and that is an answer.
+        let (windows, _) =
+            parse_codex_usage(r#"{"plan_type":"pro","rate_limit":{}}"#, now).unwrap();
+        assert!(windows.is_empty());
+        assert!(parse_codex_usage("<html>", now).is_err());
+        assert!(parse_codex_usage(r#"{"detail":"x"}"#, now).is_err());
+    }
 }

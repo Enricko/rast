@@ -34,6 +34,9 @@ pub const REST_WITHOUT_RESET_MS: i64 = 60_000;
 pub const MAX_STICKY: u32 = 100;
 /// Accounts per provider, at most.
 pub const MAX_ACCOUNTS: usize = 50;
+/// The turn order for every provider (Settings → round robin for all
+/// accounts); new providers start with it.
+const SETTING_ROTATION: &str = "ai.rotation";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,6 +69,49 @@ impl Default for Rotation {
 
 fn one() -> u32 {
     1
+}
+
+impl Rotation {
+    pub fn valid(&self) -> bool {
+        (1..=MAX_STICKY).contains(&self.sticky)
+    }
+
+    pub fn to_json(self) -> String {
+        serde_json::to_string(&self).unwrap_or_else(|_| "{}".into())
+    }
+}
+
+/// The turn order new providers start with (and every provider had when it
+/// was last set for all).
+pub async fn default_rotation(pool: &SqlitePool) -> Rotation {
+    crate::db::get_setting(pool, SETTING_ROTATION)
+        .await
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Set the turn order of every provider, and of the ones added later.
+pub async fn set_rotation_for_all(pool: &SqlitePool, rotation: Rotation) -> AppResult<()> {
+    crate::db::set_setting(pool, SETTING_ROTATION, &rotation.to_json()).await?;
+    sqlx::query("UPDATE ai_providers SET rotation = ? WHERE pool_id IS NULL")
+        .bind(rotation.to_json())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set one provider's turn order.
+pub async fn set_rotation(
+    pool: &SqlitePool,
+    provider_id: &str,
+    rotation: Rotation,
+) -> AppResult<()> {
+    sqlx::query("UPDATE ai_providers SET rotation = ? WHERE id = ? AND pool_id IS NULL")
+        .bind(rotation.to_json())
+        .bind(provider_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// The provider's accounts: the provider first, then the others in order.

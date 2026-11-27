@@ -189,7 +189,7 @@ fn count_name(what: &str) -> String {
     name
 }
 
-fn window_name(minutes: i64) -> String {
+pub(crate) fn window_name(minutes: i64) -> String {
     match minutes {
         10_080 => "Weekly".into(),
         1_440 => "Daily".into(),

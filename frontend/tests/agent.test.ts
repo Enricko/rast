@@ -5,7 +5,9 @@ import { agentHues } from "../src/apps/agent/marks";
 import { parseInline, parseMarkdown, safeHref } from "../src/apps/agent/markdown";
 import {
   accountState,
+  leftTone,
   resetIn,
+  windowLeft,
   type ProviderAccount,
   addToStep,
   groupKinds,
@@ -403,3 +405,15 @@ test("an account's state says whether it answers", () => {
   assert.equal(accountState({ ...account, ready: false }, 1000, false).label, "Key needed");
   assert.deepEqual(accountState({ ...account, paused: true }, 1000, true), { label: "Set aside", tone: "off" });
 });
+
+test("quota bars show what is left, coloured by how much", () => {
+  assert.equal(windowLeft({ name: "5 hours", usedPercent: 42 }), 58);
+  assert.equal(windowLeft({ name: "Requests", used: 360, limit: 1000 }), 64);
+  assert.equal(windowLeft({ name: "Weekly", usedPercent: 130 }), 0);
+  assert.equal(windowLeft({ name: "Tokens" }), null);
+  assert.equal(leftTone(58), "ok");
+  assert.equal(leftTone(30), "mid");
+  assert.equal(leftTone(9), "low");
+  assert.equal(leftTone(null), "");
+});
+

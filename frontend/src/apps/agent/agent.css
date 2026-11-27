@@ -2277,18 +2277,18 @@ button.ai-artifact-card:hover {
   white-space: nowrap;
 }
 
-.ai-turns {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.ai-turns-row {
-  display: flex;
+/* Round robin: a switch, and Sticky when it is on (9router's). */
+.ai-rotation {
+  display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px 14px;
+  gap: 6px 14px;
+}
+
+.ai-rotation-switch .switch-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .ai-sticky-row {
@@ -2303,7 +2303,11 @@ button.ai-artifact-card:hover {
 }
 
 .ai-sticky {
-  width: 72px;
+  width: 64px;
+}
+
+.ai-set-actions .ai-rotation {
+  margin-right: 8px;
 }
 
 .ai-account-facts {
@@ -2327,18 +2331,83 @@ button.ai-artifact-card:hover {
   margin: 0;
 }
 
-/* Quota: one card per account. */
+/* Quota (9router's tracker): filters, then each provider's accounts. */
+.ai-quota-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  max-width: 1100px;
+  margin-bottom: 16px;
+}
+
+.ai-quota-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-quota-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--ai-tint);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.ai-quota-chip:hover {
+  background: var(--ai-tint-2);
+}
+
+.ai-quota-chip.is-on {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  font-weight: 600;
+}
+
+.ai-quota-chip:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ai-quota-chip-count {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-quota-group {
+  max-width: 1100px;
+  margin-bottom: 20px;
+}
+
+.ai-quota-group-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  margin-bottom: 10px;
+}
+
+.ai-quota-group-name {
+  font-weight: 650;
+}
+
+.ai-quota-group-head .ai-rotation {
+  margin-left: auto;
+}
+
 .ai-quota-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   align-items: start;
   gap: 12px;
-  max-width: 980px;
-}
-
-.ai-quota-about {
-  max-width: 720px;
-  margin: 0 0 14px;
 }
 
 .ai-quota-card {
@@ -2359,7 +2428,7 @@ button.ai-artifact-card:hover {
 .ai-quota-head {
   display: flex;
   align-items: center;
-  gap: 11px;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -2367,12 +2436,29 @@ button.ai-artifact-card:hover {
   flex: 1;
 }
 
+.ai-quota-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ai-quota-tools {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.ai-quota-tools .ai-account-switch {
+  margin-left: 6px;
+}
+
 .ai-quota-state {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 10px;
-  min-height: 26px;
 }
 
 .ai-quota-state .btn {
@@ -2382,7 +2468,7 @@ button.ai-artifact-card:hover {
 .ai-quota-rows {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .ai-quota-row {
@@ -2401,6 +2487,7 @@ button.ai-artifact-card:hover {
 }
 
 .ai-quota-left {
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
@@ -2417,7 +2504,11 @@ button.ai-artifact-card:hover {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--text-faint);
+}
+
+.ai-quota-row.is-ok .ai-quota-fill {
+  background: var(--ok);
 }
 
 .ai-quota-row.is-mid .ai-quota-fill {
@@ -2428,37 +2519,80 @@ button.ai-artifact-card:hover {
   background: var(--danger);
 }
 
+.ai-quota-row.is-ok .ai-quota-left {
+  color: var(--ok);
+}
+
+.ai-quota-row.is-mid .ai-quota-left {
+  color: var(--warning-strong);
+}
+
 .ai-quota-row.is-low .ai-quota-left {
   color: var(--danger);
 }
 
+.ai-quota-used,
 .ai-quota-reset {
-  grid-column: 1 / -1;
   font-variant-numeric: tabular-nums;
 }
 
-.ai-quota-reset:empty {
-  display: none;
+.ai-quota-reset {
+  text-align: right;
 }
 
-.ai-quota-counts {
+.ai-quota-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-quota-models-head,
+.ai-quota-model {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) 64px 64px;
   gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-quota-models-head > span:not(:first-child),
+.ai-quota-model > span:not(:first-child) {
+  text-align: right;
+}
+
+.ai-quota-model-name {
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-quota-quiet {
+  margin: 0;
+}
+
+.ai-quota-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 
-.ai-quota-count {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
+.ai-quota-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--warning-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.ai-quota-count b {
-  font-size: 14px;
-  font-variant-numeric: tabular-nums;
+.ai-quota-error svg {
+  flex: none;
 }
 
 .ai-quota-auto {

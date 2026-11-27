@@ -25,12 +25,20 @@ this file by `scripts/changelog-section.sh`.
   Antigravity sign-ins become one provider with two accounts); chats,
   agents, limits and usage follow. Database schema v21; ships to App Center
   as AI Agent 1.1.0 (package `ai-agent`, its own database v2).
-- **AI Agent settings → Quota**: one card per account with the limits its
-  provider reports with each answer (ChatGPT's 5-hour and weekly use,
-  Claude's, the requests and tokens left in OpenAI- and Anthropic-style
-  headers) as bars with what is left and when each resets, its rest and the
-  reason, and the tokens and model calls RAST counted for it in the last
-  5 hours, 24 hours and 7 days; with Refresh and Auto-refresh.
+- **AI Agent: Round robin as a switch, for one provider or all.** A
+  provider's dialog has 9router's Round robin switch with Sticky (replies in
+  a row per account), applied at once; **Round robin for all** (Providers
+  and Quota) turns it on or off for every provider and for the ones added
+  later.
+- **AI Agent settings → Quota, a quota tracker like 9router's**: filters by
+  provider, each provider's accounts under it with its Round robin switch,
+  and a card per account with Refresh (ChatGPT Codex plans are asked for
+  their 5-hour and weekly use, as `codex /status` shows it), Edit, Remove
+  and an on/off switch. Cards show the limits the provider reports as bars
+  coloured by what is left, with the counts and "Resets in …", the
+  account's rest with Use now, and for providers that report nothing, the
+  tokens RAST counted per model in the last 5 hours and 7 days. Refresh all
+  and Auto-refresh (every minute) ask the providers again.
 
 ### Fixed
 

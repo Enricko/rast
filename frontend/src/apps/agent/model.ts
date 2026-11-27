@@ -413,16 +413,25 @@ export interface Counted {
 
 export interface QuotaAccount extends ProviderAccount {
   counted: { hours5: Counted; day: Counted; week: Counted };
+  /** What RAST counted per model (most used first). */
+  models: Array<{ model: string; hours5: Counted; week: Counted }>;
+  /** RAST can ask the provider for its limits now (ChatGPT's Codex plans). */
+  canCheck: boolean;
+  /** Why the last ask failed. */
+  checkError?: string;
 }
 
 /** GET /api/ai/admin/quota */
 export interface QuotaOverview {
   now: number;
+  /** The turn order for all providers (and new ones). */
+  rotation: Rotation;
   providers: Array<{
     id: string;
     name: string;
     kind: string;
     kindLabel: string;
+    signsIn: boolean;
     enabled: boolean;
     rotation: Rotation;
     accounts: QuotaAccount[];
@@ -561,6 +570,20 @@ export interface Overview {
   serverAccess: boolean;
   /** Whether Chrome is installed for the agents' browser. */
   browser?: { chrome: boolean };
+  /** The turn order for all providers (and new ones). */
+  rotation?: Rotation;
+}
+
+/** How much of a limit window is left (0–100), when it says. */
+export function windowLeft(w: QuotaWindow): number | null {
+  const used = w.usedPercent ?? (w.limit ? ((w.used ?? 0) * 100) / w.limit : null);
+  return used === null ? null : Math.max(0, Math.min(100, 100 - used));
+}
+
+/** A bar's tone by what is left: plenty, getting low, nearly out. */
+export function leftTone(left: number | null): "ok" | "mid" | "low" | "" {
+  if (left === null) return "";
+  return left >= 50 ? "ok" : left >= 20 ? "mid" : "low";
 }
 
 export interface SearchSettings {

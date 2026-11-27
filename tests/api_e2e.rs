@@ -4571,6 +4571,96 @@ async fn ai_provider_accounts_take_over_at_their_limits() {
     assert_eq!(quota[1]["counted"]["hours5"]["calls"], 1, "{body}");
     assert_eq!(quota[1]["counted"]["hours5"]["tokens"], 17);
     assert_eq!(quota[0]["counted"]["week"]["calls"], 0);
+    // Per model, and only Codex plans are asked on demand.
+    assert_eq!(quota[1]["models"][0]["model"], "fake-1", "{body}");
+    assert_eq!(quota[1]["models"][0]["hours5"]["calls"], 1);
+    assert_eq!(quota[1]["canCheck"], false);
+    assert_eq!(body["rotation"]["mode"], "fill");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/admin/quota/refresh",
+            Some(json!({})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["providers"][0]["accounts"][1]["checkError"],
+        Value::Null
+    );
+
+    // Round robin for every provider at once, and for the ones added later.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/ai/admin/rotation",
+            Some(json!({"mode": "round", "sticky": 101})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/ai/admin/rotation",
+            Some(json!({"mode": "round", "sticky": 2})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({"kind": "custom", "name": "Later", "baseUrl": base_url, "apiKey": "sk-test-secret-1234", "models": ["fake-1"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["provider"]["rotation"],
+        json!({"mode": "round", "sticky": 2})
+    );
+    let later = body["provider"]["id"].as_str().unwrap().to_string();
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    assert_eq!(body["rotation"], json!({"mode": "round", "sticky": 2}));
+    assert!(body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|p| p["rotation"]["mode"] == "round"));
+    // One provider on its own; then back to fill first for all.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{later}/rotation"),
+            Some(json!({"mode": "fill", "sticky": 1})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["rotation"]["mode"], "fill");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}/rotation"),
+            Some(json!({"mode": "fill", "sticky": 1})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/providers/{later}"),
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 
     // While it rests, replies go straight to the other account.
     let reply = ai_say(&server, &admin, &conversation, "Again").await;
