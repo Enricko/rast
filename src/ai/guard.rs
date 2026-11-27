@@ -465,6 +465,11 @@ Authorization: [hidden]
     }
 
     #[test]
+    // Linux paths (/etc/hostname; macOS resolves /var/tmp under /private).
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "the server guard is for Linux servers"
+    )]
     fn private_places_are_refused() {
         let hidden = vec![PathBuf::from("/srv/rast"), PathBuf::from("/etc/rast")];
         let refused = |p: &str| refusal(Path::new(p), &hidden).is_some();

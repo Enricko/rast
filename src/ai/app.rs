@@ -39,6 +39,10 @@ use crate::{
 
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations-agent");
 
+/// AI Agent's own version: its App Center package (`ai-agent`), released by
+/// tagging `ai-agent-v<VERSION>` (.github/workflows/ai-agent.yml checks it).
+pub const VERSION: &str = "1.0.0";
+
 /// Set once RAST's AI Agent data was taken (Unix ms, or `none`).
 const TAKEN_OVER: &str = "agent.takenOverAt";
 /// How often removed accounts are looked for.
@@ -63,7 +67,7 @@ pub fn main() -> ExitCode {
         .with_ansi(false)
         .init();
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("rast-ai-agent {}", crate::VERSION);
+        println!("rast-ai-agent {VERSION} (RAST {})", crate::VERSION);
         return ExitCode::SUCCESS;
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -97,8 +101,7 @@ async fn run() -> Result<(), String> {
     let remote = Remote::connect(host_socket, token.clone()).await?;
     tracing::info!(
         rast = %remote.info.rast_version,
-        "AI Agent {} starting",
-        crate::VERSION
+        "AI Agent {VERSION} starting"
     );
     let pool = db::connect_with(&data_dir.join("agent.db"), 8, &MIGRATOR)
         .await

@@ -227,7 +227,9 @@ jobs:
           path: frontend/dist
 
       - name: Build release binary
-        run: cargo build --release --locked
+        # AI Agent's program (rast-ai-agent) ships in its own App Center
+        # package: .github/workflows/ai-agent.yml.
+        run: cargo build --release --locked --bin rast
 
       - name: Verify binary version
         run: |

@@ -1558,6 +1558,11 @@ mod tests {
     }
 
     #[test]
+    // Linux paths (/etc/hostname; macOS resolves /var/tmp under /private).
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "the server guard is for Linux servers"
+    )]
     fn server_files_for_people_who_are_not_administrators() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir_in("/var/tmp").unwrap();

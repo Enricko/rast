@@ -93,6 +93,9 @@ const ADOPTIUM_AVAILABLE: &str = "https://api.adoptium.net/v3/info/available_rel
 const ADOPTIUM_LATEST: &str = "https://api.adoptium.net/v3/assets/latest/{feature}/hotspot?architecture={arch}&image_type=jdk&os=linux&vendor=eclipse";
 /// GitHub repositories whose stable releases provide self-contained binaries.
 const BUN_REPO: &str = "oven-sh/bun";
+/// RAST's own repository: AI Agent's App Center package is released there
+/// (`ai-agent-v<version>`, by .github/workflows/ai-agent.yml).
+const RAST_REPO: &str = "Enricko/rast";
 const DENO_REPO: &str = "denoland/deno";
 /// Deno attests with the in-toto release predicate, not SLSA provenance v1.
 const DENO_RELEASE_PREDICATE: &str = "https://in-toto.io/attestation/release/v0.2";
@@ -480,10 +483,26 @@ struct PackageConfig {
     /// package entry of every catalog the workflow publishes.
     #[serde(default)]
     icon: Option<String>,
+    /// An `app` package: its manifests' `app` section (window, server).
+    /// Without it the package is a runtime.
+    #[serde(default)]
+    app: Option<Value>,
+    /// Oldest RAST this package's versions need (default: the catalog's).
+    #[serde(default)]
+    min_rast_version: Option<String>,
     channels: Vec<Value>,
 }
 
 impl PackageConfig {
+    /// The package type in manifests and catalog entries.
+    fn package_type(&self) -> &'static str {
+        if self.app.is_some() {
+            "app"
+        } else {
+            "runtime"
+        }
+    }
+
     /// Absolute path of the configured icon file, if any.
     fn icon_path(&self, config_dir: &Path) -> Option<PathBuf> {
         self.icon.as_deref().map(|icon| {
@@ -687,7 +706,7 @@ fn channel_of(package: &str, version: &str) -> Option<String> {
             }
         }
         "rust" | "bun" | "deno" | "clang" | "flutter" | "composer" | "zig" | "kotlin" | "cmake"
-        | "gradle" => Some("stable".to_string()),
+        | "gradle" | "ai-agent" => Some("stable".to_string()),
         "maven" => {
             let mut parts = version.split('.');
             match (parts.next(), parts.next()) {
@@ -2088,6 +2107,178 @@ fn bun_plan_from_release(cfg: &Config, release: &Value) -> Result<Option<PlanIte
         targets,
         ..PlanItem::default()
     }))
+}
+
+fn discover_ai_agent(
+    cfg: &Config,
+    package: &PackageConfig,
+    held: &BTreeSet<String>,
+    token: Option<&str>,
+) -> Result<Vec<PlanItem>, String> {
+    if channel_ids(package) != ["stable".to_string()] {
+        return Err(
+            "catalog.config.json packages.ai-agent.channels must be exactly [{id: \"stable\"}]"
+                .into(),
+        );
+    }
+    if package.app.is_none() {
+        return Err("catalog.config.json packages.ai-agent needs its app section".into());
+    }
+    let releases = github_stable_releases(RAST_REPO, token)?;
+    ai_agent_plan_from_releases(cfg, package, &releases, held)
+}
+
+/// Pure part of the AI Agent provider: RAST's `ai-agent-v<version>` releases
+/// with one `ai-agent-<version>-<target>.tar.gz` per target and SHA256SUMS.
+fn ai_agent_plan_from_releases(
+    cfg: &Config,
+    package: &PackageConfig,
+    releases: &[Value],
+    held: &BTreeSet<String>,
+) -> Result<Vec<PlanItem>, String> {
+    let mut found = Vec::new();
+    for release in releases {
+        match ai_agent_plan_from_release(cfg, package, release) {
+            Ok(Some(item)) => {
+                if !held.contains(&format!("ai-agent@{}", item.version)) {
+                    found.push(item);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log(format!(
+                "ai-agent: skipping release {}: {error}",
+                release
+                    .get("tag_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+            )),
+        }
+    }
+    sort_items_desc(&mut found);
+    found.truncate(package.keep_patches.max(1) as usize);
+    Ok(found)
+}
+
+fn ai_agent_plan_from_release(
+    cfg: &Config,
+    package: &PackageConfig,
+    release: &Value,
+) -> Result<Option<PlanItem>, String> {
+    if truthy(release.get("prerelease")) || truthy(release.get("draft")) {
+        return Ok(None);
+    }
+    let tag = required_str(release, "tag_name")?;
+    let Some(version) = tag.strip_prefix("ai-agent-v") else {
+        return Ok(None);
+    };
+    match Version::parse(version) {
+        Some(parsed) if !parsed.is_prerelease() => {}
+        _ => return Ok(None),
+    }
+    let assets = release
+        .get("assets")
+        .and_then(Value::as_array)
+        .ok_or("the release has no assets")?;
+    let find_asset = |name: &str| {
+        assets
+            .iter()
+            .find(|asset| asset.get("name").and_then(Value::as_str) == Some(name))
+    };
+    let sums_asset =
+        find_asset("SHA256SUMS").ok_or_else(|| format!("release {tag} has no SHA256SUMS"))?;
+    let sums_url = required_str(sums_asset, "browser_download_url")?.to_string();
+    let mut targets = BTreeMap::new();
+    for target in cfg.targets.entries.iter().map(|(target, _)| target) {
+        let name = format!("ai-agent-{version}-{target}.tar.gz");
+        let Some(asset) = find_asset(&name) else {
+            log(format!("ai-agent {version}: release {tag} has no {name}"));
+            continue;
+        };
+        let digest = asset
+            .get("digest")
+            .and_then(Value::as_str)
+            .and_then(|digest| digest.strip_prefix("sha256:"))
+            .ok_or_else(|| format!("asset {name} has no SHA-256 digest"))?
+            .to_string();
+        targets.insert(
+            target.clone(),
+            TargetInfo {
+                url: Some(required_str(asset, "browser_download_url")?.to_string()),
+                sha256: Some(digest.clone()),
+                size: Some(
+                    asset
+                        .get("size")
+                        .and_then(Value::as_u64)
+                        .ok_or("the asset has no size")?,
+                ),
+                file: Some(name),
+                digest: Some(digest),
+                source: Some(required_str(release, "html_url")?.to_string()),
+                sums_url: Some(sums_url.clone()),
+                format: Some("tar.gz".into()),
+                strip_components: Some(1),
+                ..TargetInfo::default()
+            },
+        );
+    }
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PlanItem {
+        package: "ai-agent".into(),
+        version: version.to_string(),
+        channel: "stable".into(),
+        kind: "upstream".into(),
+        revision: 1,
+        release_date: release
+            .get("published_at")
+            .and_then(Value::as_str)
+            .map(|stamp| truncate_chars(stamp, 10)),
+        sums_url: Some(sums_url),
+        // The verifier checks the files the app section names.
+        source: Some(json!({ "app": package.app })),
+        targets,
+        attestations: package.github_attestations,
+        ..PlanItem::default()
+    }))
+}
+
+/// An app package's files are where its `app` section says, and its server
+/// program reports the version (`<program> --version`).
+fn check_app_files(
+    root: &Path,
+    app: &Value,
+    version: &str,
+    home: &Path,
+) -> Result<Vec<String>, String> {
+    let window = app.get("window").ok_or("the app section has no window")?;
+    let mut files: Vec<&str> = vec![required_str(window, "entry")?];
+    if let Some(styles) = window.get("styles").and_then(Value::as_array) {
+        files.extend(styles.iter().filter_map(Value::as_str));
+    }
+    for file in files {
+        let path = archive::file_inside(root, file)
+            .map_err(|error| format!("window file {file}: {error}"))?;
+        if !path.is_file() {
+            return Err(format!("the archive has no window file {file}"));
+        }
+    }
+    let mut checks = Vec::new();
+    if let Some(server) = app.get("server") {
+        let executable = required_str(server, "executable")?;
+        if !is_executable_file(&root.join(executable)) {
+            return Err(format!("the server program {executable} is missing"));
+        }
+        checks.push(run_check(
+            root,
+            executable,
+            &["--version".to_string()],
+            &format!(" {version}"),
+            home,
+            &[],
+        )?);
+    }
+    Ok(checks)
 }
 
 fn deno_plan_from_releases(
@@ -3559,6 +3750,7 @@ fn cmd_discover(
             "cmake" => discover_cmake(&cfg, package, &held, token.as_deref())?,
             "gradle" => discover_gradle(&cfg, package, &held)?,
             "maven" => discover_maven(&cfg, package, &held)?,
+            "ai-agent" => discover_ai_agent(&cfg, package, &held, token.as_deref())?,
             other => {
                 return Err(format!(
                     "catalog.config.json packages.{other} has no catalog provider"
@@ -4460,7 +4652,7 @@ fn verify_item(
             expected_sha256[0] = Some(expected);
             verification = "SHA-256 from the Adoptium API equals the GitHub release asset digest and the published .sha256.txt; downloaded and re-hashed in CI; java/javac/jar/jshell version checks run on the native runner".into();
         }
-        "bun" | "deno" => {
+        "bun" | "deno" | "ai-agent" => {
             let url = info.sums_url.as_deref().ok_or_else(|| {
                 format!(
                     "{} {} has no checksums URL in the plan",
@@ -4484,6 +4676,8 @@ fn verify_item(
             expected_sha256[0] = Some(expected);
             verification = if item.package == "deno" {
                 "SHA-256 from the release .sha256sum, equal to the GitHub asset digest; the GitHub release attestation (in-toto release predicate) is confirmed for this exact digest through the GitHub attestations API".into()
+            } else if item.package == "ai-agent" {
+                "Built by RAST's ai-agent workflow; SHA-256 from the release SHA256SUMS, equal to the GitHub asset digest; build-provenance attestation verified with gh attestation verify; window files and the server's --version checked on the native runner".into()
             } else {
                 "SHA-256 from the release SHASUMS256.txt, equal to the GitHub asset digest; downloaded and re-hashed in CI".into()
             };
@@ -4699,6 +4893,7 @@ fn verify_item(
             match item.package.as_str() {
                 "python" => verify_attestation(&archive_path, PBS_REPO)?,
                 "clang" if item.attestations => verify_attestation(&archive_path, CLANG_REPO)?,
+                "ai-agent" if item.attestations => verify_attestation(&archive_path, RAST_REPO)?,
                 "deno" if item.attestations => {
                     verify_deno_release_attestation(&sha256, gh_token().as_deref())?
                 }
@@ -4737,6 +4932,16 @@ fn verify_item(
     let home = work.join("home");
     fs::create_dir_all(&home)
         .map_err(|error| format!("cannot create {}: {error}", home.display()))?;
+    if let Some(app) = item.source.as_ref().and_then(|source| source.get("app")) {
+        let checks = check_app_files(&root, app, &item.version, &home)?;
+        return Ok(VerifiedItem {
+            archives,
+            bundled: BTreeMap::new(),
+            optional: BTreeSet::new(),
+            checks,
+            verification,
+        });
+    }
     let mut bundled = BTreeMap::new();
     match item.package.as_str() {
         "nodejs" => {
@@ -5539,7 +5744,7 @@ fn base_manifest(cfg: &Config, item: &PlanItem) -> Result<Value, String> {
     manifest.insert("schemaVersion".into(), json!(1));
     manifest.insert("kind".into(), json!("rast-package"));
     manifest.insert("id".into(), json!(item.package));
-    manifest.insert("type".into(), json!("runtime"));
+    manifest.insert("type".into(), json!(package.package_type()));
     manifest.insert("name".into(), json!(package.name));
     manifest.insert("description".into(), json!(package.description));
     manifest.insert("homepage".into(), json!(package.homepage));
@@ -5550,7 +5755,13 @@ fn base_manifest(cfg: &Config, item: &PlanItem) -> Result<Value, String> {
     );
     manifest.insert("version".into(), json!(item.version));
     manifest.insert("revision".into(), json!(item.revision));
-    manifest.insert("minRastVersion".into(), json!(cfg.min_rast_version));
+    manifest.insert(
+        "minRastVersion".into(),
+        json!(package
+            .min_rast_version
+            .as_deref()
+            .unwrap_or(&cfg.min_rast_version)),
+    );
     if let Some(channel) =
         channel_of(&item.package, &item.version).filter(|value| !value.is_empty())
     {
@@ -5616,18 +5827,23 @@ fn build_manifest(
         .as_object()
         .cloned()
         .ok_or("the generated manifest is not a JSON object")?;
-    let mut spec = runtime_spec(&item.package, &item.version, &bundled, &optional)?;
-    let extensions: BTreeSet<String> = ok
-        .iter()
-        .flat_map(|result| result.extensions.iter().cloned())
-        .collect();
-    if !extensions.is_empty() {
-        spec.extensions = extensions.iter().cloned().collect();
+    let app = package_config(cfg, &item.package)?.app.clone();
+    if let Some(app) = &app {
+        manifest.insert("app".into(), app.clone());
+    } else {
+        let mut spec = runtime_spec(&item.package, &item.version, &bundled, &optional)?;
+        let extensions: BTreeSet<String> = ok
+            .iter()
+            .flat_map(|result| result.extensions.iter().cloned())
+            .collect();
+        if !extensions.is_empty() {
+            spec.extensions = extensions.iter().cloned().collect();
+        }
+        manifest.insert(
+            "runtime".into(),
+            serde_json::to_value(&spec).map_err(|error| error.to_string())?,
+        );
     }
-    manifest.insert(
-        "runtime".into(),
-        serde_json::to_value(&spec).map_err(|error| error.to_string())?,
-    );
 
     let mut sorted = ok;
     sorted.sort_by(|a, b| a.target.cmp(&b.target));
@@ -5706,7 +5922,9 @@ fn build_manifest(
                 )
             })?;
             let mut provenance = Map::new();
-            provenance.insert("kind".into(), json!("upstream"));
+            // An app package is built by RAST's own workflow.
+            let kind = if app.is_some() { "built" } else { "upstream" };
+            provenance.insert("kind".into(), json!(kind));
             provenance.insert("source".into(), json!(source));
             provenance.insert("verification".into(), json!(verification));
             if let Some(run_url) = run_url() {
@@ -5770,6 +5988,10 @@ fn build_manifest(
                 }),
                 "maven" => json!({
                     "notes": "Architecture-independent distribution; mvn needs a JDK (java on PATH, e.g. the Temurin JDK from this catalog). Maven's local repository stays at ~/.m2."
+                }),
+                "ai-agent" => json!({
+                    "glibc": "2.35",
+                    "notes": "RAST runs the server program (bin/rast-ai-agent) and opens the window (ui/) with its window SDK."
                 }),
                 _ => json!({}),
             };
@@ -5909,6 +6131,10 @@ fn build_manifest(
                 .into(),
         ),
         "cmake" => notes.push("cmake, ctest and cpack are in bin/.".into()),
+        "ai-agent" => notes.push(
+            "On its first start AI Agent takes the chats, providers, agents, skills, limits and chat files RAST kept for it (RAST keeps its copy). Its data then lives in the app's own folder."
+                .into(),
+        ),
         "gradle" => notes.push(
             "gradle is in bin/ and runs on a JVM: a JDK must be on PATH; Gradle keeps its user home in ~/.gradle."
                 .into(),
@@ -5954,7 +6180,7 @@ fn package_entries(cfg: &Config) -> Result<Vec<(String, Value)>, String> {
     for (id, package) in &cfg.packages.entries {
         let mut entry = json!({
             "id": id,
-            "type": "runtime",
+            "type": package.package_type(),
             "name": package.name,
             "description": package.description,
             "homepage": package.homepage,
@@ -9079,6 +9305,118 @@ hash = "41920025e43c858e777177468698a88fc270bcceb6ba61059aac1dfee4da1d37"
         // The phar's wrapper path is generated by the installer, so the
         // manifest only lists bin/composer.
         assert_eq!(parsed.runtime.executables[0].path, "bin/composer");
+    }
+
+    fn ai_agent_config() -> Config {
+        let mut cfg = providers_config();
+        let package: PackageConfig = serde_json::from_value(json!({
+            "name": "AI Agent", "description": "Chat with AI agents", "homepage": "https://github.com/Enricko/rast",
+            "license": "MIT", "keepPatches": 2, "githubAttestations": true, "minRastVersion": "0.9.17",
+            "app": {
+                "id": "agent",
+                "window": {"entry": "ui/app.js", "styles": ["ui/app.css"], "sdk": 1, "singleton": true, "defaultSize": {"w": 1080, "h": 720}},
+                "server": {"executable": "bin/rast-ai-agent", "hostApi": 1, "apiPrefix": "/api/ai", "eventPrefix": "ai."}
+            },
+            "channels": [{"id": "stable", "label": "AI Agent", "status": "stable"}]
+        }))
+        .unwrap();
+        cfg.packages.entries.push(("ai-agent".into(), package));
+        cfg
+    }
+
+    fn ai_agent_release(tag: &str, version: &str) -> Value {
+        let asset = |name: &str, digest: &str| {
+            json!({
+                "name": name, "size": 4096, "digest": format!("sha256:{digest}"),
+                "browser_download_url": format!("https://github.com/Enricko/rast/releases/download/{tag}/{name}"),
+            })
+        };
+        json!({
+            "tag_name": tag, "prerelease": false, "draft": false,
+            "published_at": "2026-11-28T10:00:00Z",
+            "html_url": format!("https://github.com/Enricko/rast/releases/tag/{tag}"),
+            "assets": [
+                asset(&format!("ai-agent-{version}-linux-x86_64.tar.gz"), &"a".repeat(64)),
+                asset(&format!("ai-agent-{version}-linux-aarch64.tar.gz"), &"b".repeat(64)),
+                asset("SHA256SUMS", &"c".repeat(64)),
+            ],
+        })
+    }
+
+    #[test]
+    fn ai_agent_is_an_app_package_from_rast_releases() {
+        let cfg = ai_agent_config();
+        let package = package_config(&cfg, "ai-agent").unwrap().clone();
+        let releases = [
+            ai_agent_release("ai-agent-v1.0.0", "1.0.0"),
+            // RAST's own releases are not AI Agent's.
+            ai_agent_release("v0.9.17", "0.9.17"),
+            ai_agent_release("ai-agent-v1.1.0-rc.1", "1.1.0-rc.1"),
+        ];
+        let items =
+            ai_agent_plan_from_releases(&cfg, &package, &releases, &BTreeSet::new()).unwrap();
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.version, "1.0.0");
+        assert_eq!(item.channel, "stable");
+        assert!(item.attestations);
+        assert_eq!(item.source.as_ref().unwrap()["app"]["id"], "agent");
+        let x86 = &item.targets["linux-x86_64"];
+        assert_eq!(x86.sha256.as_deref(), Some("a".repeat(64).as_str()));
+        assert!(x86.sums_url.as_deref().unwrap().ends_with("/SHA256SUMS"));
+        assert_eq!(x86.strip_components, Some(1));
+
+        let (manifest, _) = build_manifest(&cfg, item, &outcomes_for(item), None).unwrap();
+        let manifest = manifest.unwrap();
+        assert_eq!(manifest["type"], "app");
+        assert_eq!(manifest["minRastVersion"], "0.9.17");
+        assert!(manifest.get("runtime").is_none());
+        assert_eq!(manifest["app"]["server"]["apiPrefix"], "/api/ai");
+        assert_eq!(manifest["artifacts"][0]["provenance"]["kind"], "built");
+        let parsed = manifest::parse(&serde_json::to_vec(&manifest).unwrap()).unwrap();
+        manifest::validate(&parsed).unwrap();
+        let entries = package_entries(&cfg).unwrap();
+        let entry = &entries.iter().find(|(id, _)| id == "ai-agent").unwrap().1;
+        assert_eq!(entry["type"], "app");
+        assert_eq!(
+            entries.iter().find(|(id, _)| id == "bun").unwrap().1["type"],
+            "runtime"
+        );
+    }
+
+    #[test]
+    fn app_archives_are_checked_for_their_files_and_version() {
+        use std::os::unix::fs::PermissionsExt;
+        let cfg = ai_agent_config();
+        let app = package_config(&cfg, "ai-agent")
+            .unwrap()
+            .app
+            .clone()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::create_dir_all(root.join("ui")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let program = root.join("bin/rast-ai-agent");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\necho 'rast-ai-agent 1.0.0 (RAST 0.9.17)'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("ui/app.js"), "export default {};").unwrap();
+        let missing = check_app_files(&root, &app, "1.0.0", &home).unwrap_err();
+        assert!(missing.contains("ui/app.css"), "{missing}");
+        std::fs::write(root.join("ui/app.css"), "").unwrap();
+        let checks = check_app_files(&root, &app, "1.0.0", &home).unwrap();
+        assert_eq!(
+            checks,
+            vec!["rast-ai-agent 1.0.0 (RAST 0.9.17)".to_string()]
+        );
+        let wrong = check_app_files(&root, &app, "1.0.1", &home).unwrap_err();
+        assert!(wrong.contains("expected"), "{wrong}");
     }
 
     #[test]

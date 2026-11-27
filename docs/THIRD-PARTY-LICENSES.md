@@ -4,7 +4,7 @@ RAST itself is MIT licensed (see [LICENSE](../LICENSE)). This file lists the thi
 
 **Generated file — do not edit manually.** Regenerate with `scripts/generate-third-party-licenses.sh` after changing `Cargo.lock`.
 
-The locked dependency graph (`Cargo.lock`) contains 335 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
+The locked dependency graph (`Cargo.lock`) contains 337 third-party Rust crates, including crates used only for specific platforms or for tests; only the subset required by the Linux release build is linked into the binary. Each crate remains under the license declared by its authors; the full license texts are available in the upstream crate packages. Package-level license metadata follows the SPDX expressions reported by each crate.
 
 Frontend build tooling (Vite, TypeScript and their transitive dependencies) is used only to build `frontend/dist` and is not distributed inside the binary; their exact versions and licenses are pinned in `frontend/package-lock.json`.
 
@@ -17,8 +17,6 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 
 The AI Agent's built-in model prices (`src/ai/prices.rs`) are taken from 9router's price table (`open-sse/providers/pricing.js`, <https://github.com/decolua/9router>), MIT License, Copyright (c) 2024-2026 decolua and contributors; the Claude prices are Anthropic's published ones.
 
-The AI Agent's subscription sign-in flows (the OAuth clients, endpoints and wire shapes for ChatGPT Codex, Claude, Grok, GitHub Copilot, Google Antigravity, Gemini CLI, Qwen, iFlow and Kimi, in `src/ai/signin/` and `src/ai/provider/plans/`) follow 9router (<https://github.com/decolua/9router>, MIT License, Copyright (c) 2024-2026 decolua and contributors) and `dsh-plugin-subscriptions` (<https://github.com/V1ki/dsh-plugin-subscriptions>, MIT License, Copyright (c) 2026 V1ki), together with each provider's own public CLI client. They are reimplemented for RAST in Rust; no third-party code is linked in.
-
 The AI Agent's provider logos (`frontend/src/apps/agent/logos.ts`) are taken from Lobe Icons (`@lobehub/icons-static-svg` 1.106.0, <https://github.com/lobehub/lobe-icons>), MIT License, Copyright (c) 2023 LobeHub. The logos are trademarks of their owners and only name each provider.
 
 ## License summary
@@ -26,7 +24,7 @@ The AI Agent's provider logos (`frontend/src/apps/agent/logos.ts`) are taken fro
 | License expression | Packages |
 | --- | ---: |
 | MIT OR Apache-2.0 | 185 |
-| MIT | 54 |
+| MIT | 56 |
 | Apache-2.0 OR MIT | 24 |
 | Unicode-3.0 | 18 |
 | MIT/Apache-2.0 | 10 |
@@ -316,6 +314,7 @@ The AI Agent's provider logos (`frontend/src/apps/agent/logos.ts`) are taken fro
 | `tracing-core` | 0.1.36 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-log` | 0.2.0 | MIT | <https://github.com/tokio-rs/tracing> |
 | `tracing-subscriber` | 0.3.23 | MIT | <https://github.com/tokio-rs/tracing> |
+| `try-lock` | 0.2.5 | MIT | <https://github.com/seanmonstar/try-lock> |
 | `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | <https://github.com/snapview/tungstenite-rs> |
 | `typed-path` | 0.13.0 | MIT OR Apache-2.0 | <https://github.com/chipsenkbeil/typed-path> |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | <https://github.com/paholg/typenum> |
@@ -338,6 +337,7 @@ The AI Agent's provider logos (`frontend/src/apps/agent/logos.ts`) are taken fro
 | `vcpkg` | 0.2.15 | MIT/Apache-2.0 | <https://github.com/mcgoo/vcpkg-rs> |
 | `version_check` | 0.9.5 | MIT/Apache-2.0 | <https://github.com/SergioBenitez/version_check> |
 | `walkdir` | 2.5.0 | Unlicense/MIT | <https://github.com/BurntSushi/walkdir> |
+| `want` | 0.3.2 | MIT | <https://github.com/seanmonstar/want> |
 | `wasi` | 0.11.1+wasi-snapshot-preview1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | <https://github.com/bytecodealliance/wasi> |
 | `wasip2` | 1.0.4+wasi-0.2.12 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | <https://github.com/bytecodealliance/wasi-rs> |
 | `wasm-bindgen` | 0.2.130 | MIT OR Apache-2.0 | <https://github.com/wasm-bindgen/wasm-bindgen> |

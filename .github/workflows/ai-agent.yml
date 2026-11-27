@@ -1,0 +1,186 @@
+name: AI Agent package
+
+# Builds AI Agent's App Center package (`ai-agent`): its window bundle and its
+# server program, natively on x86_64 and aarch64, and publishes them as the
+# release `ai-agent-v<version>` (never marked latest, so `rast update` keeps
+# following RAST's own `v*` releases). The rast-packages catalog workflow
+# finds these releases, verifies them and lists them in the signed catalog.
+#
+# Release: bump `VERSION` in src/ai/app.rs, then push the tag
+# `ai-agent-v<that version>`.
+
+on:
+  push:
+    tags: ["ai-agent-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "AI Agent version to release, without the prefix (e.g. 1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: ai-agent-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare:
+    name: Resolve the version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine and check the version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+          else
+            version="${GITHUB_REF_NAME#ai-agent-v}"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "not a version: '$version'" >&2
+            exit 1
+          fi
+          source_version=$(sed -n 's/^pub const VERSION: &str = "\([^"]*\)";/\1/p' src/ai/app.rs)
+          if [[ "$source_version" != "$version" ]]; then
+            echo "src/ai/app.rs says $source_version, the tag says $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=ai-agent-v$version" >> "$GITHUB_OUTPUT"
+
+  window:
+    name: Window bundle
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Check and bundle the window
+        working-directory: frontend
+        run: |
+          set -euo pipefail
+          npx tsc --noEmit -p .
+          node scripts/build-app.mjs src/apps/agent/package.ts ../ui
+          test -s ../ui/app.js
+          test -s ../ui/app.css
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-agent-ui
+          path: ui
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: [prepare, window]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 on Ubuntu 22.04 (glibc 2.35), like RAST's own release.
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read pinned toolchain
+        id: toolchain
+        run: |
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        run: rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the server program
+        run: cargo build --release --locked --bin rast-ai-agent
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-agent-ui
+          path: ai-agent/ui
+      - name: Assemble and smoke-test the package archive
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          mkdir -p ai-agent/bin
+          cp target/release/rast-ai-agent ai-agent/bin/rast-ai-agent
+          chmod 0755 ai-agent/bin/rast-ai-agent
+          cp LICENSE ai-agent/LICENSE
+          reported=$(./ai-agent/bin/rast-ai-agent --version)
+          echo "$reported"
+          [[ "$reported" == "rast-ai-agent $version "* ]]
+          # Without RAST it says what it needs and stops.
+          if env -i ./ai-agent/bin/rast-ai-agent >said.txt 2>&1; then
+            echo "the server started without RAST" >&2
+            exit 1
+          fi
+          grep -q "RAST_APP_SOCKET is not set" said.txt
+          archive="ai-agent-${version}-linux-${{ matrix.arch }}.tar.gz"
+          tar --owner=0 --group=0 --numeric-owner -czf "$archive" ai-agent
+          tar -tzf "$archive"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ env.ARCHIVE }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-agent-linux-${{ matrix.arch }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ai-agent-linux-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ai-agent-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          test "$(wc -l < SHA256SUMS)" -eq 2
+      - name: Attest SHA256SUMS
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/SHA256SUMS
+      - name: Publish (not marked latest)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          tag="${{ needs.prepare.outputs.tag }}"
+          notes="AI Agent ${version} for RAST's App Center (package ai-agent). Installed and updated from App Center; RAST 0.9.17 or later."
+          gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "AI Agent ${version}" --notes "$notes" --latest=false
