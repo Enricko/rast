@@ -11,6 +11,23 @@ this file by `scripts/changelog-section.sh`.
 
 ### Added
 
+- Nothing yet.
+
+### Planned
+
+- Project-key release signatures (minisign/cosign) in addition to the keyless
+  build-provenance attestations; the installer already supports fail-closed
+  verification via `RAST_REQUIRE_SIGNATURE`.
+- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
+  attestations can be verified manually or with the installer).
+- Automated restore drills and a documented JSON schema for backup manifests.
+- Static musl builds are **not** planned for 0.1.x (see
+  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
+
+## [0.9.17] - 2026-11-27
+
+### Added
+
 - **AI Agent**, a new app installed from App Center: chat with AI agents on
   models an administrator connects. Providers: Anthropic, OpenAI, DeepSeek,
   OpenRouter, a local Ollama or any OpenAI-compatible endpoint, as many
@@ -163,6 +180,14 @@ this file by `scripts/changelog-section.sh`.
   removed accounts. Until the package is installed, AI Agent runs inside RAST
   as before.
 
+- **The catalog tool lists app packages.** `rast catalog` finds AI Agent's
+  releases (`ai-agent-v<version>` in RAST's repository, built for x86_64 and
+  aarch64 by the new `ai-agent` workflow with build-provenance attestations),
+  checks their SHA-256 against the release's SHA256SUMS, the GitHub asset
+  digest and the attestation, checks the window files and runs the server
+  program's `--version` on each architecture, and writes `app` manifests
+  (with the package's own minimum RAST version) into the signed catalog.
+
 ### Changed
 
 - **Artifacts in AI Agent.** When an agent writes something to keep (a web
@@ -252,17 +277,6 @@ this file by `scripts/changelog-section.sh`.
   stay usable meanwhile. Clicking the window's dimmed content draws
   attention to its dialog instead of closing it. Desktop dialogs (Sign out,
   Personalize, keyboard shortcuts) still cover the desktop.
-
-### Planned
-
-- Project-key release signatures (minisign/cosign) in addition to the keyless
-  build-provenance attestations; the installer already supports fail-closed
-  verification via `RAST_REQUIRE_SIGNATURE`.
-- Provenance enforcement inside `rast update` (today: SHA-256 + version probe;
-  attestations can be verified manually or with the installer).
-- Automated restore drills and a documented JSON schema for backup manifests.
-- Static musl builds are **not** planned for 0.1.x (see
-  [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ## [0.9.16] - 2026-11-26
 
