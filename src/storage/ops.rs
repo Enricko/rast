@@ -12,7 +12,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -32,7 +32,7 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// A file or directory entry as exposed by the File Station API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryDto {
     pub name: String,
@@ -76,14 +76,14 @@ impl EntryDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BreadcrumbDto {
     pub name: String,
     pub path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaDto {
     pub quota_bytes: i64,
@@ -91,7 +91,7 @@ pub struct QuotaDto {
     pub free_bytes: i64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListingDto {
     pub path: String,
@@ -103,7 +103,7 @@ pub struct ListingDto {
     pub quota: QuotaDto,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchDto {
     pub items: Vec<EntryDto>,
@@ -123,7 +123,7 @@ pub struct UsageDto {
     pub by_type: BTreeMap<&'static str, i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextPreviewDto {
     pub content: String,

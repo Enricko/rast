@@ -28,14 +28,12 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::host::Agent;
 use super::{browser, guard, provider::ToolSpec};
 use crate::{
     auth::AuthUser,
-    sandbox,
     secrets::Secrets,
-    state::AppState,
-    storage::ops,
-    terminal::{RunOutput, TerminalClient, TerminalError},
+    terminal::{RunOutput, TerminalError},
 };
 
 pub const LIST_FILES: &str = "list_files";
@@ -176,12 +174,9 @@ impl Available {
     }
 }
 
-pub async fn available(state: &AppState, user: &AuthUser) -> Available {
+pub async fn available(state: &Agent, user: &AuthUser) -> Available {
     let mut out = Available::default();
-    let files = user.is_admin()
-        || crate::access::app_access(&state.db, user, "files")
-            .await
-            .is_ok_and(|a| a.allowed);
+    let files = state.host.may_use_app(user, "files").await;
     if files {
         out.names.extend(FILE_TOOLS);
     }
@@ -190,12 +185,12 @@ pub async fn available(state: &AppState, user: &AuthUser) -> Available {
     if server {
         out.names.extend([LIST_SERVER_FILES, READ_SERVER_FILE]);
     }
-    let helper = || async { TerminalClient::default().status().await.is_ok() };
+    let helper = || state.host.terminal_ready();
     out.shell = if user.is_admin() {
         helper().await.then_some(Shell::Root)
     } else if server && helper().await {
         Some(Shell::Guest)
-    } else if state.config.docker_enabled && sandbox::allowed(&state.db, user.id).await {
+    } else if state.host.sandbox_allowed(user.id).await {
         Some(Shell::Sandbox)
     } else {
         None
@@ -204,13 +199,7 @@ pub async fn available(state: &AppState, user: &AuthUser) -> Available {
         out.names.push(RUN_COMMAND);
     }
     if out.shell == Some(Shell::Root) {
-        out.home_on_disk = Some(
-            state
-                .storage
-                .home_dir(&user.username.to_ascii_lowercase())
-                .display()
-                .to_string(),
-        );
+        out.home_on_disk = Some(state.host.home_dir(&user.username).display().to_string());
     }
     if search_config(&state.db).await.is_configured() {
         out.names.push(WEB_SEARCH);
@@ -486,7 +475,7 @@ impl From<String> for Output {
 /// Run one tool call for `user` in the chat `conversation`: the result for
 /// the model, or why it failed (also for the model).
 pub async fn execute(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     available: &Available,
     conversation: &str,
@@ -505,29 +494,16 @@ pub async fn execute(
 }
 
 async fn run_tool(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     available: &Available,
     name: &str,
     input: &Value,
 ) -> Result<String, String> {
-    let public = |e: crate::error::AppError| e.public_message();
     match name {
         LIST_FILES => {
             let path = text_arg(input, "path")?;
-            let listing = ops::list(
-                &state.db,
-                &state.storage,
-                user,
-                path,
-                None,
-                "name",
-                "asc",
-                1,
-                500,
-            )
-            .await
-            .map_err(public)?;
+            let listing = state.host.files_list(user, path).await?;
             if listing.items.is_empty() {
                 return Ok(format!("{} is empty.", listing.path));
             }
@@ -562,10 +538,7 @@ async fn run_tool(
         }
         READ_FILE => {
             let path = text_arg(input, "path")?;
-            let preview =
-                ops::text_preview(&state.db, &state.storage, user, path, Some(READ_BYTES))
-                    .await
-                    .map_err(public)?;
+            let preview = state.host.files_read(user, path, READ_BYTES).await?;
             if preview.encoding == "binary" {
                 return Err(format!("{path} is not a text file"));
             }
@@ -578,9 +551,7 @@ async fn run_tool(
         SEARCH_FILES => {
             let query = text_arg(input, "query")?;
             let path = input.get("path").and_then(Value::as_str).unwrap_or("/");
-            let found = ops::search(&state.db, &state.storage, user, path, query, None, 1, 100)
-                .await
-                .map_err(public)?;
+            let found = state.host.files_search(user, path, query).await?;
             if found.items.is_empty() {
                 return Ok("Nothing found.".into());
             }
@@ -605,40 +576,8 @@ async fn run_tool(
                     MAX_WRITE_BYTES / 1024 / 1024
                 ));
             }
-            let (dir, name) = split_path(path)?;
-            let existed = ops::stat(&state.db, &state.storage, user, path)
-                .await
-                .is_ok();
-            let mut plan = ops::plan_upload(
-                &state.db,
-                &state.storage,
-                user,
-                &dir,
-                &name,
-                true,
-                content.len() as u64,
-            )
-            .await
-            .map_err(public)?;
-            use tokio::io::AsyncWriteExt;
-            if let Err(error) = plan.file.write_all(content.as_bytes()).await {
-                ops::abort_upload(&state.db, user, plan).await;
-                return Err(format!("cannot write the file: {error}"));
-            }
-            let entry =
-                ops::commit_upload(&state.db, &state.storage, user, plan, content.len() as u64)
-                    .await
-                    .map_err(public)?;
-            crate::realtime::publish_commit(
-                &state.events,
-                &state.db,
-                user,
-                "upload",
-                std::slice::from_ref(&entry.path),
-                Some(&entry),
-                true,
-            )
-            .await;
+            split_path(path)?;
+            let (entry, existed) = state.host.files_write(user, path, content).await?;
             Ok(format!(
                 "{} {} ({}).",
                 if existed { "Replaced" } else { "Created" },
@@ -648,24 +587,12 @@ async fn run_tool(
         }
         CREATE_FOLDER => {
             let path = text_arg(input, "path")?;
-            let entry = ops::mkdir(&state.db, &state.storage, user, path)
-                .await
-                .map_err(public)?;
-            crate::realtime::publish_commit(
-                &state.events,
-                &state.db,
-                user,
-                "mkdir",
-                std::slice::from_ref(&entry.path),
-                Some(&entry),
-                false,
-            )
-            .await;
+            let entry = state.host.files_mkdir(user, path).await?;
             Ok(format!("Created the folder {}.", entry.path))
         }
         LIST_SERVER_FILES | READ_SERVER_FILE => {
             let path = text_arg(input, "path")?.to_string();
-            let hidden = guard::hidden_paths(&state.config);
+            let hidden = guard::hidden_paths(state.host.private_paths());
             let guarded = available.guarded;
             let listing = name == LIST_SERVER_FILES;
             tokio::task::spawn_blocking(move || {
@@ -698,23 +625,18 @@ async fn run_tool(
             } else {
                 secs
             };
-            let name = user.username.to_ascii_lowercase();
             let result = match available.shell {
-                Some(Shell::Root) => {
-                    TerminalClient::default()
-                        .run(user.id, &name, command, secs)
-                        .await
-                }
-                Some(Shell::Sandbox) => {
-                    sandbox::ready_home(&state.db, &state.storage, user)
-                        .await
-                        .map_err(public)?;
-                    sandbox::client(&state.config)
-                        .run(user.id, &name, command, secs)
-                        .await
-                }
+                Some(Shell::Root) => state.host.terminal_run(user, command, secs).await,
+                Some(Shell::Sandbox) => match state.host.sandbox_run(user, command, secs).await {
+                    Err(TerminalError::Refused { code, message })
+                        if code == "home" || code == "forbidden" =>
+                    {
+                        return Err(message)
+                    }
+                    other => other,
+                },
                 Some(Shell::Guest) => {
-                    let hidden = guard::hidden_paths(&state.config);
+                    let hidden = guard::hidden_paths(state.host.private_paths());
                     let script = guard::guest_script(command, secs, &hidden)?;
                     if script.len() > crate::terminal::MAX_RUN_COMMAND {
                         return Err("the command is too long".into());
@@ -722,9 +644,7 @@ async fn run_tool(
                     // Longer than the command's own limit: it is stopped
                     // inside first (and starting it takes a moment).
                     let started = std::time::Instant::now();
-                    let mut output = TerminalClient::default()
-                        .run(user.id, &name, &script, secs + 20)
-                        .await;
+                    let mut output = state.host.terminal_run(user, &script, secs + 20).await;
                     if let Ok(output) = &mut output {
                         let ran = started.elapsed().as_secs() + 1 >= u64::from(secs);
                         if guard::timed_out(output.exit_code) && ran {

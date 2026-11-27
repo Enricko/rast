@@ -16,8 +16,6 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use crate::config::Config;
-
 /// Places hidden on every server, besides RAST's own folders.
 const HIDDEN: &[&str] = &[
     "/etc/rast",
@@ -108,20 +106,10 @@ const SECRET_EXTENSIONS: &[&str] = &[
 ];
 
 /// Everything hidden on this server: the fixed places and RAST's folders.
-pub fn hidden_paths(config: &Config) -> Vec<PathBuf> {
+/// `private`: RAST's own places (`Host::private_paths`).
+pub fn hidden_paths(private: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = HIDDEN.iter().map(PathBuf::from).collect();
-    out.push(config.data_dir.clone());
-    out.push(config.storage_dir.clone());
-    if let Some(dir) = config.loaded_from.as_deref().and_then(Path::parent) {
-        if dir != Path::new("/") {
-            out.push(dir.to_path_buf());
-        }
-    }
-    for path in [&config.data_dir, &config.storage_dir] {
-        if let Ok(real) = std::fs::canonicalize(path) {
-            out.push(real);
-        }
-    }
+    out.extend(private);
     out.sort();
     out.dedup();
     out

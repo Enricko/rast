@@ -22,9 +22,11 @@
 //! goes in steps: what the model says, then the calls it asked for; a step
 //! starts after the last tool block ([`apply_delta`]).
 
+pub mod app;
 pub mod browser;
 pub mod files;
 pub mod guard;
+pub mod host;
 pub mod prices;
 pub mod provider;
 pub mod run;
@@ -970,24 +972,25 @@ pub async fn save_limit_rule(pool: &SqlitePool, rule: &LimitRule) -> AppResult<(
     Ok(())
 }
 
-pub async fn effective_limits(pool: &SqlitePool, user: &AuthUser) -> AppResult<Effective> {
-    effective_limits_for(pool, user.id, user.is_admin()).await
+pub async fn effective_limits(agent: &host::Agent, user: &AuthUser) -> AppResult<Effective> {
+    if user.is_admin() {
+        return Ok(Effective::unlimited("admin"));
+    }
+    let groups = agent.host.group_ids(user.id).await?;
+    effective_limits_for(&agent.db, user.id, false, &groups).await
 }
 
+/// `group_ids`: the groups the account is in.
 pub async fn effective_limits_for(
     pool: &SqlitePool,
     user_id: i64,
     is_admin: bool,
+    group_ids: &[i64],
 ) -> AppResult<Effective> {
     if is_admin {
         return Ok(Effective::unlimited("admin"));
     }
     let rules = limit_rules(pool).await?;
-    let group_ids: Vec<i64> =
-        sqlx::query_scalar("SELECT group_id FROM group_members WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_all(pool)
-            .await?;
     let own = format!("user:{user_id}");
     let groups: Vec<LimitRule> = rules
         .iter()

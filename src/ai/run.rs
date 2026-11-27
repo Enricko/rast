@@ -29,16 +29,12 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
 use tokio::sync::{mpsc, Notify};
 
+use super::host::Agent;
 use super::{
     provider::{self, ChatError, ChatRequest, Delta, Turn},
     tools, Effective,
 };
-use crate::{
-    audit::{self, AuditLog},
-    auth::AuthUser,
-    db::now_ms,
-    state::AppState,
-};
+use crate::{audit::AuditLog, auth::AuthUser, db::now_ms};
 
 /// How often streamed text is published.
 const PUBLISH_EVERY: Duration = Duration::from_millis(120);
@@ -183,7 +179,7 @@ pub struct ReplyJob {
 
 impl Reservation {
     /// Write the reply (stored as message `job.message_id`) in the background.
-    pub fn start(mut self, state: AppState, job: ReplyJob) {
+    pub fn start(mut self, state: Agent, job: ReplyJob) {
         self.armed = false;
         self.run.message_id.store(job.message_id, Ordering::Relaxed);
         self.run.with(|s| s.blocks = job.blocks.clone());
@@ -216,7 +212,7 @@ enum Step {
     },
 }
 
-async fn reply(state: &AppState, runs: &Runs, run: &Arc<Active>, mut job: ReplyJob) {
+async fn reply(state: &Agent, runs: &Runs, run: &Arc<Active>, mut job: ReplyJob) {
     let history = std::mem::take(&mut job.request.messages);
     let mut tokens = job.tokens;
     let mut tools_on = !job.request.tools.is_empty();
@@ -328,7 +324,7 @@ async fn reply(state: &AppState, runs: &Runs, run: &Arc<Active>, mut job: ReplyJ
     runs.finish(&job.conversation_id, run);
     publish_message(state, &job, false, 0).await;
     if let Ok(Some(conversation)) = super::conversation(&state.db, &job.conversation_id).await {
-        state.events.publish_user_and_admin(
+        state.host.publish_user_and_admin(
             "ai.conversation",
             job.owner.id,
             json!({ "conversation": conversation.json(Some(&job.owner.username), false) }),
@@ -338,7 +334,7 @@ async fn reply(state: &AppState, runs: &Runs, run: &Arc<Active>, mut job: ReplyJ
 
 /// Run the calls the owner allowed, in order. False when stopped.
 async fn run_allowed_tools(
-    state: &AppState,
+    state: &Agent,
     run: &Arc<Active>,
     job: &ReplyJob,
     tokens: (i64, i64),
@@ -399,7 +395,7 @@ async fn run_allowed_tools(
             .object("ai_conversation", &job.conversation_id)
             .path(tools::summary(&name, &input));
         log = if failed { log.failure() } else { log.success() };
-        audit::record_with_events(&state.db, &state.events, log).await;
+        state.host.audit(log).await;
         progress(state, run, job, tokens).await;
         if stopped {
             return false;
@@ -409,7 +405,7 @@ async fn run_allowed_tools(
 
 /// One model call: stream its answer into the current step.
 async fn stream_step(
-    state: &AppState,
+    state: &Agent,
     run: &Arc<Active>,
     job: &ReplyJob,
     request: ChatRequest,
@@ -437,7 +433,7 @@ async fn stream_step(
             s.seq += 1;
             s.seq
         });
-        state.events.publish_user(
+        state.host.publish_user(
             "ai.delta",
             job.owner.id,
             json!({
@@ -505,7 +501,7 @@ async fn stream_step(
     }
 }
 
-async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage: provider::Usage) {
+async fn count(state: &Agent, job: &ReplyJob, tokens: &mut (i64, i64), usage: provider::Usage) {
     tokens.0 += usage.input;
     tokens.1 += usage.output;
     if usage.is_empty() {
@@ -540,7 +536,7 @@ async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage:
 }
 
 /// Store the reply as it is (still being written) and show it.
-async fn progress(state: &AppState, run: &Arc<Active>, job: &ReplyJob, tokens: (i64, i64)) {
+async fn progress(state: &Agent, run: &Arc<Active>, job: &ReplyJob, tokens: (i64, i64)) {
     let (content, seq) = run.with(|s| (Value::Array(s.blocks.clone()), s.seq));
     if let Err(e) = store(&state.db, job, &content, "streaming", "", tokens, None).await {
         tracing::warn!(error = %e, "could not store an AI reply");
@@ -548,9 +544,9 @@ async fn progress(state: &AppState, run: &Arc<Active>, job: &ReplyJob, tokens: (
     publish_message(state, job, true, seq).await;
 }
 
-async fn publish_message(state: &AppState, job: &ReplyJob, running: bool, seq: u64) {
+async fn publish_message(state: &Agent, job: &ReplyJob, running: bool, seq: u64) {
     if let Ok(Some(message)) = super::message(&state.db, job.message_id).await {
-        state.events.publish_user_and_admin(
+        state.host.publish_user_and_admin(
             "ai.message",
             job.owner.id,
             json!({"conversationId": job.conversation_id, "message": message.json(), "running": running, "seq": seq}),

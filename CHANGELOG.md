@@ -142,6 +142,26 @@ this file by `scripts/changelog-section.sh`.
   see docs/CONFIGURATION.md), so no credential is kept in the repository and a
   deployment can use its own OAuth client. Database schema unchanged (the
   sign-in was already stored with each provider).
+- **Apps as App Center packages.** App Center can install a desktop app
+  from the official catalog as an `app` package: its window, and optionally
+  its own server program, which RAST starts, restarts if it stops (1 s up to
+  60 s apart) and updates with the package. Requests to the app's API pass
+  RAST's sign-in, CSRF and access checks first and reach the app with the
+  signed-in account (never cookies); the app asks RAST for accounts, groups,
+  live events, the activity log, File Station and commands through a
+  versioned host API on its own socket. Its window loads from the package and
+  uses RAST's dialogs, icons and live updates (window SDK v1). See
+  docs/APP-PACKAGES.md. Database schema v20 (Package Center's table holds
+  app packages).
+- **AI Agent as its own program** (`rast-ai-agent`), ready to ship as the
+  App Center package `ai-agent` so AI Agent updates without a RAST update.
+  Installed, it takes over `/api/ai` and AI Agent's window, and on its first
+  start takes AI Agent's data from RAST (dump and restore: chats, messages,
+  usage, providers with their keys sealed again under the app's own key,
+  agents, skills, limits, search settings and chat files); RAST keeps its
+  copy. It keeps its own database (`agent.db`) and forgets the chats of
+  removed accounts. Until the package is installed, AI Agent runs inside RAST
+  as before.
 
 ### Changed
 

@@ -48,7 +48,16 @@ pub fn router(state: AppState) -> Router {
         .merge(monitor::routes())
         .merge(backup::routes())
         .merge(packages::routes())
-        .merge(ai::routes())
+        // AI Agent, built in (its Package Center app takes over /api/ai/*
+        // once RAST stops answering it here).
+        .merge(
+            ai::routes()
+                .with_state(crate::ai::host::Agent::built_in(&state))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::apphost::proxy::hand_to_app,
+                )),
+        )
         .route("/api/events", get(events::stream))
         // Package Center apps: their windows, and their APIs (any
         // `/api/<segment>` RAST does not answer itself).

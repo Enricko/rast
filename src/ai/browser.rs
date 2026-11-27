@@ -43,13 +43,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use super::host::Agent;
 use super::{files, guard, tools};
-use crate::{
-    auth::AuthUser,
-    config::Config,
-    state::AppState,
-    terminal::{TerminalClient, TerminalError},
-};
+use crate::{auth::AuthUser, terminal::TerminalError};
 
 /// Browsers open at a time on the server.
 pub const MAX_BROWSERS: usize = 3;
@@ -211,7 +207,7 @@ fn make_room() -> Result<(), String> {
 }
 
 async fn session_for(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     conversation: &str,
     may_start: bool,
@@ -242,7 +238,7 @@ impl Drop for SocketFile {
     }
 }
 
-async fn start(state: &AppState, user: &AuthUser) -> Result<Session, String> {
+async fn start(state: &Agent, user: &AuthUser) -> Result<Session, String> {
     let chrome = chrome().ok_or(NO_CHROME)?;
     let port = proxy_port().await?;
     let dir = state.data_dir().join("browser");
@@ -265,11 +261,11 @@ async fn start(state: &AppState, user: &AuthUser) -> Result<Session, String> {
         &format!("rast-browser-{id}"),
         &socket.0,
         port,
-        &state.config,
+        &guard::hidden_paths(state.host.private_paths()),
     )?;
-    let name = user.username.to_ascii_lowercase();
-    let output = TerminalClient::default()
-        .run(user.id, &name, &script, 30)
+    let output = state
+        .host
+        .terminal_run(user, &script, 30)
         .await
         .map_err(|e| match e {
             TerminalError::Off => {
@@ -380,7 +376,7 @@ fn launch_script(
     unit: &str,
     socket: &Path,
     proxy_port: u16,
-    config: &Config,
+    hidden: &[PathBuf],
 ) -> Result<String, String> {
     let socket = socket.to_string_lossy();
     let plain = |text: &str| {
@@ -435,7 +431,7 @@ fn launch_script(
     // One connection for both directions (systemd connects to the socket).
     args.push(format!("--property=StandardInput=file:{socket}"));
     args.push(format!("--property=StandardOutput=file:{socket}"));
-    for path in guard::hidden_paths(config) {
+    for path in hidden {
         let text = path.to_string_lossy();
         if text
             .chars()
@@ -647,7 +643,7 @@ async fn read_messages(mut read: OwnedReadHalf, cdp: Weak<Cdp>) {
 /// Run one browser step for the chat: the page as text for the model and a
 /// screenshot for the person.
 pub async fn act(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     conversation: &str,
     input: &Value,
@@ -945,7 +941,7 @@ async fn back(session: &Session) -> Result<(), String> {
 
 async fn screenshot(
     session: &Session,
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     conversation: &str,
     view: &Value,
@@ -1332,8 +1328,8 @@ async fn proxy_one(mut client: TcpStream) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn config() -> Config {
-        Config::from_parts(
+    fn hidden() -> Vec<PathBuf> {
+        let config = crate::config::Config::from_parts(
             None,
             crate::config::FileConfig {
                 data_dir: Some("/var/lib/rast".into()),
@@ -1342,7 +1338,8 @@ mod tests {
             },
             |_| None,
         )
-        .expect("test config")
+        .expect("test config");
+        guard::hidden_paths(crate::apphost::host_api::private_paths(&config))
     }
 
     #[test]
@@ -1352,7 +1349,7 @@ mod tests {
             "rast-browser-abc",
             Path::new("/var/lib/rast/browser/abc.sock"),
             41234,
-            &config(),
+            &hidden(),
         )
         .unwrap();
         assert!(script.starts_with("exec systemd-run '--quiet'"));
@@ -1381,7 +1378,7 @@ mod tests {
             "u",
             Path::new("/var/lib/my rast/a.sock"),
             1,
-            &config()
+            &hidden()
         )
         .is_err());
     }

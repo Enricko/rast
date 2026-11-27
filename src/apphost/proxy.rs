@@ -53,14 +53,45 @@ pub async fn forward(
     let Some(app) = state.apps.for_path(&path) else {
         return AppError::NotFound("not found").into_response();
     };
+    to_app(&state, &app, &user, ip, request).await
+}
+
+/// A part of RAST that an app package took over (AI Agent's `/api/ai`,
+/// answered by its own server once its package is installed) hands its
+/// requests to the app; otherwise RAST answers them itself.
+pub async fn hand_to_app(
+    State(state): State<AppState>,
+    request: Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let app = state.apps.for_path(request.uri().path());
+    let user = request.extensions().get::<AuthUser>().cloned();
+    let ip = request
+        .extensions()
+        .get::<ClientIp>()
+        .map(|ip| ip.0)
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    match (app, user) {
+        (Some(app), Some(user)) => to_app(&state, &app, &user, ip, request).await,
+        _ => next.run(request).await,
+    }
+}
+
+async fn to_app(
+    state: &AppState,
+    app: &App,
+    user: &AuthUser,
+    ip: std::net::IpAddr,
+    request: Request,
+) -> Response {
     // The same rules as for its window (RAST's access layer has already
     // applied read-only grants to the apps it knows by path).
-    match may_open(&state, &user, &app).await {
+    match may_open(state, user, app).await {
         Ok(true) => {}
         Ok(false) => return AppError::Forbidden("access denied").into_response(),
         Err(error) => return error.into_response(),
     }
-    match send(&app, &user, &ip.to_string(), request).await {
+    match send(app, user, &ip.to_string(), request).await {
         Ok(response) => response,
         Err(error) => error.into_response(),
     }

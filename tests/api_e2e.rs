@@ -6386,3 +6386,244 @@ async fn package_center_apps_run_behind_rast() {
         "the server process ended"
     );
 }
+
+/// AI Agent from its Package Center app package: the real `rast-ai-agent`
+/// program behind RAST. It takes RAST's AI Agent data once (chats, the
+/// provider with its key sealed again with the app's own key, chat files),
+/// then answers `/api/ai/*` with its own database, asking RAST's host API
+/// for accounts and File Station.
+#[tokio::test]
+async fn ai_agent_runs_from_its_package() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let alice_id = server.user_id("alice").await;
+    install_ai_agent_app(&server, &admin, Some(alice_id)).await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{alice_id}/access-rules"),
+            Some(json!({"folderRules": [], "appRules": [
+                {"appId": "agent", "rule": "allow"}, {"appId": "files", "rule": "allow"}
+            ]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Built in: a provider with a key, a chat with a file.
+    let (addr, log) = fake_provider();
+    let base_url = format!("http://{addr}/v1");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(
+                json!({"kind": "custom", "name": "Local", "baseUrl": base_url,
+                        "apiKey": "sk-test-secret-1234", "models": ["fake-1", "tools"]}),
+            ),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider_id = body["provider"]["id"].as_str().unwrap().to_string();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "fake-1"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let chat = body["conversation"]["id"].as_str().unwrap().to_string();
+    let (status, body) = server
+        .request_raw(
+            "POST",
+            "/api/ai/files?name=notes.txt",
+            b"buy milk".to_vec(),
+            "text/plain",
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let file: Value = serde_json::from_slice(&body).unwrap();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{chat}/messages"),
+            Some(json!({"text": "hello", "files": [file["id"]]})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let before = ai_finished(&server, &alice, &chat).await;
+    assert_eq!(before["messages"][1]["status"], "done", "{before}");
+
+    // The package: AI Agent's server program, installed and the default.
+    let root = server
+        .state
+        .config
+        .packages_dir()
+        .join("runtimes/ai-agent/1.0.0");
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::create_dir_all(root.join("ui")).unwrap();
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_rast-ai-agent"),
+        root.join("bin/rast-ai-agent"),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        root.join("bin/rast-ai-agent"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::write(root.join("ui/app.js"), "export default { mount() {} };\n").unwrap();
+    let manifest: rast::packages::manifest::Manifest = serde_json::from_value(json!({
+        "schemaVersion": 1, "kind": "rast-package", "id": "ai-agent", "type": "app",
+        "name": "AI Agent", "description": "Chat with AI models",
+        "publisher": {"id": "rast", "name": "RAST"},
+        "version": "1.0.0", "revision": 1,
+        "app": {
+            "id": "agent",
+            "window": {"entry": "ui/app.js", "sdk": 1},
+            "server": {"executable": "bin/rast-ai-agent", "hostApi": 1, "apiPrefix": "/api/ai", "eventPrefix": "ai."}
+        },
+        "artifacts": [{
+            "target": "linux-x86_64", "url": "https://example.com/ai-agent.tar.gz", "sha256": "a".repeat(64),
+            "size": 1, "format": "tar.gz", "provenance": {"kind": "built", "source": "https://example.com"}
+        }]
+    }))
+    .unwrap();
+    rast::packages::store::record_install(
+        &server.state.db,
+        rast::packages::store::NewVersion {
+            manifest: &manifest,
+            source: "official",
+            source_repo: None,
+            target: "linux-x86_64",
+            artifact_url: "https://example.com/ai-agent.tar.gz",
+            release_tag: None,
+            install_path: &root.display().to_string(),
+            size_bytes: 1,
+            check_output: "",
+            installed_by: "admin",
+            artifact_sha256: &"a".repeat(64),
+            installed_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    rast::packages::store::set_default(&server.state.db, "ai-agent", Some("1.0.0"))
+        .await
+        .unwrap();
+    server.state.apps.sync(&server.state).await;
+
+    // The chat came along, answered by the app now.
+    let (status, _, body) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{chat}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["messages"], before["messages"]);
+    let app = server.state.apps.get("agent").expect("the app runs");
+    assert_eq!(app.status().state, "running");
+    let data = app.data_dir();
+    assert!(data.join("agent.db").is_file());
+    assert!(data.join("secret.key").is_file());
+    assert!(
+        data.join(format!(
+            "ai-files/{alice_id}/{}",
+            file["id"].as_str().unwrap()
+        ))
+        .is_file(),
+        "chat files are copied"
+    );
+    let handed: Option<String> =
+        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'apps.agent.handedOverAt'")
+            .fetch_optional(&server.state.db)
+            .await
+            .unwrap();
+    assert!(handed.is_some(), "RAST knows its data was taken");
+
+    // Its file can still be read; a new reply reaches the provider with the
+    // key the app sealed again.
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/api/ai/files/{}", file["id"].as_str().unwrap()),
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let requests_before = log.lock().unwrap().len();
+    let reply = ai_say(&server, &alice, &chat, "and again").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    assert!(ai_text(&reply).contains("Ahoy"), "{reply}");
+    {
+        let requests = log.lock().unwrap();
+        assert!(requests.len() > requests_before);
+        assert_eq!(requests.last().unwrap().1, "Bearer sk-test-secret-1234");
+    }
+
+    // Accounts come from RAST: the admin list names the chat's owner.
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/conversations", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"][0]["owner"], "alice", "{body}");
+    let (status, _, body) = server
+        .request(
+            "GET",
+            "/api/ai/admin/conversations?q=ali",
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["items"].as_array().unwrap().len(), 1, "{body}");
+
+    // File tools act through File Station as the account.
+    std::fs::write(server.state.storage.home_dir("alice").join("plan.txt"), "x").unwrap();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "tools"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let tools_chat = body["conversation"]["id"].as_str().unwrap().to_string();
+    let reply = ai_say(&server, &alice, &tools_chat, "list please").await;
+    assert_eq!(reply["status"], "waiting", "{reply}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{tools_chat}/tools/call_0_list_files"),
+            Some(json!({"decision": "allow", "always": false})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let done = ai_finished(&server, &alice, &tools_chat).await;
+    let reply = done["messages"].as_array().unwrap().last().unwrap().clone();
+    assert!(reply.to_string().contains("plan.txt"), "{reply}");
+
+    // Nobody else reaches the app's server: RAST's sign-in comes first.
+    let (status, _, _) = server
+        .request("GET", "/api/ai/options", None, Default::default())
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.state.apps.stop_all().await;
+}

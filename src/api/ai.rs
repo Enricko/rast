@@ -21,15 +21,14 @@ use serde_json::{json, Value};
 use sqlx::Row;
 
 use crate::{
-    ai::{self, provider, run::ReplyJob, tools, Kind, LimitRule},
-    audit::{self, AuditLog},
+    ai::{self, host::Agent, provider, run::ReplyJob, tools, Kind, LimitRule},
+    audit::AuditLog,
     auth::{AdminUser, AuthUser, ClientIp},
     db::now_ms,
     error::{AppError, AppResult},
-    state::AppState,
 };
 
-pub fn routes() -> Router<AppState> {
+pub fn routes() -> Router<Agent> {
     Router::new()
         .route("/api/ai/options", get(options))
         .route("/api/ai/usage", get(my_usage))
@@ -140,12 +139,12 @@ fn models_list(models: &[String]) -> AppResult<Vec<String>> {
 }
 
 /// Tell the app's open pages that the setup changed.
-fn config_changed(state: &AppState, what: &str) {
-    state.events.publish("ai.config", json!({ "what": what }));
+fn config_changed(state: &Agent, what: &str) {
+    state.host.publish("ai.config", json!({ "what": what }));
 }
 
 async fn audit_admin(
-    state: &AppState,
+    state: &Agent,
     admin: &AuthUser,
     ip: &ClientIp,
     action: &str,
@@ -153,22 +152,22 @@ async fn audit_admin(
     id: &str,
     name: &str,
 ) {
-    audit::record_with_events(
-        &state.db,
-        &state.events,
-        AuditLog::new(action)
-            .actor(admin)
-            .object(kind, id)
-            .path(name)
-            .success()
-            .ip(ip.as_string()),
-    )
-    .await;
+    state
+        .host
+        .audit(
+            AuditLog::new(action)
+                .actor(admin)
+                .object(kind, id)
+                .path(name)
+                .success()
+                .ip(ip.as_string()),
+        )
+        .await;
 }
 
 /// The conversation, if `user` owns it (administrators: any, read-only).
 async fn owned(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     id: &str,
     write: bool,
@@ -199,7 +198,7 @@ struct Resolved {
 }
 
 async fn resolve(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     agent_id: Option<&str>,
     provider_id: Option<&str>,
@@ -244,7 +243,7 @@ async fn resolve(
         ));
     }
     if !user.is_admin() {
-        let limits = ai::effective_limits(&state.db, user).await?;
+        let limits = ai::effective_limits(state, user).await?;
         if !limits.allows(&provider.id) {
             return Err(AppError::Forbidden(
                 "your account may not use this provider",
@@ -269,8 +268,8 @@ async fn resolve(
 // --------------------------------------------------------------- people
 
 /// GET /api/ai/options — what the account can chat with, and its allowance.
-async fn options(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    let limits = ai::effective_limits(&state.db, &user).await?;
+async fn options(State(state): State<Agent>, user: AuthUser) -> AppResult<Json<Value>> {
+    let limits = ai::effective_limits(&state, &user).await?;
     let providers: Vec<ai::Provider> = ai::providers(&state.db)
         .await?
         .into_iter()
@@ -300,8 +299,8 @@ async fn options(State(state): State<AppState>, user: AuthUser) -> AppResult<Jso
 }
 
 /// GET /api/ai/usage
-async fn my_usage(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<Value>> {
-    let limits = ai::effective_limits(&state.db, &user).await?;
+async fn my_usage(State(state): State<Agent>, user: AuthUser) -> AppResult<Json<Value>> {
+    let limits = ai::effective_limits(&state, &user).await?;
     Ok(Json(json!({
         "limits": limits,
         "allowance": ai::allowance(&state.db, user.id, &limits).await?,
@@ -318,7 +317,7 @@ struct ListQuery {
 
 /// GET /api/ai/conversations — the account's own, newest first.
 async fn list_conversations(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
@@ -379,7 +378,7 @@ fn allowed_tool_list(list: &[String]) -> AppResult<Vec<String>> {
 
 /// POST /api/ai/conversations
 async fn create_conversation(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Json(body): Json<NewConversation>,
 ) -> AppResult<Json<Value>> {
@@ -425,7 +424,7 @@ async fn create_conversation(
     .execute(&state.db)
     .await?;
     let value = conversation.json(None, false);
-    state.events.publish_user_and_admin(
+    state.host.publish_user_and_admin(
         "ai.conversation",
         user.id,
         json!({ "conversation": conversation.json(Some(&user.username), false) }),
@@ -436,7 +435,7 @@ async fn create_conversation(
 /// GET /api/ai/conversations/{id} — with its messages; a reply being
 /// written comes with what it has so far (`seq`: deltas already in it).
 async fn get_conversation(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -444,25 +443,26 @@ async fn get_conversation(
     let conversation = owned(&state, &user, &id, false).await?;
     let mut owner: Option<String> = None;
     if conversation.user_id != user.id {
-        let name: Option<String> = sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
-            .bind(conversation.user_id)
-            .fetch_optional(&state.db)
-            .await?;
-        audit::record_with_events(
-            &state.db,
-            &state.events,
-            AuditLog::new("ai.conversation.view")
-                .actor(&user)
-                .object("ai_conversation", &conversation.id)
-                .path(format!(
-                    "{} — {}",
-                    name.as_deref().unwrap_or("?"),
-                    conversation.title
-                ))
-                .success()
-                .ip(ip.as_string()),
-        )
-        .await;
+        let name = state
+            .host
+            .account(conversation.user_id)
+            .await?
+            .map(|a| a.username);
+        state
+            .host
+            .audit(
+                AuditLog::new("ai.conversation.view")
+                    .actor(&user)
+                    .object("ai_conversation", &conversation.id)
+                    .path(format!(
+                        "{} — {}",
+                        name.as_deref().unwrap_or("?"),
+                        conversation.title
+                    ))
+                    .success()
+                    .ip(ip.as_string()),
+            )
+            .await;
         owner = name;
     }
     let active = state.ai.get(&conversation.id);
@@ -509,7 +509,7 @@ struct ConversationPatch {
 
 /// PATCH /api/ai/conversations/{id}
 async fn update_conversation(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
     Json(body): Json<ConversationPatch>,
@@ -591,7 +591,7 @@ async fn update_conversation(
     .execute(&state.db)
     .await?;
     let running = state.ai.running(&conversation.id);
-    state.events.publish_user_and_admin(
+    state.host.publish_user_and_admin(
         "ai.conversation",
         user.id,
         json!({ "conversation": conversation.json(Some(&user.username), running) }),
@@ -603,7 +603,7 @@ async fn update_conversation(
 
 /// DELETE /api/ai/conversations/{id} (what it used stays counted).
 async fn delete_conversation(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
@@ -615,7 +615,7 @@ async fn delete_conversation(
         .bind(&conversation.id)
         .execute(&state.db)
         .await?;
-    state.events.publish_user_and_admin(
+    state.host.publish_user_and_admin(
         "ai.conversation",
         user.id,
         json!({ "conversation": {"id": conversation.id, "userId": user.id}, "deleted": true }),
@@ -640,7 +640,7 @@ struct UploadQuery {
 /// POST /api/ai/files?name= — a file for the next message (raw body): an
 /// image, a PDF or a text file, up to 10 MiB.
 async fn upload_file(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Query(query): Query<UploadQuery>,
     headers: HeaderMap,
@@ -722,7 +722,7 @@ fn artifact_page(kind: &str, content: &str) -> Option<String> {
 /// artifact as a page, for whoever may read the chat, sandboxed by
 /// [`ARTIFACT_CSP`] and framed only by RAST itself. A version never changes.
 async fn get_artifact(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path((id, call_id)): Path<(String, String)>,
 ) -> AppResult<Response> {
@@ -770,7 +770,7 @@ async fn get_artifact(
 /// A file never changes, so its id is its ETag; every use still checks the
 /// session (`no-cache`), so another account on the same browser gets none.
 async fn get_file(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
     request_headers: HeaderMap,
@@ -855,7 +855,7 @@ async fn get_file(
 /// DELETE /api/ai/files/{id} — take a file out of the message box (only
 /// before it is sent).
 async fn delete_file(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
@@ -877,7 +877,7 @@ struct Prepared {
 /// Check that `user` may go on in the conversation now: its agent and
 /// model, the allowance, the provider's key.
 async fn prepare(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     conversation: &ai::Conversation,
 ) -> AppResult<Prepared> {
@@ -889,7 +889,7 @@ async fn prepare(
         &conversation.model,
     )
     .await?;
-    let limits = ai::effective_limits(&state.db, user).await?;
+    let limits = ai::effective_limits(state, user).await?;
     ai::check_allowance(&state.db, user.id, &limits).await?;
     let (api_key, account) = if resolved.provider.kind.signs_in() {
         let (token, account) =
@@ -914,7 +914,7 @@ async fn prepare(
 
 /// The run for reply `message_id` (its history: the messages before it).
 async fn reply_job(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     conversation: &ai::Conversation,
     prepared: Prepared,
@@ -980,7 +980,7 @@ async fn reply_job(
     })
 }
 
-async fn last_message(state: &AppState, conversation_id: &str) -> AppResult<Option<ai::Message>> {
+async fn last_message(state: &Agent, conversation_id: &str) -> AppResult<Option<ai::Message>> {
     let row =
         sqlx::query("SELECT * FROM ai_messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1")
             .bind(conversation_id)
@@ -989,8 +989,8 @@ async fn last_message(state: &AppState, conversation_id: &str) -> AppResult<Opti
     Ok(row.as_ref().map(ai::message_from_row))
 }
 
-fn publish_message(state: &AppState, owner_id: i64, message: &ai::Message, running: bool) {
-    state.events.publish_user_and_admin(
+fn publish_message(state: &Agent, owner_id: i64, message: &ai::Message, running: bool) {
+    state.host.publish_user_and_admin(
         "ai.message",
         owner_id,
         json!({"conversationId": message.conversation_id, "message": message.json(), "running": running, "seq": 0}),
@@ -999,7 +999,7 @@ fn publish_message(state: &AppState, owner_id: i64, message: &ai::Message, runni
 
 /// End a reply that waits for tool answers (stopped, its calls not run).
 /// Call with `decide` held. Returns whether one waited.
-async fn end_waiting(state: &AppState, conversation: &ai::Conversation) -> AppResult<bool> {
+async fn end_waiting(state: &Agent, conversation: &ai::Conversation) -> AppResult<bool> {
     let Some(mut message) = last_message(state, &conversation.id).await? else {
         return Ok(false);
     };
@@ -1032,7 +1032,7 @@ async fn end_waiting(state: &AppState, conversation: &ai::Conversation) -> AppRe
 /// background (`ai.delta`, then `ai.message`). A reply waiting for tool
 /// answers ends first (its calls are not run).
 async fn send_message(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
     Json(body): Json<NewMessage>,
@@ -1116,13 +1116,13 @@ async fn send_message(
     let reply = ai::message(&state.db, reply_id).await?.map(|m| m.json());
     let conversation_json = conversation.json(None, true);
     for message in [&sent, &reply].into_iter().flatten() {
-        state.events.publish_user_and_admin(
+        state.host.publish_user_and_admin(
             "ai.message",
             user.id,
             json!({"conversationId": conversation.id, "message": message, "running": true}),
         );
     }
-    state.events.publish_user_and_admin(
+    state.host.publish_user_and_admin(
         "ai.conversation",
         user.id,
         json!({ "conversation": conversation.json(Some(&user.username), true) }),
@@ -1137,7 +1137,7 @@ async fn send_message(
 /// POST /api/ai/conversations/{id}/stop — also ends a reply waiting for
 /// tool answers.
 async fn stop_reply(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
@@ -1149,7 +1149,7 @@ async fn stop_reply(
     let ended = end_waiting(&state, &conversation).await?;
     if ended {
         conversation.waiting = false;
-        state.events.publish_user_and_admin(
+        state.host.publish_user_and_admin(
             "ai.conversation",
             user.id,
             json!({ "conversation": conversation.json(Some(&user.username), false) }),
@@ -1172,7 +1172,7 @@ struct ToolDecision {
 /// POST /api/ai/conversations/{id}/tools/{callId} — the owner's answer to a
 /// tool request. Once every call of the reply is answered it goes on.
 async fn decide_tool(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     user: AuthUser,
     Path((id, call_id)): Path<(String, String)>,
     Json(body): Json<ToolDecision>,
@@ -1268,7 +1268,7 @@ async fn decide_tool(
     // Before the run publishes anything of its own.
     publish_message(&state, user.id, &message, true);
     reservation.start(state.clone(), job);
-    state.events.publish_user_and_admin(
+    state.host.publish_user_and_admin(
         "ai.conversation",
         user.id,
         json!({ "conversation": conversation.json(Some(&user.username), true) }),
@@ -1278,7 +1278,7 @@ async fn decide_tool(
     ))
 }
 
-async fn store_allowed_tools(state: &AppState, conversation: &ai::Conversation) -> AppResult<()> {
+async fn store_allowed_tools(state: &Agent, conversation: &ai::Conversation) -> AppResult<()> {
     sqlx::query("UPDATE ai_conversations SET allowed_tools = ? WHERE id = ?")
         .bind(serde_json::to_string(&conversation.allowed_tools).unwrap_or_else(|_| "[]".into()))
         .bind(&conversation.id)
@@ -1290,7 +1290,7 @@ async fn store_allowed_tools(state: &AppState, conversation: &ai::Conversation) 
 // -------------------------------------------------------- administrators
 
 /// GET /api/ai/admin/overview — the whole setup, for the settings page.
-async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+async fn admin_overview(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
     let providers: Vec<Value> = ai::providers(&state.db)
         .await?
@@ -1317,29 +1317,28 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
             })
         })
         .collect();
-    let users: Vec<Value> = sqlx::query(
-        "SELECT id, username, display_name, role, active FROM users ORDER BY username COLLATE NOCASE",
-    )
-    .fetch_all(&state.db)
-    .await?
-    .iter()
-    .map(|row| {
-        json!({
-            "id": row.get::<i64, _>("id"),
-            "username": row.get::<String, _>("username"),
-            "displayName": row.get::<String, _>("display_name"),
-            "isAdmin": row.get::<String, _>("role") == "admin",
-            "active": row.get::<i64, _>("active") != 0,
+    let users: Vec<Value> = state
+        .host
+        .accounts()
+        .await?
+        .iter()
+        .map(|a| {
+            json!({
+                "id": a.id,
+                "username": a.username,
+                "displayName": a.display_name,
+                "isAdmin": a.is_admin(),
+                "active": a.active,
+            })
         })
-    })
-    .collect();
-    let groups: Vec<Value> =
-        sqlx::query("SELECT id, name FROM groups ORDER BY name COLLATE NOCASE")
-            .fetch_all(&state.db)
-            .await?
-            .iter()
-            .map(|row| json!({"id": row.get::<i64, _>("id"), "name": row.get::<String, _>("name")}))
-            .collect();
+        .collect();
+    let groups: Vec<Value> = state
+        .host
+        .groups()
+        .await?
+        .iter()
+        .map(|g| json!({"id": g.id, "name": g.name}))
+        .collect();
     let usage: Vec<Value> = ai::used_by_account(&state.db, &ai::periods())
         .await?
         .into_iter()
@@ -1384,7 +1383,7 @@ struct UsageQuery {
 /// GET /api/ai/admin/usage?days=30 — everyone's use together: per day and
 /// per model, with totals and what it is worth at API prices.
 async fn admin_usage_all(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<Value>> {
@@ -1396,25 +1395,25 @@ async fn admin_usage_all(
 /// GET /api/ai/admin/usage/{userId}?days=30 — one account's use: its
 /// allowance now, a total per day and per model.
 async fn admin_usage(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     Path(user_id): Path<i64>,
     Query(query): Query<UsageQuery>,
 ) -> AppResult<Json<Value>> {
     let _ = admin;
-    let row = sqlx::query("SELECT id, username, display_name, role FROM users WHERE id = ?")
-        .bind(user_id)
-        .fetch_optional(&state.db)
+    let account = state
+        .host
+        .account(user_id)
         .await?
         .ok_or(AppError::NotFound("no such account"))?;
-    let is_admin = row.get::<String, _>("role") == "admin";
-    let limits = ai::effective_limits_for(&state.db, user_id, is_admin).await?;
+    let is_admin = account.is_admin();
+    let limits = ai::effective_limits_for(&state.db, user_id, is_admin, &account.groups).await?;
     let days = query.days.unwrap_or(30).clamp(1, 366);
     let mut history = ai::usage_history(&state.db, Some(user_id), days).await?;
     history["user"] = json!({
         "id": user_id,
-        "username": row.get::<String, _>("username"),
-        "displayName": row.get::<String, _>("display_name"),
+        "username": account.username,
+        "displayName": account.display_name,
         "isAdmin": is_admin,
     });
     history["allowance"] = ai::allowance(&state.db, user_id, &limits).await?;
@@ -1431,7 +1430,7 @@ struct ServerAccess {
 /// PUT /api/ai/server-access — whether accounts that are not
 /// administrators may read the server and run read-only commands there.
 async fn put_server_access(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<ServerAccess>,
@@ -1467,7 +1466,7 @@ struct SearchBody {
 }
 
 /// GET /api/ai/search — the web search service agents use.
-async fn get_search(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+async fn get_search(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
     Ok(Json(
         json!({ "search": tools::search_config(&state.db).await.public_json(&state.secrets) }),
@@ -1476,7 +1475,7 @@ async fn get_search(State(state): State<AppState>, admin: AdminUser) -> AppResul
 
 /// PUT /api/ai/search
 async fn put_search(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<SearchBody>,
@@ -1547,7 +1546,7 @@ async fn put_search(
 }
 
 /// POST /api/ai/search/test — one search with the saved service.
-async fn test_search(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+async fn test_search(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
     let config = tools::search_config(&state.db).await;
     if !config.is_configured() {
@@ -1568,26 +1567,43 @@ async fn test_search(State(state): State<AppState>, admin: AdminUser) -> AppResu
 
 /// GET /api/ai/admin/conversations — every account's, newest first.
 async fn admin_conversations(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     Query(query): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
     let _ = admin;
     let limit = query.limit.unwrap_or(200).clamp(1, 500);
-    let pattern = format!("%{}%", query.q.as_deref().unwrap_or("").trim());
+    let text = query.q.as_deref().unwrap_or("").trim().to_lowercase();
+    let pattern = format!("%{text}%");
+    // Accounts RAST knows (a removed account's chats stay out), and those
+    // whose name matches the search.
+    let accounts = state.host.accounts().await?;
+    let names: std::collections::HashMap<i64, String> = accounts
+        .iter()
+        .map(|a| (a.id, a.username.clone()))
+        .collect();
+    let known: Vec<i64> = accounts.iter().map(|a| a.id).collect();
+    let matching: Vec<i64> = accounts
+        .iter()
+        .filter(|a| a.username.to_lowercase().contains(&text))
+        .map(|a| a.id)
+        .collect();
     let rows = sqlx::query(
-        "SELECT c.*, u.username AS owner,
+        "SELECT c.*,
                 (SELECT COUNT(*) FROM ai_messages m WHERE m.conversation_id = c.id) AS message_count,
                 (SELECT status FROM ai_messages m WHERE m.conversation_id = c.id
                  ORDER BY m.id DESC LIMIT 1) AS last_status
-         FROM ai_conversations c JOIN users u ON u.id = c.user_id
-         WHERE (? IS NULL OR c.user_id = ?) AND (c.title LIKE ? OR u.username LIKE ?)
+         FROM ai_conversations c
+         WHERE c.user_id IN (SELECT value FROM json_each(?))
+           AND (? IS NULL OR c.user_id = ?)
+           AND (c.title LIKE ? OR c.user_id IN (SELECT value FROM json_each(?)))
          ORDER BY c.updated_at DESC LIMIT ?",
     )
+    .bind(json!(known).to_string())
     .bind(query.user_id)
     .bind(query.user_id)
     .bind(&pattern)
-    .bind(&pattern)
+    .bind(json!(matching).to_string())
     .bind(limit)
     .fetch_all(&state.db)
     .await?;
@@ -1595,10 +1611,8 @@ async fn admin_conversations(
         .iter()
         .map(|row| {
             let conversation = ai::conversation_from_row(row);
-            let mut value = conversation.json(
-                Some(&row.get::<String, _>("owner")),
-                state.ai.running(&conversation.id),
-            );
+            let owner = names.get(&conversation.user_id).map(String::as_str);
+            let mut value = conversation.json(owner, state.ai.running(&conversation.id));
             value["messageCount"] = json!(row.get::<i64, _>("message_count"));
             value
         })
@@ -1689,7 +1703,7 @@ fn checked_key(raw: Option<&str>) -> AppResult<Option<String>> {
 
 /// POST /api/ai/providers
 async fn create_provider(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<ProviderBody>,
@@ -1765,7 +1779,7 @@ async fn create_provider(
 
 /// PUT /api/ai/providers/{id}
 async fn update_provider(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -1853,7 +1867,7 @@ async fn update_provider(
 /// DELETE /api/ai/providers/{id} (agents and conversations using it keep
 /// their messages and need another model).
 async fn delete_provider(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -1881,7 +1895,7 @@ async fn delete_provider(
 
 /// GET /api/ai/prices — every provider's models with their prices and
 /// where each comes from, and the built-in list.
-async fn get_prices(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+async fn get_prices(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
     Ok(Json(ai::prices::listing(&ai::providers(&state.db).await?)))
 }
@@ -1889,7 +1903,7 @@ async fn get_prices(State(state): State<AppState>, admin: AdminUser) -> AppResul
 /// POST /api/ai/prices/refresh — ask every provider in use (not local)
 /// for its list prices now.
 async fn refresh_prices(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
 ) -> AppResult<Json<Value>> {
@@ -1932,7 +1946,7 @@ struct ModelPriceBody {
 
 /// PUT /api/ai/providers/{id}/prices — set one model's price on a provider.
 async fn put_model_price(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -1988,7 +2002,7 @@ struct ProbeBody {
 /// POST /api/ai/providers/models — test a provider (saved or being added)
 /// and list its models.
 async fn probe_models(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     Json(body): Json<ProbeBody>,
 ) -> AppResult<Json<Value>> {
@@ -2073,7 +2087,7 @@ fn flow_name(plan: ai::signin::Plan) -> &'static str {
 /// that signed in, with the models the plan offers (when they can be read).
 /// Shared by every plan flow (browser paste, device poll, Claude Code import).
 async fn store_signed_in(
-    state: &AppState,
+    state: &Agent,
     user: &AuthUser,
     ip: &ClientIp,
     plan: ai::signin::Plan,
@@ -2178,7 +2192,7 @@ struct SignInStart {
 /// open (browser flows) or a code to enter (device flows); see
 /// [`ai::signin`].
 async fn start_sign_in(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     Json(body): Json<SignInStart>,
 ) -> AppResult<Json<Value>> {
@@ -2254,7 +2268,7 @@ struct SignInFinish {
 /// code for tokens, then add the provider (or sign it in again) for the
 /// account that signed in, with the models its plan offers.
 async fn finish_sign_in(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<SignInFinish>,
@@ -2301,7 +2315,7 @@ struct SignInPoll {
 /// POST /api/ai/providers/sign-in/poll — one device flow's state: waiting,
 /// or the provider it added. The page polls this every few seconds.
 async fn poll_sign_in(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<SignInPoll>,
@@ -2348,7 +2362,7 @@ struct ClaudeImport {
 /// POST /api/ai/providers/import/claude-code — use the Claude Code login
 /// already on the server instead of a browser round trip.
 async fn import_claude_code(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<ClaudeImport>,
@@ -2392,7 +2406,7 @@ async fn import_claude_code(
 /// provider stays (and its models), but nobody can chat with it until
 /// someone signs in again.
 async fn sign_out_provider(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -2461,7 +2475,7 @@ struct CheckedAgent {
     tools: Option<String>,
 }
 
-async fn check_agent(state: &AppState, body: &AgentBody) -> AppResult<CheckedAgent> {
+async fn check_agent(state: &Agent, body: &AgentBody) -> AppResult<CheckedAgent> {
     let name = required(&body.name, "the name", ai::MAX_NAME)?;
     let description = bounded(
         body.description.trim(),
@@ -2542,7 +2556,7 @@ async fn check_agent(state: &AppState, body: &AgentBody) -> AppResult<CheckedAge
 
 /// POST /api/ai/agents
 async fn create_agent(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<AgentBody>,
@@ -2586,7 +2600,7 @@ async fn create_agent(
 
 /// PUT /api/ai/agents/{id}
 async fn update_agent(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -2631,7 +2645,7 @@ async fn update_agent(
 
 /// DELETE /api/ai/agents/{id}
 async fn delete_agent(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -2688,7 +2702,7 @@ fn check_skill(body: &SkillBody) -> AppResult<(String, String, String)> {
 
 /// POST /api/ai/skills
 async fn create_skill(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Json(body): Json<SkillBody>,
@@ -2724,7 +2738,7 @@ async fn create_skill(
 
 /// PUT /api/ai/skills/{id}
 async fn update_skill(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -2761,7 +2775,7 @@ async fn update_skill(
 
 /// DELETE /api/ai/skills/{id} (agents stop carrying it).
 async fn delete_skill(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(id): Path<String>,
@@ -2819,7 +2833,7 @@ struct LimitBody {
     monthly_cost: Option<f64>,
 }
 
-async fn subject_name(state: &AppState, subject: &str) -> AppResult<String> {
+async fn subject_name(state: &Agent, subject: &str) -> AppResult<String> {
     if !ai::valid_subject(subject) {
         return Err(AppError::bad_request(
             "limits are for 'default', 'user:<id>' or 'group:<id>'",
@@ -2835,22 +2849,22 @@ async fn subject_name(state: &AppState, subject: &str) -> AppResult<String> {
     };
     let id: i64 = id.parse().map_err(|_| AppError::bad_request("bad id"))?;
     let name: Option<String> = if is_user {
-        sqlx::query_scalar("SELECT username FROM users WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await?
+        state.host.account(id).await?.map(|a| a.username)
     } else {
-        sqlx::query_scalar("SELECT name FROM groups WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&state.db)
+        state
+            .host
+            .groups()
             .await?
+            .into_iter()
+            .find(|g| g.id == id)
+            .map(|g| g.name)
     };
     name.ok_or(AppError::NotFound("no such account or group"))
 }
 
 /// PUT /api/ai/limits/{subject}
 async fn put_limit(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(subject): Path<String>,
@@ -2914,7 +2928,7 @@ async fn put_limit(
 
 /// DELETE /api/ai/limits/{subject}
 async fn delete_limit(
-    State(state): State<AppState>,
+    State(state): State<Agent>,
     admin: AdminUser,
     ip: ClientIp,
     Path(subject): Path<String>,

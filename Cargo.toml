@@ -15,6 +15,11 @@ categories = ["web-programming::http-server", "command-line-utilities"]
 name = "rast"
 path = "src/main.rs"
 
+# AI Agent's server, shipped in its Package Center app package.
+[[bin]]
+name = "rast-ai-agent"
+path = "src/bin/rast-ai-agent.rs"
+
 [lib]
 name = "rast"
 path = "src/lib.rs"

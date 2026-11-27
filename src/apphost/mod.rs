@@ -17,6 +17,7 @@
 //! removing the package restarts or stops the app (on `package.changed`).
 
 pub mod host_api;
+pub mod migrate;
 pub mod proxy;
 
 use std::{

@@ -40,6 +40,16 @@ pub async fn init(cfg: &Config) -> AppResult<SqlitePool> {
 /// Connect to a SQLite database at `path`, creating it when missing, and apply
 /// pending migrations. WAL is used because the database sits on local storage.
 pub async fn connect(path: &Path, max_connections: u32) -> AppResult<SqlitePool> {
+    connect_with(path, max_connections, &MIGRATOR).await
+}
+
+/// [`connect`], applying `migrator`'s migrations (another program's
+/// database, such as AI Agent's `agent.db`).
+pub async fn connect_with(
+    path: &Path,
+    max_connections: u32,
+    migrator: &sqlx::migrate::Migrator,
+) -> AppResult<SqlitePool> {
     let opts = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
@@ -63,7 +73,7 @@ pub async fn connect(path: &Path, max_connections: u32) -> AppResult<SqlitePool>
             ))
         })?;
 
-    MIGRATOR
+    migrator
         .run(&pool)
         .await
         .map_err(|e| crate::error::AppError::internal(format!("database migration failed: {e}")))?;

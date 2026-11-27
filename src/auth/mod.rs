@@ -15,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, error::AppError, state::AppState};
+use crate::{config::Config, error::AppError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -136,12 +136,14 @@ where
     }
 }
 
-impl FromRequestParts<AppState> for AuthUser {
+// The extractors read what the sign-in layer put in the request, whatever
+// the router's state (RAST's, or a Package Center app's own).
+impl<S: Send + Sync> FromRequestParts<S> for AuthUser {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        _state: &AppState,
+        _state: &S,
     ) -> Result<Self, Self::Rejection> {
         parts
             .extensions
@@ -151,12 +153,12 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-impl FromRequestParts<AppState> for ClientIp {
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        _state: &AppState,
+        _state: &S,
     ) -> Result<Self, Self::Rejection> {
         Ok(parts
             .extensions
@@ -172,12 +174,12 @@ impl FromRequestParts<AppState> for ClientIp {
 #[derive(Debug, Clone)]
 pub struct AdminUser(pub AuthUser);
 
-impl FromRequestParts<AppState> for AdminUser {
+impl<S: Send + Sync> FromRequestParts<S> for AdminUser {
     type Rejection = AppError;
 
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
-        state: &AppState,
+        state: &S,
     ) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
         user.require_admin()?;
