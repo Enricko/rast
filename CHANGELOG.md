@@ -115,6 +115,11 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **AI Agent shows what a reply is doing.** While a reply is being written, a
+  line under it says "Thinking", "Writing" or "Reading the results" with a
+  timer that counts up, so a model that thinks for a while (Codex on Max)
+  no longer looks stuck behind a lone cursor. Streamed thinking shows its
+  time too, and a finished reply shows how long it took beside its tokens.
 - **AI Agent's chat list** hides and shows with the button at its top (the
   chat gets the whole window; the header's button brings it back). In a
   narrow window it slides over the chat and closes again with its button,

@@ -525,6 +525,30 @@ export function upsertMessage(messages: Message[], message: Message): void {
   else messages.splice(after, 0, message);
 }
 
+/** How long something took or has been going: "4s", "1m 05s", "1h 02m". */
+export function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+/**
+ * What a reply that is still being written is doing, for the line under it
+ * ("Thinking", "Writing", …), or null while something else shows it (a
+ * tool card that runs, thinking that streams).
+ */
+export function replyActivity(message: Pick<Message, "status" | "content">): string | null {
+  if (message.status !== "streaming") return null;
+  const tail = message.content[message.content.length - 1];
+  if (!tail) return "Thinking";
+  if (tail.type === "reasoning") return tail.text ? null : "Thinking";
+  if (tail.type === "text") return tail.text ? "Writing" : "Thinking";
+  if (tail.type === "tool") return tail.status === "running" || tail.status === "allowed" ? null : "Reading the results";
+  return "Working";
+}
+
 export function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;

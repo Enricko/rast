@@ -5561,7 +5561,7 @@ button.pkg-pill {
   color: color-mix(in srgb, var(--accent) 70%, #a855f7);
 }
 
-.ai-thinking.is-live summary span {
+.ai-thinking.is-live summary .ai-thinking-label {
   background: linear-gradient(90deg, var(--text-faint), var(--text), var(--text-faint));
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -5588,9 +5588,75 @@ button.pkg-pill {
 
 @media (prefers-reduced-motion: reduce) {
   .ai-orb,
-  .ai-thinking.is-live summary span {
+  .ai-thinking.is-live summary .ai-thinking-label,
+  .ai-working-label,
+  .ai-working-dots span {
     animation: none;
   }
+}
+
+/* A reply being written: what it does and for how long. */
+.ai-working {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 24px;
+  color: var(--text-dim);
+  font-size: var(--font-size-sm);
+}
+
+.ai-working-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-working-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: ai-bounce 1.2s ease-in-out infinite;
+}
+
+.ai-working-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.ai-working-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes ai-bounce {
+  0%,
+  70%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+
+.ai-working-label {
+  background: linear-gradient(90deg, var(--text-faint), var(--text), var(--text-faint));
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ai-shimmer 1.6s linear infinite;
+}
+
+.ai-working-time {
+  color: var(--text-faint);
+  font-size: var(--font-size-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-thinking summary .ai-working-time {
+  margin-left: 2px;
 }
 
 .ai-error {

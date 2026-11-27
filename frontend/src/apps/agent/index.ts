@@ -21,6 +21,8 @@ import {
   EFFORTS,
   effortLabel,
   formatTokens,
+  formatElapsed,
+  replyActivity,
   groupByDay,
   maySkipAsking,
   messageText,
@@ -1024,14 +1026,20 @@ function mountAgentApp(ctx: AppContext): AppInstance {
             details.open = opened.get(key) ?? live;
             details.classList.toggle("is-live", live);
             details.append(
-              h("summary", {}, iconSvg("sparkle", 13), h("span", {}, live ? "Thinking…" : "Thought it through")),
+              h(
+                "summary",
+                {},
+                iconSvg("sparkle", 13),
+                h("span", { class: "ai-thinking-label" }, live ? "Thinking…" : "Thought it through"),
+                live ? elapsedSince(message.createdAt) : null,
+              ),
               h("div", { class: "ai-thinking-text" }, block.text),
             );
             return details;
           }),
         );
       } else if (block.type === "text") {
-        if (!block.text && !live) return;
+        if (!block.text) return;
         parts.push(
           reuse(index, sig, () => {
             const md = h("div", { class: "ai-md" });
@@ -1046,16 +1054,19 @@ function mountAgentApp(ctx: AppContext): AppInstance {
         parts.push(reuse(index, sig, () => toolCard(message, block, opened)));
       }
     });
-    // Between steps: still working.
-    const tail = blocks[last];
-    const toolBusy = tail?.type === "tool" && (tail.status === "running" || tail.status === "allowed");
-    if (streaming && tail?.type !== "text" && !toolBusy && !(tail?.type === "reasoning")) {
+    // While it is written: what it is doing, and for how long.
+    const activity = replyActivity(message);
+    if (activity) {
       parts.push(
-        reuse(-1, "caret", () => {
-          const md = h("div", { class: "ai-md" });
-          caretInto(md);
-          return md;
-        }),
+        reuse(-1, `working|${activity}|${message.createdAt}`, () =>
+          h(
+            "div",
+            { class: "ai-working", role: "status" },
+            h("span", { class: "ai-working-dots", ariaHidden: true }, h("span", {}), h("span", {}), h("span", {})),
+            h("span", { class: "ai-working-label" }, activity),
+            elapsedSince(message.createdAt),
+          ),
+        ),
       );
     }
     if (message.status === "error") {
@@ -1067,6 +1078,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       if (message.model) meta.push(message.model);
       if (message.status === "stopped") meta.push("stopped");
       if (message.inputTokens || message.outputTokens) meta.push(`${formatTokens(message.inputTokens + message.outputTokens)} tokens`);
+      if (message.finishedAt && message.createdAt && message.finishedAt >= message.createdAt) meta.push(formatElapsed(message.finishedAt - message.createdAt));
       parts.push(
         reuse(-3, `${meta.join("|")}|${text}`, () =>
           h(
@@ -1171,6 +1183,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   }
 
   /** The typing caret goes at the end of the last line of text. */
+  /** A time that counts up from `since` (kept current by `ticker`). */
+  function elapsedSince(since: number): HTMLElement {
+    return h("span", { class: "ai-working-time", ariaHidden: true, dataset: { since: String(since) } }, formatElapsed(Date.now() - since));
+  }
+
   function caretInto(md: HTMLElement): void {
     const caret = h("span", { class: "ai-caret", ariaHidden: true });
     let target: Element = md;
@@ -1318,8 +1335,15 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (params.settings) openSettings();
     else if (params.conversationId) void openConversation(params.conversationId);
   });
+  // Counting times of replies being written, once a second.
+  const ticker = window.setInterval(() => {
+    for (const el of ctx.root.querySelectorAll<HTMLElement>(".ai-working-time[data-since]")) {
+      el.textContent = formatElapsed(Date.now() - Number(el.dataset.since));
+    }
+  }, 1000);
   ctx.onDispose(() => {
     disposed = true;
+    window.clearInterval(ticker);
     followObserver.disconnect();
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     for (const entry of bodies.values()) if (entry.frame) window.cancelAnimationFrame(entry.frame);

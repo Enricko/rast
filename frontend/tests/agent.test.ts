@@ -12,6 +12,8 @@ import {
   formatPrice,
   priceRules,
   planLabel,
+  formatElapsed,
+  replyActivity,
   applyDelta,
   groupByDay,
   maySkipAsking,
@@ -284,4 +286,22 @@ test("effort levels are labelled, Auto for none", () => {
     EFFORTS.map((e) => e.id),
     ["", "low", "medium", "high", "max"],
   );
+});
+
+test("a reply being written says what it does and for how long", () => {
+  assert.equal(formatElapsed(-5), "0s");
+  assert.equal(formatElapsed(4_900), "4s");
+  assert.equal(formatElapsed(65_000), "1m 05s");
+  assert.equal(formatElapsed(3_725_000), "1h 02m");
+  const reply = (status: Message["status"], content: ContentBlock[]) => replyActivity({ status, content });
+  assert.equal(reply("streaming", []), "Thinking");
+  assert.equal(reply("streaming", [{ type: "text", text: "" }]), "Thinking");
+  assert.equal(reply("streaming", [{ type: "text", text: "Hel" }]), "Writing");
+  // Thinking that streams shows itself.
+  assert.equal(reply("streaming", [{ type: "reasoning", text: "Plan" }]), null);
+  const tool = (status: string) => ({ type: "tool", id: "c1", name: "list_files", input: {}, status }) as unknown as ContentBlock;
+  assert.equal(reply("streaming", [tool("running")]), null);
+  assert.equal(reply("streaming", [tool("done")]), "Reading the results");
+  assert.equal(reply("done", []), null);
+  assert.equal(reply("waiting", [tool("pending")]), null);
 });
