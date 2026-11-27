@@ -573,6 +573,27 @@ fn read_zip_link_target(
 
 /// `true` when `path` (inside `root`) resolves to an executable regular file
 /// inside `root`.
+/// A regular file inside the package (an app's window module or styles).
+pub fn file_inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(root).map_err(|e| format!("cannot resolve package root: {e}"))?;
+    let candidate = root.join(relative);
+    if candidate
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Err(format!("{relative} is not inside the package"));
+    }
+    let resolved = fs::canonicalize(&candidate)
+        .map_err(|_| format!("{relative} does not exist in the package"))?;
+    if !resolved.starts_with(&root) {
+        return Err(format!("{relative} resolves outside the package"));
+    }
+    if !fs::metadata(&resolved).is_ok_and(|m| m.is_file()) {
+        return Err(format!("{relative} is not a file"));
+    }
+    Ok(candidate)
+}
+
 pub fn executable_inside(root: &Path, relative: &str) -> Result<PathBuf, String> {
     let root = fs::canonicalize(root).map_err(|e| format!("cannot resolve package root: {e}"))?;
     let candidate = root.join(relative);

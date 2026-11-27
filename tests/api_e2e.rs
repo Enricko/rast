@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
-        "0004 to 0019 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+        "0004 to 0020 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -6087,4 +6087,302 @@ async fn ai_claude_code_import_is_administrators_only_and_validated() {
         // A real login is on this machine: do not spend it.
         Some(path) => eprintln!("not importing {path:?}: a real Claude Code login exists"),
     }
+}
+
+/// A Package Center app for the tests: a Python server on its socket that
+/// says what it was asked and asks the host API back.
+const DEMO_APP_SERVER: &str = r#"#!/usr/bin/python3
+import http.client, http.server, json, os, socket, socketserver, sys
+
+class Host(http.client.HTTPConnection):
+    def __init__(self):
+        super().__init__("rast-host")
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX)
+        self.sock.connect(os.environ["RAST_HOST_SOCKET"])
+
+def host(method, path, body=None, token=None):
+    conn = Host()
+    headers = {"Authorization": "Bearer " + (token or os.environ["RAST_APP_TOKEN"])}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode()
+        headers["Content-Type"] = "application/json"
+    conn.request(method, path, body=data, headers=headers)
+    response = conn.getresponse()
+    text = response.read().decode()
+    try:
+        return response.status, (json.loads(text) if text else None)
+    except ValueError:
+        return response.status, text
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    def log_message(self, *args):
+        pass
+    def answer(self, value, status=200):
+        body = json.dumps(value).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Set-Cookie", "app=1")
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        try:
+            self.get()
+        except Exception:
+            import traceback
+            self.answer({"crash": traceback.format_exc()}, 500)
+    def get(self):
+        if self.path == "/api/demo/exit":
+            self.answer({"bye": True})
+            self.wfile.flush()
+            os._exit(3)
+        user = json.loads(self.headers.get("X-Rast-User", "null"))
+        info = host("GET", "/v1/info")
+        users = host("GET", "/v1/users")
+        access = host("GET", "/v1/users/%d/apps/files" % user["id"])
+        sent = host("POST", "/v1/events", {"kind": "demo.ping", "scope": {"to": "user", "userId": user["id"]}, "data": {"n": 1}})
+        foreign = host("POST", "/v1/events", {"kind": "files.changed", "scope": {"to": "all"}})
+        audit = host("POST", "/v1/audit", {"action": "demo.visit", "userId": user["id"], "username": user["username"], "detail": "hello"})
+        wrong = host("GET", "/v1/info", token="nope")
+        self.answer({
+            "path": self.path,
+            "user": user,
+            "token": self.headers.get("X-Rast-Token") == os.environ["RAST_APP_TOKEN"],
+            "cookie": self.headers.get("Cookie"),
+            "madeUp": self.headers.get("X-Rast-Admin"),
+            "ip": self.headers.get("X-Rast-Client-Ip"),
+            "info": info,
+            "users": users,
+            "access": access,
+            "sent": sent,
+            "foreign": foreign[0],
+            "audit": audit[0],
+            "wrongToken": wrong[0],
+            "pid": os.getpid(),
+        })
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", "0"))
+        self.answer({"echo": json.loads(self.rfile.read(length))}, 201)
+
+class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    daemon_threads = True
+
+path = os.environ["RAST_APP_SOCKET"]
+server = Server(path, Handler)
+os.chmod(path, 0o600)
+server.serve_forever()
+"#;
+
+#[tokio::test]
+async fn package_center_apps_run_behind_rast() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+
+    // Installed as Package Center would: files in place, a version recorded
+    // and made the default.
+    let root = server
+        .state
+        .config
+        .packages_dir()
+        .join("runtimes/demo-app/1.0.0");
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::create_dir_all(root.join("ui")).unwrap();
+    std::fs::write(root.join("bin/server"), DEMO_APP_SERVER).unwrap();
+    std::fs::set_permissions(
+        root.join("bin/server"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::write(root.join("ui/app.js"), "export default { mount() {} };\n").unwrap();
+    std::fs::write(root.join("ui/app.css"), ".app-demo {}\n").unwrap();
+    let manifest: rast::packages::manifest::Manifest = serde_json::from_value(json!({
+        "schemaVersion": 1, "kind": "rast-package", "id": "demo-app", "type": "app",
+        "name": "Demo", "description": "A test app",
+        "publisher": {"id": "rast", "name": "RAST"},
+        "version": "1.0.0", "revision": 1,
+        "app": {
+            "id": "demo",
+            "window": {"entry": "ui/app.js", "styles": ["ui/app.css"], "sdk": 1},
+            "server": {"executable": "bin/server", "hostApi": 1, "apiPrefix": "/api/demo", "eventPrefix": "demo."}
+        },
+        "artifacts": [{
+            "target": "linux-x86_64", "url": "https://example.com/demo.tar.gz", "sha256": "a".repeat(64),
+            "size": 1, "format": "tar.gz", "provenance": {"kind": "built", "source": "https://example.com"}
+        }]
+    }))
+    .unwrap();
+    rast::packages::store::record_install(
+        &server.state.db,
+        rast::packages::store::NewVersion {
+            manifest: &manifest,
+            source: "official",
+            source_repo: None,
+            target: "linux-x86_64",
+            artifact_url: "https://example.com/demo.tar.gz",
+            release_tag: None,
+            install_path: &root.display().to_string(),
+            size_bytes: 1,
+            check_output: "",
+            installed_by: "admin",
+            artifact_sha256: &"a".repeat(64),
+            installed_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    rast::packages::store::set_default(&server.state.db, "demo-app", Some("1.0.0"))
+        .await
+        .unwrap();
+    server.state.apps.sync(&server.state).await;
+
+    // Its API answers through RAST, saying who asks.
+    let (status, headers, body) = server
+        .request("GET", "/api/demo/hello?x=1", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["path"], "/api/demo/hello?x=1");
+    assert_eq!(body["user"]["username"], "admin");
+    assert_eq!(body["user"]["admin"], true);
+    assert_eq!(body["token"], true);
+    assert_eq!(
+        body["cookie"],
+        Value::Null,
+        "the session cookie stays with RAST"
+    );
+    assert!(
+        headers.get(header::SET_COOKIE).is_none(),
+        "an app sets no cookies"
+    );
+    assert_eq!(body["info"][1]["appId"], "demo");
+    assert_eq!(body["info"][1]["hostApi"], 1);
+    let names: Vec<&str> = body["users"][1]["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|u| u["username"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["admin", "alice"]);
+    assert_eq!(body["access"][1]["allowed"], true);
+    assert_eq!(body["sent"][0], 200);
+    assert_eq!(body["foreign"], 400, "events of its own kinds only");
+    assert_eq!(body["audit"], 200);
+    assert_eq!(body["wrongToken"], 401);
+    let first_pid = body["pid"].as_i64().unwrap();
+    let (_, _, logs) = server
+        .request("GET", "/api/logs?action=demo.visit", None, admin.headers())
+        .await;
+    assert!(logs.to_string().contains("demo.visit"), "{logs}");
+
+    // Bodies go through; changes need RAST's CSRF token like any other.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/demo/echo",
+            Some(json!({"hello": "app"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["echo"]["hello"], "app");
+    let (status, _, _) = server
+        .request("POST", "/api/demo/echo", Some(json!({})), admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "CSRF");
+    let (status, _, _) = server
+        .request("GET", "/api/demo/hello", None, HeaderMap::new())
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // An app RAST has no access rules for is for administrators.
+    let (status, _, _) = server
+        .request("GET", "/api/demo/hello", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (_, _, listed) = server
+        .request("GET", "/api/appfiles", None, alice.headers())
+        .await;
+    assert_eq!(listed["apps"], json!([]));
+
+    // Its window, for the desktop.
+    let (_, _, listed) = server
+        .request("GET", "/api/appfiles", None, admin.headers())
+        .await;
+    let window = &listed["apps"][0];
+    assert_eq!(window["appId"], "demo");
+    assert_eq!(window["entry"], "/api/appfiles/demo/1.0.0/1/ui/app.js");
+    assert_eq!(window["styles"][0], "/api/appfiles/demo/1.0.0/1/ui/app.css");
+    assert_eq!(window["server"]["state"], "running");
+    let (status, headers, body) = server
+        .request(
+            "GET",
+            "/api/appfiles/demo/1.0.0/1/ui/app.js",
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_str().unwrap().contains("export default"));
+    assert!(headers[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/javascript"));
+    assert!(headers[header::CACHE_CONTROL]
+        .to_str()
+        .unwrap()
+        .contains("immutable"));
+    for path in [
+        "/api/appfiles/demo/1.0.0/1/bin/server",
+        "/api/appfiles/demo/1.0.0/1/ui/../bin/server",
+        "/api/appfiles/demo/0.9.0/1/ui/app.js",
+        "/api/appfiles/demo/1.0.0/1/ui/missing.js",
+    ] {
+        let (status, _, _) = server.request("GET", path, None, admin.headers()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // A server that stops is started again.
+    let (status, _, _) = server
+        .request("GET", "/api/demo/exit", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let mut again = Value::Null;
+    for _ in 0..60 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        let (status, _, body) = server
+            .request("GET", "/api/demo/hello", None, admin.headers())
+            .await;
+        if status == StatusCode::OK {
+            again = body;
+            break;
+        }
+    }
+    assert!(
+        again["pid"].as_i64().is_some_and(|pid| pid != first_pid),
+        "{again}"
+    );
+    assert_eq!(server.state.apps.get("demo").unwrap().status().restarts, 1);
+
+    // Removed: stopped, its paths are RAST's again.
+    rast::packages::store::set_default(&server.state.db, "demo-app", None)
+        .await
+        .unwrap();
+    server.state.apps.sync(&server.state).await;
+    let (status, _, _) = server
+        .request("GET", "/api/demo/hello", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let pid = again["pid"].as_i64().unwrap();
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "the server process ended"
+    );
 }

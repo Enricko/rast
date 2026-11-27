@@ -50,6 +50,21 @@ pub fn router(state: AppState) -> Router {
         .merge(packages::routes())
         .merge(ai::routes())
         .route("/api/events", get(events::stream))
+        // Package Center apps: their windows, and their APIs (any
+        // `/api/<segment>` RAST does not answer itself).
+        .route("/api/appfiles", get(crate::apphost::proxy::windows))
+        .route(
+            "/api/appfiles/{app_id}/{version}/{revision}/{*path}",
+            get(crate::apphost::proxy::files),
+        )
+        .route(
+            "/api/{segment}",
+            axum::routing::any(crate::apphost::proxy::forward),
+        )
+        .route(
+            "/api/{segment}/{*rest}",
+            axum::routing::any(crate::apphost::proxy::forward),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             crate::access::middleware::enforce_app_policy,

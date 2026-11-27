@@ -33,6 +33,8 @@ pub struct AppState {
     pub packages: Arc<crate::packages::PackageManager>,
     /// AI Agent replies being written.
     pub ai: Arc<crate::ai::Runs>,
+    /// Package Center apps RAST runs (see `crate::apphost`).
+    pub apps: crate::apphost::AppHost,
     pub started_at: i64,
     pub login_ip_limiter: Arc<RateLimiter>,
     pub login_user_limiter: Arc<RateLimiter>,
@@ -105,6 +107,7 @@ impl AppState {
             docker,
             packages,
             ai: crate::ai::Runs::new(),
+            apps: crate::apphost::AppHost::new(),
             started_at: now_ms(),
             login_ip_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(300))),
             login_user_limiter: Arc::new(RateLimiter::new(10, Duration::from_secs(900))),

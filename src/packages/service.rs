@@ -1904,6 +1904,14 @@ impl PackageManager {
         // Imported packages are third-party code: their checks must run
         // under Landlock (see `sandbox`).
         let untrusted = source != "official";
+        // An app runs a server with RAST's own rights and loads code into
+        // every account's desktop: only the signed official catalog ships
+        // them.
+        if untrusted && manifest.package_type == "app" {
+            return Err(AppError::BadRequest(
+                "app packages install from the official catalog only".into(),
+            ));
+        }
         let installed = tokio::task::spawn_blocking(move || {
             let mut reporter = JobReporter {
                 ctx: job.clone(),

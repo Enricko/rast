@@ -8,6 +8,7 @@ pub mod access;
 pub mod ai;
 pub mod api;
 pub mod appearance;
+pub mod apphost;
 pub mod audit;
 pub mod auth;
 pub mod backup;

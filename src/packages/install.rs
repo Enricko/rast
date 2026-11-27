@@ -546,6 +546,17 @@ fn install_staged(
         archive::executable_inside(&root, &manifest.launch_path(exe))
             .map_err(|e| format!("executable {}: {e}", exe.name))?;
     }
+    // An app's window module and styles are files of the package; its server
+    // is an executable in it.
+    if let Some(app) = &manifest.app {
+        for path in std::iter::once(&app.window.entry).chain(&app.window.styles) {
+            archive::file_inside(&root, path).map_err(|e| format!("app window: {e}"))?;
+        }
+        if let Some(server) = &app.server {
+            archive::executable_inside(&root, &server.executable)
+                .map_err(|e| format!("app server: {e}"))?;
+        }
+    }
     // 5. Version checks in the staging location.
     if reporter.cancelled() {
         return Err("cancelled".into());
@@ -2027,5 +2038,92 @@ mod tests {
         assert!(fs::read_to_string(&wrapper)
             .unwrap()
             .contains("exec php \"$root/composer.phar\" \"$@\""));
+    }
+
+    #[test]
+    fn app_packages_install_with_their_window_and_server() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path().join("packages"));
+        let policy = OriginPolicy {
+            hosts: vec![],
+            allow_file: true,
+        };
+        let mut m: Manifest =
+            serde_json::from_value(crate::packages::manifest::tests::sample_app()).unwrap();
+        let pack = |name: &str, items: &[Item]| {
+            let path = dir.path().join(name);
+            build(&path, items);
+            let bytes = fs::read(&path).unwrap();
+            let mut artifact = crate::packages::manifest::tests::sample_artifact();
+            artifact.url = format!("file://{}", path.display());
+            artifact.sha256 = hex::encode(Sha256::digest(&bytes));
+            artifact.size = bytes.len() as u64;
+            artifact
+        };
+        let complete = pack(
+            "agent.tar.gz",
+            &[
+                Item::Dir("agent/"),
+                Item::Dir("agent/bin/"),
+                Item::Dir("agent/ui/"),
+                Item::File("agent/bin/rast-ai-agent", b"#!/bin/sh\n", 0o755),
+                Item::File("agent/ui/app.js", b"export default {};\n", 0o644),
+                Item::File("agent/ui/app.css", b".app-agent{}\n", 0o644),
+            ],
+        );
+        let mut quiet = Quiet(Default::default());
+        let installed =
+            install_version(&layout, &m, &complete, &policy, "job-a", false, &mut quiet).unwrap();
+        assert!(installed.checks.is_empty());
+        activate(&layout, &m, None).unwrap();
+        let current = layout.current_link("ai-agent");
+        assert!(current.join("ui/app.js").is_file() && current.join("bin/rast-ai-agent").is_file());
+        assert!(
+            fs::read_dir(layout.bin_dir()).unwrap().next().is_none(),
+            "no commands"
+        );
+
+        // A missing window module or a server that is not a program fail.
+        m.version = "1.0.1".into();
+        let no_window = pack(
+            "no-window.tar.gz",
+            &[
+                Item::Dir("agent/"),
+                Item::Dir("agent/bin/"),
+                Item::File("agent/bin/rast-ai-agent", b"#!/bin/sh\n", 0o755),
+            ],
+        );
+        let err = install_version(&layout, &m, &no_window, &policy, "job-b", false, &mut quiet)
+            .unwrap_err();
+        assert!(
+            err.contains("app window") && err.contains("ui/app.js"),
+            "{err}"
+        );
+        let not_a_program = pack(
+            "plain.tar.gz",
+            &[
+                Item::Dir("agent/"),
+                Item::Dir("agent/bin/"),
+                Item::Dir("agent/ui/"),
+                Item::File("agent/bin/rast-ai-agent", b"text\n", 0o644),
+                Item::File("agent/ui/app.js", b"export default {};\n", 0o644),
+                Item::File("agent/ui/app.css", b"\n", 0o644),
+            ],
+        );
+        let err = install_version(
+            &layout,
+            &m,
+            &not_a_program,
+            &policy,
+            "job-c",
+            false,
+            &mut quiet,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("app server") && err.contains("not executable"),
+            "{err}"
+        );
     }
 }

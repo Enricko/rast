@@ -925,6 +925,8 @@ async fn serve(
         })?;
 
     let state = AppState::new(cfg.clone()).await?;
+    // Package Center apps: start them and follow package changes.
+    rast::apphost::AppHost::spawn(state.clone());
     let app = rast::api::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await.map_err(|e| {
@@ -950,6 +952,8 @@ async fn serve(
     })
     .await?;
 
+    tracing::info!("shutting down; stopping apps");
+    state.apps.stop_all().await;
     tracing::info!("shutting down; checkpointing database");
     let _ = db::checkpoint(&state.db).await;
     Ok(ExitCode::SUCCESS)

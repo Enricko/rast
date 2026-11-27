@@ -18,6 +18,10 @@
 //! their own typed sections and operations; `type` values this RAST does not
 //! support are rejected with a clear message.
 //!
+//! An `app` package (official catalog only) is a desktop app: a window
+//! module the desktop loads, and optionally a server program RAST runs and
+//! forwards the app's API path to (see [`AppSpec`] and `crate::apps`).
+//!
 //! The JSON Schema for authors lives in `docs/rast-package.schema.json`.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -54,9 +58,43 @@ pub const MAX_ARCHIVES_PER_TARGET: usize = 8;
 /// Host targets RAST knows about (`<os>-<arch>`).
 pub const KNOWN_TARGETS: &[&str] = &["linux-x86_64", "linux-aarch64"];
 /// Package types this RAST can install.
-pub const SUPPORTED_TYPES: &[&str] = &["runtime"];
+pub const SUPPORTED_TYPES: &[&str] = &["runtime", "app"];
 /// Package types reserved for future releases (rejected with a specific note).
-pub const PLANNED_TYPES: &[&str] = &["app", "service"];
+pub const PLANNED_TYPES: &[&str] = &["service"];
+/// The host interface versions this RAST offers app packages: the server
+/// API ([`AppServer`]) and the window SDK ([`AppWindow::sdk`]).
+pub const HOST_API_VERSIONS: &[u32] = &[1];
+pub const WINDOW_SDK_VERSIONS: &[u32] = &[1];
+/// First path segments under `/api/` that belong to RAST itself; an app's
+/// `apiPrefix` must be another one.
+pub const HOST_API_SEGMENTS: &[&str] = &[
+    "auth",
+    "users",
+    "groups",
+    "files",
+    "shares",
+    "storage",
+    "packages",
+    "apps",
+    "system",
+    "settings",
+    "desktop",
+    "events",
+    "jobs",
+    "audit",
+    "logs",
+    "backup",
+    "docker",
+    "terminal",
+    "network",
+    "ws",
+    "health",
+    "update",
+    "catalog",
+    "access",
+    "me",
+    "notifications",
+];
 /// Ids that collide with API path segments (`/api/packages/<id>`).
 pub const RESERVED_IDS: &[&str] = &["check", "consumers", "github", "host", "catalog", "bin"];
 
@@ -99,7 +137,7 @@ pub struct Bundled {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeSpec {
     pub executables: Vec<Executable>,
@@ -316,6 +354,67 @@ pub struct Artifact {
     pub provenance: Provenance,
 }
 
+impl RuntimeSpec {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// An app package: a desktop app (window) and, optionally, the server
+/// program behind its API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppSpec {
+    /// The desktop app id: windows, access rules and icons use it.
+    pub id: String,
+    pub window: AppWindow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<AppServer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppWindow {
+    /// The window's ES module (relative path), whose default export mounts
+    /// the app: `export default { mount(ctx, sdk) }`.
+    pub entry: String,
+    /// Style sheets the window needs (relative paths).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub styles: Vec<String>,
+    /// The window SDK version the module is built against.
+    pub sdk: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub singleton: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub admin_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_size: Option<WindowSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_size: Option<WindowSize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WindowSize {
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The program RAST runs for an app (as its own service account's child,
+/// restarted when it stops) and forwards `apiPrefix` to.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppServer {
+    /// Relative path of the program inside the package.
+    pub executable: String,
+    /// The host API version it speaks.
+    pub host_api: u32,
+    /// `/api/<segment>`: requests below it go to the program.
+    pub api_prefix: String,
+    /// Prefix of the live event types it may publish, e.g. `ai.`.
+    pub event_prefix: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
@@ -343,7 +442,12 @@ pub struct Manifest {
     pub min_rast_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
+    /// `type: "runtime"`: what the runtime provides (absent for apps).
+    #[serde(default, skip_serializing_if = "RuntimeSpec::is_empty")]
     pub runtime: RuntimeSpec,
+    /// `type: "app"`: the desktop app and its server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<AppSpec>,
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
@@ -775,9 +879,98 @@ pub fn validate(m: &Manifest) -> Result<(), String> {
     if let Some(icon) = &m.icon {
         validate_icon(icon)?;
     }
-    validate_runtime(&m.runtime)?;
+    match m.package_type.as_str() {
+        "app" => {
+            if !m.runtime.is_empty() {
+                return Err("an app package has no runtime section".into());
+            }
+            validate_app(
+                m.app
+                    .as_ref()
+                    .ok_or("an app package needs an app section")?,
+            )?;
+        }
+        _ => {
+            if m.app.is_some() {
+                return Err("only app packages have an app section".into());
+            }
+            validate_runtime(&m.runtime)?;
+        }
+    }
     validate_artifacts(&m.artifacts)?;
     validate_phar(&m.runtime, &m.artifacts)?;
+    Ok(())
+}
+
+fn validate_app(app: &AppSpec) -> Result<(), String> {
+    if !is_id(&app.id, 40) {
+        return Err(format!(
+            "app.id {:?} must be 1-40 lowercase letters, digits or dashes",
+            app.id
+        ));
+    }
+    let window = &app.window;
+    let file = |field: &str, path: &str, ext: &str| {
+        if is_safe_relative_path(path) && path.ends_with(ext) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{field} {path:?} must be a relative path ending in {ext}"
+            ))
+        }
+    };
+    file("app.window.entry", &window.entry, ".js")?;
+    if window.styles.len() > 8 {
+        return Err("app.window.styles lists at most 8 files".into());
+    }
+    for style in &window.styles {
+        file("app.window.styles", style, ".css")?;
+    }
+    if !WINDOW_SDK_VERSIONS.contains(&window.sdk) {
+        return Err(format!(
+            "app.window.sdk {} is not offered by this RAST (offers {:?})",
+            window.sdk, WINDOW_SDK_VERSIONS
+        ));
+    }
+    for size in [window.default_size, window.min_size].into_iter().flatten() {
+        if !(200..=4000).contains(&size.w) || !(150..=3000).contains(&size.h) {
+            return Err("app.window sizes must be 200-4000 wide and 150-3000 high".into());
+        }
+    }
+    if let Some(server) = &app.server {
+        if !is_safe_relative_path(&server.executable) {
+            return Err(format!(
+                "app.server.executable {:?} must be a relative path",
+                server.executable
+            ));
+        }
+        if !HOST_API_VERSIONS.contains(&server.host_api) {
+            return Err(format!(
+                "app.server.hostApi {} is not offered by this RAST (offers {:?})",
+                server.host_api, HOST_API_VERSIONS
+            ));
+        }
+        let segment = server.api_prefix.strip_prefix("/api/").unwrap_or("");
+        if !is_id(segment, 32) {
+            return Err(format!(
+                "app.server.apiPrefix {:?} must be /api/<lowercase name>",
+                server.api_prefix
+            ));
+        }
+        if HOST_API_SEGMENTS.contains(&segment) {
+            return Err(format!(
+                "app.server.apiPrefix {:?} belongs to RAST",
+                server.api_prefix
+            ));
+        }
+        let event = server.event_prefix.strip_suffix('.').unwrap_or("");
+        if !is_id(event, 32) {
+            return Err(format!(
+                "app.server.eventPrefix {:?} must be a lowercase name and a dot, like \"ai.\"",
+                server.event_prefix
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1181,6 +1374,111 @@ pub(crate) mod tests {
         v["type"] = "service".into();
         let err = parse_value(&v).unwrap_err();
         assert!(err.contains("not supported yet"), "{err}");
+    }
+
+    /// An app package like AI Agent: a window and a server.
+    pub fn sample_app() -> serde_json::Value {
+        let mut v = sample();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("runtime");
+        obj.insert("id".into(), "ai-agent".into());
+        obj.insert("type".into(), "app".into());
+        obj.insert("name".into(), "AI Agent".into());
+        obj.insert("version".into(), "1.0.0".into());
+        obj.insert(
+            "app".into(),
+            serde_json::json!({
+                "id": "agent",
+                "window": {"entry": "ui/app.js", "styles": ["ui/app.css"], "sdk": 1, "singleton": true, "defaultSize": {"w": 1080, "h": 720}},
+                "server": {"executable": "bin/rast-ai-agent", "hostApi": 1, "apiPrefix": "/api/ai", "eventPrefix": "ai."}
+            }),
+        );
+        v
+    }
+
+    #[test]
+    fn app_packages_parse_and_are_checked() {
+        let m = parse_value(&sample_app()).unwrap();
+        let app = m.app.as_ref().unwrap();
+        assert_eq!((app.id.as_str(), app.window.sdk), ("agent", 1));
+        assert!(m.runtime.is_empty());
+        let round = serde_json::to_value(&m).unwrap();
+        assert!(round.get("runtime").is_none(), "{round}");
+        assert_eq!(parse_value(&round).unwrap(), m);
+        let cases: Vec<(&str, Mutation)> = vec![
+            (
+                "no app section",
+                Box::new(|v| {
+                    v.as_object_mut().unwrap().remove("app");
+                }),
+            ),
+            (
+                "a runtime section too",
+                Box::new(|v| v["runtime"] = sample()["runtime"].clone()),
+            ),
+            (
+                "app on a runtime",
+                Box::new(|v| v["type"] = "runtime".into()),
+            ),
+            (
+                "RAST's own API",
+                Box::new(|v| v["app"]["server"]["apiPrefix"] = "/api/files".into()),
+            ),
+            (
+                "deep prefix",
+                Box::new(|v| v["app"]["server"]["apiPrefix"] = "/api/ai/x".into()),
+            ),
+            (
+                "not under /api",
+                Box::new(|v| v["app"]["server"]["apiPrefix"] = "/ai".into()),
+            ),
+            (
+                "event prefix",
+                Box::new(|v| v["app"]["server"]["eventPrefix"] = "ai".into()),
+            ),
+            (
+                "future host API",
+                Box::new(|v| v["app"]["server"]["hostApi"] = 2.into()),
+            ),
+            (
+                "future SDK",
+                Box::new(|v| v["app"]["window"]["sdk"] = 9.into()),
+            ),
+            (
+                "entry outside",
+                Box::new(|v| v["app"]["window"]["entry"] = "../app.js".into()),
+            ),
+            (
+                "entry not a module",
+                Box::new(|v| v["app"]["window"]["entry"] = "ui/app.html".into()),
+            ),
+            (
+                "server outside",
+                Box::new(|v| v["app"]["server"]["executable"] = "/bin/sh".into()),
+            ),
+            ("app id", Box::new(|v| v["app"]["id"] = "Agent!".into())),
+            (
+                "tiny window",
+                Box::new(|v| v["app"]["window"]["minSize"] = serde_json::json!({"w": 10, "h": 10})),
+            ),
+            (
+                "unknown field",
+                Box::new(|v| v["app"]["window"]["html"] = true.into()),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let mut v = sample_app();
+            mutate(&mut v);
+            assert!(parse_value(&v).is_err(), "{name} accepted");
+        }
+        let mut window_only = sample_app();
+        window_only["app"].as_object_mut().unwrap().remove("server");
+        assert!(parse_value(&window_only)
+            .unwrap()
+            .app
+            .unwrap()
+            .server
+            .is_none());
     }
 
     /// A zip artifact like Bun/Deno: one archive, stripComponents 0/1.

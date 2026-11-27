@@ -14,7 +14,6 @@
     "publisher",
     "version",
     "revision",
-    "runtime",
     "artifacts"
   ],
   "properties": {
@@ -40,7 +39,7 @@
       }
     },
     "type": {
-      "description": "Package type: runtime installs commands; app installs an App Center application (RAST 0.11.8+); service is reserved for a later version.",
+      "description": "Package type: runtime installs commands; app installs a desktop app with an optional server RAST runs (official catalog only, RAST 0.9.17+); service is reserved for a later version.",
       "enum": [
         "runtime",
         "app"
@@ -457,6 +456,128 @@
           }
         }
       }
+    },
+    "app": {
+      "description": "type app: the desktop app (its window module) and, optionally, the server program RAST runs and forwards apiPrefix to.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "window"
+      ],
+      "properties": {
+        "id": {
+          "description": "Desktop app id (windows, access rules, icons).",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,39}$"
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "entry",
+            "sdk"
+          ],
+          "properties": {
+            "entry": {
+              "description": "ES module whose default export is { mount(ctx, sdk) }.",
+              "$ref": "#/$defs/relativePath",
+              "pattern": "\\.js$"
+            },
+            "styles": {
+              "type": "array",
+              "maxItems": 8,
+              "items": {
+                "$ref": "#/$defs/relativePath",
+                "pattern": "\\.css$"
+              }
+            },
+            "sdk": {
+              "description": "Window SDK version the module is built against.",
+              "enum": [
+                1
+              ]
+            },
+            "singleton": {
+              "type": "boolean"
+            },
+            "adminOnly": {
+              "type": "boolean"
+            },
+            "defaultSize": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "w",
+                "h"
+              ],
+              "properties": {
+                "w": {
+                  "type": "integer",
+                  "minimum": 200,
+                  "maximum": 4000
+                },
+                "h": {
+                  "type": "integer",
+                  "minimum": 150,
+                  "maximum": 3000
+                }
+              }
+            },
+            "minSize": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "w",
+                "h"
+              ],
+              "properties": {
+                "w": {
+                  "type": "integer",
+                  "minimum": 200,
+                  "maximum": 4000
+                },
+                "h": {
+                  "type": "integer",
+                  "minimum": 150,
+                  "maximum": 3000
+                }
+              }
+            }
+          }
+        },
+        "server": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executable",
+            "hostApi",
+            "apiPrefix",
+            "eventPrefix"
+          ],
+          "properties": {
+            "executable": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "hostApi": {
+              "description": "Host API version the server speaks.",
+              "enum": [
+                1
+              ]
+            },
+            "apiPrefix": {
+              "description": "/api/<name>: requests below it go to the server.",
+              "type": "string",
+              "pattern": "^/api/[a-z0-9][a-z0-9-]{0,31}$"
+            },
+            "eventPrefix": {
+              "description": "Prefix of the live event kinds and audit actions it may use, like \"ai.\".",
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9-]{0,31}\\.$"
+            }
+          }
+        }
+      }
     }
   },
   "$defs": {
@@ -477,5 +598,45 @@
       "maxLength": 200,
       "pattern": "^(?!\\.rast-mirror(/|$))(?!(.*/)?\\.{1,2}(/|$))[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$"
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "runtime"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "runtime"
+        ],
+        "not": {
+          "required": [
+            "app"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "const": "app"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "app"
+        ],
+        "not": {
+          "required": [
+            "runtime"
+          ]
+        }
+      }
+    }
+  ]
 }
