@@ -11,8 +11,9 @@ import { ApiError } from "../../core/api";
 import { h } from "../../core/dom";
 import { appIconSvg, iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
-import { confirmDialog, contextMenu, copyText, errorMessage, promptDialog } from "../../core/ui";
+import { confirmDialog, contextMenu, copyText, dialogOpen, errorMessage, modal, promptDialog } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
+import { dailyChart, formatEstimate, usageModels, usageTotals } from "./usage";
 import { renderMarkdown } from "./markdown";
 import {
   allowanceText,
@@ -22,6 +23,8 @@ import {
   effortLabel,
   formatTokens,
   formatElapsed,
+  chatTotals,
+  type UsageDetail,
   replyActivity,
   groupByDay,
   maySkipAsking,
@@ -152,6 +155,12 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     h("span", {}, "Settings"),
   );
   if (!isAdmin) settingsButton.classList.add("hidden");
+  const usageButton = h(
+    "button",
+    { class: "btn btn-ghost ai-settings-btn", type: "button", onClick: () => void openUsage() },
+    iconSvg("activity", 15),
+    h("span", {}, "Usage"),
+  );
   const sideClose = h(
     "button",
     { class: "btn btn-ghost btn-icon btn-sm ai-side-close", type: "button", title: "Hide chats", ariaLabel: "Hide chats" },
@@ -170,7 +179,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     newButton,
     h("label", { class: "ai-search-wrap" }, iconSvg("search", 14), search),
     list,
-    h("div", { class: "ai-side-foot" }, allowanceEl, settingsButton),
+    h("div", { class: "ai-side-foot" }, allowanceEl, h("div", { class: "ai-side-actions" }, usageButton, settingsButton)),
   );
 
   const titleEl = h("h2", { class: "ai-title" }, "New chat");
@@ -657,6 +666,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     const conversation = conversations.find((c) => c.id === id);
     if (conversation) void rename(conversation);
   });
+  ctx.onDialog("usage", () => void openUsage());
   ctx.onDialog("delete", (params) => {
     const id = (params as { id?: string } | null)?.id;
     const conversation = conversations.find((c) => c.id === id);
@@ -703,7 +713,11 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     titleEl.textContent = conversation ? conversation.title || "New chat" : "New chat";
     const who = describe(conversation ? choiceOf(conversation) : picker.value);
     headAvatar.replaceChildren(who ? who.picture(26) : agentAvatar("AI", 26));
-    subEl.textContent = who ? [who.name, who.detail].filter(Boolean).join(" · ") : "";
+    // The chat's tokens and what they are worth at API prices.
+    const totals = current ? chatTotals(current.messages) : { tokens: 0, estimate: 0 };
+    const spent = totals.tokens ? `${formatTokens(totals.tokens)} tokens${totals.estimate ? ` · ${formatEstimate(totals.estimate)}` : ""}` : "";
+    subEl.textContent = who ? [who.name, who.detail, spent].filter(Boolean).join(" · ") : spent;
+    subEl.title = spent ? `This chat so far: ${spent} (estimated at API prices)` : "";
     ownerEl.classList.toggle("hidden", !current?.readOnly);
     ownerEl.textContent = current?.readOnly ? `${conversation?.owner ?? "?"}'s chat · read only` : "";
     menuButton.classList.toggle("hidden", !current || current.readOnly);
@@ -793,6 +807,25 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   function drawPickFace(): void {
     const who = describe(picker.value);
     pickFace.replaceChildren(...(who ? [who.picture(18), h("span", { class: "ai-pick-name" }, who.name)] : [h("span", {}, "Choose")]));
+  }
+
+  /** The account's own use: totals, a bar per day and each model. */
+  async function openUsage(): Promise<void> {
+    const content = h("div", { class: "ai-usage-view" }, h("p", { class: "muted" }, "Loading…"));
+    modal({ session: ctx.dialog("usage", {}), title: "Your usage", wide: true, body: content });
+    try {
+      const detail = await ctx.api.get<UsageDetail>("/api/ai/usage/history", { days: "30" });
+      content.replaceChildren(
+        usageTotals(detail),
+        h("h3", { class: "ai-set-subtitle" }, "Tokens per day, last 30 days"),
+        dailyChart(detail.days),
+        h("h3", { class: "ai-set-subtitle" }, "By model, last 30 days"),
+        usageModels(detail.models, false),
+        h("p", { class: "small muted ai-usage-foot" }, "Costs are estimates at each model's API price. Signed-in plans are paid by the plan; their estimate shows what the same tokens would cost with a key."),
+      );
+    } catch (error) {
+      content.replaceChildren(h("div", { class: "banner banner-error" }, errorMessage(error)));
+    }
   }
 
   function renderAllowance(): void {
@@ -1078,6 +1111,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       if (message.model) meta.push(message.model);
       if (message.status === "stopped") meta.push("stopped");
       if (message.inputTokens || message.outputTokens) meta.push(`${formatTokens(message.inputTokens + message.outputTokens)} tokens`);
+      if (message.estimatedCost) meta.push(formatEstimate(message.estimatedCost));
       if (message.finishedAt && message.createdAt && message.finishedAt >= message.createdAt) meta.push(formatElapsed(message.finishedAt - message.createdAt));
       parts.push(
         reuse(-3, `${meta.join("|")}|${text}`, () =>
@@ -1346,7 +1380,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     const active = document.activeElement;
     if (active && active !== document.body && !win.contains(active)) return;
     if (active instanceof HTMLElement && active.closest("input, textarea, select, [contenteditable]")) return;
-    if (win.querySelector(".modal-backdrop:not(.modal-leaving)")) return;
+    if (dialogOpen(win)) return;
     if (!settingsHost.classList.contains("hidden") || composer.classList.contains("hidden") || input.disabled) return;
     event.preventDefault();
     input.focus();

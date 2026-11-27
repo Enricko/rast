@@ -9,6 +9,7 @@ import { relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import { confirmDialog, copyText, errorMessage, modal } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
+import { dailyChart, usageCard, usageModels, usageTotals } from "./usage";
 import {
   allowanceLimits,
   formatTokens,
@@ -1715,10 +1716,6 @@ export function mountSettings(options: {
     });
   }
 
-  function usageCard(label: string, value: string, detail: string): HTMLElement {
-    return h("div", { class: "ai-usage-card" }, h("span", { class: "small muted" }, label), h("span", { class: "ai-usage-value" }, value), h("span", { class: "small muted" }, detail));
-  }
-
   async function renderUsageDetail(data: Overview, userId: number): Promise<void> {
     const account = data.users.find((u) => u.id === userId);
     title.textContent = account ? account.displayName || account.username : "Usage";
@@ -1733,15 +1730,7 @@ export function mountSettings(options: {
     if (page !== "usage" || usageUser !== userId) return;
     body.replaceChildren();
     const a = detail.allowance;
-    body.appendChild(
-      h(
-        "div",
-        { class: "ai-usage-cards" },
-        usageCard("Today", `${formatTokens(a.usedToday)} tokens`, formatUsd(a.costToday ?? 0)),
-        usageCard("This week", `${formatTokens(a.usedWeek ?? 0)} tokens`, formatUsd(a.costWeek ?? 0)),
-        usageCard("This month", `${formatTokens(a.usedMonth)} tokens`, formatUsd(a.costMonth ?? 0)),
-      ),
-    );
+    body.appendChild(usageTotals(detail));
     // Its limits, each with how much is used.
     const limits = allowanceLimits(a);
     const source: Record<string, string> = { admin: "Administrator: not limited", user: "Its own rule", group: "Its groups' rules", default: "The rule for everyone", none: "No rule: not limited" };
@@ -1764,97 +1753,8 @@ export function mountSettings(options: {
     body.appendChild(h("h3", { class: "ai-set-subtitle" }, "Tokens per day, last 30 days"));
     body.appendChild(dailyChart(detail.days));
     body.appendChild(h("h3", { class: "ai-set-subtitle" }, "By model, last 30 days"));
-    if (!detail.models.length) {
-      body.appendChild(h("p", { class: "ai-set-empty muted" }, "Nothing used in the last 30 days."));
-      return;
-    }
-    const table = h("table", { class: "table ai-usage-table" });
-    table.appendChild(
-      h(
-        "thead",
-        {},
-        h("tr", {}, h("th", {}, "Model"), h("th", { class: "num" }, "Replies"), h("th", { class: "num" }, "In"), h("th", { class: "num" }, "Out"), h("th", { class: "num" }, "Cost"), h("th", {}, "Last used")),
-      ),
-    );
-    table.appendChild(
-      h(
-        "tbody",
-        {},
-        ...detail.models.map((m) =>
-          h(
-            "tr",
-            {},
-            h("td", {}, h("span", { class: "ai-usage-model" }, m.model || "—"), h("span", { class: "small muted" }, m.provider ?? "Removed provider")),
-            h("td", { class: "num" }, String(m.calls)),
-            h("td", { class: "num" }, formatTokens(m.input)),
-            h("td", { class: "num" }, formatTokens(m.output)),
-            h("td", { class: "num" }, formatUsd(m.cost)),
-            h("td", { class: "muted" }, relativeTime(m.lastAt)),
-          ),
-        ),
-      ),
-    );
-    body.appendChild(h("div", { class: "ai-table-wrap" }, table));
-  }
-
-  /** One bar per day (tokens), its cost and replies on hover or focus. */
-  function dailyChart(days: UsageDetail["days"]): HTMLElement {
-    const max = Math.max(1, ...days.map((d) => d.tokens));
-    const dateLabel = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    const tip = h("div", { class: "ai-chart-tip hidden", role: "status" });
-    const plot = h("div", { class: "ai-chart-plot" });
-    const showTip = (slot: HTMLElement, day: UsageDetail["days"][number]) => {
-      tip.replaceChildren(
-        h("strong", {}, `${day.tokens.toLocaleString()} tokens`),
-        h("span", {}, `${formatUsd(day.cost)} · ${day.calls} repl${day.calls === 1 ? "y" : "ies"}`),
-        h("span", { class: "muted" }, dateLabel(day.date)),
-      );
-      tip.classList.remove("hidden");
-      const box = plot.getBoundingClientRect();
-      const at = slot.getBoundingClientRect();
-      const center = at.left - box.left + at.width / 2;
-      tip.style.left = `${Math.min(Math.max(center, 70), box.width - 70)}px`;
-    };
-    const hideTip = () => tip.classList.add("hidden");
-    for (const day of days) {
-      const slot = h(
-        "button",
-        { class: "ai-chart-slot", type: "button", ariaLabel: `${dateLabel(day.date)}: ${day.tokens} tokens, ${formatUsd(day.cost)}` },
-        h("span", { class: "ai-chart-bar", style: `height:${day.tokens ? Math.max(2, (day.tokens / max) * 100) : 0}%` }),
-      );
-      slot.addEventListener("pointerenter", () => showTip(slot, day));
-      slot.addEventListener("focus", () => showTip(slot, day));
-      slot.addEventListener("pointerleave", hideTip);
-      slot.addEventListener("blur", hideTip);
-      plot.appendChild(slot);
-    }
-    const used = days.filter((d) => d.tokens > 0);
-    const table = h("details", { class: "ai-chart-table" }, h("summary", { class: "small muted" }, "As a table"));
-    table.appendChild(
-      used.length
-        ? h(
-            "table",
-            { class: "table ai-usage-table" },
-            h("thead", {}, h("tr", {}, h("th", {}, "Day"), h("th", { class: "num" }, "Tokens"), h("th", { class: "num" }, "Cost"), h("th", { class: "num" }, "Replies"))),
-            h(
-              "tbody",
-              {},
-              ...used
-                .slice()
-                .reverse()
-                .map((d) => h("tr", {}, h("td", {}, dateLabel(d.date)), h("td", { class: "num" }, d.tokens.toLocaleString()), h("td", { class: "num" }, formatUsd(d.cost)), h("td", { class: "num" }, String(d.calls)))),
-            ),
-          )
-        : h("p", { class: "small muted" }, "No use in these days."),
-    );
-    return h(
-      "div",
-      { class: "ai-chart" },
-      h("div", { class: "ai-chart-scale small muted" }, h("span", {}, formatTokens(max)), h("span", {}, "0")),
-      h("div", { class: "ai-chart-area" }, plot, tip),
-      h("div", { class: "ai-chart-axis small muted" }, h("span", {}, days[0] ? dateLabel(days[0].date) : ""), h("span", {}, "Today")),
-      table,
-    );
+    body.appendChild(usageModels(detail.models, true));
+    body.appendChild(h("p", { class: "ai-set-note small muted" }, "Est. cost is the tokens at API prices (signed-in plans included); Counted is what spending limits count."));
   }
 
   void load();

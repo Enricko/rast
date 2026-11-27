@@ -29,6 +29,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/ai/options", get(options))
         .route("/api/ai/usage", get(my_usage))
+        .route("/api/ai/usage/history", get(my_usage_history))
         .route(
             "/api/ai/conversations",
             get(list_conversations).post(create_conversation),
@@ -295,6 +296,20 @@ async fn my_usage(State(state): State<AppState>, user: AuthUser) -> AppResult<Js
         "limits": limits,
         "allowance": ai::allowance(&state.db, user.id, &limits).await?,
     })))
+}
+
+/// GET /api/ai/usage/history?days=30 — the account's own use: per day and
+/// per model, with totals and what it is worth at API prices.
+async fn my_usage_history(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(query): Query<UsageQuery>,
+) -> AppResult<Json<Value>> {
+    let limits = ai::effective_limits(&state.db, &user).await?;
+    let days = query.days.unwrap_or(30).clamp(1, 366);
+    let mut history = ai::usage_history(&state.db, user.id, days).await?;
+    history["allowance"] = ai::allowance(&state.db, user.id, &limits).await?;
+    Ok(Json(history))
 }
 
 #[derive(Debug, Deserialize)]

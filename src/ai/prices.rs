@@ -432,6 +432,16 @@ pub fn resolve(provider: &Provider, model: &str) -> (Option<Price>, Source) {
     }
 }
 
+/// What the model's tokens are worth at API prices, for estimates: like
+/// [`resolve`], except that a signed-in plan (counted as free) is priced as
+/// the same model would be with a key: the list's price or the built-in one.
+pub fn estimate(provider: &Provider, model: &str) -> Option<Price> {
+    match resolve(provider, model) {
+        (_, Source::Plan) => built_in(model).map(|(price, _)| price),
+        (price, _) => price,
+    }
+}
+
 /// The price a model has when no administrator set one.
 pub fn fallback(provider: &Provider, model: &str) -> (Option<Price>, Source) {
     if let Some(price) = provider.list_prices.get(model) {
@@ -848,6 +858,48 @@ mod tests {
         assert!(!Price::new(-1.0, 1.0, None, None).valid());
         assert!(!Price::new(1.0, 1.0, Some(f64::NAN), None).valid());
         assert!(Price::new(0.0, super::super::MAX_PRICE, Some(0.0), None).valid());
+    }
+
+    fn provider_of(kind: super::super::Kind) -> super::super::Provider {
+        super::super::Provider {
+            id: "p".into(),
+            kind,
+            name: "P".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            models: vec![],
+            prices: Prices::new(),
+            list_prices: Prices::new(),
+            prices_checked_at: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+            owner_id: None,
+            sign_in: String::new(),
+        }
+    }
+
+    #[test]
+    fn plans_count_nothing_but_are_estimated_at_api_prices() {
+        let mut plan = provider_of(super::super::Kind::Codex);
+        assert_eq!(resolve(&plan, "gpt-5").0, Some(FREE));
+        assert_eq!(
+            estimate(&plan, "gpt-5"),
+            Some(Price::new(1.25, 10.0, Some(0.625), Some(1.25)))
+        );
+        assert_eq!(estimate(&plan, "unknown-model-x"), None);
+        // A price the administrator set is both what counts and the estimate.
+        plan.prices
+            .insert("gpt-5".into(), Price::new(2.0, 4.0, None, None));
+        assert_eq!(
+            estimate(&plan, "gpt-5"),
+            Some(Price::new(2.0, 4.0, None, None))
+        );
+        let mut keyed = provider_of(super::super::Kind::OpenAi);
+        keyed
+            .list_prices
+            .insert("m".into(), Price::new(1.0, 1.0, None, None));
+        assert_eq!(estimate(&keyed, "m"), resolve(&keyed, "m").0);
     }
 
     fn at(text: &str) -> DateTime<Utc> {

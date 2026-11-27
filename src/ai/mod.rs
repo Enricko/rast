@@ -1213,26 +1213,34 @@ pub async fn check_allowance(pool: &SqlitePool, user_id: i64, limits: &Effective
 /// What a reply cost in micro-dollars, from the price per million tokens
 /// (which is also the price in micro-dollars per token).
 /// Count a reply's tokens, at what the model costs now (see [`prices`]).
+/// Returns what they are worth at API prices ([`prices::estimate`]), in
+/// micro-dollars.
 pub async fn record_usage(
     pool: &SqlitePool,
     user_id: i64,
     provider_id: &str,
     model: &str,
     usage: &provider::Usage,
-) -> AppResult<()> {
+) -> AppResult<i64> {
     if usage.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
-    let cost = provider(pool, provider_id)
-        .await?
-        .and_then(|p| prices::resolve(&p, model).0)
-        .map_or(0, |price| price.cost_micros(usage, chrono::Utc::now()));
+    let now = chrono::Utc::now();
+    let provider = provider(pool, provider_id).await?;
+    let cost = provider
+        .as_ref()
+        .and_then(|p| prices::resolve(p, model).0)
+        .map_or(0, |price| price.cost_micros(usage, now));
+    let estimate = provider
+        .as_ref()
+        .and_then(|p| prices::estimate(p, model))
+        .map_or(0, |price| price.cost_micros(usage, now));
     let input = usage.input.max(0);
     let cache_read = usage.cache_read.clamp(0, input);
     sqlx::query(
         "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens, cost, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             cache_read_tokens, cache_write_tokens, cost, estimated_cost, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(provider_id)
@@ -1242,10 +1250,11 @@ pub async fn record_usage(
     .bind(cache_read)
     .bind(usage.cache_write.clamp(0, input - cache_read))
     .bind(cost)
+    .bind(estimate)
     .bind(now_ms())
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(estimate)
 }
 
 /// How often a provider's model list is asked for its prices again.
@@ -1330,14 +1339,14 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
     let rows = sqlx::query(
         "SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day,
                 SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cost) AS cost,
-                COUNT(*) AS calls
+                SUM(estimated_cost) AS estimate, COUNT(*) AS calls
          FROM ai_usage WHERE user_id = ? AND created_at >= ? GROUP BY day",
     )
     .bind(user_id)
     .bind(since)
     .fetch_all(pool)
     .await?;
-    let by_day: HashMap<String, (i64, i64, i64, i64)> = rows
+    let by_day: HashMap<String, (i64, i64, i64, i64, i64)> = rows
         .iter()
         .map(|row| {
             (
@@ -1347,6 +1356,7 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
                     row.get("output"),
                     row.get("cost"),
                     row.get("calls"),
+                    row.get("estimate"),
                 ),
             )
         })
@@ -1356,17 +1366,18 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
         .take_while(|d| *d <= today)
         .map(|d| {
             let date = d.format("%Y-%m-%d").to_string();
-            let (input, output, cost, calls) = by_day.get(&date).copied().unwrap_or_default();
+            let (input, output, cost, calls, estimate) =
+                by_day.get(&date).copied().unwrap_or_default();
             json!({
                 "date": date, "input": input, "output": output, "tokens": input + output,
-                "cost": micros_to_usd(cost), "calls": calls,
+                "cost": micros_to_usd(cost), "estimate": micros_to_usd(estimate), "calls": calls,
             })
         })
         .collect();
     let models: Vec<Value> = sqlx::query(
         "SELECT u.provider_id, p.name AS provider, u.model,
                 SUM(u.input_tokens) AS input, SUM(u.output_tokens) AS output, SUM(u.cost) AS cost,
-                COUNT(*) AS calls, MAX(u.created_at) AS last_at
+                SUM(u.estimated_cost) AS estimate, COUNT(*) AS calls, MAX(u.created_at) AS last_at
          FROM ai_usage u LEFT JOIN ai_providers p ON p.id = u.provider_id
          WHERE u.user_id = ? AND u.created_at >= ?
          GROUP BY u.provider_id, u.model ORDER BY SUM(u.input_tokens + u.output_tokens) DESC",
@@ -1385,12 +1396,41 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
             "model": row.get::<String, _>("model"),
             "input": input, "output": output, "tokens": input + output,
             "cost": micros_to_usd(row.get("cost")),
+            "estimate": micros_to_usd(row.get("estimate")),
             "calls": row.get::<i64, _>("calls"),
             "lastAt": row.get::<i64, _>("last_at"),
         })
     })
     .collect();
-    Ok(json!({ "days": series, "models": models }))
+    // Today, this week and this month: tokens and their estimate.
+    let p = periods();
+    let row = sqlx::query(
+        "SELECT
+            COALESCE(SUM(CASE WHEN created_at >= ?1 THEN input_tokens + output_tokens END), 0) AS t_day,
+            COALESCE(SUM(CASE WHEN created_at >= ?1 THEN estimated_cost END), 0) AS e_day,
+            COALESCE(SUM(CASE WHEN created_at >= ?2 THEN input_tokens + output_tokens END), 0) AS t_week,
+            COALESCE(SUM(CASE WHEN created_at >= ?2 THEN estimated_cost END), 0) AS e_week,
+            COALESCE(SUM(CASE WHEN created_at >= ?3 THEN input_tokens + output_tokens END), 0) AS t_month,
+            COALESCE(SUM(CASE WHEN created_at >= ?3 THEN estimated_cost END), 0) AS e_month
+         FROM ai_usage WHERE user_id = ?4 AND created_at >= ?5",
+    )
+    .bind(p.day)
+    .bind(p.week)
+    .bind(p.month)
+    .bind(user_id)
+    .bind(p.week.min(p.month))
+    .fetch_one(pool)
+    .await?;
+    let total = |tokens: &str, estimate: &str| json!({"tokens": row.get::<i64, _>(tokens), "estimate": micros_to_usd(row.get(estimate))});
+    Ok(json!({
+        "days": series,
+        "models": models,
+        "totals": {
+            "today": total("t_day", "e_day"),
+            "week": total("t_week", "e_week"),
+            "month": total("t_month", "e_month"),
+        },
+    }))
 }
 
 // --------------------------------------------------------- conversations
@@ -1480,6 +1520,9 @@ pub struct Message {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// What the reply is worth at API prices, in micro-dollars (see
+    /// [`prices::estimate`]; 0 before it was kept or when unknown).
+    pub estimated_cost: i64,
     pub status: String,
     pub error: String,
     pub created_at: i64,
@@ -1497,6 +1540,7 @@ impl Message {
             "model": self.model,
             "inputTokens": self.input_tokens,
             "outputTokens": self.output_tokens,
+            "estimatedCost": micros_to_usd(self.estimated_cost),
             "status": self.status,
             "error": self.error,
             "createdAt": self.created_at,
@@ -1520,6 +1564,7 @@ pub fn message_from_row(row: &sqlx::sqlite::SqliteRow) -> Message {
         model: row.get("model"),
         input_tokens: row.get("input_tokens"),
         output_tokens: row.get("output_tokens"),
+        estimated_cost: row.get("estimated_cost"),
         status: row.get("status"),
         error: row.get("error"),
         created_at: row.get("created_at"),
@@ -1979,6 +2024,7 @@ mod tests {
             model: String::new(),
             input_tokens: 0,
             output_tokens: 0,
+            estimated_cost: 0,
             status: status.into(),
             error: String::new(),
             created_at: 0,

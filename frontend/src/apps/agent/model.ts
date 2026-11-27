@@ -30,6 +30,8 @@ export interface Message {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  /** What the reply is worth at API prices, USD (0: unknown or none). */
+  estimatedCost?: number;
   status: "streaming" | "waiting" | "done" | "stopped" | "error";
   error: string;
   createdAt: number;
@@ -396,12 +398,26 @@ export interface UsageRow {
 }
 
 /** GET /api/ai/admin/usage/{userId}. */
+/** Use over some days. `cost` counts toward spending limits; `estimate` is
+ * the same tokens at API prices (also for signed-in plans). */
 export interface UsageDetail {
-  user: { id: number; username: string; displayName: string; isAdmin: boolean };
+  user?: { id: number; username: string; displayName: string; isAdmin: boolean };
   allowance: Allowance;
-  providers: string[] | null;
-  days: Array<{ date: string; input: number; output: number; tokens: number; cost: number; calls: number }>;
-  models: Array<{ providerId: string | null; provider: string | null; model: string; input: number; output: number; tokens: number; cost: number; calls: number; lastAt: number }>;
+  providers?: string[] | null;
+  days: Array<{ date: string; input: number; output: number; tokens: number; cost: number; estimate?: number; calls: number }>;
+  models: Array<{ providerId: string | null; provider: string | null; model: string; input: number; output: number; tokens: number; cost: number; estimate?: number; calls: number; lastAt: number }>;
+  totals?: Record<"today" | "week" | "month", { tokens: number; estimate: number }>;
+}
+
+/** A chat's tokens and what its replies are worth at API prices. */
+export function chatTotals(messages: Array<Pick<Message, "inputTokens" | "outputTokens" | "estimatedCost">>): { tokens: number; estimate: number } {
+  let tokens = 0;
+  let estimate = 0;
+  for (const m of messages) {
+    tokens += (m.inputTokens || 0) + (m.outputTokens || 0);
+    estimate += m.estimatedCost || 0;
+  }
+  return { tokens, estimate };
 }
 
 export interface Overview {

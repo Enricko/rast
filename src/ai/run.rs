@@ -507,7 +507,7 @@ async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage:
     if usage.is_empty() {
         return;
     }
-    if let Err(e) = super::record_usage(
+    match super::record_usage(
         &state.db,
         job.owner.id,
         &job.provider_id,
@@ -516,7 +516,22 @@ async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage:
     )
     .await
     {
-        tracing::warn!(error = %e, "could not record AI usage");
+        // The reply's estimate grows with each step (also across a pause
+        // for a tool answer).
+        Ok(estimate) if estimate > 0 => {
+            let added = sqlx::query(
+                "UPDATE ai_messages SET estimated_cost = estimated_cost + ? WHERE id = ?",
+            )
+            .bind(estimate)
+            .bind(job.message_id)
+            .execute(&state.db)
+            .await;
+            if let Err(e) = added {
+                tracing::warn!(error = %e, "could not store an AI reply's estimate");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not record AI usage"),
     }
 }
 

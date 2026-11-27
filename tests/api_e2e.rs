@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-        "0004 to 0016 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        "0004 to 0017 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3948,6 +3948,44 @@ async fn ai_agent_chat_limits_and_admin_view() {
     assert_eq!(cost, input * 1000 + output * 2000);
     assert!(cost > 0);
     assert_eq!(body["allowance"]["costToday"], json!(cost as f64 / 1e6));
+    // Each reply keeps its estimate (here the same as what is counted), and
+    // the account sees its own use with the estimates added up.
+    let estimated: i64 = sqlx::query_scalar(
+        "SELECT SUM(estimated_cost) FROM ai_messages m JOIN ai_conversations c
+             ON c.id = m.conversation_id WHERE c.user_id = ?",
+    )
+    .bind(alice_id)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(estimated, cost);
+    let (status, _, history) = server
+        .request("GET", "/api/ai/usage/history?days=7", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{history}");
+    assert_eq!(history["totals"]["today"]["tokens"], 34);
+    assert_eq!(
+        history["totals"]["month"]["estimate"],
+        json!(cost as f64 / 1e6)
+    );
+    assert_eq!(history["days"].as_array().unwrap().len(), 7);
+    assert_eq!(history["days"][6]["estimate"], json!(cost as f64 / 1e6));
+    assert!(history.get("user").is_none(), "{history}");
+    let (_, _, chat) = server
+        .request(
+            "GET",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    let replies: f64 = chat["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["estimatedCost"].as_f64().unwrap())
+        .sum();
+    assert!((replies - cost as f64 / 1e6).abs() < 1e-9, "{chat}");
 
     // A slow reply can be stopped; only one runs per conversation.
     let (status, _, body) = server
