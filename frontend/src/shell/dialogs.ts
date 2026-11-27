@@ -116,6 +116,7 @@ const SHORTCUTS: Array<{ keys: string[]; label: string }> = [
     label: "Tap to open or close the start menu (⌘ Cmd on a Mac, the Windows key on Windows)",
   },
   { keys: ["?"], label: "Show this keyboard shortcuts dialog" },
+  { keys: ["Ctrl", "Shift", "F"], label: "Full screen on or off (Esc also leaves it)" },
   { keys: ["Esc"], label: "Close menus, dialogs and popovers" },
   { keys: ["↑", "↓", "←", "→"], label: "Move between desktop icons or search results" },
   { keys: ["Alt", "↑ ↓ ← →"], label: "Move the selected desktop icon (or drag it)" },

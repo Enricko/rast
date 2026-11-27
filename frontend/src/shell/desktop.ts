@@ -6,7 +6,8 @@ import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions
 import { rectToStage, stageSize } from "../core/display";
 import { h } from "../core/dom";
 import { formatClock } from "../core/format";
-import { startMenuHint, watchOsKeyTap } from "../core/os-key";
+import { fullscreenShortcutLabel, fullscreenSupported, isFullscreen, isFullscreenShortcut, onFullscreenChange, toggleFullscreen } from "../core/fullscreen";
+import { detectPlatform, startMenuHint, watchOsKeyTap } from "../core/os-key";
 import { appIconSvg, iconSvg } from "../core/icons";
 import type { MeResponse, Settings } from "../core/types";
 import {
@@ -777,6 +778,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       { label: "Display settings…", icon: "monitor", onClick: () => openDisplaySettings() },
       { label: "Widgets…", icon: "activity", onClick: () => widgets.openCatalog() },
       { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
+      ...fullscreenMenuItem(),
       "separator",
       { label: "Open Control Panel", icon: "control", onClick: () => openAccount("profile"), disabled: !isAdmin },
       { label: "Open Activity Logs", icon: "logs", onClick: () => openApp("logs") },
@@ -822,6 +824,41 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     onClick: () => setShellTheme(store.get().theme === "dark" ? "light" : "dark"),
   });
 
+  // Full screen for the whole desktop (also Ctrl+Shift+F and the menus).
+  const platform = detectPlatform();
+  const fullscreenButton = h("button", {
+    class: "tray-button tray-fullscreen",
+    type: "button",
+    onClick: () => switchFullscreen(),
+  });
+  fullscreenButton.hidden = !fullscreenSupported();
+  function showFullscreenState(): void {
+    const on = isFullscreen();
+    const label = on ? "Exit full screen" : "Full screen";
+    const tip = `${label} (${fullscreenShortcutLabel(platform)}${on ? " or Esc" : ""})`;
+    fullscreenButton.replaceChildren(iconSvg(on ? "fullscreen-exit" : "fullscreen", 18));
+    fullscreenButton.setAttribute("aria-label", label);
+    fullscreenButton.setAttribute("aria-pressed", String(on));
+    fullscreenButton.dataset.tip = tip;
+  }
+  function switchFullscreen(): void {
+    toggleFullscreen().catch((error) => toast.error(`Full screen is unavailable here: ${errorMessage(error)}`));
+  }
+  function fullscreenMenuItem(): ContextMenuEntry[] {
+    if (!fullscreenSupported()) return [];
+    const on = isFullscreen();
+    return [
+      {
+        label: on ? "Exit full screen" : "Full screen",
+        icon: on ? "fullscreen-exit" : "fullscreen",
+        shortcut: fullscreenShortcutLabel(platform),
+        onClick: () => switchFullscreen(),
+      },
+    ];
+  }
+  showFullscreenState();
+  disposers.push(onFullscreenChange(showFullscreenState));
+
   const clockTime = h("span", { class: "tray-clock-time" });
   const clockDate = h("span", { class: "tray-clock-date" });
   const clockButton = h(
@@ -858,7 +895,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
   taskbar.append(
     startButton,
     taskbarApps,
-    h("div", { class: "taskbar-tray" }, connectionButton, themeButton, clockButton, userButton),
+    h("div", { class: "taskbar-tray" }, connectionButton, themeButton, fullscreenButton, clockButton, userButton),
   );
 
   // ------------------------------------------------------ taskbar tooltips
@@ -1346,6 +1383,11 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       toggleStartPanel(startButton);
       return;
     }
+    if (isFullscreenShortcut(event, platform) && fullscreenSupported()) {
+      event.preventDefault();
+      switchFullscreen();
+      return;
+    }
     if (isEditable(event.target)) return;
     if (event.key === "?" || ((event.ctrlKey || event.metaKey) && event.key === "/")) {
       event.preventDefault();
@@ -1372,6 +1414,7 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
       [
         { label: "Open start menu", icon: "logo", shortcut: startMenuHint().short, onClick: () => toggleStartPanel(startButton) },
         { label: "Show desktop", icon: "monitor", onClick: () => wm.minimizeAll(), disabled: wm.list().length === 0 },
+        ...fullscreenMenuItem(),
         "separator",
         { label: "Keyboard shortcuts", icon: "grid", onClick: () => showShortcuts() },
         { label: "About RAST", icon: "info", onClick: () => showAbout() },

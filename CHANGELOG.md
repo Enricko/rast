@@ -145,6 +145,11 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **Full screen.** A button at the bottom right of the taskbar (next to the
+  theme switch) shows the whole desktop full screen and back; so do
+  Ctrl+Shift+F (⌘⇧F on a Mac), "Full screen" in the desktop and taskbar
+  right-click menus, and Esc leaves it. Hidden in browsers without full
+  screen (iPhone).
 - **AI Agent has a web browser.** Agents can open pages that need
   JavaScript, click, type into forms, scroll and go back, in a Chrome that
   belongs to the chat; each step shows a screenshot of the page in its card
