@@ -117,6 +117,10 @@ pub enum Protocol {
     /// OpenAI Responses as ChatGPT's Codex backend takes it (always
     /// streamed, nothing stored).
     Responses,
+    /// Google's Cloud Code `v1internal` methods, as the Antigravity IDE and
+    /// Gemini CLI send them (a Gemini-shaped request in an envelope; see
+    /// [`provider::cloud_code`]).
+    CloudCode,
 }
 
 /// Provider kinds: a preset per provider (address, protocol, whether a key
@@ -151,6 +155,22 @@ pub enum Kind {
     CustomAnthropic,
     /// ChatGPT's Codex with a signed-in plan (see [`signin`]).
     Codex,
+    /// Claude Pro/Max with a signed-in plan (see [`signin`]).
+    Claude,
+    /// Grok (X Premium) with a signed-in plan.
+    Grok,
+    /// GitHub Copilot with a signed-in plan.
+    Copilot,
+    /// Google Antigravity with a signed-in plan.
+    Antigravity,
+    /// Gemini CLI (Google Code Assist) with a signed-in plan.
+    GeminiCli,
+    /// Qwen Chat with a signed-in plan (the API-key kind is [`Kind::Qwen`]).
+    QwenPlan,
+    /// iFlow with a signed-in plan.
+    IFlow,
+    /// Kimi with a signed-in plan (the API-key kind is [`Kind::Moonshot`]).
+    KimiPlan,
 }
 
 /// What the settings page shows about a kind, and its defaults.
@@ -196,7 +216,7 @@ const fn info(
 
 /// Every kind, in the order the settings page offers them.
 #[rustfmt::skip]
-pub const KINDS: [KindInfo; 27] = [
+pub const KINDS: [KindInfo; 35] = [
     info(Kind::Anthropic, "anthropic", "Anthropic", "https://api.anthropic.com/v1", true, "maker",
         "https://platform.claude.com/settings/keys", "Claude models"),
     info(Kind::OpenAi, "openai", "OpenAI", "https://api.openai.com/v1", true, "maker",
@@ -219,6 +239,22 @@ pub const KINDS: [KindInfo; 27] = [
         "https://platform.minimax.io", "MiniMax models"),
     info(Kind::Codex, "codex", "ChatGPT Codex", "https://chatgpt.com/backend-api/codex", false, "plan",
         "https://chatgpt.com/codex/settings/usage", "Sign in with your ChatGPT plan; only you can use it"),
+    info(Kind::Claude, "claude", "Claude", "https://api.anthropic.com/v1", false, "plan",
+        "https://claude.ai/settings/usage", "Sign in with your Claude plan; only you can use it"),
+    info(Kind::Grok, "grok", "Grok (X Premium)", "https://api.x.ai/v1", false, "plan",
+        "https://grok.com", "Sign in with X Premium; only you can use it"),
+    info(Kind::Copilot, "copilot", "GitHub Copilot", "https://api.githubcopilot.com", false, "plan",
+        "https://github.com/settings/copilot", "Sign in with GitHub Copilot; only you can use it"),
+    info(Kind::Antigravity, "antigravity", "Google Antigravity", "https://cloudcode-pa.googleapis.com", false, "plan",
+        "https://antigravity.google", "Sign in with Google Antigravity; only you can use it"),
+    info(Kind::GeminiCli, "gemini-cli", "Gemini CLI", "https://cloudcode-pa.googleapis.com", false, "plan",
+        "https://github.com/google-gemini/gemini-cli", "Sign in with your Gemini CLI plan; only you can use it"),
+    info(Kind::QwenPlan, "qwen-plan", "Qwen", "https://portal.qwen.ai/v1", false, "plan",
+        "https://chat.qwen.ai", "Sign in with Qwen Chat; only you can use it"),
+    info(Kind::IFlow, "iflow", "iFlow", "https://apis.iflow.cn/v1", false, "plan",
+        "https://iflow.cn", "Sign in with iFlow; only you can use it"),
+    info(Kind::KimiPlan, "kimi-plan", "Kimi", "https://api.kimi.com/coding/v1", false, "plan",
+        "https://kimi.moonshot.cn", "Sign in with Kimi; only you can use it"),
     info(Kind::OpenCode, "opencode", "OpenCode Zen", "https://opencode.ai/inference", true, "gateway",
         "https://opencode.ai/docs/console/models/", "Claude, GPT, Gemini, Kimi, GLM and more, pay as you go"),
     info(Kind::OpenCodeGo, "opencode-go", "OpenCode Go", "https://opencode.ai/inference/go", true, "gateway",
@@ -288,8 +324,9 @@ impl Kind {
     /// The protocol, for kinds that use one for every model.
     pub fn protocol(self) -> Protocol {
         match self {
-            Kind::Anthropic | Kind::CustomAnthropic => Protocol::Anthropic,
-            Kind::Codex => Protocol::Responses,
+            Kind::Anthropic | Kind::CustomAnthropic | Kind::Claude => Protocol::Anthropic,
+            Kind::Codex | Kind::Grok => Protocol::Responses,
+            Kind::Antigravity | Kind::GeminiCli => Protocol::CloudCode,
             _ => Protocol::Chat,
         }
     }
@@ -298,6 +335,11 @@ impl Kind {
     /// only the account that signed in may use them.
     pub fn signs_in(self) -> bool {
         self.info().group == "plan"
+    }
+
+    /// The plan a kind signs in to (none for keyed providers).
+    pub fn plan(self) -> Option<signin::Plan> {
+        signin::Plan::of_kind(self)
     }
 
     /// Gateways that serve each model on its own protocol, under
@@ -532,6 +574,7 @@ pub async fn signed_in_token(
         ))
     };
     let now = now_ms();
+    let plan = provider.kind.plan().ok_or_else(again)?;
     let credentials = provider.credentials(secrets)?.ok_or_else(again)?;
     if !credentials.needs_refresh(now) {
         return Ok((credentials.access_token, credentials.account_id));
@@ -547,7 +590,7 @@ pub async fn signed_in_token(
         return Ok((credentials.access_token, credentials.account_id));
     }
     let old = credentials.clone();
-    let refreshed = tokio::task::spawn_blocking(move || signin::refresh(&old, now))
+    let refreshed = tokio::task::spawn_blocking(move || signin::refresh(plan, &old, now))
         .await
         .map_err(|e| AppError::internal(format!("sign-in refresh failed: {e}")))?;
     match refreshed {

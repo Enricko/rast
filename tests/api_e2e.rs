@@ -4841,6 +4841,7 @@ async fn ai_plan_sign_in_is_its_owners_alone() {
         account_id: "acc-1".into(),
         email: "admin@example.com".into(),
         plan: "plus".into(),
+        project_id: String::new(),
     };
     let sealed = rast::ai::seal_credentials(&server.state.secrets, &credentials).unwrap();
     sqlx::query(
@@ -4938,4 +4939,724 @@ async fn ai_plan_sign_in_is_its_owners_alone() {
         .unwrap()["models"]
         .clone();
     assert_eq!(models[0]["source"], "plan", "{models}");
+}
+
+/// The plan kinds and what the settings page says about each: kind id, flow,
+/// the kind's label and the site in the admin overview (the build contract's
+/// table; the overview labels come from the kind list).
+const AI_PLAN_KINDS: [(&str, &str, &str, &str); 9] = [
+    ("codex", "browser", "ChatGPT Codex", "ChatGPT"),
+    ("claude", "browser", "Claude", "Claude"),
+    ("grok", "browser", "Grok (X Premium)", "xAI"),
+    ("copilot", "device", "GitHub Copilot", "GitHub"),
+    ("antigravity", "browser", "Google Antigravity", "Google"),
+    ("gemini-cli", "browser", "Gemini CLI", "Google"),
+    ("qwen-plan", "device", "Qwen", "Qwen"),
+    ("iflow", "browser", "iFlow", "iFlow"),
+    ("kimi-plan", "device", "Kimi", "Kimi"),
+];
+
+/// The browser-flow plans and the page each opens, with the kind's label and
+/// site and whether its flow takes PKCE (iFlow's own flow has none: it ties
+/// the pasted answer to the sign-in with its `state` alone). Starting one
+/// only builds that page (no request to the provider), so tests may start
+/// them; the device flows (Copilot, Qwen, Kimi) are not started because that
+/// asks the provider for a code over the network.
+/// The plan sign-ins whose OAuth client comes from the server's environment
+/// (Antigravity, Gemini CLI, iFlow); the tests configure fake ones so no real
+/// credential is needed.
+fn set_plan_oauth_clients() {
+    static SET: std::sync::Once = std::sync::Once::new();
+    SET.call_once(|| {
+        for (name, id) in [
+            ("ANTIGRAVITY", "test-antigravity-client"),
+            ("GEMINI_CLI", "test-gemini-client"),
+            ("IFLOW", "test-iflow-id"),
+        ] {
+            std::env::set_var(format!("RAST_{name}_CLIENT_ID"), id);
+            std::env::set_var(format!("RAST_{name}_CLIENT_SECRET"), "test-secret");
+        }
+    });
+}
+
+const AI_BROWSER_PLANS: [(&str, &str, &str, &str, bool); 6] = [
+    (
+        "codex",
+        "https://auth.openai.com/",
+        "ChatGPT",
+        "ChatGPT",
+        true,
+    ),
+    ("claude", "https://claude.ai/", "Claude", "Claude", true),
+    (
+        "grok",
+        "https://auth.x.ai/",
+        "Grok (X Premium)",
+        "xAI",
+        true,
+    ),
+    (
+        "antigravity",
+        "https://accounts.google.com/",
+        "Google Antigravity",
+        "Google",
+        true,
+    ),
+    (
+        "gemini-cli",
+        "https://accounts.google.com/",
+        "Gemini CLI",
+        "Google",
+        true,
+    ),
+    ("iflow", "https://iflow.cn/", "iFlow", "iFlow", false),
+];
+
+fn ai_kind<'a>(kinds: &'a [Value], id: &str) -> &'a Value {
+    kinds
+        .iter()
+        .find(|kind| kind["id"] == id)
+        .unwrap_or_else(|| panic!("kind {id} is not in the admin overview"))
+}
+
+/// A signed-in plan row, as finishing a sign-in stores it.
+async fn seed_plan_provider(server: &TestServer, id: &str, kind: &str, owner_id: i64) {
+    let credentials = rast::ai::signin::Credentials {
+        access_token: "at-secret-token".into(),
+        refresh_token: "rt-secret-token".into(),
+        expires_at: db::now_ms() + 3_600_000,
+        refreshed_at: db::now_ms(),
+        account_id: "acc-1".into(),
+        email: "admin@example.com".into(),
+        plan: "plus".into(),
+        project_id: String::new(),
+    };
+    let sealed = rast::ai::seal_credentials(&server.state.secrets, &credentials).unwrap();
+    sqlx::query(
+        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+             enabled, created_at, updated_at, owner_id, sign_in)
+         VALUES (?, ?, 'My plan', '', '', '[\"plan-model\"]', '{}', '{}', 1, 1, 1, ?, ?)",
+    )
+    .bind(id)
+    .bind(kind)
+    .bind(owner_id)
+    .bind(&sealed)
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+}
+
+/// Whether this machine has a Claude Code login the server would import (the
+/// same places `signin::import_claude_code` looks). A test must never spend a
+/// real one: it would use that person's tokens and call Anthropic.
+fn claude_code_login_on_host() -> Option<std::path::PathBuf> {
+    let path = if let Some(overridden) =
+        std::env::var_os("RAST_CLAUDE_CREDENTIALS").filter(|path| !path.is_empty())
+    {
+        std::path::PathBuf::from(overridden)
+    } else if let Some(config_dir) =
+        std::env::var_os("CLAUDE_CONFIG_DIR").filter(|dir| !dir.is_empty())
+    {
+        std::path::PathBuf::from(config_dir).join(".credentials.json")
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME").filter(|home| !home.is_empty())?)
+            .join(".claude")
+            .join(".credentials.json")
+    };
+    path.is_file().then_some(path)
+}
+
+/// Browser flows come back to a page on the person's own machine: the paste
+/// is the only way that address reaches a server.
+fn assert_loopback_redirect(redirect: &str) {
+    assert!(
+        redirect.starts_with("http://localhost:") || redirect.starts_with("http://127.0.0.1:"),
+        "a pasted flow comes back to a loopback address: {redirect}"
+    );
+}
+
+/// Install the AI Agent app (it ships with RAST but starts uninstalled, and
+/// every `/api/ai/*` call needs it) and optionally grant an account access.
+async fn install_ai_agent_app(server: &TestServer, admin: &Session, user_id: Option<i64>) {
+    if let Some(user_id) = user_id {
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                &format!("/api/users/{user_id}/access-rules"),
+                Some(json!({"folderRules": [], "appRules": [{"appId": "agent", "rule": "allow"}]})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "grant the AI Agent app: {body}");
+    }
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "install the AI Agent app: {body}");
+}
+
+/// The admin overview tells the settings page how each plan signs in and
+/// what to show about it, and keyed kinds (including `qwen` and `moonshot`,
+/// whose plan counterparts are `qwen-plan` and `kimi-plan`) sign in not at
+/// all.
+#[tokio::test]
+async fn ai_plan_kinds_say_how_they_sign_in() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    install_ai_agent_app(&server, &admin, None).await;
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let kinds = body["kinds"].as_array().expect("kinds");
+    assert_eq!(
+        kinds.iter().filter(|kind| kind["signsIn"] == true).count(),
+        AI_PLAN_KINDS.len(),
+        "the signing-in kinds are the nine plans: {kinds:?}"
+    );
+    for (id, flow, label, site) in AI_PLAN_KINDS {
+        let kind = ai_kind(kinds, id);
+        assert_eq!(kind["group"], "plan", "{kind}");
+        assert_eq!(kind["signsIn"], true, "{kind}");
+        assert_eq!(kind["signInFlow"], flow, "{kind}");
+        assert_eq!(kind["label"], label, "{kind}");
+        assert_eq!(kind["site"], site, "{kind}");
+        assert!(
+            kind["risk"].as_str().is_some_and(|risk| !risk.is_empty()),
+            "a plan says what it risks: {kind}"
+        );
+        if flow == "browser" {
+            assert!(
+                kind["callbackHint"]
+                    .as_str()
+                    .is_some_and(|hint| !hint.is_empty()),
+                "a browser flow says what to paste back: {kind}"
+            );
+        } else {
+            assert_eq!(
+                kind["callbackHint"], "",
+                "a device flow pastes nothing: {kind}"
+            );
+        }
+    }
+    for id in ["openai", "qwen", "moonshot", "custom", "ollama"] {
+        let kind = ai_kind(kinds, id);
+        assert_eq!(kind["signsIn"], false, "{kind}");
+        assert_eq!(kind["signInFlow"], "", "{kind}");
+        assert_eq!(kind["site"], "", "{kind}");
+        assert_eq!(kind["callbackHint"], "", "{kind}");
+        assert_eq!(kind["risk"], "", "{kind}");
+    }
+}
+
+/// Starting a browser-flow plan builds the provider's page offline: PKCE
+/// S256, the state echoed, and the loopback address the person pastes back.
+#[tokio::test]
+async fn ai_plan_sign_in_builds_every_browser_page() {
+    set_plan_oauth_clients();
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let admin_id = server.user_id("admin").await;
+    let alice_id = server.user_id("alice").await;
+    install_ai_agent_app(&server, &admin, Some(alice_id)).await;
+    let start = "/api/ai/providers/sign-in";
+
+    // Administrators only.
+    let (status, _, _) = server
+        .request(
+            "POST",
+            start,
+            Some(json!({"kind": "claude"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Keyed and unknown kinds do not sign in.
+    for kind in ["openai", "qwen", "moonshot", "custom", "", "nonsense"] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                start,
+                Some(json!({"kind": kind})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "kind {kind:?}: {body}");
+    }
+
+    for (kind, host, label, site, pkce) in AI_BROWSER_PLANS {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                start,
+                Some(json!({"kind": kind})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "kind {kind}: {body}");
+        assert_eq!(body["flow"], "browser", "kind {kind}: {body}");
+        assert_eq!(body["label"], label, "kind {kind}: {body}");
+        assert_eq!(body["site"], site, "kind {kind}: {body}");
+        assert!(
+            body["callbackHint"]
+                .as_str()
+                .is_some_and(|hint| !hint.is_empty()),
+            "kind {kind}: {body}"
+        );
+        assert!(
+            body["risk"].as_str().is_some_and(|risk| !risk.is_empty()),
+            "kind {kind}: {body}"
+        );
+        let url = body["url"]
+            .as_str()
+            .unwrap_or_else(|| panic!("kind {kind}: no url: {body}"));
+        assert!(
+            url.starts_with(host),
+            "kind {kind} signs in on {host}: {url}"
+        );
+        if pkce {
+            assert!(url.contains("response_type=code"), "kind {kind}: {url}");
+            assert!(url.contains("code_challenge="), "kind {kind}: {url}");
+            assert!(
+                url.contains("code_challenge_method=S256"),
+                "kind {kind}: {url}"
+            );
+        }
+        let state = body["state"]
+            .as_str()
+            .unwrap_or_else(|| panic!("kind {kind}: no state: {body}"));
+        assert!(
+            url.contains(&format!("state={state}")),
+            "kind {kind}: {url}"
+        );
+        assert_loopback_redirect(
+            body["redirectUri"]
+                .as_str()
+                .unwrap_or_else(|| panic!("kind {kind}: no redirectUri: {body}")),
+        );
+    }
+
+    // Signing in again to a provider: it must exist and be of that kind.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            start,
+            Some(json!({"kind": "codex", "providerId": "no-such-provider"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    seed_plan_provider(&server, "claude-row", "claude", admin_id).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            start,
+            Some(json!({"kind": "codex", "providerId": "claude-row"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            start,
+            Some(json!({"kind": "claude", "providerId": "claude-row"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "signing in again to a Claude provider: {body}"
+    );
+    assert_eq!(body["flow"], "browser", "{body}");
+
+    // The device kinds are routed (they get past the kind check to the
+    // provider lookup) but are not started here: their `start` asks the
+    // provider for a code, which would be a network request.
+    for plan in AI_PLAN_KINDS {
+        if plan.1 != "device" {
+            continue;
+        }
+        let (status, _, body) = server
+            .request(
+                "POST",
+                start,
+                Some(json!({"kind": plan.0, "providerId": "no-such-provider"})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "kind {}: {body}", plan.0);
+    }
+}
+
+/// Answering a sign-in: only administrators, only the account that started
+/// it, only once, and only with an address that carries its code.
+#[tokio::test]
+async fn ai_plan_sign_in_is_answered_once_by_its_owner() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("admin2", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let admin2 = server.login("admin2", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let admin_id = server.user_id("admin").await;
+    let alice_id = server.user_id("alice").await;
+    install_ai_agent_app(&server, &admin, Some(alice_id)).await;
+    let (finish, poll) = (
+        "/api/ai/providers/sign-in/finish",
+        "/api/ai/providers/sign-in/poll",
+    );
+
+    // A Claude sign-in, started but not answered (offline: it is the page).
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/sign-in",
+            Some(json!({"kind": "claude"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let state = body["state"].as_str().unwrap().to_string();
+    let redirect = body["redirectUri"].as_str().unwrap().to_string();
+    let callback = format!("{redirect}?code=test-code&state={state}");
+
+    // Only administrators answer or poll a sign-in.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            finish,
+            Some(json!({"callback": callback})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            poll,
+            Some(json!({"state": state})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // A browser sign-in is not polled, and an unknown state names nothing.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            poll,
+            Some(json!({"state": state})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            poll,
+            Some(json!({"state": "not-a-state"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Another administrator cannot answer it, and trying does not use it up.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            finish,
+            Some(json!({"callback": callback})),
+            admin2.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Addresses without a code, refusals and states that name no sign-in are
+    // refused before the provider is asked anything.
+    for bad in [
+        "https://claude.ai/".to_string(),
+        format!("{redirect}?error=access_denied&state={state}"),
+        format!("{redirect}?code=test-code&state=not-a-state"),
+        format!("{redirect}?state={state}"),
+        "a-code-without-a-state#".to_string(),
+    ] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                finish,
+                Some(json!({"callback": bad})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, _, body) = server
+        .request(
+            "POST",
+            finish,
+            Some(json!({"callback": "x".repeat(8193)})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a giant paste: {body}");
+
+    // The answer is used once. Finishing for real would trade the code over
+    // the network, which tests must not do, so the used-up state is reached
+    // directly: pasting that address again names nothing.
+    let used = rast::ai::signin::take_pending(&state, admin_id).expect("the started sign-in");
+    assert_eq!(used.plan, rast::ai::signin::Plan::Claude);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            finish,
+            Some(json!({"callback": callback})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+/// Signing out forgets a plan's tokens and owner, keeping the provider and
+/// its models; only administrators do it, and only for plans.
+#[tokio::test]
+async fn ai_plan_sign_out_forgets_the_tokens() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("admin2", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let admin2 = server.login("admin2", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let admin_id = server.user_id("admin").await;
+    let alice_id = server.user_id("alice").await;
+    install_ai_agent_app(&server, &admin, Some(alice_id)).await;
+    seed_plan_provider(&server, "plan1", "codex", admin_id).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({"kind": "openai", "name": "Keyed", "apiKey": "sk-test-1234", "models": ["gpt-4o"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let keyed_id = body["provider"]["id"].as_str().unwrap().to_string();
+
+    // Only administrators, only existing providers, only plans.
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/ai/providers/plan1/sign-out",
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/no-such-provider/sign-out",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/providers/{keyed_id}/sign-out"),
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "bad_request", "{body}");
+
+    // Before: it is a signed-in provider its owner may chat with.
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, admin.headers())
+        .await;
+    assert!(
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "plan1"),
+        "{body}"
+    );
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    let signed_in = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "plan1")
+        .unwrap()["signedIn"]
+        .clone();
+    assert_eq!(signed_in["email"], "admin@example.com", "{signed_in}");
+    assert_eq!(signed_in["plan"], "plus", "{signed_in}");
+
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/plan1/sign-out",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider = &body["provider"];
+    assert_eq!(provider["id"], "plan1", "{body}");
+    assert_eq!(provider["signsIn"], true, "{body}");
+    assert_eq!(provider["signedIn"], Value::Null, "{body}");
+    assert_eq!(provider["ownerId"], Value::Null, "{body}");
+    assert_eq!(provider["models"], json!(["plan-model"]), "{body}");
+    assert!(!body.to_string().contains("secret-token"), "{body}");
+
+    // The tokens are gone and so is the owner; in the database too.
+    let sign_in: String = sqlx::query_scalar("SELECT sign_in FROM ai_providers WHERE id = 'plan1'")
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(sign_in, "");
+    let owner: Option<i64> =
+        sqlx::query_scalar("SELECT owner_id FROM ai_providers WHERE id = 'plan1'")
+            .fetch_one(&server.state.db)
+            .await
+            .unwrap();
+    assert_eq!(owner, None);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'ai.provider.sign_out' AND object_id = 'plan1'",
+    )
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "signing out is in the activity log");
+
+    // Nobody may chat with it until someone signs in again (its new owner).
+    for session in [&admin, &admin2, &alice] {
+        let (status, _, body) = server
+            .request("GET", "/api/ai/options", None, session.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            !body["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"] == "plan1"),
+            "{body}"
+        );
+    }
+}
+
+/// Importing the server's own Claude Code login: administrators only, a
+/// provider to sign in again must be a Claude one, and a missing login says
+/// so. This machine may have a real Claude Code login: importing it would
+/// spend that person's tokens and call Anthropic, so the test only checks
+/// the paths that fail before that file is read.
+#[tokio::test]
+async fn ai_claude_code_import_is_administrators_only_and_validated() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let alice_id = server.user_id("alice").await;
+    install_ai_agent_app(&server, &admin, Some(alice_id)).await;
+    let import = "/api/ai/providers/import/claude-code";
+
+    // Administrators only.
+    let (status, _, _) = server
+        .request("POST", import, Some(json!({})), alice.headers_with_csrf())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    // Unknown provider: 404; a provider of another kind: 400.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            import,
+            Some(json!({"providerId": "no-such-provider"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({"kind": "openai", "name": "Keyed", "apiKey": "sk-test-1234", "models": ["gpt-4o"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let keyed_id = body["provider"]["id"].as_str().unwrap().to_string();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            import,
+            Some(json!({"providerId": keyed_id})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // A name that is too long is refused before the login file is read.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            import,
+            Some(json!({"name": "x".repeat(rast::ai::MAX_NAME + 1)})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    match claude_code_login_on_host() {
+        // No login on this machine: the import says so and adds nothing.
+        None => {
+            let (status, _, body) = server
+                .request("POST", import, Some(json!({})), admin.headers_with_csrf())
+                .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "no Claude Code login on this machine: {body}"
+            );
+            assert_eq!(body["error"]["code"], "bad_request", "{body}");
+            let providers: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_providers")
+                .fetch_one(&server.state.db)
+                .await
+                .unwrap();
+            assert_eq!(providers, 1, "only the keyed provider was added");
+        }
+        // A real login is on this machine: do not spend it.
+        Some(path) => eprintln!("not importing {path:?}: a real Claude Code login exists"),
+    }
 }

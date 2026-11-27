@@ -38,6 +38,15 @@ const MARKS: Record<string, Mark> = {
   llamacpp: { text: "ll", bg: "#8b5cf6" },
   chatgpt: { text: "C", bg: "#10a37f" },
   codex: { text: "cx", bg: "linear-gradient(135deg, #1b1b1f 40%, #4d55e8)" },
+  // Plans people sign in to (the logo sits on this colour).
+  claude: { text: "C", bg: "#d97757" },
+  grok: { text: "x", bg: "#111" },
+  copilot: { text: "gh", bg: "#24292f" },
+  antigravity: { text: "A", bg: "#202124" },
+  "gemini-cli": { text: "G", bg: "linear-gradient(135deg, #4285f4, #9b72cb 60%, #d96570)" },
+  "qwen-plan": { text: "Q", bg: "#615ced" },
+  iflow: { text: "iF", bg: "#2563eb" },
+  "kimi-plan": { text: "K", bg: "#16191f" },
   custom: { text: "{ }", bg: "#475569" },
   "custom-anthropic": { text: "{A}", bg: "#7c5a4a" },
 };

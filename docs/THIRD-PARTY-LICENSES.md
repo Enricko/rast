@@ -17,6 +17,8 @@ The web interface embedded in the binary bundles these frontend libraries (loade
 
 The AI Agent's built-in model prices (`src/ai/prices.rs`) are taken from 9router's price table (`open-sse/providers/pricing.js`, <https://github.com/decolua/9router>), MIT License, Copyright (c) 2024-2026 decolua and contributors; the Claude prices are Anthropic's published ones.
 
+The AI Agent's subscription sign-in flows (the OAuth clients, endpoints and wire shapes for ChatGPT Codex, Claude, Grok, GitHub Copilot, Google Antigravity, Gemini CLI, Qwen, iFlow and Kimi, in `src/ai/signin/` and `src/ai/provider/plans/`) follow 9router (<https://github.com/decolua/9router>, MIT License, Copyright (c) 2024-2026 decolua and contributors) and `dsh-plugin-subscriptions` (<https://github.com/V1ki/dsh-plugin-subscriptions>, MIT License, Copyright (c) 2026 V1ki), together with each provider's own public CLI client. They are reimplemented for RAST in Rust; no third-party code is linked in.
+
 The AI Agent's provider logos (`frontend/src/apps/agent/logos.ts`) are taken from Lobe Icons (`@lobehub/icons-static-svg` 1.106.0, <https://github.com/lobehub/lobe-icons>), MIT License, Copyright (c) 2023 LobeHub. The logos are trademarks of their owners and only name each provider.
 
 ## License summary

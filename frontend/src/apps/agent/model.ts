@@ -249,7 +249,54 @@ export interface ProviderKind {
   /** Where to get a key ("" none). */
   keyUrl: string;
   about: string;
+  /** Added only by signing in to a plan: no API key (group "plan"). */
+  signsIn: boolean;
+  /** How signing in to a plan works ("" for the API-key kinds). */
+  signInFlow: SignInFlow;
+  /** Plan kinds, browser flows: whose page asks to allow RAST ("OpenAI",
+   * "Claude", "Google", …). */
+  site: string;
+  /** Plan kinds, browser flows: what the address to paste looks like. */
+  callbackHint: string;
+  /** Plan kinds: what using a plan outside its own app may cost ("" none). */
+  risk: string;
 }
+
+/** How a plan is signed in to: a page to allow in a browser, with the
+ * address it ends on pasted back, or a code entered on the provider's page
+ * while this page waits. */
+export type SignInFlow = "browser" | "device" | "";
+
+/** POST /api/ai/providers/sign-in: a page to open, or a code to enter. */
+export interface SignInStarted {
+  flow: "browser" | "device";
+  /** Ties the finish (or the polls) of this attempt to its pending sign-in. */
+  state: string;
+  /** Browser flow: the provider's page, and where it sends the browser. */
+  url?: string;
+  redirectUri?: string;
+  callbackHint?: string;
+  /** Device flow: what to enter on the provider's page, and how often to ask
+   * whether it was entered (`interval`, seconds; `expiresIn`, seconds). */
+  userCode?: string;
+  verificationUri?: string;
+  interval?: number;
+  expiresIn?: number;
+  /** What the plan calls itself, whose page it is, and any risk note. */
+  label?: string;
+  site?: string;
+  risk?: string;
+}
+
+/** A sign-in that added (or signed in again to) a provider. */
+export interface SignInDone {
+  provider: AdminProvider;
+  /** The models the plan lists that RAST can use (null: none could be read). */
+  offered: string[] | null;
+}
+
+/** One poll of a device flow: still waiting, or done and stored. */
+export type SignInPoll = { status: "waiting" } | ({ status: "done" } & SignInDone);
 
 /** A plan's name as people know it ("plus" → "Plus"). */
 export function planLabel(plan: string): string {

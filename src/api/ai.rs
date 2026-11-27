@@ -55,6 +55,12 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/providers/models", post(probe_models))
         .route("/api/ai/providers/sign-in", post(start_sign_in))
         .route("/api/ai/providers/sign-in/finish", post(finish_sign_in))
+        .route("/api/ai/providers/sign-in/poll", post(poll_sign_in))
+        .route(
+            "/api/ai/providers/import/claude-code",
+            post(import_claude_code),
+        )
+        .route("/api/ai/providers/{id}/sign-out", post(sign_out_provider))
         .route("/api/ai/providers/{id}/prices", put(put_model_price))
         .route("/api/ai/prices", get(get_prices))
         .route("/api/ai/prices/refresh", post(refresh_prices))
@@ -1016,6 +1022,7 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
     let kinds: Vec<Value> = ai::KINDS
         .iter()
         .map(|k| {
+            let plan = ai::signin::Plan::of_kind(k.kind);
             json!({
                 "id": k.id,
                 "label": k.label,
@@ -1024,6 +1031,11 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
                 "group": k.group,
                 "keyUrl": k.key_url,
                 "about": k.about,
+                "signsIn": plan.is_some(),
+                "signInFlow": plan.map(flow_name).unwrap_or(""),
+                "site": plan.map(|p| p.site()).unwrap_or(""),
+                "callbackHint": plan.map(|p| p.callback_hint()).unwrap_or(""),
+                "risk": plan.map(|p| p.risk_note()).unwrap_or(""),
             })
         })
         .collect();
@@ -1707,7 +1719,7 @@ async fn probe_models(
         let (token, account) = ai::signed_in_token(&state.db, &state.secrets, &saved).await?;
         let base_url = saved.effective_base_url();
         let models = tokio::task::spawn_blocking(move || {
-            provider::list_codex_models(&base_url, &token, &account)
+            provider::list_plan_models(kind, &base_url, &token, &account)
         })
         .await
         .map_err(|e| AppError::internal(format!("model list failed: {e}")))?
@@ -1738,6 +1750,119 @@ async fn probe_models(
     ))
 }
 
+// ------------------------------------------------------------- plan sign-in
+
+/// What the settings page shows about a plan while signing in.
+fn sign_in_meta(plan: ai::signin::Plan) -> Value {
+    json!({
+        "label": plan.label(),
+        "site": plan.site(),
+        "callbackHint": plan.callback_hint(),
+        "risk": plan.risk_note(),
+    })
+}
+
+fn flow_name(plan: ai::signin::Plan) -> &'static str {
+    match plan.flow() {
+        ai::signin::Flow::Browser => "browser",
+        ai::signin::Flow::Device => "device",
+    }
+}
+
+/// Store a finished sign-in: tokens sealed, the provider owned by the account
+/// that signed in, with the models the plan offers (when they can be read).
+/// Shared by every plan flow (browser paste, device poll, Claude Code import).
+async fn store_signed_in(
+    state: &AppState,
+    user: &AuthUser,
+    ip: &ClientIp,
+    plan: ai::signin::Plan,
+    provider_id: Option<&str>,
+    name: &str,
+    credentials: ai::signin::Credentials,
+) -> AppResult<(ai::Provider, Option<Vec<String>>)> {
+    let kind = plan.kind();
+    // The models the plan offers (the sign-in stands even when this fails).
+    let offered = {
+        let (base_url, token, account) = (
+            kind.default_base_url().to_string(),
+            credentials.access_token.clone(),
+            credentials.account_id.clone(),
+        );
+        tokio::task::spawn_blocking(move || {
+            provider::list_plan_models(kind, &base_url, &token, &account)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .filter(|models| !models.is_empty())
+    };
+    let sealed = ai::seal_credentials(&state.secrets, &credentials)?;
+    let now = now_ms();
+    let id = match provider_id {
+        Some(id) => {
+            let existing = ai::provider(&state.db, id)
+                .await?
+                .ok_or(AppError::NotFound("provider not found"))?;
+            if existing.kind != kind {
+                return Err(AppError::bad_request("that provider is of another kind"));
+            }
+            let models = match &offered {
+                Some(fresh) if existing.models.is_empty() => fresh.clone(),
+                _ => existing.models.clone(),
+            };
+            sqlx::query(
+                "UPDATE ai_providers SET sign_in = ?, owner_id = ?, models = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&sealed)
+            .bind(user.id)
+            .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
+            .bind(now)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+            id.to_string()
+        }
+        None => {
+            let id = ai::new_id();
+            sqlx::query(
+                "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+                     enabled, created_at, updated_at, owner_id, sign_in)
+                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(kind.as_str())
+            .bind(name)
+            .bind(
+                serde_json::to_string(&offered.clone().unwrap_or_default())
+                    .unwrap_or_else(|_| "[]".into()),
+            )
+            .bind(now)
+            .bind(now)
+            .bind(user.id)
+            .bind(&sealed)
+            .execute(&state.db)
+            .await?;
+            id
+        }
+    };
+    audit_admin(
+        state,
+        user,
+        ip,
+        "ai.provider.sign_in",
+        "ai_provider",
+        &id,
+        name,
+    )
+    .await;
+    config_changed(state, "providers");
+    let provider = ai::provider(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    Ok((provider, offered))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SignInStart {
@@ -1748,8 +1873,9 @@ struct SignInStart {
     name: String,
 }
 
-/// POST /api/ai/providers/sign-in — start signing in to a plan: the address
-/// to open in the browser (see [`ai::signin`]).
+/// POST /api/ai/providers/sign-in — start signing in to a plan: a page to
+/// open (browser flows) or a code to enter (device flows); see
+/// [`ai::signin`].
 async fn start_sign_in(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -1757,6 +1883,9 @@ async fn start_sign_in(
 ) -> AppResult<Json<Value>> {
     let kind = Kind::parse(&body.kind)
         .filter(|k| k.signs_in())
+        .ok_or_else(|| AppError::bad_request("that provider does not sign in"))?;
+    let plan = kind
+        .plan()
         .ok_or_else(|| AppError::bad_request("that provider does not sign in"))?;
     if let Some(id) = &body.provider_id {
         let existing = ai::provider(&state.db, id)
@@ -1771,12 +1900,43 @@ async fn start_sign_in(
     } else {
         required(&body.name, "the name", ai::MAX_NAME)?
     };
-    let (url, sign_in) = ai::signin::start(admin.0.id, body.provider_id.clone(), name);
-    Ok(Json(json!({
-        "url": url,
-        "state": sign_in,
-        "redirectUri": ai::signin::REDIRECT_URI,
-    })))
+    let (user_id, provider_id) = (admin.0.id, body.provider_id.clone());
+    let started = tokio::task::spawn_blocking(move || {
+        ai::signin::start(plan, user_id, provider_id, name, now_ms())
+    })
+    .await
+    .map_err(|e| AppError::internal(format!("sign-in failed: {e}")))?
+    .map_err(AppError::bad_request)?;
+    let mut out = match started {
+        ai::signin::Started::Browser {
+            url,
+            state,
+            redirect_uri,
+        } => json!({
+            "flow": "browser",
+            "url": url,
+            "state": state,
+            "redirectUri": redirect_uri,
+        }),
+        ai::signin::Started::Device {
+            state,
+            user_code,
+            verification_uri,
+            interval,
+            expires_in,
+        } => json!({
+            "flow": "device",
+            "state": state,
+            "userCode": user_code,
+            "verificationUri": verification_uri,
+            "interval": interval,
+            "expiresIn": expires_in,
+        }),
+    };
+    if let (Value::Object(fields), Value::Object(meta)) = (&mut out, sign_in_meta(plan)) {
+        fields.extend(meta);
+    }
+    Ok(Json(out))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1809,84 +1969,163 @@ async fn finish_sign_in(
     }
     let now = now_ms();
     let code = callback.code.clone();
-    let exchanged = {
-        let pending = pending.clone();
-        tokio::task::spawn_blocking(move || ai::signin::exchange(&pending, &code, now))
+    let exchange = pending.clone();
+    let credentials =
+        tokio::task::spawn_blocking(move || ai::signin::finish(&exchange, &code, now))
             .await
             .map_err(|e| AppError::internal(format!("sign-in failed: {e}")))?
-            .map_err(AppError::bad_request)?
+            .map_err(AppError::bad_request)?;
+    let (provider, offered) = store_signed_in(
+        &state,
+        &admin.0,
+        &ip,
+        pending.plan,
+        pending.provider_id.as_deref(),
+        &pending.name,
+        credentials,
+    )
+    .await?;
+    Ok(Json(json!({
+        "provider": provider.admin_json(&state.secrets),
+        "offered": offered,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignInPoll {
+    state: String,
+}
+
+/// POST /api/ai/providers/sign-in/poll — one device flow's state: waiting,
+/// or the provider it added. The page polls this every few seconds.
+async fn poll_sign_in(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(body): Json<SignInPoll>,
+) -> AppResult<Json<Value>> {
+    let state_id = body.state;
+    let user_id = admin.0.id;
+    let polled =
+        tokio::task::spawn_blocking(move || ai::signin::poll(&state_id, user_id, now_ms()))
+            .await
+            .map_err(|e| AppError::internal(format!("sign-in failed: {e}")))?
+            .map_err(AppError::bad_request)?;
+    match polled {
+        ai::signin::Poll::Waiting => Ok(Json(json!({"status": "waiting"}))),
+        ai::signin::Poll::Failed(message) => Err(AppError::bad_request(message)),
+        ai::signin::Poll::Done(signed_in) => {
+            let (provider, offered) = store_signed_in(
+                &state,
+                &admin.0,
+                &ip,
+                signed_in.plan,
+                signed_in.provider_id.as_deref(),
+                &signed_in.name,
+                signed_in.credentials,
+            )
+            .await?;
+            Ok(Json(json!({
+                "status": "done",
+                "provider": provider.admin_json(&state.secrets),
+                "offered": offered,
+            })))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ClaudeImport {
+    /// Sign in again to this provider (else a new one is added).
+    provider_id: Option<String>,
+    #[serde(default)]
+    name: String,
+}
+
+/// POST /api/ai/providers/import/claude-code — use the Claude Code login
+/// already on the server instead of a browser round trip.
+async fn import_claude_code(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(body): Json<ClaudeImport>,
+) -> AppResult<Json<Value>> {
+    let kind = Kind::Claude;
+    if let Some(id) = &body.provider_id {
+        let existing = ai::provider(&state.db, id)
+            .await?
+            .ok_or(AppError::NotFound("provider not found"))?;
+        if existing.kind != kind {
+            return Err(AppError::bad_request("that provider is of another kind"));
+        }
+    }
+    let name = if body.name.trim().is_empty() {
+        kind.label().to_string()
+    } else {
+        required(&body.name, "the name", ai::MAX_NAME)?
     };
-    let kind = Kind::Codex;
-    // The models the plan offers (kept as they were when this fails).
-    let models = {
-        let (token, account) = (exchanged.access_token.clone(), exchanged.account_id.clone());
-        tokio::task::spawn_blocking(move || {
-            provider::list_codex_models(kind.default_base_url(), &token, &account)
-        })
+    let now = now_ms();
+    let credentials = tokio::task::spawn_blocking(move || ai::signin::import_claude_code(now))
         .await
-        .ok()
-        .and_then(Result::ok)
-    };
-    let sealed = ai::seal_credentials(&state.secrets, &exchanged)?;
-    let id = match &pending.provider_id {
-        Some(id) => {
-            let existing = ai::provider(&state.db, id)
-                .await?
-                .ok_or(AppError::NotFound("provider not found"))?;
-            let models = match &models {
-                Some(offered) if existing.models.is_empty() => offered.clone(),
-                _ => existing.models.clone(),
-            };
-            sqlx::query(
-                "UPDATE ai_providers SET sign_in = ?, owner_id = ?, models = ?, updated_at = ? WHERE id = ?",
-            )
-            .bind(&sealed)
-            .bind(admin.0.id)
-            .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
-            .bind(now)
-            .bind(id)
-            .execute(&state.db)
-            .await?;
-            id.clone()
-        }
-        None => {
-            let id = ai::new_id();
-            sqlx::query(
-                "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
-                     enabled, created_at, updated_at, owner_id, sign_in)
-                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?)",
-            )
-            .bind(&id)
-            .bind(kind.as_str())
-            .bind(&pending.name)
-            .bind(serde_json::to_string(&models.clone().unwrap_or_default()).unwrap_or_else(|_| "[]".into()))
-            .bind(now)
-            .bind(now)
-            .bind(admin.0.id)
-            .bind(&sealed)
-            .execute(&state.db)
-            .await?;
-            id
-        }
-    };
+        .map_err(|e| AppError::internal(format!("import failed: {e}")))?
+        .map_err(AppError::bad_request)?;
+    let (provider, offered) = store_signed_in(
+        &state,
+        &admin.0,
+        &ip,
+        ai::signin::Plan::Claude,
+        body.provider_id.as_deref(),
+        &name,
+        credentials,
+    )
+    .await?;
+    Ok(Json(json!({
+        "provider": provider.admin_json(&state.secrets),
+        "offered": offered,
+    })))
+}
+
+/// POST /api/ai/providers/{id}/sign-out — forget a plan's tokens: the
+/// provider stays (and its models), but nobody can chat with it until
+/// someone signs in again.
+async fn sign_out_provider(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    let existing = ai::provider(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    if !existing.kind.signs_in() {
+        return Err(AppError::bad_request("that provider does not sign in"));
+    }
+    sqlx::query(
+        "UPDATE ai_providers SET sign_in = '', owner_id = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(now_ms())
+    .bind(&id)
+    .execute(&state.db)
+    .await?;
     audit_admin(
         &state,
         &admin.0,
         &ip,
-        "ai.provider.sign_in",
+        "ai.provider.sign_out",
         "ai_provider",
         &id,
-        &pending.name,
+        &existing.name,
     )
     .await;
     config_changed(&state, "providers");
     let provider = ai::provider(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound("provider not found"))?;
-    Ok(Json(json!({
-        "provider": provider.admin_json(&state.secrets),
-        "offered": models,
-    })))
+    Ok(Json(
+        json!({"provider": provider.admin_json(&state.secrets)}),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

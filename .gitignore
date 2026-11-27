@@ -26,3 +26,12 @@
 /frontend/node_modules/
 /frontend/dist/
 npm-debug.log*
+
+# AI Agent subscription sign-ins: OAuth client credentials for Antigravity,
+# Gemini CLI and iFlow are read from the server's environment (RAST_*_CLIENT_*,
+# e.g. /etc/rast/rast.env), never from the repository.
+*.oauth
+oauth.env
+*.oauth.env
+*.credentials
+*.credentials.json

@@ -200,6 +200,30 @@ Environment variables have higher precedence than the TOML file, which is handy
 for secrets-free deployment automation. Do not put secrets in this file — RAST
 has no configuration-time secrets beyond the generated `secret.key`.
 
+### AI Agent plan sign-in clients
+
+Three AI Agent subscription sign-ins use an OAuth **application** credential
+(not a person's): Google Antigravity and Gemini CLI use a Google OAuth desktop
+client, and iFlow uses its own client id and secret. RAST reads them from the
+server's environment so no credential lives in the repository, and so a
+deployment can choose its own app instead of the public one:
+
+| Variable | Used by |
+| --- | --- |
+| `RAST_ANTIGRAVITY_CLIENT_ID` / `RAST_ANTIGRAVITY_CLIENT_SECRET` | *Settings → Providers → Google Antigravity* |
+| `RAST_GEMINI_CLI_CLIENT_ID` / `RAST_GEMINI_CLI_CLIENT_SECRET` | *Settings → Providers → Gemini CLI* |
+| `RAST_IFLOW_CLIENT_ID` / `RAST_IFLOW_CLIENT_SECRET` | *Settings → Providers → iFlow* |
+
+Set them in `/etc/rast/rast.env` (or the unit's environment) and restart
+`rast.service`; the file stays outside the repository and is mode `0640`
+`root:rast`, so the AI Agent can read it. Use the OAuth client the provider's
+own CLI ships (Antigravity, Gemini CLI and iFlow are all public desktop/CLI
+applications) or your own Google OAuth desktop client with the Cloud Code API
+enabled. A missing pair only disables that one provider: starting its sign-in
+answers `400` with a message naming the variables to set. The other plan
+sign-ins (ChatGPT Codex, Claude, Grok, GitHub Copilot, Qwen, Kimi) use public
+client identifiers that are not application secrets and need no configuration.
+
 ### App Center mirror signed with your own key
 
 ```toml

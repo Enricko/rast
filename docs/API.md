@@ -294,11 +294,14 @@ any price costs nothing. A new reply is refused (429, with `Retry-After`)
 once any limit is reached; a reply already running finishes.
 
 Provider `kind`s are presets of an address and protocol (`kinds` in the
-admin overview lists them with `group`, `keyUrl` and `about`):
+admin overview lists them with `group`, `keyUrl`, `about`, and for the plan
+kinds also `signsIn:true`, `signInFlow`, `site`, `callbackHint` and `risk`;
+the other kinds have `signsIn:false` and the rest `""`):
 
 | Group | Kinds |
 | --- | --- |
 | model makers | `anthropic` (Anthropic Messages), `openai`, `gemini` (AI Studio's OpenAI-compatible endpoint), `xai`, `deepseek`, `mistral`, `moonshot`, `zai`, `qwen` (Model Studio), `minimax` |
+| plans (signed in, no key) | `codex` (ChatGPT Codex), `claude` (Claude Pro/Max), `grok` (Grok with X Premium), `copilot` (GitHub Copilot), `antigravity` (Google Antigravity), `gemini-cli` (Gemini CLI), `qwen-plan` (Qwen Chat), `iflow` (iFlow), `kimi-plan` (Kimi) |
 | gateways | `opencode` (OpenCode Zen, pay as you go), `opencode-go` (the OpenCode Go subscription), `openrouter`, `vercel` (AI Gateway), `huggingface` (Inference Providers) |
 | fast open models | `groq`, `cerebras`, `together`, `fireworks`, `nvidia` (NIM) |
 | on your network (no key needed) | `ollama`, `lmstudio`, `vllm`, `llamacpp` |
@@ -313,6 +316,36 @@ translates for GPT and Gemini); their model list leaves out models that are
 not for chat and free ones (OpenCode serves those only to its own apps).
 Requests to them carry the chat's id as `x-opencode-session`, which OpenCode Go
 requires. A server that refuses `stream_options` is asked again without it.
+
+**Signing in with a subscription plan.** The nine `plan` kinds are a
+person's own subscription instead of an API key: they are not added with a
+key, only by signing in (Claude can also import the Claude Code login the
+server already has). A browser flow (`signInFlow:"browser"`) opens the
+provider's page (with PKCE S256 where the provider's flow takes it, and a
+`state` that is checked); the person allows it and
+pastes back the address the browser lands on (a page that does not open on
+the server) or, for Claude, the `code#state` its page shows. A device flow
+(`signInFlow:"device"`) shows a `userCode` to type at the provider's own
+site, and the page polls RAST for the tokens every `interval` seconds for
+up to `expiresIn` seconds. A started sign-in waits 20 minutes in memory and
+is answered once, only by the account that started it. The tokens are
+stored encrypted with the server secret, never returned or logged, and
+refreshed by RAST ahead of expiry, one refresh at a time (most providers
+rotate the refresh token, and using an old one ends the session). The
+provider it adds (or signs in again) is owned by the signer: `ownerId` and
+`signedIn:{email, plan, expiresAt}` in the admin views (never the tokens),
+usable by that account alone (administrators included), and its replies are
+priced `plan` ("In your plan") rather than from RAST's price list. Its
+models are the provider's live catalog read with the new tokens (a short
+fallback list when the catalog cannot be read) and are listed by
+`POST /api/ai/providers/models {providerId}`. Signing out clears the tokens
+and the owner but keeps the provider and its models, so it can be signed in
+again. Each provider sets its own line on using a plan outside its own app:
+the `risk` note the settings page shows says so. Antigravity, Gemini CLI and
+iFlow read their OAuth application client from the server's environment
+(`RAST_ANTIGRAVITY_CLIENT_*`, `RAST_GEMINI_CLI_CLIENT_*`, `RAST_IFLOW_CLIENT_*`,
+see [CONFIGURATION.md](CONFIGURATION.md)); without it, starting that one sign-in
+is a `400` naming the variables, and the other plans still work.
 
 **Effort.** A chat's `effort` (`""` = the provider's default, `low`,
 `medium`, `high`, `max`) goes out as `output_config.effort` over Anthropic
@@ -378,7 +411,7 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality) |
+| GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality; a signed-in plan is listed only to the account that signed in) |
 | GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, weeklyTokens, monthlyTokens, dailyCost, weeklyCost, monthlyCost, source}, allowance:{usedToday, usedWeek, usedMonth, costToday, costWeek, costMonth` (USD)`, dailyTokens, weeklyTokens, monthlyTokens, dailyCost, weeklyCost, monthlyCost, dayEndsAt, weekEndsAt, monthEndsAt, source}}` |
 | GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, effort, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
 | POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model; a model must be one the provider offers), plus `effort?` and `allowedTools?` to start with |
@@ -388,17 +421,20 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
 | POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
 | POST | `/api/ai/conversations/{id}/tools/{callId}` | owner only: `{decision:"allow"\|"deny", always?}` → `{message, conversation}`; once no call is `pending` the reply goes on (checked like a new message: `429`, `403`, …). `409` when the chat is not waiting or the call was answered |
-| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, week, month, costToday, costWeek, costMonth, lastAt}], tools:[{name, label}], search, serverAccess}` |
+| GET | `/api/ai/admin/overview` | admin: `{kinds:[{id, label, defaultBaseUrl, needsKey, group, keyUrl, about, signsIn, signInFlow, site, callbackHint, risk}], providers, agents, skills, limits, users, groups, usage:[{userId, today, week, month, costToday, costWeek, costMonth, lastAt}], tools:[{name, label}], search, serverAccess}` (`signsIn`, `signInFlow:"browser"\|"device"\|""`, `site`, `callbackHint` and `risk` are set for the plan kinds: see above) |
 | GET | `/api/ai/admin/usage/{userId}?days=30` | admin: one account's use: `{user, allowance, providers, days:[{date, input, output, tokens, cost, calls}]` (oldest first, every day of the last `days` (1–366), server time)`, models:[{providerId, provider, model, input, output, tokens, cost, calls, lastAt}]}` |
 | PUT | `/api/ai/server-access` | admin: `{enabled}` — whether accounts that are not administrators may read the server and run read-only commands there; audited `ai.server_access.update` |
 | GET / PUT | `/api/ai/search` | admin: the web search service `{kind:"brave"\|"tavily"\|"searxng"\|"", url, hasKey, keyHint, configured}`; PUT `{kind, url?` (SearXNG)`, apiKey?` (absent = keep)`}`; audited `ai.search.update` |
 | POST | `/api/ai/search/test` | admin: one search with the saved service → `{results, first}` |
 | GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |
-| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], prices?:{model: Price}` (set by an administrator; USD per million tokens, 0–10 000; models not offered are dropped)`, listPrices?:{model: Price}` (what the model list gave, all its models)`, enabled?}` |
-| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove; `prices` / `listPrices` absent = keep) |
-| POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models, prices}` (`prices`: those the list gives) |
-| POST | `/api/ai/providers/sign-in` | admin: start signing in to a plan (kind `codex`): `{kind, providerId?}` (`providerId`: sign in again to that provider) → `{url, state, redirectUri}`; open `url`, allow it, and the browser lands on `redirectUri?code=…&state=…` (a page that does not open) |
-| POST | `/api/ai/providers/sign-in/finish` | admin, the account that started it, within 20 minutes: `{callback` (the address landed on)`, name?}` → `{provider, offered}`: adds the provider (or signs it in again) owned by the caller, with the models the plan offers. A signed-in provider (`signsIn`, `ownerId`, `signedIn:{email, plan, expiresAt}` in the admin views; never its tokens) is usable by its owner only, is not created or given a key with `/api/ai/providers`, and its models load with `/api/ai/providers/models {providerId}` |
+| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], prices?:{model: Price}` (set by an administrator; USD per million tokens, 0–10 000; models not offered are dropped)`, listPrices?:{model: Price}` (what the model list gave, all its models)`, enabled?}`; a plan kind is refused (`400`): it is added by signing in |
+| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove; `prices` / `listPrices` absent = keep); a plan kind keeps its own address and takes no key (`400`) |
+| POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models, prices}` (`prices`: those the list gives). A signed-in plan is asked with its tokens (its live catalog; `prices` is `{}`) |
+| POST | `/api/ai/providers/sign-in` | admin: start signing in to a plan: `{kind, providerId?` (sign in again to that provider)`, name?` (a new provider's name)}`. A browser flow answers `{flow:"browser", url, state, redirectUri, label, site, callbackHint, risk}`: open `url`, allow it, and the browser lands on `redirectUri?code=…&state=…` (a page that does not open); paste that address back. A device flow answers `{flow:"device", state, userCode, verificationUri, interval, expiresIn, label, site, risk}`: enter `userCode` at `verificationUri` and the page polls `/api/ai/providers/sign-in/poll`. `risk` says why using a plan outside the provider's own app is unsupported (`""` none) and `callbackHint` what to paste (`""` for a device flow) |
+| POST | `/api/ai/providers/sign-in/finish` | admin, the account that started it, within 20 minutes, once: `{callback` (the address landed on, or the `code#state` Claude's copy-code page shows)`, name?}` → `{provider, offered}`: trades the code for tokens and adds the provider (or signs it in again) owned by the caller, with the models the plan offers (`offered`, `null` when the catalog could not be read) |
+| POST | `/api/ai/providers/sign-in/poll` | admin, the account that started a device sign-in: `{state}` → `{"status":"waiting"}` until the person finishes on the provider's page, then `{"status":"done", provider, offered}` (same as finishing). A code the provider refuses is a `400` |
+| POST | `/api/ai/providers/{id}/sign-out` | admin: forget a plan's tokens and owner → `{provider}` with `signedIn:null` and `ownerId:null` (`400` for a provider that does not sign in); the provider and its models stay, but nobody can chat with it until someone signs in again; audited `ai.provider.sign_out` |
+| POST | `/api/ai/providers/import/claude-code` | admin: use the Claude Code login already on the server instead of a browser round trip: `{providerId?` (sign in again to that provider)`, name?}` → `{provider, offered}`; `400` when the server has no Claude Code login (`~/.claude/.credentials.json`, or `$CLAUDE_CONFIG_DIR/.credentials.json`) or it cannot be read |
 | PUT | `/api/ai/providers/{id}/prices` | admin: set one model's price there: `{model, price: Price \| null}` (`null`: the list's or the built-in price again) → the listing below |
 | GET | `/api/ai/prices` | admin: `{providers:[{id, name, kind, kindLabel, enabled, local, checkedAt, models:[{model, price, source, match, fallback?}]}], builtIn:{models:[{name, input, output, cached, cacheWrite}], patterns:[{pattern, …}]}}`; `source` is `set`, `list`, `built-in` (`match`: the entry), `local`, `plan` (a signed-in plan: free here) or `none`; `fallback` (with `source: set`) is the price without it |
 | POST | `/api/ai/prices/refresh` | admin: ask every enabled, non-local provider's model list for its prices now → the listing plus `results:[{id, name, priced \| error}]` |

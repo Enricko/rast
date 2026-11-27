@@ -109,9 +109,29 @@ this file by `scripts/changelog-section.sh`.
   limits, not toward RAST's spending (priced "In your plan"). RAST
   refreshes the sign-in itself, one refresh at a time, and the tokens are
   stored encrypted and never shown. Using a plan outside OpenAI's own apps
-  is not officially supported, and the dialog says so. Claude and
-  Antigravity sign-ins are not offered: Anthropic and Google forbid using
-  them in other apps. Database schema v16.
+  is not officially supported, and the dialog says so. Database schema v16.
+- **Sign in with your other subscription plans.** The plan sign-in started
+  with ChatGPT Codex now covers Claude Pro/Max, Grok (X Premium), GitHub
+  Copilot, Google Antigravity, Gemini CLI, Qwen Chat, iFlow and Kimi: add one
+  by signing in with your own account instead of a key, the way 9router,
+  OpenCode and the providers' own CLIs do it. A browser flow opens the
+  provider's page (PKCE, a checked state) and takes back the address the
+  browser ends on; GitHub Copilot, Qwen and Kimi instead show a code to type
+  on the provider's site, and RAST polls for the tokens. Claude can also
+  import the Claude Code login already on the server instead of a browser
+  round trip. Only the account that signed in can chat with the provider,
+  administrators included, and replies count toward that plan's limits
+  rather than RAST's spending (priced "In your plan"). Tokens are stored
+  encrypted, never shown, and refreshed by RAST ahead of expiry, one refresh
+  at a time. Settings → Providers shows who is signed in and the plan, with
+  Sign out (the provider and its models stay for the next sign-in) and, for
+  Claude, Import from Claude Code. Each provider's dialog says where it
+  draws the line on using a plan outside its own apps. Antigravity, Gemini CLI
+  and iFlow read their OAuth application client from the server's environment
+  (`RAST_ANTIGRAVITY_CLIENT_*`, `RAST_GEMINI_CLI_CLIENT_*`, `RAST_IFLOW_CLIENT_*`,
+  see docs/CONFIGURATION.md), so no credential is kept in the repository and a
+  deployment can use its own OAuth client. Database schema unchanged (the
+  sign-in was already stored with each provider).
 
 ### Changed
 

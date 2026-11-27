@@ -3,11 +3,11 @@
 // opens its own page.
 
 import type { AppContext } from "../../core/app";
-import { h } from "../../core/dom";
+import { appendChildren, h } from "../../core/dom";
 import { switchControl } from "../../core/components";
 import { relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
-import { confirmDialog, errorMessage, modal } from "../../core/ui";
+import { confirmDialog, copyText, errorMessage, modal } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
 import {
   allowanceLimits,
@@ -23,6 +23,10 @@ import {
   type Prices,
   type UsageDetail,
   type ProviderKind,
+  type SignInDone,
+  type SignInFlow,
+  type SignInPoll,
+  type SignInStarted,
   type AdminAgent,
   type AdminProvider,
   type Conversation,
@@ -56,6 +60,17 @@ const SEARCH_LABELS: Record<SearchSettings["kind"], string> = {
   tavily: "Tavily",
   searxng: "SearXNG",
 };
+
+/**
+ * Codex's sign-in copy, used only when the server does not send the plan's
+ * own (`site`/`callbackHint`/`risk` in GET /api/ai/admin/overview and in the
+ * start response). It keeps the dialog worded exactly as it was before other
+ * plans existed; the server's values win as soon as it has them.
+ */
+const CODEX_SITE = "ChatGPT";
+const CODEX_CALLBACK_HINT = "http://localhost:1455/auth/callback?code=…";
+const CODEX_RISK =
+  "A ChatGPT plan is one person's: only you can chat with it here, and replies count toward your plan's Codex limits. Using a plan outside OpenAI's own apps is not officially supported; OpenAI may restrict the account.";
 
 function numberOrNull(value: string): number | null {
   const trimmed = value.trim().replace(/[,_\s]/g, "");
@@ -586,71 +601,304 @@ export function mountSettings(options: {
     });
   }
 
-  /** Who a plan provider is signed in as, and signing in again. */
+  /** After a sign-in succeeded: say who, reload, and open the provider when
+   * its plan listed no models (so they can be added by hand). */
+  async function connected(done: SignInDone, close: () => void): Promise<void> {
+    const who = done.provider.signedIn;
+    ctx.toast.success(who?.email ? `Signed in as ${who.email}` : "Signed in");
+    close();
+    await load();
+    if (!done.provider.models.length) {
+      const fresh = overview?.providers.find((p) => p.id === done.provider.id);
+      if (fresh) editProvider(fresh);
+    }
+  }
+
+  /** Who a plan provider is signed in as, signing in again, and signing out. */
   function signedInField(existing: AdminProvider, info: ProviderKind): HTMLElement {
-    const me = ctx.store.get().user?.id ?? null;
-    const owner = overview?.users.find((u) => u.id === existing.ownerId);
-    const who = existing.signedIn;
-    const again = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, who ? "Sign in again" : "Sign in"));
-    again.addEventListener("click", () => signIn(existing, info));
-    const ownerText =
-      existing.ownerId === me ? "Only you can chat with it." : owner ? `Only ${owner.displayName || owner.username} can chat with it.` : "Nobody can chat with it until someone signs in again.";
-    return h(
-      "div",
-      { class: "field" },
-      h("span", { class: "field-label ai-field-row" }, "Signed in", again),
-      h(
-        "span",
-        { class: "ai-signed-in" },
-        iconSvg("user", 14),
-        h("span", {}, who ? who.email || "Signed in" : "Not signed in"),
-        who?.plan ? h("span", { class: "ai-pill" }, planLabel(who.plan)) : null,
-      ),
-      h("span", { class: "field-hint" }, ownerText),
-    );
+    const field = h("div", { class: "field" });
+
+    function draw(): void {
+      const me = ctx.store.get().user?.id ?? null;
+      const owner = overview?.users.find((u) => u.id === existing.ownerId);
+      const who = existing.signedIn;
+      const again = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, who ? "Sign in again" : "Sign in"));
+      again.addEventListener("click", () => signIn(existing, info));
+      const out = h("button", { class: "btn btn-sm btn-ghost", type: "button" }, iconSvg("logout", 13), h("span", {}, "Sign out"));
+      out.addEventListener("click", () => void signOut());
+      const ownerText =
+        existing.ownerId === me ? "Only you can chat with it." : owner ? `Only ${owner.displayName || owner.username} can chat with it.` : "Nobody can chat with it until someone signs in again.";
+      field.replaceChildren(
+        h("span", { class: "field-label ai-field-row" }, "Signed in", h("span", { class: "ai-signed-in-actions" }, again, who ? out : null)),
+        h(
+          "span",
+          { class: "ai-signed-in" },
+          iconSvg("user", 14),
+          h("span", {}, who ? who.email || "Signed in" : "Not signed in"),
+          who?.plan ? h("span", { class: "ai-pill" }, planLabel(who.plan)) : null,
+        ),
+        h("span", { class: "field-hint" }, ownerText),
+      );
+    }
+
+    async function signOut(): Promise<void> {
+      const ok = await confirmDialog({
+        within: ctx.root,
+        title: "Sign out",
+        message: `Sign out of "${existing.name}"? Its models stay, but nobody can chat with it until someone signs in again.`,
+        confirmLabel: "Sign out",
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const result = await ctx.api.post<{ provider: AdminProvider }>(`/api/ai/providers/${existing.id}/sign-out`);
+        // This dialog stays useful: the same provider, now signed out.
+        existing.ownerId = result.provider.ownerId;
+        existing.signedIn = result.provider.signedIn;
+        ctx.toast.success(`Signed out of ${existing.name}`);
+        draw();
+        await load();
+      } catch (error) {
+        ctx.toast.error(errorMessage(error));
+      }
+    }
+
+    draw();
+    return field;
   }
 
   /**
-   * Sign in with a plan (ChatGPT's Codex): open OpenAI's page, then paste
+   * Sign in with a plan. A browser flow opens the provider's page and takes
    * the address it sends the browser to (a localhost page that does not
-   * open). A new provider is added for this account; `existing` signs in
-   * again to that one.
+   * open). A device flow shows a code to enter on the provider's own page and
+   * asks the server whether it was entered yet, every `interval` seconds.
+   * A new provider is added for this account; `existing` signs in again to
+   * that one. Claude's dialog also offers the Claude Code login already on
+   * the server.
    */
   function signIn(existing: AdminProvider | null, info: ProviderKind): void {
     const name = h("input", { class: "input", value: existing?.name ?? info.label, autocomplete: "off", placeholder: `e.g. ${info.label} (work)` });
-    const link = h(
-      "a",
-      { class: "btn btn-primary ai-sign-in-open is-waiting", target: "_blank", rel: "noopener noreferrer" },
-      h("span", {}, "Continue with ChatGPT"),
-      iconSvg("external", 13),
-    );
-    link.setAttribute("aria-disabled", "true");
-    const pasted = h("input", {
-      class: "input",
-      autocomplete: "off",
-      spellcheck: false,
-      placeholder: "http://localhost:1455/auth/callback?code=…",
-    });
     const status = h("div", { class: "field-error", hidden: true });
-    const startIt = async () => {
+    let flow: SignInFlow = info.signInFlow || "browser";
+    let started: SignInStarted | null = null;
+    let pollTimer = 0;
+    let closed = false;
+    let close: () => void = () => undefined;
+
+    // What the plan calls its page and the note it shows: the server sends
+    // these (overview and start response); the Codex copies keep the old
+    // dialog for a server that does not send them yet.
+    const site = (): string => started?.site || info.site || (info.id === "codex" ? CODEX_SITE : info.label);
+    const callbackHint = (): string => started?.callbackHint || info.callbackHint || (info.id === "codex" ? CODEX_CALLBACK_HINT : "Paste the address here");
+    const riskNote = (): string => started?.risk ?? info.risk ?? (info.id === "codex" ? CODEX_RISK : "");
+
+    const clearError = (): void => {
+      status.textContent = "";
+      status.hidden = true;
+    };
+    const showError = (error: unknown): void => {
+      status.textContent = errorMessage(error);
+      status.hidden = false;
+    };
+    const stopPolling = (): void => {
+      if (pollTimer) window.clearTimeout(pollTimer);
+      pollTimer = 0;
+    };
+
+    // Browser flow: the provider's page, then the address it ends on.
+    const openLinkLabel = h("span", {}, "");
+    const openLink = h("a", { class: "btn btn-primary ai-sign-in-open is-waiting", target: "_blank", rel: "noopener noreferrer" }, openLinkLabel, iconSvg("external", 13));
+    openLink.setAttribute("aria-disabled", "true");
+    const pasted = h("input", { class: "input", autocomplete: "off", spellcheck: false });
+    openLink.addEventListener("click", (event) => {
+      if (openLink.classList.contains("is-waiting")) event.preventDefault();
+      else window.setTimeout(() => pasted.focus(), 300);
+    });
+
+    // Device flow: the code to enter on the provider's page, then polls.
+    const codeEl = h("code", { class: "ai-device-code" }, "…");
+    const copyCode = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("copy", 13), h("span", {}, "Copy"));
+    copyCode.addEventListener("click", () => {
+      const code = started?.userCode ?? "";
+      if (!code) return;
+      void copyText(code).then((copied) => {
+        if (copied) ctx.toast.success("Code copied");
+        else ctx.toast.error("Could not copy the code; select it and copy it by hand.");
+      });
+    });
+    const openPageLabel = h("span", {}, "");
+    const openPage = h("a", { class: "btn btn-primary ai-sign-in-open is-waiting", target: "_blank", rel: "noopener noreferrer" }, openPageLabel, iconSvg("external", 13));
+    openPage.setAttribute("aria-disabled", "true");
+    openPage.addEventListener("click", (event) => {
+      if (openPage.classList.contains("is-waiting")) event.preventDefault();
+    });
+    const waitingLabel = h("span", {}, "Waiting…");
+    const waiting = h("div", { class: "ai-sign-in-waiting", role: "status" }, h("span", { class: "spinner" }), waitingLabel);
+    waiting.hidden = true;
+
+    const riskBanner = (): HTMLElement | null => {
+      const note = riskNote();
+      return note ? h("div", { class: "banner banner-warning ai-sign-in-risk" }, iconSvg("warning", 15), h("span", {}, note)) : null;
+    };
+    const browserSteps = (): Array<Node | null> => [
+      h("div", { class: "field ai-sign-in-step" }, h("span", { class: "field-label" }, `1. Allow RAST in your ${site()} account`), openLink),
+      h(
+        "label",
+        { class: "field ai-sign-in-step" },
+        h("span", { class: "field-label" }, "2. Paste the address you land on"),
+        pasted,
+        h("span", { class: "field-hint" }, "The page after you allow it will not open (it points at localhost). Copy its whole address from the address bar."),
+      ),
+      riskBanner(),
+    ];
+    const deviceSteps = (): Array<Node | null> => [
+      h(
+        "div",
+        { class: "field ai-sign-in-step" },
+        h("span", { class: "field-label" }, `1. Open ${site()} and enter this code`),
+        h("span", { class: "ai-device-row" }, codeEl, copyCode),
+        openPage,
+      ),
+      waiting,
+      riskBanner(),
+    ];
+    const step = h("div", { class: "ai-sign-in-flow" });
+    const paint = (): void => {
+      openLinkLabel.textContent = `Continue with ${site()}`;
+      pasted.placeholder = callbackHint();
+      openPageLabel.textContent = `Open ${site()}`;
+      waitingLabel.textContent = `Waiting for you to allow it in ${site()}…`;
+      step.replaceChildren();
+      appendChildren(step, flow === "device" ? deviceSteps() : browserSteps());
+    };
+    paint();
+
+    const enableBrowser = (result: SignInStarted): void => {
+      if (!result.url) return;
+      openLink.setAttribute("href", result.url);
+      openLink.classList.remove("is-waiting");
+      openLink.removeAttribute("aria-disabled");
+    };
+    const startDevice = (result: SignInStarted): void => {
+      if (result.userCode) codeEl.textContent = result.userCode;
+      if (result.verificationUri) {
+        openPage.setAttribute("href", result.verificationUri);
+        openPage.classList.remove("is-waiting");
+        openPage.removeAttribute("aria-disabled");
+      }
+      waiting.hidden = false;
+      pollDevice(result);
+    };
+    const pollDevice = (result: SignInStarted): void => {
+      const interval = Math.max(2, Math.round(result.interval || 5));
+      const deadline = Date.now() + Math.max(30, Math.round(result.expiresIn || 900)) * 1000;
+      const poll = async (): Promise<void> => {
+        pollTimer = 0;
+        if (closed) return;
+        if (Date.now() >= deadline) {
+          waiting.hidden = true;
+          showError("That code expired before it was used. Close this and sign in again for a fresh one.");
+          return;
+        }
+        let answer: SignInPoll;
+        try {
+          answer = await ctx.api.post<SignInPoll>("/api/ai/providers/sign-in/poll", { state: result.state });
+        } catch (error) {
+          if (closed) return;
+          waiting.hidden = true;
+          showError(error);
+          return;
+        }
+        if (closed) return;
+        if (answer.status === "done") {
+          waiting.hidden = true;
+          await connected(answer, close);
+          return;
+        }
+        pollTimer = window.setTimeout(() => void poll(), interval * 1000);
+      };
+      pollTimer = window.setTimeout(() => void poll(), interval * 1000);
+    };
+
+    const connect = async (): Promise<void> => {
+      clearError();
+      const value = pasted.value.trim();
+      if (!value) {
+        status.textContent = `Paste the address of the page ${site()} sent you to.`;
+        status.hidden = false;
+        pasted.focus();
+        return;
+      }
       try {
-        const started = await ctx.api.post<{ url: string }>("/api/ai/providers/sign-in", {
+        const done = await ctx.api.post<SignInDone>("/api/ai/providers/sign-in/finish", {
+          callback: value,
+          ...(existing ? {} : { name: name.value.trim() }),
+        });
+        if (closed) return;
+        await connected(done, close);
+      } catch (error) {
+        if (closed) return;
+        // A used or failed sign-in cannot be finished: ask for a new page.
+        openLink.classList.add("is-waiting");
+        openLink.setAttribute("aria-disabled", "true");
+        void startIt();
+        showError(error);
+      }
+    };
+
+    const startIt = async (): Promise<void> => {
+      started = null;
+      if (flow === "device") stopPolling();
+      try {
+        const result = await ctx.api.post<SignInStarted>("/api/ai/providers/sign-in", {
           kind: info.id,
           ...(existing ? { providerId: existing.id } : {}),
         });
-        link.setAttribute("href", started.url);
-        link.classList.remove("is-waiting");
-        link.removeAttribute("aria-disabled");
+        if (closed) return;
+        started = result;
+        // The kind list says how a kind signs in; follow the server if it
+        // knows better (a server from before the plans sends no flow).
+        if (result.flow && result.flow !== flow) {
+          flow = result.flow;
+          // The browser flow's Connect action has nothing to do here.
+          if (flow === "device") step.closest(".modal")?.querySelector<HTMLButtonElement>(".modal-foot .btn-primary")?.remove();
+        }
+        paint();
+        if (flow === "device") startDevice(result);
+        else enableBrowser(result);
       } catch (error) {
-        status.textContent = errorMessage(error);
-        status.hidden = false;
+        if (!closed) showError(error);
       }
     };
-    link.addEventListener("click", (event) => {
-      if (link.classList.contains("is-waiting")) event.preventDefault();
-      else window.setTimeout(() => pasted.focus(), 300);
-    });
-    void startIt();
+
+    // Claude: the login Claude Code already has on this server works too.
+    let importField: HTMLElement | null = null;
+    if (info.id === "claude") {
+      const importButton = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("download", 13), h("span", {}, "Import from Claude Code"));
+      importButton.addEventListener("click", async () => {
+        clearError();
+        importButton.disabled = true;
+        try {
+          const done = await ctx.api.post<SignInDone>("/api/ai/providers/import/claude-code", {
+            ...(existing ? { providerId: existing.id } : { name: name.value.trim() }),
+          });
+          if (closed) return;
+          await connected(done, close);
+        } catch (error) {
+          if (!closed) showError(error);
+        } finally {
+          importButton.disabled = false;
+        }
+      });
+      importField = h(
+        "div",
+        { class: "field ai-sign-in-alt" },
+        h("span", { class: "field-label" }, "Already signed in to Claude Code on this server?"),
+        importButton,
+        h("span", { class: "field-hint" }, "Uses the login Claude Code keeps on the server (~/.claude/.credentials.json) instead of the browser round trip."),
+      );
+    }
+
     const form = h(
       "div",
       { class: "ai-form" },
@@ -661,69 +909,28 @@ export function mountSettings(options: {
         h("span", { class: "ai-connect-text" }, h("span", { class: "ai-connect-title" }, info.label), h("span", { class: "small muted" }, info.about)),
       ),
       existing ? null : h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
-      h("div", { class: "field ai-sign-in-step" }, h("span", { class: "field-label" }, "1. Allow RAST in your ChatGPT account"), link),
-      h(
-        "label",
-        { class: "field ai-sign-in-step" },
-        h("span", { class: "field-label" }, "2. Paste the address you land on"),
-        pasted,
-        h("span", { class: "field-hint" }, "The page after you allow it will not open (it points at localhost). Copy its whole address from the address bar."),
-      ),
-      h(
-        "div",
-        { class: "banner banner-warning ai-sign-in-risk" },
-        iconSvg("warning", 15),
-        h(
-          "span",
-          {},
-          "A ChatGPT plan is one person's: only you can chat with it here, and replies count toward your plan's Codex limits. Using a plan outside OpenAI's own apps is not officially supported; OpenAI may restrict the account.",
-        ),
-      ),
+      step,
+      importField,
       status,
     );
-    modal({
+    const back = {
+      label: existing ? "Cancel" : "Back",
+      variant: "ghost" as const,
+      onClick: existing ? () => undefined : () => pickProvider(),
+    };
+    const actions = flow === "device" ? [back] : [back, { label: "Connect", variant: "primary" as const, keepOpen: true, onClick: () => connect() }];
+    close = modal({
       within: ctx.root,
       title: existing ? `Sign in to ${existing.name}` : `Sign in to ${info.label}`,
       body: form,
       wide: true,
-      actions: [
-        existing ? { label: "Cancel", variant: "ghost", onClick: () => undefined } : { label: "Back", variant: "ghost", onClick: () => pickProvider() },
-        {
-          label: "Connect",
-          variant: "primary",
-          keepOpen: true,
-          onClick: async (close) => {
-            status.hidden = true;
-            if (!pasted.value.trim()) {
-              status.textContent = "Paste the address of the page ChatGPT sent you to.";
-              status.hidden = false;
-              pasted.focus();
-              return;
-            }
-            try {
-              const done = await ctx.api.post<{ provider: AdminProvider; offered: string[] | null }>("/api/ai/providers/sign-in/finish", {
-                callback: pasted.value.trim(),
-                ...(existing ? {} : { name: name.value.trim() }),
-              });
-              const who = done.provider.signedIn;
-              ctx.toast.success(who?.email ? `Signed in as ${who.email}` : "Signed in");
-              close();
-              await load();
-              if (!done.provider.models.length) {
-                const fresh = overview?.providers.find((p) => p.id === done.provider.id);
-                if (fresh) editProvider(fresh);
-              }
-            } catch (error) {
-              // A used or failed sign-in cannot be tried again: start anew.
-              link.classList.add("is-waiting");
-              link.setAttribute("aria-disabled", "true");
-              void startIt();
-              formError(status, error);
-            }
-          },
-        },
-      ],
+      onClose: () => {
+        closed = true;
+        stopPolling();
+      },
+      actions,
     });
+    void startIt();
   }
 
   // ------------------------------------------------------------- agents
