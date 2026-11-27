@@ -159,6 +159,10 @@ test("deltas fill the current step, as on the server", () => {
 test("tool cards show their main argument", () => {
   assert.equal(toolArgument({ name: "run_command", input: { command: "ls -la" } }), "ls -la");
   assert.equal(toolArgument({ name: "fetch_url", input: { url: "https://x.io" } }), "https://x.io");
+  assert.equal(toolArgument({ name: "browser", input: { action: "open", url: "https://x.io" } }), "open https://x.io");
+  assert.equal(toolArgument({ name: "browser", input: { action: "click", ref: 12 } }), "click [12]");
+  assert.equal(toolArgument({ name: "browser", input: { action: "type", ref: "3", text: "cats", submit: true } }), 'type "cats" into [3] + Enter');
+  assert.equal(toolArgument({ name: "browser", input: { action: "scroll" } }), "scroll down");
   assert.equal(toolArgument({ name: "read_file", input: "not json" }), "not json");
   assert.equal(toolArgument({ name: "unknown", input: { a: 1 } }), '{"a":1}');
   assert.equal(maySkipAsking("write_file"), true);

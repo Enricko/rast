@@ -13,6 +13,8 @@
 //! * `web_search` (the search service an administrator connects: Brave,
 //!   Tavily or SearXNG) and `fetch_url` (public web pages only: addresses on
 //!   this server or private networks are refused).
+//! * `browser`: a headless Chrome for the chat that opens public pages,
+//!   clicks, types and scrolls (see [`super::browser`]).
 
 use std::{
     io::Read,
@@ -23,7 +25,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::{guard, provider::ToolSpec};
+use super::{browser, guard, provider::ToolSpec};
 use crate::{
     auth::AuthUser,
     sandbox,
@@ -43,9 +45,10 @@ pub const READ_SERVER_FILE: &str = "read_server_file";
 pub const RUN_COMMAND: &str = "run_command";
 pub const WEB_SEARCH: &str = "web_search";
 pub const FETCH_URL: &str = "fetch_url";
+pub const BROWSER: &str = "browser";
 
 /// Every tool, in the order agents' settings list them.
-pub const ALL: [&str; 10] = [
+pub const ALL: [&str; 11] = [
     LIST_FILES,
     READ_FILE,
     SEARCH_FILES,
@@ -56,6 +59,7 @@ pub const ALL: [&str; 10] = [
     RUN_COMMAND,
     WEB_SEARCH,
     FETCH_URL,
+    BROWSER,
 ];
 
 const FILE_TOOLS: [&str; 5] = [
@@ -92,6 +96,7 @@ pub fn label(name: &str) -> &'static str {
         RUN_COMMAND => "Run a command",
         WEB_SEARCH => "Search the web",
         FETCH_URL => "Open a web page",
+        BROWSER => "Use the browser",
         _ => "Unknown tool",
     }
 }
@@ -194,6 +199,12 @@ pub async fn available(state: &AppState, user: &AuthUser) -> Available {
         out.names.push(WEB_SEARCH);
     }
     out.names.push(FETCH_URL);
+    // Chrome starts through the terminal helper, boxed in (see browser.rs).
+    if browser::chrome().is_some()
+        && (matches!(out.shell, Some(Shell::Root | Shell::Guest)) || helper().await)
+    {
+        out.names.push(BROWSER);
+    }
     out
 }
 
@@ -286,6 +297,23 @@ pub fn spec(name: &str, shell: Option<Shell>, guarded: bool) -> Option<ToolSpec>
             "Read a public web page (http or https) as plain text.".to_string(),
             schema(json!({"url": {"type": "string"}}), &["url"]),
         ),
+        BROWSER => (
+            format!(
+                "Use a real web browser (Chrome, public web only) for pages that need JavaScript or interaction: open a page, click, type into fields and forms, scroll, go back, or read the page again. For simply reading a page, fetch_url is faster. Every step answers with the page as text, where what can be clicked or typed into shows as [number kind \"name\"]: give that number as ref. The person sees a screenshot of every step. The browser keeps its tab, cookies and sign-ins for this chat until it is unused for {} minutes. Ask the person before you submit anything that buys, posts, sends or signs up.",
+                browser::IDLE.as_secs() / 60
+            ),
+            schema(
+                json!({
+                    "action": {"type": "string", "enum": ["open", "click", "type", "scroll", "back", "read"]},
+                    "url": {"type": "string", "description": "open: the address (http or https)"},
+                    "ref": {"type": "integer", "description": "click, type: the element's number from the latest page, like 12 for [12 link …]"},
+                    "text": {"type": "string", "description": "type: what to enter (it replaces what the field holds; for a list, the option to choose)"},
+                    "submit": {"type": "boolean", "description": "type: press Enter afterwards"},
+                    "direction": {"type": "string", "enum": ["down", "up"], "description": "scroll: which way (one screen)"},
+                }),
+                &["action"],
+            ),
+        ),
         _ => return None,
     };
     Some(ToolSpec {
@@ -304,6 +332,10 @@ fn text_arg<'a>(input: &'a Value, key: &str) -> Result<&'a str, String> {
 
 /// What a call is about, in one line (approval cards, activity log).
 pub fn summary(name: &str, input: &Value) -> String {
+    if name == BROWSER {
+        let line: String = browser::describe(input).chars().take(300).collect();
+        return format!("{name}: {line}");
+    }
     let key = match name {
         RUN_COMMAND => "command",
         WEB_SEARCH | SEARCH_FILES => "query",
@@ -331,18 +363,49 @@ pub fn cap(text: &str, max: usize, keep_end: bool) -> String {
     }
 }
 
-/// Run one tool call for `user`: the result text for the model, or why it
-/// failed (also for the model).
+/// What a tool gives back: text for the model, and for the browser a
+/// screenshot the person sees (a file of the chat, `{id, name, mime, kind,
+/// size}`).
+#[derive(Debug, Default)]
+pub struct Output {
+    pub text: String,
+    pub image: Option<Value>,
+}
+
+impl From<String> for Output {
+    fn from(text: String) -> Self {
+        Self { text, image: None }
+    }
+}
+
+/// Run one tool call for `user` in the chat `conversation`: the result for
+/// the model, or why it failed (also for the model).
 pub async fn execute(
+    state: &AppState,
+    user: &AuthUser,
+    available: &Available,
+    conversation: &str,
+    name: &str,
+    input: &Value,
+) -> Result<Output, String> {
+    if !available.has(name) {
+        return Err(format!("the tool {name} is not available to this account"));
+    }
+    if name == BROWSER {
+        return browser::act(state, user, conversation, input).await;
+    }
+    run_tool(state, user, available, name, input)
+        .await
+        .map(Output::from)
+}
+
+async fn run_tool(
     state: &AppState,
     user: &AuthUser,
     available: &Available,
     name: &str,
     input: &Value,
 ) -> Result<String, String> {
-    if !available.has(name) {
-        return Err(format!("the tool {name} is not available to this account"));
-    }
     let public = |e: crate::error::AppError| e.public_message();
     match name {
         LIST_FILES => {

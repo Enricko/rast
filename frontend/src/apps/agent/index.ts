@@ -13,7 +13,7 @@ import { appIconSvg, iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import { confirmDialog, contextMenu, copyText, dialogOpen, errorMessage, promptDialog } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
-import { createAttachments, sentFiles } from "./attachments";
+import { createAttachments, picture, sentFiles } from "./attachments";
 import { formatEstimate } from "./usage";
 import { renderMarkdown } from "./markdown";
 import {
@@ -33,6 +33,7 @@ import {
   PERMISSION_MODES,
   permissionMode,
   TOOL_INFO,
+  fileUrl,
   toolArgument,
   toolBlocks,
   upsertMessage,
@@ -1255,6 +1256,16 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     }
     if (block.status === "error" && block.error) {
       card.appendChild(h("p", { class: "ai-tool-error small" }, block.error));
+    }
+    if (block.image) {
+      // The browser's view after the step; opens full size.
+      card.appendChild(
+        h(
+          "a",
+          { class: "ai-tool-shot", href: fileUrl(block.image.id), target: "_blank", rel: "noopener", title: "Open the screenshot" },
+          picture(fileUrl(block.image.id), `The page after: ${arg}`),
+        ),
+      );
     }
     if (block.status === "done" && block.output) {
       const key = `output:${block.id}`;

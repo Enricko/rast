@@ -365,7 +365,7 @@ async fn run_allowed_tools(
         let outcome = tokio::select! {
             biased;
             _ = run.stopped.notified() => None,
-            result = tools::execute(state, &job.owner, &job.tools, &name, &input) => Some(result),
+            result = tools::execute(state, &job.owner, &job.tools, &job.conversation_id, &name, &input) => Some(result),
         };
         let stopped = outcome.is_none();
         let failed = !matches!(outcome, Some(Ok(_)));
@@ -375,10 +375,13 @@ async fn run_allowed_tools(
                 Some(Ok(output)) => {
                     block["status"] = json!("done");
                     block["output"] = json!(tools::cap(
-                        &output,
+                        &output.text,
                         tools::MAX_RESULT,
                         name == tools::RUN_COMMAND
                     ));
+                    if let Some(image) = output.image {
+                        block["image"] = image;
+                    }
                 }
                 Some(Err(error)) => {
                     block["status"] = json!("error");

@@ -605,6 +605,7 @@ async fn delete_conversation(
 ) -> AppResult<Json<Value>> {
     let conversation = owned(&state, &user, &id, true).await?;
     state.ai.stop(&conversation.id);
+    ai::browser::close(&conversation.id);
     ai::files::remove_for_conversation(&state.db, state.data_dir(), &conversation.id).await?;
     sqlx::query("DELETE FROM ai_conversations WHERE id = ?")
         .bind(&conversation.id)
@@ -1288,6 +1289,7 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
         "tools": tools::ALL.iter().map(|name| json!({"name": name, "label": tools::label(name)})).collect::<Vec<_>>(),
         "search": tools::search_config(&state.db).await.public_json(&state.secrets),
         "serverAccess": tools::server_access(&state.db).await,
+        "browser": {"chrome": ai::browser::chrome().is_some()},
     })))
 }
 

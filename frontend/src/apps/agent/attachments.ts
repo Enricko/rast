@@ -40,7 +40,7 @@ export interface Attachments {
 
 const KIND_LABEL: Record<FileBlock["kind"], string> = { image: "Image", pdf: "PDF", text: "Text" };
 
-function picture(src: string, alt: string, className = ""): HTMLImageElement {
+export function picture(src: string, alt: string, className = ""): HTMLImageElement {
   const img = document.createElement("img");
   if (className) img.className = className;
   img.alt = alt;

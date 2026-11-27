@@ -6006,6 +6006,25 @@ button.pkg-pill {
   overflow-wrap: anywhere;
 }
 
+.ai-tool-shot {
+  display: block;
+  max-width: 420px;
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.ai-tool-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+  object-fit: cover;
+  object-position: top;
+}
+
 .ai-tool-more summary {
   color: var(--text-faint);
   cursor: pointer;

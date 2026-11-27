@@ -4693,7 +4693,7 @@ async fn ai_agent_tools_ask_before_acting() {
             "read_server_file",
             "fetch_url"
         ],
-        "server reads (read-only), no shell without Terminal, no web search without a service"
+        "server reads (read-only), no shell or browser without Terminal, no web search without a service"
     );
     let (_, _, body) = server
         .request(

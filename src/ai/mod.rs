@@ -22,6 +22,7 @@
 //! goes in steps: what the model says, then the calls it asked for; a step
 //! starts after the last tool block ([`apply_delta`]).
 
+pub mod browser;
 pub mod files;
 pub mod guard;
 pub mod prices;

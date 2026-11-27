@@ -17,6 +17,8 @@ export interface ToolBlock {
   status: ToolStatus;
   output?: string;
   error?: string;
+  /** The browser's screenshot of the page after the step (a file of the chat). */
+  image?: Omit<FileBlock, "type">;
 }
 
 /** A file sent with a message (see src/ai/files.rs). */
@@ -460,6 +462,8 @@ export interface Overview {
   search: SearchSettings;
   /** Accounts that are not administrators may read the server (read-only). */
   serverAccess: boolean;
+  /** Whether Chrome is installed for the agents' browser. */
+  browser?: { chrome: boolean };
 }
 
 export interface SearchSettings {
@@ -547,12 +551,32 @@ export const TOOL_INFO: Record<string, { label: string; doing: string; arg: stri
   run_command: { label: "Run a command", doing: "Running", arg: "command", icon: "terminal" },
   web_search: { label: "Search the web", doing: "Searching", arg: "query", icon: "network" },
   fetch_url: { label: "Open a web page", doing: "Opening", arg: "url", icon: "external" },
+  browser: { label: "Use the browser", doing: "Browsing", arg: "action", icon: "browser" },
 };
+
+/** A browser step in a few words: "open https://…", "click [12]". */
+export function browserStep(input: Record<string, unknown>): string {
+  const text = (key: string) => (typeof input[key] === "string" ? (input[key] as string) : "");
+  const ref = typeof input.ref === "number" || typeof input.ref === "string" ? `[${String(input.ref).replace(/[[\]]/g, "")}]` : "";
+  switch (input.action) {
+    case "open":
+      return `open ${text("url")}`;
+    case "click":
+      return `click ${ref}`;
+    case "type":
+      return `type "${text("text")}" into ${ref}${input.submit === true ? " + Enter" : ""}`;
+    case "scroll":
+      return `scroll ${text("direction") || "down"}`;
+    default:
+      return text("action");
+  }
+}
 
 /** The argument a tool card shows (its path, command, query or address). */
 export function toolArgument(block: Pick<ToolBlock, "name" | "input">): string {
   const key = TOOL_INFO[block.name]?.arg ?? "path";
   if (typeof block.input === "string") return block.input;
+  if (block.name === "browser" && block.input) return browserStep(block.input);
   const value = block.input?.[key];
   return typeof value === "string" ? value : JSON.stringify(block.input ?? {});
 }
@@ -588,8 +612,8 @@ export const PERMISSION_MODES: readonly PermissionMode[] = [
   { id: "ask", label: "Ask every time", short: "Asks first", hint: "Every step on your files or the web waits for you", tools: [] },
   { id: "read", label: "Allow reading files", short: "Reads freely", hint: "Lists, reads and searches your files and the server's without asking", tools: READ_TOOLS },
   { id: "edit", label: "Allow file changes", short: "Edits freely", hint: "Also writes files and makes folders without asking", tools: EDIT_TOOLS },
-  { id: "act", label: "Allow files and the web", short: "Acts freely", hint: "Also searches the web and opens pages without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url"] },
-  { id: "all", label: "Allow everything", short: "Runs freely", hint: "Also runs commands without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url", "run_command"] },
+  { id: "act", label: "Allow files and the web", short: "Acts freely", hint: "Also searches the web, opens pages and uses the browser without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url", "browser"] },
+  { id: "all", label: "Allow everything", short: "Runs freely", hint: "Also runs commands without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url", "browser", "run_command"] },
 ];
 
 /** The preset a chat's allowed tools match, or null (allowed one by one). */

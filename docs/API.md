@@ -364,6 +364,22 @@ than it has ([`src/ai/tools.rs`](../src/ai/tools.rs)):
 | `run_command` | one command in a fresh `bash -l` without a terminal (default 60 s, at most 600 s; 64 KB of output per stream) | administrators: root on the server via `rast-terminal.service`; others (unless turned off): read-only on the server, see below; with server access off, accounts granted Terminal: their own sandbox |
 | `web_search` | the search service an administrator connects (Brave, Tavily or SearXNG) | everyone, once connected |
 | `fetch_url` | a public web page as text; addresses on the server or private networks are refused, redirects included | everyone |
+| `browser` | a headless Chrome for the chat: `{action: open\|click\|type\|scroll\|back\|read, url, ref, text, submit, direction}`; each step answers with the page as text (what can be clicked or typed into marked `[n kind "name"]`, `ref` = n) and keeps a JPEG screenshot as a file of the chat (`image` on the tool block, served by `GET /api/ai/files/{id}`) | everyone, when Google Chrome is installed and `rast-terminal.service` runs |
+
+**The browser** ([`src/ai/browser.rs`](../src/ai/browser.rs)): Chrome runs
+in a systemd unit of its own (`rast-browser-<id>`, started by the terminal
+helper) as `nobody`, with Chrome's sandbox on, `ProtectSystem=strict`,
+home folders and RAST's data, storage and settings hidden, a private `/tmp`
+for its profile, 1 GiB of memory and at most 2 hours. Its only network is
+`127.0.0.1` (`IPAddressDeny=any`), where RAST runs a proxy that connects to
+public addresses only (the server, private networks and other local
+services get `403`; ports 80, 443 and 1024 and up); QUIC is off and WebRTC
+goes through the proxy only. RAST speaks DevTools with it over
+`--remote-debugging-pipe`, which systemd connects to a socket in
+`<data_dir>/browser` only RAST can open. One browser per chat, closed after
+10 idle minutes, with its chat, or for another chat (at most 3 at a time).
+Downloads are refused, dialogs are accepted, and pages that open a window
+open it in the same tab.
 
 **Server access for accounts that are not administrators**
 ([`src/ai/guard.rs`](../src/ai/guard.rs)), on unless an administrator turns

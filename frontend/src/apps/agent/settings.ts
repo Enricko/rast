@@ -1081,6 +1081,13 @@ export function mountSettings(options: {
       ["monitor", "Server files", "Administrators: anything RAST's service account can read. Others: read only, never RAST's data, people's files, home folders or secrets (secret values show as [hidden])."],
       ["terminal", "Commands", "Administrators: as root on this server, once Terminal is turned on. Others: on the server read-only, as an account without privileges and without network; nothing they run can change the server."],
       ["external", "Web pages", "Public pages only; addresses on this server or private networks are refused."],
+      [
+        "browser",
+        "Browser",
+        data.browser?.chrome
+          ? "Chrome on this server for pages that need clicks and forms, with a screenshot of each step. Public web only; it runs boxed in as an account without privileges, once Terminal is turned on."
+          : "Opens pages, clicks and fills in forms with a screenshot of each step, once Google Chrome is installed on this server (Linux 64-bit .deb) and Terminal is turned on.",
+      ],
       ["network", "Web search", search.configured ? `Through ${SEARCH_LABELS[search.kind]}.` : "Needs a search service, below."],
     ];
     body.append(

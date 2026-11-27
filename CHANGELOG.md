@@ -145,6 +145,16 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **AI Agent has a web browser.** Agents can open pages that need
+  JavaScript, click, type into forms, scroll and go back, in a Chrome that
+  belongs to the chat; each step shows a screenshot of the page in its card
+  (click it for full size) and gives the model the page as text with what
+  it can click or type into. It asks first like the other tools, and
+  "Allow files and the web" and "Allow everything" include it. Chrome runs
+  boxed in as an account without privileges, with only the public web
+  within reach (this server and private networks are refused), and closes
+  after 10 idle minutes or with its chat. Needs Google Chrome (Linux .deb)
+  on the server and Terminal turned on; Settings → Tools says which.
 - **AI Agent chats can be pinned.** "Pin to top" in a chat's menu (right
   click in the list, or the chat's ⋯ menu) keeps it in a Pinned group at the
   top of the list; Unpin sends it back to its day. Pinning leaves the chat's
