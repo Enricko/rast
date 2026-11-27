@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-        "0004 to 0014 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        "0004 to 0015 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3691,6 +3691,8 @@ async fn ai_agent_chat_limits_and_admin_view() {
                 "models": ["fake-1", "slow"],
                 // USD per million tokens; a model not offered is dropped.
                 "prices": {"fake-1": [1000.0, 2000.0], "fake-2": [1.0, 1.0]},
+                // What the model list gave when the models were loaded.
+                "listPrices": {"slow": {"input": 1.0, "output": 2.0, "cached": 0.1}},
             })),
             admin.headers_with_csrf(),
         )
@@ -3702,9 +3704,101 @@ async fn ai_agent_chat_limits_and_admin_view() {
     assert_eq!(body["provider"]["keyHint"], "…1234");
     assert_eq!(
         body["provider"]["prices"],
-        json!({"fake-1": [1000.0, 2000.0]})
+        json!({"fake-1": {"input": 1000.0, "output": 2000.0}})
     );
     assert!(!body.to_string().contains("sk-test-secret"), "{body}");
+
+    // Prices: what an administrator set wins over the provider's list,
+    // which wins over the built-in list.
+    let price_of = |listing: &Value, model: &str| -> Value {
+        listing["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == provider_id.as_str())
+            .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["model"] == model)
+            .unwrap()
+            .clone()
+    };
+    let (status, _, listing) = server
+        .request("GET", "/api/ai/prices", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(price_of(&listing, "fake-1")["source"], "set");
+    assert_eq!(price_of(&listing, "fake-1")["fallback"]["source"], "none");
+    assert_eq!(price_of(&listing, "slow")["source"], "list");
+    assert_eq!(price_of(&listing, "slow")["price"]["cached"], 0.1);
+    let built_in = listing["builtIn"]["models"].as_array().unwrap();
+    assert!(built_in
+        .iter()
+        .any(|m| m["name"] == "claude-opus-5-5" && m["input"] == 4.0));
+    assert!(!listing["builtIn"]["patterns"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    let (status, _, _) = server
+        .request("GET", "/api/ai/prices", None, alice.headers())
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "only administrators see prices"
+    );
+    let price_url = format!("/api/ai/providers/{provider_id}/prices");
+    for (bad, why) in [
+        (
+            json!({"model": "slow", "price": {"input": -1.0, "output": 1.0}}),
+            "a negative price",
+        ),
+        (
+            json!({"model": "fake-2", "price": {"input": 1.0, "output": 1.0}}),
+            "a model not offered",
+        ),
+    ] {
+        let (status, _, body) = server
+            .request("PUT", &price_url, Some(bad), admin.headers_with_csrf())
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {body}");
+    }
+    let (status, _, listing) = server
+        .request(
+            "PUT",
+            &price_url,
+            Some(json!({"model": "slow", "price": {"input": 3.0, "output": 15.0, "cached": 0.3, "cacheWrite": 3.75}})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(price_of(&listing, "slow")["source"], "set");
+    assert_eq!(price_of(&listing, "slow")["price"]["cacheWrite"], 3.75);
+    assert_eq!(price_of(&listing, "slow")["fallback"]["source"], "list");
+    let (status, _, listing) = server
+        .request(
+            "PUT",
+            &price_url,
+            Some(json!({"model": "slow", "price": null})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(price_of(&listing, "slow")["source"], "list");
+    // Asking the list again: this one gives no prices.
+    let (status, _, listing) = server
+        .request(
+            "POST",
+            "/api/ai/prices/refresh",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{listing}");
+    assert_eq!(listing["results"][0]["priced"], 0, "{listing}");
+    assert_eq!(price_of(&listing, "slow")["source"], "none");
+    assert_eq!(price_of(&listing, "fake-1")["source"], "set");
     let (status, _, body) = server
         .request(
             "POST",

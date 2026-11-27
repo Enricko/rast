@@ -266,12 +266,23 @@ with the most generous winning, limit by limit (`group:<id>`), else the
 `default` rule, else no limits. Administrators are not limited. Usage counts
 the tokens the provider reports (about four characters per token when it
 reports none) and stays counted when a chat is deleted. **Money** comes from
-each provider's `prices` (`{model: [input, output]}` in USD per million
-tokens; the model list fills them in where the provider publishes them:
-OpenCode's `cost`, OpenRouter's `pricing`). Each reply's cost is stored when
-it is made (in micro-dollars), so later price changes do not rewrite it, and
-a model without a price costs nothing. A new reply is refused (429, with
-`Retry-After`) once any limit is reached; a reply already running finishes.
+each model's price, a `Price` of `{input, output, cached?, cacheWrite?}` in
+USD per million tokens (`cached`: input the provider reads back from its
+prompt cache; `cacheWrite`: input written to it; both the input price when
+absent; reasoning counts as output; `[input, output]` is still read). A
+model's price on a provider is, first to last: the one an administrator set
+there (`prices`), the one the provider's own model list gives (`listPrices`:
+OpenCode's `cost`, OpenRouter's or Vercel's `pricing`; kept when the models
+are loaded and asked again daily, ten minutes after start then every half
+hour for providers not asked for a day), then the built-in list (9router's
+price table with Anthropic's published Claude prices; names compared without
+case, a vendor prefix, a variant, a date or an effort, then `*` patterns,
+first match wins; `…:free` and `…-free` cost nothing). Local providers
+(Ollama, LM Studio, vLLM, llama.cpp) skip the built-in list: free unless
+priced. Each reply's cost is stored when it is made (in micro-dollars, with
+its cached input), so later price changes do not rewrite it; a model without
+any price costs nothing. A new reply is refused (429, with `Retry-After`)
+once any limit is reached; a reply already running finishes.
 
 Provider `kind`s are presets of an address and protocol (`kinds` in the
 admin overview lists them with `group`, `keyUrl` and `about`):
@@ -373,9 +384,12 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | GET / PUT | `/api/ai/search` | admin: the web search service `{kind:"brave"\|"tavily"\|"searxng"\|"", url, hasKey, keyHint, configured}`; PUT `{kind, url?` (SearXNG)`, apiKey?` (absent = keep)`}`; audited `ai.search.update` |
 | POST | `/api/ai/search/test` | admin: one search with the saved service → `{results, first}` |
 | GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |
-| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], prices?:{model:[input, output]}` (USD per million tokens, 0–10 000; models not offered are dropped)`, enabled?}` |
-| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove; `prices` absent = keep) |
+| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], prices?:{model: Price}` (set by an administrator; USD per million tokens, 0–10 000; models not offered are dropped)`, listPrices?:{model: Price}` (what the model list gave, all its models)`, enabled?}` |
+| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove; `prices` / `listPrices` absent = keep) |
 | POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models, prices}` (`prices`: those the list gives) |
+| PUT | `/api/ai/providers/{id}/prices` | admin: set one model's price there: `{model, price: Price \| null}` (`null`: the list's or the built-in price again) → the listing below |
+| GET | `/api/ai/prices` | admin: `{providers:[{id, name, kind, kindLabel, enabled, local, checkedAt, models:[{model, price, source, match, fallback?}]}], builtIn:{models:[{name, input, output, cached, cacheWrite}], patterns:[{pattern, …}]}}`; `source` is `set`, `list`, `built-in` (`match`: the entry), `local` or `none`; `fallback` (with `source: set`) is the price without it |
+| POST | `/api/ai/prices/refresh` | admin: ask every enabled, non-local provider's model list for its prices now → the listing plus `results:[{id, name, priced \| error}]` |
 | POST | `/api/ai/agents` | admin: `{name, description?, systemPrompt?, providerId?, model?, skills:[ids], tools?:[names] \| null, temperature?` (0–2)`, maxOutputTokens?, enabled?}` |
 | PUT / DELETE | `/api/ai/agents/{id}` | admin |
 | POST | `/api/ai/skills` | admin: `{name, description?, instructions}` → `{id}` |

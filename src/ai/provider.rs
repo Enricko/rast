@@ -156,10 +156,70 @@ pub enum Delta {
     Reasoning(String),
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+/// Tokens of one reply as the provider reports them. `input` is all input;
+/// `cache_read` and `cache_write` are the parts of it read back from the
+/// provider's prompt cache and written to it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     pub input: i64,
     pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
+impl Usage {
+    pub fn is_empty(&self) -> bool {
+        self.input <= 0 && self.output <= 0
+    }
+}
+
+/// Anthropic's usage: input in three parts, which RAST adds up.
+fn anthropic_usage(usage: &Value, into: &mut Usage) {
+    let part = |key: &str| usage.get(key).and_then(Value::as_i64);
+    let (plain, read, write) = (
+        part("input_tokens"),
+        part("cache_read_input_tokens"),
+        part("cache_creation_input_tokens"),
+    );
+    if plain.is_some() || read.is_some() || write.is_some() {
+        into.cache_read = read.unwrap_or(0);
+        into.cache_write = write.unwrap_or(0);
+        into.input = plain.unwrap_or(0) + into.cache_read + into.cache_write;
+    }
+    if let Some(output) = part("output_tokens") {
+        into.output = output;
+    }
+}
+
+/// An OpenAI-style usage: cached input as OpenAI, DeepSeek, Kimi and the
+/// gateways report it (all part of `prompt_tokens`).
+fn chat_usage(usage: &Value, into: &mut Usage) {
+    let first = |paths: &[&str]| {
+        paths
+            .iter()
+            .find_map(|p| usage.pointer(p).and_then(Value::as_i64))
+    };
+    if let Some(input) = first(&["/prompt_tokens"]) {
+        into.input = input;
+    }
+    if let Some(output) = first(&["/completion_tokens"]) {
+        into.output = output;
+    }
+    if let Some(read) = first(&[
+        "/prompt_tokens_details/cached_tokens",
+        "/prompt_cache_hit_tokens",
+        "/cached_tokens",
+        "/cache_read_input_tokens",
+    ]) {
+        into.cache_read = read;
+    }
+    if let Some(write) = first(&[
+        "/prompt_tokens_details/cache_write_tokens",
+        "/prompt_tokens_details/cache_creation_tokens",
+        "/cache_creation_input_tokens",
+    ]) {
+        into.cache_write = write;
+    }
 }
 
 /// How a streamed reply ended.
@@ -666,18 +726,7 @@ impl StreamParser {
         if self.anthropic {
             match event.get("type").and_then(Value::as_str) {
                 Some("message_start") => {
-                    let usage = &event["message"]["usage"];
-                    self.usage.input = [
-                        "input_tokens",
-                        "cache_read_input_tokens",
-                        "cache_creation_input_tokens",
-                    ]
-                    .iter()
-                    .filter_map(|k| usage.get(*k).and_then(Value::as_i64))
-                    .sum();
-                    if let Some(output) = usage.get("output_tokens").and_then(Value::as_i64) {
-                        self.usage.output = output;
-                    }
+                    anthropic_usage(&event["message"]["usage"], &mut self.usage);
                 }
                 Some("content_block_start") => {
                     let block = &event["content_block"];
@@ -719,11 +768,8 @@ impl StreamParser {
                     }
                 }
                 Some("message_delta") => {
-                    if let Some(output) =
-                        event["usage"].get("output_tokens").and_then(Value::as_i64)
-                    {
-                        self.usage.output = output;
-                    }
+                    // Totals so far; some gateways send the input here only.
+                    anthropic_usage(&event["usage"], &mut self.usage);
                 }
                 Some("message_stop") => self.done = true,
                 _ => {}
@@ -761,12 +807,7 @@ impl StreamParser {
             }
         }
         if let Some(usage) = event.get("usage").filter(|u| u.is_object()) {
-            if let Some(input) = usage.get("prompt_tokens").and_then(Value::as_i64) {
-                self.usage.input = input;
-            }
-            if let Some(output) = usage.get("completion_tokens").and_then(Value::as_i64) {
-                self.usage.output = output;
-            }
+            chat_usage(usage, &mut self.usage);
         }
         Ok(out)
     }
@@ -916,8 +957,7 @@ pub fn refuses_effort(status: u16, body: &str) -> bool {
     matches!(status, 400 | 422) && (body.contains("effort") || body.contains("reasoning"))
 }
 
-/// Prices per model in USD per million tokens: `[input, output]`.
-pub type Prices = BTreeMap<String, [f64; 2]>;
+pub use super::prices::{Price, Prices};
 
 /// A provider's models and the prices its list gives for them.
 #[derive(Debug, Clone, PartialEq)]
@@ -954,8 +994,10 @@ pub fn list_models(kind: Kind, base_url: &str, api_key: Option<&str>) -> Result<
 }
 
 /// What a model list says its models cost, where it says so: OpenCode's
-/// `cost.text.{input,output}.price` (USD per million tokens) and
-/// OpenRouter's `pricing.{prompt,completion}` (USD per token, as text).
+/// `cost.text` (USD per million tokens: `input.price`, `input.cache.read`,
+/// `input.cache.write`, `output.price`) and OpenRouter's or Vercel's
+/// `pricing` (USD per token, as text: `prompt` or `input`, `completion` or
+/// `output`, `input_cache_read`, `input_cache_write`).
 pub fn parse_prices(body: &str) -> Prices {
     let Ok(value) = serde_json::from_str::<Value>(body) else {
         return Prices::new();
@@ -977,20 +1019,44 @@ pub fn parse_prices(body: &str) -> Prices {
                 .get("id")
                 .or_else(|| m.get("name"))
                 .and_then(Value::as_str)?;
-            let per_million = number(m.pointer("/cost/text/input/price"))
-                .zip(number(m.pointer("/cost/text/output/price")))
-                .or_else(|| {
-                    number(m.pointer("/pricing/prompt"))
-                        .zip(number(m.pointer("/pricing/completion")))
-                        .map(|(i, o)| (i * 1e6, o * 1e6))
-                })?;
             let round = |p: f64| (p * 1e6).round() / 1e6;
-            let price = [round(per_million.0), round(per_million.1)];
+            let price = if let Some(text) = m.pointer("/cost/text") {
+                // A write price per cache lifetime ({"5m": …, "1h": …}): the shortest.
+                let write = text.pointer("/input/cache/write").and_then(|w| match w {
+                    Value::Object(by_ttl) => by_ttl
+                        .values()
+                        .filter_map(|v| number(Some(v)))
+                        .min_by(f64::total_cmp),
+                    other => number(Some(other)),
+                });
+                Price::new(
+                    number(text.pointer("/input/price"))?,
+                    number(text.pointer("/output/price"))?,
+                    number(text.pointer("/input/cache/read")),
+                    write,
+                )
+            } else {
+                let pricing = m.get("pricing")?;
+                let per_token = |keys: &[&str]| {
+                    keys.iter()
+                        .find_map(|k| number(pricing.get(*k)))
+                        .map(|p| p * 1e6)
+                };
+                Price::new(
+                    per_token(&["prompt", "input"])?,
+                    per_token(&["completion", "output"])?,
+                    per_token(&["input_cache_read"]),
+                    per_token(&["input_cache_write"]),
+                )
+            };
+            let price = Price::new(
+                round(price.input),
+                round(price.output),
+                price.cached.map(round),
+                price.cache_write.map(round),
+            );
             // Negative: "it depends" (OpenRouter's automatic routing).
-            price
-                .iter()
-                .all(|p| p.is_finite() && (0.0..=super::MAX_PRICE).contains(p))
-                .then(|| (id.to_string(), price))
+            price.valid().then(|| (id.to_string(), price))
         })
         .collect()
 }
@@ -1188,7 +1254,7 @@ mod tests {
                 r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think"}}]}"#,
                 r#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#,
                 r#"data:{"choices":[{"delta":{"content":"lo"}}]}"#,
-                r#"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5}}"#,
+                r#"data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":5,"prompt_cache_hit_tokens":8}}"#,
                 "data: [DONE]",
             ],
         );
@@ -1204,9 +1270,19 @@ mod tests {
             usage,
             Usage {
                 input: 12,
-                output: 5
+                output: 5,
+                cache_read: 8,
+                cache_write: 0,
             }
         );
+        // OpenAI and the gateways: cached input under prompt_tokens_details.
+        let (_, usage, _) = feed(
+            Kind::OpenRouter,
+            &[
+                r#"data: {"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":30}}}"#,
+            ],
+        );
+        assert_eq!((usage.cache_read, usage.cache_write), (60, 30));
         assert!(done);
         let mut parser = StreamParser::new(Kind::OpenRouter);
         let err = parser
@@ -1221,7 +1297,7 @@ mod tests {
             Kind::Anthropic,
             &[
                 "event: message_start",
-                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":20,"cache_read_input_tokens":5,"output_tokens":1}}}"#,
+                r#"data: {"type":"message_start","message":{"usage":{"input_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":3,"output_tokens":1}}}"#,
                 r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
                 r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Hi"}}"#,
                 r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":9}}"#,
@@ -1235,11 +1311,21 @@ mod tests {
         assert_eq!(
             usage,
             Usage {
-                input: 25,
-                output: 9
+                input: 28,
+                output: 9,
+                cache_read: 5,
+                cache_write: 3,
             }
         );
         assert!(done);
+        // A gateway that sends the input with the totals at the end.
+        let (_, usage, _) = feed(
+            Kind::Anthropic,
+            &[
+                r#"data: {"type":"message_delta","usage":{"input_tokens":4,"cache_read_input_tokens":40,"output_tokens":2}}"#,
+            ],
+        );
+        assert_eq!((usage.input, usage.cache_read, usage.output), (44, 40, 2));
         let mut parser = StreamParser::new(Kind::Anthropic);
         let err = parser
             .line(r#"data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#)
@@ -1513,7 +1599,10 @@ mod tests {
         let prices = parse_prices(
             &json!({"data": [
                 {"id": "claude-x", "cost": {"text": {"input": {"price": 2}, "output": {"price": 10}}}},
-                {"id": "openai/gpt-x", "pricing": {"prompt": "0.0000011", "completion": "0.0000044"}},
+                {"id": "glm-x", "cost": {"text": {"input": {"price": 1.4, "cache": {"read": 0.26}}, "output": {"price": 4.4}}}},
+                {"id": "gpt-y", "cost": {"text": {"input": {"price": 0.2, "cache": {"read": 0.02, "write": {"30m": 0.25, "12h": 0.5}}}, "output": {"price": 1.2}}}},
+                {"id": "openai/gpt-x", "pricing": {"prompt": "0.0000011", "completion": "0.0000044", "input_cache_read": "0.000000275"}},
+                {"id": "vercel/x", "pricing": {"input": "0.000003", "output": "0.000015", "input_cache_write": "0.00000375"}},
                 {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
                 {"id": "plain"}
             ]})
@@ -1522,8 +1611,20 @@ mod tests {
         assert_eq!(
             prices,
             Prices::from([
-                ("claude-x".to_string(), [2.0, 10.0]),
-                ("openai/gpt-x".to_string(), [1.1, 4.4]),
+                ("claude-x".to_string(), Price::new(2.0, 10.0, None, None)),
+                ("glm-x".to_string(), Price::new(1.4, 4.4, Some(0.26), None)),
+                (
+                    "gpt-y".to_string(),
+                    Price::new(0.2, 1.2, Some(0.02), Some(0.25))
+                ),
+                (
+                    "openai/gpt-x".to_string(),
+                    Price::new(1.1, 4.4, Some(0.275), None)
+                ),
+                (
+                    "vercel/x".to_string(),
+                    Price::new(3.0, 15.0, None, Some(3.75))
+                ),
             ])
         );
     }

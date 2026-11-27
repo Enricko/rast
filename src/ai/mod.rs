@@ -23,6 +23,7 @@
 //! starts after the last tool block ([`apply_delta`]).
 
 pub mod guard;
+pub mod prices;
 pub mod provider;
 pub mod run;
 pub mod tools;
@@ -290,6 +291,12 @@ impl Kind {
         matches!(self, Kind::OpenCode | Kind::OpenCodeGo)
     }
 
+    /// Providers that run on the server or the network: their models cost
+    /// nothing unless an administrator sets a price.
+    pub fn is_local(self) -> bool {
+        self.info().group == "local"
+    }
+
     /// Reasoning models that want their reasoning back with tool calls
     /// (`reasoning_content`).
     pub fn wants_reasoning_back(self) -> bool {
@@ -328,8 +335,11 @@ pub struct Provider {
     pub base_url: String,
     api_key: String,
     pub models: Vec<String>,
-    /// USD per million tokens, for the models that have a price.
+    /// Prices an administrator set (USD per million tokens).
     pub prices: provider::Prices,
+    /// Prices the provider's model list gives, and when it was last asked.
+    pub list_prices: provider::Prices,
+    pub prices_checked_at: Option<i64>,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -423,6 +433,8 @@ fn provider_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Provider> {
         api_key: row.get("api_key"),
         models: serde_json::from_str(&row.get::<String, _>("models")).unwrap_or_default(),
         prices: serde_json::from_str(&row.get::<String, _>("prices")).unwrap_or_default(),
+        list_prices: serde_json::from_str(&row.get::<String, _>("list_prices")).unwrap_or_default(),
+        prices_checked_at: row.get("prices_checked_at"),
         enabled: row.get::<i64, _>("enabled") != 0,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -996,43 +1008,113 @@ pub async fn check_allowance(pool: &SqlitePool, user_id: i64, limits: &Effective
 
 /// What a reply cost in micro-dollars, from the price per million tokens
 /// (which is also the price in micro-dollars per token).
-pub fn cost_micros(price: [f64; 2], input: i64, output: i64) -> i64 {
-    (input.max(0) as f64 * price[0] + output.max(0) as f64 * price[1]).round() as i64
-}
-
+/// Count a reply's tokens, at what the model costs now (see [`prices`]).
 pub async fn record_usage(
     pool: &SqlitePool,
     user_id: i64,
     provider_id: &str,
     model: &str,
-    input: i64,
-    output: i64,
+    usage: &provider::Usage,
 ) -> AppResult<()> {
-    if input <= 0 && output <= 0 {
+    if usage.is_empty() {
         return Ok(());
     }
-    let prices: Option<String> = sqlx::query_scalar("SELECT prices FROM ai_providers WHERE id = ?")
-        .bind(provider_id)
-        .fetch_optional(pool)
-        .await?;
-    let cost = prices
-        .and_then(|raw| serde_json::from_str::<provider::Prices>(&raw).ok())
-        .and_then(|prices| prices.get(model).copied())
-        .map_or(0, |price| cost_micros(price, input, output));
+    let cost = provider(pool, provider_id)
+        .await?
+        .and_then(|p| prices::resolve(&p, model).0)
+        .map_or(0, |price| price.cost_micros(usage));
+    let input = usage.input.max(0);
+    let cache_read = usage.cache_read.clamp(0, input);
     sqlx::query(
-        "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens, cost, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens,
+             cache_read_tokens, cache_write_tokens, cost, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(provider_id)
     .bind(model)
-    .bind(input.max(0))
-    .bind(output.max(0))
+    .bind(input)
+    .bind(usage.output.max(0))
+    .bind(cache_read)
+    .bind(usage.cache_write.clamp(0, input - cache_read))
     .bind(cost)
     .bind(now_ms())
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// How often a provider's model list is asked for its prices again.
+const PRICES_EVERY_MS: i64 = 24 * 3600 * 1000;
+
+/// Ask a provider's model list for its prices again and keep them. The
+/// attempt is remembered either way, so a provider that is down is asked
+/// again the next day rather than every few minutes.
+pub async fn refresh_list_prices(
+    pool: &SqlitePool,
+    secrets: &Secrets,
+    provider: &Provider,
+) -> Result<usize, String> {
+    let kind = provider.kind;
+    let base_url = provider.effective_base_url();
+    let key = provider.api_key(secrets).map_err(|e| e.to_string())?;
+    let listed =
+        tokio::task::spawn_blocking(move || provider::list_models(kind, &base_url, key.as_deref()))
+            .await
+            .map_err(|e| format!("the model list failed: {e}"))?;
+    let prices = listed
+        .as_ref()
+        .ok()
+        .map(|list| serde_json::to_string(&list.prices).unwrap_or_else(|_| "{}".into()));
+    sqlx::query(
+        "UPDATE ai_providers SET list_prices = COALESCE(?, list_prices), prices_checked_at = ?
+         WHERE id = ?",
+    )
+    .bind(prices)
+    .bind(now_ms())
+    .bind(&provider.id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    listed.map(|list| list.prices.len())
+}
+
+/// The providers whose prices may be refreshed: in use and not local.
+pub fn prices_refreshable(provider: &Provider) -> bool {
+    provider.enabled && !provider.kind.is_local()
+}
+
+/// Refresh the prices of providers not asked for a day.
+pub async fn refresh_due_prices(pool: &SqlitePool, secrets: &Secrets) {
+    let Ok(all) = providers(pool).await else {
+        return;
+    };
+    let due = now_ms() - PRICES_EVERY_MS;
+    for p in all
+        .iter()
+        .filter(|p| prices_refreshable(p) && p.prices_checked_at.is_none_or(|at| at < due))
+    {
+        match refresh_list_prices(pool, secrets, p).await {
+            Ok(priced) => tracing::info!(provider = %p.name, priced, "AI model prices refreshed"),
+            Err(error) => {
+                tracing::warn!(provider = %p.name, %error, "AI model prices not refreshed")
+            }
+        }
+    }
+}
+
+/// Keep providers' list prices fresh: a first look ten minutes after the
+/// server starts, then every half hour for providers due.
+pub fn spawn_price_refresh(pool: SqlitePool, secrets: std::sync::Arc<Secrets>) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1800));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            refresh_due_prices(&pool, &secrets).await;
+        }
+    });
 }
 
 /// One account's use over the last `days` days (server time): a total per
@@ -1626,8 +1708,19 @@ mod tests {
         assert_eq!(eff.caps.daily_cost, Some(1.5));
         assert_eq!(eff.caps.monthly_cost, None);
         // Prices per million tokens are micro-dollars per token.
-        assert_eq!(cost_micros([3.0, 15.0], 1000, 200), 6000);
-        assert_eq!(cost_micros([0.1, 0.4], 3, 0), 0);
+        let usage = |input, output| provider::Usage {
+            input,
+            output,
+            ..Default::default()
+        };
+        assert_eq!(
+            prices::Price::new(3.0, 15.0, None, None).cost_micros(&usage(1000, 200)),
+            6000
+        );
+        assert_eq!(
+            prices::Price::new(0.1, 0.4, None, None).cost_micros(&usage(3, 0)),
+            0
+        );
         assert_eq!(usd_to_micros(1.5), 1_500_000);
         // The first limit reached, and when it starts again.
         let p = periods_on(chrono::NaiveDate::from_ymd_opt(2026, 11, 27).unwrap());

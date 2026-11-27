@@ -145,6 +145,12 @@ lines.append("| --- | --- | --- | --- |")
 lines.append("| `@xterm/xterm` | 6.0.0 | MIT | The xterm.js authors; SourceLair Private Company; Christopher Jeffrey |")
 lines.append("| `@xterm/addon-fit` | 0.11.0 | MIT | The xterm.js authors |")
 lines.append("")
+lines.append("The AI Agent's built-in model prices (`src/ai/prices.rs`) are taken "
+             "from 9router's price table (`open-sse/providers/pricing.js`, "
+             "<https://github.com/decolua/9router>), MIT License, Copyright (c) "
+             "2024-2026 decolua and contributors; the Claude prices are "
+             "Anthropic's published ones.")
+lines.append("")
 lines.append("## License summary")
 lines.append("")
 lines.append("| License expression | Packages |")

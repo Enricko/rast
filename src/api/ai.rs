@@ -53,6 +53,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/admin/usage/{user_id}", get(admin_usage))
         .route("/api/ai/providers", post(create_provider))
         .route("/api/ai/providers/models", post(probe_models))
+        .route("/api/ai/providers/{id}/prices", put(put_model_price))
+        .route("/api/ai/prices", get(get_prices))
+        .route("/api/ai/prices/refresh", post(refresh_prices))
         .route(
             "/api/ai/providers/{id}",
             put(update_provider).delete(delete_provider),
@@ -1292,14 +1295,24 @@ struct ProviderBody {
     remove_key: bool,
     #[serde(default)]
     models: Vec<String>,
-    /// USD per million tokens per model (absent: keep the current ones).
+    /// Prices an administrator set, per model (absent: keep the current ones).
     prices: Option<provider::Prices>,
+    /// What the provider's model list gave when its models were loaded
+    /// (absent: keep the current ones).
+    list_prices: Option<provider::Prices>,
     #[serde(default = "yes")]
     enabled: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+fn price_error() -> AppError {
+    AppError::bad_request(format!(
+        "prices are in USD per million tokens, from 0 to {}",
+        ai::MAX_PRICE
+    ))
 }
 
 /// Prices for the provider's models only, each within reason.
@@ -1309,18 +1322,26 @@ fn checked_prices(prices: &provider::Prices, models: &[String]) -> AppResult<pro
         if !models.contains(model) {
             continue;
         }
-        if price
-            .iter()
-            .any(|p| !p.is_finite() || !(0.0..=ai::MAX_PRICE).contains(p))
-        {
-            return Err(AppError::bad_request(format!(
-                "prices are in USD per million tokens, from 0 to {}",
-                ai::MAX_PRICE
-            )));
+        if !price.valid() {
+            return Err(price_error());
         }
         out.insert(model.clone(), *price);
     }
     Ok(out)
+}
+
+/// A model list's prices (every model it lists, not only those offered),
+/// each within reason.
+fn checked_list_prices(prices: &provider::Prices) -> AppResult<provider::Prices> {
+    if prices.len() > 4 * ai::MAX_MODELS {
+        return Err(AppError::bad_request("too many prices"));
+    }
+    if prices.iter().any(|(model, price)| {
+        model.is_empty() || model.len() > ai::MAX_MODEL_NAME || !price.valid()
+    }) {
+        return Err(price_error());
+    }
+    Ok(prices.clone())
 }
 
 fn checked_base_url(raw: &str) -> AppResult<String> {
@@ -1364,11 +1385,17 @@ async fn create_provider(
     let key = checked_key(body.api_key.as_deref())?;
     let models = models_list(&body.models)?;
     let prices = checked_prices(&body.prices.clone().unwrap_or_default(), &models)?;
+    let list_prices = body
+        .list_prices
+        .as_ref()
+        .map(checked_list_prices)
+        .transpose()?;
     let id = ai::new_id();
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+             prices_checked_at, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(kind.as_str())
@@ -1377,6 +1404,11 @@ async fn create_provider(
     .bind(ai::seal_key(&state.secrets, key.as_deref().unwrap_or(""))?)
     .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
     .bind(serde_json::to_string(&prices).unwrap_or_else(|_| "{}".into()))
+    .bind(
+        serde_json::to_string(&list_prices.clone().unwrap_or_default())
+            .unwrap_or_else(|_| "{}".into()),
+    )
+    .bind(list_prices.as_ref().map(|_| now))
     .bind(body.enabled as i64)
     .bind(now)
     .bind(now)
@@ -1430,14 +1462,22 @@ async fn update_provider(
     }
     let models = models_list(&body.models)?;
     let prices = checked_prices(body.prices.as_ref().unwrap_or(&existing.prices), &models)?;
+    let list_prices = body
+        .list_prices
+        .as_ref()
+        .map(checked_list_prices)
+        .transpose()?;
     let key = checked_key(body.api_key.as_deref())?;
     let sealed = match (&key, body.remove_key) {
         (Some(key), _) => ai::seal_key(&state.secrets, key)?,
         (None, true) => String::new(),
         (None, false) => existing.sealed_key().to_string(),
     };
+    let now = now_ms();
     sqlx::query(
         "UPDATE ai_providers SET name = ?, base_url = ?, models = ?, prices = ?, enabled = ?, api_key = ?,
+             list_prices = COALESCE(?, list_prices),
+             prices_checked_at = CASE WHEN ? IS NULL THEN prices_checked_at ELSE ? END,
              updated_at = ? WHERE id = ?",
     )
     .bind(&name)
@@ -1446,7 +1486,10 @@ async fn update_provider(
     .bind(serde_json::to_string(&prices).unwrap_or_else(|_| "{}".into()))
     .bind(body.enabled as i64)
     .bind(&sealed)
-    .bind(now_ms())
+    .bind(list_prices.as_ref().map(|p| serde_json::to_string(p).unwrap_or_else(|_| "{}".into())))
+    .bind(list_prices.as_ref().map(|_| now))
+    .bind(now)
+    .bind(now)
     .bind(&id)
     .execute(&state.db)
     .await?;
@@ -1496,6 +1539,103 @@ async fn delete_provider(
     .await;
     config_changed(&state, "providers");
     Ok(Json(json!({ "deleted": true })))
+}
+
+/// GET /api/ai/prices — every provider's models with their prices and
+/// where each comes from, and the built-in list.
+async fn get_prices(State(state): State<AppState>, admin: AdminUser) -> AppResult<Json<Value>> {
+    let _ = admin;
+    Ok(Json(ai::prices::listing(&ai::providers(&state.db).await?)))
+}
+
+/// POST /api/ai/prices/refresh — ask every provider in use (not local)
+/// for its list prices now.
+async fn refresh_prices(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+) -> AppResult<Json<Value>> {
+    let mut results = Vec::new();
+    for p in ai::providers(&state.db)
+        .await?
+        .iter()
+        .filter(|p| ai::prices_refreshable(p))
+    {
+        results.push(
+            match ai::refresh_list_prices(&state.db, &state.secrets, p).await {
+                Ok(priced) => json!({ "id": p.id, "name": p.name, "priced": priced }),
+                Err(error) => json!({ "id": p.id, "name": p.name, "error": error }),
+            },
+        );
+    }
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.prices.refresh",
+        "ai_prices",
+        "",
+        "",
+    )
+    .await;
+    config_changed(&state, "providers");
+    let mut listing = ai::prices::listing(&ai::providers(&state.db).await?);
+    listing["results"] = json!(results);
+    Ok(Json(listing))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ModelPriceBody {
+    model: String,
+    /// null: use the provider's list or the built-in price again.
+    price: Option<provider::Price>,
+}
+
+/// PUT /api/ai/providers/{id}/prices — set one model's price on a provider.
+async fn put_model_price(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path(id): Path<String>,
+    Json(body): Json<ModelPriceBody>,
+) -> AppResult<Json<Value>> {
+    let existing = ai::provider(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    if !existing.models.contains(&body.model) {
+        return Err(AppError::bad_request(
+            "the provider does not offer that model",
+        ));
+    }
+    let mut prices = existing.prices.clone();
+    match body.price {
+        Some(price) if !price.valid() => return Err(price_error()),
+        Some(price) => {
+            prices.insert(body.model.clone(), price);
+        }
+        None => {
+            prices.remove(&body.model);
+        }
+    }
+    sqlx::query("UPDATE ai_providers SET prices = ?, updated_at = ? WHERE id = ?")
+        .bind(serde_json::to_string(&prices).unwrap_or_else(|_| "{}".into()))
+        .bind(now_ms())
+        .bind(&id)
+        .execute(&state.db)
+        .await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.price",
+        "ai_provider",
+        &id,
+        &format!("{}: {}", existing.name, body.model),
+    )
+    .await;
+    config_changed(&state, "providers");
+    Ok(Json(ai::prices::listing(&ai::providers(&state.db).await?)))
 }
 
 #[derive(Debug, Deserialize)]

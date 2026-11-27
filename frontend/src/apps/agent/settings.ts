@@ -1,6 +1,6 @@
 // AI Agent settings, for administrators: tiles for providers, agents, skills,
-// tools (web search), limits, everyone's chats and usage; each opens its own
-// page.
+// tools (web search), limits, everyone's chats, model prices and usage; each
+// opens its own page.
 
 import type { AppContext } from "../../core/app";
 import { h } from "../../core/dom";
@@ -12,8 +12,12 @@ import { agentAvatar, providerMark } from "./marks";
 import {
   allowanceLimits,
   formatTokens,
+  formatPrice,
   formatUsd,
   groupKinds,
+  type Price,
+  type PriceListing,
+  type PricedModel,
   type Prices,
   type UsageDetail,
   type ProviderKind,
@@ -31,7 +35,7 @@ export interface SettingsView {
   destroy(): void;
 }
 
-type Page = "home" | "providers" | "agents" | "skills" | "tools" | "limits" | "chats" | "usage";
+type Page = "home" | "providers" | "agents" | "skills" | "tools" | "limits" | "chats" | "prices" | "usage";
 
 const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string; hue: number }> = [
   { id: "providers", label: "Providers", icon: "database", hue: 212 },
@@ -40,6 +44,7 @@ const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string; hue
   { id: "tools", label: "Tools", icon: "terminal", hue: 32 },
   { id: "limits", label: "Limits", icon: "shield", hue: 145 },
   { id: "chats", label: "Chats", icon: "list", hue: 198 },
+  { id: "prices", label: "Prices", icon: "tag", hue: 48 },
   { id: "usage", label: "Usage", icon: "activity", hue: 340 },
 ];
 
@@ -133,6 +138,8 @@ export function mountSettings(options: {
         return renderLimits(overview);
       case "chats":
         return void renderChats(overview);
+      case "prices":
+        return void renderPrices();
       case "usage":
         return usageUser === null ? renderUsage(overview) : void renderUsageDetail(overview, usageUser);
     }
@@ -149,6 +156,7 @@ export function mountSettings(options: {
       tools: data.search.configured ? `Web search: ${SEARCH_LABELS[data.search.kind]}` : "Files, commands, web pages",
       limits: data.limits.length ? `${data.limits.length} rule${data.limits.length === 1 ? "" : "s"}` : "No limits",
       chats: "All accounts",
+      prices: "Per model",
       usage: spentToday > 0 ? `${formatTokens(usedToday)} tokens · ${formatUsd(spentToday)} today` : `${formatTokens(usedToday)} tokens today`,
     };
     // What each tile shows at a glance.
@@ -377,40 +385,9 @@ export function mountSettings(options: {
     const status = h("div", { class: "field-error", hidden: true });
     let selected: string[] = [...(existing?.models ?? [])];
     let offered: string[] | null = null;
-    // USD per million tokens; filled in from the provider's list where it
-    // has them, editable here.
-    const prices: Prices = { ...(existing?.prices ?? {}) };
-    const pricesEl = h("details", { class: "ai-advanced ai-prices" });
-    const pricesSummary = h("summary", {});
-    const pricesBody = h("div", { class: "ai-price-rows" });
-    pricesEl.append(
-      pricesSummary,
-      h("p", { class: "small muted" }, "In USD per million tokens. Spending limits count each reply at the price it had then; models without a price count as free."),
-      pricesBody,
-    );
-    const priceText = (value: number | undefined) => (value === undefined ? "" : String(value));
-    const drawPrices = () => {
-      const priced = selected.filter((m) => prices[m]).length;
-      pricesSummary.textContent = selected.length ? `Prices · ${priced} of ${selected.length} model${selected.length === 1 ? "" : "s"}` : "Prices";
-      pricesBody.replaceChildren(
-        ...selected.map((model) => {
-          const input = h("input", { class: "input input-sm", inputMode: "decimal", placeholder: "Input", ariaLabel: `${model}: input price`, value: priceText(prices[model]?.[0]) });
-          const output = h("input", { class: "input input-sm", inputMode: "decimal", placeholder: "Output", ariaLabel: `${model}: output price`, value: priceText(prices[model]?.[1]) });
-          const update = () => {
-            const a = numberOrNull(input.value);
-            const b = numberOrNull(output.value);
-            if (a === null && b === null) delete prices[model];
-            else prices[model] = [a ?? 0, b ?? 0];
-            const priced = selected.filter((m) => prices[m]).length;
-            pricesSummary.textContent = `Prices · ${priced} of ${selected.length} model${selected.length === 1 ? "" : "s"}`;
-          };
-          input.addEventListener("input", update);
-          output.addEventListener("input", update);
-          return h("div", { class: "ai-price-row" }, h("span", { class: "ai-price-model small" }, model), h("span", { class: "ai-price-unit small muted" }, "$"), input, h("span", { class: "ai-price-unit small muted" }, "$"), output);
-        }),
-      );
-      if (!selected.length) pricesBody.appendChild(h("p", { class: "small muted" }, "Choose models first."));
-    };
+    // What the provider's list says its models cost, kept with the
+    // provider when it is saved (prices are changed under Prices).
+    let listPrices: Prices | null = null;
 
     // Models: chosen ones as chips, the provider's list to pick from.
     const chips = h("div", { class: "ai-model-chips" });
@@ -442,7 +419,6 @@ export function mountSettings(options: {
         ),
       );
       if (!selected.length) chips.appendChild(h("span", { class: "small muted" }, "None yet: load them from the provider, or add one by name."));
-      drawPrices();
     };
     const filter = h("input", { class: "input input-sm", type: "search", autocomplete: "off" });
     const offerList = h("div", { class: "ai-model-list" });
@@ -490,8 +466,7 @@ export function mountSettings(options: {
           ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
         });
         offered = result.models;
-        for (const [model, price] of Object.entries(result.prices ?? {})) if (!prices[model]) prices[model] = price;
-        drawPrices();
+        listPrices = result.prices ?? {};
         filter.placeholder = `Filter ${offered.length} models`;
         offerEl.classList.remove("hidden");
         drawOffer();
@@ -557,7 +532,6 @@ export function mountSettings(options: {
         offerEl,
         typed,
       ),
-      pricesEl,
       advanced.childElementCount > 1 ? advanced : null,
       enabled.el,
       status,
@@ -577,13 +551,6 @@ export function mountSettings(options: {
           keepOpen: true,
           onClick: async (close) => {
             status.hidden = true;
-            const chosenPrices: Prices = {};
-            for (const model of selected) {
-              const price = prices[model];
-              if (!price) continue;
-              if (price.some((p) => Number.isNaN(p) || p < 0)) formError(status, new Error(`The price of ${model} is not a number of dollars.`));
-              chosenPrices[model] = price;
-            }
             const payload = {
               kind: info.id,
               name: name.value.trim(),
@@ -591,7 +558,7 @@ export function mountSettings(options: {
               ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
               ...(existing && removeKey.isChecked() && !key.value.trim() ? { removeKey: true } : {}),
               models: selected,
-              prices: chosenPrices,
+              ...(listPrices ? { listPrices } : {}),
               enabled: enabled.isChecked(),
             };
             try {
@@ -1020,7 +987,7 @@ export function mountSettings(options: {
           { class: "ai-limit-set" },
           h("legend", { class: "field-label" }, "Spending (USD)"),
           h("div", { class: "ai-form-row ai-form-row-3" }, cell("Per day", dailyCost), cell("Per week", weeklyCost), cell("Per month", monthlyCost)),
-          h("span", { class: "field-hint" }, "Counted from each model's price under Providers. Weeks start on Monday."),
+          h("span", { class: "field-hint" }, "Counted from each model's price under Prices. Weeks start on Monday."),
         ),
         status,
       ),
@@ -1151,8 +1118,225 @@ export function mountSettings(options: {
     table.appendChild(tbody);
     body.append(
       h("div", { class: "ai-table-wrap" }, table),
-      h("p", { class: "ai-set-note small muted" }, "Tokens as the providers report them (estimated when they do not); money from each model's price under Providers. Open an account for its days and models."),
+      h("p", { class: "ai-set-note small muted" }, "Tokens as the providers report them (estimated when they do not); money from each model's price under Prices. Open an account for its days and models."),
     );
+  }
+
+  // ------------------------------------------------------------- prices
+  const SOURCE_TEXT: Record<PricedModel["source"], string> = {
+    set: "Set here",
+    list: "Provider's list",
+    "built-in": "Built-in",
+    local: "Free (local)",
+    none: "No price",
+  };
+
+  /** Input, output, cached and cache-write cells for a price. */
+  function priceCells(price: Price | null): HTMLElement[] {
+    if (!price) return [0, 1, 2, 3].map(() => h("td", { class: "num muted" }, "—"));
+    return [price.input, price.output, price.cached ?? price.input, price.cacheWrite ?? price.input].map((value, i) =>
+      h("td", { class: `num${i > 1 && (i === 2 ? price.cached : price.cacheWrite) === undefined ? " muted" : ""}` }, formatPrice(value)),
+    );
+  }
+
+  function priceHead(first: string, last: string | null): HTMLElement {
+    return h(
+      "thead",
+      {},
+      h(
+        "tr",
+        {},
+        h("th", {}, first),
+        h("th", { class: "num" }, "Input"),
+        h("th", { class: "num" }, "Output"),
+        h("th", { class: "num" }, "Cached"),
+        h("th", { class: "num" }, "Cache write"),
+        last === null ? null : h("th", {}, last),
+      ),
+    );
+  }
+
+  async function renderPrices(listing?: PriceListing): Promise<void> {
+    if (!listing) {
+      body.appendChild(h("div", { class: "ai-set-loading muted" }, "Loading…"));
+      try {
+        listing = await ctx.api.get<PriceListing>("/api/ai/prices");
+      } catch (error) {
+        if (page === "prices") body.replaceChildren(h("div", { class: "banner banner-error" }, errorMessage(error)));
+        return;
+      }
+      if (disposed || page !== "prices") return;
+    }
+    const data = listing;
+    actions.replaceChildren();
+    body.replaceChildren();
+    const refresh = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, "Update prices"));
+    refresh.title = "Ask each provider's model list for its prices now";
+    refresh.addEventListener("click", async () => {
+      refresh.disabled = true;
+      try {
+        const next = await ctx.api.post<PriceListing>("/api/ai/prices/refresh", {});
+        if (disposed || page !== "prices") return;
+        await renderPrices(next);
+        const failed = (next.results ?? []).filter((r) => r.error);
+        if (failed.length) {
+          body.prepend(h("div", { class: "banner banner-error" }, failed.map((r) => `${r.name}: ${r.error}`).join(" · ")));
+        }
+      } catch (error) {
+        refresh.disabled = false;
+        body.prepend(h("div", { class: "banner banner-error" }, errorMessage(error)));
+      }
+    });
+    actions.appendChild(refresh);
+    body.appendChild(
+      h(
+        "p",
+        { class: "ai-set-note ai-price-note small muted" },
+        "USD per million tokens. A price set here comes first, then the provider's own list (checked daily), then the built-in list. Cached input is what the provider reads back from its prompt cache; reasoning counts as output.",
+      ),
+    );
+    if (!data.providers.length) body.appendChild(h("p", { class: "ai-set-empty muted" }, "Connect a provider to see its models' prices."));
+    for (const provider of data.providers) {
+      const checked = provider.local ? "Runs locally: free" : provider.checkedAt ? `List checked ${relativeTime(provider.checkedAt)}` : "List not checked yet";
+      const table = h("table", { class: "table ai-usage-table ai-price-table" }, priceHead("Model", "From"));
+      const tbody = h("tbody", {});
+      for (const item of provider.models) {
+        const from = h("span", { class: `ai-price-from is-${item.source}` }, SOURCE_TEXT[item.source]);
+        if (item.match) from.title = `Built-in: ${item.match}`;
+        tbody.appendChild(
+          h(
+            "tr",
+            { class: "ai-usage-row" },
+            h("td", {}, h("button", { class: "ai-usage-open", type: "button", onClick: () => editPrice(provider, item) }, item.model, iconSvg("edit", 12))),
+            ...priceCells(item.price),
+            h("td", {}, from),
+          ),
+        );
+      }
+      if (!provider.models.length) tbody.appendChild(h("tr", {}, h("td", { class: "muted", colspan: 6 }, "No models chosen.")));
+      table.appendChild(tbody);
+      body.appendChild(
+        h(
+          "section",
+          { class: `ai-price-provider${provider.enabled ? "" : " is-off"}` },
+          h(
+            "div",
+            { class: "ai-price-head" },
+            providerMark(provider.kind, 26),
+            h("span", { class: "ai-card-names" }, h("span", { class: "ai-card-title" }, provider.name), h("span", { class: "ai-card-sub small muted" }, `${provider.kindLabel} · ${checked}`)),
+          ),
+          h("div", { class: "ai-table-wrap" }, table),
+        ),
+      );
+    }
+    body.appendChild(builtInList(data));
+  }
+
+  /** The built-in list, searchable. */
+  function builtInList(data: PriceListing): HTMLElement {
+    const all = [...data.builtIn.models.map((p) => ({ ...p, key: p.name ?? "", isPattern: false })), ...data.builtIn.patterns.map((p) => ({ ...p, key: p.pattern ?? "", isPattern: true }))];
+    const search = h("input", { class: "input input-sm ai-price-search", type: "search", placeholder: `Search ${all.length} names and patterns`, ariaLabel: "Search the built-in prices", spellcheck: false });
+    const tbody = h("tbody", {});
+    const draw = () => {
+      const q = search.value.trim().toLowerCase();
+      const shown = all.filter((p) => !q || p.key.toLowerCase().includes(q));
+      tbody.replaceChildren(
+        ...shown.map((p) =>
+          h(
+            "tr",
+            {},
+            h("td", {}, h("span", { class: p.isPattern ? "ai-price-pattern" : "" }, p.key)),
+            ...priceCells({ input: p.input, output: p.output, cached: p.cached, cacheWrite: p.cacheWrite }),
+          ),
+        ),
+      );
+      if (!shown.length) tbody.appendChild(h("tr", {}, h("td", { class: "muted", colspan: 5 }, "Nothing matches.")));
+    };
+    search.addEventListener("input", draw);
+    draw();
+    return h(
+      "details",
+      { class: "ai-advanced ai-price-builtin" },
+      h("summary", {}, `Built-in list · ${data.builtIn.models.length} models, ${data.builtIn.patterns.length} patterns`),
+      h("p", { class: "small muted" }, "Used for models the provider's list does not price. Names are matched without case, a vendor prefix, a date or an effort; patterns (* matches anything) after, first match wins. From 9router's price table, with Anthropic's published prices for Claude."),
+      search,
+      h("div", { class: "ai-table-wrap" }, h("table", { class: "table ai-usage-table ai-price-table" }, priceHead("Model or pattern", null), tbody)),
+    );
+  }
+
+  function editPrice(provider: PriceListing["providers"][number], item: PricedModel): void {
+    const base = item.source === "set" ? item.fallback : { price: item.price, source: item.source, match: item.match };
+    const current = item.source === "set" ? item.price : null;
+    const status = h("div", { class: "field-error", hidden: true });
+    const field = (label: string, value: number | undefined, fallback: number | undefined) => {
+      const input = h("input", {
+        class: "input",
+        inputMode: "decimal",
+        placeholder: fallback === undefined ? "" : String(fallback),
+        value: value === undefined ? "" : String(value),
+        ariaLabel: `${label}, USD per million tokens`,
+      });
+      return { input, el: h("label", { class: "field" }, h("span", { class: "field-label" }, label), h("span", { class: "ai-price-input" }, h("span", { class: "muted" }, "$"), input)) };
+    };
+    const bp = base?.price ?? null;
+    const input = field("Input", current?.input, bp?.input);
+    const output = field("Output", current?.output, bp?.output);
+    const cached = field("Cached input", current?.cached, bp?.cached ?? bp?.input);
+    const write = field("Cache write", current?.cacheWrite, bp?.cacheWrite ?? bp?.input);
+    const otherwise =
+      base && base.source !== "none"
+        ? `Without a price here: ${SOURCE_TEXT[base.source].toLowerCase()}${base.match ? ` (${base.match})` : ""}${bp ? `, ${formatPrice(bp.input)} in, ${formatPrice(bp.output)} out` : ""}.`
+        : "Without a price here it counts as free.";
+    const save = async (price: Price | null, close: () => void) => {
+      try {
+        const next = await ctx.api.put<PriceListing>(`/api/ai/providers/${provider.id}/prices`, { model: item.model, price });
+        close();
+        if (!disposed && page === "prices") await renderPrices(next);
+      } catch (error) {
+        formError(status, error);
+      }
+    };
+    modal({
+      within: ctx.root,
+      title: item.model,
+      body: h(
+        "div",
+        { class: "ai-form" },
+        h("p", { class: "small muted" }, `${provider.name}. USD per million tokens; empty fields take the value shown.`),
+        h("div", { class: "ai-form-row" }, input.el, output.el),
+        h("div", { class: "ai-form-row" }, cached.el, write.el),
+        h("p", { class: "small muted" }, otherwise),
+        status,
+      ),
+      actions: [
+        ...(item.source === "set"
+          ? [{ label: "Remove this price", variant: "ghost" as const, keepOpen: true, onClick: (close: () => void) => save(null, close) }]
+          : []),
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Save",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            status.hidden = true;
+            const read = (f: { input: HTMLInputElement }, fallback: number | undefined) => {
+              const value = numberOrNull(f.input.value);
+              if (Number.isNaN(value) || (value !== null && value < 0)) formError(status, new Error("Prices are a number of dollars, 0 or more."));
+              return value ?? fallback;
+            };
+            const price: Price = {
+              input: read(input, bp?.input) ?? 0,
+              output: read(output, bp?.output) ?? 0,
+            };
+            const c = read(cached, bp?.cached);
+            const w = read(write, bp?.cacheWrite);
+            if (c !== undefined) price.cached = c;
+            if (w !== undefined) price.cacheWrite = w;
+            await save(price, close);
+          },
+        },
+      ],
+    });
   }
 
   function usageCard(label: string, value: string, detail: string): HTMLElement {

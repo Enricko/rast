@@ -88,11 +88,14 @@ impl AppState {
         crate::sandbox::spawn_access_sweeper(db.clone(), config.clone());
         // AI Agent: replies cut off by a restart are marked interrupted.
         crate::ai::run::recover(&db).await;
+        let secrets = Arc::new(secrets);
+        // AI Agent: model prices from the providers' lists, kept fresh.
+        crate::ai::spawn_price_refresh(db.clone(), secrets.clone());
 
         Ok(Self {
             config,
             db,
-            secrets: Arc::new(secrets),
+            secrets,
             events,
             jobs,
             monitor,

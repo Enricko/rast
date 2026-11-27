@@ -101,8 +101,57 @@ export interface Allowance {
   source: string;
 }
 
-/** USD per million tokens: [input, output]. */
-export type Prices = Record<string, [number, number]>;
+/** A model's price in USD per million tokens. Cached input (read back from
+ * the provider's prompt cache) and input written to the cache cost the input
+ * price unless given. */
+export interface Price {
+  input: number;
+  output: number;
+  cached?: number;
+  cacheWrite?: number;
+}
+
+export type Prices = Record<string, Price>;
+
+/** Where a price comes from: set by an administrator, the provider's own
+ * model list, the built-in list, free because the provider runs locally, or
+ * unknown (free). */
+export type PriceSource = "set" | "list" | "built-in" | "local" | "none";
+
+export interface PricedModel {
+  model: string;
+  price: Price | null;
+  source: PriceSource;
+  /** The built-in entry that matched (a name or a pattern). */
+  match: string | null;
+  /** With a price set: what the model costs without it. */
+  fallback?: { price: Price | null; source: PriceSource; match: string | null };
+}
+
+export interface BuiltInPrice {
+  name?: string;
+  pattern?: string;
+  input: number;
+  output: number;
+  cached: number;
+  cacheWrite: number;
+}
+
+/** GET /api/ai/prices. */
+export interface PriceListing {
+  providers: Array<{
+    id: string;
+    name: string;
+    kind: string;
+    kindLabel: string;
+    enabled: boolean;
+    local: boolean;
+    checkedAt: number | null;
+    models: PricedModel[];
+  }>;
+  builtIn: { models: BuiltInPrice[]; patterns: BuiltInPrice[] };
+  results?: Array<{ id: string; name: string; priced?: number; error?: string }>;
+}
 
 export interface Options {
   isAdmin: boolean;
@@ -404,6 +453,13 @@ export function formatTokens(value: number): string {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 0 : 1)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
   return String(value);
+}
+
+/** A price per million tokens: "$3", "$0.30", "$0.625", "$0.0028". */
+export function formatPrice(value: number): string {
+  if (value === 0) return "$0";
+  const text = String(Number(value.toPrecision(4)));
+  return "$" + (/\.\d$/.test(text) ? text + "0" : text);
 }
 
 /** "$1.23", "$0.0042", "$0". */

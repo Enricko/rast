@@ -81,6 +81,18 @@ this file by `scripts/changelog-section.sh`.
   model. People see their tightest limit under the chat list. Database
   schema v14.
 
+- **A price for every AI model.** Settings → Prices lists each provider's
+  models with their input, output, cached-input and cache-write prices and
+  where each comes from: a price set there, the provider's own model list
+  (OpenCode, OpenRouter, Vercel; asked again every day and on "Update
+  prices"), or a built-in list of 119 models and 53 name patterns taken from
+  9router's price table, with Anthropic's published prices for Claude.
+  Local providers (Ollama, LM Studio, vLLM, llama.cpp) are free unless
+  priced. Input read back from a provider's prompt cache is now counted
+  apart and billed at its own, lower price, so spending limits match what
+  providers charge. Prices moved out of the provider form. Database schema
+  v15.
+
 ### Changed
 
 - **AI Agent's chat list** hides and shows with the button at its top (the

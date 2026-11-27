@@ -207,9 +207,9 @@ enum End {
 enum Step {
     Answered {
         calls: Vec<provider::ToolCall>,
-        usage: (i64, i64),
+        usage: provider::Usage,
     },
-    Stopped((i64, i64)),
+    Stopped(provider::Usage),
     Failed {
         error: ChatError,
         wrote: bool,
@@ -468,15 +468,16 @@ async fn stream_step(
     // Tokens the provider reported; otherwise about four characters each,
     // when anything was written (a refused request costs nothing).
     let tokens = |usage: provider::Usage, extra: usize| {
-        if usage.input > 0 || usage.output > 0 {
-            (usage.input, usage.output)
+        if !usage.is_empty() {
+            usage
         } else if wrote + extra > 0 {
-            (
-                (prompt_chars / 4) as i64,
-                ((wrote + extra) / 4).max(1) as i64,
-            )
+            provider::Usage {
+                input: (prompt_chars / 4) as i64,
+                output: ((wrote + extra) / 4).max(1) as i64,
+                ..Default::default()
+            }
         } else {
-            (0, 0)
+            provider::Usage::default()
         }
     };
     match result {
@@ -500,10 +501,10 @@ async fn stream_step(
     }
 }
 
-async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage: (i64, i64)) {
-    tokens.0 += usage.0;
-    tokens.1 += usage.1;
-    if usage == (0, 0) {
+async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage: provider::Usage) {
+    tokens.0 += usage.input;
+    tokens.1 += usage.output;
+    if usage.is_empty() {
         return;
     }
     if let Err(e) = super::record_usage(
@@ -511,8 +512,7 @@ async fn count(state: &AppState, job: &ReplyJob, tokens: &mut (i64, i64), usage:
         job.owner.id,
         &job.provider_id,
         &job.model,
-        usage.0,
-        usage.1,
+        &usage,
     )
     .await
     {

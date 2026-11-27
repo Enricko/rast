@@ -9,6 +9,7 @@ import {
   allowanceText,
   allowanceUsed,
   formatUsd,
+  formatPrice,
   applyDelta,
   groupByDay,
   maySkipAsking,
@@ -183,6 +184,12 @@ test("allowance summary", () => {
   assert.equal(formatUsd(0), "$0");
   assert.equal(formatUsd(0.0042), "$0.0042");
   assert.equal(formatUsd(1234.5), "$1,235");
+  assert.equal(formatPrice(3), "$3");
+  assert.equal(formatPrice(0.3), "$0.30");
+  assert.equal(formatPrice(0.625), "$0.625");
+  assert.equal(formatPrice(0.0028), "$0.0028");
+  assert.equal(formatPrice(0), "$0");
+  assert.equal(formatPrice(12.5), "$12.50");
 });
 
 test("chats group by day", () => {
