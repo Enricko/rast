@@ -41,7 +41,7 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations-agen
 
 /// AI Agent's own version: its App Center package (`ai-agent`), released by
 /// tagging `ai-agent-v<VERSION>` (.github/workflows/ai-agent.yml checks it).
-pub const VERSION: &str = "1.0.0";
+pub const VERSION: &str = "1.1.0";
 
 /// Set once RAST's AI Agent data was taken (Unix ms, or `none`).
 const TAKEN_OVER: &str = "agent.takenOverAt";

@@ -23,7 +23,8 @@ this file by `scripts/changelog-section.sh`.
   in again, woken with Use now, or removed. Sign-ins of one person to the
   same plan become accounts of one provider on upgrade (the two Google
   Antigravity sign-ins become one provider with two accounts); chats,
-  agents, limits and usage follow. Database schema v21.
+  agents, limits and usage follow. Database schema v21; ships to App Center
+  as AI Agent 1.1.0 (package `ai-agent`, its own database v2).
 - **AI Agent settings → Quota**: one card per account with the limits its
   provider reports with each answer (ChatGPT's 5-hour and weekly use,
   Claude's, the requests and tokens left in OpenAI- and Anthropic-style
