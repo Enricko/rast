@@ -259,12 +259,19 @@ Administrators set up **providers** (several of one kind are fine),
 **agents** (personality, provider and model, skills). API keys are encrypted
 with the server secret and never returned: providers show `hasKey` and
 `keyHint` (`…` and the last four characters). **Limits** decide which
-providers an account may use and how many tokens it may spend per day and per
-month (server time): the account's own rule (`user:<id>`), else its groups'
-rules combined with the most generous winning (`group:<id>`), else the
+providers an account may use and how much it may use per day, per week
+(Monday to Sunday) and per month (server time), in tokens and in money
+(USD): the account's own rule (`user:<id>`), else its groups' rules combined
+with the most generous winning, limit by limit (`group:<id>`), else the
 `default` rule, else no limits. Administrators are not limited. Usage counts
 the tokens the provider reports (about four characters per token when it
-reports none) and stays counted when a chat is deleted.
+reports none) and stays counted when a chat is deleted. **Money** comes from
+each provider's `prices` (`{model: [input, output]}` in USD per million
+tokens; the model list fills them in where the provider publishes them:
+OpenCode's `cost`, OpenRouter's `pricing`). Each reply's cost is stored when
+it is made (in micro-dollars), so later price changes do not rewrite it, and
+a model without a price costs nothing. A new reply is refused (429, with
+`Retry-After`) once any limit is reached; a reply already running finishes.
 
 Provider `kind`s are presets of an address and protocol (`kinds` in the
 admin overview lists them with `group`, `keyUrl` and `about`):
@@ -351,7 +358,7 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/api/ai/options` | what the caller may chat with: `{isAdmin, configured, providers:[{id, kind, kindLabel, name, models}], agents:[{id, name, description, providerId, model}], allowance}` (agents without their personality) |
-| GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, monthlyTokens, source}, allowance:{usedToday, usedMonth, dailyTokens, monthlyTokens, dayEndsAt, monthEndsAt, source}}` |
+| GET | `/api/ai/usage` | `{limits:{providers, dailyTokens, weeklyTokens, monthlyTokens, dailyCost, weeklyCost, monthlyCost, source}, allowance:{usedToday, usedWeek, usedMonth, costToday, costWeek, costMonth` (USD)`, dailyTokens, weeklyTokens, monthlyTokens, dailyCost, weeklyCost, monthlyCost, dayEndsAt, weekEndsAt, monthEndsAt, source}}` |
 | GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, effort, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
 | POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model; a model must be one the provider offers), plus `effort?` and `allowedTools?` to start with |
 | GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[blocks], providerId, model, inputTokens, outputTokens, status:"streaming"\|"waiting"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`. Blocks: `{type:"text"\|"reasoning", text}` and `{type:"tool", id, name, input, status:"pending"\|"allowed"\|"running"\|"done"\|"error"\|"denied"\|"skipped", output?, error?}`, in reply order. A reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
@@ -360,19 +367,20 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
 | POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
 | POST | `/api/ai/conversations/{id}/tools/{callId}` | owner only: `{decision:"allow"\|"deny", always?}` → `{message, conversation}`; once no call is `pending` the reply goes on (checked like a new message: `429`, `403`, …). `409` when the chat is not waiting or the call was answered |
-| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}], tools:[{name, label}], search, serverAccess}` |
+| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, week, month, costToday, costWeek, costMonth, lastAt}], tools:[{name, label}], search, serverAccess}` |
+| GET | `/api/ai/admin/usage/{userId}?days=30` | admin: one account's use: `{user, allowance, providers, days:[{date, input, output, tokens, cost, calls}]` (oldest first, every day of the last `days` (1–366), server time)`, models:[{providerId, provider, model, input, output, tokens, cost, calls, lastAt}]}` |
 | PUT | `/api/ai/server-access` | admin: `{enabled}` — whether accounts that are not administrators may read the server and run read-only commands there; audited `ai.server_access.update` |
 | GET / PUT | `/api/ai/search` | admin: the web search service `{kind:"brave"\|"tavily"\|"searxng"\|"", url, hasKey, keyHint, configured}`; PUT `{kind, url?` (SearXNG)`, apiKey?` (absent = keep)`}`; audited `ai.search.update` |
 | POST | `/api/ai/search/test` | admin: one search with the saved service → `{results, first}` |
 | GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |
-| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], enabled?}` |
-| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove) |
-| POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models}` |
+| POST | `/api/ai/providers` | admin: `{kind, name, baseUrl?` (empty = the kind's usual address)`, apiKey?, models:[…], prices?:{model:[input, output]}` (USD per million tokens, 0–10 000; models not offered are dropped)`, enabled?}` |
+| PUT / DELETE | `/api/ai/providers/{id}` | admin: same body (kind cannot change; `apiKey` absent = keep, `removeKey:true` = remove; `prices` absent = keep) |
+| POST | `/api/ai/providers/models` | admin: test a provider and list its models: `{providerId}` or `{kind, baseUrl?, apiKey?}` → `{models, prices}` (`prices`: those the list gives) |
 | POST | `/api/ai/agents` | admin: `{name, description?, systemPrompt?, providerId?, model?, skills:[ids], tools?:[names] \| null, temperature?` (0–2)`, maxOutputTokens?, enabled?}` |
 | PUT / DELETE | `/api/ai/agents/{id}` | admin |
 | POST | `/api/ai/skills` | admin: `{name, description?, instructions}` → `{id}` |
 | PUT / DELETE | `/api/ai/skills/{id}` | admin (agents stop carrying a deleted skill) |
-| PUT / DELETE | `/api/ai/limits/{subject}` | admin: `subject` is `default`, `group:<id>` or `user:<id>`; body `{providers: [ids] \| null, dailyTokens: n \| null, monthlyTokens: n \| null}` (`null` = all / no limit) |
+| PUT / DELETE | `/api/ai/limits/{subject}` | admin: `subject` is `default`, `group:<id>` or `user:<id>`; body `{providers: [ids] \| null, dailyTokens, weeklyTokens, monthlyTokens: n \| null, dailyCost, weeklyCost, monthlyCost: USD \| null}` (`null` or absent = all / no limit) |
 
 Replies are written on the server, one per chat at a time, and stream to the
 owner's pages as `ai.delta` events `{conversationId, messageId, seq, text,

@@ -70,6 +70,17 @@ this file by `scripts/changelog-section.sh`.
   stay limited to their own RAST files and the shared folders they may
   write to. Administrators can turn this off under Settings → Tools.
 
+- **AI spending and weekly limits, and usage per account.** Limits can now
+  cap tokens per day, week (Monday to Sunday) and month, and spending in
+  dollars per day, week and month. Prices come from each provider's model
+  list where it publishes them (OpenCode, OpenRouter) and can be entered or
+  changed per model under Providers; every reply keeps the cost it had when
+  it was made. Settings → Usage shows each account's tokens today, this week
+  and this month and what it spent; opening an account shows its limits with
+  how much is used, its tokens per day for the last 30 days, and its use per
+  model. People see their tightest limit under the chat list. Database
+  schema v14.
+
 ### Changed
 
 - **AI Agent's chat list** hides and shows with the button at its top (the

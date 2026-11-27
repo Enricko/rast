@@ -8,6 +8,7 @@ import {
   groupKinds,
   allowanceText,
   allowanceUsed,
+  formatUsd,
   applyDelta,
   groupByDay,
   maySkipAsking,
@@ -174,6 +175,14 @@ test("allowance summary", () => {
   assert.equal(allowanceText({ ...base, dailyTokens: 10_000, monthlyTokens: null }), "1.5k of 10k tokens today");
   assert.equal(allowanceUsed({ ...base, dailyTokens: 10_000, monthlyTokens: 50_000 }), 0.8);
   assert.equal(allowanceUsed({ ...base, dailyTokens: 0, monthlyTokens: null }), 1);
+  // The tightest limit is the one shown, money included.
+  const week = { ...base, dailyTokens: 10_000, monthlyTokens: null, usedWeek: 9000, weeklyTokens: 10_000, costMonth: 4.75, monthlyCost: 5 };
+  assert.equal(allowanceText(week), "$4.75 of $5.00 spent this month");
+  assert.equal(allowanceUsed(week), 0.95);
+  assert.equal(allowanceText({ ...week, monthlyCost: null }), "9.0k of 10k tokens this week");
+  assert.equal(formatUsd(0), "$0");
+  assert.equal(formatUsd(0.0042), "$0.0042");
+  assert.equal(formatUsd(1234.5), "$1,235");
 });
 
 test("chats group by day", () => {

@@ -50,6 +50,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/server-access", put(put_server_access))
         .route("/api/ai/admin/overview", get(admin_overview))
         .route("/api/ai/admin/conversations", get(admin_conversations))
+        .route("/api/ai/admin/usage/{user_id}", get(admin_usage))
         .route("/api/ai/providers", post(create_provider))
         .route("/api/ai/providers/models", post(probe_models))
         .route(
@@ -1028,26 +1029,22 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
             .iter()
             .map(|row| json!({"id": row.get::<i64, _>("id"), "name": row.get::<String, _>("name")}))
             .collect();
-    let (day, _, month, _) = ai::periods();
-    let usage: Vec<Value> = sqlx::query(
-        "SELECT user_id,
-                SUM(CASE WHEN created_at >= ? THEN input_tokens + output_tokens ELSE 0 END) AS today,
-                SUM(input_tokens + output_tokens) AS month
-         FROM ai_usage WHERE created_at >= ? GROUP BY user_id",
-    )
-    .bind(day)
-    .bind(month)
-    .fetch_all(&state.db)
-    .await?
-    .iter()
-    .map(|row| {
-        json!({
-            "userId": row.get::<i64, _>("user_id"),
-            "today": row.get::<i64, _>("today"),
-            "month": row.get::<i64, _>("month"),
+    let usage: Vec<Value> = ai::used_by_account(&state.db, &ai::periods())
+        .await?
+        .into_iter()
+        .map(|(user_id, used, last_at)| {
+            json!({
+                "userId": user_id,
+                "today": used.tokens[0],
+                "week": used.tokens[1],
+                "month": used.tokens[2],
+                "costToday": ai::micros_to_usd(used.cost[0]),
+                "costWeek": ai::micros_to_usd(used.cost[1]),
+                "costMonth": ai::micros_to_usd(used.cost[2]),
+                "lastAt": last_at,
+            })
         })
-    })
-    .collect();
+        .collect();
     Ok(Json(json!({
         "kinds": kinds,
         "providers": providers,
@@ -1061,6 +1058,41 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
         "search": tools::search_config(&state.db).await.public_json(&state.secrets),
         "serverAccess": tools::server_access(&state.db).await,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageQuery {
+    days: Option<u32>,
+}
+
+/// GET /api/ai/admin/usage/{userId}?days=30 — one account's use: its
+/// allowance now, a total per day and per model.
+async fn admin_usage(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Path(user_id): Path<i64>,
+    Query(query): Query<UsageQuery>,
+) -> AppResult<Json<Value>> {
+    let _ = admin;
+    let row = sqlx::query("SELECT id, username, display_name, role FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("no such account"))?;
+    let is_admin = row.get::<String, _>("role") == "admin";
+    let limits = ai::effective_limits_for(&state.db, user_id, is_admin).await?;
+    let days = query.days.unwrap_or(30).clamp(1, 366);
+    let mut history = ai::usage_history(&state.db, user_id, days).await?;
+    history["user"] = json!({
+        "id": user_id,
+        "username": row.get::<String, _>("username"),
+        "displayName": row.get::<String, _>("display_name"),
+        "isAdmin": is_admin,
+    });
+    history["allowance"] = ai::allowance(&state.db, user_id, &limits).await?;
+    history["providers"] = json!(limits.providers);
+    Ok(Json(history))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1260,12 +1292,35 @@ struct ProviderBody {
     remove_key: bool,
     #[serde(default)]
     models: Vec<String>,
+    /// USD per million tokens per model (absent: keep the current ones).
+    prices: Option<provider::Prices>,
     #[serde(default = "yes")]
     enabled: bool,
 }
 
 fn yes() -> bool {
     true
+}
+
+/// Prices for the provider's models only, each within reason.
+fn checked_prices(prices: &provider::Prices, models: &[String]) -> AppResult<provider::Prices> {
+    let mut out = provider::Prices::new();
+    for (model, price) in prices {
+        if !models.contains(model) {
+            continue;
+        }
+        if price
+            .iter()
+            .any(|p| !p.is_finite() || !(0.0..=ai::MAX_PRICE).contains(p))
+        {
+            return Err(AppError::bad_request(format!(
+                "prices are in USD per million tokens, from 0 to {}",
+                ai::MAX_PRICE
+            )));
+        }
+        out.insert(model.clone(), *price);
+    }
+    Ok(out)
 }
 
 fn checked_base_url(raw: &str) -> AppResult<String> {
@@ -1308,11 +1363,12 @@ async fn create_provider(
     }
     let key = checked_key(body.api_key.as_deref())?;
     let models = models_list(&body.models)?;
+    let prices = checked_prices(&body.prices.clone().unwrap_or_default(), &models)?;
     let id = ai::new_id();
     let now = now_ms();
     sqlx::query(
-        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, enabled, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(kind.as_str())
@@ -1320,6 +1376,7 @@ async fn create_provider(
     .bind(&base_url)
     .bind(ai::seal_key(&state.secrets, key.as_deref().unwrap_or(""))?)
     .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&prices).unwrap_or_else(|_| "{}".into()))
     .bind(body.enabled as i64)
     .bind(now)
     .bind(now)
@@ -1372,6 +1429,7 @@ async fn update_provider(
         ));
     }
     let models = models_list(&body.models)?;
+    let prices = checked_prices(body.prices.as_ref().unwrap_or(&existing.prices), &models)?;
     let key = checked_key(body.api_key.as_deref())?;
     let sealed = match (&key, body.remove_key) {
         (Some(key), _) => ai::seal_key(&state.secrets, key)?,
@@ -1379,12 +1437,13 @@ async fn update_provider(
         (None, false) => existing.sealed_key().to_string(),
     };
     sqlx::query(
-        "UPDATE ai_providers SET name = ?, base_url = ?, models = ?, enabled = ?, api_key = ?, updated_at = ?
-         WHERE id = ?",
+        "UPDATE ai_providers SET name = ?, base_url = ?, models = ?, prices = ?, enabled = ?, api_key = ?,
+             updated_at = ? WHERE id = ?",
     )
     .bind(&name)
     .bind(&base_url)
     .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
+    .bind(serde_json::to_string(&prices).unwrap_or_else(|_| "{}".into()))
     .bind(body.enabled as i64)
     .bind(&sealed)
     .bind(now_ms())
@@ -1485,12 +1544,14 @@ async fn probe_models(
             None => None,
         },
     };
-    let models =
+    let list =
         tokio::task::spawn_blocking(move || provider::list_models(kind, &base_url, key.as_deref()))
             .await
             .map_err(|e| AppError::internal(format!("model list failed: {e}")))?
             .map_err(AppError::bad_request)?;
-    Ok(Json(json!({ "models": models })))
+    Ok(Json(
+        json!({ "models": list.models, "prices": list.prices }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1875,7 +1936,12 @@ async fn delete_skill(
 struct LimitBody {
     providers: Option<Vec<String>>,
     daily_tokens: Option<i64>,
+    weekly_tokens: Option<i64>,
     monthly_tokens: Option<i64>,
+    /// Spending limits in USD.
+    daily_cost: Option<f64>,
+    weekly_cost: Option<f64>,
+    monthly_cost: Option<f64>,
 }
 
 async fn subject_name(state: &AppState, subject: &str) -> AppResult<String> {
@@ -1924,7 +1990,7 @@ async fn put_limit(
             ));
         }
     }
-    for value in [body.daily_tokens, body.monthly_tokens]
+    for value in [body.daily_tokens, body.weekly_tokens, body.monthly_tokens]
         .into_iter()
         .flatten()
     {
@@ -1932,30 +1998,31 @@ async fn put_limit(
             return Err(AppError::bad_request("allowances cannot be negative"));
         }
     }
+    for value in [body.daily_cost, body.weekly_cost, body.monthly_cost]
+        .into_iter()
+        .flatten()
+    {
+        if !value.is_finite() || !(0.0..=1_000_000.0).contains(&value) {
+            return Err(AppError::bad_request(
+                "spending limits are in USD, from 0 to 1 000 000",
+            ));
+        }
+    }
+    // Whole micro-dollars, as they are stored.
+    let usd = |v: Option<f64>| v.map(|v| ai::micros_to_usd(ai::usd_to_micros(v)));
     let rule = LimitRule {
         subject: subject.clone(),
         providers: body.providers.clone(),
-        daily_tokens: body.daily_tokens,
-        monthly_tokens: body.monthly_tokens,
+        caps: ai::Caps {
+            daily_tokens: body.daily_tokens,
+            weekly_tokens: body.weekly_tokens,
+            monthly_tokens: body.monthly_tokens,
+            daily_cost: usd(body.daily_cost),
+            weekly_cost: usd(body.weekly_cost),
+            monthly_cost: usd(body.monthly_cost),
+        },
     };
-    sqlx::query(
-        "INSERT INTO ai_limits (subject, providers, daily_tokens, monthly_tokens, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(subject) DO UPDATE SET providers = excluded.providers,
-             daily_tokens = excluded.daily_tokens, monthly_tokens = excluded.monthly_tokens,
-             updated_at = excluded.updated_at",
-    )
-    .bind(&subject)
-    .bind(
-        rule.providers
-            .as_ref()
-            .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into())),
-    )
-    .bind(rule.daily_tokens)
-    .bind(rule.monthly_tokens)
-    .bind(now_ms())
-    .execute(&state.db)
-    .await?;
+    ai::save_limit_rule(&state.db, &rule).await?;
     audit_admin(
         &state,
         &admin.0,

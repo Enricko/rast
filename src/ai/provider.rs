@@ -916,19 +916,26 @@ pub fn refuses_effort(status: u16, body: &str) -> bool {
     matches!(status, 400 | 422) && (body.contains("effort") || body.contains("reasoning"))
 }
 
+/// Prices per model in USD per million tokens: `[input, output]`.
+pub type Prices = BTreeMap<String, [f64; 2]>;
+
+/// A provider's models and the prices its list gives for them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelList {
+    pub models: Vec<String>,
+    pub prices: Prices,
+}
+
 /// The models a provider offers (`GET {base}/models`), sorted. Gateways
 /// leave out what RAST cannot use: models that are not for chat, and free
 /// ones only their own apps may call.
-pub fn list_models(
-    kind: Kind,
-    base_url: &str,
-    api_key: Option<&str>,
-) -> Result<Vec<String>, String> {
+pub fn list_models(kind: Kind, base_url: &str, api_key: Option<&str>) -> Result<ModelList, String> {
     if base_url.is_empty() {
         return Err("set the provider's base URL first".into());
     }
-    if kind.routes_by_model() {
-        let models = gateway_models(kind, base_url, api_key)?;
+    let body = fetch_models(kind, base_url, api_key)?;
+    let models = if kind.routes_by_model() {
+        let models = parse_gateway_models(&body)?;
         remember_routes(base_url, &models, ROUTES_FOR);
         let mut ids: Vec<String> = models
             .into_iter()
@@ -937,9 +944,55 @@ pub fn list_models(
             .collect();
         ids.sort();
         ids.truncate(super::MAX_MODELS);
-        return Ok(ids);
-    }
-    parse_models(&fetch_models(kind, base_url, api_key)?)
+        ids
+    } else {
+        parse_models(&body)?
+    };
+    let mut prices = parse_prices(&body);
+    prices.retain(|id, _| models.contains(id));
+    Ok(ModelList { models, prices })
+}
+
+/// What a model list says its models cost, where it says so: OpenCode's
+/// `cost.text.{input,output}.price` (USD per million tokens) and
+/// OpenRouter's `pricing.{prompt,completion}` (USD per token, as text).
+pub fn parse_prices(body: &str) -> Prices {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Prices::new();
+    };
+    let Some(list) = value
+        .get("data")
+        .or_else(|| value.get("models"))
+        .and_then(Value::as_array)
+    else {
+        return Prices::new();
+    };
+    let number = |v: Option<&Value>| -> Option<f64> {
+        let v = v?;
+        v.as_f64().or_else(|| v.as_str()?.trim().parse().ok())
+    };
+    list.iter()
+        .filter_map(|m| {
+            let id = m
+                .get("id")
+                .or_else(|| m.get("name"))
+                .and_then(Value::as_str)?;
+            let per_million = number(m.pointer("/cost/text/input/price"))
+                .zip(number(m.pointer("/cost/text/output/price")))
+                .or_else(|| {
+                    number(m.pointer("/pricing/prompt"))
+                        .zip(number(m.pointer("/pricing/completion")))
+                        .map(|(i, o)| (i * 1e6, o * 1e6))
+                })?;
+            let round = |p: f64| (p * 1e6).round() / 1e6;
+            let price = [round(per_million.0), round(per_million.1)];
+            // Negative: "it depends" (OpenRouter's automatic routing).
+            price
+                .iter()
+                .all(|p| p.is_finite() && (0.0..=super::MAX_PRICE).contains(p))
+                .then(|| (id.to_string(), price))
+        })
+        .collect()
 }
 
 fn fetch_models(kind: Kind, base_url: &str, api_key: Option<&str>) -> Result<String, String> {
@@ -1457,6 +1510,22 @@ mod tests {
             vec!["llama3"]
         );
         assert!(parse_models("[]").is_err());
+        let prices = parse_prices(
+            &json!({"data": [
+                {"id": "claude-x", "cost": {"text": {"input": {"price": 2}, "output": {"price": 10}}}},
+                {"id": "openai/gpt-x", "pricing": {"prompt": "0.0000011", "completion": "0.0000044"}},
+                {"id": "openrouter/auto", "pricing": {"prompt": "-1", "completion": "-1"}},
+                {"id": "plain"}
+            ]})
+            .to_string(),
+        );
+        assert_eq!(
+            prices,
+            Prices::from([
+                ("claude-x".to_string(), [2.0, 10.0]),
+                ("openai/gpt-x".to_string(), [1.1, 4.4]),
+            ])
+        );
     }
 
     #[test]
@@ -1663,7 +1732,9 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert!(seen[1..].iter().all(|(_, session, _)| session == "conv-7"));
         assert_eq!(
-            list_models(Kind::OpenCode, &base, Some("k")).unwrap(),
+            list_models(Kind::OpenCode, &base, Some("k"))
+                .unwrap()
+                .models,
             vec!["claude-x".to_string(), "kimi-x".to_string()]
         );
     }

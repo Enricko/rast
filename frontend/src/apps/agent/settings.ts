@@ -10,8 +10,12 @@ import { iconSvg } from "../../core/icons";
 import { confirmDialog, errorMessage, modal } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
 import {
+  allowanceLimits,
   formatTokens,
+  formatUsd,
   groupKinds,
+  type Prices,
+  type UsageDetail,
   type ProviderKind,
   type AdminAgent,
   type AdminProvider,
@@ -68,6 +72,8 @@ export function mountSettings(options: {
 }): SettingsView {
   const { ctx, host } = options;
   let page: Page = "home";
+  /** Usage: the account whose use is open (null: everyone's). */
+  let usageUser: number | null = null;
   let overview: Overview | null = null;
   let disposed = false;
   const stops: Array<() => void> = [];
@@ -79,7 +85,10 @@ export function mountSettings(options: {
   host.append(h("header", { class: "ai-set-head" }, back, title, actions), body);
   back.addEventListener("click", () => {
     if (page === "home") options.onClose();
-    else show("home");
+    else if (page === "usage" && usageUser !== null) {
+      usageUser = null;
+      render();
+    } else show("home");
   });
 
   async function load(): Promise<void> {
@@ -94,6 +103,7 @@ export function mountSettings(options: {
 
   function show(next: Page): void {
     page = next;
+    usageUser = null;
     render();
     body.scrollTop = 0;
   }
@@ -101,7 +111,7 @@ export function mountSettings(options: {
   function render(): void {
     const label = PAGES.find((p) => p.id === page)?.label;
     title.textContent = label ?? "Settings";
-    back.lastElementChild!.textContent = page === "home" ? "Chats" : "Settings";
+    back.lastElementChild!.textContent = page === "home" ? "Chats" : page === "usage" && usageUser !== null ? "Usage" : "Settings";
     actions.replaceChildren();
     body.replaceChildren();
     if (!overview) {
@@ -124,13 +134,14 @@ export function mountSettings(options: {
       case "chats":
         return void renderChats(overview);
       case "usage":
-        return renderUsage(overview);
+        return usageUser === null ? renderUsage(overview) : void renderUsageDetail(overview, usageUser);
     }
   }
 
   // --------------------------------------------------------------- home
   function renderHome(data: Overview): void {
     const usedToday = data.usage.reduce((sum, u) => sum + u.today, 0);
+    const spentToday = data.usage.reduce((sum, u) => sum + u.costToday, 0);
     const counts: Record<Exclude<Page, "home">, string> = {
       providers: data.providers.length ? `${data.providers.length} connected` : "None yet",
       agents: data.agents.length ? `${data.agents.length}` : "None yet",
@@ -138,7 +149,7 @@ export function mountSettings(options: {
       tools: data.search.configured ? `Web search: ${SEARCH_LABELS[data.search.kind]}` : "Files, commands, web pages",
       limits: data.limits.length ? `${data.limits.length} rule${data.limits.length === 1 ? "" : "s"}` : "No limits",
       chats: "All accounts",
-      usage: `${formatTokens(usedToday)} tokens today`,
+      usage: spentToday > 0 ? `${formatTokens(usedToday)} tokens · ${formatUsd(spentToday)} today` : `${formatTokens(usedToday)} tokens today`,
     };
     // What each tile shows at a glance.
     const peek: Partial<Record<Exclude<Page, "home">, HTMLElement | null>> = {
@@ -366,6 +377,40 @@ export function mountSettings(options: {
     const status = h("div", { class: "field-error", hidden: true });
     let selected: string[] = [...(existing?.models ?? [])];
     let offered: string[] | null = null;
+    // USD per million tokens; filled in from the provider's list where it
+    // has them, editable here.
+    const prices: Prices = { ...(existing?.prices ?? {}) };
+    const pricesEl = h("details", { class: "ai-advanced ai-prices" });
+    const pricesSummary = h("summary", {});
+    const pricesBody = h("div", { class: "ai-price-rows" });
+    pricesEl.append(
+      pricesSummary,
+      h("p", { class: "small muted" }, "In USD per million tokens. Spending limits count each reply at the price it had then; models without a price count as free."),
+      pricesBody,
+    );
+    const priceText = (value: number | undefined) => (value === undefined ? "" : String(value));
+    const drawPrices = () => {
+      const priced = selected.filter((m) => prices[m]).length;
+      pricesSummary.textContent = selected.length ? `Prices · ${priced} of ${selected.length} model${selected.length === 1 ? "" : "s"}` : "Prices";
+      pricesBody.replaceChildren(
+        ...selected.map((model) => {
+          const input = h("input", { class: "input input-sm", inputMode: "decimal", placeholder: "Input", ariaLabel: `${model}: input price`, value: priceText(prices[model]?.[0]) });
+          const output = h("input", { class: "input input-sm", inputMode: "decimal", placeholder: "Output", ariaLabel: `${model}: output price`, value: priceText(prices[model]?.[1]) });
+          const update = () => {
+            const a = numberOrNull(input.value);
+            const b = numberOrNull(output.value);
+            if (a === null && b === null) delete prices[model];
+            else prices[model] = [a ?? 0, b ?? 0];
+            const priced = selected.filter((m) => prices[m]).length;
+            pricesSummary.textContent = `Prices · ${priced} of ${selected.length} model${selected.length === 1 ? "" : "s"}`;
+          };
+          input.addEventListener("input", update);
+          output.addEventListener("input", update);
+          return h("div", { class: "ai-price-row" }, h("span", { class: "ai-price-model small" }, model), h("span", { class: "ai-price-unit small muted" }, "$"), input, h("span", { class: "ai-price-unit small muted" }, "$"), output);
+        }),
+      );
+      if (!selected.length) pricesBody.appendChild(h("p", { class: "small muted" }, "Choose models first."));
+    };
 
     // Models: chosen ones as chips, the provider's list to pick from.
     const chips = h("div", { class: "ai-model-chips" });
@@ -397,6 +442,7 @@ export function mountSettings(options: {
         ),
       );
       if (!selected.length) chips.appendChild(h("span", { class: "small muted" }, "None yet: load them from the provider, or add one by name."));
+      drawPrices();
     };
     const filter = h("input", { class: "input input-sm", type: "search", autocomplete: "off" });
     const offerList = h("div", { class: "ai-model-list" });
@@ -438,12 +484,14 @@ export function mountSettings(options: {
       loadButton.disabled = true;
       if (!quiet) status.hidden = true;
       try {
-        const result = await ctx.api.post<{ models: string[] }>("/api/ai/providers/models", {
+        const result = await ctx.api.post<{ models: string[]; prices?: Prices }>("/api/ai/providers/models", {
           ...(existing ? { providerId: existing.id } : { kind: info.id }),
           ...(baseUrl.value.trim() ? { baseUrl: baseUrl.value.trim() } : {}),
           ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
         });
         offered = result.models;
+        for (const [model, price] of Object.entries(result.prices ?? {})) if (!prices[model]) prices[model] = price;
+        drawPrices();
         filter.placeholder = `Filter ${offered.length} models`;
         offerEl.classList.remove("hidden");
         drawOffer();
@@ -509,6 +557,7 @@ export function mountSettings(options: {
         offerEl,
         typed,
       ),
+      pricesEl,
       advanced.childElementCount > 1 ? advanced : null,
       enabled.el,
       status,
@@ -528,6 +577,13 @@ export function mountSettings(options: {
           keepOpen: true,
           onClick: async (close) => {
             status.hidden = true;
+            const chosenPrices: Prices = {};
+            for (const model of selected) {
+              const price = prices[model];
+              if (!price) continue;
+              if (price.some((p) => Number.isNaN(p) || p < 0)) formError(status, new Error(`The price of ${model} is not a number of dollars.`));
+              chosenPrices[model] = price;
+            }
             const payload = {
               kind: info.id,
               name: name.value.trim(),
@@ -535,6 +591,7 @@ export function mountSettings(options: {
               ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
               ...(existing && removeKey.isChecked() && !key.value.trim() ? { removeKey: true } : {}),
               models: selected,
+              prices: chosenPrices,
               enabled: enabled.isChecked(),
             };
             try {
@@ -871,9 +928,17 @@ export function mountSettings(options: {
         : rule.providers.length
           ? rule.providers.map((id) => data.providers.find((p) => p.id === id)?.name ?? "?").join(", ")
           : "No providers";
-    const day = rule.dailyTokens === null ? "no daily limit" : `${formatTokens(rule.dailyTokens)}/day`;
-    const month = rule.monthlyTokens === null ? "no monthly limit" : `${formatTokens(rule.monthlyTokens)}/month`;
-    return `${providers} · ${day} · ${month}`;
+    const caps: string[] = [];
+    const per = { day: "day", week: "week", month: "month" } as const;
+    const tokens = (value: number | null, when: keyof typeof per) => value !== null && caps.push(`${formatTokens(value)} tokens/${per[when]}`);
+    const money = (value: number | null, when: keyof typeof per) => value !== null && caps.push(`${formatUsd(value)}/${per[when]}`);
+    tokens(rule.dailyTokens, "day");
+    tokens(rule.weeklyTokens ?? null, "week");
+    tokens(rule.monthlyTokens, "month");
+    money(rule.dailyCost ?? null, "day");
+    money(rule.weeklyCost ?? null, "week");
+    money(rule.monthlyCost ?? null, "month");
+    return `${providers} · ${caps.length ? caps.join(" · ") : "no limits on use"}`;
   }
 
   function renderLimits(data: Overview): void {
@@ -926,8 +991,15 @@ export function mountSettings(options: {
     const syncAll = () => checks.classList.toggle("hidden", all.isChecked());
     all.input.addEventListener("change", syncAll);
     syncAll();
-    const daily = h("input", { class: "input", inputMode: "numeric", value: existing?.dailyTokens?.toString() ?? "", placeholder: "No limit" });
-    const monthly = h("input", { class: "input", inputMode: "numeric", value: existing?.monthlyTokens?.toString() ?? "", placeholder: "No limit" });
+    const field = (value: number | null | undefined, mode: "numeric" | "decimal") =>
+      h("input", { class: "input", inputMode: mode, value: value === null || value === undefined ? "" : String(value), placeholder: "No limit" });
+    const daily = field(existing?.dailyTokens, "numeric");
+    const weekly = field(existing?.weeklyTokens, "numeric");
+    const monthly = field(existing?.monthlyTokens, "numeric");
+    const dailyCost = field(existing?.dailyCost, "decimal");
+    const weeklyCost = field(existing?.weeklyCost, "decimal");
+    const monthlyCost = field(existing?.monthlyCost, "decimal");
+    const cell = (label: string, input: HTMLElement) => h("label", { class: "field" }, h("span", { class: "field-label" }, label), input);
     const status = h("div", { class: "field-error", hidden: true });
     modal({
       within: ctx.root,
@@ -938,10 +1010,17 @@ export function mountSettings(options: {
         h("label", { class: "field" }, h("span", { class: "field-label" }, "For"), who),
         h("div", { class: "field" }, h("span", { class: "field-label" }, "Providers"), all.el, checks),
         h(
-          "div",
-          { class: "ai-form-row" },
-          h("label", { class: "field" }, h("span", { class: "field-label" }, "Tokens per day"), daily),
-          h("label", { class: "field" }, h("span", { class: "field-label" }, "Tokens per month"), monthly),
+          "fieldset",
+          { class: "ai-limit-set" },
+          h("legend", { class: "field-label" }, "Tokens"),
+          h("div", { class: "ai-form-row ai-form-row-3" }, cell("Per day", daily), cell("Per week", weekly), cell("Per month", monthly)),
+        ),
+        h(
+          "fieldset",
+          { class: "ai-limit-set" },
+          h("legend", { class: "field-label" }, "Spending (USD)"),
+          h("div", { class: "ai-form-row ai-form-row-3" }, cell("Per day", dailyCost), cell("Per week", weeklyCost), cell("Per month", monthlyCost)),
+          h("span", { class: "field-hint" }, "Counted from each model's price under Providers. Weeks start on Monday."),
         ),
         status,
       ),
@@ -953,14 +1032,20 @@ export function mountSettings(options: {
           keepOpen: true,
           onClick: async (close) => {
             status.hidden = true;
-            const day = numberOrNull(daily.value);
-            const month = numberOrNull(monthly.value);
-            if (Number.isNaN(day) || Number.isNaN(month)) formError(status, new Error("Token limits are whole numbers."));
+            const tokens = [daily, weekly, monthly].map((el) => numberOrNull(el.value));
+            const money = [dailyCost, weeklyCost, monthlyCost].map((el) => numberOrNull(el.value.replace("$", "")));
+            if (tokens.some((v) => Number.isNaN(v))) formError(status, new Error("Token limits are whole numbers."));
+            if (money.some((v) => Number.isNaN(v))) formError(status, new Error("Spending limits are amounts in dollars, such as 2.50."));
+            const whole = (v: number | null | undefined) => (v === null || v === undefined ? null : Math.round(v));
             try {
               await ctx.api.put(`/api/ai/limits/${encodeURIComponent(who.value)}`, {
                 providers: all.isChecked() ? null : boxes.filter((b) => b.box.checked).map((b) => b.p.id),
-                dailyTokens: day === null ? null : Math.round(day),
-                monthlyTokens: month === null ? null : Math.round(month),
+                dailyTokens: whole(tokens[0]),
+                weeklyTokens: whole(tokens[1]),
+                monthlyTokens: whole(tokens[2]),
+                dailyCost: money[0] ?? null,
+                weeklyCost: money[1] ?? null,
+                monthlyCost: money[2] ?? null,
               });
             } catch (error) {
               formError(status, error);
@@ -1022,28 +1107,194 @@ export function mountSettings(options: {
 
   // -------------------------------------------------------------- usage
   function renderUsage(data: Overview): void {
-    const table = h("table", { class: "table ai-usage-table" });
-    table.appendChild(h("thead", {}, h("tr", {}, h("th", {}, "Account"), h("th", {}, "Today"), h("th", {}, "This month"), h("th", {}, "Rule"))));
-    const tbody = h("tbody", {});
+    const none = { today: 0, week: 0, month: 0, costToday: 0, costWeek: 0, costMonth: 0, lastAt: 0 };
     const rowsData = data.users
-      .map((u) => ({ u, used: data.usage.find((x) => x.userId === u.id) ?? { today: 0, month: 0 } }))
-      .sort((a, b) => b.used.month - a.used.month || a.u.username.localeCompare(b.u.username));
+      .map((u) => ({ u, used: data.usage.find((x) => x.userId === u.id) ?? { ...none, userId: u.id } }))
+      .sort((a, b) => b.used.costMonth - a.used.costMonth || b.used.month - a.used.month || a.u.username.localeCompare(b.u.username));
+    const total = data.usage.reduce((sum, u) => ({ tokens: sum.tokens + u.month, cost: sum.cost + u.costMonth }), { tokens: 0, cost: 0 });
+    body.appendChild(
+      h(
+        "div",
+        { class: "ai-usage-cards" },
+        usageCard("This month, everyone", `${formatTokens(total.tokens)} tokens`, formatUsd(total.cost)),
+        usageCard("Accounts that used it", String(data.usage.filter((u) => u.month > 0).length), `of ${data.users.length}`),
+      ),
+    );
+    const table = h("table", { class: "table ai-usage-table" });
+    table.appendChild(
+      h(
+        "thead",
+        {},
+        h("tr", {}, h("th", {}, "Account"), h("th", { class: "num" }, "Today"), h("th", { class: "num" }, "This week"), h("th", { class: "num" }, "This month"), h("th", { class: "num" }, "Spent this month"), h("th", {}, "Last used")),
+      ),
+    );
+    const tbody = h("tbody", {});
     for (const { u, used } of rowsData) {
-      const own = data.limits.find((l) => l.subject === `user:${u.id}`);
-      const rule = u.isAdmin ? "Not limited" : own ? "Own rule" : data.limits.some((l) => l.subject.startsWith("group:")) ? "Group or Everyone" : data.limits.some((l) => l.subject === "default") ? "Everyone" : "Not limited";
+      const open = () => {
+        usageUser = u.id;
+        render();
+        body.scrollTop = 0;
+      };
       tbody.appendChild(
         h(
           "tr",
-          {},
-          h("td", {}, u.displayName || u.username),
-          h("td", {}, formatTokens(used.today)),
-          h("td", {}, formatTokens(used.month)),
-          h("td", { class: "muted" }, rule),
+          { class: "ai-usage-row" },
+          h("td", {}, h("button", { class: "ai-usage-open", type: "button", onClick: open }, u.displayName || u.username, iconSvg("chevronRight", 12))),
+          h("td", { class: "num" }, formatTokens(used.today)),
+          h("td", { class: "num" }, formatTokens(used.week)),
+          h("td", { class: "num" }, formatTokens(used.month)),
+          h("td", { class: "num" }, formatUsd(used.costMonth)),
+          h("td", { class: "muted" }, used.lastAt ? relativeTime(used.lastAt) : "—"),
         ),
       );
     }
     table.appendChild(tbody);
-    body.append(h("div", { class: "ai-table-wrap" }, table), h("p", { class: "ai-set-note small muted" }, "Tokens as the providers report them (estimated when they do not)."));
+    body.append(
+      h("div", { class: "ai-table-wrap" }, table),
+      h("p", { class: "ai-set-note small muted" }, "Tokens as the providers report them (estimated when they do not); money from each model's price under Providers. Open an account for its days and models."),
+    );
+  }
+
+  function usageCard(label: string, value: string, detail: string): HTMLElement {
+    return h("div", { class: "ai-usage-card" }, h("span", { class: "small muted" }, label), h("span", { class: "ai-usage-value" }, value), h("span", { class: "small muted" }, detail));
+  }
+
+  async function renderUsageDetail(data: Overview, userId: number): Promise<void> {
+    const account = data.users.find((u) => u.id === userId);
+    title.textContent = account ? account.displayName || account.username : "Usage";
+    body.appendChild(h("div", { class: "ai-set-loading muted" }, "Loading…"));
+    let detail: UsageDetail;
+    try {
+      detail = await ctx.api.get<UsageDetail>(`/api/ai/admin/usage/${userId}`, { days: "30" });
+    } catch (error) {
+      body.replaceChildren(h("div", { class: "banner banner-error" }, errorMessage(error)));
+      return;
+    }
+    if (page !== "usage" || usageUser !== userId) return;
+    body.replaceChildren();
+    const a = detail.allowance;
+    body.appendChild(
+      h(
+        "div",
+        { class: "ai-usage-cards" },
+        usageCard("Today", `${formatTokens(a.usedToday)} tokens`, formatUsd(a.costToday ?? 0)),
+        usageCard("This week", `${formatTokens(a.usedWeek ?? 0)} tokens`, formatUsd(a.costWeek ?? 0)),
+        usageCard("This month", `${formatTokens(a.usedMonth)} tokens`, formatUsd(a.costMonth ?? 0)),
+      ),
+    );
+    // Its limits, each with how much is used.
+    const limits = allowanceLimits(a);
+    const source: Record<string, string> = { admin: "Administrator: not limited", user: "Its own rule", group: "Its groups' rules", default: "The rule for everyone", none: "No rule: not limited" };
+    body.appendChild(h("h3", { class: "ai-set-subtitle" }, "Limits"));
+    body.appendChild(
+      h(
+        "div",
+        { class: "ai-usage-limits" },
+        h("p", { class: "small muted" }, source[a.source] ?? a.source),
+        ...limits.map((limit) =>
+          h(
+            "div",
+            { class: `ai-usage-limit${limit.share >= 1 ? " is-full" : ""}` },
+            h("span", { class: "small" }, limit.text),
+            h("span", { class: "ai-allowance-bar" }, h("span", { style: `width:${Math.round(Math.min(1, limit.share) * 100)}%` })),
+          ),
+        ),
+      ),
+    );
+    body.appendChild(h("h3", { class: "ai-set-subtitle" }, "Tokens per day, last 30 days"));
+    body.appendChild(dailyChart(detail.days));
+    body.appendChild(h("h3", { class: "ai-set-subtitle" }, "By model, last 30 days"));
+    if (!detail.models.length) {
+      body.appendChild(h("p", { class: "ai-set-empty muted" }, "Nothing used in the last 30 days."));
+      return;
+    }
+    const table = h("table", { class: "table ai-usage-table" });
+    table.appendChild(
+      h(
+        "thead",
+        {},
+        h("tr", {}, h("th", {}, "Model"), h("th", { class: "num" }, "Replies"), h("th", { class: "num" }, "In"), h("th", { class: "num" }, "Out"), h("th", { class: "num" }, "Cost"), h("th", {}, "Last used")),
+      ),
+    );
+    table.appendChild(
+      h(
+        "tbody",
+        {},
+        ...detail.models.map((m) =>
+          h(
+            "tr",
+            {},
+            h("td", {}, h("span", { class: "ai-usage-model" }, m.model || "—"), h("span", { class: "small muted" }, m.provider ?? "Removed provider")),
+            h("td", { class: "num" }, String(m.calls)),
+            h("td", { class: "num" }, formatTokens(m.input)),
+            h("td", { class: "num" }, formatTokens(m.output)),
+            h("td", { class: "num" }, formatUsd(m.cost)),
+            h("td", { class: "muted" }, relativeTime(m.lastAt)),
+          ),
+        ),
+      ),
+    );
+    body.appendChild(h("div", { class: "ai-table-wrap" }, table));
+  }
+
+  /** One bar per day (tokens), its cost and replies on hover or focus. */
+  function dailyChart(days: UsageDetail["days"]): HTMLElement {
+    const max = Math.max(1, ...days.map((d) => d.tokens));
+    const dateLabel = (date: string) => new Date(`${date}T12:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+    const tip = h("div", { class: "ai-chart-tip hidden", role: "status" });
+    const plot = h("div", { class: "ai-chart-plot" });
+    const showTip = (slot: HTMLElement, day: UsageDetail["days"][number]) => {
+      tip.replaceChildren(
+        h("strong", {}, `${day.tokens.toLocaleString()} tokens`),
+        h("span", {}, `${formatUsd(day.cost)} · ${day.calls} repl${day.calls === 1 ? "y" : "ies"}`),
+        h("span", { class: "muted" }, dateLabel(day.date)),
+      );
+      tip.classList.remove("hidden");
+      const box = plot.getBoundingClientRect();
+      const at = slot.getBoundingClientRect();
+      const center = at.left - box.left + at.width / 2;
+      tip.style.left = `${Math.min(Math.max(center, 70), box.width - 70)}px`;
+    };
+    const hideTip = () => tip.classList.add("hidden");
+    for (const day of days) {
+      const slot = h(
+        "button",
+        { class: "ai-chart-slot", type: "button", ariaLabel: `${dateLabel(day.date)}: ${day.tokens} tokens, ${formatUsd(day.cost)}` },
+        h("span", { class: "ai-chart-bar", style: `height:${day.tokens ? Math.max(2, (day.tokens / max) * 100) : 0}%` }),
+      );
+      slot.addEventListener("pointerenter", () => showTip(slot, day));
+      slot.addEventListener("focus", () => showTip(slot, day));
+      slot.addEventListener("pointerleave", hideTip);
+      slot.addEventListener("blur", hideTip);
+      plot.appendChild(slot);
+    }
+    const used = days.filter((d) => d.tokens > 0);
+    const table = h("details", { class: "ai-chart-table" }, h("summary", { class: "small muted" }, "As a table"));
+    table.appendChild(
+      used.length
+        ? h(
+            "table",
+            { class: "table ai-usage-table" },
+            h("thead", {}, h("tr", {}, h("th", {}, "Day"), h("th", { class: "num" }, "Tokens"), h("th", { class: "num" }, "Cost"), h("th", { class: "num" }, "Replies"))),
+            h(
+              "tbody",
+              {},
+              ...used
+                .slice()
+                .reverse()
+                .map((d) => h("tr", {}, h("td", {}, dateLabel(d.date)), h("td", { class: "num" }, d.tokens.toLocaleString()), h("td", { class: "num" }, formatUsd(d.cost)), h("td", { class: "num" }, String(d.calls)))),
+            ),
+          )
+        : h("p", { class: "small muted" }, "No use in these days."),
+    );
+    return h(
+      "div",
+      { class: "ai-chart" },
+      h("div", { class: "ai-chart-scale small muted" }, h("span", {}, formatTokens(max)), h("span", {}, "0")),
+      h("div", { class: "ai-chart-area" }, plot, tip),
+      h("div", { class: "ai-chart-axis small muted" }, h("span", {}, days[0] ? dateLabel(days[0].date) : ""), h("span", {}, "Today")),
+      table,
+    );
   }
 
   void load();

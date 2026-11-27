@@ -27,6 +27,8 @@ pub mod provider;
 pub mod run;
 pub mod tools;
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{Row, SqlitePool};
@@ -50,6 +52,8 @@ pub const MAX_INSTRUCTIONS: usize = 64 * 1024;
 pub const MAX_MESSAGE: usize = 100 * 1024;
 pub const MAX_MODELS: usize = 500;
 pub const MAX_MODEL_NAME: usize = 200;
+/// The highest price per million tokens accepted (USD).
+pub const MAX_PRICE: f64 = 10_000.0;
 /// Skills one agent carries.
 pub const MAX_AGENT_SKILLS: usize = 20;
 /// Earlier messages sent with each request (the newest ones).
@@ -324,6 +328,8 @@ pub struct Provider {
     pub base_url: String,
     api_key: String,
     pub models: Vec<String>,
+    /// USD per million tokens, for the models that have a price.
+    pub prices: provider::Prices,
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -388,6 +394,7 @@ impl Provider {
             "hasKey": self.has_key(),
             "keyHint": hint,
             "models": self.models,
+            "prices": self.prices,
             "enabled": self.enabled,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
@@ -415,6 +422,7 @@ fn provider_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Provider> {
         base_url: row.get("base_url"),
         api_key: row.get("api_key"),
         models: serde_json::from_str(&row.get::<String, _>("models")).unwrap_or_default(),
+        prices: serde_json::from_str(&row.get::<String, _>("prices")).unwrap_or_default(),
         enabled: row.get::<i64, _>("enabled") != 0,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -548,6 +556,54 @@ pub async fn agent(pool: &SqlitePool, id: &str) -> AppResult<Option<Agent>> {
 
 // ---------------------------------------------------------------- limits
 
+/// Money is counted in micro-dollars (1 USD = 1 000 000).
+pub const MICROS_PER_USD: f64 = 1_000_000.0;
+
+pub fn usd_to_micros(usd: f64) -> i64 {
+    (usd * MICROS_PER_USD).round() as i64
+}
+
+pub fn micros_to_usd(micros: i64) -> f64 {
+    micros as f64 / MICROS_PER_USD
+}
+
+/// How much an account may use per day, week (Monday to Sunday) and month,
+/// in tokens and in money (USD); `None`: no limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Caps {
+    pub daily_tokens: Option<i64>,
+    pub weekly_tokens: Option<i64>,
+    pub monthly_tokens: Option<i64>,
+    pub daily_cost: Option<f64>,
+    pub weekly_cost: Option<f64>,
+    pub monthly_cost: Option<f64>,
+}
+
+impl Caps {
+    /// The most generous of several: a missing limit anywhere wins.
+    fn most_generous(all: &[&Caps]) -> Caps {
+        fn most<T: PartialOrd + Copy>(values: impl Iterator<Item = Option<T>>) -> Option<T> {
+            let mut best: Option<T> = None;
+            for value in values {
+                let value = value?;
+                if best.is_none_or(|b| value > b) {
+                    best = Some(value);
+                }
+            }
+            best
+        }
+        Caps {
+            daily_tokens: most(all.iter().map(|c| c.daily_tokens)),
+            weekly_tokens: most(all.iter().map(|c| c.weekly_tokens)),
+            monthly_tokens: most(all.iter().map(|c| c.monthly_tokens)),
+            daily_cost: most(all.iter().map(|c| c.daily_cost)),
+            weekly_cost: most(all.iter().map(|c| c.weekly_cost)),
+            monthly_cost: most(all.iter().map(|c| c.monthly_cost)),
+        }
+    }
+}
+
 /// One limits rule (`subject`: `default`, `group:<id>` or `user:<id>`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -555,8 +611,8 @@ pub struct LimitRule {
     pub subject: String,
     /// Providers the subject may use (`None`: all).
     pub providers: Option<Vec<String>>,
-    pub daily_tokens: Option<i64>,
-    pub monthly_tokens: Option<i64>,
+    #[serde(flatten)]
+    pub caps: Caps,
 }
 
 /// What one account may use, and which rule said so.
@@ -564,8 +620,8 @@ pub struct LimitRule {
 #[serde(rename_all = "camelCase")]
 pub struct Effective {
     pub providers: Option<Vec<String>>,
-    pub daily_tokens: Option<i64>,
-    pub monthly_tokens: Option<i64>,
+    #[serde(flatten)]
+    pub caps: Caps,
     /// `admin`, `user`, `group`, `default` or `none`.
     pub source: String,
 }
@@ -574,8 +630,7 @@ impl Effective {
     pub fn unlimited(source: &str) -> Self {
         Self {
             providers: None,
-            daily_tokens: None,
-            monthly_tokens: None,
+            caps: Caps::default(),
             source: source.to_string(),
         }
     }
@@ -608,8 +663,7 @@ pub fn combine(
     if let Some(rule) = user {
         return Effective {
             providers: rule.providers.clone(),
-            daily_tokens: rule.daily_tokens,
-            monthly_tokens: rule.monthly_tokens,
+            caps: rule.caps.clone(),
             source: "user".into(),
         };
     }
@@ -625,25 +679,17 @@ pub fn combine(
             all.dedup();
             Some(all)
         };
-        let most = |pick: fn(&LimitRule) -> Option<i64>| -> Option<i64> {
-            if groups.iter().any(|g| pick(g).is_none()) {
-                None
-            } else {
-                groups.iter().filter_map(pick).max()
-            }
-        };
+        let caps: Vec<&Caps> = groups.iter().map(|g| &g.caps).collect();
         return Effective {
             providers,
-            daily_tokens: most(|g| g.daily_tokens),
-            monthly_tokens: most(|g| g.monthly_tokens),
+            caps: Caps::most_generous(&caps),
             source: "group".into(),
         };
     }
     if let Some(rule) = default {
         return Effective {
             providers: rule.providers.clone(),
-            daily_tokens: rule.daily_tokens,
-            monthly_tokens: rule.monthly_tokens,
+            caps: rule.caps.clone(),
             source: "default".into(),
         };
     }
@@ -651,13 +697,20 @@ pub fn combine(
 }
 
 fn rule_from_row(row: &sqlx::sqlite::SqliteRow) -> LimitRule {
+    let usd = |column: &str| row.get::<Option<i64>, _>(column).map(micros_to_usd);
     LimitRule {
         subject: row.get("subject"),
         providers: row
             .get::<Option<String>, _>("providers")
             .and_then(|raw| serde_json::from_str(&raw).ok()),
-        daily_tokens: row.get("daily_tokens"),
-        monthly_tokens: row.get("monthly_tokens"),
+        caps: Caps {
+            daily_tokens: row.get("daily_tokens"),
+            weekly_tokens: row.get("weekly_tokens"),
+            monthly_tokens: row.get("monthly_tokens"),
+            daily_cost: usd("daily_cost"),
+            weekly_cost: usd("weekly_cost"),
+            monthly_cost: usd("monthly_cost"),
+        },
     }
 }
 
@@ -668,17 +721,56 @@ pub async fn limit_rules(pool: &SqlitePool) -> AppResult<Vec<LimitRule>> {
     Ok(rows.iter().map(rule_from_row).collect())
 }
 
+/// Save (add or replace) a rule.
+pub async fn save_limit_rule(pool: &SqlitePool, rule: &LimitRule) -> AppResult<()> {
+    let micros = |usd: Option<f64>| usd.map(usd_to_micros);
+    sqlx::query(
+        "INSERT INTO ai_limits (subject, providers, daily_tokens, weekly_tokens, monthly_tokens,
+                               daily_cost, weekly_cost, monthly_cost, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(subject) DO UPDATE SET providers = excluded.providers,
+             daily_tokens = excluded.daily_tokens, weekly_tokens = excluded.weekly_tokens,
+             monthly_tokens = excluded.monthly_tokens, daily_cost = excluded.daily_cost,
+             weekly_cost = excluded.weekly_cost, monthly_cost = excluded.monthly_cost,
+             updated_at = excluded.updated_at",
+    )
+    .bind(&rule.subject)
+    .bind(
+        rule.providers
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "[]".into())),
+    )
+    .bind(rule.caps.daily_tokens)
+    .bind(rule.caps.weekly_tokens)
+    .bind(rule.caps.monthly_tokens)
+    .bind(micros(rule.caps.daily_cost))
+    .bind(micros(rule.caps.weekly_cost))
+    .bind(micros(rule.caps.monthly_cost))
+    .bind(now_ms())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn effective_limits(pool: &SqlitePool, user: &AuthUser) -> AppResult<Effective> {
-    if user.is_admin() {
+    effective_limits_for(pool, user.id, user.is_admin()).await
+}
+
+pub async fn effective_limits_for(
+    pool: &SqlitePool,
+    user_id: i64,
+    is_admin: bool,
+) -> AppResult<Effective> {
+    if is_admin {
         return Ok(Effective::unlimited("admin"));
     }
     let rules = limit_rules(pool).await?;
     let group_ids: Vec<i64> =
         sqlx::query_scalar("SELECT group_id FROM group_members WHERE user_id = ?")
-            .bind(user.id)
+            .bind(user_id)
             .fetch_all(pool)
             .await?;
-    let own = format!("user:{}", user.id);
+    let own = format!("user:{user_id}");
     let groups: Vec<LimitRule> = rules
         .iter()
         .filter(|rule| {
@@ -708,11 +800,27 @@ fn local_midnight(date: chrono::NaiveDate) -> i64 {
         .unwrap_or_else(|| naive.and_utc().timestamp_millis())
 }
 
-/// Start of today and of this month (server time), and when they end.
-pub fn periods() -> (i64, i64, i64, i64) {
+/// Where today, this week (from Monday) and this month start and end
+/// (server time, milliseconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Periods {
+    pub day: i64,
+    pub day_end: i64,
+    pub week: i64,
+    pub week_end: i64,
+    pub month: i64,
+    pub month_end: i64,
+}
+
+pub fn periods() -> Periods {
+    periods_on(chrono::Local::now().date_naive())
+}
+
+pub fn periods_on(today: chrono::NaiveDate) -> Periods {
     use chrono::Datelike;
-    let today = chrono::Local::now().date_naive();
     let tomorrow = today.succ_opt().unwrap_or(today);
+    let monday = today - chrono::Days::new(u64::from(today.weekday().num_days_from_monday()));
+    let next_monday = monday + chrono::Days::new(7);
     let month = today.with_day(1).unwrap_or(today);
     let next_month = if month.month() == 12 {
         chrono::NaiveDate::from_ymd_opt(month.year() + 1, 1, 1)
@@ -720,60 +828,176 @@ pub fn periods() -> (i64, i64, i64, i64) {
         chrono::NaiveDate::from_ymd_opt(month.year(), month.month() + 1, 1)
     }
     .unwrap_or(tomorrow);
-    (
-        local_midnight(today),
-        local_midnight(tomorrow),
-        local_midnight(month),
-        local_midnight(next_month),
-    )
+    Periods {
+        day: local_midnight(today),
+        day_end: local_midnight(tomorrow),
+        week: local_midnight(monday),
+        week_end: local_midnight(next_monday),
+        month: local_midnight(month),
+        month_end: local_midnight(next_month),
+    }
 }
 
-pub async fn used_since(pool: &SqlitePool, user_id: i64, since: i64) -> AppResult<i64> {
-    let used: Option<i64> = sqlx::query_scalar(
-        "SELECT SUM(input_tokens + output_tokens) FROM ai_usage WHERE user_id = ? AND created_at >= ?",
-    )
+/// Tokens and money (micro-dollars) used today, this week and this month.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Used {
+    pub tokens: [i64; 3],
+    pub cost: [i64; 3],
+}
+
+/// Sums for [`Used`]: `?1`, `?2`, `?3` are where the day, week and month
+/// start.
+macro_rules! used_sums {
+    () => {
+        "
+    COALESCE(SUM(CASE WHEN created_at >= ?1 THEN input_tokens + output_tokens END), 0) AS day_tokens,
+    COALESCE(SUM(CASE WHEN created_at >= ?2 THEN input_tokens + output_tokens END), 0) AS week_tokens,
+    COALESCE(SUM(CASE WHEN created_at >= ?3 THEN input_tokens + output_tokens END), 0) AS month_tokens,
+    COALESCE(SUM(CASE WHEN created_at >= ?1 THEN cost END), 0) AS day_cost,
+    COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost END), 0) AS week_cost,
+    COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost END), 0) AS month_cost"
+    };
+}
+
+fn used_from_row(row: &sqlx::sqlite::SqliteRow) -> Used {
+    Used {
+        tokens: [
+            row.get("day_tokens"),
+            row.get("week_tokens"),
+            row.get("month_tokens"),
+        ],
+        cost: [
+            row.get("day_cost"),
+            row.get("week_cost"),
+            row.get("month_cost"),
+        ],
+    }
+}
+
+pub async fn used(pool: &SqlitePool, user_id: i64, p: &Periods) -> AppResult<Used> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        used_sums!(),
+        " FROM ai_usage WHERE user_id = ?4 AND created_at >= ?5"
+    ))
+    .bind(p.day)
+    .bind(p.week)
+    .bind(p.month)
     .bind(user_id)
-    .bind(since)
+    .bind(p.week.min(p.month))
     .fetch_one(pool)
     .await?;
-    Ok(used.unwrap_or(0))
+    Ok(used_from_row(&row))
 }
 
-/// The account's allowance and what it used today and this month.
+/// Every account's use today, this week and this month.
+pub async fn used_by_account(pool: &SqlitePool, p: &Periods) -> AppResult<Vec<(i64, Used, i64)>> {
+    let rows = sqlx::query(concat!(
+        "SELECT user_id, MAX(created_at) AS last_at, ",
+        used_sums!(),
+        " FROM ai_usage WHERE created_at >= ?4 GROUP BY user_id"
+    ))
+    .bind(p.day)
+    .bind(p.week)
+    .bind(p.month)
+    .bind(p.week.min(p.month))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| (row.get("user_id"), used_from_row(row), row.get("last_at")))
+        .collect())
+}
+
+/// The account's allowance and what it used today, this week and this month
+/// (money in USD).
 pub async fn allowance(pool: &SqlitePool, user_id: i64, limits: &Effective) -> AppResult<Value> {
-    let (day, day_end, month, month_end) = periods();
+    let p = periods();
+    let used = used(pool, user_id, &p).await?;
+    let caps = &limits.caps;
     Ok(json!({
-        "usedToday": used_since(pool, user_id, day).await?,
-        "usedMonth": used_since(pool, user_id, month).await?,
-        "dailyTokens": limits.daily_tokens,
-        "monthlyTokens": limits.monthly_tokens,
-        "dayEndsAt": day_end,
-        "monthEndsAt": month_end,
+        "usedToday": used.tokens[0],
+        "usedWeek": used.tokens[1],
+        "usedMonth": used.tokens[2],
+        "costToday": micros_to_usd(used.cost[0]),
+        "costWeek": micros_to_usd(used.cost[1]),
+        "costMonth": micros_to_usd(used.cost[2]),
+        "dailyTokens": caps.daily_tokens,
+        "weeklyTokens": caps.weekly_tokens,
+        "monthlyTokens": caps.monthly_tokens,
+        "dailyCost": caps.daily_cost,
+        "weeklyCost": caps.weekly_cost,
+        "monthlyCost": caps.monthly_cost,
+        "dayEndsAt": p.day_end,
+        "weekEndsAt": p.week_end,
+        "monthEndsAt": p.month_end,
         "source": limits.source,
     }))
 }
 
+/// The first limit the account reached, if any: when it starts again and
+/// what to tell them.
+pub fn reached(caps: &Caps, used: &Used, p: &Periods) -> Option<(i64, &'static str)> {
+    let tokens = |limit: Option<i64>, i: usize| limit.is_some_and(|l| used.tokens[i] >= l);
+    let money =
+        |limit: Option<f64>, i: usize| limit.is_some_and(|l| used.cost[i] >= usd_to_micros(l));
+    [
+        (
+            tokens(caps.daily_tokens, 0),
+            p.day_end,
+            "You have used today's AI allowance. It starts again tomorrow.",
+        ),
+        (
+            money(caps.daily_cost, 0),
+            p.day_end,
+            "You have reached today's AI spending limit. It starts again tomorrow.",
+        ),
+        (
+            tokens(caps.weekly_tokens, 1),
+            p.week_end,
+            "You have used this week's AI allowance. It starts again on Monday.",
+        ),
+        (
+            money(caps.weekly_cost, 1),
+            p.week_end,
+            "You have reached this week's AI spending limit. It starts again on Monday.",
+        ),
+        (
+            tokens(caps.monthly_tokens, 2),
+            p.month_end,
+            "You have used this month's AI allowance. It starts again next month.",
+        ),
+        (
+            money(caps.monthly_cost, 2),
+            p.month_end,
+            "You have reached this month's AI spending limit. It starts again next month.",
+        ),
+    ]
+    .into_iter()
+    .find(|(hit, ..)| *hit)
+    .map(|(_, ends, message)| (ends, message))
+}
+
 /// Refuse a new reply once the account used its allowance.
 pub async fn check_allowance(pool: &SqlitePool, user_id: i64, limits: &Effective) -> AppResult<()> {
-    let (day, day_end, month, month_end) = periods();
-    let now = now_ms();
-    if let Some(daily) = limits.daily_tokens {
-        if used_since(pool, user_id, day).await? >= daily {
-            return Err(AppError::TooManyRequests {
-                retry_after_secs: ((day_end - now).max(1000) / 1000) as u64,
-                message: "You have used today's AI allowance. It starts again tomorrow.",
-            });
-        }
+    if limits.caps == Caps::default() {
+        return Ok(());
     }
-    if let Some(monthly) = limits.monthly_tokens {
-        if used_since(pool, user_id, month).await? >= monthly {
-            return Err(AppError::TooManyRequests {
-                retry_after_secs: ((month_end - now).max(1000) / 1000) as u64,
-                message: "You have used this month's AI allowance. It starts again next month.",
-            });
-        }
+    let p = periods();
+    let used = used(pool, user_id, &p).await?;
+    match reached(&limits.caps, &used, &p) {
+        Some((ends, message)) => Err(AppError::TooManyRequests {
+            retry_after_secs: ((ends - now_ms()).max(1000) / 1000) as u64,
+            message,
+        }),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// What a reply cost in micro-dollars, from the price per million tokens
+/// (which is also the price in micro-dollars per token).
+pub fn cost_micros(price: [f64; 2], input: i64, output: i64) -> i64 {
+    (input.max(0) as f64 * price[0] + output.max(0) as f64 * price[1]).round() as i64
 }
 
 pub async fn record_usage(
@@ -787,19 +1011,100 @@ pub async fn record_usage(
     if input <= 0 && output <= 0 {
         return Ok(());
     }
+    let prices: Option<String> = sqlx::query_scalar("SELECT prices FROM ai_providers WHERE id = ?")
+        .bind(provider_id)
+        .fetch_optional(pool)
+        .await?;
+    let cost = prices
+        .and_then(|raw| serde_json::from_str::<provider::Prices>(&raw).ok())
+        .and_then(|prices| prices.get(model).copied())
+        .map_or(0, |price| cost_micros(price, input, output));
     sqlx::query(
-        "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens, cost, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(provider_id)
     .bind(model)
     .bind(input.max(0))
     .bind(output.max(0))
+    .bind(cost)
     .bind(now_ms())
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// One account's use over the last `days` days (server time): a total per
+/// day (oldest first, days without use included) and per model.
+pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppResult<Value> {
+    let today = chrono::Local::now().date_naive();
+    let first = today - chrono::Days::new(u64::from(days.saturating_sub(1)));
+    let since = local_midnight(first);
+    let rows = sqlx::query(
+        "SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day,
+                SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cost) AS cost,
+                COUNT(*) AS calls
+         FROM ai_usage WHERE user_id = ? AND created_at >= ? GROUP BY day",
+    )
+    .bind(user_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let by_day: HashMap<String, (i64, i64, i64, i64)> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<String, _>("day"),
+                (
+                    row.get("input"),
+                    row.get("output"),
+                    row.get("cost"),
+                    row.get("calls"),
+                ),
+            )
+        })
+        .collect();
+    let series: Vec<Value> = first
+        .iter_days()
+        .take_while(|d| *d <= today)
+        .map(|d| {
+            let date = d.format("%Y-%m-%d").to_string();
+            let (input, output, cost, calls) = by_day.get(&date).copied().unwrap_or_default();
+            json!({
+                "date": date, "input": input, "output": output, "tokens": input + output,
+                "cost": micros_to_usd(cost), "calls": calls,
+            })
+        })
+        .collect();
+    let models: Vec<Value> = sqlx::query(
+        "SELECT u.provider_id, p.name AS provider, u.model,
+                SUM(u.input_tokens) AS input, SUM(u.output_tokens) AS output, SUM(u.cost) AS cost,
+                COUNT(*) AS calls, MAX(u.created_at) AS last_at
+         FROM ai_usage u LEFT JOIN ai_providers p ON p.id = u.provider_id
+         WHERE u.user_id = ? AND u.created_at >= ?
+         GROUP BY u.provider_id, u.model ORDER BY SUM(u.input_tokens + u.output_tokens) DESC",
+    )
+    .bind(user_id)
+    .bind(since)
+    .fetch_all(pool)
+    .await?
+    .iter()
+    .map(|row| {
+        let input: i64 = row.get("input");
+        let output: i64 = row.get("output");
+        json!({
+            "providerId": row.get::<Option<String>, _>("provider_id"),
+            "provider": row.get::<Option<String>, _>("provider"),
+            "model": row.get::<String, _>("model"),
+            "input": input, "output": output, "tokens": input + output,
+            "cost": micros_to_usd(row.get("cost")),
+            "calls": row.get::<i64, _>("calls"),
+            "lastAt": row.get::<i64, _>("last_at"),
+        })
+    })
+    .collect();
+    Ok(json!({ "days": series, "models": models }))
 }
 
 // --------------------------------------------------------- conversations
@@ -1267,8 +1572,11 @@ mod tests {
         LimitRule {
             subject: subject.into(),
             providers: providers.map(|list| list.iter().map(|s| s.to_string()).collect()),
-            daily_tokens: daily,
-            monthly_tokens: monthly,
+            caps: Caps {
+                daily_tokens: daily,
+                monthly_tokens: monthly,
+                ..Caps::default()
+            },
         }
     }
 
@@ -1288,8 +1596,8 @@ mod tests {
             eff.providers,
             Some(vec!["p1".to_string(), "p2".to_string()])
         );
-        assert_eq!(eff.daily_tokens, Some(2000));
-        assert_eq!(eff.monthly_tokens, None);
+        assert_eq!(eff.caps.daily_tokens, Some(2000));
+        assert_eq!(eff.caps.monthly_tokens, None);
         let all = rule("group:3", None, Some(1), Some(1));
         assert_eq!(combine(None, &[g1.clone(), all], None).providers, None);
         // The account's own rule decides alone.
@@ -1297,7 +1605,54 @@ mod tests {
         let eff = combine(Some(&own), &[g1], Some(&default));
         assert_eq!(eff.source, "user");
         assert!(!eff.allows("p1"));
-        assert_eq!((eff.daily_tokens, eff.monthly_tokens), (Some(10), Some(20)));
+        assert_eq!(
+            (eff.caps.daily_tokens, eff.caps.monthly_tokens),
+            (Some(10), Some(20))
+        );
+    }
+
+    #[test]
+    fn spending_and_weekly_limits() {
+        // Groups: the most generous spending limit wins; none anywhere = none.
+        let mut a = rule("group:1", None, None, None);
+        a.caps.weekly_tokens = Some(5000);
+        a.caps.daily_cost = Some(1.5);
+        let mut b = rule("group:2", None, None, None);
+        b.caps.weekly_tokens = Some(9000);
+        b.caps.daily_cost = Some(0.25);
+        b.caps.monthly_cost = Some(20.0);
+        let eff = combine(None, &[a, b], None);
+        assert_eq!(eff.caps.weekly_tokens, Some(9000));
+        assert_eq!(eff.caps.daily_cost, Some(1.5));
+        assert_eq!(eff.caps.monthly_cost, None);
+        // Prices per million tokens are micro-dollars per token.
+        assert_eq!(cost_micros([3.0, 15.0], 1000, 200), 6000);
+        assert_eq!(cost_micros([0.1, 0.4], 3, 0), 0);
+        assert_eq!(usd_to_micros(1.5), 1_500_000);
+        // The first limit reached, and when it starts again.
+        let p = periods_on(chrono::NaiveDate::from_ymd_opt(2026, 11, 27).unwrap());
+        assert_eq!(p.week_end - p.week, 7 * 86_400_000);
+        assert!(p.week <= p.day && p.day < p.day_end && p.day_end <= p.week_end);
+        let caps = Caps {
+            weekly_tokens: Some(100),
+            daily_cost: Some(0.01),
+            ..Caps::default()
+        };
+        let mut used = Used::default();
+        assert_eq!(reached(&caps, &used, &p), None);
+        used.cost[0] = 10_000;
+        assert_eq!(reached(&caps, &used, &p).map(|r| r.0), Some(p.day_end));
+        used.cost[0] = 9_999;
+        used.tokens[1] = 100;
+        let (ends, message) = reached(&caps, &used, &p).unwrap();
+        assert_eq!(ends, p.week_end);
+        assert!(message.contains("Monday"));
+        // A Monday starts its own week; a Sunday ends one.
+        let monday = periods_on(chrono::NaiveDate::from_ymd_opt(2026, 11, 23).unwrap());
+        let sunday = periods_on(chrono::NaiveDate::from_ymd_opt(2026, 11, 29).unwrap());
+        assert_eq!(monday.week, monday.day);
+        assert_eq!(sunday.week, monday.week);
+        assert_eq!(sunday.week_end, sunday.day_end);
     }
 
     #[test]

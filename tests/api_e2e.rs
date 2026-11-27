@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-        "0004 to 0013 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+        "0004 to 0014 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3689,6 +3689,8 @@ async fn ai_agent_chat_limits_and_admin_view() {
                 "baseUrl": format!("{base_url}/"),
                 "apiKey": "sk-test-secret-1234",
                 "models": ["fake-1", "slow"],
+                // USD per million tokens; a model not offered is dropped.
+                "prices": {"fake-1": [1000.0, 2000.0], "fake-2": [1.0, 1.0]},
             })),
             admin.headers_with_csrf(),
         )
@@ -3698,6 +3700,10 @@ async fn ai_agent_chat_limits_and_admin_view() {
     assert_eq!(body["provider"]["baseUrl"], base_url);
     assert_eq!(body["provider"]["hasKey"], true);
     assert_eq!(body["provider"]["keyHint"], "…1234");
+    assert_eq!(
+        body["provider"]["prices"],
+        json!({"fake-1": [1000.0, 2000.0]})
+    );
     assert!(!body.to_string().contains("sk-test-secret"), "{body}");
     let (status, _, body) = server
         .request(
@@ -3836,6 +3842,18 @@ async fn ai_agent_chat_limits_and_admin_view() {
         .request("GET", "/api/ai/usage", None, alice.headers())
         .await;
     assert_eq!(body["allowance"]["usedToday"], 34);
+    assert_eq!(body["allowance"]["usedWeek"], 34);
+    // Each reply's cost is kept as it was priced (micro-dollars).
+    let (input, output, cost): (i64, i64, i64) = sqlx::query_as(
+        "SELECT SUM(input_tokens), SUM(output_tokens), SUM(cost) FROM ai_usage WHERE user_id = ?",
+    )
+    .bind(alice_id)
+    .fetch_one(&server.state.db)
+    .await
+    .unwrap();
+    assert_eq!(cost, input * 1000 + output * 2000);
+    assert!(cost > 0);
+    assert_eq!(body["allowance"]["costToday"], json!(cost as f64 / 1e6));
 
     // A slow reply can be stopped; only one runs per conversation.
     let (status, _, body) = server
@@ -3944,7 +3962,99 @@ async fn ai_agent_chat_limits_and_admin_view() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    // Limits: allowance used up, then no providers.
+    // Limits: spending, then weekly tokens, then the daily allowance used
+    // up, then no providers.
+    let (_, _, usage) = server
+        .request("GET", "/api/ai/usage", None, alice.headers())
+        .await;
+    let spent = usage["allowance"]["costToday"].as_f64().unwrap();
+    let used_week = usage["allowance"]["usedWeek"].as_i64().unwrap();
+    for (limit, word) in [
+        (json!({"dailyCost": spent}), "spending"),
+        (
+            json!({"weeklyCost": spent, "dailyCost": spent * 10.0}),
+            "spending",
+        ),
+        (json!({"weeklyTokens": used_week}), "week"),
+    ] {
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                &format!("/api/ai/limits/user:{alice_id}"),
+                Some(limit.clone()),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, _, body) = server
+            .request(
+                "POST",
+                &path,
+                Some(json!({"text": "more"})),
+                alice.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{limit} {body}");
+        assert!(body.to_string().contains(word), "{limit} {body}");
+    }
+    let (_, _, usage) = server
+        .request("GET", "/api/ai/usage", None, alice.headers())
+        .await;
+    assert_eq!(usage["limits"]["weeklyTokens"], used_week);
+    assert_eq!(usage["allowance"]["weeklyTokens"], used_week);
+    let (status, _, _) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/limits/user:{alice_id}"),
+            Some(json!({"dailyCost": -1})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Administrators see each account's use by day and model.
+    let (status, _, stats) = server
+        .request(
+            "GET",
+            &format!("/api/ai/admin/usage/{alice_id}?days=7"),
+            None,
+            admin.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stats}");
+    assert_eq!(stats["user"]["username"], "alice");
+    let days = stats["days"].as_array().unwrap();
+    assert_eq!(days.len(), 7);
+    assert_eq!(days[6]["tokens"], usage["allowance"]["usedToday"]);
+    let fake = stats["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fake-1")
+        .unwrap();
+    assert_eq!(fake["provider"], "Local");
+    assert_eq!(fake["cost"], json!(cost as f64 / 1e6));
+    assert_eq!(stats["allowance"]["weeklyTokens"], used_week);
+    let (_, _, overview) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    let row = overview["usage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["userId"] == alice_id)
+        .unwrap();
+    assert_eq!(row["week"], used_week);
+    assert_eq!(row["costToday"], json!(cost as f64 / 1e6));
+    let (status, _, _) = server
+        .request(
+            "GET",
+            &format!("/api/ai/admin/usage/{alice_id}"),
+            None,
+            alice.headers(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
     let (status, _, body) = server
         .request(
             "PUT",

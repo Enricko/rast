@@ -82,13 +82,27 @@ export interface PublicAgent {
 
 export interface Allowance {
   usedToday: number;
+  usedWeek?: number;
   usedMonth: number;
+  /** Money spent (USD). */
+  costToday?: number;
+  costWeek?: number;
+  costMonth?: number;
   dailyTokens: number | null;
+  weeklyTokens?: number | null;
   monthlyTokens: number | null;
+  /** Spending limits (USD). */
+  dailyCost?: number | null;
+  weeklyCost?: number | null;
+  monthlyCost?: number | null;
   dayEndsAt: number;
+  weekEndsAt?: number;
   monthEndsAt: number;
   source: string;
 }
+
+/** USD per million tokens: [input, output]. */
+export type Prices = Record<string, [number, number]>;
 
 export interface Options {
   isAdmin: boolean;
@@ -150,6 +164,7 @@ export function groupKinds(kinds: ProviderKind[], query: string): Array<{ id: st
 }
 
 export interface AdminProvider extends PublicProvider {
+  prices: Prices;
   baseUrl: string;
   effectiveBaseUrl: string;
   hasKey: boolean;
@@ -189,7 +204,33 @@ export interface LimitRule {
   subject: string;
   providers: string[] | null;
   dailyTokens: number | null;
+  weeklyTokens: number | null;
   monthlyTokens: number | null;
+  /** Spending limits (USD). */
+  dailyCost: number | null;
+  weeklyCost: number | null;
+  monthlyCost: number | null;
+}
+
+/** One account's use today, this week and this month (money in USD). */
+export interface UsageRow {
+  userId: number;
+  today: number;
+  week: number;
+  month: number;
+  costToday: number;
+  costWeek: number;
+  costMonth: number;
+  lastAt: number;
+}
+
+/** GET /api/ai/admin/usage/{userId}. */
+export interface UsageDetail {
+  user: { id: number; username: string; displayName: string; isAdmin: boolean };
+  allowance: Allowance;
+  providers: string[] | null;
+  days: Array<{ date: string; input: number; output: number; tokens: number; cost: number; calls: number }>;
+  models: Array<{ providerId: string | null; provider: string | null; model: string; input: number; output: number; tokens: number; cost: number; calls: number; lastAt: number }>;
 }
 
 export interface Overview {
@@ -200,7 +241,7 @@ export interface Overview {
   limits: LimitRule[];
   users: Array<{ id: number; username: string; displayName: string; isAdmin: boolean; active: boolean }>;
   groups: Array<{ id: number; name: string }>;
-  usage: Array<{ userId: number; today: number; month: number }>;
+  usage: UsageRow[];
   tools: Array<{ name: string; label: string }>;
   search: SearchSettings;
   /** Accounts that are not administrators may read the server (read-only). */
@@ -365,24 +406,45 @@ export function formatTokens(value: number): string {
   return String(value);
 }
 
-/** "12k of 50k today" style summary, or null when unlimited. */
+/** "$1.23", "$0.0042", "$0". */
+export function formatUsd(value: number): string {
+  if (value === 0) return "$0";
+  if (value >= 100) return "$" + Math.round(value).toLocaleString("en-US");
+  if (value >= 0.01) return "$" + value.toFixed(2);
+  return "$" + String(Number(value.toPrecision(2)));
+}
+
+/** Every limit the account has, each with what was used of it. */
+export function allowanceLimits(a: Allowance): Array<{ text: string; share: number }> {
+  const out: Array<{ text: string; share: number }> = [];
+  const add = (used: number, limit: number | null | undefined, kind: "tokens" | "money", when: string) => {
+    if (limit === null || limit === undefined) return;
+    const text =
+      kind === "tokens"
+        ? `${formatTokens(used)} of ${formatTokens(limit)} tokens ${when}`
+        : `${formatUsd(used)} of ${formatUsd(limit)} spent ${when}`;
+    out.push({ text, share: limit > 0 ? used / limit : 1 });
+  };
+  add(a.usedToday, a.dailyTokens, "tokens", "today");
+  add(a.costToday ?? 0, a.dailyCost, "money", "today");
+  add(a.usedWeek ?? 0, a.weeklyTokens, "tokens", "this week");
+  add(a.costWeek ?? 0, a.weeklyCost, "money", "this week");
+  add(a.usedMonth, a.monthlyTokens, "tokens", "this month");
+  add(a.costMonth ?? 0, a.monthlyCost, "money", "this month");
+  return out;
+}
+
+/** The tightest limit as "12k of 50k tokens today", or null when unlimited. */
 export function allowanceText(allowance: Allowance): string | null {
-  const parts: string[] = [];
-  if (allowance.dailyTokens !== null) {
-    parts.push(`${formatTokens(allowance.usedToday)} of ${formatTokens(allowance.dailyTokens)} tokens today`);
-  }
-  if (allowance.monthlyTokens !== null) {
-    parts.push(`${formatTokens(allowance.usedMonth)} of ${formatTokens(allowance.monthlyTokens)} this month`);
-  }
-  return parts.length ? parts.join(" · ") : null;
+  const limits = allowanceLimits(allowance);
+  if (!limits.length) return null;
+  return limits.reduce((a, b) => (b.share > a.share ? b : a)).text;
 }
 
 /** Share of the tightest allowance used (0–1), or null when unlimited. */
 export function allowanceUsed(allowance: Allowance): number | null {
-  const shares: number[] = [];
-  if (allowance.dailyTokens !== null) shares.push(allowance.dailyTokens > 0 ? allowance.usedToday / allowance.dailyTokens : 1);
-  if (allowance.monthlyTokens !== null) shares.push(allowance.monthlyTokens > 0 ? allowance.usedMonth / allowance.monthlyTokens : 1);
-  return shares.length ? Math.min(1, Math.max(...shares)) : null;
+  const limits = allowanceLimits(allowance);
+  return limits.length ? Math.min(1, Math.max(...limits.map((l) => l.share))) : null;
 }
 
 /** Group conversations by when they were last used. */
