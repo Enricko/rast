@@ -2143,6 +2143,328 @@ button.ai-artifact-card:hover {
   color: var(--warning-strong);
 }
 
+/* A long email or key stays inside its card. */
+.ai-card,
+.ai-card-main {
+  min-width: 0;
+}
+
+.ai-card-foot .ai-pill,
+.ai-card-count {
+  flex: none;
+  white-space: nowrap;
+}
+
+.ai-card-foot .ai-card-key {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ai-card-key svg {
+  flex: none;
+}
+
+.ai-card-key-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A provider's accounts (in its dialog). */
+.ai-account-rows {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.ai-account-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding-right: 12px;
+  background: var(--ai-tint);
+}
+
+.ai-account-row + .ai-account-row {
+  border-top: 1px solid var(--border);
+}
+
+.ai-account-row.is-off .ai-account-main {
+  opacity: 0.6;
+}
+
+.ai-account-main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 4px 9px 12px;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-account-main:hover {
+  background: var(--ai-tint-2);
+}
+
+.ai-account-main:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ai-account-main > svg {
+  flex: none;
+  color: var(--text-faint);
+}
+
+.ai-account-order {
+  flex: none;
+  min-width: 22px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-account-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.ai-account-label {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-account-state {
+  white-space: nowrap;
+}
+
+.ai-account-state.is-ok {
+  color: var(--ok);
+}
+
+.ai-account-state.is-warn {
+  color: var(--warning-strong);
+}
+
+.ai-account-state.is-off {
+  color: var(--text-faint);
+}
+
+/* The switch alone, its label read by screen readers. */
+.ai-account-switch {
+  flex: none;
+  gap: 0;
+}
+
+.ai-account-switch .switch-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ai-turns {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.ai-turns-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.ai-sticky-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+}
+
+.ai-sticky-row[hidden] {
+  display: none;
+}
+
+.ai-sticky {
+  width: 72px;
+}
+
+.ai-account-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ai-account-danger {
+  color: var(--danger);
+}
+
+.ai-sign-in-add {
+  margin: 0;
+}
+
+/* Quota: one card per account. */
+.ai-quota-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: start;
+  gap: 12px;
+  max-width: 980px;
+}
+
+.ai-quota-about {
+  max-width: 720px;
+  margin: 0 0 14px;
+}
+
+.ai-quota-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--ai-tint);
+}
+
+.ai-quota-card.is-off {
+  opacity: 0.65;
+}
+
+.ai-quota-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.ai-quota-head .ai-card-names {
+  flex: 1;
+}
+
+.ai-quota-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-height: 26px;
+}
+
+.ai-quota-state .btn {
+  margin-left: auto;
+}
+
+.ai-quota-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ai-quota-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  align-items: center;
+}
+
+.ai-quota-name {
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-quota-left {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ai-quota-bar {
+  grid-column: 1 / -1;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ai-tint-2);
+}
+
+.ai-quota-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.ai-quota-row.is-mid .ai-quota-fill {
+  background: var(--warning);
+}
+
+.ai-quota-row.is-low .ai-quota-fill {
+  background: var(--danger);
+}
+
+.ai-quota-row.is-low .ai-quota-left {
+  color: var(--danger);
+}
+
+.ai-quota-reset {
+  grid-column: 1 / -1;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-quota-reset:empty {
+  display: none;
+}
+
+.ai-quota-counts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.ai-quota-count {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ai-quota-count b {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-quota-auto {
+  margin-right: 6px;
+}
+
 /* Signing in with a plan (ChatGPT's Codex). */
 .ai-sign-in-open {
   display: inline-flex;

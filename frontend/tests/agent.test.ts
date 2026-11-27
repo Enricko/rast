@@ -4,6 +4,9 @@ import test from "node:test";
 import { agentHues } from "../src/apps/agent/marks";
 import { parseInline, parseMarkdown, safeHref } from "../src/apps/agent/markdown";
 import {
+  accountState,
+  resetIn,
+  type ProviderAccount,
   addToStep,
   groupKinds,
   allowanceText,
@@ -364,4 +367,39 @@ test("artifacts: versions per id, file names, slugs like the server", () => {
   assert.equal(artifactFileName({ title: "x", kind: "code", language: "cobol" }), "x.txt");
   assert.equal(artifactSlug("Budget Calc"), "budget-calc");
   assert.equal(artifactSlug("--"), "artifact");
+});
+
+test("reset times read in hours and minutes", () => {
+  assert.equal(resetIn(40_000), "in 40 s");
+  assert.equal(resetIn(600_000), "in 10 min");
+  assert.equal(resetIn(11_520_000), "in 3 h 12 min");
+  assert.equal(resetIn(7_200_000), "in 2 h");
+  assert.equal(resetIn(2 * 86_400_000 + 3_600_000), "in 2 d 1 h");
+});
+
+test("an account's state says whether it answers", () => {
+  const account: ProviderAccount = {
+    id: "a",
+    label: "me@example.com",
+    name: "Antigravity",
+    first: true,
+    signedIn: { email: "me@example.com", plan: "", expiresAt: 0 },
+    hasKey: false,
+    keyHint: "",
+    ready: true,
+    paused: false,
+    resting: null,
+    quota: {},
+    position: 0,
+  };
+  assert.deepEqual(accountState(account, 1000, true), { label: "Ready", tone: "ok" });
+  assert.deepEqual(accountState({ ...account, resting: { until: 1000 + 600_000, reason: "Usage limit reached" } }, 1000, true), {
+    label: "Resting · back in 10 min",
+    tone: "warn",
+  });
+  // A rest that is over: ready again.
+  assert.equal(accountState({ ...account, resting: { until: 500, reason: "" } }, 1000, true).label, "Ready");
+  assert.equal(accountState({ ...account, ready: false, signedIn: null }, 1000, true).label, "Sign in needed");
+  assert.equal(accountState({ ...account, ready: false }, 1000, false).label, "Key needed");
+  assert.deepEqual(accountState({ ...account, paused: true }, 1000, true), { label: "Set aside", tone: "off" });
 });

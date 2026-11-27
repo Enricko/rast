@@ -9,6 +9,35 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
+### Added
+
+- **AI Agent: one provider, several accounts.** A provider's dialog lists
+  its accounts with Add account (sign in with another plan account, or
+  paste another API key). Replies take the accounts by the provider's turn
+  order: **Fill first** uses the first account and moves to the next when
+  it reaches a limit; **Round robin** takes them in turn (a set number of
+  replies each), so they reach their limits together. An account whose
+  provider answers that it reached a limit rests until the reset time the
+  provider gives (one minute when it gives none) and the reply goes on with
+  the next account. Each account can be set aside, moved up or down, signed
+  in again, woken with Use now, or removed. Sign-ins of one person to the
+  same plan become accounts of one provider on upgrade (the two Google
+  Antigravity sign-ins become one provider with two accounts); chats,
+  agents, limits and usage follow. Database schema v21.
+- **AI Agent settings → Quota**: one card per account with the limits its
+  provider reports with each answer (ChatGPT's 5-hour and weekly use,
+  Claude's, the requests and tokens left in OpenAI- and Anthropic-style
+  headers) as bars with what is left and when each resets, its rest and the
+  reason, and the tokens and model calls RAST counted for it in the last
+  5 hours, 24 hours and 7 days; with Refresh and Auto-refresh.
+
+### Fixed
+
+- AI Agent settings → Providers: a long account email stays inside its card
+  (shortened with "…") instead of running into the next card, and the
+  models count stays on one line. A provider with several accounts says how
+  many.
+
 ### Changed
 
 - **AI Agent installs and updates from its own tile in App Center.** When

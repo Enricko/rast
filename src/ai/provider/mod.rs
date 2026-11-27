@@ -33,6 +33,7 @@ mod anthropic;
 mod chat;
 pub mod cloud_code;
 mod gateway;
+pub mod limits;
 mod models;
 pub mod plans;
 mod responses;
@@ -262,6 +263,8 @@ pub struct Outcome {
     pub usage: Usage,
     /// Calls the model asked for (none when it was stopped early).
     pub calls: Vec<ToolCall>,
+    /// The account's limits as the answer reported them (empty: none).
+    pub quota: limits::Quota,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -269,6 +272,8 @@ pub struct ChatError {
     pub message: String,
     /// The provider or model refused the tools (try again without them).
     pub tools_refused: bool,
+    /// The account reached a limit (another account may answer).
+    pub limit: Option<limits::Limit>,
 }
 
 impl From<String> for ChatError {
@@ -276,6 +281,7 @@ impl From<String> for ChatError {
         Self {
             message,
             tools_refused: false,
+            limit: None,
         }
     }
 }
@@ -597,8 +603,9 @@ pub fn stream_chat(
             .send(body.as_bytes())
             .map_err(|e| format!("cannot reach the provider at {}: {e}", req.base_url))?;
         let status = response.status().as_u16();
+        let headers = limits::headers_of(response.headers());
         if (200..300).contains(&status) {
-            break response;
+            break (response, headers);
         }
         let body = read_limited(response.into_body(), 16 * 1024);
         if wire.usage_option && refuses_usage_option(status, &body) {
@@ -613,9 +620,15 @@ pub fn stream_chat(
         }
         return Err(ChatError {
             tools_refused: !req.tools.is_empty() && refuses_tools(status, &body),
+            limit: limits::limit(status, &headers, &body, now_ms()),
             message: plans::refusal(req.kind, status, &body)
                 .unwrap_or_else(|| refusal(status, &body)),
         });
+    };
+    let (response, headers) = response;
+    let quota = limits::Quota {
+        windows: limits::windows(&headers, now_ms()),
+        checked_at: now_ms(),
     };
     let mut parser = StreamParser::for_protocol(wire.protocol);
     let reader = BufReader::new(response.into_body().into_reader());
@@ -624,6 +637,7 @@ pub fn stream_chat(
             return Ok(Outcome {
                 usage: parser.usage,
                 calls: Vec::new(),
+                quota,
             });
         }
         let line = line.map_err(|e| format!("the provider's answer broke off: {e}"))?;
@@ -637,7 +651,12 @@ pub fn stream_chat(
     Ok(Outcome {
         usage: parser.usage,
         calls: parser.take_calls(),
+        quota,
     })
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// Whether a refusal is about `stream_options` (servers that do not know it).

@@ -876,6 +876,13 @@ mod tests {
             updated_at: 0,
             owner_id: None,
             sign_in: String::new(),
+            pool_id: None,
+            position: 0,
+            rotation: Default::default(),
+            resting_until: None,
+            resting_reason: String::new(),
+            quota: Default::default(),
+            paused: false,
         }
     }
 

@@ -358,6 +358,77 @@ export interface SignedIn {
   expiresAt: number;
 }
 
+/** One limit window a provider reported for an account. */
+export interface QuotaWindow {
+  /** "5 hours", "Weekly", "Requests", "Tokens", … */
+  name: string;
+  /** Share used, 0–100. */
+  usedPercent?: number;
+  used?: number;
+  limit?: number;
+  /** When it starts again (ms). */
+  resetsAt?: number;
+}
+
+export interface AccountQuota {
+  windows?: QuotaWindow[];
+  /** When an answer last reported them (ms; 0 never). */
+  checkedAt?: number;
+}
+
+/** How a provider's accounts take turns. */
+export interface Rotation {
+  /** fill: the first that can answer; round: in turn. */
+  mode: "fill" | "round";
+  /** Replies in a row per account (round robin). */
+  sticky: number;
+}
+
+/** One account of a provider (the provider itself is the first). */
+export interface ProviderAccount {
+  id: string;
+  /** Who signed in, or the key's name. */
+  label: string;
+  name: string;
+  /** The provider's own row. */
+  first: boolean;
+  signedIn: SignedIn | null;
+  hasKey: boolean;
+  keyHint: string;
+  /** Signed in or keyed. */
+  ready: boolean;
+  /** Set aside by an administrator. */
+  paused: boolean;
+  /** Reached a limit: skipped until then. */
+  resting: { until: number; reason: string } | null;
+  quota: AccountQuota;
+  position: number;
+}
+
+/** What RAST counted for an account in a time window. */
+export interface Counted {
+  calls: number;
+  tokens: number;
+}
+
+export interface QuotaAccount extends ProviderAccount {
+  counted: { hours5: Counted; day: Counted; week: Counted };
+}
+
+/** GET /api/ai/admin/quota */
+export interface QuotaOverview {
+  now: number;
+  providers: Array<{
+    id: string;
+    name: string;
+    kind: string;
+    kindLabel: string;
+    enabled: boolean;
+    rotation: Rotation;
+    accounts: QuotaAccount[];
+  }>;
+}
+
 export interface AdminProvider extends PublicProvider {
   prices: Prices;
   baseUrl: string;
@@ -369,8 +440,34 @@ export interface AdminProvider extends PublicProvider {
   ownerId: number | null;
   signedIn: SignedIn | null;
   enabled: boolean;
+  /** Its accounts, the provider first (a server before accounts sends none). */
+  accounts?: ProviderAccount[];
+  rotation?: Rotation;
   createdAt: number;
   updatedAt: number;
+}
+
+/** "in 3 h 12 min", "in 40 s" (ms from now). */
+export function resetIn(ms: number): string {
+  const secs = Math.max(1, Math.round(ms / 1000));
+  if (secs < 60) return `in ${secs} s`;
+  if (secs < 3600) return `in ${Math.ceil(secs / 60)} min`;
+  if (secs < 86_400) {
+    const hours = Math.floor(secs / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    return minutes ? `in ${hours} h ${minutes} min` : `in ${hours} h`;
+  }
+  const days = Math.floor(secs / 86_400);
+  const hours = Math.floor((secs % 86_400) / 3600);
+  return hours ? `in ${days} d ${hours} h` : `in ${days} d`;
+}
+
+/** An account's state in a few words, and its tone. */
+export function accountState(account: ProviderAccount, now: number, signsIn: boolean): { label: string; tone: "ok" | "warn" | "off" } {
+  if (account.paused) return { label: "Set aside", tone: "off" };
+  if (!account.ready) return { label: signsIn ? "Sign in needed" : "Key needed", tone: "warn" };
+  if (account.resting && account.resting.until > now) return { label: `Resting · back ${resetIn(account.resting.until - now)}`, tone: "warn" };
+  return { label: "Ready", tone: "ok" };
 }
 
 export interface AdminAgent {

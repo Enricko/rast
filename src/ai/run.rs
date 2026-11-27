@@ -164,6 +164,11 @@ pub struct ReplyJob {
     pub conversation_id: String,
     pub message_id: i64,
     pub provider_id: String,
+    /// The provider's account answering (the provider itself, or one of
+    /// its other accounts); another takes over when it reaches a limit.
+    pub account_id: String,
+    /// Accounts taken in this reply so far.
+    pub tried: Vec<String>,
     pub model: String,
     /// Its messages: the conversation before this reply.
     pub request: ChatRequest,
@@ -204,6 +209,7 @@ enum Step {
     Answered {
         calls: Vec<provider::ToolCall>,
         usage: provider::Usage,
+        quota: provider::limits::Quota,
     },
     Stopped(provider::Usage),
     Failed {
@@ -245,13 +251,29 @@ async fn reply(state: &Agent, runs: &Runs, run: &Arc<Active>, mut job: ReplyJob)
                 count(state, &job, &mut tokens, usage).await;
                 break End::Stopped;
             }
+            Step::Failed { error, wrote } if error.limit.is_some() => {
+                let limit = error.limit.clone().unwrap_or_else(|| unreachable!());
+                let until =
+                    super::accounts::rest(&state.db, &job.account_id, &limit, now_ms()).await;
+                if !wrote && next_account(state, &mut job).await {
+                    tracing::info!(provider = %job.provider_id, account = %job.account_id, reason = %limit.reason, "AI account reached a limit; the next account answers");
+                    steps -= 1;
+                    continue;
+                }
+                break End::Failed(limited(state, &job, error.message, until).await);
+            }
             Step::Failed { error, wrote } if error.tools_refused && tools_on && !wrote => {
                 tracing::info!(model = %job.model, error = %error.message, "AI model refused tools; answering without them");
                 tools_on = false;
                 steps -= 1;
             }
             Step::Failed { error, .. } => break End::Failed(error.message),
-            Step::Answered { calls, usage } => {
+            Step::Answered {
+                calls,
+                usage,
+                quota,
+            } => {
+                super::accounts::store_quota(&state.db, &job.account_id, &quota).await;
                 count(state, &job, &mut tokens, usage).await;
                 if calls.is_empty() {
                     break End::Done;
@@ -492,6 +514,7 @@ async fn stream_step(
             Step::Answered {
                 usage: tokens(outcome.usage, call_chars),
                 calls: outcome.calls,
+                quota: outcome.quota,
             }
         }
         Some(Err(error)) => Step::Failed {
@@ -511,6 +534,7 @@ async fn count(state: &Agent, job: &ReplyJob, tokens: &mut (i64, i64), usage: pr
         &state.db,
         job.owner.id,
         &job.provider_id,
+        &job.account_id,
         &job.model,
         &usage,
     )
@@ -533,6 +557,48 @@ async fn count(state: &Agent, job: &ReplyJob, tokens: &mut (i64, i64), usage: pr
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "could not record AI usage"),
     }
+}
+
+/// Go on with the provider's next account that is not resting (after a
+/// limit). False when none is left.
+async fn next_account(state: &Agent, job: &mut ReplyJob) -> bool {
+    let Ok(Some(provider)) = super::provider(&state.db, &job.provider_id).await else {
+        return false;
+    };
+    match super::accounts::pick(&state.db, &state.secrets, &provider, &mut job.tried, false).await {
+        Ok(Some(picked)) => {
+            job.account_id = picked.account.id;
+            job.request.api_key = picked.api_key;
+            job.request.account = picked.account_ref;
+            true
+        }
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(error = %error.public_message(), "no other AI account could take over");
+            false
+        }
+    }
+}
+
+/// The refusal of a provider whose accounts all reached their limits.
+async fn limited(state: &Agent, job: &ReplyJob, message: String, until: i64) -> String {
+    let Ok(Some(provider)) = super::provider(&state.db, &job.provider_id).await else {
+        return message;
+    };
+    let accounts = super::accounts::of(&state.db, &provider)
+        .await
+        .unwrap_or_default();
+    if accounts.len() < 2 {
+        return message;
+    }
+    let now = now_ms();
+    let back = super::accounts::back_soonest(&accounts, now).unwrap_or(until);
+    format!(
+        "{message} All {} accounts of {} reached their limits; the next one is back {}.",
+        accounts.len(),
+        provider.name,
+        super::accounts::in_words(back - now)
+    )
 }
 
 /// Store the reply as it is (still being written) and show it.

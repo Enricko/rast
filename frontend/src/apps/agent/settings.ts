@@ -4,7 +4,7 @@
 
 import type { AppContext } from "../../core/app";
 import { appendChildren, h } from "../../core/dom";
-import { switchControl } from "../../core/components";
+import { segmented, switchControl } from "../../core/components";
 import { relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import { confirmDialog, copyText, errorMessage, modal } from "../../core/ui";
@@ -31,6 +31,13 @@ import {
   type SignInStarted,
   type AdminAgent,
   type AdminProvider,
+  type ProviderAccount,
+  type QuotaAccount,
+  type QuotaOverview,
+  type QuotaWindow,
+  type Rotation,
+  accountState,
+  resetIn,
   type Conversation,
   type LimitRule,
   type Overview,
@@ -43,10 +50,11 @@ export interface SettingsView {
   destroy(): void;
 }
 
-type Page = "home" | "providers" | "agents" | "skills" | "tools" | "limits" | "chats" | "prices" | "usage";
+type Page = "home" | "providers" | "quota" | "agents" | "skills" | "tools" | "limits" | "chats" | "prices" | "usage";
 
 const PAGES: Array<{ id: Exclude<Page, "home">; label: string; icon: string; hue: number }> = [
   { id: "providers", label: "Providers", icon: "database", hue: 212 },
+  { id: "quota", label: "Quota", icon: "gauge", hue: 20 },
   { id: "agents", label: "Agents", icon: "sparkle", hue: 268 },
   { id: "skills", label: "Skills", icon: "layers", hue: 172 },
   { id: "tools", label: "Tools", icon: "terminal", hue: 32 },
@@ -100,6 +108,13 @@ export function mountSettings(options: {
   let usageUser: number | null = null;
   let overview: Overview | null = null;
   let disposed = false;
+  /** Quota: its automatic refresh (0: off). */
+  let quotaTimer = 0;
+  let quotaAuto = false;
+  const stopQuotaTimer = (): void => {
+    if (quotaTimer) window.clearInterval(quotaTimer);
+    quotaTimer = 0;
+  };
   const stops: Array<() => void> = [];
 
   const back = h("button", { class: "btn btn-ghost btn-sm ai-set-back", type: "button" }, iconSvg("arrowLeft", 15), h("span", {}, "Chats"));
@@ -138,6 +153,7 @@ export function mountSettings(options: {
     back.lastElementChild!.textContent = page === "home" ? "Chats" : page === "usage" && usageUser !== null ? "Usage" : "Settings";
     actions.replaceChildren();
     body.replaceChildren();
+    if (page !== "quota") stopQuotaTimer();
     if (!overview) {
       body.appendChild(h("div", { class: "ai-set-loading muted" }, "Loading…"));
       return;
@@ -147,6 +163,8 @@ export function mountSettings(options: {
         return renderHome(overview);
       case "providers":
         return renderProviders(overview);
+      case "quota":
+        return void renderQuota();
       case "agents":
         return renderAgents(overview);
       case "skills":
@@ -170,6 +188,7 @@ export function mountSettings(options: {
     const spentToday = data.usage.reduce((sum, u) => sum + u.costToday, 0);
     const counts: Record<Exclude<Page, "home">, string> = {
       providers: data.providers.length ? `${data.providers.length} connected` : "None yet",
+      quota: quotaSummary(data.providers),
       agents: data.agents.length ? `${data.agents.length}` : "None yet",
       skills: data.skills.length ? `${data.skills.length}` : "None yet",
       tools: data.search.configured ? `Web search: ${SEARCH_LABELS[data.search.kind]}` : "Files, commands, web pages",
@@ -283,6 +302,9 @@ export function mountSettings(options: {
     const grid = h("div", { class: "ai-cards" });
     for (const p of data.providers) {
       const models = `${p.models.length} model${p.models.length === 1 ? "" : "s"}`;
+      const accounts = p.accounts ?? [];
+      const keyText = (icon: string, text: string, warn = false) =>
+        h("span", { class: `ai-card-key${warn ? " is-warn" : " muted"}`, title: text }, iconSvg(icon, 12), h("span", { class: "ai-card-key-text" }, text));
       grid.appendChild(
         h(
           "div",
@@ -300,12 +322,14 @@ export function mountSettings(options: {
               "span",
               { class: "ai-card-foot small" },
               h("span", { class: `ai-pill${p.enabled ? " is-on" : ""}` }, p.enabled ? "On" : "Off"),
-              h("span", { class: "muted" }, models),
-              p.signsIn
-                ? h("span", { class: `ai-card-key${p.signedIn ? " muted" : " is-warn"}` }, iconSvg("user", 12), p.signedIn ? p.signedIn.email || "Signed in" : "Not signed in")
-                : p.hasKey
-                  ? h("span", { class: "muted ai-card-key" }, iconSvg("key", 12), p.keyHint)
-                  : null,
+              h("span", { class: "muted ai-card-count" }, models),
+              accounts.length > 1
+                ? keyText("users", `${accounts.length} accounts`)
+                : p.signsIn
+                  ? keyText("user", p.signedIn ? p.signedIn.email || "Signed in" : "Not signed in", !p.signedIn)
+                  : p.hasKey
+                    ? keyText("key", p.keyHint)
+                    : null,
             ),
           ),
           h(
@@ -410,6 +434,8 @@ export function mountSettings(options: {
     });
     const removeKey = switchControl({ label: "Remove the saved key" });
     const enabled = switchControl({ label: "People can use it", checked: existing?.enabled ?? true });
+    // Several accounts (the provider's own key or sign-in is the first).
+    const accounts = existing && !local ? accountsField(existing, info) : null;
     const status = h("div", { class: "field-error", hidden: true });
     let selected: string[] = [...(existing?.models ?? [])];
     let offered: string[] | null = null;
@@ -556,7 +582,8 @@ export function mountSettings(options: {
       ),
       h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
       custom ? urlField : null,
-      plan && existing ? signedInField(existing, info) : local ? null : keyField,
+      plan ? null : local ? null : keyField,
+      accounts?.el ?? null,
       h(
         "div",
         { class: "field" },
@@ -594,6 +621,7 @@ export function mountSettings(options: {
               models: selected,
               ...(listPrices ? { listPrices } : {}),
               enabled: enabled.isChecked(),
+              ...(accounts ? { rotation: accounts.rotation() } : {}),
             };
             try {
               if (existing) await ctx.api.put(`/api/ai/providers/${existing.id}`, payload);
@@ -611,68 +639,21 @@ export function mountSettings(options: {
 
   /** After a sign-in succeeded: say who, reload, and open the provider when
    * its plan listed no models (so they can be added by hand). */
-  async function connected(done: SignInDone, close: () => void): Promise<void> {
+  async function connected(done: SignInDone, close: () => void, onDone?: (provider: AdminProvider) => void): Promise<void> {
     const who = done.provider.signedIn;
     ctx.toast.success(who?.email ? `Signed in as ${who.email}` : "Signed in");
     close();
     await load();
+    // Added to a provider (or signed in again from its accounts): its
+    // dialog shows the account; the provider is set up already.
+    if (onDone) {
+      onDone(done.provider);
+      return;
+    }
     if (!done.provider.models.length) {
       const fresh = overview?.providers.find((p) => p.id === done.provider.id);
       if (fresh) editProvider(fresh);
     }
-  }
-
-  /** Who a plan provider is signed in as, signing in again, and signing out. */
-  function signedInField(existing: AdminProvider, info: ProviderKind): HTMLElement {
-    const field = h("div", { class: "field" });
-
-    function draw(): void {
-      const me = ctx.store.get().user?.id ?? null;
-      const owner = overview?.users.find((u) => u.id === existing.ownerId);
-      const who = existing.signedIn;
-      const again = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, who ? "Sign in again" : "Sign in"));
-      again.addEventListener("click", () => signIn(existing, info));
-      const out = h("button", { class: "btn btn-sm btn-ghost", type: "button" }, iconSvg("logout", 13), h("span", {}, "Sign out"));
-      out.addEventListener("click", () => void signOut());
-      const ownerText =
-        existing.ownerId === me ? "Only you can chat with it." : owner ? `Only ${owner.displayName || owner.username} can chat with it.` : "Nobody can chat with it until someone signs in again.";
-      field.replaceChildren(
-        h("span", { class: "field-label ai-field-row" }, "Signed in", h("span", { class: "ai-signed-in-actions" }, again, who ? out : null)),
-        h(
-          "span",
-          { class: "ai-signed-in" },
-          iconSvg("user", 14),
-          h("span", {}, who ? who.email || "Signed in" : "Not signed in"),
-          who?.plan ? h("span", { class: "ai-pill" }, planLabel(who.plan)) : null,
-        ),
-        h("span", { class: "field-hint" }, ownerText),
-      );
-    }
-
-    async function signOut(): Promise<void> {
-      const ok = await confirmDialog({
-        within: ctx.root,
-        title: "Sign out",
-        message: `Sign out of "${existing.name}"? Its models stay, but nobody can chat with it until someone signs in again.`,
-        confirmLabel: "Sign out",
-        danger: true,
-      });
-      if (!ok) return;
-      try {
-        const result = await ctx.api.post<{ provider: AdminProvider }>(`/api/ai/providers/${existing.id}/sign-out`);
-        // This dialog stays useful: the same provider, now signed out.
-        existing.ownerId = result.provider.ownerId;
-        existing.signedIn = result.provider.signedIn;
-        ctx.toast.success(`Signed out of ${existing.name}`);
-        draw();
-        await load();
-      } catch (error) {
-        ctx.toast.error(errorMessage(error));
-      }
-    }
-
-    draw();
-    return field;
   }
 
   /**
@@ -684,7 +665,8 @@ export function mountSettings(options: {
    * that one. Claude's dialog also offers the Claude Code login already on
    * the server.
    */
-  function signIn(existing: AdminProvider | null, info: ProviderKind): void {
+  function signIn(existing: AdminProvider | null, info: ProviderKind, more: { addTo?: AdminProvider; again?: ProviderAccount; onDone?: (provider: AdminProvider) => void } = {}): void {
+    const { addTo, again, onDone } = more;
     const name = h("input", { class: "input", value: existing?.name ?? info.label, autocomplete: "off", placeholder: `e.g. ${info.label} (work)` });
     const status = h("div", { class: "field-error", hidden: true });
     let flow: SignInFlow = info.signInFlow || "browser";
@@ -820,7 +802,7 @@ export function mountSettings(options: {
         if (closed) return;
         if (answer.status === "done") {
           waiting.hidden = true;
-          await connected(answer, close);
+          await connected(answer, close, onDone);
           return;
         }
         pollTimer = window.setTimeout(() => void poll(), interval * 1000);
@@ -840,10 +822,10 @@ export function mountSettings(options: {
       try {
         const done = await ctx.api.post<SignInDone>("/api/ai/providers/sign-in/finish", {
           callback: value,
-          ...(existing ? {} : { name: name.value.trim() }),
+          ...(existing || again ? {} : addTo ? { name: addTo.name } : { name: name.value.trim() }),
         });
         if (closed) return;
-        await connected(done, close);
+        await connected(done, close, onDone);
       } catch (error) {
         if (closed) return;
         // A used or failed sign-in cannot be finished: ask for a new page.
@@ -860,7 +842,8 @@ export function mountSettings(options: {
       try {
         const result = await ctx.api.post<SignInStarted>("/api/ai/providers/sign-in", {
           kind: info.id,
-          ...(existing ? { providerId: existing.id } : {}),
+          ...(again ? { providerId: again.id } : existing ? { providerId: existing.id } : {}),
+          ...(addTo ? { addTo: addTo.id, name: addTo.name } : {}),
         });
         if (closed) return;
         started = result;
@@ -881,7 +864,7 @@ export function mountSettings(options: {
 
     // Claude: the login Claude Code already has on this server works too.
     let importField: HTMLElement | null = null;
-    if (info.id === "claude") {
+    if (info.id === "claude" && !addTo && !again) {
       const importButton = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("download", 13), h("span", {}, "Import from Claude Code"));
       importButton.addEventListener("click", async () => {
         clearError();
@@ -891,7 +874,7 @@ export function mountSettings(options: {
             ...(existing ? { providerId: existing.id } : { name: name.value.trim() }),
           });
           if (closed) return;
-          await connected(done, close);
+          await connected(done, close, onDone);
         } catch (error) {
           if (!closed) showError(error);
         } finally {
@@ -916,20 +899,23 @@ export function mountSettings(options: {
         providerMark(info.id, 40),
         h("span", { class: "ai-connect-text" }, h("span", { class: "ai-connect-title" }, info.label), h("span", { class: "small muted" }, info.about)),
       ),
-      existing ? null : h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
+      existing || addTo || again ? null : h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
+      addTo
+        ? h("p", { class: "small muted ai-sign-in-add" }, `Sign in with another ${site()} account. ${addTo.name} then takes turns between its accounts.`)
+        : null,
       step,
       importField,
       status,
     );
     const back = {
-      label: existing ? "Cancel" : "Back",
+      label: existing || addTo || again ? "Cancel" : "Back",
       variant: "ghost" as const,
-      onClick: existing ? () => undefined : () => pickProvider(),
+      onClick: existing || addTo || again ? () => undefined : () => pickProvider(),
     };
     const actions = flow === "device" ? [back] : [back, { label: "Connect", variant: "primary" as const, keepOpen: true, onClick: () => connect() }];
     close = modal({
       within: ctx.root,
-      title: existing ? `Sign in to ${existing.name}` : `Sign in to ${info.label}`,
+      title: addTo ? `Add an account to ${addTo.name}` : again ? `Sign in again: ${again.label}` : existing ? `Sign in to ${existing.name}` : `Sign in to ${info.label}`,
       body: form,
       wide: true,
       onClose: () => {
@@ -939,6 +925,439 @@ export function mountSettings(options: {
       actions,
     });
     void startIt();
+  }
+
+  // ----------------------------------------------------------- accounts
+
+  /** The provider editor's accounts: one row each (its state and an on/off
+   * switch; the row opens the account), Add account, and how they take
+   * turns. Account changes apply at once; the turn order saves with the
+   * provider. */
+  function accountsField(existing: AdminProvider, info: ProviderKind): { el: HTMLElement; rotation: () => Rotation } {
+    let provider = existing;
+    let rotation: Rotation = { mode: existing.rotation?.mode ?? "fill", sticky: existing.rotation?.sticky ?? 1 };
+    const field = h("div", { class: "field ai-accounts" });
+    const list = h("div", { class: "ai-account-rows" });
+    const add = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("plus", 13), h("span", {}, "Add account"));
+    add.addEventListener("click", () => {
+      if (provider.signsIn) signIn(null, info, { addTo: provider, onDone: refreshed });
+      else addKeyAccount(provider, refreshed);
+    });
+    const mode = segmented<Rotation["mode"]>({
+      ariaLabel: "How the accounts take turns",
+      value: rotation.mode,
+      items: [
+        { value: "fill", label: "Fill first" },
+        { value: "round", label: "Round robin" },
+      ],
+      onChange: (value) => {
+        rotation = { ...rotation, mode: value };
+        drawTurns();
+      },
+    });
+    const sticky = h("input", { class: "input input-sm ai-sticky", type: "number", min: "1", max: "100", value: String(rotation.sticky), ariaLabel: "Replies in a row per account" });
+    sticky.addEventListener("change", () => {
+      const value = Math.round(Number(sticky.value));
+      rotation = { ...rotation, sticky: Number.isFinite(value) ? Math.min(100, Math.max(1, value)) : 1 };
+      sticky.value = String(rotation.sticky);
+    });
+    const turnsHint = h("span", { class: "field-hint" });
+    const stickyRow = h("label", { class: "ai-sticky-row small" }, h("span", {}, "Replies in a row"), sticky);
+    const turns = h("div", { class: "ai-turns" }, h("div", { class: "ai-turns-row" }, mode.el, stickyRow), turnsHint);
+    const drawTurns = (): void => {
+      stickyRow.hidden = rotation.mode !== "round";
+      turnsHint.textContent =
+        rotation.mode === "round"
+          ? "Each reply takes the next account, so they reach their limits together."
+          : "Replies use the first account; when it reaches a limit, the next takes over until it is back.";
+    };
+
+    function refreshed(next: AdminProvider): void {
+      provider = { ...provider, ...next, rotation: provider.rotation };
+      draw();
+    }
+
+    function draw(): void {
+      const accounts = provider.accounts ?? [];
+      const now = Date.now();
+      list.replaceChildren(
+        ...accounts.map((account, index) => {
+          const state = accountState(account, now, provider.signsIn);
+          const toggle = switchControl({
+            label: `${account.label} answers`,
+            checked: !account.paused,
+            onChange: (on) => void change(account, { paused: !on }),
+          });
+          toggle.el.classList.add("ai-account-switch");
+          return h(
+            "div",
+            { class: `ai-account-row${account.paused ? " is-off" : ""}` },
+            h(
+              "button",
+              { class: "ai-account-main", type: "button", onClick: () => openAccount(account, index, accounts.length) },
+              h("span", { class: "ai-account-order small muted" }, `#${index + 1}`),
+              h(
+                "span",
+                { class: "ai-account-text" },
+                h("span", { class: "ai-account-label", title: account.label }, account.label),
+                h("span", { class: `ai-account-state small is-${state.tone}` }, state.label),
+              ),
+              iconSvg("chevronRight", 14),
+            ),
+            toggle.el,
+          );
+        }),
+      );
+      field.replaceChildren(
+        h("span", { class: "field-label ai-field-row" }, accounts.length > 1 ? `Accounts (${accounts.length})` : "Account", add),
+        list,
+        accounts.length > 1 ? turns : h("span", { class: "field-hint" }, "Add another account and replies switch to it when this one reaches its limit."),
+      );
+      drawTurns();
+    }
+
+    async function change(account: ProviderAccount, body: Record<string, unknown>): Promise<AdminProvider | null> {
+      try {
+        const result = await ctx.api.put<{ provider: AdminProvider }>(`/api/ai/providers/${provider.id}/accounts/${account.id}`, body);
+        refreshed(result.provider);
+        void load();
+        return result.provider;
+      } catch (error) {
+        ctx.toast.error(errorMessage(error));
+        draw();
+        return null;
+      }
+    }
+
+    /** One account: who, its state and limits, and what can be done. */
+    function openAccount(account: ProviderAccount, index: number, count: number): void {
+      const now = Date.now();
+      const state = accountState(account, now, provider.signsIn);
+      let close: () => void = () => undefined;
+      const act = (label: string, icon: string, run: () => Promise<unknown> | void, danger = false): HTMLButtonElement => {
+        const button = h("button", { class: `btn btn-sm${danger ? " ai-account-danger" : ""}`, type: "button" }, iconSvg(icon, 13), h("span", {}, label));
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          try {
+            await run();
+          } finally {
+            button.disabled = false;
+          }
+        });
+        return button;
+      };
+      const buttons: HTMLElement[] = [];
+      if (account.resting && account.resting.until > now) {
+        buttons.push(act("Use now", "play", async () => {
+          if (await change(account, { wake: true })) close();
+        }));
+      }
+      if (provider.signsIn) {
+        buttons.push(act(account.signedIn ? "Sign in again" : "Sign in", "refresh", () => {
+          close();
+          signIn(provider, info, { again: account, onDone: refreshed });
+        }));
+        if (account.signedIn) {
+          buttons.push(act("Sign out", "logout", async () => {
+            const ok = await confirmDialog({
+              within: ctx.root,
+              title: "Sign out",
+              message:
+                count > 1
+                  ? `Sign out of ${account.label}? ${provider.name}'s other accounts go on answering.`
+                  : `Sign out of "${provider.name}"? Its models stay, but nobody can chat with it until someone signs in again.`,
+              confirmLabel: "Sign out",
+              danger: true,
+            });
+            if (!ok) return;
+            try {
+              await ctx.api.post(`/api/ai/providers/${account.id}/sign-out`);
+              ctx.toast.success(`Signed out of ${account.label}`);
+              await load();
+              const fresh = overview?.providers.find((p) => p.id === provider.id);
+              if (fresh) refreshed(fresh);
+              close();
+            } catch (error) {
+              ctx.toast.error(errorMessage(error));
+            }
+          }));
+        }
+      }
+      if (index > 0) buttons.push(act("Move up", "arrowUp", async () => {
+        if (await change(account, { move: "up" })) close();
+      }));
+      if (index + 1 < count) buttons.push(act("Move down", "arrowDown", async () => {
+        if (await change(account, { move: "down" })) close();
+      }));
+      if (count > 1) {
+        buttons.push(act("Remove", "trash", async () => {
+          const ok = await confirmDialog({
+            within: ctx.root,
+            title: "Remove account",
+            message: `Remove ${account.label} from ${provider.name}? Its use so far stays in Usage.`,
+            confirmLabel: "Remove",
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            const result = await ctx.api.del<{ provider: AdminProvider }>(`/api/ai/providers/${provider.id}/accounts/${account.id}`);
+            refreshed(result.provider);
+            void load();
+            close();
+          } catch (error) {
+            ctx.toast.error(errorMessage(error));
+          }
+        }, true));
+      }
+      const windows = account.quota.windows ?? [];
+      close = modal({
+        within: ctx.root,
+        title: account.label,
+        body: h(
+          "div",
+          { class: "ai-form" },
+          h(
+            "div",
+            { class: "ai-connect-head" },
+            providerMark(provider.kind, 40),
+            h(
+              "span",
+              { class: "ai-connect-text" },
+              h("span", { class: "ai-connect-title ai-account-label" }, account.label),
+              h("span", { class: "small muted" }, `${provider.name} · account #${index + 1}`),
+            ),
+          ),
+          h(
+            "div",
+            { class: "ai-account-facts" },
+            h("span", { class: `ai-account-state is-${state.tone}` }, state.label),
+            account.resting && account.resting.until > now ? h("span", { class: "small muted" }, account.resting.reason) : null,
+            account.signedIn?.plan ? h("span", { class: "ai-pill" }, planLabel(account.signedIn.plan)) : null,
+          ),
+          windows.length
+            ? h("div", { class: "ai-quota-rows" }, ...windows.map((w) => quotaRow(w, now)))
+            : h("p", { class: "small muted" }, "Its limits show here once the provider reports them with an answer. Quota has what RAST counted."),
+          h("div", { class: "ai-account-actions" }, ...buttons),
+        ),
+        actions: [{ label: "Close", variant: "ghost", onClick: () => undefined }],
+      });
+    }
+
+    draw();
+    return { el: field, rotation: () => rotation };
+  }
+
+  /** Another API key for a provider. */
+  function addKeyAccount(provider: AdminProvider, onDone: (provider: AdminProvider) => void): void {
+    const key = h("input", { class: "input", type: "password", autocomplete: "new-password", spellcheck: false, placeholder: "Paste the key", dataset: { autofocus: "true" } });
+    const status = h("div", { class: "field-error", hidden: true });
+    modal({
+      within: ctx.root,
+      title: `Add an account to ${provider.name}`,
+      body: h(
+        "div",
+        { class: "ai-form" },
+        h("p", { class: "small muted" }, `Another ${provider.kindLabel} key. ${provider.name} then takes turns between its keys.`),
+        h("label", { class: "field" }, h("span", { class: "field-label" }, "API key"), key),
+        status,
+      ),
+      actions: [
+        { label: "Cancel", variant: "ghost", onClick: () => undefined },
+        {
+          label: "Add",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            status.hidden = true;
+            let result: { provider: AdminProvider };
+            try {
+              result = await ctx.api.post<{ provider: AdminProvider }>(`/api/ai/providers/${provider.id}/accounts`, { apiKey: key.value.trim() });
+            } catch (error) {
+              formError(status, error);
+            }
+            close();
+            ctx.toast.success("Account added");
+            onDone(result.provider);
+            void load();
+          },
+        },
+      ],
+    });
+  }
+
+  /** One limit window: its name, a bar, what is left and when it resets. */
+  function quotaRow(w: QuotaWindow, now: number): HTMLElement {
+    const used = w.usedPercent ?? (w.limit ? ((w.used ?? 0) * 100) / w.limit : null);
+    const left = used === null ? null : Math.max(0, 100 - used);
+    const fill = h("span", { class: "ai-quota-fill" });
+    fill.style.width = `${Math.min(100, Math.max(0, used ?? 0))}%`;
+    const tone = used === null ? "" : used >= 90 ? " is-low" : used >= 70 ? " is-mid" : "";
+    const counts = w.limit !== undefined ? `${formatTokens(w.used ?? 0)} / ${formatTokens(w.limit)}` : null;
+    return h(
+      "div",
+      { class: `ai-quota-row${tone}` },
+      h("span", { class: "ai-quota-name" }, w.name),
+      h("span", { class: "ai-quota-left small" }, left === null ? "—" : `${Math.round(left)}% left`),
+      h("span", { class: "ai-quota-bar", role: "meter", ariaLabel: `${w.name}: ${used === null ? "unknown" : `${Math.round(used)}% used`}` }, fill),
+      h(
+        "span",
+        { class: "ai-quota-reset small muted" },
+        [counts, w.resetsAt ? (w.resetsAt > now ? `resets ${resetIn(w.resetsAt - now)}` : "reset") : null].filter(Boolean).join(" · "),
+      ),
+    );
+  }
+
+  /** The Quota tile's line: accounts, and how many rest. */
+  function quotaSummary(providers: AdminProvider[]): string {
+    const all = providers.flatMap((p) => p.accounts ?? []);
+    if (!all.length) return "No accounts yet";
+    const now = Date.now();
+    const resting = all.filter((a) => a.resting && a.resting.until > now).length;
+    const accounts = `${all.length} account${all.length === 1 ? "" : "s"}`;
+    return resting ? `${accounts} · ${resting} resting` : accounts;
+  }
+
+  // -------------------------------------------------------------- quota
+
+  /** Every account's limits (as its provider reported them), its rest and
+   * what RAST counted, one card each. */
+  async function renderQuota(data?: QuotaOverview): Promise<void> {
+    if (!data) {
+      if (!body.childElementCount) body.appendChild(h("div", { class: "ai-set-loading muted" }, "Loading…"));
+      try {
+        data = await ctx.api.get<QuotaOverview>("/api/ai/admin/quota");
+      } catch (error) {
+        if (page === "quota") body.replaceChildren(h("div", { class: "banner banner-error" }, errorMessage(error)));
+        return;
+      }
+      if (disposed || page !== "quota") return;
+    }
+    const scroll = body.scrollTop;
+    actions.replaceChildren();
+    body.replaceChildren();
+    const refresh = h("button", { class: "btn btn-sm", type: "button", title: "Refresh" }, iconSvg("refresh", 13), h("span", {}, "Refresh"));
+    refresh.addEventListener("click", () => {
+      refresh.disabled = true;
+      void renderQuota();
+    });
+    const auto = switchControl({
+      label: "Auto-refresh",
+      checked: quotaAuto,
+      onChange: (on) => {
+        quotaAuto = on;
+        stopQuotaTimer();
+        if (on) startQuotaTimer();
+      },
+    });
+    auto.el.classList.add("ai-quota-auto");
+    actions.append(auto.el, refresh);
+    if (quotaAuto && !quotaTimer) startQuotaTimer();
+
+    const now = Date.now();
+    const cards: HTMLElement[] = [];
+    for (const provider of data.providers) {
+      const signsIn = overview?.providers.find((p) => p.id === provider.id)?.signsIn ?? false;
+      for (const [index, account] of provider.accounts.entries()) {
+        cards.push(quotaCard(provider, account, index, signsIn, now));
+      }
+    }
+    if (!cards.length) {
+      body.appendChild(h("p", { class: "ai-set-empty muted" }, "Connect a provider under Providers; its accounts show here with their limits."));
+      return;
+    }
+    body.append(
+      h("p", { class: "ai-quota-about small muted" }, "Bars are the limits a provider reports with its answers; tokens and calls are what RAST counted. An account that reaches a limit rests until it resets, and the next account answers."),
+      h("div", { class: "ai-quota-cards" }, ...cards),
+    );
+    body.scrollTop = scroll;
+  }
+
+  function startQuotaTimer(): void {
+    quotaTimer = window.setInterval(() => {
+      if (disposed || page !== "quota") return stopQuotaTimer();
+      void renderQuota();
+    }, 60_000);
+  }
+
+  function quotaCard(provider: QuotaOverview["providers"][number], account: QuotaAccount, index: number, signsIn: boolean, now: number): HTMLElement {
+    const state = accountState(account, now, signsIn);
+    const toggle = switchControl({
+      label: `${account.label} answers`,
+      checked: !account.paused,
+      onChange: async (on) => {
+        try {
+          await ctx.api.put(`/api/ai/providers/${provider.id}/accounts/${account.id}`, { paused: !on });
+          void load();
+          void renderQuota();
+        } catch (error) {
+          ctx.toast.error(errorMessage(error));
+          toggle.setChecked(!on);
+        }
+      },
+    });
+    toggle.el.classList.add("ai-account-switch");
+    const windows = account.quota.windows ?? [];
+    const resting = account.resting && account.resting.until > now ? account.resting : null;
+    const useNow = resting
+      ? h(
+          "button",
+          {
+            class: "btn btn-sm",
+            type: "button",
+            onClick: async () => {
+              try {
+                await ctx.api.put(`/api/ai/providers/${provider.id}/accounts/${account.id}`, { wake: true });
+                void load();
+                void renderQuota();
+              } catch (error) {
+                ctx.toast.error(errorMessage(error));
+              }
+            },
+          },
+          "Use now",
+        )
+      : null;
+    const counted = (label: string, c: { calls: number; tokens: number }) =>
+      h(
+        "span",
+        { class: "ai-quota-count", title: `${formatTokens(c.tokens)} tokens in ${c.calls} model call${c.calls === 1 ? "" : "s"}` },
+        h("span", { class: "muted" }, label),
+        h("b", {}, formatTokens(c.tokens)),
+        h("span", { class: "muted" }, `${c.calls} call${c.calls === 1 ? "" : "s"}`),
+      );
+    const checked = account.quota.checkedAt ? `Reported ${relativeTime(account.quota.checkedAt)}` : null;
+    return h(
+      "section",
+      { class: `ai-quota-card${account.paused || !provider.enabled ? " is-off" : ""}` },
+      h(
+        "header",
+        { class: "ai-quota-head" },
+        providerMark(provider.kind, 30),
+        h(
+          "span",
+          { class: "ai-card-names" },
+          h("span", { class: "ai-card-title", title: account.label }, account.label),
+          h("span", { class: "ai-card-sub small muted" }, provider.accounts.length > 1 ? `${provider.name} · #${index + 1}` : provider.name),
+        ),
+        toggle.el,
+      ),
+      h(
+        "div",
+        { class: "ai-quota-state small" },
+        h("span", { class: `ai-account-state is-${state.tone}` }, state.label),
+        resting ? h("span", { class: "muted" }, resting.reason) : null,
+        useNow,
+      ),
+      windows.length ? h("div", { class: "ai-quota-rows" }, ...windows.map((w) => quotaRow(w, now))) : null,
+      h(
+        "div",
+        { class: "ai-quota-counts small" },
+        counted("Last 5 h", account.counted.hours5),
+        counted("24 h", account.counted.day),
+        counted("7 days", account.counted.week),
+      ),
+      checked ? h("span", { class: "ai-quota-foot small muted" }, checked) : null,
+    );
   }
 
   // ------------------------------------------------------------- agents
@@ -1814,6 +2233,7 @@ export function mountSettings(options: {
     refresh: () => void load(),
     destroy: () => {
       disposed = true;
+      stopQuotaTimer();
       for (const stop of stops.splice(0)) stop();
     },
   };

@@ -22,6 +22,7 @@
 //! goes in steps: what the model says, then the calls it asked for; a step
 //! starts after the last tool block ([`apply_delta`]).
 
+pub mod accounts;
 pub mod app;
 pub mod browser;
 pub mod files;
@@ -409,6 +410,20 @@ pub struct Provider {
     /// the provider) and its tokens, encrypted ("" none).
     pub owner_id: Option<i64>,
     sign_in: String,
+    /// The provider this row is an account of (`None`: a provider, which is
+    /// also its own first account).
+    pub pool_id: Option<String>,
+    /// The account's place among its provider's accounts.
+    pub position: i64,
+    /// How the provider's accounts take turns (on the provider).
+    pub rotation: accounts::Rotation,
+    /// The account reached a limit: skipped until then (ms).
+    pub resting_until: Option<i64>,
+    pub resting_reason: String,
+    /// The limits the provider last reported for the account.
+    pub quota: provider::limits::Quota,
+    /// The account was set aside by an administrator.
+    pub paused: bool,
 }
 
 impl Provider {
@@ -447,6 +462,11 @@ impl Provider {
         &self.api_key
     }
 
+    /// The sign-in as stored (encrypted), to move it between accounts.
+    pub fn sealed_sign_in(&self) -> &str {
+        &self.sign_in
+    }
+
     pub fn api_key(&self, secrets: &Secrets) -> AppResult<Option<String>> {
         if self.api_key.is_empty() {
             return Ok(None);
@@ -459,10 +479,9 @@ impl Provider {
             })
     }
 
-    /// For administrators: everything but the key (its last four characters).
-    pub fn admin_json(&self, secrets: &Secrets) -> Value {
-        let hint = self
-            .api_key(secrets)
+    /// The key's last four characters ("…abcd"), "" without a key.
+    pub fn key_hint(&self, secrets: &Secrets) -> String {
+        self.api_key(secrets)
             .ok()
             .flatten()
             .map(|key| {
@@ -476,13 +495,29 @@ impl Provider {
                     .collect();
                 format!("…{tail}")
             })
-            .unwrap_or_default();
-        // Who signed in (never the tokens).
-        let signed_in = self
-            .credentials(secrets)
+            .unwrap_or_default()
+    }
+
+    /// Who signed in (never the tokens).
+    fn signed_in_json(&self, secrets: &Secrets) -> Option<Value> {
+        self.credentials(secrets)
             .ok()
             .flatten()
-            .map(|c| json!({"email": c.email, "plan": c.plan, "expiresAt": c.expires_at}));
+            .map(|c| json!({"email": c.email, "plan": c.plan, "expiresAt": c.expires_at}))
+    }
+
+    /// Whether the account can answer at all (signed in, or has the key its
+    /// kind needs).
+    pub fn has_credentials(&self) -> bool {
+        if self.kind.signs_in() {
+            !self.sign_in.is_empty()
+        } else {
+            !self.kind.needs_key() || self.has_key()
+        }
+    }
+
+    /// For administrators: everything but the key (its last four characters).
+    pub fn admin_json(&self, secrets: &Secrets) -> Value {
         json!({
             "id": self.id,
             "kind": self.kind.as_str(),
@@ -490,16 +525,49 @@ impl Provider {
             "name": self.name,
             "signsIn": self.kind.signs_in(),
             "ownerId": self.owner_id,
-            "signedIn": signed_in,
+            "signedIn": self.signed_in_json(secrets),
             "baseUrl": self.base_url,
             "effectiveBaseUrl": self.effective_base_url(),
             "hasKey": self.has_key(),
-            "keyHint": hint,
+            "keyHint": self.key_hint(secrets),
             "models": self.models,
             "prices": self.prices,
             "enabled": self.enabled,
+            "rotation": self.rotation,
             "createdAt": self.created_at,
             "updatedAt": self.updated_at,
+        })
+    }
+
+    /// One account of a provider, for administrators (never its key or
+    /// tokens).
+    pub fn account_json(&self, secrets: &Secrets, now: i64) -> Value {
+        let signed_in = self.signed_in_json(secrets);
+        let hint = self.key_hint(secrets);
+        let label = signed_in
+            .as_ref()
+            .and_then(|s| s["email"].as_str())
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+            .or_else(|| (!hint.is_empty()).then(|| format!("Key {hint}")))
+            .unwrap_or_else(|| self.name.clone());
+        let resting = self
+            .resting_until
+            .filter(|&until| until > now)
+            .map(|until| json!({"until": until, "reason": self.resting_reason}));
+        json!({
+            "id": self.id,
+            "label": label,
+            "name": self.name,
+            "first": self.pool_id.is_none(),
+            "signedIn": signed_in,
+            "hasKey": self.has_key(),
+            "keyHint": hint,
+            "ready": self.has_credentials(),
+            "paused": self.paused,
+            "resting": resting,
+            "quota": self.quota,
+            "position": self.position,
         })
     }
 
@@ -532,13 +600,23 @@ fn provider_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Provider> {
         updated_at: row.get("updated_at"),
         owner_id: row.get("owner_id"),
         sign_in: row.get("sign_in"),
+        pool_id: row.get("pool_id"),
+        position: row.get("position"),
+        rotation: serde_json::from_str(&row.get::<String, _>("rotation")).unwrap_or_default(),
+        resting_until: row.get("resting_until"),
+        resting_reason: row.get("resting_reason"),
+        quota: serde_json::from_str(&row.get::<String, _>("quota")).unwrap_or_default(),
+        paused: row.get::<i64, _>("paused") != 0,
     })
 }
 
+/// The providers (their other accounts are listed by [`accounts::of`]).
 pub async fn providers(pool: &SqlitePool) -> AppResult<Vec<Provider>> {
-    let rows = sqlx::query("SELECT * FROM ai_providers ORDER BY name COLLATE NOCASE, created_at")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query(
+        "SELECT * FROM ai_providers WHERE pool_id IS NULL ORDER BY name COLLATE NOCASE, created_at",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows.iter().filter_map(provider_from_row).collect())
 }
 
@@ -1234,6 +1312,7 @@ pub async fn record_usage(
     pool: &SqlitePool,
     user_id: i64,
     provider_id: &str,
+    account_id: &str,
     model: &str,
     usage: &provider::Usage,
 ) -> AppResult<i64> {
@@ -1253,12 +1332,13 @@ pub async fn record_usage(
     let input = usage.input.max(0);
     let cache_read = usage.cache_read.clamp(0, input);
     sqlx::query(
-        "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, output_tokens,
+        "INSERT INTO ai_usage (user_id, provider_id, account_id, model, input_tokens, output_tokens,
              cache_read_tokens, cache_write_tokens, cost, estimated_cost, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(user_id)
     .bind(provider_id)
+    .bind((!account_id.is_empty()).then_some(account_id))
     .bind(model)
     .bind(input)
     .bind(usage.output.max(0))

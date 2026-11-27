@@ -78,6 +78,12 @@ pub fn routes() -> Router<Agent> {
             "/api/ai/providers/{id}",
             put(update_provider).delete(delete_provider),
         )
+        .route("/api/ai/providers/{id}/accounts", post(add_account))
+        .route(
+            "/api/ai/providers/{id}/accounts/{account_id}",
+            put(update_account).delete(delete_account),
+        )
+        .route("/api/ai/admin/quota", get(admin_quota))
         .route("/api/ai/agents", post(create_agent))
         .route(
             "/api/ai/agents/{id}",
@@ -228,9 +234,15 @@ async fn resolve(
     if model.is_empty() {
         return Err(AppError::bad_request("pick a model first"));
     }
-    let provider = ai::provider(&state.db, &provider_id)
+    let mut provider = ai::provider(&state.db, &provider_id)
         .await?
         .ok_or_else(|| AppError::bad_request("that provider no longer exists"))?;
+    // One of a provider's other accounts: its provider.
+    if let Some(first) = provider.pool_id.clone() {
+        provider = ai::provider(&state.db, &first)
+            .await?
+            .ok_or_else(|| AppError::bad_request("that provider no longer exists"))?;
+    }
     if !provider.enabled {
         return Err(AppError::bad_request(format!(
             "{} is turned off",
@@ -871,6 +883,9 @@ struct Prepared {
     api_key: Option<String>,
     /// The signed-in account (ChatGPT's account id), "" none.
     account: String,
+    /// The provider's account that answers, and the accounts taken.
+    account_id: String,
+    tried: Vec<String>,
     limits: ai::Effective,
 }
 
@@ -891,13 +906,23 @@ async fn prepare(
     .await?;
     let limits = ai::effective_limits(state, user).await?;
     ai::check_allowance(&state.db, user.id, &limits).await?;
-    let (api_key, account) = if resolved.provider.kind.signs_in() {
-        let (token, account) =
-            ai::signed_in_token(&state.db, &state.secrets, &resolved.provider).await?;
-        (Some(token), account)
-    } else {
-        (resolved.provider.api_key(&state.secrets)?, String::new())
-    };
+    // The account that answers (the provider's turn order; see ai::accounts).
+    let mut tried = Vec::new();
+    let picked = ai::accounts::pick(
+        &state.db,
+        &state.secrets,
+        &resolved.provider,
+        &mut tried,
+        true,
+    )
+    .await?
+    .ok_or_else(|| {
+        AppError::bad_request(format!(
+            "{} has no account that can answer; an administrator checks it in the AI Agent settings",
+            resolved.provider.name
+        ))
+    })?;
+    let (api_key, account, account_id) = (picked.api_key, picked.account_ref, picked.account.id);
     if api_key.is_none() && resolved.provider.kind.needs_key() {
         return Err(AppError::bad_request(format!(
             "{} has no API key yet; an administrator adds it in the AI Agent settings",
@@ -908,6 +933,8 @@ async fn prepare(
         resolved,
         api_key,
         account,
+        account_id,
+        tried,
         limits,
     })
 }
@@ -926,6 +953,8 @@ async fn reply_job(
         resolved,
         api_key,
         account,
+        account_id,
+        tried,
         limits,
     } = prepared;
     let earlier: Vec<ai::Message> = ai::messages(&state.db, &conversation.id)
@@ -970,6 +999,8 @@ async fn reply_job(
         conversation_id: conversation.id.clone(),
         message_id,
         provider_id: resolved.provider.id.clone(),
+        account_id,
+        tried,
         model: resolved.model,
         request,
         tools: available,
@@ -1292,11 +1323,10 @@ async fn store_allowed_tools(state: &Agent, conversation: &ai::Conversation) -> 
 /// GET /api/ai/admin/overview — the whole setup, for the settings page.
 async fn admin_overview(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
     let _ = admin;
-    let providers: Vec<Value> = ai::providers(&state.db)
-        .await?
-        .iter()
-        .map(|p| p.admin_json(&state.secrets))
-        .collect();
+    let mut providers: Vec<Value> = Vec::new();
+    for p in ai::providers(&state.db).await? {
+        providers.push(provider_json(&state, &p).await?);
+    }
     let kinds: Vec<Value> = ai::KINDS
         .iter()
         .map(|k| {
@@ -1640,6 +1670,8 @@ struct ProviderBody {
     list_prices: Option<provider::Prices>,
     #[serde(default = "yes")]
     enabled: bool,
+    /// How the accounts take turns (absent: keep it).
+    rotation: Option<ai::accounts::Rotation>,
 }
 
 fn yes() -> bool {
@@ -1773,7 +1805,7 @@ async fn create_provider(
         .await?
         .ok_or_else(|| AppError::internal("the provider was not saved"))?;
     Ok(Json(
-        json!({ "provider": provider.admin_json(&state.secrets) }),
+        json!({ "provider": provider_json(&state, &provider).await? }),
     ))
 }
 
@@ -1788,6 +1820,21 @@ async fn update_provider(
     let existing = ai::provider(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound("provider not found"))?;
+    if existing.pool_id.is_some() {
+        return Err(AppError::bad_request(
+            "that is an account of another provider; change it under the provider's accounts",
+        ));
+    }
+    let rotation = match body.rotation {
+        Some(rotation) if !(1..=ai::accounts::MAX_STICKY).contains(&rotation.sticky) => {
+            return Err(AppError::bad_request(format!(
+                "replies in a row per account go from 1 to {}",
+                ai::accounts::MAX_STICKY
+            )))
+        }
+        Some(rotation) => rotation,
+        None => existing.rotation,
+    };
     if body
         .kind
         .as_deref()
@@ -1830,7 +1877,7 @@ async fn update_provider(
         "UPDATE ai_providers SET name = ?, base_url = ?, models = ?, prices = ?, enabled = ?, api_key = ?,
              list_prices = COALESCE(?, list_prices),
              prices_checked_at = CASE WHEN ? IS NULL THEN prices_checked_at ELSE ? END,
-             updated_at = ? WHERE id = ?",
+             rotation = ?, updated_at = ? WHERE id = ?",
     )
     .bind(&name)
     .bind(&base_url)
@@ -1841,6 +1888,7 @@ async fn update_provider(
     .bind(list_prices.as_ref().map(|p| serde_json::to_string(p).unwrap_or_else(|_| "{}".into())))
     .bind(list_prices.as_ref().map(|_| now))
     .bind(now)
+    .bind(serde_json::to_string(&rotation).unwrap_or_else(|_| "{}".into()))
     .bind(now)
     .bind(&id)
     .execute(&state.db)
@@ -1860,12 +1908,12 @@ async fn update_provider(
         .await?
         .ok_or(AppError::NotFound("provider not found"))?;
     Ok(Json(
-        json!({ "provider": provider.admin_json(&state.secrets) }),
+        json!({ "provider": provider_json(&state, &provider).await? }),
     ))
 }
 
 /// DELETE /api/ai/providers/{id} (agents and conversations using it keep
-/// their messages and need another model).
+/// their messages and need another model). Its accounts go with it.
 async fn delete_provider(
     State(state): State<Agent>,
     admin: AdminUser,
@@ -1875,7 +1923,8 @@ async fn delete_provider(
     let existing = ai::provider(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound("provider not found"))?;
-    sqlx::query("DELETE FROM ai_providers WHERE id = ?")
+    sqlx::query("DELETE FROM ai_providers WHERE id = ? OR pool_id = ?")
+        .bind(&id)
         .bind(&id)
         .execute(&state.db)
         .await?;
@@ -2086,16 +2135,36 @@ fn flow_name(plan: ai::signin::Plan) -> &'static str {
 /// Store a finished sign-in: tokens sealed, the provider owned by the account
 /// that signed in, with the models the plan offers (when they can be read).
 /// Shared by every plan flow (browser paste, device poll, Claude Code import).
+#[allow(clippy::too_many_arguments)] // where it goes: again, or into a provider
 async fn store_signed_in(
     state: &Agent,
     user: &AuthUser,
     ip: &ClientIp,
     plan: ai::signin::Plan,
     provider_id: Option<&str>,
+    add_to: Option<&str>,
     name: &str,
     credentials: ai::signin::Credentials,
 ) -> AppResult<(ai::Provider, Option<Vec<String>>)> {
     let kind = plan.kind();
+    // Adding an account the provider already has signs that one in again.
+    let mut provider_id = provider_id.map(str::to_string);
+    if let (None, Some(first_id)) = (&provider_id, add_to) {
+        if let Some(first) = ai::provider(&state.db, first_id).await? {
+            for account in ai::accounts::of(&state.db, &first).await? {
+                let same = account
+                    .credentials(&state.secrets)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|c| !c.email.is_empty() && c.email == credentials.email);
+                if same {
+                    provider_id = Some(account.id.clone());
+                    break;
+                }
+            }
+        }
+    }
+    let provider_id = provider_id.as_deref();
     // The models the plan offers (the sign-in stands even when this fails).
     let offered = {
         let (base_url, token, account) = (
@@ -2140,10 +2209,14 @@ async fn store_signed_in(
         }
         None => {
             let id = ai::new_id();
+            let position = match add_to {
+                Some(first) => next_position(state, first).await?,
+                None => 0,
+            };
             sqlx::query(
                 "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
-                     enabled, created_at, updated_at, owner_id, sign_in)
-                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?)",
+                     enabled, created_at, updated_at, owner_id, sign_in, pool_id, position)
+                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(kind.as_str())
@@ -2156,6 +2229,8 @@ async fn store_signed_in(
             .bind(now)
             .bind(user.id)
             .bind(&sealed)
+            .bind(add_to)
+            .bind(position)
             .execute(&state.db)
             .await?;
             id
@@ -2184,8 +2259,31 @@ struct SignInStart {
     kind: String,
     /// Sign in again to this provider (else a new one is added).
     provider_id: Option<String>,
+    /// Add the account to this provider (one provider, several accounts).
+    add_to: Option<String>,
     #[serde(default)]
     name: String,
+}
+
+/// Sign-ins started to add an account to a provider: sign-in state →
+/// (provider id, when started).
+type AddTo = std::collections::HashMap<String, (String, i64)>;
+static ADD_TO: std::sync::LazyLock<std::sync::Mutex<AddTo>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn remember_add_to(state: &str, provider_id: &str) {
+    let now = now_ms();
+    let mut map = ADD_TO.lock().unwrap_or_else(|e| e.into_inner());
+    map.retain(|_, (_, at)| now - *at < 60 * 60 * 1000);
+    map.insert(state.to_string(), (provider_id.to_string(), now));
+}
+
+fn take_add_to(state: &str) -> Option<String> {
+    ADD_TO
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(state)
+        .map(|(id, _)| id)
 }
 
 /// POST /api/ai/providers/sign-in — start signing in to a plan: a page to
@@ -2202,12 +2300,32 @@ async fn start_sign_in(
     let plan = kind
         .plan()
         .ok_or_else(|| AppError::bad_request("that provider does not sign in"))?;
-    if let Some(id) = &body.provider_id {
+    for id in body.provider_id.iter().chain(body.add_to.iter()) {
         let existing = ai::provider(&state.db, id)
             .await?
             .ok_or(AppError::NotFound("provider not found"))?;
         if existing.kind != kind {
             return Err(AppError::bad_request("that provider is of another kind"));
+        }
+    }
+    if let Some(id) = &body.add_to {
+        let first = ai::provider(&state.db, id)
+            .await?
+            .ok_or(AppError::NotFound("provider not found"))?;
+        if first.pool_id.is_some() {
+            return Err(AppError::bad_request("add accounts to the provider itself"));
+        }
+        // A plan is one person's: its accounts are its owner's.
+        if first.owner_id.is_some_and(|owner| owner != admin.0.id) {
+            return Err(AppError::bad_request(
+                "only the person who signed in to this provider adds accounts to it",
+            ));
+        }
+        if ai::accounts::of(&state.db, &first).await?.len() >= ai::accounts::MAX_ACCOUNTS {
+            return Err(AppError::bad_request(format!(
+                "a provider has at most {} accounts",
+                ai::accounts::MAX_ACCOUNTS
+            )));
         }
     }
     let name = if body.name.trim().is_empty() {
@@ -2251,6 +2369,9 @@ async fn start_sign_in(
     if let (Value::Object(fields), Value::Object(meta)) = (&mut out, sign_in_meta(plan)) {
         fields.extend(meta);
     }
+    if let (Some(add_to), Some(sign_in_state)) = (&body.add_to, out["state"].as_str()) {
+        remember_add_to(sign_in_state, add_to);
+    }
     Ok(Json(out))
 }
 
@@ -2279,6 +2400,7 @@ async fn finish_sign_in(
     let callback = ai::signin::parse_callback(&body.callback).map_err(AppError::bad_request)?;
     let mut pending =
         ai::signin::take_pending(&callback.state, admin.0.id).map_err(AppError::bad_request)?;
+    let add_to = take_add_to(&callback.state);
     if let Some(name) = body.name.as_ref().filter(|n| !n.trim().is_empty()) {
         pending.name = required(name, "the name", ai::MAX_NAME)?;
     }
@@ -2296,12 +2418,13 @@ async fn finish_sign_in(
         &ip,
         pending.plan,
         pending.provider_id.as_deref(),
+        add_to.as_deref(),
         &pending.name,
         credentials,
     )
     .await?;
     Ok(Json(json!({
-        "provider": provider.admin_json(&state.secrets),
+        "provider": provider_json(&state, &provider).await?,
         "offered": offered,
     })))
 }
@@ -2321,6 +2444,7 @@ async fn poll_sign_in(
     Json(body): Json<SignInPoll>,
 ) -> AppResult<Json<Value>> {
     let state_id = body.state;
+    let sign_in_state = state_id.clone();
     let user_id = admin.0.id;
     let polled =
         tokio::task::spawn_blocking(move || ai::signin::poll(&state_id, user_id, now_ms()))
@@ -2331,19 +2455,21 @@ async fn poll_sign_in(
         ai::signin::Poll::Waiting => Ok(Json(json!({"status": "waiting"}))),
         ai::signin::Poll::Failed(message) => Err(AppError::bad_request(message)),
         ai::signin::Poll::Done(signed_in) => {
+            let add_to = take_add_to(&sign_in_state);
             let (provider, offered) = store_signed_in(
                 &state,
                 &admin.0,
                 &ip,
                 signed_in.plan,
                 signed_in.provider_id.as_deref(),
+                add_to.as_deref(),
                 &signed_in.name,
                 signed_in.credentials,
             )
             .await?;
             Ok(Json(json!({
                 "status": "done",
-                "provider": provider.admin_json(&state.secrets),
+                "provider": provider_json(&state, &provider).await?,
                 "offered": offered,
             })))
         }
@@ -2392,12 +2518,13 @@ async fn import_claude_code(
         &ip,
         ai::signin::Plan::Claude,
         body.provider_id.as_deref(),
+        None,
         &name,
         credentials,
     )
     .await?;
     Ok(Json(json!({
-        "provider": provider.admin_json(&state.secrets),
+        "provider": provider_json(&state, &provider).await?,
         "offered": offered,
     })))
 }
@@ -2417,9 +2544,14 @@ async fn sign_out_provider(
     if !existing.kind.signs_in() {
         return Err(AppError::bad_request("that provider does not sign in"));
     }
+    // A provider with other accounts stays its owner's: they still answer.
+    let keeps_owner =
+        existing.pool_id.is_some() || ai::accounts::of(&state.db, &existing).await?.len() > 1;
     sqlx::query(
-        "UPDATE ai_providers SET sign_in = '', owner_id = NULL, updated_at = ? WHERE id = ?",
+        "UPDATE ai_providers SET sign_in = '', owner_id = CASE WHEN ? THEN owner_id END, updated_at = ?
+         WHERE id = ?",
     )
+    .bind(keeps_owner)
     .bind(now_ms())
     .bind(&id)
     .execute(&state.db)
@@ -2439,7 +2571,7 @@ async fn sign_out_provider(
         .await?
         .ok_or(AppError::NotFound("provider not found"))?;
     Ok(Json(
-        json!({"provider": provider.admin_json(&state.secrets)}),
+        json!({"provider": provider_json(&state, &provider).await?}),
     ))
 }
 
@@ -2957,4 +3089,356 @@ async fn delete_limit(
     .await;
     config_changed(&state, "limits");
     Ok(Json(json!({ "deleted": true })))
+}
+
+// ------------------------------------------------------------- accounts
+
+/// A provider for the settings page, with its accounts (the provider first).
+async fn provider_json(state: &Agent, provider: &ai::Provider) -> AppResult<Value> {
+    let now = now_ms();
+    // An account: its provider.
+    let first = match &provider.pool_id {
+        Some(id) => ai::provider(&state.db, id).await?,
+        None => None,
+    };
+    let provider = first.as_ref().unwrap_or(provider);
+    let mut json = provider.admin_json(&state.secrets);
+    json["accounts"] = ai::accounts::of(&state.db, provider)
+        .await?
+        .iter()
+        .map(|a| a.account_json(&state.secrets, now))
+        .collect();
+    Ok(json)
+}
+
+/// The provider an account route names (a provider, not one of its accounts).
+async fn first_account(state: &Agent, id: &str) -> AppResult<ai::Provider> {
+    let provider = ai::provider(&state.db, id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    if provider.pool_id.is_some() {
+        return Err(AppError::bad_request("add accounts to the provider itself"));
+    }
+    Ok(provider)
+}
+
+async fn next_position(state: &Agent, first_id: &str) -> AppResult<i64> {
+    let max: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(position) FROM ai_providers WHERE pool_id = ?")
+            .bind(first_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(max.unwrap_or(0) + 1)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NewAccount {
+    api_key: String,
+}
+
+/// POST /api/ai/providers/{id}/accounts — another API key for the provider
+/// (plans add accounts by signing in with `addTo`).
+async fn add_account(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path(id): Path<String>,
+    Json(body): Json<NewAccount>,
+) -> AppResult<Json<Value>> {
+    let first = first_account(&state, &id).await?;
+    if first.kind.signs_in() {
+        return Err(AppError::bad_request(format!(
+            "{} accounts are added by signing in",
+            first.kind.label()
+        )));
+    }
+    let accounts = ai::accounts::of(&state.db, &first).await?;
+    if accounts.len() >= ai::accounts::MAX_ACCOUNTS {
+        return Err(AppError::bad_request(format!(
+            "a provider has at most {} accounts",
+            ai::accounts::MAX_ACCOUNTS
+        )));
+    }
+    let key = checked_key(Some(&body.api_key))?
+        .ok_or_else(|| AppError::bad_request("paste the account's API key"))?;
+    let sealed = ai::seal_key(&state.secrets, &key)?;
+    let account_id = ai::new_id();
+    let now = now_ms();
+    sqlx::query(
+        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+             enabled, created_at, updated_at, pool_id, position)
+         VALUES (?, ?, ?, '', ?, '[]', '{}', '{}', 1, ?, ?, ?, ?)",
+    )
+    .bind(&account_id)
+    .bind(first.kind.as_str())
+    .bind(&first.name)
+    .bind(&sealed)
+    .bind(now)
+    .bind(now)
+    .bind(&first.id)
+    .bind(next_position(&state, &first.id).await?)
+    .execute(&state.db)
+    .await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.account_add",
+        "ai_provider",
+        &account_id,
+        &first.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    Ok(Json(
+        json!({ "provider": provider_json(&state, &first).await? }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AccountChange {
+    /// Set the account aside, or take it back.
+    paused: Option<bool>,
+    /// Let a resting account answer again now.
+    #[serde(default)]
+    wake: bool,
+    /// "up" or "down" in the turn order.
+    #[serde(rename = "move")]
+    move_to: Option<String>,
+}
+
+/// Swap two accounts' credentials and state (the rows keep their ids, so
+/// the provider stays the provider).
+async fn swap_accounts(state: &Agent, a: &ai::Provider, b: &ai::Provider) -> AppResult<()> {
+    let pick = |p: &ai::Provider| {
+        (
+            p.sealed_key().to_string(),
+            p.sealed_sign_in().to_string(),
+            p.owner_id,
+            p.paused as i64,
+            p.resting_until,
+            p.resting_reason.clone(),
+            serde_json::to_string(&p.quota).unwrap_or_else(|_| "{}".into()),
+        )
+    };
+    let (va, vb) = (pick(a), pick(b));
+    let mut tx = state.db.begin().await?;
+    for (id, v) in [(&a.id, vb), (&b.id, va)] {
+        sqlx::query(
+            "UPDATE ai_providers SET api_key = ?, sign_in = ?, owner_id = ?, paused = ?,
+                 resting_until = ?, resting_reason = ?, quota = ? WHERE id = ?",
+        )
+        .bind(v.0)
+        .bind(v.1)
+        .bind(v.2)
+        .bind(v.3)
+        .bind(v.4)
+        .bind(v.5)
+        .bind(v.6)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query(
+        "UPDATE ai_usage SET account_id = CASE account_id WHEN ?1 THEN ?2 ELSE ?1 END
+         WHERE account_id IN (?1, ?2)",
+    )
+    .bind(&a.id)
+    .bind(&b.id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// PUT /api/ai/providers/{id}/accounts/{account_id} — set an account aside
+/// or take it back, let it answer again now, or move it in the order.
+async fn update_account(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path((id, account_id)): Path<(String, String)>,
+    Json(body): Json<AccountChange>,
+) -> AppResult<Json<Value>> {
+    let first = first_account(&state, &id).await?;
+    let accounts = ai::accounts::of(&state.db, &first).await?;
+    let at = accounts
+        .iter()
+        .position(|a| a.id == account_id)
+        .ok_or(AppError::NotFound("account not found"))?;
+    if let Some(paused) = body.paused {
+        sqlx::query("UPDATE ai_providers SET paused = ? WHERE id = ?")
+            .bind(paused as i64)
+            .bind(&account_id)
+            .execute(&state.db)
+            .await?;
+    }
+    if body.wake {
+        ai::accounts::wake(&state.db, &account_id).await?;
+    }
+    if let Some(direction) = body.move_to.as_deref() {
+        let other = match direction {
+            "up" if at > 0 => at - 1,
+            "down" if at + 1 < accounts.len() => at + 1,
+            "up" | "down" => at,
+            _ => return Err(AppError::bad_request("move is \"up\" or \"down\"")),
+        };
+        if other != at {
+            let (a, b) = (&accounts[at.min(other)], &accounts[at.max(other)]);
+            if a.pool_id.is_none() {
+                // The provider row stays first: its credentials move instead.
+                swap_accounts(&state, a, b).await?;
+            } else {
+                let mut tx = state.db.begin().await?;
+                for (row, position) in [(a, b.position), (b, a.position)] {
+                    sqlx::query("UPDATE ai_providers SET position = ? WHERE id = ?")
+                        .bind(position)
+                        .bind(&row.id)
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                tx.commit().await?;
+                // Equal positions (older rows): number them in order first.
+                if a.position == b.position {
+                    let mut tx = state.db.begin().await?;
+                    for (i, row) in accounts.iter().enumerate().skip(1) {
+                        let i = i as i64;
+                        let position = if row.id == a.id {
+                            i + 1
+                        } else if row.id == b.id {
+                            i - 1
+                        } else {
+                            i
+                        };
+                        sqlx::query("UPDATE ai_providers SET position = ? WHERE id = ?")
+                            .bind(position)
+                            .bind(&row.id)
+                            .execute(&mut *tx)
+                            .await?;
+                    }
+                    tx.commit().await?;
+                }
+            }
+        }
+    }
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.account_update",
+        "ai_provider",
+        &account_id,
+        &first.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    Ok(Json(
+        json!({ "provider": provider_json(&state, &first).await? }),
+    ))
+}
+
+/// DELETE /api/ai/providers/{id}/accounts/{account_id} — remove one account
+/// (the provider's own: the next account's credentials take its place).
+async fn delete_account(
+    State(state): State<Agent>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Path((id, account_id)): Path<(String, String)>,
+) -> AppResult<Json<Value>> {
+    let first = first_account(&state, &id).await?;
+    let accounts = ai::accounts::of(&state.db, &first).await?;
+    let account = accounts
+        .iter()
+        .find(|a| a.id == account_id)
+        .ok_or(AppError::NotFound("account not found"))?;
+    let removed = if account.pool_id.is_none() {
+        let Some(next) = accounts.get(1) else {
+            return Err(AppError::bad_request(
+                "this is the provider's only account; delete the provider instead",
+            ));
+        };
+        swap_accounts(&state, account, next).await?;
+        next.id.clone()
+    } else {
+        account.id.clone()
+    };
+    sqlx::query("DELETE FROM ai_providers WHERE id = ? AND pool_id IS NOT NULL")
+        .bind(&removed)
+        .execute(&state.db)
+        .await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.account_delete",
+        "ai_provider",
+        &account_id,
+        &first.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    Ok(Json(
+        json!({ "provider": provider_json(&state, &first).await? }),
+    ))
+}
+
+/// GET /api/ai/admin/quota — every account's limits as its provider last
+/// reported them, its rest, and what RAST counted for it (model calls and
+/// tokens in the last 5 hours, 24 hours and 7 days).
+async fn admin_quota(State(state): State<Agent>, admin: AdminUser) -> AppResult<Json<Value>> {
+    let _ = admin;
+    let now = now_ms();
+    let (h5, d1, d7) = (now - 5 * 3_600_000, now - 86_400_000, now - 7 * 86_400_000);
+    let rows = sqlx::query(
+        "SELECT account_id,
+             SUM(created_at >= ?1), SUM(CASE WHEN created_at >= ?1 THEN input_tokens + output_tokens ELSE 0 END),
+             SUM(created_at >= ?2), SUM(CASE WHEN created_at >= ?2 THEN input_tokens + output_tokens ELSE 0 END),
+             COUNT(*), SUM(input_tokens + output_tokens)
+         FROM ai_usage WHERE created_at >= ?3 AND account_id IS NOT NULL GROUP BY account_id",
+    )
+    .bind(h5)
+    .bind(d1)
+    .bind(d7)
+    .fetch_all(&state.db)
+    .await?;
+    let mut counted: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    for row in &rows {
+        let window = |calls: usize, tokens: usize| {
+            json!({
+                "calls": row.try_get::<i64, _>(calls).unwrap_or(0),
+                "tokens": row.try_get::<i64, _>(tokens).unwrap_or(0),
+            })
+        };
+        counted.insert(
+            row.get::<String, _>(0),
+            json!({ "hours5": window(1, 2), "day": window(3, 4), "week": window(5, 6) }),
+        );
+    }
+    let mut providers = Vec::new();
+    for provider in ai::providers(&state.db).await? {
+        let accounts: Vec<Value> = ai::accounts::of(&state.db, &provider)
+            .await?
+            .iter()
+            .map(|a| {
+                let mut json = a.account_json(&state.secrets, now);
+                json["counted"] = counted.get(&a.id).cloned().unwrap_or_else(|| {
+                    let zero = json!({"calls": 0, "tokens": 0});
+                    json!({ "hours5": zero, "day": zero, "week": zero })
+                });
+                json
+            })
+            .collect();
+        providers.push(json!({
+            "id": provider.id,
+            "name": provider.name,
+            "kind": provider.kind.as_str(),
+            "kindLabel": provider.kind.label(),
+            "enabled": provider.enabled,
+            "rotation": provider.rotation,
+            "accounts": accounts,
+        }));
+    }
+    Ok(Json(json!({ "providers": providers, "now": now })))
 }

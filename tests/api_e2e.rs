@@ -1628,6 +1628,151 @@ async fn effective_access_precedence_and_legacy_fallback() {
     assert_eq!(applications["allowed"], false);
 }
 
+/// 0021: sign-ins to one plan (same kind, address and owner) become
+/// accounts of the oldest; chats, agents, limits and usage that named an
+/// account name its provider, and usage keeps which account it was.
+#[tokio::test]
+async fn migration_0021_makes_plan_sign_ins_accounts_of_one_provider() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(dir.path().join("rast.db"))
+        .create_if_missing(true)
+        .foreign_keys(true);
+    let pool = sqlx::SqlitePool::connect_with(options).await.expect("db");
+    let old_dir = dir.path().join("old-migrations");
+    std::fs::create_dir_all(&old_dir).expect("old migrations dir");
+    for entry in std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let version: u32 = name[..4].parse().unwrap();
+        if version <= 20 {
+            std::fs::copy(&path, old_dir.join(&name)).unwrap();
+        }
+    }
+    sqlx::migrate::Migrator::new(old_dir)
+        .await
+        .expect("load old migrator")
+        .run(&pool)
+        .await
+        .expect("run old migrations");
+    for (id, name) in [(1, "owner"), (2, "other")] {
+        sqlx::query(
+            "INSERT INTO users (id, username, display_name, password_hash, role, active,
+                 quota_bytes, must_change_password, created_at, updated_at)
+             VALUES (?, ?, ?, 'x', 'admin', 1, 0, 0, 1, 1)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(name)
+        .execute(&pool)
+        .await
+        .expect("user");
+    }
+    // a and b: one person's two Antigravity sign-ins; c: someone else's;
+    // d: an API key provider.
+    for (id, kind, owner, sign_in, at) in [
+        ("a", "antigravity", Some(1), "sealed-a", 10),
+        ("b", "antigravity", Some(1), "sealed-b", 20),
+        ("c", "antigravity", Some(2), "sealed-c", 30),
+        ("d", "openai", None, "", 40),
+    ] {
+        sqlx::query(
+            "INSERT INTO ai_providers (id, kind, name, owner_id, sign_in, created_at, updated_at)
+             VALUES (?, ?, 'P', ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(kind)
+        .bind(owner)
+        .bind(sign_in)
+        .bind(at)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .expect("provider");
+    }
+    sqlx::query(
+        "INSERT INTO ai_conversations (id, user_id, provider_id, created_at, updated_at)
+         VALUES ('chat', 1, 'b', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("conversation");
+    sqlx::query(
+        "INSERT INTO ai_agents (id, name, provider_id, created_at, updated_at)
+         VALUES ('agent', 'A', 'b', 1, 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("agent");
+    sqlx::query(
+        "INSERT INTO ai_limits (subject, providers, updated_at) VALUES ('default', '[\"b\",\"a\",\"d\"]', 1)",
+    )
+    .execute(&pool)
+    .await
+    .expect("limit");
+    for provider in ["a", "b", "b", "c"] {
+        sqlx::query(
+            "INSERT INTO ai_usage (user_id, provider_id, model, input_tokens, created_at)
+             VALUES (1, ?, 'm', 5, 1)",
+        )
+        .bind(provider)
+        .execute(&pool)
+        .await
+        .expect("usage");
+    }
+
+    sqlx::migrate!("./migrations")
+        .run(&pool)
+        .await
+        .expect("upgrade migrations");
+    let rows: Vec<(String, Option<String>, i64)> =
+        sqlx::query_as("SELECT id, pool_id, position FROM ai_providers ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        rows,
+        [
+            ("a".into(), None, 0),
+            ("b".into(), Some("a".into()), 1),
+            ("c".into(), None, 0),
+            ("d".into(), None, 0),
+        ]
+    );
+    let chat: String = sqlx::query_scalar("SELECT provider_id FROM ai_conversations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let agent: String = sqlx::query_scalar("SELECT provider_id FROM ai_agents")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((chat.as_str(), agent.as_str()), ("a", "a"));
+    let limit: String = sqlx::query_scalar("SELECT providers FROM ai_limits")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let mut limit: Vec<String> = serde_json::from_str(&limit).unwrap();
+    limit.sort();
+    assert_eq!(limit, ["a", "d"]);
+    let usage: Vec<(String, String)> =
+        sqlx::query_as("SELECT provider_id, account_id FROM ai_usage ORDER BY id")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let pairs: Vec<(&str, &str)> = usage
+        .iter()
+        .map(|(p, a)| (p.as_str(), a.as_str()))
+        .collect();
+    assert_eq!(pairs, [("a", "a"), ("a", "b"), ("a", "b"), ("c", "c")]);
+    let (rotation, quota, paused): (String, String, i64) =
+        sqlx::query_as("SELECT rotation, quota, paused FROM ai_providers WHERE id = 'a'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((rotation.as_str(), quota.as_str(), paused), ("{}", "{}", 0));
+}
+
 #[tokio::test]
 async fn migration_0004_applies_additively_and_preserves_legacy_access() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -1714,8 +1859,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
-        "0004 to 0020 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+        "0004 to 0021 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -3431,8 +3576,10 @@ async fn access_decisions_are_not_shared_between_servers() {
 type FakeLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String, Value)>>>;
 
 /// A local OpenAI-compatible provider: lists three models, streams
-/// "Ahoy there!" (with reasoning and usage) or, for the model `slow`, four
-/// words 700 ms apart. Chat requests need the key `sk-test-secret-1234`.
+/// "Ahoy there!" (with reasoning, usage and its request limits) or, for the
+/// model `slow`, four words 700 ms apart. Chat requests need the key
+/// `sk-test-secret-1234`; the key `sk-limited-0000` has used up its plan
+/// (429, back in an hour).
 fn fake_provider() -> (SocketAddr, FakeLog) {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
     let addr = listener.local_addr().expect("address");
@@ -3490,6 +3637,15 @@ fn serve_fake(mut stream: std::net::TcpStream, log: &FakeLog) {
         );
         return;
     }
+    if auth == "Bearer sk-limited-0000" {
+        let json = r#"{"error":{"type":"usage_limit_reached","message":"The usage limit has been reached","resets_in_seconds":3600}}"#;
+        let _ = write!(
+            stream,
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+            json.len()
+        );
+        return;
+    }
     if auth != "Bearer sk-test-secret-1234" {
         let json = r#"{"error":{"message":"Invalid API key"}}"#;
         let _ = write!(
@@ -3500,7 +3656,7 @@ fn serve_fake(mut stream: std::net::TcpStream, log: &FakeLog) {
         return;
     }
     let _ = stream.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nx-ratelimit-limit-requests: 100\r\nx-ratelimit-remaining-requests: 97\r\nx-ratelimit-reset-requests: 6m0s\r\nConnection: close\r\n\r\n",
     );
     let event = |delta: Value| format!("data: {}\n\n", json!({"choices": [{"delta": delta}]}));
     if body["model"] == "slow" {
@@ -4303,6 +4459,245 @@ async fn ai_agent_chat_limits_and_admin_view() {
         .request("GET", "/api/ai/options", None, alice.headers())
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn ai_provider_accounts_take_over_at_their_limits() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (addr, log) = fake_provider();
+    let base_url = format!("http://{addr}/v1");
+    // The provider's own key has used up its plan; a second account has not.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({
+                "kind": "custom",
+                "name": "Pool",
+                "baseUrl": base_url,
+                "apiKey": "sk-limited-0000",
+                "models": ["fake-1"],
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider_id = body["provider"]["id"].as_str().unwrap().to_string();
+    assert_eq!(body["provider"]["accounts"].as_array().unwrap().len(), 1);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/providers/{provider_id}/accounts"),
+            Some(json!({"apiKey": "sk-test-secret-1234"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let accounts = body["provider"]["accounts"].as_array().unwrap().clone();
+    assert_eq!(accounts.len(), 2, "{body}");
+    assert_eq!(accounts[0]["id"], provider_id.as_str());
+    assert_eq!(accounts[0]["label"], "Key …0000");
+    assert_eq!(accounts[1]["label"], "Key …1234");
+    assert_eq!(body["provider"]["rotation"]["mode"], "fill");
+    let spare = accounts[1]["id"].as_str().unwrap().to_string();
+    // Only the provider is listed; its accounts are not providers of their own.
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin.headers())
+        .await;
+    assert_eq!(body["providers"].as_array().unwrap().len(), 1, "{body}");
+
+    let (_, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "fake-1"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    let conversation = body["conversation"]["id"].as_str().unwrap().to_string();
+    let reply = ai_say(&server, &admin, &conversation, "Hello").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    assert!(reply.to_string().contains("Ahoy there!"), "{reply}");
+    let keys = |log: &FakeLog| -> Vec<String> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|(line, _, _)| line.starts_with("POST"))
+            .map(|(_, auth, _)| auth.clone())
+            .collect()
+    };
+    assert_eq!(
+        keys(&log),
+        ["Bearer sk-limited-0000", "Bearer sk-test-secret-1234"]
+    );
+
+    // The used-up account rests until its reset; the other kept the limits
+    // its answer reported, and what it answered is counted for it.
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/quota", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let now = body["now"].as_i64().unwrap();
+    let quota = body["providers"][0]["accounts"].as_array().unwrap().clone();
+    assert_eq!(
+        quota[0]["resting"]["reason"], "Usage limit reached",
+        "{body}"
+    );
+    let until = quota[0]["resting"]["until"].as_i64().unwrap();
+    assert!(
+        until > now + 3_500_000 && until <= now + 3_600_000,
+        "{body}"
+    );
+    assert_eq!(quota[1]["resting"], Value::Null);
+    assert_eq!(
+        quota[1]["quota"]["windows"][0]["name"], "Requests",
+        "{body}"
+    );
+    assert_eq!(quota[1]["quota"]["windows"][0]["used"], 3);
+    assert_eq!(quota[1]["quota"]["windows"][0]["limit"], 100);
+    assert_eq!(quota[1]["counted"]["hours5"]["calls"], 1, "{body}");
+    assert_eq!(quota[1]["counted"]["hours5"]["tokens"], 17);
+    assert_eq!(quota[0]["counted"]["week"]["calls"], 0);
+
+    // While it rests, replies go straight to the other account.
+    let reply = ai_say(&server, &admin, &conversation, "Again").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    assert_eq!(keys(&log).len(), 3);
+    assert_eq!(keys(&log)[2], "Bearer sk-test-secret-1234");
+
+    // Round robin, one reply each; "Use now" ends the rest.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}"),
+            Some(json!({
+                "name": "Pool",
+                "baseUrl": base_url,
+                "models": ["fake-1"],
+                "rotation": {"mode": "round", "sticky": 0},
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}"),
+            Some(json!({
+                "name": "Pool",
+                "baseUrl": base_url,
+                "models": ["fake-1"],
+                "rotation": {"mode": "round", "sticky": 1},
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["rotation"]["mode"], "round");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}/accounts/{provider_id}"),
+            Some(json!({"wake": true})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["accounts"][0]["resting"], Value::Null);
+    // Set aside: the other account answers every time.
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}/accounts/{provider_id}"),
+            Some(json!({"paused": true})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["accounts"][0]["paused"], true);
+    for text in ["One", "Two"] {
+        let reply = ai_say(&server, &admin, &conversation, text).await;
+        assert_eq!(reply["status"], "done", "{reply}");
+    }
+    assert_eq!(keys(&log).len(), 5);
+    assert!(keys(&log)[3..]
+        .iter()
+        .all(|k| k == "Bearer sk-test-secret-1234"));
+
+    // Moving the spare up puts its key first (the provider stays the provider).
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/ai/providers/{provider_id}/accounts/{spare}"),
+            Some(json!({"move": "up"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let accounts = body["provider"]["accounts"].as_array().unwrap().clone();
+    assert_eq!(accounts[0]["id"], provider_id.as_str());
+    assert_eq!(accounts[0]["label"], "Key …1234", "{body}");
+    assert_eq!(accounts[0]["paused"], false);
+    assert_eq!(accounts[1]["label"], "Key …0000");
+    assert_eq!(accounts[1]["paused"], true);
+    // What each account answered moved with it.
+    let (_, _, body) = server
+        .request("GET", "/api/ai/admin/quota", None, admin.headers())
+        .await;
+    assert_eq!(
+        body["providers"][0]["accounts"][0]["counted"]["hours5"]["calls"], 4,
+        "{body}"
+    );
+
+    // Removing the first account: the other's key takes its place.
+    let (status, _, body) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/providers/{provider_id}/accounts/{provider_id}"),
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let accounts = body["provider"]["accounts"].as_array().unwrap().clone();
+    assert_eq!(accounts.len(), 1, "{body}");
+    assert_eq!(accounts[0]["id"], provider_id.as_str());
+    assert_eq!(accounts[0]["label"], "Key …0000");
+    // The only account stays; the provider is deleted instead.
+    let (status, _, body) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/providers/{provider_id}/accounts/{provider_id}"),
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    // Every account set aside: the reply says so.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &format!("/api/ai/conversations/{conversation}/messages"),
+            Some(json!({ "text": "Anyone?" })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.to_string().contains("set aside"), "{body}");
 }
 
 async fn ai_say(server: &TestServer, session: &Session, id: &str, text: &str) -> Value {
