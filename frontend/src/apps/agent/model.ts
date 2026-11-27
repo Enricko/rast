@@ -203,6 +203,8 @@ export interface Overview {
   usage: Array<{ userId: number; today: number; month: number }>;
   tools: Array<{ name: string; label: string }>;
   search: SearchSettings;
+  /** Accounts that are not administrators may read the server (read-only). */
+  serverAccess: boolean;
 }
 
 export interface SearchSettings {
@@ -285,6 +287,8 @@ export const TOOL_INFO: Record<string, { label: string; doing: string; arg: stri
   search_files: { label: "Find files", doing: "Finding", arg: "query", icon: "search" },
   write_file: { label: "Write a file", doing: "Writing", arg: "path", icon: "edit" },
   create_folder: { label: "Create a folder", doing: "Creating", arg: "path", icon: "folder" },
+  list_server_files: { label: "List a server folder", doing: "Listing", arg: "path", icon: "monitor" },
+  read_server_file: { label: "Read a server file", doing: "Reading", arg: "path", icon: "monitor" },
   run_command: { label: "Run a command", doing: "Running", arg: "command", icon: "terminal" },
   web_search: { label: "Search the web", doing: "Searching", arg: "query", icon: "network" },
   fetch_url: { label: "Open a web page", doing: "Opening", arg: "url", icon: "external" },
@@ -322,12 +326,12 @@ export interface PermissionMode {
   tools: readonly string[];
 }
 
-const READ_TOOLS = ["list_files", "read_file", "search_files"] as const;
+const READ_TOOLS = ["list_files", "read_file", "search_files", "list_server_files", "read_server_file"] as const;
 const EDIT_TOOLS = [...READ_TOOLS, "write_file", "create_folder"] as const;
 
 export const PERMISSION_MODES: readonly PermissionMode[] = [
   { id: "ask", label: "Ask every time", short: "Asks first", hint: "Every step on your files or the web waits for you", tools: [] },
-  { id: "read", label: "Allow reading files", short: "Reads freely", hint: "Lists, reads and searches your files without asking", tools: READ_TOOLS },
+  { id: "read", label: "Allow reading files", short: "Reads freely", hint: "Lists, reads and searches your files and the server's without asking", tools: READ_TOOLS },
   { id: "edit", label: "Allow file changes", short: "Edits freely", hint: "Also writes files and makes folders without asking", tools: EDIT_TOOLS },
   { id: "act", label: "Allow files and the web", short: "Acts freely", hint: "Also searches the web and opens pages without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url"] },
 ];

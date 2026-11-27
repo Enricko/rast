@@ -5690,10 +5690,21 @@ button.pkg-pill {
   gap: 12px;
 }
 
+.ai-tool-info-row > .ai-tile-icon {
+  flex: none;
+}
+
 .ai-tool-info-row > span:last-child {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+}
+
+/* These explain, so they wrap instead of trailing off. */
+.ai-tool-info-row .ai-row-detail {
+  white-space: normal;
+  overflow: visible;
 }
 
 .ai-set-subtitle {
@@ -6720,4 +6731,13 @@ button.pkg-pill {
   .ai-set-body {
     padding: 14px 12px;
   }
+}
+
+.ai-set-switch {
+  max-width: 820px;
+  margin: 4px 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--ai-tint);
 }

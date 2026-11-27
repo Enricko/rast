@@ -300,9 +300,43 @@ than it has ([`src/ai/tools.rs`](../src/ai/tools.rs)):
 | Tool | What | Who |
 | --- | --- | --- |
 | `list_files`, `read_file`, `search_files`, `write_file`, `create_folder` | the account's RAST files (`/` = home, `/shared/<name>` = shares it may open), through the same checks and quota as File Station | accounts that may open File Station |
-| `run_command` | one command in a fresh `bash -l` without a terminal (default 60 s, at most 600 s; 64 KB of output per stream) | administrators: root on the server via `rast-terminal.service`; accounts granted Terminal: their own sandbox |
+| `list_server_files`, `read_server_file` | a folder or the first 128 KB of a text file on the server itself | administrators: as RAST's service account; others (unless turned off): read-only and guarded, see below |
+| `run_command` | one command in a fresh `bash -l` without a terminal (default 60 s, at most 600 s; 64 KB of output per stream) | administrators: root on the server via `rast-terminal.service`; others (unless turned off): read-only on the server, see below; with server access off, accounts granted Terminal: their own sandbox |
 | `web_search` | the search service an administrator connects (Brave, Tavily or SearXNG) | everyone, once connected |
 | `fetch_url` | a public web page as text; addresses on the server or private networks are refused, redirects included | everyone |
+
+**Server access for accounts that are not administrators**
+([`src/ai/guard.rs`](../src/ai/guard.rs)), on unless an administrator turns
+it off (`PUT /api/ai/server-access`):
+
+- Server files: only paths readable by any account (the file world-readable,
+  every folder above it world-searchable; symlinks resolved first), never
+  RAST's data, storage and config folders, `/etc/rast`, `/etc/cloudflared`,
+  `/etc/netplan`, NetworkManager connections, `/etc/ssh`,
+  `/etc/ssl/private`, WireGuard, Let's Encrypt, sudoers, `shadow`/`gshadow`,
+  `/root`, `/home`, `/run/user`, Docker and containerd, `/var/backups`,
+  cron spools, `/sys/firmware`, nor `/proc` beyond a few system summaries
+  (`cpuinfo`, `meminfo`, `loadavg`, `uptime`, `version`, `stat`, `diskstats`,
+  `partitions`, `swaps`, `filesystems`). Any path part named like a secret is
+  refused: `.env*`, `*.pem`/`.key`/`.p12`/`.pfx`/`.jks`/`.kdbx`/`.gpg`/
+  `.asc`/`.ovpn`, databases (`.db`, `.sqlite`), SSH/GnuPG/cloud credential
+  folders, `id_rsa`-style keys, `.netrc`, `.pgpass`, `.git-credentials`,
+  `.npmrc`, `htpasswd`, `rast.toml`, and names containing `password`,
+  `passwd`, `secret`, `token`, `credential`, `private` or `apikey`. Binary
+  files and files holding a private key are refused; listings leave private
+  entries out.
+- Commands: through the Terminal helper, as `systemd-run` with
+  `User=nobody`, `ProtectSystem=strict`, `ProtectHome=yes`, a private `/tmp`,
+  `/dev` and process namespace, `NoNewPrivileges`, no capabilities,
+  `IPAddressDeny=any` (Unix and netlink sockets only), the places above as
+  `InaccessiblePaths`, 1 GB of memory, 128 tasks and two CPUs;
+  `timeout` stops the command at its limit (at most 580 s) and systemd
+  removes whatever is left.
+- Output of both passes through redaction: private key blocks, `$1$`…`$y$`
+  password hashes, well-known token formats (`sk-`, `ghp_`, `github_pat_`,
+  `glpat-`, `xox?-`, `AKIA`, `AIza`, …) and the values of settings whose
+  name says secret (`password=`, `"api_key":`, `DB_PASSWORD=`) become
+  `[hidden]`, with a count at the end.
 
 An agent's `tools` list narrows this (`null` = all). Every call waits for the
 chat's owner: the reply is stored with `status:"waiting"` and a block
@@ -326,7 +360,8 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
 | POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
 | POST | `/api/ai/conversations/{id}/tools/{callId}` | owner only: `{decision:"allow"\|"deny", always?}` → `{message, conversation}`; once no call is `pending` the reply goes on (checked like a new message: `429`, `403`, …). `409` when the chat is not waiting or the call was answered |
-| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}], tools:[{name, label}], search}` |
+| GET | `/api/ai/admin/overview` | admin: `{kinds, providers, agents, skills, limits, users, groups, usage:[{userId, today, month}], tools:[{name, label}], search, serverAccess}` |
+| PUT | `/api/ai/server-access` | admin: `{enabled}` — whether accounts that are not administrators may read the server and run read-only commands there; audited `ai.server_access.update` |
 | GET / PUT | `/api/ai/search` | admin: the web search service `{kind:"brave"\|"tavily"\|"searxng"\|"", url, hasKey, keyHint, configured}`; PUT `{kind, url?` (SearXNG)`, apiKey?` (absent = keep)`}`; audited `ai.search.update` |
 | POST | `/api/ai/search/test` | admin: one search with the saved service → `{results, first}` |
 | GET | `/api/ai/admin/conversations?userId=&q=&limit=` | admin: every account's chats with `owner` and `messageCount` |

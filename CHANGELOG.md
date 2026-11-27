@@ -55,6 +55,21 @@ this file by `scripts/changelog-section.sh`.
   ask every time, read files, change files, or files and the web; commands
   always ask. Database schema v13.
 
+- **AI Agent on the server, read-only for everyone but administrators.**
+  New tools list and read the server's own files. For accounts that are not
+  administrators, agents may read only what any account on the server could
+  read, never RAST's data, people's files (those go through the file tools
+  and their permissions), home folders, network and account secrets, other
+  processes' details, or files whose name says secret (`.env`, keys,
+  `*password*`, databases); secret values in what they read show as
+  `[hidden]`. Their commands now run on the server too, but read-only: as
+  `nobody` in a throwaway systemd sandbox where the whole file system is
+  read-only (a scratch `/tmp` is discarded), the same places are hidden,
+  there is no network, no privileges can be gained, other processes are not
+  visible, and services can be checked but not started or stopped. Changes
+  stay limited to their own RAST files and the shared folders they may
+  write to. Administrators can turn this off under Settings → Tools.
+
 ### Changed
 
 - **AI Agent's chat list** hides and shows with the button at its top (the

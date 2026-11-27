@@ -23,7 +23,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::provider::ToolSpec;
+use super::{guard, provider::ToolSpec};
 use crate::{
     auth::AuthUser,
     sandbox,
@@ -38,17 +38,21 @@ pub const READ_FILE: &str = "read_file";
 pub const SEARCH_FILES: &str = "search_files";
 pub const WRITE_FILE: &str = "write_file";
 pub const CREATE_FOLDER: &str = "create_folder";
+pub const LIST_SERVER_FILES: &str = "list_server_files";
+pub const READ_SERVER_FILE: &str = "read_server_file";
 pub const RUN_COMMAND: &str = "run_command";
 pub const WEB_SEARCH: &str = "web_search";
 pub const FETCH_URL: &str = "fetch_url";
 
 /// Every tool, in the order agents' settings list them.
-pub const ALL: [&str; 8] = [
+pub const ALL: [&str; 10] = [
     LIST_FILES,
     READ_FILE,
     SEARCH_FILES,
     WRITE_FILE,
     CREATE_FOLDER,
+    LIST_SERVER_FILES,
+    READ_SERVER_FILE,
     RUN_COMMAND,
     WEB_SEARCH,
     FETCH_URL,
@@ -72,6 +76,9 @@ const READ_BYTES: u64 = 128 * 1024;
 /// Characters of a tool's result kept (sent to the model and stored).
 pub const MAX_RESULT: usize = 40_000;
 const SETTING_SEARCH: &str = "ai.search";
+/// Whether accounts that are not administrators may read the server and run
+/// read-only commands there ("0": no; anything else or unset: yes).
+const SETTING_SERVER_ACCESS: &str = "ai.serverAccess";
 
 pub fn label(name: &str) -> &'static str {
     match name {
@@ -80,6 +87,8 @@ pub fn label(name: &str) -> &'static str {
         SEARCH_FILES => "Find files",
         WRITE_FILE => "Write a file",
         CREATE_FOLDER => "Create a folder",
+        LIST_SERVER_FILES => "List a server folder",
+        READ_SERVER_FILE => "Read a server file",
         RUN_COMMAND => "Run a command",
         WEB_SEARCH => "Search the web",
         FETCH_URL => "Open a web page",
@@ -104,6 +113,8 @@ pub enum Shell {
     Root,
     /// Accounts granted Terminal: their own container.
     Sandbox,
+    /// Everyone else: the server read-only, as `nobody` (see [`guard`]).
+    Guest,
 }
 
 /// The tools an account may use now.
@@ -113,6 +124,9 @@ pub struct Available {
     pub shell: Option<Shell>,
     /// The account's home folder on the server (administrators' commands).
     pub home_on_disk: Option<String>,
+    /// Not an administrator: the server only read-only, private places and
+    /// secrets kept out (see [`guard`]).
+    pub guarded: bool,
 }
 
 impl Available {
@@ -134,7 +148,7 @@ impl Available {
     pub fn specs(&self) -> Vec<ToolSpec> {
         self.names
             .iter()
-            .filter_map(|name| spec(name, self.shell))
+            .filter_map(|name| spec(name, self.shell, self.guarded))
             .collect()
     }
 }
@@ -148,12 +162,16 @@ pub async fn available(state: &AppState, user: &AuthUser) -> Available {
     if files {
         out.names.extend(FILE_TOOLS);
     }
+    out.guarded = !user.is_admin();
+    let server = user.is_admin() || server_access(&state.db).await;
+    if server {
+        out.names.extend([LIST_SERVER_FILES, READ_SERVER_FILE]);
+    }
+    let helper = || async { TerminalClient::default().status().await.is_ok() };
     out.shell = if user.is_admin() {
-        TerminalClient::default()
-            .status()
-            .await
-            .is_ok()
-            .then_some(Shell::Root)
+        helper().await.then_some(Shell::Root)
+    } else if server && helper().await {
+        Some(Shell::Guest)
     } else if state.config.docker_enabled && sandbox::allowed(&state.db, user.id).await {
         Some(Shell::Sandbox)
     } else {
@@ -182,7 +200,28 @@ fn schema(properties: Value, required: &[&str]) -> Value {
     json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false})
 }
 
-pub fn spec(name: &str, shell: Option<Shell>) -> Option<ToolSpec> {
+/// Whether accounts that are not administrators may read the server (and
+/// run read-only commands there). On unless an administrator turned it off.
+pub async fn server_access(pool: &sqlx::SqlitePool) -> bool {
+    crate::db::get_setting(pool, SETTING_SERVER_ACCESS)
+        .await
+        .is_none_or(|value| value != "0")
+}
+
+pub async fn set_server_access(
+    pool: &sqlx::SqlitePool,
+    enabled: bool,
+) -> crate::error::AppResult<()> {
+    crate::db::set_setting(pool, SETTING_SERVER_ACCESS, if enabled { "1" } else { "0" }).await
+}
+
+pub fn spec(name: &str, shell: Option<Shell>, guarded: bool) -> Option<ToolSpec> {
+    let server_path = json!({"type": "string", "description": "Absolute path on the server, such as /etc/os-release or /var/log"});
+    let server_rule = if guarded {
+        " Read-only. Private places (RAST's own data, people's files, home folders, account and network secrets, other processes) and files with secrets in their name are refused, and secret values are shown as [hidden]."
+    } else {
+        " Read as the RAST service account (commands, as root, can read the rest)."
+    };
     let path = json!({"type": "string", "description": "Path in the person's files: '/' is their home folder, '/shared/<name>' a shared folder"});
     let (description, parameters) = match name {
         LIST_FILES => (
@@ -211,10 +250,19 @@ pub fn spec(name: &str, shell: Option<Shell>) -> Option<ToolSpec> {
             "Create a folder in the person's RAST files (its parent must exist).".to_string(),
             schema(json!({"path": path}), &["path"]),
         ),
+        LIST_SERVER_FILES => (
+            format!("List a folder on the server itself (not the person's RAST files): one entry per line, dir or file, size, last change, name.{server_rule}"),
+            schema(json!({"path": server_path}), &["path"]),
+        ),
+        READ_SERVER_FILE => (
+            format!("Read a text file on the server itself (not the person's RAST files), the first 128 KB.{server_rule}"),
+            schema(json!({"path": server_path}), &["path"]),
+        ),
         RUN_COMMAND => {
             let place = match shell? {
                 Shell::Root => "on this server as root (the RAST host). Use it to inspect and manage the server; be careful: changes are real and immediate",
                 Shell::Sandbox => "in the person's own Linux sandbox (Ubuntu): their RAST home folder is the working directory, there is no network, and the server itself is out of reach",
+                Shell::Guest => "on this server, read-only, as an account without privileges: use it to look (ls, cat, df, free, uptime, systemctl status, journal entries it may read) — nothing it does can change the server. Everything but a scratch /tmp (thrown away afterwards) is read-only; there is no network; RAST's own data, people's files, home folders and secrets are hidden; other processes are not visible; secret values in the output are shown as [hidden]",
             };
             (
                 format!(
@@ -446,6 +494,21 @@ pub async fn execute(
             .await;
             Ok(format!("Created the folder {}.", entry.path))
         }
+        LIST_SERVER_FILES | READ_SERVER_FILE => {
+            let path = text_arg(input, "path")?.to_string();
+            let hidden = guard::hidden_paths(&state.config);
+            let guarded = available.guarded;
+            let listing = name == LIST_SERVER_FILES;
+            tokio::task::spawn_blocking(move || {
+                if listing {
+                    list_server(&path, guarded, &hidden)
+                } else {
+                    read_server(&path, guarded, &hidden)
+                }
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
         RUN_COMMAND => {
             let command = text_arg(input, "command")?;
             if command.trim().is_empty() {
@@ -459,6 +522,13 @@ pub async fn execute(
                 .and_then(Value::as_u64)
                 .map(|s| s.clamp(1, u64::from(MAX_COMMAND_SECS)) as u32)
                 .unwrap_or(COMMAND_SECS);
+            // The helper's own limit is the most a guest command plus its
+            // start and stop may take.
+            let secs = if available.shell == Some(Shell::Guest) {
+                secs.min(crate::terminal::MAX_RUN_SECS - 20)
+            } else {
+                secs
+            };
             let name = user.username.to_ascii_lowercase();
             let result = match available.shell {
                 Some(Shell::Root) => {
@@ -474,15 +544,39 @@ pub async fn execute(
                         .run(user.id, &name, command, secs)
                         .await
                 }
+                Some(Shell::Guest) => {
+                    let hidden = guard::hidden_paths(&state.config);
+                    let script = guard::guest_script(command, secs, &hidden)?;
+                    if script.len() > crate::terminal::MAX_RUN_COMMAND {
+                        return Err("the command is too long".into());
+                    }
+                    // Longer than the command's own limit: it is stopped
+                    // inside first (and starting it takes a moment).
+                    let started = std::time::Instant::now();
+                    let mut output = TerminalClient::default()
+                        .run(user.id, &name, &script, secs + 20)
+                        .await;
+                    if let Ok(output) = &mut output {
+                        let ran = started.elapsed().as_secs() + 1 >= u64::from(secs);
+                        if guard::timed_out(output.exit_code) && ran {
+                            output.timed_out = true;
+                        }
+                    }
+                    output
+                }
                 None => return Err("commands are not available to this account".into()),
             };
             match result {
+                Ok(output) if available.guarded => {
+                    let (text, hidden) = guard::redact(&command_result(&output, secs));
+                    Ok(with_hidden_note(text, hidden))
+                }
                 Ok(output) => Ok(command_result(&output, secs)),
-                Err(TerminalError::Off) if available.shell == Some(Shell::Root) => Err(
+                Err(TerminalError::Off) if available.shell != Some(Shell::Sandbox) => Err(
                     "commands on this server need Terminal turned on (sudo rast terminal enable)".into(),
                 ),
                 Err(TerminalError::Off) => Err("commands need Docker on this server, and it is not running".into()),
-                Err(TerminalError::Refused { code, .. }) if code == "invalid" && available.shell == Some(Shell::Root) => Err(
+                Err(TerminalError::Refused { code, .. }) if code == "invalid" && available.shell != Some(Shell::Sandbox) => Err(
                     "the server's terminal helper is older than RAST and cannot run commands yet; an administrator restarts it once with: sudo systemctl restart rast-terminal".into(),
                 ),
                 Err(error) => Err(error.to_string()),
@@ -556,6 +650,135 @@ fn human_size(bytes: i64) -> String {
     } else {
         format!("{:.1} GB", b / 1024.0 / 1024.0 / 1024.0)
     }
+}
+
+/// A note after text whose secrets were hidden.
+fn with_hidden_note(mut text: String, hidden: usize) -> String {
+    if hidden > 0 {
+        text.push_str(&format!(
+            "\n[{hidden} secret value{} hidden]",
+            if hidden == 1 { "" } else { "s" }
+        ));
+    }
+    text
+}
+
+/// `list_server_files`: a folder on the server (see [`guard`] when
+/// `guarded`).
+fn list_server(raw: &str, guarded: bool, hidden: &[std::path::PathBuf]) -> Result<String, String> {
+    let dir = if guarded {
+        guard::allowed_path(raw, hidden)?
+    } else {
+        std::fs::canonicalize(raw).map_err(|e| format!("{raw}: {e}"))?
+    };
+    if !dir.is_dir() {
+        return Err(format!(
+            "{} is a file; read it with read_server_file",
+            dir.display()
+        ));
+    }
+    let mut entries = Vec::new();
+    let mut left_out = 0usize;
+    for entry in
+        std::fs::read_dir(&dir).map_err(|e| format!("cannot list {}: {e}", dir.display()))?
+    {
+        let Ok(entry) = entry else { continue };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if guarded && guard::refusal(&dir.join(&name), hidden).is_some() {
+            left_out += 1;
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
+        let size = meta
+            .as_ref()
+            .filter(|_| !is_dir)
+            .map(|m| human_size(m.len() as i64))
+            .unwrap_or_default();
+        let when = meta
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                chrono::DateTime::<chrono::Local>::from(t)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        entries.push((is_dir, name, size, when));
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let total = entries.len();
+    let mut lines: Vec<String> = entries
+        .into_iter()
+        .take(500)
+        .map(|(is_dir, name, size, when)| {
+            format!(
+                "{}\t{size}\t{when}\t{name}{}",
+                if is_dir { "dir" } else { "file" },
+                if is_dir { "/" } else { "" }
+            )
+        })
+        .collect();
+    if lines.is_empty() {
+        lines.push(format!("{} is empty.", dir.display()));
+    } else {
+        lines.insert(0, format!("{}:", dir.display()));
+    }
+    if total > 500 {
+        lines.push(format!("[{} more not shown]", total - 500));
+    }
+    if left_out > 0 {
+        lines.push(format!(
+            "[{left_out} private entr{} left out]",
+            if left_out == 1 { "y" } else { "ies" }
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+/// `read_server_file`: the start of a text file on the server (see
+/// [`guard`] when `guarded`).
+fn read_server(raw: &str, guarded: bool, hidden: &[std::path::PathBuf]) -> Result<String, String> {
+    use std::io::Read;
+    let path = if guarded {
+        guard::allowed_path(raw, hidden)?
+    } else {
+        std::fs::canonicalize(raw).map_err(|e| format!("{raw}: {e}"))?
+    };
+    if path.is_dir() {
+        return Err(format!(
+            "{} is a folder; list it with list_server_files",
+            path.display()
+        ));
+    }
+    let file =
+        std::fs::File::open(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    file.take(READ_BYTES)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if bytes.contains(&0) {
+        return Err(format!("{} is not a text file", path.display()));
+    }
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if guarded {
+        if text.contains("PRIVATE KEY-----") {
+            return Err(format!(
+                "{} cannot be read: it holds a private key",
+                path.display()
+            ));
+        }
+        let (clean, count) = guard::redact(&text);
+        text = with_hidden_note(clean, count);
+    }
+    if size > READ_BYTES {
+        text.push_str(&format!(
+            "\n[only the first {} of {} were read]",
+            human_size(READ_BYTES as i64),
+            human_size(size as i64)
+        ));
+    }
+    Ok(text)
 }
 
 pub fn command_result(output: &RunOutput, secs: u32) -> String {
@@ -1216,6 +1439,67 @@ fn decode_entities(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_files_for_people_who_are_not_administrators() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+        let root = dir.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let write = |name: &str, text: &str, mode: u32| {
+            let path = root.join(name);
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let app = write("app.conf", "port = 80\ndb_password = hunter2\n", 0o644);
+        let closed = write("closed.conf", "x", 0o600);
+        let named = write("api_token.txt", "abc", 0o644);
+        let key = write(
+            "deploy",
+            "-----BEGIN RSA PRIVATE KEY-----\nMII\n-----END RSA PRIVATE KEY-----\n",
+            0o644,
+        );
+        let private = root.join("rast-data");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hidden = vec![private.clone()];
+
+        let text = read_server(&app, true, &hidden).unwrap();
+        assert_eq!(
+            text,
+            "port = 80\ndb_password = [hidden]\n\n[1 secret value hidden]"
+        );
+        // Administrators read it as it is.
+        assert_eq!(
+            read_server(&app, false, &hidden).unwrap(),
+            "port = 80\ndb_password = hunter2\n"
+        );
+        for path in [&closed, &named, &key] {
+            assert!(read_server(path, true, &hidden).is_err(), "{path}");
+        }
+        assert!(read_server(&private.to_string_lossy(), true, &hidden).is_err());
+        assert!(read_server("/proc/self/environ", true, &hidden).is_err());
+        // Through a link: the real place decides.
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        assert!(list_server(&link.to_string_lossy(), true, &hidden).is_err());
+
+        let listing = list_server(&root.to_string_lossy(), true, &hidden).unwrap();
+        assert!(
+            listing.contains("\tapp.conf") && listing.contains("\tclosed.conf"),
+            "{listing}"
+        );
+        assert!(
+            !listing.contains("api_token") && !listing.contains("rast-data"),
+            "{listing}"
+        );
+        assert!(
+            listing.ends_with("[2 private entries left out]"),
+            "{listing}"
+        );
+        assert!(read_server("/etc/hostname", true, &hidden).is_ok());
+    }
 
     #[test]
     fn only_public_addresses_are_opened() {

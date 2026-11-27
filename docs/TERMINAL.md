@@ -73,8 +73,11 @@ with a clean environment (`HOME=/root`, a standard `PATH`, `TERM`,
 `RAST_USER=<who opened it>`), so `/etc/profile`, `/etc/profile.d` (including
 App Center's runtimes) and root's own profile apply.
 
-The AI Agent's `run_command` tool uses the same helper (and the same sandboxes
-for other accounts) through a one-off `run` request: one command in a fresh
+The AI Agent's `run_command` tool uses the same helper through a one-off
+`run` request (for accounts that are not administrators, wrapped in a
+read-only `systemd-run` sandbox as `nobody`, see
+[API.md](API.md#ai-agent-app-id-agent); with that turned off, their Terminal sandbox
+when they have one): one command in a fresh
 login shell without a terminal (`TERM=dumb`, no pager, empty input), stopped
 after its time limit with everything it started, answered with the exit code
 and up to 64 KB of each output stream. Each call is allowed by the chat's

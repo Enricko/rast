@@ -22,6 +22,7 @@
 //! goes in steps: what the model says, then the calls it asked for; a step
 //! starts after the last tool block ([`apply_delta`]).
 
+pub mod guard;
 pub mod provider;
 pub mod run;
 pub mod tools;
@@ -1237,7 +1238,17 @@ pub fn system_prompt(
                 "\n\nCommands run in their own sandbox container, with their RAST home folder as the \
                  working directory.",
             ),
+            (Some(tools::Shell::Guest), _) => prompt.push_str(
+                "\n\nCommands run on this server read-only, without privileges: you can look but not \
+                 change anything there. To change their RAST files use the file tools.",
+            ),
             _ => {}
+        }
+        if tools.guarded && tools.has(tools::READ_SERVER_FILE) {
+            prompt.push_str(
+                "\n\nThe server's own files can be read but not changed, apart from private places and \
+                 secrets. Do not try to get around what is hidden or refused.",
+            );
         }
     }
     prompt

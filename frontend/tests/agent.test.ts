@@ -223,8 +223,11 @@ test("an agent keeps its colours", () => {
 
 test("a chat's allowed tools match a permission preset in any order", () => {
   assert.equal(permissionMode([])?.id, "ask");
-  assert.equal(permissionMode(["search_files", "list_files", "read_file"])?.id, "read");
-  assert.equal(permissionMode(["list_files", "read_file", "search_files", "write_file", "create_folder"])?.id, "edit");
+  const reads = ["read_server_file", "search_files", "list_files", "read_file", "list_server_files"];
+  assert.equal(permissionMode(reads)?.id, "read");
+  assert.equal(permissionMode([...reads, "write_file", "create_folder"])?.id, "edit");
+  // An older chat that allowed only the RAST file reads.
+  assert.equal(permissionMode(["search_files", "list_files", "read_file"]), null);
   assert.equal(permissionMode(PERMISSION_MODES[3]!.tools)?.id, "act");
   // Allowed one by one ("Allow for this chat" on a single tool).
   assert.equal(permissionMode(["read_file"]), null);

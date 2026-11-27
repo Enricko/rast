@@ -688,7 +688,8 @@ export function mountSettings(options: {
     const search = data.search;
     const items: Array<[string, string, string]> = [
       ["folder", "Files", "List, read, find and write files in the person's home and the shared folders they can open (accounts that may use File Station)."],
-      ["terminal", "Commands", "Administrators: as root on this server, once Terminal is turned on. Others: in their own sandbox, when they may use Terminal."],
+      ["monitor", "Server files", "Administrators: anything RAST's service account can read. Others: read only, never RAST's data, people's files, home folders or secrets (secret values show as [hidden])."],
+      ["terminal", "Commands", "Administrators: as root on this server, once Terminal is turned on. Others: on the server read-only, as an account without privileges and without network; nothing they run can change the server."],
       ["external", "Web pages", "Public pages only; addresses on this server or private networks are refused."],
       ["network", "Web search", search.configured ? `Through ${SEARCH_LABELS[search.kind]}.` : "Needs a search service, below."],
     ];
@@ -705,8 +706,26 @@ export function mountSettings(options: {
           ),
         ),
       ),
-      h("p", { class: "ai-set-note small muted" }, "Every tool call shows in the chat and runs only once its owner allows it. Turn tools off per agent in Agents."),
+      h("p", { class: "ai-set-note small muted" }, "Every tool call shows in the chat and runs only once its owner allows it (or lets that kind run). Turn tools off per agent in Agents."),
     );
+    const serverAccess = switchControl({
+      label: "Let people who are not administrators read the server",
+      hint: "Server files and read-only commands, as above. Their own RAST files and the shared folders they may change stay writable through the file tools.",
+      checked: data.serverAccess,
+      onChange: async (enabled) => {
+        serverAccess.input.disabled = true;
+        try {
+          await ctx.api.put("/api/ai/server-access", { enabled });
+          ctx.toast.success(enabled ? "People can read the server, read-only." : "Only administrators can reach the server now.");
+        } catch (error) {
+          serverAccess.input.checked = !enabled;
+          ctx.toast.error(errorMessage(error));
+        } finally {
+          serverAccess.input.disabled = false;
+        }
+      },
+    });
+    body.append(h("div", { class: "ai-set-switch" }, serverAccess.el));
     const detail = search.configured
       ? search.kind === "searxng"
         ? `${SEARCH_LABELS[search.kind]} · ${search.url}`

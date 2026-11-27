@@ -47,6 +47,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/ai/search", get(get_search).put(put_search))
         .route("/api/ai/search/test", post(test_search))
+        .route("/api/ai/server-access", put(put_server_access))
         .route("/api/ai/admin/overview", get(admin_overview))
         .route("/api/ai/admin/conversations", get(admin_conversations))
         .route("/api/ai/providers", post(create_provider))
@@ -1058,7 +1059,37 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
         "usage": usage,
         "tools": tools::ALL.iter().map(|name| json!({"name": name, "label": tools::label(name)})).collect::<Vec<_>>(),
         "search": tools::search_config(&state.db).await.public_json(&state.secrets),
+        "serverAccess": tools::server_access(&state.db).await,
     })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerAccess {
+    enabled: bool,
+}
+
+/// PUT /api/ai/server-access — whether accounts that are not
+/// administrators may read the server and run read-only commands there.
+async fn put_server_access(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(body): Json<ServerAccess>,
+) -> AppResult<Json<Value>> {
+    tools::set_server_access(&state.db, body.enabled).await?;
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.server_access.update",
+        "ai_settings",
+        "serverAccess",
+        if body.enabled { "on" } else { "off" },
+    )
+    .await;
+    config_changed(&state, "serverAccess");
+    Ok(Json(json!({ "serverAccess": body.enabled })))
 }
 
 const SEARCH_KINDS: [&str; 4] = ["", "brave", "tavily", "searxng"];

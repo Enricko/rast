@@ -4160,9 +4160,11 @@ async fn ai_agent_tools_ask_before_acting() {
             "search_files",
             "write_file",
             "create_folder",
+            "list_server_files",
+            "read_server_file",
             "fetch_url"
         ],
-        "no shell without Terminal, no web search without a service"
+        "server reads (read-only), no shell without Terminal, no web search without a service"
     );
     let (_, _, body) = server
         .request(
