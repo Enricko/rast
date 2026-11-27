@@ -19,7 +19,29 @@ export interface ToolBlock {
   error?: string;
 }
 
-export type ContentBlock = WordsBlock | ToolBlock;
+/** A file sent with a message (see src/ai/files.rs). */
+export interface FileBlock {
+  type: "file";
+  id: string;
+  name: string;
+  mime: string;
+  kind: "image" | "pdf" | "text";
+  size: number;
+}
+
+export type ContentBlock = WordsBlock | ToolBlock | FileBlock;
+
+/** The largest file and how many files go with one message. */
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_FILES = 10;
+
+export function messageFiles(message: Pick<Message, "content">): FileBlock[] {
+  return message.content.filter((block): block is FileBlock => block.type === "file");
+}
+
+export function fileUrl(id: string): string {
+  return `/api/ai/files/${encodeURIComponent(id)}`;
+}
 
 export interface Message {
   id: number;

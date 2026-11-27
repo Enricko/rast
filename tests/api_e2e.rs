@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
-        "0004 to 0017 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+        "0004 to 0018 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -4311,6 +4311,229 @@ fn ai_tools(message: &Value) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn ai_agent_files_go_with_messages() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    server.create_user("bob", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let bob = server.login("bob", USER_PASSWORD).await;
+    for name in ["alice", "bob"] {
+        let id = server.user_id(name).await;
+        let (status, _, body) = server
+            .request(
+                "PUT",
+                &format!("/api/users/{id}/access-rules"),
+                Some(json!({"folderRules": [], "appRules": [{"appId": "agent", "rule": "allow"}]})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (addr, log) = fake_provider();
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({
+                "kind": "custom",
+                "name": "Local",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiKey": "sk-test-secret-1234",
+                "models": ["fake-1"],
+            })),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let provider_id = body["provider"]["id"].as_str().unwrap().to_string();
+    let (_, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "fake-1"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    let conversation = body["conversation"]["id"].as_str().unwrap().to_string();
+    let upload = |name: &str, bytes: &[u8], mime: &str, who: &Session| {
+        let path = format!("/api/ai/files?name={name}");
+        let (bytes, mime, headers) = (bytes.to_vec(), mime.to_string(), who.headers_with_csrf());
+        let server = &server;
+        async move {
+            let (status, body) = server
+                .request_raw("POST", &path, bytes, &mime, headers)
+                .await;
+            (
+                status,
+                serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null),
+            )
+        }
+    };
+
+    // Images, PDFs and text are taken; other files and big ones are not.
+    let png = b"\x89PNG\r\n\x1a\nfake image";
+    let (status, image) = upload("cat.png", png, "image/png", &alice).await;
+    assert_eq!(status, StatusCode::CREATED, "{image}");
+    assert_eq!(image["kind"], "image");
+    assert_eq!(image["mime"], "image/png");
+    let (status, notes) = upload("notes.txt", b"buy milk", "text/plain", &alice).await;
+    assert_eq!(status, StatusCode::CREATED, "{notes}");
+    assert_eq!(notes["kind"], "text");
+    let (status, pdf) = upload("doc.pdf", b"%PDF-1.7\nx", "application/pdf", &alice).await;
+    assert_eq!(status, StatusCode::CREATED, "{pdf}");
+    let (status, body) = upload("a.bin", b"\x00\x01\x02", "application/octet-stream", &alice).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{body}");
+    let big = vec![b'a'; 10 * 1024 * 1024 + 1];
+    let (status, _) = upload("big.txt", &big, "text/plain", &alice).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+    // A file not sent can be taken out; someone else's cannot be sent.
+    let pdf_id = pdf["id"].as_str().unwrap();
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/files/{pdf_id}"),
+            None,
+            bob.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/files/{pdf_id}"),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, bobs) = upload("bob.txt", b"secret", "text/plain", &bob).await;
+    let path = format!("/api/ai/conversations/{conversation}/messages");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "hi", "files": [bobs["id"]]})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Sent: the message lists them, the model gets the image and the text.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            &path,
+            Some(json!({"text": "", "files": [image["id"], notes["id"]]})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["conversation"]["title"], "cat.png");
+    let done = ai_finished(&server, &alice, &conversation).await;
+    let sent_blocks = done["messages"][0]["content"].as_array().unwrap().clone();
+    assert_eq!(sent_blocks.len(), 3, "{sent_blocks:?}");
+    assert_eq!(sent_blocks[0]["type"], "file");
+    assert_eq!(sent_blocks[0]["name"], "cat.png");
+    assert_eq!(sent_blocks[1]["kind"], "text");
+    {
+        let requests = log.lock().unwrap();
+        let sent = &requests.last().unwrap().2;
+        let content = &sent["messages"][1]["content"];
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "<file name=\"notes.txt\">\nbuy milk\n</file>"}),
+            "{content}"
+        );
+        let url = content[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,iVBORw0KGg"), "{url}");
+    }
+    // A sent file stays with the chat; the next request sends it again.
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/files/{}", image["id"].as_str().unwrap()),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    ai_say(&server, &alice, &conversation, "And now?").await;
+    {
+        let requests = log.lock().unwrap();
+        let sent = &requests.last().unwrap().2;
+        assert!(sent["messages"][1]["content"].is_array(), "{sent}");
+    }
+
+    // Its owner and administrators see it; images show, text downloads.
+    let image_url = format!("/api/ai/files/{}", image["id"].as_str().unwrap());
+    let (status, bytes) = server
+        .request_raw("GET", &image_url, Vec::new(), "", alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bytes, png);
+    let mut again = alice.headers();
+    again.insert(
+        header::IF_NONE_MATCH,
+        format!("\"{}\"", image["id"].as_str().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    let (status, _) = server
+        .request_raw("GET", &image_url, Vec::new(), "", again.clone())
+        .await;
+    assert_eq!(status, StatusCode::NOT_MODIFIED);
+    let (status, _) = server
+        .request_raw("GET", &image_url, Vec::new(), "", admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = server
+        .request_raw("GET", &image_url, Vec::new(), "", bob.headers())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Deleting the chat removes its files.
+    let alice_id = server.user_id("alice").await;
+    let on_disk = server
+        .state
+        .config
+        .data_dir
+        .join("ai-files")
+        .join(alice_id.to_string())
+        .join(image["id"].as_str().unwrap());
+    assert!(on_disk.is_file());
+    let (status, _, _) = server
+        .request(
+            "DELETE",
+            &format!("/api/ai/conversations/{conversation}"),
+            None,
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!on_disk.exists());
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_files WHERE user_id = ?")
+        .bind(alice_id)
+        .fetch_one(&server.state.db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
 }
 
 #[tokio::test]

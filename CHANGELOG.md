@@ -150,6 +150,17 @@ this file by `scripts/changelog-section.sh`.
   earlier year. Typing while the AI Agent window is in front writes in the
   message box, as in chat apps (keys in other fields and shortcuts stay
   where they are).
+- **AI Agent takes files with messages.** Add images (PNG, JPEG, GIF, WebP),
+  PDFs and text files (notes, code, CSV, JSON, logs) with the paperclip in
+  the message box, by dropping them on the chat or by pasting a picture;
+  they upload at once and wait above the text as chips (a picture shows its
+  thumbnail, a file it cannot read says so). Models see images and PDFs as
+  they are (Anthropic, OpenAI-compatible, Responses and Gemini each in their
+  own format) and text files as their text. Sent messages show pictures and
+  file chips that download. Up to 10 files of 10 MiB each per message and
+  500 MiB per account; files live under `<data_dir>/ai-files` and go with
+  their chat; files added but never sent go after a day. Database schema
+  v18.
 - **AI Agent shows what replies cost.** Each reply shows its estimated cost
   at the model's API price beside its tokens, the chat's header adds up its
   tokens and cost, and a new Usage button (for every account) shows today,

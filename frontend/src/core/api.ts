@@ -218,10 +218,23 @@ export class ApiClient {
   ): Promise<FileEntry> {
     const params = new URLSearchParams({ dir, name: handlers.name ?? file.name });
     if (handlers.overwrite) params.set("overwrite", "true");
-    return new Promise<FileEntry>((resolve, reject) => {
+    return this.uploadRaw<FileEntry>(`/api/files/upload?${params.toString()}`, file, { ...handlers, contentType: "application/octet-stream" });
+  }
+
+  /** POST a file as the raw request body to `url`, with progress (XHR). */
+  uploadRaw<T>(
+    url: string,
+    file: Blob,
+    handlers: {
+      onProgress?: (loaded: number, total: number) => void;
+      signal?: AbortSignal;
+      contentType?: string;
+    } = {},
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/api/files/upload?${params.toString()}`);
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.open("POST", url);
+      xhr.setRequestHeader("Content-Type", handlers.contentType || file.type || "application/octet-stream");
       xhr.setRequestHeader("X-CSRF-Token", this.csrfToken);
       xhr.withCredentials = true;
       xhr.upload.onprogress = (event) => {
@@ -237,7 +250,7 @@ export class ApiClient {
           payload = xhr.responseText;
         }
         if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(payload as FileEntry);
+          resolve(payload as T);
         } else {
           const err = (payload as { error?: { code?: string; message?: string } } | null)?.error;
           if (xhr.status === 401) this.notifySessionLost();

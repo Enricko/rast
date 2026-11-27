@@ -22,6 +22,7 @@
 //! goes in steps: what the model says, then the calls it asked for; a step
 //! starts after the last tool block ([`apply_delta`]).
 
+pub mod files;
 pub mod guard;
 pub mod prices;
 pub mod provider;
@@ -1796,11 +1797,11 @@ pub fn history(messages: &[Message]) -> Vec<provider::Turn> {
             }
             turns_of(&message.content)
         } else {
-            let text = message.text();
-            if text.trim().is_empty() {
+            let turn = files::user_turn(&message.content);
+            if turn.text.trim().is_empty() && turn.files.is_empty() {
                 continue;
             }
-            vec![provider::Turn::User(text)]
+            vec![provider::Turn::User(turn)]
         };
         if turns.is_empty() {
             continue;

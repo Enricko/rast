@@ -13,10 +13,17 @@ fn responses_input(turns: &[Turn]) -> Vec<Value> {
     let mut out = Vec::with_capacity(turns.len());
     for turn in turns {
         match turn {
-            Turn::User(text) => out.push(json!({
-                "type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": text}],
-            })),
+            Turn::User(user) => {
+                let mut content = vec![json!({"type": "input_text", "text": user.text})];
+                for file in user.ready_files() {
+                    content.push(if file.is_pdf() {
+                        json!({"type": "input_file", "filename": file.name, "file_data": file.data_url()})
+                    } else {
+                        json!({"type": "input_image", "image_url": file.data_url(), "detail": "auto"})
+                    });
+                }
+                out.push(json!({"type": "message", "role": "user", "content": content}));
+            }
             Turn::Assistant { text, calls, .. } => {
                 if !text.is_empty() {
                     out.push(json!({

@@ -4,14 +4,14 @@
 
 use serde_json::{json, Value};
 
-use super::{ChatRequest, Turn, Wire};
+use super::{ChatRequest, Turn, UserTurn, Wire};
 use crate::ai::{Effort, Kind};
 
 fn openai_turns(reasoning_back: bool, turns: &[Turn]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(turns.len());
     for turn in turns {
         match turn {
-            Turn::User(text) => out.push(json!({"role": "user", "content": text})),
+            Turn::User(user) => out.push(json!({"role": "user", "content": user_content(user)})),
             Turn::Assistant {
                 reasoning,
                 text,
@@ -53,6 +53,27 @@ fn openai_turns(reasoning_back: bool, turns: &[Turn]) -> Vec<Value> {
         }
     }
     out
+}
+
+/// A user message: its text alone, or with its images (`image_url` data
+/// URLs) and PDFs (`file` parts, as OpenAI takes them).
+fn user_content(user: &UserTurn) -> Value {
+    let mut files = user.ready_files().peekable();
+    if files.peek().is_none() {
+        return json!(user.text);
+    }
+    let mut parts = Vec::new();
+    if !user.text.trim().is_empty() {
+        parts.push(json!({"type": "text", "text": user.text}));
+    }
+    for file in files {
+        parts.push(if file.is_pdf() {
+            json!({"type": "file", "file": {"filename": file.name, "file_data": file.data_url()}})
+        } else {
+            json!({"type": "image_url", "image_url": {"url": file.data_url()}})
+        });
+    }
+    Value::Array(parts)
 }
 
 /// The body of a streamed chat completion over `wire`.

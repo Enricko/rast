@@ -283,7 +283,15 @@ fn contents(turns: &[Turn], model: &str) -> Vec<Value> {
     let signed = wants_thought_signature(model);
     for turn in turns {
         match turn {
-            Turn::User(text) => push_content(&mut out, "user", text_parts(text)),
+            Turn::User(user) => {
+                let mut parts = text_parts(&user.text);
+                parts.extend(
+                    user.ready_files().map(
+                        |file| json!({"inlineData": {"mimeType": file.mime, "data": file.data}}),
+                    ),
+                );
+                push_content(&mut out, "user", parts);
+            }
             Turn::Assistant { text, calls, .. } => {
                 let mut parts = Vec::with_capacity(calls.len() + 1);
                 if !text.trim().is_empty() {
@@ -1041,6 +1049,30 @@ mod tests {
 
     fn user(text: &str) -> Turn {
         Turn::User(text.into())
+    }
+
+    #[test]
+    fn images_and_pdfs_go_as_inline_data() {
+        let turns = vec![Turn::User(crate::ai::provider::UserTurn {
+            text: "What is this?".into(),
+            files: vec![crate::ai::provider::Attachment {
+                id: "f".into(),
+                name: "cat.png".into(),
+                mime: "image/png".into(),
+                size: 3,
+                is_text: false,
+                data: "QUJD".into(),
+            }],
+        })];
+        let req = request(Kind::GeminiCli, "gemini-3.1-pro");
+        let envelope = body(&req, wire(Kind::GeminiCli, None), &turns);
+        assert_eq!(
+            envelope["request"]["contents"][0]["parts"],
+            json!([
+                {"text": "What is this?"},
+                {"inlineData": {"mimeType": "image/png", "data": "QUJD"}},
+            ])
+        );
     }
 
     /// The envelope the Antigravity IDE's client sends: the Cloud Code

@@ -85,10 +85,68 @@ pub struct ToolResult {
     pub is_error: bool,
 }
 
+/// A file the person added to a message (see `ai::files`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    pub size: usize,
+    /// A text file: its text joins the message before it is sent.
+    pub is_text: bool,
+    /// An image's or a PDF's bytes in base64, read just before sending (""
+    /// not read: such a file is left out).
+    pub data: String,
+}
+
+impl Attachment {
+    pub fn is_pdf(&self) -> bool {
+        self.mime == "application/pdf"
+    }
+
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime, self.data)
+    }
+}
+
+/// What the person wrote, with the images and PDFs they added.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UserTurn {
+    pub text: String,
+    pub files: Vec<Attachment>,
+}
+
+impl UserTurn {
+    /// The images and PDFs that go with the text, read and ready.
+    pub fn ready_files(&self) -> impl Iterator<Item = &Attachment> {
+        self.files
+            .iter()
+            .filter(|f| !f.is_text && !f.data.is_empty())
+    }
+}
+
+impl From<&str> for UserTurn {
+    fn from(text: &str) -> Self {
+        Self {
+            text: text.into(),
+            files: Vec::new(),
+        }
+    }
+}
+
+impl From<String> for UserTurn {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            files: Vec::new(),
+        }
+    }
+}
+
 /// One turn of a conversation as providers see it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn {
-    User(String),
+    User(UserTurn),
     Assistant {
         reasoning: String,
         text: String,
@@ -102,7 +160,15 @@ impl Turn {
     /// About how much it weighs (for estimates and history budgets).
     pub fn chars(&self) -> usize {
         match self {
-            Self::User(text) => text.len(),
+            // An image or a PDF weighs about a page of text.
+            Self::User(user) => {
+                user.text.len()
+                    + user
+                        .files
+                        .iter()
+                        .map(|f| if f.is_text { f.size } else { 4000 })
+                        .sum::<usize>()
+            }
             Self::Assistant {
                 reasoning,
                 text,
@@ -257,16 +323,18 @@ pub fn normalize(turns: Vec<Turn>, with_tools: bool) -> Vec<Turn> {
                         )
                     })
                     .collect::<Vec<_>>()
-                    .join("\n\n"),
+                    .join("\n\n")
+                    .into(),
             ),
             other => other,
         };
         match (out.last_mut(), turn) {
             (_, Turn::Assistant { text, calls, .. })
                 if text.trim().is_empty() && calls.is_empty() => {}
-            (Some(Turn::User(last)), Turn::User(text)) => {
-                last.push_str("\n\n");
-                last.push_str(&text);
+            (Some(Turn::User(last)), Turn::User(user)) => {
+                last.text.push_str("\n\n");
+                last.text.push_str(&user.text);
+                last.files.extend(user.files);
             }
             (
                 Some(Turn::Assistant {

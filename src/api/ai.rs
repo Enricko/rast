@@ -8,10 +8,14 @@
 //! `POST /api/ai/conversations/{id}/tools/{callId}`.
 
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post, put},
     Json, Router,
 };
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -41,6 +45,8 @@ pub fn routes() -> Router<AppState> {
                 .delete(delete_conversation),
         )
         .route("/api/ai/conversations/{id}/messages", post(send_message))
+        .route("/api/ai/files", post(upload_file))
+        .route("/api/ai/files/{id}", get(get_file).delete(delete_file))
         .route("/api/ai/conversations/{id}/stop", post(stop_reply))
         .route(
             "/api/ai/conversations/{id}/tools/{call_id}",
@@ -592,6 +598,7 @@ async fn delete_conversation(
 ) -> AppResult<Json<Value>> {
     let conversation = owned(&state, &user, &id, true).await?;
     state.ai.stop(&conversation.id);
+    ai::files::remove_for_conversation(&state.db, state.data_dir(), &conversation.id).await?;
     sqlx::query("DELETE FROM ai_conversations WHERE id = ?")
         .bind(&conversation.id)
         .execute(&state.db)
@@ -608,6 +615,164 @@ async fn delete_conversation(
 #[serde(deny_unknown_fields)]
 struct NewMessage {
     text: String,
+    /// Files added with `POST /api/ai/files`, in the order shown.
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadQuery {
+    name: Option<String>,
+}
+
+/// POST /api/ai/files?name= — a file for the next message (raw body): an
+/// image, a PDF or a text file, up to 10 MiB.
+async fn upload_file(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(query): Query<UploadQuery>,
+    headers: HeaderMap,
+    body: Body,
+) -> AppResult<Response> {
+    let declared = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let too_large = || AppError::PayloadTooLarge("files are limited to 10 MiB each");
+    let length = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if length.is_some_and(|l| l > ai::files::MAX_FILE_BYTES) {
+        return Err(too_large());
+    }
+    // Bounded read: at most the limit and one chunk is ever held.
+    let mut data: Vec<u8> = Vec::with_capacity(length.unwrap_or(0) as usize);
+    let mut stream = body.into_data_stream();
+    while let Some(frame) = stream.next().await {
+        let bytes =
+            frame.map_err(|e| AppError::bad_request(format!("upload stream failed: {e}")))?;
+        if data.len() as u64 + bytes.len() as u64 > ai::files::MAX_FILE_BYTES {
+            return Err(too_large());
+        }
+        data.extend_from_slice(&bytes);
+    }
+    if length.is_some_and(|l| l != data.len() as u64) {
+        return Err(AppError::bad_request(
+            "upload ended before the whole file arrived",
+        ));
+    }
+    let file = ai::files::store(
+        &state.db,
+        state.data_dir(),
+        user.id,
+        query.name.as_deref(),
+        &declared,
+        &data,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(file.json())).into_response())
+}
+
+/// GET /api/ai/files/{id} — the file, for its owner (and administrators,
+/// who may read every chat). Images show; other files download, as text.
+/// A file never changes, so its id is its ETag; every use still checks the
+/// session (`no-cache`), so another account on the same browser gets none.
+async fn get_file(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    request_headers: HeaderMap,
+) -> AppResult<Response> {
+    let file = ai::files::get(&state.db, &id)
+        .await?
+        .filter(|f| f.user_id == user.id || user.is_admin())
+        .ok_or(AppError::NotFound("file not found"))?;
+    let etag = format!("\"{}\"", file.id);
+    let private = |response: &mut Response| {
+        let h = response.headers_mut();
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, no-cache"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&etag) {
+            h.insert(header::ETAG, value);
+        }
+    };
+    let unchanged = request_headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.split(',').any(|tag| tag.trim() == etag));
+    if unchanged {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        private(&mut response);
+        return Ok(response);
+    }
+    let bytes = tokio::fs::read(ai::files::path_of(state.data_dir(), file.user_id, &file.id))
+        .await
+        .map_err(|_| AppError::NotFound("file not found"))?;
+    let (mime, disposition) = match file.kind.as_str() {
+        "image" => (file.mime.as_str(), "inline"),
+        "pdf" => ("application/pdf", "attachment"),
+        _ => ("text/plain; charset=utf-8", "attachment"),
+    };
+    let ascii: String = file
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || ".-_ ".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let encoded: String = file
+        .name
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b".-_".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    let mut response = bytes.into_response();
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime).map_err(|_| AppError::internal("bad type"))?,
+    );
+    if let Ok(value) = HeaderValue::from_str(&format!(
+        "{disposition}; filename=\"{ascii}\"; filename*=UTF-8''{encoded}"
+    )) {
+        h.insert(header::CONTENT_DISPOSITION, value);
+    }
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; sandbox"),
+    );
+    private(&mut response);
+    Ok(response)
+}
+
+/// DELETE /api/ai/files/{id} — take a file out of the message box (only
+/// before it is sent).
+async fn delete_file(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    if !ai::files::remove_unsent(&state.db, state.data_dir(), user.id, &id).await? {
+        return Err(AppError::NotFound("file not found"));
+    }
+    Ok(Json(json!({ "deleted": true })))
 }
 
 /// What a run is checked against before it starts.
@@ -694,13 +859,15 @@ async fn reply_job(
         .await
         .restrict(resolved.agent.as_ref().and_then(|a| a.tools.as_deref()));
     let today = chrono::Local::now().format("%A, %-d %B %Y").to_string();
+    let mut messages = ai::history(&earlier);
+    ai::files::load(state.data_dir(), conversation.user_id, &mut messages).await;
     let request = provider::ChatRequest {
         kind: resolved.provider.kind,
         base_url: resolved.provider.effective_base_url(),
         api_key,
         model: resolved.model.clone(),
         system: ai::system_prompt(resolved.agent.as_ref(), &skills, user, &today, &available),
-        messages: ai::history(&earlier),
+        messages,
         tools: available.specs(),
         temperature: resolved.agent.as_ref().and_then(|a| a.temperature),
         max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
@@ -783,7 +950,7 @@ async fn send_message(
     let _deciding = state.ai.decide.lock().await;
     let mut conversation = owned(&state, &user, &id, true).await?;
     let text = body.text.trim_end().to_string();
-    if text.trim().is_empty() {
+    if text.trim().is_empty() && body.files.is_empty() {
         return Err(AppError::bad_request("write a message first"));
     }
     if text.len() > ai::MAX_MESSAGE {
@@ -803,8 +970,11 @@ async fn send_message(
         prepared.resolved.model.clone(),
     );
 
+    let files = ai::files::attach(&state.db, user.id, &conversation.id, &body.files).await?;
     let now = now_ms();
-    let user_content = json!([{ "type": "text", "text": text }]);
+    let mut blocks: Vec<Value> = files.iter().map(ai::files::StoredFile::block).collect();
+    blocks.push(json!({ "type": "text", "text": text }));
+    let user_content = Value::Array(blocks);
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO ai_messages (conversation_id, role, content, status, created_at, finished_at)
          VALUES (?, 'user', ?, 'done', ?, ?) RETURNING id",
@@ -826,7 +996,10 @@ async fn send_message(
     .fetch_one(&state.db)
     .await?;
     if conversation.title.is_empty() {
-        conversation.title = ai::title_from(&text);
+        conversation.title = match files.first() {
+            Some(file) if text.trim().is_empty() => ai::title_from(&file.name),
+            _ => ai::title_from(&text),
+        };
     }
     conversation.updated_at = now;
     sqlx::query("UPDATE ai_conversations SET title = ?, updated_at = ? WHERE id = ?")

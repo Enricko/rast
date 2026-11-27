@@ -13,6 +13,7 @@ import { appIconSvg, iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import { confirmDialog, contextMenu, copyText, dialogOpen, errorMessage, modal, promptDialog } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
+import { createAttachments, sentFiles } from "./attachments";
 import { dailyChart, formatEstimate, usageModels, usageTotals } from "./usage";
 import { renderMarkdown } from "./markdown";
 import {
@@ -29,6 +30,7 @@ import {
   groupByDay,
   maySkipAsking,
   messageText,
+  messageFiles,
   PERMISSION_MODES,
   permissionMode,
   TOOL_INFO,
@@ -249,13 +251,23 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   guard.setAttribute("aria-haspopup", "menu");
   effortButton.setAttribute("aria-haspopup", "menu");
   const composerNote = h("div", { class: "ai-composer-note small muted" });
+  // Files for the next message: the attach button, a drop on the chat or a
+  // paste; they upload at once and wait above the text.
+  const attachments = createAttachments(ctx, () => updateComposer());
   const composer = h(
     "div",
     { class: "ai-composer" },
     composerNote,
-    h("div", { class: "ai-input-wrap" }, input, h("div", { class: "ai-composer-bar" }, pickWrap, effortButton, guard, sendButton)),
+    h(
+      "div",
+      { class: "ai-input-wrap" },
+      attachments.tray,
+      input,
+      h("div", { class: "ai-composer-bar" }, attachments.button, pickWrap, effortButton, guard, sendButton),
+    ),
   );
-  const main = h("section", { class: "ai-main" }, head, scrollArea, composer);
+  const dropHint = h("div", { class: "ai-drop-hint", ariaHidden: true }, iconSvg("attach", 22), h("span", {}, "Drop files to add them"));
+  const main = h("section", { class: "ai-main" }, head, scrollArea, composer, dropHint);
   const settingsHost = h("section", { class: "ai-settings hidden" });
   const scrim = h("div", { class: "ai-scrim" });
   ctx.root.append(side, main, settingsHost, scrim);
@@ -343,6 +355,42 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   input.addEventListener("input", () => {
     autoGrow();
     updateComposer();
+  });
+  // A pasted picture or file joins the message (text pastes as text).
+  input.addEventListener("paste", (event) => {
+    const data = event.clipboardData;
+    const files = Array.from(data?.files ?? []);
+    if (!files.length || data?.types.includes("text/plain")) return;
+    event.preventDefault();
+    attachments.add(files);
+  });
+  // Files dropped anywhere on the chat.
+  let dragDepth = 0;
+  const carriesFiles = (event: DragEvent) =>
+    Boolean(event.dataTransfer?.types.includes("Files")) && !composer.classList.contains("hidden") && settingsHost.classList.contains("hidden");
+  main.addEventListener("dragenter", (event) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    main.classList.add("is-dropping");
+  });
+  main.addEventListener("dragover", (event) => {
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  });
+  main.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) main.classList.remove("is-dropping");
+  });
+  main.addEventListener("drop", (event) => {
+    dragDepth = 0;
+    main.classList.remove("is-dropping");
+    if (!carriesFiles(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    attachments.add(Array.from(event.dataTransfer?.files ?? []));
+    input.focus();
   });
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -466,7 +514,12 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   // ----------------------------------------------------------- actions
   async function send(): Promise<void> {
     const text = input.value.trim();
-    if (!text || current?.readOnly || current?.conversation.running) return;
+    const files = attachments.ready();
+    if ((!text && !files.length) || current?.readOnly || current?.conversation.running) return;
+    if (attachments.busy()) {
+      ctx.toast.warning("Files are still uploading; they send once they are ready.");
+      return;
+    }
     const choice = picker.value;
     if (!current && !choice) {
       ctx.toast.warning("Pick an agent or a model first.");
@@ -488,9 +541,10 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       }
       const sent = await ctx.api.post<{ conversation: Conversation; message: Message; reply: Message }>(
         `/api/ai/conversations/${encodeURIComponent(id)}/messages`,
-        { text },
+        { text, files: files.map((file) => file.id) },
       );
       input.value = "";
+      attachments.sent();
       autoGrow();
       if (current?.conversation.id === id) {
         current.conversation = sent.conversation;
@@ -656,7 +710,8 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (!current) return;
     const lines = current.messages.map((m) => {
       const calls = toolBlocks(m).map((call) => `[${TOOL_INFO[call.name]?.label ?? call.name}: ${toolArgument(call)} (${call.status})]`);
-      return `${m.role === "user" ? "You" : "Assistant"}:\n${[messageText(m), ...calls].filter(Boolean).join("\n")}`;
+      const files = messageFiles(m).map((file) => `[${file.name}]`);
+      return `${m.role === "user" ? "You" : "Assistant"}:\n${[...files, messageText(m), ...calls].filter(Boolean).join("\n")}`;
     });
     if (await copyText(lines.join("\n\n"))) ctx.toast.success("Chat copied.");
   }
@@ -849,7 +904,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     sendButton.title = running ? "Stop" : "Send (Enter)";
     sendButton.setAttribute("aria-label", running ? "Stop" : "Send");
     sendButton.classList.toggle("is-stop", running);
-    sendButton.disabled = !running && (!input.value.trim() || !picker.value);
+    sendButton.disabled = !running && ((!input.value.trim() && !attachments.ready().length) || !picker.value);
     const allowed = current ? current.conversation.allowedTools ?? [] : draftAllowed;
     const mode = permissionMode(allowed);
     guardLabel.textContent = mode?.short ?? "Some allowed";
@@ -991,10 +1046,10 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       return h(
         "div",
         { class: "ai-msg ai-msg-user", dataset: { id: String(message.id) } },
-        h("div", { class: "ai-bubble" }, text),
+        h("div", { class: "ai-user-stack" }, sentFiles(messageFiles(message)), text ? h("div", { class: "ai-bubble" }, text) : null),
         h(
           "div",
-          { class: "ai-msg-tools" },
+          { class: text ? "ai-msg-tools" : "ai-msg-tools hidden" },
           h(
             "button",
             {
@@ -1399,6 +1454,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     disposed = true;
     window.clearInterval(ticker);
     document.removeEventListener("keydown", typeToCompose);
+    attachments.clear();
     followObserver.disconnect();
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     for (const entry of bodies.values()) if (entry.frame) window.cancelAnimationFrame(entry.frame);

@@ -29,15 +29,37 @@ fn anthropic_turns(turns: &[Turn]) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::with_capacity(turns.len());
     for turn in turns {
         match turn {
-            Turn::User(text) => match out.last_mut() {
-                // After tool results: the same user turn.
-                Some(last) if last["role"] == "user" && last["content"].is_array() => {
-                    if let Some(blocks) = last["content"].as_array_mut() {
-                        blocks.push(json!({"type": "text", "text": text}));
-                    }
+            Turn::User(user) => {
+                // Images and PDFs first, then the words about them.
+                let mut blocks: Vec<Value> = user
+                    .ready_files()
+                    .map(|file| {
+                        let source =
+                            json!({"type": "base64", "media_type": file.mime, "data": file.data});
+                        if file.is_pdf() {
+                            json!({"type": "document", "source": source, "title": file.name})
+                        } else {
+                            json!({"type": "image", "source": source})
+                        }
+                    })
+                    .collect();
+                let with_files = !blocks.is_empty();
+                if !with_files || !user.text.trim().is_empty() {
+                    blocks.push(json!({"type": "text", "text": user.text}));
                 }
-                _ => out.push(json!({"role": "user", "content": text})),
-            },
+                match out.last_mut() {
+                    // After tool results: the same user turn.
+                    Some(last) if last["role"] == "user" && last["content"].is_array() => {
+                        if let Some(existing) = last["content"].as_array_mut() {
+                            existing.extend(blocks);
+                        }
+                    }
+                    _ if !with_files => {
+                        out.push(json!({"role": "user", "content": user.text}));
+                    }
+                    _ => out.push(json!({"role": "user", "content": blocks})),
+                }
+            }
             Turn::Assistant { text, calls, .. } => {
                 if calls.is_empty() {
                     out.push(json!({"role": "assistant", "content": text}));

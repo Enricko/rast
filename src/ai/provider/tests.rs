@@ -976,3 +976,96 @@ fn plan_model_lists_say_where_they_come_from() {
     // Kinds without a built-in list pass the error on.
     assert!(plan_models_from(Kind::OpenAi, Err("nope".into())).is_err());
 }
+
+fn with_files(kind: Kind, text: &str) -> ChatRequest {
+    let file = |name: &str, mime: &str| Attachment {
+        id: name.into(),
+        name: name.into(),
+        mime: mime.into(),
+        size: 3,
+        is_text: false,
+        data: "QUJD".into(),
+    };
+    ChatRequest {
+        kind,
+        base_url: String::new(),
+        api_key: Some("k".into()),
+        model: "m".into(),
+        system: String::new(),
+        messages: vec![Turn::User(UserTurn {
+            text: text.into(),
+            files: vec![
+                file("cat.png", "image/png"),
+                file("doc.pdf", "application/pdf"),
+                // Never read (text files join the text before this).
+                Attachment {
+                    is_text: true,
+                    data: String::new(),
+                    ..file("notes.txt", "text/plain")
+                },
+            ],
+        })],
+        tools: Vec::new(),
+        temperature: None,
+        effort: None,
+        max_output_tokens: None,
+        session: String::new(),
+        account: String::new(),
+    }
+}
+
+#[test]
+fn files_go_in_each_protocols_shape() {
+    let body = request_body(&with_files(Kind::OpenAi, "What is this?"));
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "text", "text": "What is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+            {"type": "file", "file": {"filename": "doc.pdf", "file_data": "data:application/pdf;base64,QUJD"}},
+        ])
+    );
+    let body = request_body(&with_files(Kind::Anthropic, "What is this?"));
+    assert_eq!(
+        body["messages"][0]["content"],
+        json!([
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+            {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "QUJD"}, "title": "doc.pdf"},
+            {"type": "text", "text": "What is this?"},
+        ])
+    );
+    // Files alone: no empty text block.
+    let body = request_body(&with_files(Kind::Anthropic, ""));
+    assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 2);
+    let body = request_body(&with_files(Kind::Codex, "What is this?"));
+    let input = body["input"].as_array().unwrap();
+    let user = input.iter().find(|i| i["role"] == "user").unwrap();
+    assert_eq!(
+        user["content"],
+        json!([
+            {"type": "input_text", "text": "What is this?"},
+            {"type": "input_image", "image_url": "data:image/png;base64,QUJD", "detail": "auto"},
+            {"type": "input_file", "filename": "doc.pdf", "file_data": "data:application/pdf;base64,QUJD"},
+        ])
+    );
+    // Without files a message stays plain text.
+    let mut plain = with_files(Kind::OpenAi, "hi");
+    plain.messages = vec![Turn::User("hi".into())];
+    assert_eq!(request_body(&plain)["messages"][0]["content"], "hi");
+    // Joined user turns keep every file.
+    let turns = normalize(
+        vec![
+            Turn::User(UserTurn {
+                text: "one".into(),
+                files: vec![],
+            }),
+            with_files(Kind::OpenAi, "two").messages.remove(0),
+        ],
+        true,
+    );
+    let Turn::User(joined) = &turns[0] else {
+        panic!("{turns:?}")
+    };
+    assert_eq!(joined.text, "one\n\ntwo");
+    assert_eq!(joined.files.len(), 3);
+}
