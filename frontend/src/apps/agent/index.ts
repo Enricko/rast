@@ -197,7 +197,15 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     menuButton,
   );
   const thread = h("div", { class: "ai-thread" });
-  const scroller = h("div", { class: "ai-scroll" }, thread);
+  // The chat keeps to its own scrolling (it opens at the latest message and
+  // follows a reply), not to the window's saved position.
+  const scroller = h("div", { class: "ai-scroll", dataset: { sync: "off" } }, thread);
+  const jumpButton = h(
+    "button",
+    { class: "ai-jump", type: "button", title: "Go to the latest", ariaLabel: "Go to the latest" },
+    iconSvg("arrowDown", 16),
+  );
+  const scrollArea = h("div", { class: "ai-scroll-area" }, scroller, jumpButton);
   const input = h("textarea", {
     class: "ai-input",
     rows: 1,
@@ -236,7 +244,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     composerNote,
     h("div", { class: "ai-input-wrap" }, input, h("div", { class: "ai-composer-bar" }, pickWrap, effortButton, guard, sendButton)),
   );
-  const main = h("section", { class: "ai-main" }, head, scroller, composer);
+  const main = h("section", { class: "ai-main" }, head, scrollArea, composer);
   const settingsHost = h("section", { class: "ai-settings hidden" });
   const scrim = h("div", { class: "ai-scrim" });
   ctx.root.append(side, main, settingsHost, scrim);
@@ -284,14 +292,14 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   guard.addEventListener("click", () => {
     const allowed = current ? current.conversation.allowedTools ?? [] : draftAllowed;
     const mode = permissionMode(allowed);
-    const icons: Record<string, string> = { ask: "shield", read: "eye", edit: "edit", act: "network" };
+    const icons: Record<string, string> = { ask: "shield", read: "eye", edit: "edit", act: "network", all: "terminal" };
     contextMenu(
       0,
       0,
       [
         ...PERMISSION_MODES.map((m) => ({
           label: m.label,
-          hint: m.hint,
+          hint: m.id === "all" ? (isAdmin ? "Also runs commands without asking, as root on this server" : "Also runs commands without asking (they cannot change the server)") : m.hint,
           icon: icons[m.id],
           checked: mode?.id === m.id,
           onClick: () => void setPermissions([...m.tools]),
@@ -307,8 +315,6 @@ function mountAgentApp(ctx: AppContext): AppInstance {
                 onClick: () => undefined,
               },
             ]),
-        "separator" as const,
-        { label: "Commands always ask first", icon: "terminal", disabled: true, onClick: () => undefined },
       ],
       { anchor: guard, ariaLabel: "Permissions" },
     );
@@ -482,7 +488,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       }
       upsertConversation(sent.conversation);
       renderAll(false);
-      scrollToEnd(true);
+      followLatest();
     } catch (error) {
       ctx.toast.error(errorMessage(error));
       if (error instanceof ApiError && (error.isRateLimited || error.isForbidden)) void loadOptions();
@@ -526,6 +532,18 @@ function mountAgentApp(ctx: AppContext): AppInstance {
 
   /** What runs without asking: this chat's, or the next new chat's. */
   async function setPermissions(tools: string[]): Promise<void> {
+    // Commands as root without asking: say so once more.
+    const allowed = current ? current.conversation.allowedTools ?? [] : draftAllowed;
+    if (isAdmin && tools.includes("run_command") && !allowed.includes("run_command")) {
+      const ok = await confirmDialog({
+        title: "Allow everything",
+        message: "The agent will run commands as root on this server without asking, in this chat. You can still stop a reply, and every command shows in the chat.",
+        confirmLabel: "Allow everything",
+        danger: true,
+        within: ctx.root,
+      });
+      if (!ok) return;
+    }
     if (!current) {
       draftAllowed = tools;
       updateComposer();
@@ -659,7 +677,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     renderThread();
     updateTitle();
     updateComposer();
-    if (resetScroll) scrollToEnd(true);
+    if (resetScroll) followLatest();
   }
 
   /** Who answers for a picker value: name, the model behind it, picture. */
@@ -970,9 +988,22 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     return wrap;
   }
 
+  /** Parts of a reply already shown, by block: kept while unchanged, so a
+   * streaming reply redraws only what grew (and a selection in an earlier
+   * part survives). */
+  const shownParts = new WeakMap<HTMLElement, Map<number, { sig: string; el: HTMLElement }>>();
+
   function fillReply(body: HTMLElement, message: Message): void {
     const text = messageText(message);
     const streaming = message.status === "streaming";
+    const before = shownParts.get(body) ?? new Map<number, { sig: string; el: HTMLElement }>();
+    const now = new Map<number, { sig: string; el: HTMLElement }>();
+    const reuse = (index: number, sig: string, make: () => HTMLElement): HTMLElement => {
+      const old = before.get(index);
+      const el = old && old.sig === sig ? old.el : make();
+      now.set(index, { sig, el });
+      return el;
+    };
     // Opened sections stay open while the reply changes.
     const opened = new Map<string, boolean>();
     for (const details of body.querySelectorAll<HTMLDetailsElement>("details[data-key]")) {
@@ -983,39 +1014,53 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     const last = blocks.length - 1;
     blocks.forEach((block, index) => {
       const live = streaming && index === last;
+      const sig = `${live}|${message.status}|${current?.readOnly ?? false}|${JSON.stringify(block)}`;
       if (block.type === "reasoning") {
         if (!block.text) return;
         const key = `reasoning:${index}`;
-        const details = h("details", { class: "ai-thinking", dataset: { key } });
-        details.open = opened.get(key) ?? live;
-        details.classList.toggle("is-live", live);
-        details.append(
-          h("summary", {}, iconSvg("sparkle", 13), h("span", {}, live ? "Thinking…" : "Thought it through")),
-          h("div", { class: "ai-thinking-text" }, block.text),
+        parts.push(
+          reuse(index, sig, () => {
+            const details = h("details", { class: "ai-thinking", dataset: { key } });
+            details.open = opened.get(key) ?? live;
+            details.classList.toggle("is-live", live);
+            details.append(
+              h("summary", {}, iconSvg("sparkle", 13), h("span", {}, live ? "Thinking…" : "Thought it through")),
+              h("div", { class: "ai-thinking-text" }, block.text),
+            );
+            return details;
+          }),
         );
-        parts.push(details);
       } else if (block.type === "text") {
         if (!block.text && !live) return;
-        const md = h("div", { class: "ai-md" });
-        renderMarkdown(md, block.text, {
-          onCopy: (code) => void copyText(code).then((ok) => ok && ctx.toast.success("Code copied.")),
-        });
-        if (live) caretInto(md);
-        parts.push(md);
+        parts.push(
+          reuse(index, sig, () => {
+            const md = h("div", { class: "ai-md" });
+            renderMarkdown(md, block.text, {
+              onCopy: (code) => void copyText(code).then((ok) => ok && ctx.toast.success("Code copied.")),
+            });
+            if (live) caretInto(md);
+            return md;
+          }),
+        );
       } else if (block.type === "tool") {
-        parts.push(toolCard(message, block, opened));
+        parts.push(reuse(index, sig, () => toolCard(message, block, opened)));
       }
     });
     // Between steps: still working.
     const tail = blocks[last];
     const toolBusy = tail?.type === "tool" && (tail.status === "running" || tail.status === "allowed");
     if (streaming && tail?.type !== "text" && !toolBusy && !(tail?.type === "reasoning")) {
-      const md = h("div", { class: "ai-md" });
-      caretInto(md);
-      parts.push(md);
+      parts.push(
+        reuse(-1, "caret", () => {
+          const md = h("div", { class: "ai-md" });
+          caretInto(md);
+          return md;
+        }),
+      );
     }
     if (message.status === "error") {
-      parts.push(h("div", { class: "ai-error", role: "alert" }, iconSvg("warning", 14), h("span", {}, message.error || "The reply failed.")));
+      const error = message.error || "The reply failed.";
+      parts.push(reuse(-2, error, () => h("div", { class: "ai-error", role: "alert" }, iconSvg("warning", 14), h("span", {}, error))));
     }
     if (!streaming && message.status !== "waiting") {
       const meta: string[] = [];
@@ -1023,27 +1068,32 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       if (message.status === "stopped") meta.push("stopped");
       if (message.inputTokens || message.outputTokens) meta.push(`${formatTokens(message.inputTokens + message.outputTokens)} tokens`);
       parts.push(
-        h(
-          "div",
-          { class: "ai-msg-tools" },
-          text
-            ? h(
-                "button",
-                {
-                  class: "btn btn-ghost btn-icon btn-sm",
-                  type: "button",
-                  title: "Copy",
-                  ariaLabel: "Copy",
-                  onClick: () => void copyText(text).then((ok) => ok && ctx.toast.success("Copied.")),
-                },
-                iconSvg("copy", 13),
-              )
-            : null,
-          h("span", { class: "ai-meta small faint" }, meta.join(" · ")),
+        reuse(-3, `${meta.join("|")}|${text}`, () =>
+          h(
+            "div",
+            { class: "ai-msg-tools" },
+            text
+              ? h(
+                  "button",
+                  {
+                    class: "btn btn-ghost btn-icon btn-sm",
+                    type: "button",
+                    title: "Copy",
+                    ariaLabel: "Copy",
+                    onClick: () => void copyText(text).then((ok) => ok && ctx.toast.success("Copied.")),
+                  },
+                  iconSvg("copy", 13),
+                )
+              : null,
+            h("span", { class: "ai-meta small faint" }, meta.join(" · ")),
+          ),
         ),
       );
     }
-    body.replaceChildren(...parts);
+    shownParts.set(body, now);
+    // Only what changed is put in again.
+    const same = parts.length === body.children.length && parts.every((part, i) => body.children[i] === part);
+    if (!same) body.replaceChildren(...parts);
   }
 
   function toolCard(message: Message, block: ToolBlock, opened: Map<string, boolean>): HTMLElement {
@@ -1141,24 +1191,61 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (entry.frame) return;
     entry.frame = window.requestAnimationFrame(() => {
       entry.frame = 0;
-      const stick = nearBottom();
       const latest = current?.messages.find((m) => m.id === message.id);
       if (latest) fillReply(entry.el, latest);
-      if (stick) scrollToEnd(false);
     });
   }
 
-  function nearBottom(): boolean {
-    return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+  // Following the latest: while the reader is at the end, the chat stays
+  // there as replies grow (and as the window or the composer resizes). A
+  // scroll the reader makes upwards stops it; the button, or scrolling back
+  // down to the end, starts it again.
+  let following = true;
+  let readerAt = 0;
+  const farFromEnd = (): number => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  function toEnd(): void {
+    scroller.scrollTop = scroller.scrollHeight;
   }
-
-  function scrollToEnd(force: boolean): void {
-    if (force || nearBottom()) {
-      window.requestAnimationFrame(() => {
-        scroller.scrollTop = scroller.scrollHeight;
-      });
-    }
+  function followLatest(): void {
+    following = true;
+    toEnd();
+    updateJump();
   }
+  function updateJump(): void {
+    const away = !following && farFromEnd() > 48;
+    jumpButton.classList.toggle("is-shown", away);
+    if (!away) jumpButton.classList.remove("has-new");
+  }
+  for (const type of ["wheel", "touchmove", "pointerdown", "keydown"]) {
+    scroller.addEventListener(type, () => (readerAt = performance.now()), { passive: true });
+  }
+  scroller.addEventListener(
+    "scroll",
+    () => {
+      // Only the reader's own scrolling decides (not the chat growing or a
+      // re-render); reaching the end always follows again.
+      const far = farFromEnd();
+      if (far <= 4) following = true;
+      else if (performance.now() - readerAt < 1000) following = far <= 48;
+      updateJump();
+    },
+    { passive: true },
+  );
+  jumpButton.addEventListener("click", () => {
+    following = true;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "smooth" });
+    updateJump();
+  });
+  let threadHeight = 0;
+  const followObserver = new ResizeObserver(() => {
+    const grew = thread.offsetHeight > threadHeight;
+    threadHeight = thread.offsetHeight;
+    if (following) toEnd();
+    else if (grew && current?.conversation.running) jumpButton.classList.add("has-new");
+    updateJump();
+  });
+  followObserver.observe(thread);
+  followObserver.observe(scroller);
 
   // ---------------------------------------------------------- realtime
   unsubscribers.push(
@@ -1190,11 +1277,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       else if (typeof event.seq === "number" && event.message.status === "streaming") current.seq = event.seq;
       if (event.message.role === "assistant") current.conversation.waiting = event.message.status === "waiting";
       if (known) refreshMessage(event.message);
-      else {
-        const stick = nearBottom();
-        renderThread();
-        if (stick) scrollToEnd(true);
-      }
+      else renderThread();
       updateComposer();
     }),
     realtime.on<ConversationEvent>("ai.conversation", (event) => {
@@ -1237,6 +1320,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   });
   ctx.onDispose(() => {
     disposed = true;
+    followObserver.disconnect();
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     for (const entry of bodies.values()) if (entry.frame) window.cancelAnimationFrame(entry.frame);
     allowanceRefresh.cancel();

@@ -52,8 +52,9 @@ this file by `scripts/changelog-section.sh`.
   Claude's effort or the OpenAI-style `reasoning_effort`, lowered when a
   model does not have that level), and new chats start from the last one
   chosen. A permission chip chooses what the agent may do without asking:
-  ask every time, read files, change files, or files and the web; commands
-  always ask. Database schema v13.
+  ask every time, read files, change files, files and the web, or
+  everything (commands too: as root for administrators, who confirm it
+  once; read-only on the server for everyone else). Database schema v13.
 
 - **AI Agent on the server, read-only for everyone but administrators.**
   New tools list and read the server's own files. For accounts that are not
@@ -92,6 +93,12 @@ this file by `scripts/changelog-section.sh`.
   apart and billed at its own, lower price, so spending limits match what
   providers charge. Prices moved out of the provider form. Database schema
   v15.
+- **Peak-hour and long-prompt prices.** Where a provider's list prices a
+  model higher at certain times (OpenCode's peak hours, e.g. twice the price
+  on weekdays 01:00–04:00 and 06:00–10:00 UTC, or from a date on) or for
+  long prompts (e.g. above 200K input tokens), usage is counted at the price
+  that applied when the reply was written. Settings → Prices shows these
+  rules under each model.
 
 ### Changed
 
@@ -108,6 +115,15 @@ this file by `scripts/changelog-section.sh`.
   that provider needs (a key with a link to get one; the address under
   Advanced), loads its models as soon as the key is in and lets you pick them
   as chips.
+- **AI Agent shows each provider's logo** (from Lobe Icons, MIT) instead of
+  its initials; custom endpoints and llama.cpp keep initials.
+- **AI Agent's chat scrolls better.** It follows a reply as it streams only
+  while you are at the end; scroll up to read and it stays put, with a
+  button (marked when more came in) to go back down. A chat always opens at
+  its latest message (it no longer takes the window's saved scroll position
+  from another page), parts of a reply that are done stop redrawing while
+  the rest streams (so clicks and selections there work), text fades under
+  the header instead of being cut, and turns sit closer together.
 - **An app's dialogs open in its own window**, as on other systems, instead
   of dimming the whole desktop: they cover only that window's content, move
   with it, and close when it closes. The title bar still moves, minimizes and

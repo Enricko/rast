@@ -1,8 +1,9 @@
-// Small pictures for the AI Agent: a mark per provider (its initials in a
-// colour that recalls it; no logos) and an avatar per agent (a gradient
+// Small pictures for the AI Agent: a mark per provider (its logo, or its
+// initials, on a colour that recalls it) and an avatar per agent (a gradient
 // picked from its name, so each agent keeps its own look everywhere).
 
 import { h } from "../../core/dom";
+import { KIND_LOGOS, LOGOS } from "./logos";
 
 interface Mark {
   text: string;
@@ -35,18 +36,50 @@ const MARKS: Record<string, Mark> = {
   lmstudio: { text: "LM", bg: "#4f46e5" },
   vllm: { text: "v", bg: "#fdb515", fg: "#1f2328" },
   llamacpp: { text: "ll", bg: "#8b5cf6" },
+  chatgpt: { text: "C", bg: "#10a37f" },
   custom: { text: "{ }", bg: "#475569" },
   "custom-anthropic": { text: "{A}", bg: "#7c5a4a" },
 };
 
-/** A provider kind's mark (`size` in pixels). */
+const SVG = "http://www.w3.org/2000/svg";
+
+/** A logo as an SVG drawn in the current colour. */
+function logoSvg(name: string): SVGSVGElement | null {
+  const paths = LOGOS[name];
+  if (!paths) return null;
+  const svg = document.createElementNS(SVG, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("fill", "currentColor");
+  svg.setAttribute("aria-hidden", "true");
+  svg.classList.add("ai-mark-logo");
+  for (const p of paths) {
+    const path = document.createElementNS(SVG, "path");
+    path.setAttribute("d", p.d);
+    if (p.fillRule) path.setAttribute("fill-rule", p.fillRule);
+    if (p.clipRule) path.setAttribute("clip-rule", p.clipRule);
+    if (p.fillOpacity) path.setAttribute("fill-opacity", p.fillOpacity);
+    if (p.opacity) path.setAttribute("opacity", p.opacity);
+    svg.appendChild(path);
+  }
+  return svg;
+}
+
+/** Whether a provider kind has a logo (others show initials). */
+export function hasLogo(kind: string): boolean {
+  return (KIND_LOGOS[kind] ?? "") in LOGOS;
+}
+
+/** A provider kind's mark (`size` in pixels): its logo on its colour, or
+ * its initials. */
 export function providerMark(kind: string, size = 28): HTMLElement {
   const mark = MARKS[kind] ?? { text: kind.slice(0, 2).toUpperCase(), bg: "#64748b" };
-  const el = h("span", { class: "ai-mark", ariaHidden: true }, mark.text);
+  const logo = logoSvg(KIND_LOGOS[kind] ?? "");
+  const el = h("span", { class: "ai-mark", ariaHidden: true }, logo ?? mark.text);
   el.style.setProperty("--mark-size", `${size}px`);
   el.style.background = mark.bg;
   el.style.color = mark.fg ?? "#fff";
-  if (mark.text.length > 1) el.classList.add("is-wide");
+  if (logo) el.classList.add("has-logo");
+  else if (mark.text.length > 1) el.classList.add("is-wide");
   return el;
 }
 

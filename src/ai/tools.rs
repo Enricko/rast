@@ -100,10 +100,11 @@ pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
 }
 
-/// Whether the owner may let the tool run without asking in a chat (the
-/// shell always asks).
+/// Whether the owner may let the tool run without asking in a chat: every
+/// tool, commands included ("Allow everything"). Commands still run where
+/// the account's commands run (administrators: root; others: read-only).
 pub fn may_skip_asking(name: &str) -> bool {
-    is_tool(name) && name != RUN_COMMAND
+    is_tool(name)
 }
 
 /// Where commands run for an account.

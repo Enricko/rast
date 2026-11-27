@@ -440,6 +440,9 @@ pre {
   backdrop-filter: blur(26px) saturate(1.2);
   box-shadow: var(--shadow-window);
   overflow: hidden;
+  /* Clipped, never scrolled: focusing something at an edge (a dialog's
+     button, say) must not shift the whole window's content sideways. */
+  overflow: clip;
   opacity: 0;
   transform: translateY(8px) scale(0.985);
   transition: opacity 0.16s ease, transform 0.16s ease;

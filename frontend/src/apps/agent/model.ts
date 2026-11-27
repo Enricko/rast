@@ -109,6 +109,61 @@ export interface Price {
   output: number;
   cached?: number;
   cacheWrite?: number;
+  /** Other prices for prompts of more than `above` input tokens. */
+  tiers?: PriceTier[];
+  /** Factors at certain times (UTC), e.g. peak hours. */
+  multipliers?: PriceMultiplier[];
+}
+
+export interface PriceTier {
+  above: number;
+  input: number;
+  output: number;
+  cached?: number;
+  cacheWrite?: number;
+}
+
+export interface PriceMultiplier {
+  factor: number;
+  /** "mon" … "sun"; none: every day. */
+  days?: string[];
+  /** ["01:00", "04:00"]; none: all day. */
+  hours?: Array<[string, string]>;
+  /** YYYY-MM-DD, from (inclusive) and until (exclusive). */
+  from?: string;
+  until?: string;
+}
+
+const WEEK = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+function dayNames(days: string[]): string {
+  const idx = days.map((d) => WEEK.indexOf(d.toLowerCase())).filter((i) => i >= 0).sort((a, b) => a - b);
+  const name = (i: number) => WEEK[i]![0]!.toUpperCase() + WEEK[i]!.slice(1);
+  const consecutive = idx.length > 2 && idx.every((d, i) => i === 0 || d === idx[i - 1]! + 1);
+  return consecutive ? `${name(idx[0]!)}–${name(idx[idx.length - 1]!)}` : idx.map(name).join(", ");
+}
+
+function shortDate(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? date : d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+/** A price's time and length rules in words: "×2 Mon–Fri 01:00–04:00
+ * UTC", "Over 200k tokens: $4 in, $12 out". */
+export function priceRules(price: Price): string[] {
+  const out: string[] = [];
+  for (const m of price.multipliers ?? []) {
+    const parts = [`×${Number(m.factor.toFixed(2))}`];
+    if (m.days?.length) parts.push(dayNames(m.days));
+    if (m.hours?.length) parts.push(`${m.hours.map(([a, b]) => `${a}–${b}`).join(", ")} UTC`);
+    if (m.from) parts.push(`from ${shortDate(m.from)}`);
+    if (m.until) parts.push(`until ${shortDate(m.until)}`);
+    out.push(parts.join(" "));
+  }
+  for (const t of price.tiers ?? []) {
+    out.push(`Over ${formatTokens(t.above)} tokens: ${formatPrice(t.input)} in, ${formatPrice(t.output)} out`);
+  }
+  return out;
 }
 
 export type Prices = Record<string, Price>;
@@ -407,9 +462,9 @@ export function effortLabel(effort: string | undefined): string {
   return EFFORTS.find((e) => e.id === (effort ?? ""))?.label ?? "Auto";
 }
 
-/** What may run without asking: presets of tools (commands always ask). */
+/** What may run without asking: presets of tools. */
 export interface PermissionMode {
-  id: "ask" | "read" | "edit" | "act";
+  id: "ask" | "read" | "edit" | "act" | "all";
   label: string;
   short: string;
   hint: string;
@@ -424,6 +479,7 @@ export const PERMISSION_MODES: readonly PermissionMode[] = [
   { id: "read", label: "Allow reading files", short: "Reads freely", hint: "Lists, reads and searches your files and the server's without asking", tools: READ_TOOLS },
   { id: "edit", label: "Allow file changes", short: "Edits freely", hint: "Also writes files and makes folders without asking", tools: EDIT_TOOLS },
   { id: "act", label: "Allow files and the web", short: "Acts freely", hint: "Also searches the web and opens pages without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url"] },
+  { id: "all", label: "Allow everything", short: "Runs freely", hint: "Also runs commands without asking", tools: [...EDIT_TOOLS, "web_search", "fetch_url", "run_command"] },
 ];
 
 /** The preset a chat's allowed tools match, or null (allowed one by one). */
@@ -432,9 +488,9 @@ export function permissionMode(allowed: readonly string[]): PermissionMode | nul
   return PERMISSION_MODES.find((mode) => mode.tools.length === have.size && mode.tools.every((t) => have.has(t))) ?? null;
 }
 
-/** Whether "Allow for this chat" is offered (never for the shell). */
+/** Whether "Allow for this chat" is offered: for every tool. */
 export function maySkipAsking(name: string): boolean {
-  return name in TOOL_INFO && name !== "run_command";
+  return name in TOOL_INFO;
 }
 
 /** Insert or replace a message, keeping id order. */

@@ -337,7 +337,7 @@ struct NewConversation {
     allowed_tools: Vec<String>,
 }
 
-/// Tools that may run without asking, without repeats (never the shell).
+/// Tools that may run without asking, without repeats.
 fn allowed_tool_list(list: &[String]) -> AppResult<Vec<String>> {
     let mut allowed: Vec<String> = Vec::new();
     for name in list {
@@ -1325,7 +1325,7 @@ fn checked_prices(prices: &provider::Prices, models: &[String]) -> AppResult<pro
         if !price.valid() {
             return Err(price_error());
         }
-        out.insert(model.clone(), *price);
+        out.insert(model.clone(), price.clone());
     }
     Ok(out)
 }

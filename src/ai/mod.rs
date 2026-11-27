@@ -1022,7 +1022,7 @@ pub async fn record_usage(
     let cost = provider(pool, provider_id)
         .await?
         .and_then(|p| prices::resolve(&p, model).0)
-        .map_or(0, |price| price.cost_micros(usage));
+        .map_or(0, |price| price.cost_micros(usage, chrono::Utc::now()));
     let input = usage.input.max(0);
     let cache_read = usage.cache_read.clamp(0, input);
     sqlx::query(
@@ -1714,11 +1714,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            prices::Price::new(3.0, 15.0, None, None).cost_micros(&usage(1000, 200)),
+            prices::Price::new(3.0, 15.0, None, None)
+                .cost_micros(&usage(1000, 200), chrono::Utc::now()),
             6000
         );
         assert_eq!(
-            prices::Price::new(0.1, 0.4, None, None).cost_micros(&usage(3, 0)),
+            prices::Price::new(0.1, 0.4, None, None).cost_micros(&usage(3, 0), chrono::Utc::now()),
             0
         );
         assert_eq!(usd_to_micros(1.5), 1_500_000);

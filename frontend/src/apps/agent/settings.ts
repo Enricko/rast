@@ -14,6 +14,7 @@ import {
   formatTokens,
   formatPrice,
   formatUsd,
+  priceRules,
   groupKinds,
   type Price,
   type PriceListing,
@@ -1207,7 +1208,12 @@ export function mountSettings(options: {
           h(
             "tr",
             { class: "ai-usage-row" },
-            h("td", {}, h("button", { class: "ai-usage-open", type: "button", onClick: () => editPrice(provider, item) }, item.model, iconSvg("edit", 12))),
+            h(
+              "td",
+              {},
+              h("button", { class: "ai-usage-open", type: "button", onClick: () => editPrice(provider, item) }, item.model, iconSvg("edit", 12)),
+              ...(item.price ? priceRules(item.price) : []).map((rule) => h("span", { class: "ai-price-rule small muted" }, rule)),
+            ),
             ...priceCells(item.price),
             h("td", {}, from),
           ),
@@ -1283,6 +1289,8 @@ export function mountSettings(options: {
     const output = field("Output", current?.output, bp?.output);
     const cached = field("Cached input", current?.cached, bp?.cached ?? bp?.input);
     const write = field("Cache write", current?.cacheWrite, bp?.cacheWrite ?? bp?.input);
+    // Peak hours and long-prompt prices stay as they are.
+    const rules = (current ?? bp) ? priceRules((current ?? bp)!) : [];
     const otherwise =
       base && base.source !== "none"
         ? `Without a price here: ${SOURCE_TEXT[base.source].toLowerCase()}${base.match ? ` (${base.match})` : ""}${bp ? `, ${formatPrice(bp.input)} in, ${formatPrice(bp.output)} out` : ""}.`
@@ -1305,6 +1313,7 @@ export function mountSettings(options: {
         h("p", { class: "small muted" }, `${provider.name}. USD per million tokens; empty fields take the value shown.`),
         h("div", { class: "ai-form-row" }, input.el, output.el),
         h("div", { class: "ai-form-row" }, cached.el, write.el),
+        rules.length ? h("p", { class: "small muted" }, `Kept as they are: ${rules.join("; ")}.`) : null,
         h("p", { class: "small muted" }, otherwise),
         status,
       ),
@@ -1324,9 +1333,12 @@ export function mountSettings(options: {
               if (Number.isNaN(value) || (value !== null && value < 0)) formError(status, new Error("Prices are a number of dollars, 0 or more."));
               return value ?? fallback;
             };
+            const keep = current ?? bp;
             const price: Price = {
               input: read(input, bp?.input) ?? 0,
               output: read(output, bp?.output) ?? 0,
+              ...(keep?.tiers?.length ? { tiers: keep.tiers } : {}),
+              ...(keep?.multipliers?.length ? { multipliers: keep.multipliers } : {}),
             };
             const c = read(cached, bp?.cached);
             const w = read(write, bp?.cacheWrite);

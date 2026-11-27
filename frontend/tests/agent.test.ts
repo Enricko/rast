@@ -10,6 +10,7 @@ import {
   allowanceUsed,
   formatUsd,
   formatPrice,
+  priceRules,
   applyDelta,
   groupByDay,
   maySkipAsking,
@@ -158,7 +159,7 @@ test("tool cards show their main argument", () => {
   assert.equal(toolArgument({ name: "read_file", input: "not json" }), "not json");
   assert.equal(toolArgument({ name: "unknown", input: { a: 1 } }), '{"a":1}');
   assert.equal(maySkipAsking("write_file"), true);
-  assert.equal(maySkipAsking("run_command"), false);
+  assert.equal(maySkipAsking("run_command"), true);
   assert.equal(maySkipAsking("format_disk"), false);
 });
 
@@ -190,6 +191,18 @@ test("allowance summary", () => {
   assert.equal(formatPrice(0.0028), "$0.0028");
   assert.equal(formatPrice(0), "$0");
   assert.equal(formatPrice(12.5), "$12.50");
+  assert.deepEqual(
+    priceRules({
+      input: 2,
+      output: 6,
+      multipliers: [
+        { factor: 2, days: ["mon", "tue", "wed", "thu", "fri"], hours: [["01:00", "04:00"], ["06:00", "10:00"]] },
+        { factor: 2, from: "2026-12-01" },
+      ],
+      tiers: [{ above: 200_000, input: 4, output: 12 }],
+    }),
+    ["×2 Mon–Fri 01:00–04:00, 06:00–10:00 UTC", "×2 from Dec 1, 2026", "Over 200k tokens: $4 in, $12 out"],
+  );
 });
 
 test("chats group by day", () => {
@@ -247,7 +260,9 @@ test("a chat's allowed tools match a permission preset in any order", () => {
   assert.equal(permissionMode(PERMISSION_MODES[3]!.tools)?.id, "act");
   // Allowed one by one ("Allow for this chat" on a single tool).
   assert.equal(permissionMode(["read_file"]), null);
-  assert.ok(PERMISSION_MODES.every((m) => !m.tools.includes("run_command")));
+  // Only "Allow everything" runs commands without asking.
+  assert.deepEqual(PERMISSION_MODES.filter((m) => m.tools.includes("run_command")).map((m) => m.id), ["all"]);
+  assert.equal(permissionMode(PERMISSION_MODES[4]!.tools)?.id, "all");
 });
 
 test("effort levels are labelled, Auto for none", () => {

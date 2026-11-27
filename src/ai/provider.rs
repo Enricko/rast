@@ -1029,12 +1029,25 @@ pub fn parse_prices(body: &str) -> Prices {
                         .min_by(f64::total_cmp),
                     other => number(Some(other)),
                 });
-                Price::new(
+                let base = Price::new(
                     number(text.pointer("/input/price"))?,
                     number(text.pointer("/output/price"))?,
                     number(text.pointer("/input/cache/read")),
                     write,
-                )
+                );
+                Price {
+                    tiers: super::prices::opencode_tiers(text, &base, |v| number(Some(v))),
+                    multipliers: m
+                        .pointer("/cost/multipliers")
+                        .and_then(Value::as_array)
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(super::prices::opencode_multiplier)
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    ..base
+                }
             } else {
                 let pricing = m.get("pricing")?;
                 let per_token = |keys: &[&str]| {
@@ -1049,12 +1062,26 @@ pub fn parse_prices(body: &str) -> Prices {
                     per_token(&["input_cache_write"]),
                 )
             };
-            let price = Price::new(
-                round(price.input),
-                round(price.output),
-                price.cached.map(round),
-                price.cache_write.map(round),
-            );
+            let price = Price {
+                tiers: price
+                    .tiers
+                    .iter()
+                    .map(|t| super::prices::Tier {
+                        input: round(t.input),
+                        output: round(t.output),
+                        cached: t.cached.map(round),
+                        cache_write: t.cache_write.map(round),
+                        ..t.clone()
+                    })
+                    .collect(),
+                multipliers: price.multipliers.clone(),
+                ..Price::new(
+                    round(price.input),
+                    round(price.output),
+                    price.cached.map(round),
+                    price.cache_write.map(round),
+                )
+            };
             // Negative: "it depends" (OpenRouter's automatic routing).
             price.valid().then(|| (id.to_string(), price))
         })
@@ -1626,6 +1653,27 @@ mod tests {
                     Price::new(3.0, 15.0, None, Some(3.75))
                 ),
             ])
+        );
+        // OpenCode Go's DeepSeek and Grok: peak hours and long prompts.
+        let prices = parse_prices(
+            &json!({"data": [
+                {"id": "ds", "cost": {"text": {"input": {"price": 0.15, "cache": {"read": 0.003}}, "output": {"price": 0.6}},
+                    "multipliers": [{"when": {"utc_days": {"in": ["mon", "tue", "wed", "thu", "fri"]}, "any": [{"all": [{"utc_hours": {"gte": "01:00"}}, {"utc_hours": {"lt": "04:00"}}]}]}, "factor": 2}]}},
+                {"id": "grok", "cost": {"text": {"input": {"price": 2, "cache": {"read": 0.5}, "overrides": [{"when": {"context": {"gt": 200000}}, "price": 4, "cache": {"read": 1}}]},
+                    "output": {"price": 6, "overrides": [{"when": {"context": {"gt": 200000}}, "price": 12}]}}}}
+            ]})
+            .to_string(),
+        );
+        assert_eq!(prices["ds"].multipliers.len(), 1);
+        assert_eq!(prices["ds"].multipliers[0].factor, 2.0);
+        assert_eq!(prices["ds"].multipliers[0].days.len(), 5);
+        assert_eq!(prices["grok"].tiers.len(), 1);
+        assert_eq!(
+            (
+                prices["grok"].tiers[0].above,
+                prices["grok"].tiers[0].output
+            ),
+            (200_000, 12.0)
         );
     }
 

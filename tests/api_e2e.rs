@@ -4501,12 +4501,23 @@ async fn ai_agent_tools_ask_before_acting() {
         calls[0]["output"].as_str().unwrap().contains("hello.txt"),
         "{reply}"
     );
-    // The shell never skips asking; Alice may go back to asking for all.
-    let (status, _, _) = server
+    // Commands may run without asking too ("Allow everything"); an unknown
+    // tool may not; Alice may go back to asking for all.
+    let (status, _, body) = server
         .request(
             "PATCH",
             &format!("/api/ai/conversations/{id}"),
             Some(json!({"allowedTools": ["run_command"]})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["conversation"]["allowedTools"], json!(["run_command"]));
+    let (status, _, _) = server
+        .request(
+            "PATCH",
+            &format!("/api/ai/conversations/{id}"),
+            Some(json!({"allowedTools": ["format_disk"]})),
             alice.headers_with_csrf(),
         )
         .await;

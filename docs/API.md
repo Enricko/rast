@@ -266,10 +266,19 @@ with the most generous winning, limit by limit (`group:<id>`), else the
 `default` rule, else no limits. Administrators are not limited. Usage counts
 the tokens the provider reports (about four characters per token when it
 reports none) and stays counted when a chat is deleted. **Money** comes from
-each model's price, a `Price` of `{input, output, cached?, cacheWrite?}` in
-USD per million tokens (`cached`: input the provider reads back from its
-prompt cache; `cacheWrite`: input written to it; both the input price when
-absent; reasoning counts as output; `[input, output]` is still read). A
+each model's price, a `Price` of `{input, output, cached?, cacheWrite?,
+tiers?, multipliers?}` in USD per million tokens (`cached`: input the
+provider reads back from its prompt cache; `cacheWrite`: input written to
+it; both the input price when absent; reasoning counts as output; `[input,
+output]` is still read). `tiers` are other prices for long prompts,
+`[{above, input, output, cached?, cacheWrite?}]` (more than `above` input
+tokens; the highest that applies wins). `multipliers` are factors on the
+whole price at certain times, all that apply multiplied: `[{factor, days?,
+hours?, from?, until?}]` with `days` such as `["mon", …]`, `hours` such as
+`[["01:00", "04:00"]]` (UTC, the second excluded, across midnight when it is
+earlier) and `from`/`until` dates (`YYYY-MM-DD`, `until` excluded); OpenCode's
+`cost.multipliers` and `input`/`output` `overrides` are read into these. A
+reply is priced when it is recorded. A
 model's price on a provider is, first to last: the one an administrator set
 there (`prices`), the one the provider's own model list gives (`listPrices`:
 OpenCode's `cost`, OpenRouter's or Vercel's `pricing`; kept when the models
@@ -361,8 +370,9 @@ chat's owner: the reply is stored with `status:"waiting"` and a block
 `{type:"tool", id, name, input, status:"pending"}`; the owner answers
 `allow` or `deny`, and once every call is answered the reply goes on (calls
 run in order, then the model hears their results). The owner may let a tool
-other than `run_command` run without asking for the rest of a chat
-(`always:true`, kept in `allowedTools`). Sending a message or stopping instead
+run without asking for the rest of a chat (`always:true`, kept in
+`allowedTools`; `run_command` too, where it still runs as that account's
+commands do). Sending a message or stopping instead
 ends the request (its calls become `skipped`). Each call that runs is audited
 (`ai.tool.<name>`). A reply makes at most 25 model calls per run.
 
@@ -373,7 +383,7 @@ ends the request (its calls become `skipped`). Each call that runs is audited
 | GET | `/api/ai/conversations?q=&limit=` | the caller's own chats, newest first: `{items:[{id, userId, agentId, providerId, model, title, allowedTools, effort, createdAt, updatedAt, running, waiting}]}` (`waiting`: the last reply waits for a tool answer) |
 | POST | `/api/ai/conversations` | `{agentId}` and/or `{providerId, model}` (an agent brings its own model; a model must be one the provider offers), plus `effort?` and `allowedTools?` to start with |
 | GET | `/api/ai/conversations/{id}` | `{conversation, messages:[{id, role, content:[blocks], providerId, model, inputTokens, outputTokens, status:"streaming"\|"waiting"\|"done"\|"stopped"\|"error", error, createdAt, finishedAt}], seq, readOnly}`. Blocks: `{type:"text"\|"reasoning", text}` and `{type:"tool", id, name, input, status:"pending"\|"allowed"\|"running"\|"done"\|"error"\|"denied"\|"skipped", output?, error?}`, in reply order. A reply being written comes with what it has so far and `seq` (deltas already in it). Administrators may read anyone's chat (`readOnly:true`, `conversation.owner`; audited `ai.conversation.view`) |
-| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?, allowedTools?, effort?}` (`allowedTools: []` = ask before every tool again; never `run_command`; `effort: ""` = the provider's default); owner only |
+| PATCH | `/api/ai/conversations/{id}` | `{title?, agentId?` (`""` = none)`, providerId?, model?, allowedTools?, effort?}` (`allowedTools: []` = ask before every tool again; `effort: ""` = the provider's default); owner only |
 | DELETE | `/api/ai/conversations/{id}` | owner only; stops a running reply |
 | POST | `/api/ai/conversations/{id}/messages` | `{text}` (≤ 100 KiB): stores it and starts the reply in the background; returns `{conversation, message, reply}` (`reply.status:"streaming"`). `409` while a reply is running, `429` (with `Retry-After`) once the allowance is used, `403` for a provider the account may not use |
 | POST | `/api/ai/conversations/{id}/stop` | `{stopped}`; the reply keeps what was written (`status:"stopped"`); a reply waiting for tool answers ends too (its calls `skipped`) |
