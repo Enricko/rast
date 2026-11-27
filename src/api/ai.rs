@@ -1718,13 +1718,19 @@ async fn probe_models(
         let saved = saved.ok_or_else(|| AppError::bad_request("sign in first"))?;
         let (token, account) = ai::signed_in_token(&state.db, &state.secrets, &saved).await?;
         let base_url = saved.effective_base_url();
-        let models = tokio::task::spawn_blocking(move || {
+        let list = tokio::task::spawn_blocking(move || {
             provider::list_plan_models(kind, &base_url, &token, &account)
         })
         .await
         .map_err(|e| AppError::internal(format!("model list failed: {e}")))?
         .map_err(AppError::bad_request)?;
-        return Ok(Json(json!({ "models": models, "prices": {} })));
+        // "built-in": the plan's own catalog could not be used; `note` says why.
+        return Ok(Json(json!({
+            "models": list.models,
+            "prices": {},
+            "source": if list.fallback_reason.is_some() { "built-in" } else { "live" },
+            "note": list.fallback_reason,
+        })));
     }
     let base_url = match body.base_url.as_deref().map(checked_base_url).transpose()? {
         Some(url) if !url.is_empty() => url,
@@ -1795,6 +1801,7 @@ async fn store_signed_in(
         .await
         .ok()
         .and_then(Result::ok)
+        .map(|list| list.models)
         .filter(|models| !models.is_empty())
     };
     let sealed = ai::seal_credentials(&state.secrets, &credentials)?;

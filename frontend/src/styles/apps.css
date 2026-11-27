@@ -6579,6 +6579,12 @@ button.pkg-pill {
   text-decoration: underline;
 }
 
+.ai-model-note {
+  margin: 0;
+  color: var(--warning-strong);
+  overflow-wrap: anywhere;
+}
+
 .ai-card-key.is-warn {
   color: var(--warning-strong);
 }

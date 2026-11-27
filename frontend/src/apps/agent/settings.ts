@@ -482,17 +482,22 @@ export function mountSettings(options: {
       drawChips();
       drawOffer();
     });
+    // Shown when the list is RAST's own because the provider's could not be read.
+    const listNote = h("p", { class: "field-hint ai-model-note", hidden: true });
     const loadModels = async (quiet: boolean) => {
       loadButton.disabled = true;
       if (!quiet) status.hidden = true;
       try {
-        const result = await ctx.api.post<{ models: string[]; prices?: Prices }>("/api/ai/providers/models", {
+        const result = await ctx.api.post<{ models: string[]; prices?: Prices; source?: "live" | "built-in"; note?: string | null }>("/api/ai/providers/models", {
           ...(existing ? { providerId: existing.id } : { kind: info.id }),
           ...(baseUrl.value.trim() ? { baseUrl: baseUrl.value.trim() } : {}),
           ...(key.value.trim() ? { apiKey: key.value.trim() } : {}),
         });
         offered = result.models;
         listPrices = result.prices ?? {};
+        listNote.hidden = result.source !== "built-in";
+        listNote.textContent =
+          result.source === "built-in" ? `These are RAST's built-in models for ${info.label}. Its own list: ${result.note || "unavailable"}` : "";
         filter.placeholder = `Filter ${offered.length} models`;
         offerEl.classList.remove("hidden");
         drawOffer();
@@ -556,6 +561,7 @@ export function mountSettings(options: {
         h("span", { class: "field-label ai-field-row" }, "Models people can pick", loadButton),
         chips,
         offerEl,
+        listNote,
         typed,
       ),
       advanced.childElementCount > 1 ? advanced : null,

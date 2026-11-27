@@ -584,14 +584,32 @@ pub fn refuses_effort(status: u16, body: &str) -> bool {
     matches!(status, 400 | 422) && (body.contains("effort") || body.contains("reasoning"))
 }
 
+/// A signed-in plan's models and where they come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanModels {
+    pub models: Vec<String>,
+    /// Why RAST's built-in list stands in for the plan's own catalog (the
+    /// provider's refusal or error); `None` when the list is the provider's.
+    pub fallback_reason: Option<String>,
+}
+
 /// The models a signed-in plan offers: [`plans::catalog`] (blocking HTTP),
-/// with its static fallback list when the catalog cannot be read.
+/// or its static fallback list with the reason the catalog was not used
+/// (also logged), so the page can say the list is RAST's own.
 pub fn list_plan_models(
     kind: Kind,
     base_url: &str,
     token: &str,
     account: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<PlanModels, String> {
+    plan_models_from(kind, plans::catalog(kind, base_url, token, account))
+}
+
+/// [`list_plan_models`] once the catalog has answered (or failed).
+pub(crate) fn plan_models_from(
+    kind: Kind,
+    catalog: Result<Vec<String>, String>,
+) -> Result<PlanModels, String> {
     let fallback = || {
         plans::fallback_models(kind)
             .iter()
@@ -599,12 +617,22 @@ pub fn list_plan_models(
             .take(super::MAX_MODELS)
             .collect::<Vec<_>>()
     };
-    match plans::catalog(kind, base_url, token, account) {
-        Ok(models) if !models.is_empty() => Ok(models),
-        Ok(_) => Ok(fallback()),
-        Err(error) if plans::fallback_models(kind).is_empty() => Err(error),
-        Err(_) => Ok(fallback()),
-    }
+    let reason = match catalog {
+        Ok(models) if !models.is_empty() => {
+            return Ok(PlanModels {
+                models,
+                fallback_reason: None,
+            })
+        }
+        Ok(_) => format!("{} listed no models", kind.label()),
+        Err(error) if plans::fallback_models(kind).is_empty() => return Err(error),
+        Err(error) => error,
+    };
+    tracing::warn!(kind = kind.as_str(), reason = %reason, "AI plan model list unavailable; using RAST's built-in list");
+    Ok(PlanModels {
+        models: fallback(),
+        fallback_reason: Some(reason),
+    })
 }
 
 pub use super::prices::{Price, Prices};

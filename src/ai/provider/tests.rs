@@ -945,3 +945,34 @@ fn a_refused_effort_is_asked_again_lower() {
     assert!(!refuses_effort(401, "effort"));
     assert!(!refuses_effort(400, "model not found"));
 }
+
+/// A plan's own catalog is used when it answers; otherwise RAST's built-in
+/// list stands in, with the provider's reason kept for the page.
+#[test]
+fn plan_model_lists_say_where_they_come_from() {
+    let live = plan_models_from(Kind::Codex, Ok(vec!["gpt-x".into()])).unwrap();
+    assert_eq!(live.models, vec!["gpt-x"]);
+    assert_eq!(live.fallback_reason, None);
+
+    let refused = plan_models_from(
+        Kind::Antigravity,
+        Err("Google's Cloud Code refused the model list (HTTP 403): forbidden".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        refused.models,
+        plans::fallback_models(Kind::Antigravity)
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        refused.fallback_reason.as_deref(),
+        Some("Google's Cloud Code refused the model list (HTTP 403): forbidden")
+    );
+
+    let empty = plan_models_from(Kind::Codex, Ok(Vec::new())).unwrap();
+    assert!(empty.fallback_reason.unwrap().contains("listed no models"));
+    // Kinds without a built-in list pass the error on.
+    assert!(plan_models_from(Kind::OpenAi, Err("nope".into())).is_err());
+}

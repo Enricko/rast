@@ -36,8 +36,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::{json, Map, Value};
 
 use super::{
-    agent, error_text, read_limited, ChatRequest, Delta, ToolCall, ToolResult, ToolSpec, Turn,
-    Usage, Wire, LIST_TIMEOUT,
+    agent, error_text, read_limited, refusal, ChatRequest, Delta, ToolCall, ToolResult, ToolSpec,
+    Turn, Usage, Wire, LIST_TIMEOUT,
 };
 use crate::ai::{Kind, MAX_MODELS, MAX_MODEL_NAME};
 
@@ -743,9 +743,14 @@ pub(crate) fn fetch_available_models(
     let status = response.status().as_u16();
     let text = read_limited(response.into_body(), 4 * 1024 * 1024);
     if !(200..300).contains(&status) {
-        return Err(format!(
-            "Google's Cloud Code refused the model list (HTTP {status})"
-        ));
+        // Google's own words (e.g. a 403 naming the client it expects).
+        let said = refusal(status, &text);
+        let said = said.split_once("): ").map(|(_, said)| said).unwrap_or("");
+        return Err(if said.is_empty() {
+            format!("Google's Cloud Code refused the model list (HTTP {status})")
+        } else {
+            format!("Google's Cloud Code refused the model list (HTTP {status}): {said}")
+        });
     }
     parse_available_models(&text)
 }
