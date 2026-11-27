@@ -53,6 +53,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/admin/usage/{user_id}", get(admin_usage))
         .route("/api/ai/providers", post(create_provider))
         .route("/api/ai/providers/models", post(probe_models))
+        .route("/api/ai/providers/sign-in", post(start_sign_in))
+        .route("/api/ai/providers/sign-in/finish", post(finish_sign_in))
         .route("/api/ai/providers/{id}/prices", put(put_model_price))
         .route("/api/ai/prices", get(get_prices))
         .route("/api/ai/prices/refresh", post(refresh_prices))
@@ -219,6 +221,11 @@ async fn resolve(
             provider.name
         )));
     }
+    if !provider.usable_by(user.id) {
+        return Err(AppError::Forbidden(
+            "only the account that signed in to this plan may use it",
+        ));
+    }
     if !user.is_admin() {
         let limits = ai::effective_limits(&state.db, user).await?;
         if !limits.allows(&provider.id) {
@@ -250,7 +257,7 @@ async fn options(State(state): State<AppState>, user: AuthUser) -> AppResult<Jso
     let providers: Vec<ai::Provider> = ai::providers(&state.db)
         .await?
         .into_iter()
-        .filter(|p| p.enabled && limits.allows(&p.id))
+        .filter(|p| p.enabled && limits.allows(&p.id) && p.usable_by(user.id))
         .collect();
     let agents: Vec<Value> = ai::agents(&state.db)
         .await?
@@ -586,6 +593,8 @@ struct NewMessage {
 struct Prepared {
     resolved: Resolved,
     api_key: Option<String>,
+    /// The signed-in account (ChatGPT's account id), "" none.
+    account: String,
     limits: ai::Effective,
 }
 
@@ -606,7 +615,13 @@ async fn prepare(
     .await?;
     let limits = ai::effective_limits(&state.db, user).await?;
     ai::check_allowance(&state.db, user.id, &limits).await?;
-    let api_key = resolved.provider.api_key(&state.secrets)?;
+    let (api_key, account) = if resolved.provider.kind.signs_in() {
+        let (token, account) =
+            ai::signed_in_token(&state.db, &state.secrets, &resolved.provider).await?;
+        (Some(token), account)
+    } else {
+        (resolved.provider.api_key(&state.secrets)?, String::new())
+    };
     if api_key.is_none() && resolved.provider.kind.needs_key() {
         return Err(AppError::bad_request(format!(
             "{} has no API key yet; an administrator adds it in the AI Agent settings",
@@ -616,6 +631,7 @@ async fn prepare(
     Ok(Prepared {
         resolved,
         api_key,
+        account,
         limits,
     })
 }
@@ -633,6 +649,7 @@ async fn reply_job(
     let Prepared {
         resolved,
         api_key,
+        account,
         limits,
     } = prepared;
     let earlier: Vec<ai::Message> = ai::messages(&state.db, &conversation.id)
@@ -668,6 +685,7 @@ async fn reply_job(
         max_output_tokens: resolved.agent.as_ref().and_then(|a| a.max_output_tokens),
         effort: conversation.effort,
         session: conversation.id.clone(),
+        account,
     };
     Ok(ReplyJob {
         owner: user.clone(),
@@ -1375,6 +1393,12 @@ async fn create_provider(
         .as_deref()
         .and_then(Kind::parse)
         .ok_or_else(|| AppError::bad_request("pick the kind of provider"))?;
+    if kind.signs_in() {
+        return Err(AppError::bad_request(format!(
+            "{} is added by signing in, not with a key",
+            kind.label()
+        )));
+    }
     let name = required(&body.name, "the name", ai::MAX_NAME)?;
     let base_url = checked_base_url(&body.base_url)?;
     if base_url.is_empty() && kind.default_base_url().is_empty() {
@@ -1459,6 +1483,14 @@ async fn update_provider(
         return Err(AppError::bad_request(
             "a custom provider needs its base URL",
         ));
+    }
+    if existing.kind.signs_in()
+        && (!base_url.is_empty() || body.api_key.as_deref().is_some_and(|k| !k.is_empty()))
+    {
+        return Err(AppError::bad_request(format!(
+            "{} keeps its own address and signs in instead of using a key",
+            existing.kind.label()
+        )));
     }
     let models = models_list(&body.models)?;
     let prices = checked_prices(body.prices.as_ref().unwrap_or(&existing.prices), &models)?;
@@ -1670,6 +1702,18 @@ async fn probe_models(
         }
         (None, None) => return Err(AppError::bad_request("pick the kind of provider")),
     };
+    if kind.signs_in() {
+        let saved = saved.ok_or_else(|| AppError::bad_request("sign in first"))?;
+        let (token, account) = ai::signed_in_token(&state.db, &state.secrets, &saved).await?;
+        let base_url = saved.effective_base_url();
+        let models = tokio::task::spawn_blocking(move || {
+            provider::list_codex_models(&base_url, &token, &account)
+        })
+        .await
+        .map_err(|e| AppError::internal(format!("model list failed: {e}")))?
+        .map_err(AppError::bad_request)?;
+        return Ok(Json(json!({ "models": models, "prices": {} })));
+    }
     let base_url = match body.base_url.as_deref().map(checked_base_url).transpose()? {
         Some(url) if !url.is_empty() => url,
         _ => match &saved {
@@ -1692,6 +1736,157 @@ async fn probe_models(
     Ok(Json(
         json!({ "models": list.models, "prices": list.prices }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignInStart {
+    kind: String,
+    /// Sign in again to this provider (else a new one is added).
+    provider_id: Option<String>,
+    #[serde(default)]
+    name: String,
+}
+
+/// POST /api/ai/providers/sign-in — start signing in to a plan: the address
+/// to open in the browser (see [`ai::signin`]).
+async fn start_sign_in(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Json(body): Json<SignInStart>,
+) -> AppResult<Json<Value>> {
+    let kind = Kind::parse(&body.kind)
+        .filter(|k| k.signs_in())
+        .ok_or_else(|| AppError::bad_request("that provider does not sign in"))?;
+    if let Some(id) = &body.provider_id {
+        let existing = ai::provider(&state.db, id)
+            .await?
+            .ok_or(AppError::NotFound("provider not found"))?;
+        if existing.kind != kind {
+            return Err(AppError::bad_request("that provider is of another kind"));
+        }
+    }
+    let name = if body.name.trim().is_empty() {
+        kind.label().to_string()
+    } else {
+        required(&body.name, "the name", ai::MAX_NAME)?
+    };
+    let (url, sign_in) = ai::signin::start(admin.0.id, body.provider_id.clone(), name);
+    Ok(Json(json!({
+        "url": url,
+        "state": sign_in,
+        "redirectUri": ai::signin::REDIRECT_URI,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SignInFinish {
+    /// The address the browser ended on after allowing it.
+    callback: String,
+    /// A new provider's name (absent: the one given when it started).
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// POST /api/ai/providers/sign-in/finish — the pasted address: trade its
+/// code for tokens, then add the provider (or sign it in again) for the
+/// account that signed in, with the models its plan offers.
+async fn finish_sign_in(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    ip: ClientIp,
+    Json(body): Json<SignInFinish>,
+) -> AppResult<Json<Value>> {
+    if body.callback.len() > 8192 {
+        return Err(AppError::bad_request("that address is too long"));
+    }
+    let callback = ai::signin::parse_callback(&body.callback).map_err(AppError::bad_request)?;
+    let mut pending =
+        ai::signin::take_pending(&callback.state, admin.0.id).map_err(AppError::bad_request)?;
+    if let Some(name) = body.name.as_ref().filter(|n| !n.trim().is_empty()) {
+        pending.name = required(name, "the name", ai::MAX_NAME)?;
+    }
+    let now = now_ms();
+    let code = callback.code.clone();
+    let exchanged = {
+        let pending = pending.clone();
+        tokio::task::spawn_blocking(move || ai::signin::exchange(&pending, &code, now))
+            .await
+            .map_err(|e| AppError::internal(format!("sign-in failed: {e}")))?
+            .map_err(AppError::bad_request)?
+    };
+    let kind = Kind::Codex;
+    // The models the plan offers (kept as they were when this fails).
+    let models = {
+        let (token, account) = (exchanged.access_token.clone(), exchanged.account_id.clone());
+        tokio::task::spawn_blocking(move || {
+            provider::list_codex_models(kind.default_base_url(), &token, &account)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+    };
+    let sealed = ai::seal_credentials(&state.secrets, &exchanged)?;
+    let id = match &pending.provider_id {
+        Some(id) => {
+            let existing = ai::provider(&state.db, id)
+                .await?
+                .ok_or(AppError::NotFound("provider not found"))?;
+            let models = match &models {
+                Some(offered) if existing.models.is_empty() => offered.clone(),
+                _ => existing.models.clone(),
+            };
+            sqlx::query(
+                "UPDATE ai_providers SET sign_in = ?, owner_id = ?, models = ?, updated_at = ? WHERE id = ?",
+            )
+            .bind(&sealed)
+            .bind(admin.0.id)
+            .bind(serde_json::to_string(&models).unwrap_or_else(|_| "[]".into()))
+            .bind(now)
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+            id.clone()
+        }
+        None => {
+            let id = ai::new_id();
+            sqlx::query(
+                "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+                     enabled, created_at, updated_at, owner_id, sign_in)
+                 VALUES (?, ?, ?, '', '', ?, '{}', '{}', 1, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(kind.as_str())
+            .bind(&pending.name)
+            .bind(serde_json::to_string(&models.clone().unwrap_or_default()).unwrap_or_else(|_| "[]".into()))
+            .bind(now)
+            .bind(now)
+            .bind(admin.0.id)
+            .bind(&sealed)
+            .execute(&state.db)
+            .await?;
+            id
+        }
+    };
+    audit_admin(
+        &state,
+        &admin.0,
+        &ip,
+        "ai.provider.sign_in",
+        "ai_provider",
+        &id,
+        &pending.name,
+    )
+    .await;
+    config_changed(&state, "providers");
+    let provider = ai::provider(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    Ok(Json(json!({
+        "provider": provider.admin_json(&state.secrets),
+        "offered": models,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

@@ -169,9 +169,9 @@ export function priceRules(price: Price): string[] {
 export type Prices = Record<string, Price>;
 
 /** Where a price comes from: set by an administrator, the provider's own
- * model list, the built-in list, free because the provider runs locally, or
- * unknown (free). */
-export type PriceSource = "set" | "list" | "built-in" | "local" | "none";
+ * model list, the built-in list, free because the provider runs locally or
+ * because a signed-in plan pays for it, or unknown (free). */
+export type PriceSource = "set" | "list" | "built-in" | "local" | "plan" | "none";
 
 export interface PricedModel {
   model: string;
@@ -244,16 +244,24 @@ export interface ProviderKind {
   label: string;
   defaultBaseUrl: string;
   needsKey: boolean;
-  /** How the picker groups it: maker, gateway, fast, local or custom. */
+  /** How the picker groups it: maker, plan, gateway, fast, local or custom. */
   group: string;
   /** Where to get a key ("" none). */
   keyUrl: string;
   about: string;
 }
 
+/** A plan's name as people know it ("plus" → "Plus"). */
+export function planLabel(plan: string): string {
+  const known: Record<string, string> = { plus: "Plus", pro: "Pro", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free", go: "Go" };
+  const p = plan.trim().toLowerCase();
+  return known[p] ?? (p ? p[0]!.toUpperCase() + p.slice(1) : "");
+}
+
 /** The provider picker's groups, in order. */
 export const KIND_GROUPS: Array<{ id: string; label: string }> = [
   { id: "maker", label: "Model makers" },
+  { id: "plan", label: "Sign in with your plan" },
   { id: "gateway", label: "Gateways and subscriptions" },
   { id: "fast", label: "Fast open models" },
   { id: "local", label: "On your network" },
@@ -267,12 +275,24 @@ export function groupKinds(kinds: ProviderKind[], query: string): Array<{ id: st
   return KIND_GROUPS.map((g) => ({ ...g, kinds: kinds.filter((k) => k.group === g.id && match(k)) })).filter((g) => g.kinds.length);
 }
 
+/** Who signed in to a plan (never its tokens). */
+export interface SignedIn {
+  email: string;
+  /** "plus", "pro", "team", … ("" unknown). */
+  plan: string;
+  expiresAt: number;
+}
+
 export interface AdminProvider extends PublicProvider {
   prices: Prices;
   baseUrl: string;
   effectiveBaseUrl: string;
   hasKey: boolean;
   keyHint: string;
+  /** Added by signing in with a plan: only its owner may chat with it. */
+  signsIn: boolean;
+  ownerId: number | null;
+  signedIn: SignedIn | null;
   enabled: boolean;
   createdAt: number;
   updatedAt: number;

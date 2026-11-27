@@ -37,6 +37,7 @@ const MARKS: Record<string, Mark> = {
   vllm: { text: "v", bg: "#fdb515", fg: "#1f2328" },
   llamacpp: { text: "ll", bg: "#8b5cf6" },
   chatgpt: { text: "C", bg: "#10a37f" },
+  codex: { text: "cx", bg: "linear-gradient(135deg, #1b1b1f 40%, #4d55e8)" },
   custom: { text: "{ }", bg: "#475569" },
   "custom-anthropic": { text: "{A}", bg: "#7c5a4a" },
 };

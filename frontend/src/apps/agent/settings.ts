@@ -15,6 +15,7 @@ import {
   formatPrice,
   formatUsd,
   priceRules,
+  planLabel,
   groupKinds,
   type Price,
   type PriceListing,
@@ -283,7 +284,11 @@ export function mountSettings(options: {
               { class: "ai-card-foot small" },
               h("span", { class: `ai-pill${p.enabled ? " is-on" : ""}` }, p.enabled ? "On" : "Off"),
               h("span", { class: "muted" }, models),
-              p.hasKey ? h("span", { class: "muted ai-card-key" }, iconSvg("key", 12), p.keyHint) : null,
+              p.signsIn
+                ? h("span", { class: `ai-card-key${p.signedIn ? " muted" : " is-warn"}` }, iconSvg("user", 12), p.signedIn ? p.signedIn.email || "Signed in" : "Not signed in")
+                : p.hasKey
+                  ? h("span", { class: "muted ai-card-key" }, iconSvg("key", 12), p.keyHint)
+                  : null,
             ),
           ),
           h(
@@ -366,6 +371,11 @@ export function mountSettings(options: {
     if (!info) return;
     const custom = info.group === "custom";
     const local = info.group === "local";
+    const plan = info.group === "plan";
+    if (plan && !existing) {
+      signIn(null, info);
+      return;
+    }
     const name = h("input", { class: "input", value: existing?.name ?? info.label, autocomplete: "off", placeholder: `e.g. ${info.label} (work)` });
     const baseUrl = h("input", {
       class: "input",
@@ -508,7 +518,7 @@ export function mountSettings(options: {
       h("span", { class: "field-hint" }, custom ? "Where its API answers, e.g. https://example.com/v1." : `Leave empty for ${info.defaultBaseUrl}.`),
     );
     const advanced = h("details", { class: "ai-advanced" }, h("summary", {}, "Advanced"));
-    if (!custom) advanced.appendChild(urlField);
+    if (!custom && !plan) advanced.appendChild(urlField);
     if (local) advanced.appendChild(keyField);
     if (existing?.hasKey) advanced.appendChild(removeKey.el);
     advanced.open = Boolean(existing?.baseUrl);
@@ -524,7 +534,7 @@ export function mountSettings(options: {
       ),
       h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
       custom ? urlField : null,
-      local ? null : keyField,
+      plan && existing ? signedInField(existing, info) : local ? null : keyField,
       h(
         "div",
         { class: "field" },
@@ -570,6 +580,146 @@ export function mountSettings(options: {
             }
             close();
             await load();
+          },
+        },
+      ],
+    });
+  }
+
+  /** Who a plan provider is signed in as, and signing in again. */
+  function signedInField(existing: AdminProvider, info: ProviderKind): HTMLElement {
+    const me = ctx.store.get().user?.id ?? null;
+    const owner = overview?.users.find((u) => u.id === existing.ownerId);
+    const who = existing.signedIn;
+    const again = h("button", { class: "btn btn-sm", type: "button" }, iconSvg("refresh", 13), h("span", {}, who ? "Sign in again" : "Sign in"));
+    again.addEventListener("click", () => signIn(existing, info));
+    const ownerText =
+      existing.ownerId === me ? "Only you can chat with it." : owner ? `Only ${owner.displayName || owner.username} can chat with it.` : "Nobody can chat with it until someone signs in again.";
+    return h(
+      "div",
+      { class: "field" },
+      h("span", { class: "field-label ai-field-row" }, "Signed in", again),
+      h(
+        "span",
+        { class: "ai-signed-in" },
+        iconSvg("user", 14),
+        h("span", {}, who ? who.email || "Signed in" : "Not signed in"),
+        who?.plan ? h("span", { class: "ai-pill" }, planLabel(who.plan)) : null,
+      ),
+      h("span", { class: "field-hint" }, ownerText),
+    );
+  }
+
+  /**
+   * Sign in with a plan (ChatGPT's Codex): open OpenAI's page, then paste
+   * the address it sends the browser to (a localhost page that does not
+   * open). A new provider is added for this account; `existing` signs in
+   * again to that one.
+   */
+  function signIn(existing: AdminProvider | null, info: ProviderKind): void {
+    const name = h("input", { class: "input", value: existing?.name ?? info.label, autocomplete: "off", placeholder: `e.g. ${info.label} (work)` });
+    const link = h(
+      "a",
+      { class: "btn btn-primary ai-sign-in-open is-waiting", target: "_blank", rel: "noopener noreferrer" },
+      h("span", {}, "Continue with ChatGPT"),
+      iconSvg("external", 13),
+    );
+    link.setAttribute("aria-disabled", "true");
+    const pasted = h("input", {
+      class: "input",
+      autocomplete: "off",
+      spellcheck: false,
+      placeholder: "http://localhost:1455/auth/callback?code=…",
+    });
+    const status = h("div", { class: "field-error", hidden: true });
+    const startIt = async () => {
+      try {
+        const started = await ctx.api.post<{ url: string }>("/api/ai/providers/sign-in", {
+          kind: info.id,
+          ...(existing ? { providerId: existing.id } : {}),
+        });
+        link.setAttribute("href", started.url);
+        link.classList.remove("is-waiting");
+        link.removeAttribute("aria-disabled");
+      } catch (error) {
+        status.textContent = errorMessage(error);
+        status.hidden = false;
+      }
+    };
+    link.addEventListener("click", (event) => {
+      if (link.classList.contains("is-waiting")) event.preventDefault();
+      else window.setTimeout(() => pasted.focus(), 300);
+    });
+    void startIt();
+    const form = h(
+      "div",
+      { class: "ai-form" },
+      h(
+        "div",
+        { class: "ai-connect-head" },
+        providerMark(info.id, 40),
+        h("span", { class: "ai-connect-text" }, h("span", { class: "ai-connect-title" }, info.label), h("span", { class: "small muted" }, info.about)),
+      ),
+      existing ? null : h("label", { class: "field" }, h("span", { class: "field-label" }, "Name"), name),
+      h("div", { class: "field ai-sign-in-step" }, h("span", { class: "field-label" }, "1. Allow RAST in your ChatGPT account"), link),
+      h(
+        "label",
+        { class: "field ai-sign-in-step" },
+        h("span", { class: "field-label" }, "2. Paste the address you land on"),
+        pasted,
+        h("span", { class: "field-hint" }, "The page after you allow it will not open (it points at localhost). Copy its whole address from the address bar."),
+      ),
+      h(
+        "div",
+        { class: "banner banner-warning ai-sign-in-risk" },
+        iconSvg("warning", 15),
+        h(
+          "span",
+          {},
+          "A ChatGPT plan is one person's: only you can chat with it here, and replies count toward your plan's Codex limits. Using a plan outside OpenAI's own apps is not officially supported; OpenAI may restrict the account.",
+        ),
+      ),
+      status,
+    );
+    modal({
+      within: ctx.root,
+      title: existing ? `Sign in to ${existing.name}` : `Sign in to ${info.label}`,
+      body: form,
+      wide: true,
+      actions: [
+        existing ? { label: "Cancel", variant: "ghost", onClick: () => undefined } : { label: "Back", variant: "ghost", onClick: () => pickProvider() },
+        {
+          label: "Connect",
+          variant: "primary",
+          keepOpen: true,
+          onClick: async (close) => {
+            status.hidden = true;
+            if (!pasted.value.trim()) {
+              status.textContent = "Paste the address of the page ChatGPT sent you to.";
+              status.hidden = false;
+              pasted.focus();
+              return;
+            }
+            try {
+              const done = await ctx.api.post<{ provider: AdminProvider; offered: string[] | null }>("/api/ai/providers/sign-in/finish", {
+                callback: pasted.value.trim(),
+                ...(existing ? {} : { name: name.value.trim() }),
+              });
+              const who = done.provider.signedIn;
+              ctx.toast.success(who?.email ? `Signed in as ${who.email}` : "Signed in");
+              close();
+              await load();
+              if (!done.provider.models.length) {
+                const fresh = overview?.providers.find((p) => p.id === done.provider.id);
+                if (fresh) editProvider(fresh);
+              }
+            } catch (error) {
+              // A used or failed sign-in cannot be tried again: start anew.
+              link.classList.add("is-waiting");
+              link.setAttribute("aria-disabled", "true");
+              void startIt();
+              formError(status, error);
+            }
           },
         },
       ],
@@ -1129,6 +1279,7 @@ export function mountSettings(options: {
     list: "Provider's list",
     "built-in": "Built-in",
     local: "Free (local)",
+    plan: "In your plan",
     none: "No price",
   };
 

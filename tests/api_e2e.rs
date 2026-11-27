@@ -1714,8 +1714,8 @@ async fn migration_0004_applies_additively_and_preserves_legacy_access() {
             .expect("versions");
     assert_eq!(
         applied,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-        "0004 to 0015 are the new migrations"
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        "0004 to 0016 are the new migrations"
     );
     // Migration 0005 runs on the same upgrade and records rule-mapping stats.
     for (key, expected) in [
@@ -4709,4 +4709,233 @@ fn ai_text(message: &Value) -> String {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Signing in with a plan (ChatGPT's Codex): only administrators start it,
+/// a pasted address answers only the sign-in started by the same account,
+/// and the provider it adds is its owner's alone.
+#[tokio::test]
+async fn ai_plan_sign_in_is_its_owners_alone() {
+    let server = TestServer::start().await;
+    server
+        .create_user("admin", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server
+        .create_user("admin2", ADMIN_PASSWORD, Role::Admin)
+        .await;
+    server.create_user("alice", USER_PASSWORD, Role::User).await;
+    let admin = server.login("admin", ADMIN_PASSWORD).await;
+    let admin2 = server.login("admin2", ADMIN_PASSWORD).await;
+    let alice = server.login("alice", USER_PASSWORD).await;
+    let admin_id = server.user_id("admin").await;
+    let alice_id = server.user_id("alice").await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{alice_id}/access-rules"),
+            Some(json!({"folderRules": [], "appRules": [{"appId": "agent", "rule": "allow"}]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/packages/apps/agent/install",
+            None,
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // Not added with a key.
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers",
+            Some(json!({"kind": "codex", "name": "Mine", "apiKey": "sk-x"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/models",
+            Some(json!({"kind": "codex"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Starting: administrators only; OpenAI's page with PKCE.
+    let (status, _, _) = server
+        .request(
+            "POST",
+            "/api/ai/providers/sign-in",
+            Some(json!({"kind": "codex"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/sign-in",
+            Some(json!({"kind": "openai"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/sign-in",
+            Some(json!({"kind": "codex"})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let url = body["url"].as_str().unwrap();
+    assert!(
+        url.starts_with("https://auth.openai.com/oauth/authorize?"),
+        "{url}"
+    );
+    assert!(url.contains("code_challenge_method=S256"), "{url}");
+    let state = body["state"].as_str().unwrap().to_string();
+    assert!(url.contains(&format!("state={state}")));
+
+    // Another account cannot answer it (and that does not use it up);
+    // addresses without a code are refused before anything is sent.
+    let callback = format!("http://localhost:1455/auth/callback?code=c1&state={state}");
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/providers/sign-in/finish",
+            Some(json!({"callback": callback})),
+            admin2.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    for bad in [
+        "https://chatgpt.com/".to_string(),
+        format!("http://localhost:1455/auth/callback?error=access_denied&state={state}"),
+    ] {
+        let (status, _, body) = server
+            .request(
+                "POST",
+                "/api/ai/providers/sign-in/finish",
+                Some(json!({"callback": bad})),
+                admin.headers_with_csrf(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    // A signed-in plan (as finishing stores it).
+    let credentials = rast::ai::signin::Credentials {
+        access_token: "at-secret-token".into(),
+        refresh_token: "rt-secret-token".into(),
+        expires_at: db::now_ms() + 3_600_000,
+        refreshed_at: db::now_ms(),
+        account_id: "acc-1".into(),
+        email: "admin@example.com".into(),
+        plan: "plus".into(),
+    };
+    let sealed = rast::ai::seal_credentials(&server.state.secrets, &credentials).unwrap();
+    sqlx::query(
+        "INSERT INTO ai_providers (id, kind, name, base_url, api_key, models, prices, list_prices,
+             enabled, created_at, updated_at, owner_id, sign_in)
+         VALUES ('plan1', 'codex', 'My ChatGPT', '', '', '[\"gpt-5.6-terra\"]', '{}', '{}', 1, 1, 1, ?, ?)",
+    )
+    .bind(admin_id)
+    .bind(&sealed)
+    .execute(&server.state.db)
+    .await
+    .unwrap();
+    // Default limits allow every provider; the owner check still applies.
+    let offered = |body: &Value| -> bool {
+        body["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["id"] == "plan1")
+    };
+    let (_, _, body) = server
+        .request("GET", "/api/ai/options", None, admin.headers())
+        .await;
+    assert!(offered(&body), "{body}");
+    for other in [&admin2, &alice] {
+        let (status, _, body) = server
+            .request("GET", "/api/ai/options", None, other.headers())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!offered(&body), "{body}");
+    }
+    let (status, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": "plan1", "model": "gpt-5.6-terra"})),
+            admin2.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+    // Administrators see who signed in, never the tokens; it keeps its own
+    // address and takes no key.
+    let (status, _, body) = server
+        .request("GET", "/api/ai/admin/overview", None, admin2.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let plan = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "plan1")
+        .unwrap()
+        .clone();
+    assert_eq!(plan["signsIn"], true);
+    assert_eq!(plan["ownerId"], admin_id);
+    assert_eq!(plan["signedIn"]["email"], "admin@example.com");
+    assert_eq!(plan["signedIn"]["plan"], "plus");
+    assert!(!body.to_string().contains("secret-token"), "{body}");
+    assert!(body["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k["id"] == "codex" && k["group"] == "plan"));
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/ai/providers/plan1",
+            Some(json!({"name": "Mine", "apiKey": "sk-x", "models": ["gpt-5.6-terra"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            "/api/ai/providers/plan1",
+            Some(json!({"name": "Mine", "models": ["gpt-5.6-terra", "gpt-6.2-sol"]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["provider"]["signedIn"]["email"], "admin@example.com");
+
+    // Its replies are paid for by the plan.
+    let (status, _, body) = server
+        .request("GET", "/api/ai/prices", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let models = body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "plan1")
+        .unwrap()["models"]
+        .clone();
+    assert_eq!(models[0]["source"], "plan", "{models}");
 }

@@ -8,6 +8,13 @@
 //! * Anthropic Messages (`POST {base}/messages`): text and thinking deltas,
 //!   input tokens in `message_start`, output tokens in `message_delta`.
 //!
+//! * OpenAI Responses as ChatGPT's Codex backend takes it
+//!   (`POST {base}/responses`, a signed-in plan; see [`super::signin`]):
+//!   instructions apart from the input, function calls as items, reasoning
+//!   summaries, usage in `response.completed`. Shaped as 9router sends it,
+//!   including Codex's "lite" models, which take their tools and
+//!   instructions as the first input items.
+//!
 //! Gateways that serve each model on its own protocol (OpenCode: Claude and
 //! Qwen on Messages, the rest on chat completions, which translate GPT and
 //! Gemini) say which in their model list; RAST reads it once in a while and
@@ -124,6 +131,9 @@ pub struct ChatRequest {
     /// A stable id for the conversation, for gateways that ask for one
     /// (OpenCode Go refuses requests without it); "" none.
     pub session: String,
+    /// The signed-in account, for providers that want it with each
+    /// request (ChatGPT's account id); "" none.
+    pub account: String,
 }
 
 /// How one request goes out: the protocol and its details.
@@ -544,12 +554,47 @@ fn chat_url(kind: Kind, base_url: &str, protocol: Protocol) -> String {
         (true, Protocol::Chat) => format!("{base_url}/openai/v1/chat/completions"),
         (false, Protocol::Anthropic) => format!("{base_url}/messages"),
         (false, Protocol::Chat) => format!("{base_url}/chat/completions"),
+        (_, Protocol::Responses) => format!("{base_url}/responses"),
     }
+}
+
+/// Codex's models that take tools and instructions as input items, with
+/// their own header (9router's "responses lite": GPT-6 Sol, Luna, Terra).
+pub fn codex_lite(model: &str) -> bool {
+    model.starts_with("gpt-6")
+        && ["-sol", "-luna", "-terra"]
+            .iter()
+            .any(|m| model.contains(m))
+}
+
+/// What Codex's backend wants with every request, as the Codex CLI sends it.
+fn codex_headers(model: &str, account: &str, session: &str) -> Vec<(&'static str, String)> {
+    let version = super::signin::CODEX_VERSION;
+    let mut out = vec![
+        ("originator", "codex_cli_rs".to_string()),
+        ("version", version.to_string()),
+        ("User-Agent", format!("codex_cli_rs/{version}")),
+    ];
+    if !account.is_empty() {
+        out.push(("ChatGPT-Account-ID", account.to_string()));
+    }
+    if !session.is_empty() {
+        out.push(("session_id", session.to_string()));
+    }
+    if codex_lite(model) {
+        out.push(("x-openai-internal-codex-responses-lite", "true".into()));
+    }
+    out
 }
 
 /// Where the model list is.
 fn models_url(kind: Kind, base_url: &str) -> String {
-    if kind.routes_by_model() {
+    if kind == Kind::Codex {
+        format!(
+            "{base_url}/models?client_version={}",
+            super::signin::CODEX_VERSION
+        )
+    } else if kind.routes_by_model() {
         format!("{base_url}/v1/models")
     } else if kind.protocol() == Protocol::Anthropic {
         format!("{base_url}/models?limit=1000")
@@ -566,6 +611,9 @@ pub fn request_body(req: &ChatRequest) -> Value {
 /// The request body for a streamed reply over `wire`.
 pub fn request_body_for(req: &ChatRequest, wire: Wire) -> Value {
     let normalized = normalize(req.messages.clone(), !req.tools.is_empty());
+    if wire.protocol == Protocol::Responses {
+        return responses_body(req, wire, &normalized);
+    }
     if wire.protocol == Protocol::Anthropic {
         let mut body = json!({
             "model": req.model,
@@ -642,6 +690,104 @@ pub fn request_body_for(req: &ChatRequest, wire: Wire) -> Value {
     body
 }
 
+/// Turns as Responses input items (no ids: nothing is stored upstream).
+fn responses_input(turns: &[Turn]) -> Vec<Value> {
+    let mut out = Vec::with_capacity(turns.len());
+    for turn in turns {
+        match turn {
+            Turn::User(text) => out.push(json!({
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            })),
+            Turn::Assistant { text, calls, .. } => {
+                if !text.is_empty() {
+                    out.push(json!({
+                        "type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    }));
+                }
+                for call in calls {
+                    let arguments = match &call.input {
+                        Value::String(raw) => raw.clone(),
+                        other => other.to_string(),
+                    };
+                    out.push(json!({
+                        "type": "function_call", "call_id": call.id,
+                        "name": call.name, "arguments": arguments,
+                    }));
+                }
+            }
+            Turn::Results(results) => {
+                for r in results {
+                    out.push(json!({
+                        "type": "function_call_output", "call_id": r.id, "output": r.output,
+                    }));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A Responses request as Codex's backend takes it (9router's shape).
+fn responses_body(req: &ChatRequest, wire: Wire, turns: &[Turn]) -> Value {
+    let lite = codex_lite(&req.model);
+    let level = match wire.effort {
+        Some(Effort::Low) => "low",
+        None | Some(Effort::Medium) => "medium",
+        Some(Effort::High) => "high",
+        Some(Effort::Max) if lite => "max",
+        Some(Effort::Max) => "xhigh",
+    };
+    let tools: Vec<Value> = req
+        .tools
+        .iter()
+        .map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters, "strict": false}))
+        .collect();
+    let instructions = if req.system.trim().is_empty() {
+        "You are a helpful assistant."
+    } else {
+        req.system.as_str()
+    };
+    let mut input = Vec::with_capacity(turns.len() + 2);
+    if lite {
+        input.push(json!({"type": "additional_tools", "role": "developer", "tools": tools}));
+        input.push(json!({
+            "type": "message", "role": "developer",
+            "content": [{"type": "input_text", "text": instructions}],
+        }));
+    }
+    input.extend(responses_input(turns));
+    if input.is_empty() {
+        input.push(json!({"type": "message", "role": "user", "content": [{"type": "input_text", "text": "..."}]}));
+    }
+    let mut body = json!({
+        "model": req.model,
+        "input": input,
+        "store": false,
+        "stream": true,
+        "include": ["reasoning.encrypted_content"],
+    });
+    if lite {
+        body["instructions"] = json!("");
+        body["tools"] = Value::Null;
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(false);
+        body["reasoning"] = json!({"effort": level, "context": "all_turns"});
+    } else {
+        body["instructions"] = json!(instructions);
+        if !tools.is_empty() {
+            body["tools"] = json!(tools);
+            body["tool_choice"] = json!("auto");
+        }
+        body["reasoning"] = json!({"effort": level, "summary": "auto"});
+    }
+    if !req.session.is_empty() {
+        body["prompt_cache_key"] = json!(req.session);
+    }
+    body
+}
+
 #[derive(Debug, Default)]
 struct PartialCall {
     id: String,
@@ -652,7 +798,7 @@ struct PartialCall {
 /// Reads a provider's event stream line by line.
 #[derive(Debug)]
 pub struct StreamParser {
-    anthropic: bool,
+    protocol: Protocol,
     pub usage: Usage,
     pub done: bool,
     /// Calls being streamed, by the provider's index.
@@ -666,7 +812,7 @@ impl StreamParser {
 
     pub fn for_protocol(protocol: Protocol) -> Self {
         Self {
-            anthropic: protocol == Protocol::Anthropic,
+            protocol,
             usage: Usage::default(),
             done: false,
             calls: BTreeMap::new(),
@@ -723,7 +869,11 @@ impl StreamParser {
             return Err(error_text(error));
         }
         let mut out = Vec::new();
-        if self.anthropic {
+        if self.protocol == Protocol::Responses {
+            self.responses_event(&event, &mut out)?;
+            return Ok(out);
+        }
+        if self.protocol == Protocol::Anthropic {
             match event.get("type").and_then(Value::as_str) {
                 Some("message_start") => {
                     anthropic_usage(&event["message"]["usage"], &mut self.usage);
@@ -813,6 +963,97 @@ impl StreamParser {
     }
 }
 
+impl StreamParser {
+    /// One Responses event (`type` names it).
+    fn responses_event(&mut self, event: &Value, out: &mut Vec<Delta>) -> Result<(), String> {
+        let index = event
+            .get("output_index")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            "response.output_text.delta" => push_text(out, event.get("delta"), false),
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                push_text(out, event.get("delta"), true)
+            }
+            // Summaries come in parts: keep them apart.
+            "response.reasoning_summary_part.added"
+                if event
+                    .get("summary_index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0)
+                    > 0 =>
+            {
+                out.push(Delta::Reasoning("\n\n".into()))
+            }
+            "response.output_item.added" | "response.output_item.done" => {
+                let item = &event["item"];
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    let call = self.calls.entry(index).or_default();
+                    let text = |key: &str| item.get(key).and_then(Value::as_str).unwrap_or("");
+                    if call.id.is_empty() {
+                        call.id = text("call_id").to_string();
+                    }
+                    if call.name.is_empty() {
+                        call.name = text("name").to_string();
+                    }
+                    // The finished item has all the arguments.
+                    if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+                        if !arguments.is_empty() {
+                            call.arguments = arguments.to_string();
+                        }
+                    }
+                }
+            }
+            "response.function_call_arguments.delta" => {
+                if let Some(part) = event.get("delta").and_then(Value::as_str) {
+                    self.calls
+                        .entry(index)
+                        .or_default()
+                        .arguments
+                        .push_str(part);
+                }
+            }
+            "response.completed" => {
+                let usage = &event["response"]["usage"];
+                let part = |path: &str| usage.pointer(path).and_then(Value::as_i64);
+                if let Some(input) = part("/input_tokens") {
+                    self.usage.input = input;
+                    self.usage.cache_read =
+                        part("/input_tokens_details/cached_tokens").unwrap_or(0);
+                }
+                if let Some(output) = part("/output_tokens") {
+                    self.usage.output = output;
+                }
+                self.done = true;
+            }
+            "response.failed" => {
+                let error = &event["response"]["error"];
+                return Err(if error.is_null() {
+                    "the reply failed".into()
+                } else {
+                    error_text(error)
+                });
+            }
+            "response.incomplete" => {
+                let reason = event
+                    .pointer("/response/incomplete_details/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                return Err(format!("the reply stopped before it was done ({reason})"));
+            }
+            "error" => {
+                return Err(event
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the provider had an error")
+                    .to_string())
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
 fn push_text(out: &mut Vec<Delta>, value: Option<&Value>, reasoning: bool) {
     if let Some(text) = value.and_then(Value::as_str).filter(|t| !t.is_empty()) {
         out.push(if reasoning {
@@ -898,6 +1139,11 @@ pub fn stream_chat(
         ) {
             request = request.header(name, value);
         }
+        if req.kind == Kind::Codex {
+            for (name, value) in codex_headers(&req.model, &req.account, &req.session) {
+                request = request.header(name, value);
+            }
+        }
         request = request.header("Accept", "text/event-stream");
         let response = request
             .send(body.as_bytes())
@@ -919,7 +1165,11 @@ pub fn stream_chat(
         }
         return Err(ChatError {
             tools_refused: !req.tools.is_empty() && refuses_tools(status, &body),
-            message: refusal(status, &body),
+            message: if req.kind == Kind::Codex {
+                codex_refusal(status, &body)
+            } else {
+                refusal(status, &body)
+            },
         });
     };
     let mut parser = StreamParser::for_protocol(wire.protocol);
@@ -935,7 +1185,7 @@ pub fn stream_chat(
         for delta in parser.line(&line)? {
             on_delta(delta);
         }
-        if parser.done && wire.protocol == Protocol::Anthropic {
+        if parser.done && wire.protocol != Protocol::Chat {
             break;
         }
     }
@@ -943,6 +1193,23 @@ pub fn stream_chat(
         usage: parser.usage,
         calls: parser.take_calls(),
     })
+}
+
+/// What ChatGPT's Codex said when it refused, in its own terms.
+pub fn codex_refusal(status: u16, body: &str) -> String {
+    let said = refusal(status, body);
+    let said = said.split_once("): ").map(|(_, s)| s).unwrap_or("");
+    let what = match status {
+        401 | 403 => "ChatGPT refused the sign-in; sign in again under AI Agent settings → Providers".to_string(),
+        429 => "your ChatGPT plan's Codex limit is used up for now (see chatgpt.com/codex/settings/usage)".to_string(),
+        404 => "ChatGPT's Codex does not offer this model to your plan".to_string(),
+        _ => return refusal(status, body),
+    };
+    if said.is_empty() {
+        format!("{what} (HTTP {status})")
+    } else {
+        format!("{what} (HTTP {status}): {said}")
+    }
 }
 
 /// Whether a refusal is about `stream_options` (servers that do not know it).
@@ -1104,6 +1371,73 @@ fn fetch_models(kind: Kind, base_url: &str, api_key: Option<&str>) -> Result<Str
         return Err(refusal(status, &body));
     }
     Ok(body)
+}
+
+/// The models ChatGPT's Codex offers a signed-in plan
+/// (`GET {base}/models?client_version=…`), in the order it gives them.
+pub fn list_codex_models(
+    base_url: &str,
+    token: &str,
+    account: &str,
+) -> Result<Vec<String>, String> {
+    let mut request = agent(LIST_TIMEOUT)
+        .get(models_url(Kind::Codex, base_url))
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/json");
+    for (name, value) in codex_headers("", account, "") {
+        request = request.header(name, value);
+    }
+    let response = request
+        .call()
+        .map_err(|e| format!("cannot reach ChatGPT's Codex: {e}"))?;
+    let status = response.status().as_u16();
+    let body = read_limited(response.into_body(), 4 * 1024 * 1024);
+    if !(200..300).contains(&status) {
+        return Err(codex_refusal(status, &body));
+    }
+    parse_codex_models(&body)
+}
+
+/// Codex's model list: `models` (or `data`) of `{slug, display_name,
+/// visibility}`; models it hides from pickers, and image or speech models,
+/// are left out.
+pub fn parse_codex_models(body: &str) -> Result<Vec<String>, String> {
+    let value: Value = serde_json::from_str(body)
+        .map_err(|_| "ChatGPT's Codex sent a model list RAST cannot read".to_string())?;
+    let list = value
+        .get("models")
+        .or_else(|| value.get("data"))
+        .and_then(Value::as_array)
+        .ok_or("ChatGPT's Codex sent no model list")?;
+    let mut out: Vec<String> = Vec::new();
+    for model in list {
+        let Some(id) = model
+            .get("slug")
+            .or_else(|| model.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let visibility = model
+            .get("visibility")
+            .and_then(Value::as_str)
+            .unwrap_or("list");
+        let lower = id.to_ascii_lowercase();
+        if visibility != "list"
+            || ["image", "transcribe", "embed", "tts"]
+                .iter()
+                .any(|w| lower.contains(w))
+        {
+            continue;
+        }
+        if !out.iter().any(|m| m == id) {
+            out.push(id.to_string());
+        }
+    }
+    out.truncate(super::MAX_MODELS);
+    Ok(out)
 }
 
 /// A model of a gateway that routes by model.
@@ -1360,6 +1694,218 @@ mod tests {
         assert_eq!(err, "Overloaded");
     }
 
+    fn codex_request(model: &str) -> ChatRequest {
+        ChatRequest {
+            kind: Kind::Codex,
+            base_url: "https://chatgpt.com/backend-api/codex".into(),
+            api_key: Some("token".into()),
+            model: model.into(),
+            system: "Be brief.".into(),
+            messages: vec![
+                Turn::User("files?".into()),
+                Turn::Assistant {
+                    reasoning: "think".into(),
+                    text: "Looking.".into(),
+                    calls: vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "list_files".into(),
+                        input: json!({"path": "/"}),
+                    }],
+                },
+                Turn::Results(vec![ToolResult {
+                    id: "call_1".into(),
+                    name: "list_files".into(),
+                    output: "a.txt".into(),
+                    is_error: false,
+                }]),
+            ],
+            tools: vec![ToolSpec {
+                name: "list_files".into(),
+                description: "List".into(),
+                parameters: json!({"type": "object"}),
+            }],
+            temperature: Some(0.3),
+            effort: Some(Effort::Max),
+            max_output_tokens: Some(500),
+            session: "conv-1".into(),
+            account: "acc-1".into(),
+        }
+    }
+
+    #[test]
+    fn codex_bodies_are_shaped_like_the_codex_cli() {
+        let req = codex_request("gpt-5.6-terra");
+        assert_eq!(
+            chat_url(req.kind, &req.base_url, Protocol::Responses),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        let wire = |req: &ChatRequest| Wire {
+            effort: req.effort,
+            ..Wire::of(req.kind)
+        };
+        let body = request_body_for(&req, wire(&req));
+        assert_eq!(body["instructions"], "Be brief.");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["prompt_cache_key"], "conv-1");
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort": "xhigh", "summary": "auto"})
+        );
+        assert_eq!(
+            body["tools"],
+            json!([{"type": "function", "name": "list_files", "description": "List", "parameters": {"type": "object"}, "strict": false}])
+        );
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "files?"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Looking."}]},
+                {"type": "function_call", "call_id": "call_1", "name": "list_files", "arguments": "{\"path\":\"/\"}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "a.txt"},
+            ])
+        );
+        // Codex refuses what the Codex CLI does not send.
+        for key in [
+            "temperature",
+            "max_output_tokens",
+            "max_tokens",
+            "messages",
+            "stream_options",
+        ] {
+            assert!(body.get(key).is_none(), "{key} is not sent");
+        }
+
+        // "Lite" models take their tools and instructions as input items.
+        let req = codex_request("gpt-6.1-sol");
+        assert!(
+            codex_lite("gpt-6.1-sol")
+                && codex_lite("gpt-6-luna")
+                && !codex_lite("gpt-6.2-astra")
+                && !codex_lite("gpt-5.6-sol")
+        );
+        let body = request_body_for(&req, wire(&req));
+        // No effort asked for: Codex's default.
+        assert_eq!(request_body(&req)["reasoning"]["effort"], "medium");
+        assert_eq!(body["instructions"], "");
+        assert_eq!(body["tools"], Value::Null);
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(
+            body["reasoning"],
+            json!({"effort": "max", "context": "all_turns"})
+        );
+        assert_eq!(body["input"][0]["type"], "additional_tools");
+        assert_eq!(body["input"][0]["tools"][0]["name"], "list_files");
+        assert_eq!(
+            body["input"][1],
+            json!({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Be brief."}]})
+        );
+        assert_eq!(body["input"][2]["role"], "user");
+
+        let headers = codex_headers("gpt-6.1-sol", "acc-1", "conv-1");
+        let has = |name: &str, value: &str| headers.iter().any(|(n, v)| *n == name && v == value);
+        assert!(
+            has("ChatGPT-Account-ID", "acc-1")
+                && has("session_id", "conv-1")
+                && has("originator", "codex_cli_rs")
+        );
+        assert!(has("x-openai-internal-codex-responses-lite", "true"));
+        assert!(!codex_headers("gpt-5.6-sol", "", "")
+            .iter()
+            .any(|(n, _)| *n == "x-openai-internal-codex-responses-lite"
+                || *n == "ChatGPT-Account-ID"));
+    }
+
+    #[test]
+    fn codex_streams_are_read() {
+        let mut parser = StreamParser::for_protocol(Protocol::Responses);
+        let mut deltas = Vec::new();
+        for line in [
+            "event: response.created",
+            r#"data: {"type":"response.created","response":{"id":"r1"}}"#,
+            r#"data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":0,"delta":"Plan"}"#,
+            r#"data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":1}"#,
+            r#"data: {"type":"response.reasoning_summary_text.delta","output_index":0,"summary_index":1,"delta":"More"}"#,
+            r#"data: {"type":"response.output_text.delta","output_index":1,"delta":"Hi"}"#,
+            r#"data: {"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","call_id":"call_9","name":"list_files","arguments":""}}"#,
+            r#"data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":"{\"path\":"}"#,
+            r#"data: {"type":"response.function_call_arguments.delta","output_index":2,"delta":"\"/\"}"}"#,
+            r#"data: {"type":"response.output_item.done","output_index":2,"item":{"type":"function_call","call_id":"call_9","name":"list_files","arguments":"{\"path\":\"/\"}"}}"#,
+            r#"data: {"type":"response.completed","response":{"usage":{"input_tokens":120,"input_tokens_details":{"cached_tokens":100},"output_tokens":9}}}"#,
+        ] {
+            deltas.extend(parser.line(line).unwrap());
+        }
+        assert_eq!(
+            deltas,
+            vec![
+                Delta::Reasoning("Plan".into()),
+                Delta::Reasoning("\n\n".into()),
+                Delta::Reasoning("More".into()),
+                Delta::Text("Hi".into()),
+            ]
+        );
+        assert!(parser.done);
+        assert_eq!(
+            parser.usage,
+            Usage {
+                input: 120,
+                output: 9,
+                cache_read: 100,
+                cache_write: 0
+            }
+        );
+        assert_eq!(
+            parser.take_calls(),
+            vec![ToolCall {
+                id: "call_9".into(),
+                name: "list_files".into(),
+                input: json!({"path": "/"})
+            }]
+        );
+
+        let mut parser = StreamParser::for_protocol(Protocol::Responses);
+        let failed = parser
+            .line(r#"data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"Try later"}}}"#)
+            .unwrap_err();
+        assert!(failed.contains("Try later"), "{failed}");
+        let mut parser = StreamParser::for_protocol(Protocol::Responses);
+        let cut = parser
+            .line(r#"data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#)
+            .unwrap_err();
+        assert!(cut.contains("max_output_tokens"));
+    }
+
+    #[test]
+    fn codex_models_and_refusals_are_read() {
+        let body = r#"{"models":[
+            {"slug":"gpt-6.2-sol","display_name":"GPT-6.2 Sol","visibility":"list"},
+            {"slug":"gpt-5.6-terra","visibility":"list"},
+            {"slug":"codex-auto-review","visibility":"hide"},
+            {"slug":"gpt-image-2"},
+            {"id":"gpt-6-luna"},
+            {"slug":"gpt-6.2-sol"}
+        ]}"#;
+        assert_eq!(
+            parse_codex_models(body).unwrap(),
+            vec!["gpt-6.2-sol", "gpt-5.6-terra", "gpt-6-luna"]
+        );
+        assert!(parse_codex_models("{}").is_err());
+        assert!(parse_codex_models("nope").is_err());
+        assert!(
+            codex_refusal(401, r#"{"error":{"message":"Token expired"}}"#)
+                .starts_with("ChatGPT refused the sign-in; sign in again")
+        );
+        assert!(codex_refusal(429, "{}").contains("Codex limit is used up"));
+        assert_eq!(codex_refusal(500, "{}"), refusal(500, "{}"));
+        assert_eq!(
+            models_url(Kind::Codex, "https://chatgpt.com/backend-api/codex"),
+            format!(
+                "https://chatgpt.com/backend-api/codex/models?client_version={}",
+                super::super::signin::CODEX_VERSION
+            )
+        );
+    }
+
     #[test]
     fn bodies_follow_each_protocol() {
         let mut req = ChatRequest {
@@ -1374,6 +1920,7 @@ mod tests {
             effort: None,
             max_output_tokens: Some(100),
             session: String::new(),
+            account: String::new(),
         };
         let body = request_body(&req);
         assert_eq!(
@@ -1567,6 +2114,7 @@ mod tests {
             effort: None,
             max_output_tokens: None,
             session: String::new(),
+            account: String::new(),
         };
         let body = request_body(&req);
         assert_eq!(body["tools"][0]["function"]["name"], "list_files");
@@ -1691,13 +2239,15 @@ mod tests {
             }
             assert!(info.key_url.is_empty() || info.key_url.starts_with("https://"));
             assert!(
-                ["maker", "gateway", "fast", "local", "custom"].contains(&info.group),
+                ["maker", "plan", "gateway", "fast", "local", "custom"].contains(&info.group),
                 "{}",
                 info.id
             );
         }
         assert_eq!(Kind::CustomAnthropic.protocol(), Protocol::Anthropic);
         assert_eq!(Kind::Gemini.protocol(), Protocol::Chat);
+        assert_eq!(Kind::Codex.protocol(), Protocol::Responses);
+        assert!(Kind::Codex.signs_in() && !Kind::Codex.needs_key() && !Kind::OpenAi.signs_in());
     }
 
     #[test]
@@ -1854,6 +2404,7 @@ mod tests {
                 effort: None,
                 max_output_tokens: None,
                 session: "conv-7".into(),
+                account: String::new(),
             };
             let mut text = String::new();
             stream_chat(&req, &AtomicBool::new(false), &mut |delta| {
@@ -1902,6 +2453,7 @@ mod tests {
             effort: Some(Effort::Max),
             max_output_tokens: None,
             session: String::new(),
+            account: String::new(),
         };
         let body = |req: &ChatRequest| {
             let mut wire = Wire::of(req.kind);
@@ -1949,6 +2501,7 @@ mod tests {
             effort: Some(Effort::Max),
             max_output_tokens: None,
             session: String::new(),
+            account: String::new(),
         };
         let mut text = String::new();
         stream_chat(&req, &AtomicBool::new(false), &mut |delta| {

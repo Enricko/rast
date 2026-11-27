@@ -26,6 +26,7 @@ pub mod guard;
 pub mod prices;
 pub mod provider;
 pub mod run;
+pub mod signin;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -106,13 +107,16 @@ impl Effort {
     }
 }
 
-/// The two wire protocols RAST speaks (see [`provider`]).
+/// The wire protocols RAST speaks (see [`provider`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     /// OpenAI-compatible chat completions.
     Chat,
     /// Anthropic Messages.
     Anthropic,
+    /// OpenAI Responses as ChatGPT's Codex backend takes it (always
+    /// streamed, nothing stored).
+    Responses,
 }
 
 /// Provider kinds: a preset per provider (address, protocol, whether a key
@@ -145,6 +149,8 @@ pub enum Kind {
     LlamaCpp,
     Custom,
     CustomAnthropic,
+    /// ChatGPT's Codex with a signed-in plan (see [`signin`]).
+    Codex,
 }
 
 /// What the settings page shows about a kind, and its defaults.
@@ -156,7 +162,8 @@ pub struct KindInfo {
     /// Where requests go unless the administrator enters another address.
     pub base_url: &'static str,
     pub needs_key: bool,
-    /// "maker", "gateway", "fast", "local" or "custom" (how the page groups them).
+    /// "maker", "plan", "gateway", "fast", "local" or "custom" (how the
+    /// page groups them).
     pub group: &'static str,
     /// Where an administrator gets a key ("" none).
     pub key_url: &'static str,
@@ -189,7 +196,7 @@ const fn info(
 
 /// Every kind, in the order the settings page offers them.
 #[rustfmt::skip]
-pub const KINDS: [KindInfo; 26] = [
+pub const KINDS: [KindInfo; 27] = [
     info(Kind::Anthropic, "anthropic", "Anthropic", "https://api.anthropic.com/v1", true, "maker",
         "https://platform.claude.com/settings/keys", "Claude models"),
     info(Kind::OpenAi, "openai", "OpenAI", "https://api.openai.com/v1", true, "maker",
@@ -210,6 +217,8 @@ pub const KINDS: [KindInfo; 26] = [
         "https://modelstudio.console.alibabacloud.com", "Qwen models (Model Studio)"),
     info(Kind::MiniMax, "minimax", "MiniMax", "https://api.minimax.io/v1", true, "maker",
         "https://platform.minimax.io", "MiniMax models"),
+    info(Kind::Codex, "codex", "ChatGPT Codex", "https://chatgpt.com/backend-api/codex", false, "plan",
+        "https://chatgpt.com/codex/settings/usage", "Sign in with your ChatGPT plan; only you can use it"),
     info(Kind::OpenCode, "opencode", "OpenCode Zen", "https://opencode.ai/inference", true, "gateway",
         "https://opencode.ai/docs/console/models/", "Claude, GPT, Gemini, Kimi, GLM and more, pay as you go"),
     info(Kind::OpenCodeGo, "opencode-go", "OpenCode Go", "https://opencode.ai/inference/go", true, "gateway",
@@ -280,8 +289,15 @@ impl Kind {
     pub fn protocol(self) -> Protocol {
         match self {
             Kind::Anthropic | Kind::CustomAnthropic => Protocol::Anthropic,
+            Kind::Codex => Protocol::Responses,
             _ => Protocol::Chat,
         }
+    }
+
+    /// Kinds a person signs in to with their own plan instead of a key:
+    /// only the account that signed in may use them.
+    pub fn signs_in(self) -> bool {
+        self.info().group == "plan"
     }
 
     /// Gateways that serve each model on its own protocol, under
@@ -343,9 +359,30 @@ pub struct Provider {
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// For kinds that sign in: the account that signed in (only it may use
+    /// the provider) and its tokens, encrypted ("" none).
+    pub owner_id: Option<i64>,
+    sign_in: String,
 }
 
 impl Provider {
+    /// Whether `user_id` may chat with it (a signed-in plan is its owner's
+    /// alone, administrators included).
+    pub fn usable_by(&self, user_id: i64) -> bool {
+        !self.kind.signs_in() || self.owner_id == Some(user_id)
+    }
+
+    /// The signed-in plan's tokens.
+    pub fn credentials(&self, secrets: &Secrets) -> AppResult<Option<signin::Credentials>> {
+        if self.sign_in.is_empty() {
+            return Ok(None);
+        }
+        let text = secrets.decrypt_string(&self.sign_in).map_err(|_| {
+            AppError::internal("the provider's sign-in cannot be read (server secret changed?)")
+        })?;
+        Ok(serde_json::from_str(&text).ok())
+    }
+
     pub fn effective_base_url(&self) -> String {
         let url = if self.base_url.is_empty() {
             self.kind.default_base_url()
@@ -394,11 +431,20 @@ impl Provider {
                 format!("…{tail}")
             })
             .unwrap_or_default();
+        // Who signed in (never the tokens).
+        let signed_in = self
+            .credentials(secrets)
+            .ok()
+            .flatten()
+            .map(|c| json!({"email": c.email, "plan": c.plan, "expiresAt": c.expires_at}));
         json!({
             "id": self.id,
             "kind": self.kind.as_str(),
             "kindLabel": self.kind.label(),
             "name": self.name,
+            "signsIn": self.kind.signs_in(),
+            "ownerId": self.owner_id,
+            "signedIn": signed_in,
             "baseUrl": self.base_url,
             "effectiveBaseUrl": self.effective_base_url(),
             "hasKey": self.has_key(),
@@ -438,6 +484,8 @@ fn provider_from_row(row: &sqlx::sqlite::SqliteRow) -> Option<Provider> {
         enabled: row.get::<i64, _>("enabled") != 0,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        owner_id: row.get("owner_id"),
+        sign_in: row.get("sign_in"),
     })
 }
 
@@ -454,6 +502,74 @@ pub async fn provider(pool: &SqlitePool, id: &str) -> AppResult<Option<Provider>
         .fetch_optional(pool)
         .await?;
     Ok(row.as_ref().and_then(provider_from_row))
+}
+
+/// Store a signed-in plan's tokens encrypted.
+pub fn seal_credentials(secrets: &Secrets, credentials: &signin::Credentials) -> AppResult<String> {
+    let text = serde_json::to_string(credentials)
+        .map_err(|_| AppError::internal("cannot store the sign-in"))?;
+    secrets
+        .encrypt_str(&text)
+        .map_err(|_| AppError::internal("cannot encrypt the sign-in"))
+}
+
+/// One refresh at a time, for every signed-in provider (refresh tokens
+/// rotate: two refreshes with the same one would end the session).
+static REFRESHING: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// A signed-in provider's access token and account id, refreshed first
+/// when it is about to expire (and stored at once).
+pub async fn signed_in_token(
+    pool: &SqlitePool,
+    secrets: &Secrets,
+    provider: &Provider,
+) -> AppResult<(String, String)> {
+    let again = || {
+        AppError::bad_request(format!(
+            "{} is not signed in; sign in again under AI Agent settings → Providers",
+            provider.name
+        ))
+    };
+    let now = now_ms();
+    let credentials = provider.credentials(secrets)?.ok_or_else(again)?;
+    if !credentials.needs_refresh(now) {
+        return Ok((credentials.access_token, credentials.account_id));
+    }
+    let _one = REFRESHING.lock().await;
+    // Another request may have refreshed it meanwhile.
+    let current = self::provider(pool, &provider.id)
+        .await?
+        .ok_or(AppError::NotFound("provider not found"))?;
+    let credentials = current.credentials(secrets)?.ok_or_else(again)?;
+    let now = now_ms();
+    if !credentials.needs_refresh(now) {
+        return Ok((credentials.access_token, credentials.account_id));
+    }
+    let old = credentials.clone();
+    let refreshed = tokio::task::spawn_blocking(move || signin::refresh(&old, now))
+        .await
+        .map_err(|e| AppError::internal(format!("sign-in refresh failed: {e}")))?;
+    match refreshed {
+        Ok(fresh) => {
+            sqlx::query("UPDATE ai_providers SET sign_in = ?, updated_at = ? WHERE id = ?")
+                .bind(seal_credentials(secrets, &fresh)?)
+                .bind(now)
+                .bind(&provider.id)
+                .execute(pool)
+                .await?;
+            Ok((fresh.access_token, fresh.account_id))
+        }
+        // Still valid for a while: use it, try again next time.
+        Err(error) if !credentials.expired(now + 60_000) => {
+            tracing::warn!(provider = %provider.name, %error, "AI sign-in refresh failed; using the current token");
+            Ok((credentials.access_token, credentials.account_id))
+        }
+        Err(error) => Err(AppError::bad_request(format!(
+            "{}'s sign-in has ended ({error}); sign in again under AI Agent settings → Providers",
+            provider.name
+        ))),
+    }
 }
 
 /// Store a provider's key encrypted ("" removes it).
@@ -1081,7 +1197,7 @@ pub async fn refresh_list_prices(
 
 /// The providers whose prices may be refreshed: in use and not local.
 pub fn prices_refreshable(provider: &Provider) -> bool {
-    provider.enabled && !provider.kind.is_local()
+    provider.enabled && !provider.kind.is_local() && !provider.kind.signs_in()
 }
 
 /// Refresh the prices of providers not asked for a day.

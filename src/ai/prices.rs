@@ -405,6 +405,8 @@ pub enum Source {
     BuiltIn(&'static str),
     /// The provider runs locally: free.
     Local,
+    /// A signed-in plan: paid for by the plan, counted as free.
+    Plan,
     /// Nobody knows: counted as free.
     None,
 }
@@ -416,6 +418,7 @@ impl Source {
             Source::List => "list",
             Source::BuiltIn(_) => "built-in",
             Source::Local => "local",
+            Source::Plan => "plan",
             Source::None => "none",
         }
     }
@@ -436,6 +439,9 @@ pub fn fallback(provider: &Provider, model: &str) -> (Option<Price>, Source) {
     }
     if provider.kind.is_local() {
         return (Some(FREE), Source::Local);
+    }
+    if provider.kind.signs_in() {
+        return (Some(FREE), Source::Plan);
     }
     match built_in(model) {
         Some((price, entry)) => (Some(price), Source::BuiltIn(entry)),
@@ -586,6 +592,7 @@ pub fn listing(providers: &[Provider]) -> Value {
                 "kindLabel": p.kind.label(),
                 "enabled": p.enabled,
                 "local": p.kind.is_local(),
+                "plan": p.kind.signs_in(),
                 "checkedAt": p.prices_checked_at,
                 "models": models,
             })

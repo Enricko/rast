@@ -99,6 +99,19 @@ this file by `scripts/changelog-section.sh`.
   long prompts (e.g. above 200K input tokens), usage is counted at the price
   that applied when the reply was written. Settings → Prices shows these
   rules under each model.
+- **Sign in with your ChatGPT plan (Codex).** An administrator can add
+  ChatGPT Codex by signing in with their own ChatGPT plan instead of an API
+  key, the way 9router and OpenCode do it: "Continue with ChatGPT" opens
+  OpenAI's sign-in (the Codex CLI's OAuth client, with PKCE), then the
+  address the browser lands on (`http://localhost:1455/auth/callback?…`) is
+  pasted back into RAST. Only the account that signed in can chat with it,
+  since a plan is one person's. Replies count toward the plan's Codex
+  limits, not toward RAST's spending (priced "In your plan"). RAST
+  refreshes the sign-in itself, one refresh at a time, and the tokens are
+  stored encrypted and never shown. Using a plan outside OpenAI's own apps
+  is not officially supported, and the dialog says so. Claude and
+  Antigravity sign-ins are not offered: Anthropic and Google forbid using
+  them in other apps. Database schema v16.
 
 ### Changed
 

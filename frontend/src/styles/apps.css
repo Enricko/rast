@@ -6513,6 +6513,47 @@ button.pkg-pill {
   text-decoration: underline;
 }
 
+.ai-card-key.is-warn {
+  color: var(--warning-strong);
+}
+
+/* Signing in with a plan (ChatGPT's Codex). */
+.ai-sign-in-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  text-decoration: none;
+}
+
+.ai-sign-in-open.is-waiting {
+  cursor: progress;
+  opacity: 0.6;
+}
+
+.ai-signed-in {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ai-sign-in-risk {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.ai-sign-in-risk svg {
+  flex: none;
+  margin-top: 1px;
+}
+
 .ai-model-chips {
   display: flex;
   flex-wrap: wrap;

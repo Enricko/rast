@@ -11,6 +11,7 @@ import {
   formatUsd,
   formatPrice,
   priceRules,
+  planLabel,
   applyDelta,
   groupByDay,
   maySkipAsking,
@@ -226,12 +227,14 @@ test("the provider picker groups kinds and finds them by name or what they offer
     kind("anthropic", "maker", "Anthropic", "Claude models"),
     kind("opencode", "gateway", "OpenCode Zen", "Claude, GPT and more"),
     kind("ollama", "local", "Ollama"),
+    kind("codex", "plan", "ChatGPT Codex", "Sign in with your ChatGPT plan"),
     kind("custom", "custom", "OpenAI-compatible"),
   ];
   assert.deepEqual(
     groupKinds(kinds, "").map((g) => [g.id, g.kinds.map((k) => k.id)]),
     [
       ["maker", ["anthropic"]],
+      ["plan", ["codex"]],
       ["gateway", ["opencode"]],
       ["local", ["ollama"]],
       ["custom", ["custom"]],
@@ -242,6 +245,14 @@ test("the provider picker groups kinds and finds them by name or what they offer
     [["anthropic"], ["opencode"]],
   );
   assert.deepEqual(groupKinds(kinds, "nothing like it"), []);
+  assert.deepEqual(
+    groupKinds(kinds, "chatgpt").map((g) => g.id),
+    ["plan"],
+  );
+  assert.equal(planLabel("plus"), "Plus");
+  assert.equal(planLabel("PRO"), "Pro");
+  assert.equal(planLabel("k12"), "K12");
+  assert.equal(planLabel(""), "");
 });
 
 test("an agent keeps its colours", () => {
