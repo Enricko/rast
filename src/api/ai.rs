@@ -33,7 +33,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/ai/options", get(options))
         .route("/api/ai/usage", get(my_usage))
-        .route("/api/ai/usage/history", get(my_usage_history))
         .route(
             "/api/ai/conversations",
             get(list_conversations).post(create_conversation),
@@ -57,6 +56,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/server-access", put(put_server_access))
         .route("/api/ai/admin/overview", get(admin_overview))
         .route("/api/ai/admin/conversations", get(admin_conversations))
+        .route("/api/ai/admin/usage", get(admin_usage_all))
         .route("/api/ai/admin/usage/{user_id}", get(admin_usage))
         .route("/api/ai/providers", post(create_provider))
         .route("/api/ai/providers/models", post(probe_models))
@@ -302,20 +302,6 @@ async fn my_usage(State(state): State<AppState>, user: AuthUser) -> AppResult<Js
         "limits": limits,
         "allowance": ai::allowance(&state.db, user.id, &limits).await?,
     })))
-}
-
-/// GET /api/ai/usage/history?days=30 — the account's own use: per day and
-/// per model, with totals and what it is worth at API prices.
-async fn my_usage_history(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Query(query): Query<UsageQuery>,
-) -> AppResult<Json<Value>> {
-    let limits = ai::effective_limits(&state.db, &user).await?;
-    let days = query.days.unwrap_or(30).clamp(1, 366);
-    let mut history = ai::usage_history(&state.db, user.id, days).await?;
-    history["allowance"] = ai::allowance(&state.db, user.id, &limits).await?;
-    Ok(Json(history))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1262,6 +1248,9 @@ async fn admin_overview(State(state): State<AppState>, admin: AdminUser) -> AppR
                 "costToday": ai::micros_to_usd(used.cost[0]),
                 "costWeek": ai::micros_to_usd(used.cost[1]),
                 "costMonth": ai::micros_to_usd(used.cost[2]),
+                "estimateToday": ai::micros_to_usd(used.estimate[0]),
+                "estimateWeek": ai::micros_to_usd(used.estimate[1]),
+                "estimateMonth": ai::micros_to_usd(used.estimate[2]),
                 "lastAt": last_at,
             })
         })
@@ -1287,6 +1276,18 @@ struct UsageQuery {
     days: Option<u32>,
 }
 
+/// GET /api/ai/admin/usage?days=30 — everyone's use together: per day and
+/// per model, with totals and what it is worth at API prices.
+async fn admin_usage_all(
+    State(state): State<AppState>,
+    admin: AdminUser,
+    Query(query): Query<UsageQuery>,
+) -> AppResult<Json<Value>> {
+    let _ = admin;
+    let days = query.days.unwrap_or(30).clamp(1, 366);
+    Ok(Json(ai::usage_history(&state.db, None, days).await?))
+}
+
 /// GET /api/ai/admin/usage/{userId}?days=30 — one account's use: its
 /// allowance now, a total per day and per model.
 async fn admin_usage(
@@ -1304,7 +1305,7 @@ async fn admin_usage(
     let is_admin = row.get::<String, _>("role") == "admin";
     let limits = ai::effective_limits_for(&state.db, user_id, is_admin).await?;
     let days = query.days.unwrap_or(30).clamp(1, 366);
-    let mut history = ai::usage_history(&state.db, user_id, days).await?;
+    let mut history = ai::usage_history(&state.db, Some(user_id), days).await?;
     history["user"] = json!({
         "id": user_id,
         "username": row.get::<String, _>("username"),

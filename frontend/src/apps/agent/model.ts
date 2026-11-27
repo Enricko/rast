@@ -416,11 +416,14 @@ export interface UsageRow {
   costToday: number;
   costWeek: number;
   costMonth: number;
+  /** The same tokens at API prices (also for signed-in plans). */
+  estimateToday?: number;
+  estimateWeek?: number;
+  estimateMonth?: number;
   lastAt: number;
 }
 
-/** GET /api/ai/admin/usage/{userId}. */
-/** Use over some days. `cost` counts toward spending limits; `estimate` is
+/** GET /api/ai/admin/usage[/{userId}]: use over some days. `cost` counts toward spending limits; `estimate` is
  * the same tokens at API prices (also for signed-in plans). */
 export interface UsageDetail {
   user?: { id: number; username: string; displayName: string; isAdmin: boolean };

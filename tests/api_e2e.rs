@@ -3959,8 +3959,13 @@ async fn ai_agent_chat_limits_and_admin_view() {
     .await
     .unwrap();
     assert_eq!(estimated, cost);
+    // Administrators see everyone's use together (only Alice used it).
+    let (status, _, _) = server
+        .request("GET", "/api/ai/admin/usage?days=7", None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     let (status, _, history) = server
-        .request("GET", "/api/ai/usage/history?days=7", None, alice.headers())
+        .request("GET", "/api/ai/admin/usage?days=7", None, admin.headers())
         .await;
     assert_eq!(status, StatusCode::OK, "{history}");
     assert_eq!(history["totals"]["today"]["tokens"], 34);
@@ -4177,6 +4182,7 @@ async fn ai_agent_chat_limits_and_admin_view() {
         .unwrap();
     assert_eq!(row["week"], used_week);
     assert_eq!(row["costToday"], json!(cost as f64 / 1e6));
+    assert_eq!(row["estimateMonth"], json!(cost as f64 / 1e6));
     let (status, _, _) = server
         .request(
             "GET",

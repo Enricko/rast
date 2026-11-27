@@ -5118,15 +5118,8 @@ button.pkg-pill {
   border-top: 1px solid var(--border);
 }
 
-.ai-side-actions {
-  display: flex;
-  gap: 4px;
-}
-
 .ai-settings-btn {
-  flex: 1 1 0;
-  min-width: 0;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
 }
 
@@ -7325,24 +7318,11 @@ button.pkg-pill {
   min-width: 0;
 }
 
-/* Everyone's own Usage dialog: the same cards, chart and table. */
-.ai-usage-view {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  max-height: min(70vh, 640px);
-  overflow: auto;
-}
-
-.ai-usage-view .ai-set-subtitle:first-of-type {
-  margin-top: 4px;
-}
-
-.ai-usage-foot {
-  margin: 12px 0 0;
-}
-
 /* Usage: totals, a table per account, one account's days and models. */
+.ai-set-subtitle.ai-usage-first {
+  margin-top: 0;
+}
+
 .ai-usage-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));

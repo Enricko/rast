@@ -9,7 +9,7 @@ import { relativeTime } from "../../core/format";
 import { iconSvg } from "../../core/icons";
 import { confirmDialog, copyText, errorMessage, modal } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
-import { dailyChart, usageCard, usageModels, usageTotals } from "./usage";
+import { dailyChart, formatEstimate, usageCard, usageModels, usageTotals } from "./usage";
 import {
   allowanceLimits,
   formatTokens,
@@ -23,6 +23,7 @@ import {
   type PricedModel,
   type Prices,
   type UsageDetail,
+  type UsageRow,
   type ProviderKind,
   type SignInDone,
   type SignInFlow,
@@ -1438,26 +1439,49 @@ export function mountSettings(options: {
   }
 
   // -------------------------------------------------------------- usage
+  /** Everyone together (cards, a bar per day, each model), then each
+   * account, which opens its own page. */
   function renderUsage(data: Overview): void {
     const none = { today: 0, week: 0, month: 0, costToday: 0, costWeek: 0, costMonth: 0, lastAt: 0 };
     const rowsData = data.users
       .map((u) => ({ u, used: data.usage.find((x) => x.userId === u.id) ?? { ...none, userId: u.id } }))
-      .sort((a, b) => b.used.costMonth - a.used.costMonth || b.used.month - a.used.month || a.u.username.localeCompare(b.u.username));
-    const total = data.usage.reduce((sum, u) => ({ tokens: sum.tokens + u.month, cost: sum.cost + u.costMonth }), { tokens: 0, cost: 0 });
+      .sort(
+        (a, b) =>
+          (b.used.estimateMonth ?? 0) - (a.used.estimateMonth ?? 0) || b.used.month - a.used.month || a.u.username.localeCompare(b.u.username),
+      );
+    const sum = (pick: (u: UsageRow) => number | undefined) => data.usage.reduce((total, u) => total + (pick(u) ?? 0), 0);
+    const card = (label: string, tokens: number, estimate: number, counted: number) =>
+      usageCard(label, `${formatTokens(tokens)} tokens`, `${formatEstimate(estimate)} estimated${counted ? ` · ${formatUsd(counted)} counted` : ""}`);
+    body.appendChild(h("h3", { class: "ai-set-subtitle ai-usage-first" }, "Everyone"));
     body.appendChild(
       h(
         "div",
         { class: "ai-usage-cards" },
-        usageCard("This month, everyone", `${formatTokens(total.tokens)} tokens`, formatUsd(total.cost)),
-        usageCard("Accounts that used it", String(data.usage.filter((u) => u.month > 0).length), `of ${data.users.length}`),
+        card("Today", sum((u) => u.today), sum((u) => u.estimateToday), sum((u) => u.costToday)),
+        card("This week", sum((u) => u.week), sum((u) => u.estimateWeek), sum((u) => u.costWeek)),
+        card("This month", sum((u) => u.month), sum((u) => u.estimateMonth), sum((u) => u.costMonth)),
+        usageCard("Accounts that used it", String(data.usage.filter((u) => u.month > 0).length), `of ${data.users.length} this month`),
       ),
     );
+
+    // Each account: its use and cost; a row opens its days and models.
+    body.appendChild(h("h3", { class: "ai-set-subtitle" }, "Each account"));
     const table = h("table", { class: "table ai-usage-table" });
     table.appendChild(
       h(
         "thead",
         {},
-        h("tr", {}, h("th", {}, "Account"), h("th", { class: "num" }, "Today"), h("th", { class: "num" }, "This week"), h("th", { class: "num" }, "This month"), h("th", { class: "num" }, "Spent this month"), h("th", {}, "Last used")),
+        h(
+          "tr",
+          {},
+          h("th", {}, "Account"),
+          h("th", { class: "num" }, "Today"),
+          h("th", { class: "num" }, "This week"),
+          h("th", { class: "num" }, "This month"),
+          h("th", { class: "num" }, "Est. cost, month"),
+          h("th", { class: "num" }, "Counted, month"),
+          h("th", {}, "Last used"),
+        ),
       ),
     );
     const tbody = h("tbody", {});
@@ -1475,16 +1499,37 @@ export function mountSettings(options: {
           h("td", { class: "num" }, formatTokens(used.today)),
           h("td", { class: "num" }, formatTokens(used.week)),
           h("td", { class: "num" }, formatTokens(used.month)),
-          h("td", { class: "num" }, formatUsd(used.costMonth)),
+          h("td", { class: "num" }, formatEstimate(used.estimateMonth)),
+          h("td", { class: "num muted" }, formatUsd(used.costMonth)),
           h("td", { class: "muted" }, used.lastAt ? relativeTime(used.lastAt) : "—"),
         ),
       );
     }
     table.appendChild(tbody);
+    body.appendChild(h("div", { class: "ai-table-wrap" }, table));
+
+    // Everyone's days and models, once loaded.
+    const later = h("div", { class: "ai-usage-later" }, h("p", { class: "ai-set-loading muted" }, "Loading…"));
     body.append(
-      h("div", { class: "ai-table-wrap" }, table),
-      h("p", { class: "ai-set-note small muted" }, "Tokens as the providers report them (estimated when they do not); money from each model's price under Prices. Open an account for its days and models."),
+      later,
+      h(
+        "p",
+        { class: "ai-set-note small muted" },
+        "Est. cost is the tokens at each model's API price, signed-in plans included. Counted is what spending limits count (a signed-in plan counts nothing). Open an account for its own days and models.",
+      ),
     );
+    void ctx.api
+      .get<UsageDetail>("/api/ai/admin/usage", { days: "30" })
+      .then((detail) => {
+        if (page !== "usage" || usageUser !== null) return;
+        later.replaceChildren(
+          h("h3", { class: "ai-set-subtitle" }, "Tokens per day, everyone, last 30 days"),
+          dailyChart(detail.days),
+          h("h3", { class: "ai-set-subtitle" }, "By model, everyone, last 30 days"),
+          usageModels(detail.models, true),
+        );
+      })
+      .catch((error: unknown) => later.replaceChildren(h("div", { class: "banner banner-error" }, errorMessage(error))));
   }
 
   // ------------------------------------------------------------- prices

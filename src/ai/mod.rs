@@ -1060,6 +1060,8 @@ pub fn periods_on(today: chrono::NaiveDate) -> Periods {
 pub struct Used {
     pub tokens: [i64; 3],
     pub cost: [i64; 3],
+    /// The same tokens at API prices (see [`prices::estimate`]).
+    pub estimate: [i64; 3],
 }
 
 /// Sums for [`Used`]: `?1`, `?2`, `?3` are where the day, week and month
@@ -1072,7 +1074,10 @@ macro_rules! used_sums {
     COALESCE(SUM(CASE WHEN created_at >= ?3 THEN input_tokens + output_tokens END), 0) AS month_tokens,
     COALESCE(SUM(CASE WHEN created_at >= ?1 THEN cost END), 0) AS day_cost,
     COALESCE(SUM(CASE WHEN created_at >= ?2 THEN cost END), 0) AS week_cost,
-    COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost END), 0) AS month_cost"
+    COALESCE(SUM(CASE WHEN created_at >= ?3 THEN cost END), 0) AS month_cost,
+    COALESCE(SUM(CASE WHEN created_at >= ?1 THEN estimated_cost END), 0) AS day_estimate,
+    COALESCE(SUM(CASE WHEN created_at >= ?2 THEN estimated_cost END), 0) AS week_estimate,
+    COALESCE(SUM(CASE WHEN created_at >= ?3 THEN estimated_cost END), 0) AS month_estimate"
     };
 }
 
@@ -1087,6 +1092,11 @@ fn used_from_row(row: &sqlx::sqlite::SqliteRow) -> Used {
             row.get("day_cost"),
             row.get("week_cost"),
             row.get("month_cost"),
+        ],
+        estimate: [
+            row.get("day_estimate"),
+            row.get("week_estimate"),
+            row.get("month_estimate"),
         ],
     }
 }
@@ -1333,7 +1343,9 @@ pub fn spawn_price_refresh(pool: SqlitePool, secrets: std::sync::Arc<Secrets>) {
 
 /// One account's use over the last `days` days (server time): a total per
 /// day (oldest first, days without use included) and per model.
-pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppResult<Value> {
+/// Use per day and per model over `days`, with totals for today, this week
+/// and this month: one account's, or everyone's (`user_id` None).
+pub async fn usage_history(pool: &SqlitePool, user_id: Option<i64>, days: u32) -> AppResult<Value> {
     let today = chrono::Local::now().date_naive();
     let first = today - chrono::Days::new(u64::from(days.saturating_sub(1)));
     let since = local_midnight(first);
@@ -1341,7 +1353,7 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
         "SELECT date(created_at / 1000, 'unixepoch', 'localtime') AS day,
                 SUM(input_tokens) AS input, SUM(output_tokens) AS output, SUM(cost) AS cost,
                 SUM(estimated_cost) AS estimate, COUNT(*) AS calls
-         FROM ai_usage WHERE user_id = ? AND created_at >= ? GROUP BY day",
+         FROM ai_usage WHERE (?1 IS NULL OR user_id = ?1) AND created_at >= ?2 GROUP BY day",
     )
     .bind(user_id)
     .bind(since)
@@ -1380,7 +1392,7 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
                 SUM(u.input_tokens) AS input, SUM(u.output_tokens) AS output, SUM(u.cost) AS cost,
                 SUM(u.estimated_cost) AS estimate, COUNT(*) AS calls, MAX(u.created_at) AS last_at
          FROM ai_usage u LEFT JOIN ai_providers p ON p.id = u.provider_id
-         WHERE u.user_id = ? AND u.created_at >= ?
+         WHERE (?1 IS NULL OR u.user_id = ?1) AND u.created_at >= ?2
          GROUP BY u.provider_id, u.model ORDER BY SUM(u.input_tokens + u.output_tokens) DESC",
     )
     .bind(user_id)
@@ -1413,7 +1425,7 @@ pub async fn usage_history(pool: &SqlitePool, user_id: i64, days: u32) -> AppRes
             COALESCE(SUM(CASE WHEN created_at >= ?2 THEN estimated_cost END), 0) AS e_week,
             COALESCE(SUM(CASE WHEN created_at >= ?3 THEN input_tokens + output_tokens END), 0) AS t_month,
             COALESCE(SUM(CASE WHEN created_at >= ?3 THEN estimated_cost END), 0) AS e_month
-         FROM ai_usage WHERE user_id = ?4 AND created_at >= ?5",
+         FROM ai_usage WHERE (?4 IS NULL OR user_id = ?4) AND created_at >= ?5",
     )
     .bind(p.day)
     .bind(p.week)

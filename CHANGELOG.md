@@ -163,11 +163,12 @@ this file by `scripts/changelog-section.sh`.
   v18.
 - **AI Agent shows what replies cost.** Each reply shows its estimated cost
   at the model's API price beside its tokens, the chat's header adds up its
-  tokens and cost, and a new Usage button (for every account) shows today,
-  this week and this month, a bar per day and a table per model. Signed-in
-  plans are estimated at what the same tokens would cost with a key, while
-  spending limits still count them as free; administrators see both on an
-  account's usage page. Database schema v17.
+  tokens and cost. Settings → Usage shows everyone together (today, this
+  week, this month, a bar per day and each model, with estimated and counted
+  cost), then each account with its estimated cost; a row opens the
+  account's own days and models. Signed-in plans are estimated at what the
+  same tokens would cost with a key, while spending limits still count them
+  as free. Database schema v17.
 - **AI Agent shows what a reply is doing.** While a reply is being written, a
   line under it says "Thinking", "Writing" or "Reading the results" with a
   timer that counts up, so a model that thinks for a while (Codex on Max)
