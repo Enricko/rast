@@ -285,6 +285,8 @@ pub struct PackageView {
     /// Package icon from the signed catalog (or the installed manifest for
     /// GitHub imports); App Center falls back to a monogram when absent.
     pub icon: Option<manifest::PackageIcon>,
+    /// The desktop app an `app` package provides (its tile in App Center).
+    pub app_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1473,6 +1475,7 @@ impl PackageManager {
             system: system.cloned(),
             terminal,
             icon,
+            app_id: base.and_then(|b| b.app.as_ref()).map(|app| app.id.clone()),
         })
     }
 

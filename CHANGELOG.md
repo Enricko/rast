@@ -9,9 +9,15 @@ this file by `scripts/changelog-section.sh`.
 
 ## [Unreleased]
 
-### Added
+### Changed
 
-- Nothing yet.
+- **AI Agent installs and updates from its own tile in App Center.** When
+  the catalog offers AI Agent's package, the AI Agent tile under Apps says
+  which version is available and offers Install (later Update, with the
+  progress on the tile), and opens the package's page with its versions.
+  The package no longer shows a second "AI Agent" tile under Runtimes; the
+  Updates view still lists it when an update is ready. App Center's package
+  list names the app an app package provides (`appId`).
 
 ### Planned
 

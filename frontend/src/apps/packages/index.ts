@@ -17,6 +17,7 @@ import { watchJob } from "../../components/jobs";
 import { banner, emptyBlock, renderLoadFailure } from "../../components/states";
 import { openGithubImport } from "./github";
 import {
+  appTileLine,
   filterApps,
   filterPackages,
   groupByChannel,
@@ -26,7 +27,9 @@ import {
   linkLabel,
   monogram,
   monogramColor,
+  onAppTiles,
   packageIconDataUrl,
+  packageOfApp,
   shortSha,
   sortForTiles,
   stateLabel,
@@ -588,7 +591,7 @@ class PackageCenterApp {
     const view = this.currentView();
     const title = VIEWS.find((v) => v.id === view)?.label ?? "Packages";
     content.appendChild(h("h2", { class: "pkg-heading" }, title));
-    // Updates come with RAST for its own apps: the Updates view lists runtimes only.
+    // The Updates view lists packages only (an app's package shows there as a tile).
     if (view !== "updates" && this.overview.apps?.length) {
       this.appGrid = h("div", { class: "pkg-grid" });
       this.appSection = h("section", { class: "pkg-group", ariaLabel: "Apps" }, h("h3", { class: "pkg-group-title" }, "Apps"), this.appGrid);
@@ -656,7 +659,9 @@ class PackageCenterApp {
       for (const app of apps) this.appGrid.appendChild(this.appTile(app));
       this.appSection.hidden = apps.length === 0;
     }
-    const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query));
+    // An app's package (AI Agent's) is installed and updated from the app's tile.
+    const shownOnApps = onAppTiles(apps, this.overview?.packages ?? []);
+    const packages = sortForTiles(filterPackages(this.overview?.packages ?? [], view, this.query)).filter((p) => !shownOnApps.has(p.id));
     if (this.runtimeSection) this.runtimeSection.hidden = packages.length === 0 && apps.length > 0 && Boolean(this.query);
     if (packages.length === 0) {
       grid.appendChild(
@@ -702,32 +707,42 @@ class PackageCenterApp {
   // ------------------------------------------------------------------ apps
 
   private appTile(app: AppPackage): HTMLElement {
+    // An app with a catalog package opens the package's page (versions, updates).
+    const pkg = packageOfApp(app, this.overview?.packages ?? []);
+    const openPage = () => (pkg ? this.openDetail(pkg.id) : this.openAppPage(app.id));
     const open = h("button", { class: "pkg-tile-name", type: "button", title: `About ${app.name}` }, app.name);
     open.addEventListener("click", (event) => {
       event.stopPropagation();
-      this.openAppPage(app.id);
+      openPage();
     });
     const tile = h(
       "article",
-      { class: `pkg-tile is-app is-${app.installed ? "installed" : "install"}`, dataset: { appId: app.id } },
+      { class: `pkg-tile is-app is-${app.installed ? "installed" : "install"}`, dataset: pkg ? { appId: app.id, packageId: pkg.id } : { appId: app.id } },
       this.appIconEl(app, "tile"),
       h(
         "div",
         { class: "pkg-tile-body" },
         open,
-        h("div", { class: "pkg-tile-sub" }, app.removable ? "Optional app" : "Built-in app"),
-        h("div", { class: "pkg-tile-foot" }, this.appTileAction(app)),
+        h("div", { class: "pkg-tile-sub" }, appTileLine(app, pkg)),
+        h("div", { class: "pkg-tile-foot" }, this.appTileAction(app, pkg), pkg ? this.progressEl(pkg) : null),
       ),
     );
     tile.addEventListener("click", (event) => {
       if ((event.target as HTMLElement).closest("button, a")) return;
-      this.openAppPage(app.id);
+      openPage();
     });
     return tile;
   }
 
-  /** Open when it is installed (and this account may open it), else Install. */
-  private appTileAction(app: AppPackage): HTMLElement {
+  /**
+   * Install or Update when the app's package offers one (to administrators),
+   * else Open when it is installed (and this account may open it), else Install.
+   */
+  private appTileAction(app: AppPackage, pkg?: PackageView): HTMLElement {
+    if (pkg && app.installed && !this.readOnly) {
+      const state = tileState(pkg);
+      if (state.action === "update" || state.action === "install") return this.tileAction(pkg, state);
+    }
     if (app.installed) {
       if (app.id !== "packages" && this.canOpen(app.id)) {
         return this.pill("Open", "is-quiet", `Open ${app.name}`, () => this.ctx.openApp(app.id));

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  appTileLine,
   filterApps,
   filterPackages,
   groupByChannel,
@@ -10,6 +11,8 @@ import {
   jobFraction,
   linkLabel,
   monogram,
+  onAppTiles,
+  packageOfApp,
   sortForTiles,
   statusLine,
   suggestedVersion,
@@ -59,6 +62,31 @@ function pkg(id: string, extra: Partial<PackageView> = {}): PackageView {
     ...extra,
   };
 }
+
+test("an app's package shows on the app's tile", () => {
+  const agent: AppPackage = { id: "agent", name: "AI Agent", description: "", installed: true, removable: true };
+  const files: AppPackage = { id: "files", name: "File Station", description: "", installed: true, removable: false };
+  const available = pkg("ai-agent", { packageType: "app", appId: "agent", versions: [choice("1.0.0")] });
+  const runtime = pkg("go");
+  assert.equal(packageOfApp(agent, [runtime, available])?.id, "ai-agent");
+  assert.equal(packageOfApp(files, [runtime, available]), undefined);
+  assert.deepEqual([...onAppTiles([agent, files], [runtime, available])], ["ai-agent"]);
+  // In a view without the app's tile (Updates), the package keeps its own.
+  assert.deepEqual([...onAppTiles([], [runtime, available])], []);
+
+  assert.equal(appTileLine(files), "Built-in app");
+  assert.equal(appTileLine(agent), "Optional app");
+  assert.equal(appTileLine(agent, available), "1.0.0 available");
+  const installed = pkg("ai-agent", { appId: "agent", installed: [{ version: "1.0.0", isDefault: true } as never] });
+  assert.equal(appTileLine(agent, installed), "Version 1.0.0");
+  const update = pkg("ai-agent", {
+    appId: "agent",
+    installed: [{ version: "1.0.0", isDefault: true } as never],
+    updates: [{ channel: "stable", from: "1.0.0", to: "1.1.0", revision: 1, replacesDefault: true, fromSystem: false }],
+  });
+  assert.equal(appTileLine(agent, update), "1.0.0 → 1.1.0");
+  assert.equal(tileState(update).action, "update");
+});
 
 test("views filter installed packages and packages with updates", () => {
   const installed = pkg("go", { installed: [{ version: "1.26.11" } as never], updateState: "ready" });

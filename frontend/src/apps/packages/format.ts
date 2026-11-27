@@ -21,6 +21,29 @@ export function filterApps(apps: AppPackage[], view: PackageFilter, query: strin
   );
 }
 
+/** The catalog package that provides an app (AI Agent's `ai-agent`), if any. */
+export function packageOfApp(app: AppPackage, packages: PackageView[]): PackageView | undefined {
+  return packages.find((p) => p.appId === app.id);
+}
+
+/** Packages that show on an app tile in the list instead of a tile of their own. */
+export function onAppTiles(apps: AppPackage[], packages: PackageView[]): Set<string> {
+  const ids = new Set(apps.map((app) => app.id));
+  return new Set(packages.filter((p) => p.appId && ids.has(p.appId)).map((p) => p.id));
+}
+
+/** The short line under an app's name: its package's version when it has one. */
+export function appTileLine(app: AppPackage, pkg?: PackageView): string {
+  const kind = app.removable ? "Optional app" : "Built-in app";
+  if (!pkg) return kind;
+  const update = pkg.updates[0];
+  if (update) return `${update.from} → ${update.to}`;
+  const installed = installedLabel(pkg);
+  if (installed) return `Version ${installed}`;
+  const next = pkg.official ? suggestedVersion(pkg) : null;
+  return next ? `${next.version} available` : kind;
+}
+
 /** Packages shown by a sidebar view, filtered by a free-text query. */
 export function filterPackages(packages: PackageView[], view: PackageFilter, query = ""): PackageView[] {
   const q = query.trim().toLowerCase();

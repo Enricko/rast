@@ -6526,6 +6526,20 @@ async fn ai_agent_runs_from_its_package() {
         .unwrap();
     server.state.apps.sync(&server.state).await;
 
+    // App Center shows the package on the AI Agent app's tile.
+    let (status, _, body) = server
+        .request("GET", "/api/packages", None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let listed = body["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "ai-agent")
+        .expect("the package is listed");
+    assert_eq!(listed["appId"], "agent", "{listed}");
+    assert_eq!(listed["packageType"], "app", "{listed}");
+
     // The chat came along, answered by the app now.
     let (status, _, body) = server
         .request(

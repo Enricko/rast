@@ -208,6 +208,8 @@ export interface PackageView {
   terminal?: TerminalView | null;
   /** Package icon; absent for older catalogs/imports (the UI falls back to a monogram). */
   icon?: PackageIcon | null;
+  /** The desktop app an `app` package provides: it shows on that app's tile. */
+  appId?: string | null;
 }
 
 export interface CatalogStatus {
