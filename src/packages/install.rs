@@ -2041,6 +2041,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "package checks run only on Linux")]
     fn app_packages_install_with_their_window_and_server() {
         use sha2::{Digest, Sha256};
         let dir = tempfile::tempdir().unwrap();

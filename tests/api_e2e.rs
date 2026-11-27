@@ -6393,6 +6393,8 @@ async fn package_center_apps_run_behind_rast() {
 /// then answers `/api/ai/*` with its own database, asking RAST's host API
 /// for accounts and File Station.
 #[tokio::test]
+// App packages install on Linux servers (their checks run only there).
+#[cfg_attr(not(target_os = "linux"), ignore = "app packages run on Linux servers")]
 async fn ai_agent_runs_from_its_package() {
     use std::os::unix::fs::PermissionsExt;
     let server = TestServer::start().await;
