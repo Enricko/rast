@@ -1,7 +1,8 @@
 // Desktop shell: wallpaper, application icon grid, window layer, taskbar, tray,
 // panels (start menu / account / status / clock), context menus and shortcuts.
 
-import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature } from "../apps/registry";
+import { appsForPermissions, findApp, isAppAllowed, isAppInstalled, permissionsSignature, setPackageApps } from "../apps/registry";
+import { fetchPackageWindows, packageAppDefinition } from "../core/package-apps";
 import { APP_DRAG_TYPE, type AppContext, type AppDefinition, type DesktopActions } from "../core/app";
 import { rectToStage, stageSize } from "../core/display";
 import { h } from "../core/dom";
@@ -1479,6 +1480,27 @@ export function startDesktop(deps: ShellDeps, me: MeResponse, options: DesktopOp
     }),
   );
   updateTray();
+
+  // Package Center apps installed, updated or removed: the launcher, the
+  // taskbar and open windows follow (a removed app's windows close).
+  let packagesTimer: number | undefined;
+  async function refreshPackageApps(): Promise<void> {
+    const windows = await fetchPackageWindows(deps.api);
+    if (disposed) return;
+    if (setPackageApps(windows.map(packageAppDefinition))) enforceEffectiveAccess();
+  }
+  disposers.push(
+    realtime.on("package.changed", () => {
+      if (packagesTimer !== undefined) window.clearTimeout(packagesTimer);
+      packagesTimer = window.setTimeout(() => {
+        packagesTimer = undefined;
+        void refreshPackageApps();
+      }, 400);
+    }),
+    () => {
+      if (packagesTimer !== undefined) window.clearTimeout(packagesTimer);
+    },
+  );
 
   // --------------------------------------------------- session-expiry flow
   if (me.user.mustChangePassword) {

@@ -1,0 +1,89 @@
+{
+  "api": [
+    "ApiClient",
+    "ApiError",
+    "apiErrorMessage",
+    "isFeatureUnavailable"
+  ],
+  "components": [
+    "badge",
+    "banner",
+    "card",
+    "codeValue",
+    "copyButton",
+    "iconButton",
+    "kvList",
+    "loadingBlock",
+    "pager",
+    "segmented",
+    "skeletonBlock",
+    "statusBadge",
+    "switchControl",
+    "textButton",
+    "usageBar"
+  ],
+  "dom": [
+    "appendChildren",
+    "applyAttrs",
+    "button",
+    "clear",
+    "debounce",
+    "emptyState",
+    "errorState",
+    "field",
+    "h",
+    "on",
+    "qs",
+    "qsa",
+    "spinner",
+    "text"
+  ],
+  "format": [
+    "clamp",
+    "endOfDay",
+    "formatAge",
+    "formatBytes",
+    "formatBytesShort",
+    "formatClock",
+    "formatClockSeconds",
+    "formatCount",
+    "formatDate",
+    "formatDateTime",
+    "formatDateTimeSec",
+    "formatDuration",
+    "formatEta",
+    "formatNumberCompact",
+    "formatPercent",
+    "formatSpeed",
+    "formatTime",
+    "formatWeekdayDate",
+    "pad2",
+    "relativeTime",
+    "startOfDay"
+  ],
+  "icons": [
+    "appAccentClass",
+    "appIconSvg",
+    "fileIcon",
+    "hasIcon",
+    "iconEl",
+    "iconSvg"
+  ],
+  "realtime": [
+    "QueryCache",
+    "RealtimeStore",
+    "debounceTask",
+    "getRealtime"
+  ],
+  "ui": [
+    "WINDOW_CLOSING",
+    "confirmDialog",
+    "contextMenu",
+    "copyText",
+    "dialogOpen",
+    "errorMessage",
+    "modal",
+    "promptDialog",
+    "sparkline"
+  ]
+}

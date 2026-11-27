@@ -6,6 +6,7 @@
 // conversations (settings.ts). Agents may ask to use tools (files, commands,
 // the web); each call shows as a card the chat's owner allows or denies.
 
+import "./agent.css";
 import type { AppContext, AppDefinition, AppInstance } from "../../core/app";
 import { ApiError } from "../../core/api";
 import { h } from "../../core/dom";

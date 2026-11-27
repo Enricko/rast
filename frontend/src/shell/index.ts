@@ -4,6 +4,8 @@
 import { ApiClient, ApiError, apiErrorMessage } from "../core/api";
 import { h } from "../core/dom";
 import { iconSvg } from "../core/icons";
+import { fetchPackageWindows, packageAppDefinition } from "../core/package-apps";
+import { setPackageApps } from "../apps/registry";
 import { EventStream } from "../core/sse";
 import { Store } from "../core/store";
 import { promptDialog } from "../core/ui";
@@ -51,9 +53,22 @@ export async function boot(root: HTMLElement): Promise<void> {
   let pendingRestore: SessionSnapshot | null = null;
   let handlingLostSession = false;
 
+  // Package Center apps are known before the desktop opens saved windows.
+  let signIn = 0;
   const onAuthenticated = (me: MeResponse): void => {
     handlingLostSession = false;
     desktop?.dispose();
+    desktop = null;
+    const attempt = ++signIn;
+    const waited = new Promise<null>((resolve) => window.setTimeout(() => resolve(null), 5000));
+    void Promise.race([fetchPackageWindows(api), waited]).then((windows) => {
+      if (attempt !== signIn) return;
+      setPackageApps((windows ?? []).map(packageAppDefinition));
+      openDesktop(me);
+    });
+  };
+
+  const openDesktop = (me: MeResponse): void => {
     desktop = startDesktop(deps, me, {
       restore: pendingRestore,
       onSignedOut: (notice) => {
@@ -75,6 +90,7 @@ export async function boot(root: HTMLElement): Promise<void> {
   };
 
   const showLogin = (notice?: string): void => {
+    signIn += 1;
     desktop?.dispose();
     desktop = null;
     events.stop();

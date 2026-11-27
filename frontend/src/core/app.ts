@@ -90,5 +90,7 @@ export interface AppDefinition {
   singleton?: boolean;
   defaultSize?: { w: number; h: number };
   minSize?: { w: number; h: number };
+  /** Set for Package Center apps: the installed version. */
+  packageVersion?: string;
   mount(ctx: AppContext): AppInstance | void | Promise<AppInstance | void>;
 }

@@ -26,13 +26,31 @@ export const APPS: AppDefinition[] = [
   agentApp,
 ];
 
+// Package Center apps (see core/package-apps.ts): they join the built-in
+// apps, and one with a built-in app's id takes its place.
+let packageApps: AppDefinition[] = [];
+
+/** Set the Package Center apps; true when the list changed. */
+export function setPackageApps(apps: AppDefinition[]): boolean {
+  const key = (list: AppDefinition[]) => list.map((app) => `${app.id}@${app.packageVersion ?? ""}`).join(",");
+  if (key(apps) === key(packageApps)) return false;
+  packageApps = apps.slice();
+  return true;
+}
+
+/** Every app the desktop knows: built-in ones and Package Center ones. */
+export function allApps(): AppDefinition[] {
+  const replaced = new Set(packageApps.map((app) => app.id));
+  return [...APPS.filter((app) => !replaced.has(app.id)), ...packageApps];
+}
+
 export function findApp(id: string): AppDefinition | undefined {
-  return APPS.find((app) => app.id === id);
+  return packageApps.find((app) => app.id === id) ?? APPS.find((app) => app.id === id);
 }
 
 /** Apps visible to the current role (fallback when permissions are absent). */
 export function appsForRole(isAdmin: boolean): AppDefinition[] {
-  return APPS.filter((app) => !app.adminOnly || isAdmin);
+  return allApps().filter((app) => !app.adminOnly || isAdmin);
 }
 
 /**
@@ -55,7 +73,7 @@ export function isAppAllowed(appId: string, permissions: Permissions | null, isA
 
 /** Apps visible to the current account, driven by effective permissions. */
 export function appsForPermissions(permissions: Permissions | null, isAdmin: boolean): AppDefinition[] {
-  return APPS.filter((app) => isAppAllowed(app.id, permissions, isAdmin));
+  return allApps().filter((app) => isAppAllowed(app.id, permissions, isAdmin));
 }
 
 /** True when the app is read-only for this account (e.g. group `allow` grant). */
@@ -72,7 +90,9 @@ export function isAppInstalled(appId: string, permissions: Permissions | null): 
 
 /** Stable signature used to detect effective permission changes. */
 export function permissionsSignature(permissions: Permissions | null, isAdmin: boolean): string {
-  const ids = appsForPermissions(permissions, isAdmin).map((app) => app.id);
-  const flags = ids.map((id) => `${id}:${isAppReadOnly(id, permissions, isAdmin) ? "ro" : "rw"}`);
+  const flags = appsForPermissions(permissions, isAdmin).map((app) => {
+    const version = app.packageVersion ? `@${app.packageVersion}` : "";
+    return `${app.id}${version}:${isAppReadOnly(app.id, permissions, isAdmin) ? "ro" : "rw"}`;
+  });
   return flags.join(",");
 }
