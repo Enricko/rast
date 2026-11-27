@@ -19,6 +19,9 @@ import {
   maySkipAsking,
   messageText,
   toolArgument,
+  chatArtifacts,
+  artifactFileName,
+  artifactSlug,
   upsertMessage,
   type ContentBlock,
   type Message,
@@ -335,4 +338,30 @@ test("a reply being written says what it does and for how long", () => {
   assert.equal(reply("streaming", [tool("done")]), "Reading the results");
   assert.equal(reply("done", []), null);
   assert.equal(reply("waiting", [tool("pending")]), null);
+});
+
+test("artifacts: versions per id, file names, slugs like the server", () => {
+  const tool = (id: string, input: Record<string, unknown>, status = "done") => ({ type: "tool", id, name: "artifact", input, status }) as never;
+  const messages = [
+    { id: 1, content: [tool("c1", { id: "calc", title: "Calculator", kind: "html", content: "<p>1</p>" })] },
+    { id: 2, content: [{ type: "text", text: "Here" }, tool("c2", { id: "notes", title: "Notes", kind: "markdown", content: "# N" })] },
+    { id: 3, content: [tool("c3", { id: "calc", title: "Calculator", kind: "html", content: "<p>2</p>" }), tool("c4", { kind: "html", content: "x" }, "pending")] },
+    { id: 4, content: [tool("c5", { title: "Sales report 2026!", kind: "code", language: "Python", content: "print(1)" })] },
+  ] as never;
+  const list = chatArtifacts(messages);
+  assert.deepEqual(
+    list.map((a) => [a.callId, a.key, a.version]),
+    [
+      ["c1", "calc", 1],
+      ["c2", "notes", 1],
+      ["c3", "calc", 2],
+      ["c5", "sales-report-2026", 1],
+    ],
+  );
+  assert.equal(artifactFileName(list[0]!), "calculator.html");
+  assert.equal(artifactFileName(list[1]!), "notes.md");
+  assert.equal(artifactFileName(list[3]!), "sales-report-2026.py");
+  assert.equal(artifactFileName({ title: "x", kind: "code", language: "cobol" }), "x.txt");
+  assert.equal(artifactSlug("Budget Calc"), "budget-calc");
+  assert.equal(artifactSlug("--"), "artifact");
 });

@@ -552,7 +552,100 @@ export const TOOL_INFO: Record<string, { label: string; doing: string; arg: stri
   web_search: { label: "Search the web", doing: "Searching", arg: "query", icon: "network" },
   fetch_url: { label: "Open a web page", doing: "Opening", arg: "url", icon: "external" },
   browser: { label: "Use the browser", doing: "Browsing", arg: "action", icon: "browser" },
+  artifact: { label: "Artifact", doing: "Writing", arg: "title", icon: "compose" },
 };
+
+// ------------------------------------------------------------- artifacts
+
+export type ArtifactKind = "html" | "svg" | "markdown" | "code";
+
+/** One version of an artifact the model showed (the `artifact` tool). */
+export interface ArtifactVersion {
+  callId: string;
+  /** The same across versions (the call's id, as a slug). */
+  key: string;
+  title: string;
+  kind: ArtifactKind;
+  language: string;
+  content: string;
+  /** 1 for the first version of `key` in the chat. */
+  version: number;
+}
+
+export const ARTIFACT_KINDS: Record<ArtifactKind, { label: string; icon: string }> = {
+  html: { label: "Web page", icon: "browser" },
+  svg: { label: "Picture", icon: "image" },
+  markdown: { label: "Document", icon: "file" },
+  code: { label: "Code", icon: "terminal" },
+};
+
+/** Lowercase letters, digits and dashes (as src/ai/tools.rs `slug`). */
+export function artifactSlug(text: string): string {
+  let out = "";
+  for (const c of text.toLowerCase()) {
+    if (/^[a-z0-9]$/.test(c)) out += c;
+    else if (out && !out.endsWith("-")) out += "-";
+    if (out.length >= 64) break;
+  }
+  out = out.replace(/-+$/, "");
+  return out || "artifact";
+}
+
+/** The artifact a tool block shows, once it is done (else null). */
+export function artifactOf(block: ContentBlock): Omit<ArtifactVersion, "version"> | null {
+  if (block.type !== "tool" || block.name !== "artifact" || block.status !== "done") return null;
+  const input = typeof block.input === "object" && block.input ? block.input : {};
+  const text = (key: string) => (typeof input[key] === "string" ? (input[key] as string) : "");
+  const kind = text("kind").trim().toLowerCase();
+  if (!(kind in ARTIFACT_KINDS) || !text("content")) return null;
+  const title = text("title").trim().slice(0, 120) || "Untitled";
+  return {
+    callId: block.id,
+    key: artifactSlug(text("id").trim() || title),
+    title,
+    kind: kind as ArtifactKind,
+    language: text("language").trim(),
+    content: text("content"),
+  };
+}
+
+/** Every artifact of a chat, oldest first, numbered per key. */
+export function chatArtifacts(messages: readonly Message[]): ArtifactVersion[] {
+  const counts = new Map<string, number>();
+  const out: ArtifactVersion[] = [];
+  for (const message of messages) {
+    for (const block of message.content ?? []) {
+      const artifact = artifactOf(block);
+      if (!artifact) continue;
+      const version = (counts.get(artifact.key) ?? 0) + 1;
+      counts.set(artifact.key, version);
+      out.push({ ...artifact, version });
+    }
+  }
+  return out;
+}
+
+const CODE_EXTENSIONS: Record<string, string> = {
+  javascript: "js", js: "js", typescript: "ts", ts: "ts", tsx: "tsx", jsx: "jsx", python: "py", py: "py",
+  rust: "rs", go: "go", java: "java", kotlin: "kt", swift: "swift", c: "c", cpp: "cpp", "c++": "cpp",
+  csharp: "cs", "c#": "cs", ruby: "rb", php: "php", bash: "sh", shell: "sh", sh: "sh", zsh: "sh",
+  powershell: "ps1", sql: "sql", json: "json", yaml: "yaml", yml: "yaml", toml: "toml", css: "css",
+  html: "html", xml: "xml", lua: "lua", dart: "dart", r: "r", scala: "scala", dockerfile: "Dockerfile",
+};
+
+/** The file name a download of the artifact gets. */
+export function artifactFileName(artifact: Pick<ArtifactVersion, "title" | "kind" | "language">): string {
+  const base = artifactSlug(artifact.title);
+  if (artifact.kind === "html") return `${base}.html`;
+  if (artifact.kind === "svg") return `${base}.svg`;
+  if (artifact.kind === "markdown") return `${base}.md`;
+  const ext = CODE_EXTENSIONS[artifact.language.toLowerCase()] ?? "txt";
+  return ext === "Dockerfile" ? "Dockerfile" : `${base}.${ext}`;
+}
+
+export function artifactMime(kind: ArtifactKind): string {
+  return kind === "html" ? "text/html" : kind === "svg" ? "image/svg+xml" : kind === "markdown" ? "text/markdown" : "text/plain";
+}
 
 /** A browser step in a few words: "open https://…", "click [12]". */
 export function browserStep(input: Record<string, unknown>): string {

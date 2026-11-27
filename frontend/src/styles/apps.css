@@ -5868,6 +5868,205 @@ button.pkg-pill {
 }
 
 /* Tool calls: one card per call, in reply order, joined like steps. */
+/* Artifacts: a card in the chat, a panel beside it (artifact.ts). */
+.ai-artifact-card {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: min(100%, 420px);
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--ai-tint);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+button.ai-artifact-card {
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+button.ai-artifact-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--ai-tint-2);
+}
+
+.ai-artifact-card-icon {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--ai-accent-tint);
+  color: var(--accent);
+}
+
+.ai-artifact-card-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-artifact-card-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-artifact-card-sub {
+  color: var(--text-dim);
+}
+
+.ai-artifact-card.is-error .ai-artifact-card-sub {
+  color: var(--danger);
+}
+
+.ai-artifact-card-open {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-dim);
+}
+
+.ai-artifact {
+  display: none;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface-solid, var(--surface));
+}
+
+.app-agent.has-artifact .ai-artifact {
+  display: flex;
+}
+
+.ai-artifact-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 8px 10px 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ai-artifact-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-artifact-title {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-artifact-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-artifact-versions,
+.ai-artifact-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.ai-artifact-modes {
+  flex: none;
+}
+
+.ai-artifact-modes .segment {
+  height: 24px;
+  padding: 0 10px;
+}
+
+.ai-artifact-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.ai-artifact-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.ai-artifact-doc {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 18px 22px 28px;
+}
+
+.ai-artifact-doc h1,
+.ai-artifact-doc h2 {
+  margin: 20px 0 10px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.ai-artifact-doc h1 {
+  font-size: 24px;
+}
+
+.ai-artifact-doc h2 {
+  font-size: 19px;
+}
+
+.ai-artifact-doc > :first-child {
+  margin-top: 0;
+}
+
+.ai-artifact-code {
+  min-height: 100%;
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--surface-inset, var(--surface-2));
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+  tab-size: 4;
+  white-space: pre;
+}
+
+/* Wide windows: chats, the chat and the panel side by side. */
+@container win (min-width: 961px) {
+  .app-agent.has-artifact {
+    grid-template-columns: 244px minmax(0, 1fr) minmax(0, 1.15fr);
+  }
+
+  .app-agent.ai-side-hidden.has-artifact {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  }
+}
+
+/* Narrow windows: the panel covers the window until it is closed. */
+@container win (max-width: 960px) {
+  .app-agent.has-artifact .ai-artifact {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    border-left: 0;
+  }
+
+  .ai-artifact-head {
+    flex-wrap: wrap;
+  }
+}
+
 .ai-tool {
   position: relative;
   display: flex;

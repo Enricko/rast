@@ -145,6 +145,16 @@ this file by `scripts/changelog-section.sh`.
 
 ### Changed
 
+- **Artifacts in AI Agent.** When an agent writes something to keep (a web
+  page or small app, an SVG picture, a document, a script), it opens in a
+  panel beside the chat with Preview and Code, Copy, Download and (pages)
+  Open in a new tab; asking for a change adds a new version, and the arrows
+  go back to earlier ones. The chat shows a card for each; a click opens it
+  again, and the open artifact comes back after a reload. Pages and
+  pictures run sandboxed: their scripts run, without RAST's session, API or
+  other network (only a few public script libraries). Narrow windows show
+  the panel over the chat. Showing an artifact never asks first. Database
+  schema unchanged.
 - **Full screen.** A button at the bottom right of the taskbar (next to the
   theme switch) shows the whole desktop full screen and back; so do
   Ctrl+Shift+F (⌘⇧F on a Mac), "Full screen" in the desktop and taskbar

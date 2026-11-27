@@ -15,6 +15,9 @@
 //!   this server or private networks are refused).
 //! * `browser`: a headless Chrome for the chat that opens public pages,
 //!   clicks, types and scrolls (see [`super::browser`]).
+//! * `artifact`: content shown in a panel beside the chat (a page or small
+//!   app, an SVG picture, a document, code); it touches nothing, so it never
+//!   asks first. Pages run sandboxed (see `api::ai::get_artifact`).
 
 use std::{
     io::Read,
@@ -46,9 +49,10 @@ pub const RUN_COMMAND: &str = "run_command";
 pub const WEB_SEARCH: &str = "web_search";
 pub const FETCH_URL: &str = "fetch_url";
 pub const BROWSER: &str = "browser";
+pub const ARTIFACT: &str = "artifact";
 
 /// Every tool, in the order agents' settings list them.
-pub const ALL: [&str; 11] = [
+pub const ALL: [&str; 12] = [
     LIST_FILES,
     READ_FILE,
     SEARCH_FILES,
@@ -60,7 +64,13 @@ pub const ALL: [&str; 11] = [
     WEB_SEARCH,
     FETCH_URL,
     BROWSER,
+    ARTIFACT,
 ];
+
+/// Kinds of artifact (see [`ARTIFACT`]).
+pub const ARTIFACT_KINDS: [&str; 4] = ["html", "svg", "markdown", "code"];
+/// Largest artifact content.
+pub const MAX_ARTIFACT_BYTES: usize = 400 * 1024;
 
 const FILE_TOOLS: [&str; 5] = [
     LIST_FILES,
@@ -97,12 +107,19 @@ pub fn label(name: &str) -> &'static str {
         WEB_SEARCH => "Search the web",
         FETCH_URL => "Open a web page",
         BROWSER => "Use the browser",
+        ARTIFACT => "Show an artifact",
         _ => "Unknown tool",
     }
 }
 
 pub fn is_tool(name: &str) -> bool {
     ALL.contains(&name)
+}
+
+/// Whether a call waits for its owner first: every tool that reads or
+/// changes something does; an artifact only shows what the model wrote.
+pub fn asks_first(name: &str) -> bool {
+    name != ARTIFACT
 }
 
 /// Whether the owner may let the tool run without asking in a chat: every
@@ -205,6 +222,7 @@ pub async fn available(state: &AppState, user: &AuthUser) -> Available {
     {
         out.names.push(BROWSER);
     }
+    out.names.push(ARTIFACT);
     out
 }
 
@@ -314,12 +332,98 @@ pub fn spec(name: &str, shell: Option<Shell>, guarded: bool) -> Option<ToolSpec>
                 &["action"],
             ),
         ),
+        ARTIFACT => (
+            format!(
+                "Show the person a self-contained piece of content in a panel beside the chat, where they can view it, copy it and download it. Kinds: html (a web page or small app in one file: inline CSS and JavaScript; libraries only from cdnjs.cloudflare.com, cdn.jsdelivr.net, unpkg.com or esm.sh; it runs sandboxed, without access to RAST or other network), svg (one <svg> picture or diagram), markdown (a document), code (a program or file in one language: give language). Use it for substantial content the person will keep or reuse (a page, a tool, a report, a script of more than about 15 lines), and keep short answers in the chat. To change an artifact, call this again with the same id and the complete new content: it becomes a new version. At most {} KB.",
+                MAX_ARTIFACT_BYTES / 1024
+            ),
+            schema(
+                json!({
+                    "id": {"type": "string", "description": "Short name that stays the same across versions, lowercase with dashes, like \"budget-calculator\""},
+                    "title": {"type": "string", "description": "Title the person sees"},
+                    "kind": {"type": "string", "enum": ARTIFACT_KINDS},
+                    "language": {"type": "string", "description": "code: the language, like python or typescript"},
+                    "content": {"type": "string", "description": "The whole content"},
+                }),
+                &["id", "title", "kind", "content"],
+            ),
+        ),
         _ => return None,
     };
     Some(ToolSpec {
         name: name.to_string(),
         description,
         parameters,
+    })
+}
+
+/// An artifact call, checked (see [`ARTIFACT`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artifact {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub language: String,
+    pub content: String,
+}
+
+/// A name of lowercase letters, digits and dashes from any text.
+pub fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    let out = out.trim_end_matches('-').to_string();
+    if out.is_empty() {
+        "artifact".into()
+    } else {
+        out
+    }
+}
+
+pub fn check_artifact(input: &Value) -> Result<Artifact, String> {
+    let text = |key: &str| input.get(key).and_then(Value::as_str).unwrap_or("");
+    let kind = text("kind").trim().to_ascii_lowercase();
+    if !ARTIFACT_KINDS.contains(&kind.as_str()) {
+        return Err("kind is one of html, svg, markdown or code".into());
+    }
+    let content = text("content");
+    if content.trim().is_empty() {
+        return Err("give the artifact's content".into());
+    }
+    if content.len() > MAX_ARTIFACT_BYTES {
+        return Err(format!(
+            "an artifact holds at most {} KB; make it smaller",
+            MAX_ARTIFACT_BYTES / 1024
+        ));
+    }
+    if kind == "svg" && !content.to_ascii_lowercase().contains("<svg") {
+        return Err("an svg artifact holds an <svg> element".into());
+    }
+    let title: String = text("title").trim().chars().take(120).collect();
+    let title = if title.is_empty() {
+        "Untitled".to_string()
+    } else {
+        title
+    };
+    let id = match text("id").trim() {
+        "" => slug(&title),
+        id => slug(id),
+    };
+    let language: String = text("language").trim().chars().take(40).collect();
+    Ok(Artifact {
+        id,
+        title,
+        kind,
+        language,
+        content: content.to_string(),
     })
 }
 
@@ -337,6 +441,7 @@ pub fn summary(name: &str, input: &Value) -> String {
         return format!("{name}: {line}");
     }
     let key = match name {
+        ARTIFACT => "title",
         RUN_COMMAND => "command",
         WEB_SEARCH | SEARCH_FILES => "query",
         FETCH_URL => "url",
@@ -674,6 +779,13 @@ async fn run_tool(
                 })
                 .collect::<Vec<_>>()
                 .join("\n"))
+        }
+        ARTIFACT => {
+            let artifact = check_artifact(input)?;
+            Ok(format!(
+                "The person now sees \"{}\" ({}) in the artifact panel beside the chat. To change it, call artifact again with id \"{}\" and the complete new content.",
+                artifact.title, artifact.kind, artifact.id
+            ))
         }
         FETCH_URL => {
             let url = text_arg(input, "url")?.trim().to_string();
@@ -1503,6 +1615,27 @@ fn decode_entities(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifacts_are_checked() {
+        let ok = check_artifact(&json!({"id": "Budget Calc", "title": " Budget ", "kind": "HTML", "content": "<p>hi</p>"})).unwrap();
+        assert_eq!(
+            (ok.id.as_str(), ok.title.as_str(), ok.kind.as_str()),
+            ("budget-calc", "Budget", "html")
+        );
+        let derived = check_artifact(
+            &json!({"title": "Sales report 2026!", "kind": "markdown", "content": "# x"}),
+        )
+        .unwrap();
+        assert_eq!(derived.id, "sales-report-2026");
+        assert!(check_artifact(&json!({"kind": "exe", "content": "x"})).is_err());
+        assert!(check_artifact(&json!({"kind": "html", "content": "  "})).is_err());
+        assert!(check_artifact(&json!({"kind": "svg", "content": "<p>no picture</p>"})).is_err());
+        let big = "x".repeat(MAX_ARTIFACT_BYTES + 1);
+        assert!(check_artifact(&json!({"kind": "code", "content": big})).is_err());
+        assert_eq!(slug("--"), "artifact");
+        assert!(!asks_first(ARTIFACT) && asks_first(FETCH_URL) && asks_first(BROWSER));
+    }
 
     #[test]
     fn server_files_for_people_who_are_not_administrators() {

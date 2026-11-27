@@ -13,6 +13,7 @@ import { appIconSvg, iconSvg } from "../../core/icons";
 import { debounceTask, getRealtime } from "../../core/realtime";
 import { confirmDialog, contextMenu, copyText, dialogOpen, errorMessage, promptDialog } from "../../core/ui";
 import { agentAvatar, providerMark } from "./marks";
+import { artifactCard, createArtifactPane } from "./artifact";
 import { createAttachments, picture, sentFiles } from "./attachments";
 import { formatEstimate } from "./usage";
 import { renderMarkdown } from "./markdown";
@@ -33,6 +34,7 @@ import {
   PERMISSION_MODES,
   permissionMode,
   TOOL_INFO,
+  chatArtifacts,
   fileUrl,
   toolArgument,
   toolBlocks,
@@ -66,6 +68,8 @@ export const agentApp: AppDefinition = {
 interface Params {
   conversationId?: string;
   settings?: boolean;
+  /** The artifact version open beside the chat. */
+  artifact?: string;
 }
 
 const CHOICE_KEY = "rast.agent.choice";
@@ -118,6 +122,7 @@ function asParams(value: unknown): Params {
   return {
     ...(typeof raw.conversationId === "string" ? { conversationId: raw.conversationId } : {}),
     ...(raw.settings === true ? { settings: true } : {}),
+    ...(typeof raw.artifact === "string" ? { artifact: raw.artifact } : {}),
   };
 }
 
@@ -264,7 +269,39 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   const main = h("section", { class: "ai-main" }, head, scrollArea, composer, dropHint);
   const settingsHost = h("section", { class: "ai-settings hidden" });
   const scrim = h("div", { class: "ai-scrim" });
-  ctx.root.append(side, main, settingsHost, scrim);
+  const artifactPane = createArtifactPane(ctx, () => closeArtifact(true));
+  ctx.root.append(side, main, artifactPane.el, settingsHost, scrim);
+
+  // Artifacts: a panel beside the chat. A new one opens by itself while the
+  // chat is in view; those already there when a chat opens wait for a click.
+  let seenArtifacts = new Set<string>();
+  function openArtifact(callId: string): void {
+    if (!current) return;
+    const list = chatArtifacts(current.messages);
+    if (!list.some((a) => a.callId === callId)) return;
+    artifactPane.show(list, callId, current.conversation.id);
+    ctx.root.classList.add("has-artifact");
+    ctx.root.classList.remove("ai-side-open");
+    if (!current.readOnly) ctx.saveState({ conversationId: current.conversation.id, artifact: callId });
+  }
+  function closeArtifact(save: boolean): void {
+    if (!artifactPane.shown()) return;
+    artifactPane.close();
+    ctx.root.classList.remove("has-artifact");
+    if (save && current && !current.readOnly) ctx.saveState({ conversationId: current.conversation.id });
+  }
+  function noticeArtifacts(): void {
+    if (!current) return;
+    const list = chatArtifacts(current.messages);
+    let fresh: string | null = null;
+    for (const artifact of list) {
+      if (seenArtifacts.has(artifact.callId)) continue;
+      seenArtifacts.add(artifact.callId);
+      fresh = artifact.callId;
+    }
+    if (fresh) openArtifact(fresh);
+    else if (artifactPane.shown()) artifactPane.update(list);
+  }
 
   // The chat list: a column that hides in a wide window, a drawer in a
   // narrow one (where it is positioned over the chat).
@@ -445,7 +482,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     renderList();
   }
 
-  async function openConversation(id: string, options_: { quiet?: boolean } = {}): Promise<void> {
+  async function openConversation(id: string, options_: { quiet?: boolean; artifact?: string } = {}): Promise<void> {
     closeSettings();
     const token = ++loadToken;
     try {
@@ -453,8 +490,15 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       if (token !== loadToken || disposed) return;
       const switching = current?.conversation.id !== id;
       current = detail;
-      if (!detail.readOnly) ctx.saveState({ conversationId: id });
+      if (switching) {
+        seenArtifacts = new Set(chatArtifacts(detail.messages).map((a) => a.callId));
+        closeArtifact(false);
+      }
+      const keep = options_.artifact ?? (switching ? undefined : (artifactPane.shown() ?? undefined));
+      if (!detail.readOnly) ctx.saveState(keep ? { conversationId: id, artifact: keep } : { conversationId: id });
       renderAll(switching);
+      if (options_.artifact) openArtifact(options_.artifact);
+      else if (!switching) noticeArtifacts();
       if (switching && !detail.readOnly) input.focus();
     } catch (error) {
       if (token !== loadToken) return;
@@ -469,6 +513,8 @@ function mountAgentApp(ctx: AppContext): AppInstance {
 
   function openNew(): void {
     closeSettings();
+    closeArtifact(false);
+    seenArtifacts = new Set();
     loadToken += 1;
     current = null;
     draftAllowed = [];
@@ -480,6 +526,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
 
   function openSettings(): void {
     if (!isAdmin) return;
+    closeArtifact(false);
     ctx.saveState({ settings: true });
     main.classList.add("hidden");
     settingsHost.classList.remove("hidden");
@@ -1134,6 +1181,12 @@ function mountAgentApp(ctx: AppContext): AppInstance {
             return md;
           }),
         );
+      } else if (block.type === "tool" && block.name === "artifact") {
+        parts.push(
+          reuse(index, sig, () =>
+            artifactCard(block, current ? (chatArtifacts(current.messages).find((a) => a.callId === block.id) ?? null) : null, openArtifact),
+          ),
+        );
       } else if (block.type === "tool") {
         parts.push(reuse(index, sig, () => toolCard(message, block, opened)));
       }
@@ -1390,6 +1443,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
       if (event.message.role === "assistant") current.conversation.waiting = event.message.status === "waiting";
       if (known) refreshMessage(event.message);
       else renderThread();
+      noticeArtifacts();
       updateComposer();
     }),
     realtime.on<ConversationEvent>("ai.conversation", (event) => {
@@ -1422,13 +1476,13 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   ctx.onPlace((value) => {
     const params = asParams(value);
     if (params.settings) openSettings();
-    else if (params.conversationId) void openConversation(params.conversationId, { quiet: true });
+    else if (params.conversationId) void openConversation(params.conversationId, { quiet: true, artifact: params.artifact });
     else openNew();
   });
   ctx.onReopen((value) => {
     const params = asParams(value);
     if (params.settings) openSettings();
-    else if (params.conversationId) void openConversation(params.conversationId);
+    else if (params.conversationId) void openConversation(params.conversationId, { artifact: params.artifact });
   });
   // Typing while the window is in front writes in the message box, as in
   // chat apps: the first key moves the cursor there and the rest follows.
@@ -1475,7 +1529,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     await Promise.all([loadOptions(), loadList()]);
     if (disposed) return;
     if (start.settings && isAdmin) openSettings();
-    else if (start.conversationId) await openConversation(start.conversationId, { quiet: true });
+    else if (start.conversationId) await openConversation(start.conversationId, { quiet: true, artifact: start.artifact });
     else renderThread();
   })();
   return {};

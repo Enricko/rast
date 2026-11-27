@@ -3569,6 +3569,24 @@ fn fake_tool_reply(body: &Value) -> String {
         if text.contains("shell") {
             calls.push(("run_command", json!({"command": "id"})));
         }
+        if text.contains("artifact") {
+            calls.push((
+                "artifact",
+                json!({"id": "Counter", "title": "Counter", "kind": "html", "content": "<h1>Counter</h1><script>let n = 0</script>"}),
+            ));
+            calls.push((
+                "artifact",
+                json!({"title": "Notes", "kind": "markdown", "content": "# Notes"}),
+            ));
+            calls.push((
+                "artifact",
+                json!({"title": "Dot", "kind": "svg", "content": "<svg xmlns='http://www.w3.org/2000/svg'><circle r='4'/></svg>"}),
+            ));
+            calls.push((
+                "artifact",
+                json!({"title": "Bad", "kind": "exe", "content": "x"}),
+            ));
+        }
         if calls.is_empty() {
             out.push_str(&event(json!({"content": "Nothing to do."})));
         } else {
@@ -4691,7 +4709,8 @@ async fn ai_agent_tools_ask_before_acting() {
             "create_folder",
             "list_server_files",
             "read_server_file",
-            "fetch_url"
+            "fetch_url",
+            "artifact"
         ],
         "server reads (read-only), no shell or browser without Terminal, no web search without a service"
     );
@@ -5021,6 +5040,90 @@ async fn ai_agent_tools_ask_before_acting() {
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Artifacts show without asking; pages and pictures open sandboxed, for
+    // whoever may read the chat.
+    let (_, _, body) = server
+        .request(
+            "POST",
+            "/api/ai/conversations",
+            Some(json!({"providerId": provider_id, "model": "tools"})),
+            alice.headers_with_csrf(),
+        )
+        .await;
+    let shown = body["conversation"]["id"].as_str().unwrap().to_string();
+    let reply = ai_say(&server, &alice, &shown, "show me artifacts").await;
+    assert_eq!(reply["status"], "done", "{reply}");
+    let calls = ai_tools(&reply);
+    let statuses: Vec<&str> = calls
+        .iter()
+        .map(|c| c["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, vec!["done", "done", "done", "error"], "{reply}");
+    assert!(ai_text(&reply).contains("in the artifact panel"), "{reply}");
+    let artifact = |call: &str| format!("/api/ai/conversations/{shown}/artifacts/{call}");
+    let (status, headers, page) = server
+        .request("GET", &artifact("call_0_artifact"), None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let page = page.as_str().unwrap().to_string();
+    assert!(
+        page.starts_with("<!doctype html>") && page.contains("<h1>Counter</h1><script>"),
+        "{page}"
+    );
+    assert!(headers[header::CONTENT_TYPE]
+        .to_str()
+        .unwrap()
+        .starts_with("text/html"));
+    let csp = headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+    assert!(
+        csp.starts_with("sandbox allow-scripts") && !csp.contains("allow-same-origin"),
+        "{csp}"
+    );
+    assert!(
+        csp.contains("frame-ancestors 'self'") && csp.contains("default-src 'none'"),
+        "{csp}"
+    );
+    assert_eq!(headers[header::X_FRAME_OPTIONS], "SAMEORIGIN");
+    let (status, _, page) = server
+        .request("GET", &artifact("call_2_artifact"), None, alice.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.as_str().unwrap().contains("<circle r='4'/>"));
+    for call in ["call_1_artifact", "call_3_artifact", "call_9_artifact"] {
+        let (status, _, _) = server
+            .request("GET", &artifact(call), None, alice.headers())
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{call}: documents show in the app; failed calls show nowhere"
+        );
+    }
+    let (status, _, _) = server
+        .request("GET", &artifact("call_0_artifact"), None, admin.headers())
+        .await;
+    assert_eq!(status, StatusCode::OK, "administrators read every chat");
+    server.create_user("bob", USER_PASSWORD, Role::User).await;
+    let bob_id = server.user_id("bob").await;
+    let (status, _, body) = server
+        .request(
+            "PUT",
+            &format!("/api/users/{bob_id}/access-rules"),
+            Some(json!({"folderRules": [], "appRules": [{"appId": "agent", "rule": "allow"}]})),
+            admin.headers_with_csrf(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let bob = server.login("bob", USER_PASSWORD).await;
+    let (status, _, _) = server
+        .request("GET", &artifact("call_0_artifact"), None, bob.headers())
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "other accounts see nothing");
+    let (status, _, _) = server
+        .request("GET", &artifact("call_0_artifact"), None, HeaderMap::new())
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 fn ai_text(message: &Value) -> String {

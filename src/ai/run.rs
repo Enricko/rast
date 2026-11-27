@@ -264,8 +264,9 @@ async fn reply(state: &AppState, runs: &Runs, run: &Arc<Active>, mut job: ReplyJ
                     for call in &calls {
                         let status = if !job.tools.has(&call.name) {
                             "error"
-                        } else if tools::may_skip_asking(&call.name)
-                            && job.allowed_tools.iter().any(|t| t == &call.name)
+                        } else if !tools::asks_first(&call.name)
+                            || (tools::may_skip_asking(&call.name)
+                                && job.allowed_tools.iter().any(|t| t == &call.name))
                         {
                             "allowed"
                         } else {

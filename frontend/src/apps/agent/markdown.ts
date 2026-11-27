@@ -404,6 +404,8 @@ function inlineInto(el: HTMLElement, text: string): HTMLElement {
 export interface RenderOptions {
   /** Adds a copy button to code blocks. */
   onCopy?: (code: string) => void;
+  /** Headings keep their level (a document); in a chat `#` is an h3. */
+  fullHeadings?: boolean;
 }
 
 function blockNodes(blocks: Block[], parent: HTMLElement, options: RenderOptions): void {
@@ -413,7 +415,7 @@ function blockNodes(blocks: Block[], parent: HTMLElement, options: RenderOptions
         parent.appendChild(inlineInto(document.createElement("p"), block.text));
         break;
       case "h": {
-        const level = Math.min(6, block.level + 2);
+        const level = Math.min(6, block.level + (options.fullHeadings ? 0 : 2));
         parent.appendChild(inlineInto(document.createElement(`h${level}` as "h3"), block.text));
         break;
       }

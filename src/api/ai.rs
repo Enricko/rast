@@ -48,6 +48,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/ai/files/{id}", get(get_file).delete(delete_file))
         .route("/api/ai/conversations/{id}/stop", post(stop_reply))
         .route(
+            "/api/ai/conversations/{id}/artifacts/{call_id}",
+            get(get_artifact),
+        )
+        .route(
             "/api/ai/conversations/{id}/tools/{call_id}",
             post(decide_tool),
         )
@@ -681,6 +685,84 @@ async fn upload_file(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(file.json())).into_response())
+}
+
+/// What an html or svg artifact may do in its frame: run its own scripts
+/// and those of a few public CDNs, in an opaque origin (`sandbox` without
+/// `allow-same-origin`, also when opened in a tab of its own), so it reaches
+/// neither the session nor RAST's API; no other network.
+const ARTIFACT_CSP: &str = "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads; \
+default-src 'none'; \
+script-src 'unsafe-inline' 'unsafe-eval' blob: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://esm.sh; \
+style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://fonts.googleapis.com; \
+font-src data: https://fonts.gstatic.com https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; \
+img-src data: blob: https:; media-src data: blob: https:; worker-src blob:; \
+connect-src https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com https://esm.sh; \
+frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'";
+
+/// The page an html or svg artifact shows as.
+fn artifact_page(kind: &str, content: &str) -> Option<String> {
+    match kind {
+        "html" => {
+            let start = content.trim_start().get(..15).unwrap_or("").to_ascii_lowercase();
+            Some(if start.starts_with("<!doctype") || start.starts_with("<html") {
+                content.to_string()
+            } else {
+                format!("<!doctype html>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n{content}")
+            })
+        }
+        "svg" => Some(format!(
+            "<!doctype html>\n<meta charset=\"utf-8\">\n<style>html,body{{margin:0;height:100%}}body{{display:grid;place-items:center;background:#fff}}body>svg{{max-width:100%;max-height:100vh;height:auto}}</style>\n{content}"
+        )),
+        _ => None,
+    }
+}
+
+/// GET /api/ai/conversations/{id}/artifacts/{callId} — an html or svg
+/// artifact as a page, for whoever may read the chat, sandboxed by
+/// [`ARTIFACT_CSP`] and framed only by RAST itself. A version never changes.
+async fn get_artifact(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, call_id)): Path<(String, String)>,
+) -> AppResult<Response> {
+    let conversation = owned(&state, &user, &id, false).await?;
+    let messages = ai::messages(&state.db, &conversation.id).await?;
+    let block = messages
+        .iter()
+        .rev()
+        .filter_map(|m| m.content.as_array())
+        .flatten()
+        .find(|b| {
+            ai::is_tool_block(b)
+                && b["name"] == tools::ARTIFACT
+                && b["id"] == call_id.as_str()
+                && b["status"] == "done"
+        })
+        .ok_or(AppError::NotFound("artifact not found"))?;
+    let artifact = tools::check_artifact(&block["input"])
+        .map_err(|_| AppError::NotFound("artifact not found"))?;
+    let page = artifact_page(&artifact.kind, &artifact.content)
+        .ok_or(AppError::NotFound("this artifact shows in the app"))?;
+    let mut response = page.into_response();
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(ARTIFACT_CSP),
+    );
+    h.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    h.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+    Ok(response)
 }
 
 /// GET /api/ai/files/{id} — the file, for its owner (and administrators,
