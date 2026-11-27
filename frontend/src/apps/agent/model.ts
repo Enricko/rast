@@ -651,20 +651,43 @@ export function allowanceUsed(allowance: Allowance): number | null {
 }
 
 /** Group conversations by when they were last used. */
+/**
+ * Chats by when they were last used, newest first: Today, Yesterday,
+ * Previous 7 days, Previous 30 days, then each earlier month of this year
+ * ("October"), then each earlier year ("2025"). Local time.
+ */
 export function groupByDay(items: Conversation[], now = Date.now()): Array<{ label: string; items: Conversation[] }> {
   const start = new Date(now);
   start.setHours(0, 0, 0, 0);
   const today = start.getTime();
-  const yesterday = today - 86_400_000;
-  const week = today - 6 * 86_400_000;
-  const groups = new Map<string, Conversation[]>();
+  const day = (n: number) => {
+    const d = new Date(today);
+    d.setDate(d.getDate() - n);
+    return d.getTime();
+  };
+  const [yesterday, week, month] = [day(1), day(7), day(30)];
+  const year = start.getFullYear();
+  const monthName = new Intl.DateTimeFormat("en-US", { month: "long" });
+  const label = (at: number): string => {
+    if (at >= today) return "Today";
+    if (at >= yesterday) return "Yesterday";
+    if (at >= week) return "Previous 7 days";
+    if (at >= month) return "Previous 30 days";
+    const when = new Date(at);
+    return when.getFullYear() === year ? monthName.format(when) : String(when.getFullYear());
+  };
+  const groups: Array<{ label: string; items: Conversation[]; newest: number }> = [];
   for (const item of items) {
-    const label = item.updatedAt >= today ? "Today" : item.updatedAt >= yesterday ? "Yesterday" : item.updatedAt >= week ? "This week" : "Older";
-    const list = groups.get(label) ?? [];
-    list.push(item);
-    groups.set(label, list);
+    const name = label(item.updatedAt);
+    let group = groups.find((g) => g.label === name);
+    if (!group) {
+      group = { label: name, items: [], newest: item.updatedAt };
+      groups.push(group);
+    }
+    group.items.push(item);
+    group.newest = Math.max(group.newest, item.updatedAt);
   }
-  return ["Today", "Yesterday", "This week", "Older"]
-    .filter((label) => groups.has(label))
-    .map((label) => ({ label, items: groups.get(label) ?? [] }));
+  return groups
+    .sort((a, b) => b.newest - a.newest)
+    .map(({ label, items }) => ({ label, items: [...items].sort((a, b) => b.updatedAt - a.updatedAt) }));
 }

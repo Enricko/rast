@@ -208,11 +208,23 @@ test("allowance summary", () => {
   );
 });
 
-test("chats group by day", () => {
+test("chats group by day, week, month and year", () => {
   const now = new Date(2026, 10, 26, 15).getTime();
   const at = (days: number) => ({ id: String(days), userId: 1, agentId: null, providerId: null, model: "", title: "", createdAt: 0, updatedAt: now - days * 86_400_000, running: false });
-  const groups = groupByDay([at(0), at(1), at(3), at(30)], now);
-  assert.deepEqual(groups.map((g) => g.label), ["Today", "Yesterday", "This week", "Older"]);
+  const groups = groupByDay([at(800), at(3), at(0), at(40), at(1), at(10), at(70), at(400), at(45)] as never, now);
+  assert.deepEqual(
+    groups.map((g) => [g.label, g.items.map((c) => c.id)]),
+    [
+      ["Today", ["0"]],
+      ["Yesterday", ["1"]],
+      ["Previous 7 days", ["3"]],
+      ["Previous 30 days", ["10"]],
+      ["October", ["40", "45"]],
+      ["September", ["70"]],
+      ["2025", ["400"]],
+      ["2024", ["800"]],
+    ],
+  );
 });
 
 test("the provider picker groups kinds and finds them by name or what they offer", () => {

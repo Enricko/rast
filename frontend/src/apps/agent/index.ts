@@ -1335,6 +1335,26 @@ function mountAgentApp(ctx: AppContext): AppInstance {
     if (params.settings) openSettings();
     else if (params.conversationId) void openConversation(params.conversationId);
   });
+  // Typing while the window is in front writes in the message box, as in
+  // chat apps: the first key moves the cursor there and the rest follows.
+  const typeToCompose = (event: KeyboardEvent) => {
+    if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey) return;
+    // Printable keys only; a space may be pressing a focused button.
+    if (event.key.length !== 1 || event.key === " ") return;
+    const win = ctx.root.closest(".window");
+    if (!win?.classList.contains("is-focused")) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && !win.contains(active)) return;
+    if (active instanceof HTMLElement && active.closest("input, textarea, select, [contenteditable]")) return;
+    if (win.querySelector(".modal-backdrop:not(.modal-leaving)")) return;
+    if (!settingsHost.classList.contains("hidden") || composer.classList.contains("hidden") || input.disabled) return;
+    event.preventDefault();
+    input.focus();
+    input.setRangeText(event.key, input.selectionStart, input.selectionEnd, "end");
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  document.addEventListener("keydown", typeToCompose);
+
   // Counting times of replies being written, once a second.
   const ticker = window.setInterval(() => {
     for (const el of ctx.root.querySelectorAll<HTMLElement>(".ai-working-time[data-since]")) {
@@ -1344,6 +1364,7 @@ function mountAgentApp(ctx: AppContext): AppInstance {
   ctx.onDispose(() => {
     disposed = true;
     window.clearInterval(ticker);
+    document.removeEventListener("keydown", typeToCompose);
     followObserver.disconnect();
     for (const unsubscribe of unsubscribers.splice(0)) unsubscribe();
     for (const entry of bodies.values()) if (entry.frame) window.cancelAnimationFrame(entry.frame);
