@@ -119,7 +119,10 @@ this file by `scripts/changelog-section.sh`.
   answers only its shared consumer project (`aicode-consumers`), which
   generation refuses, the sign-in onboards again and falls back to a stable
   per-account project id — older sign-ins that stored the shared project
-  repair themselves before the next request. A browser flow opens the
+  repair themselves before the next request. Its chat traffic omits
+  `requestType` (Google answers a request naming `agent` with a false
+  `429 RESOURCE_EXHAUSTED`) and signing in again re-reads the account's
+  model list instead of keeping the built-in fallback. A browser flow opens the
   provider's page (PKCE, a checked state) and takes back the address the
   browser ends on; GitHub Copilot, Qwen and Kimi instead show a code to type
   on the provider's site, and RAST polls for the tokens. Claude can also

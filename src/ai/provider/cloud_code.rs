@@ -26,10 +26,11 @@
 //!   host does not.
 //! * Thinking is asked for with a model-family budget (the plugin's
 //!   `antigravity-thinking.ts`), not the generic effort fields.
-//! * Antigravity's official client omits `requestType` on chat traffic
-//!   (9router's note) while the DSH plugin sends `"agent"`; RAST sends
-//!   `"agent"` like the plugin. Only the IDE's envelope has those fields —
-//!   the Gemini CLI's envelope is just identity + request.
+//! * Antigravity's official client omits `requestType` on chat traffic, and
+//!   Google answers a request that names `"agent"` with a detail-free 429
+//!   `RESOURCE_EXHAUSTED` even when quota is left (9router's executor note;
+//!   verified against the live host on 2026-11-27). Only the IDE's envelope
+//!   has these fields — the Gemini CLI's envelope is just identity + request.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -179,7 +180,9 @@ pub(crate) fn body(req: &ChatRequest, wire: Wire, turns: &[Turn]) -> Value {
             "requestId": antigravity_request_id(turns.len()),
             "model": req.model,
             "userAgent": "antigravity",
-            "requestType": "agent",
+            // No `requestType`: the official Antigravity client omits it on
+            // the chat path, and Google buckets a request that names "agent"
+            // with a detail-free 429 RESOURCE_EXHAUSTED even with quota.
             "request": request,
         }),
         Client::GeminiCli => json!({
@@ -1054,7 +1057,7 @@ mod tests {
         assert_eq!(envelope["project"], "project-1");
         assert_eq!(envelope["model"], "gemini-3-pro-preview");
         assert_eq!(envelope["userAgent"], "antigravity");
-        assert_eq!(envelope["requestType"], "agent");
+        assert!(envelope.get("requestType").is_none(), "{envelope}");
         let request_id = envelope["requestId"].as_str().expect("a request id");
         let pieces: Vec<&str> = request_id.split('/').collect();
         assert_eq!(pieces.len(), 5, "{request_id}");

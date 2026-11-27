@@ -26,14 +26,44 @@ const DAILY_BASE: &str = "https://daily-cloudcode-pa.googleapis.com";
 /// The host the `kind` preset names (and what the onboarding uses).
 const PROD_BASE: &str = "https://cloudcode-pa.googleapis.com";
 
-/// Models kept when the live catalog cannot be read (the current Antigravity
-/// catalogue's own wire ids; the live list replaces these at sign-in).
+/// Models kept when the live catalog cannot be read: the Antigravity wire ids
+/// of the account catalog in 2026-11 (`fetchAvailableModels`), image/test
+/// routes left out. The live list replaces these at sign-in.
 const MODELS: &[&str] = &[
-    "gemini-3.1-pro-high",
-    "gemini-3.1-pro-low",
-    "gemini-3-flash-preview",
-    "claude-sonnet-4-5",
-    "gpt-oss-120b",
+    "claude-opus-5-5-high",
+    "claude-opus-5-5-low",
+    "claude-opus-5-5-medium",
+    "claude-sonnet-5-5-high",
+    "claude-sonnet-5-5-low",
+    "claude-sonnet-5-5-medium",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-thinking",
+    "gemini-3-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
+    "gemini-3.8-flash-tiered",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-carbon-high",
+    "gemini-4-carbon-low",
+    "gemini-4-carbon-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-sonar",
+    "gemini-4-hydrogen-tiered-high",
+    "gemini-4-hydrogen-tiered-xhigh",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-neon-high",
+    "gemini-4-neon-low",
+    "gemini-4-neon-medium",
+    "gemini-4-neon-xhigh",
+    "gpt-oss-120b-medium",
 ];
 
 /// Where chat and catalog traffic goes: the IDE's daily host unless the
@@ -225,8 +255,8 @@ mod tests {
     fn the_fallback_models_are_the_reference_list() {
         let models = fallback_models();
         assert!(!models.is_empty());
-        assert!(models.contains(&"gemini-3.1-pro-high"));
-        assert!(models.contains(&"claude-sonnet-4-5"));
+        assert!(models.contains(&"gemini-4-hydrogen-high"));
+        assert!(models.contains(&"claude-sonnet-5-5-medium"));
         let mut sorted = models.to_vec();
         sorted.sort_unstable();
         sorted.dedup();

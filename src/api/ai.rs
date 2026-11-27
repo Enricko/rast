@@ -1814,10 +1814,10 @@ async fn store_signed_in(
             if existing.kind != kind {
                 return Err(AppError::bad_request("that provider is of another kind"));
             }
-            let models = match &offered {
-                Some(fresh) if existing.models.is_empty() => fresh.clone(),
-                _ => existing.models.clone(),
-            };
+            // Signing in again re-reads the plan's catalog: the models the
+            // account can use may have changed, and an older sign-in could
+            // have stored only the built-in fallback list.
+            let models = offered.clone().unwrap_or_else(|| existing.models.clone());
             sqlx::query(
                 "UPDATE ai_providers SET sign_in = ?, owner_id = ?, models = ?, updated_at = ? WHERE id = ?",
             )
